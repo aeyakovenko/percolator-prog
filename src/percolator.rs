@@ -3,19 +3,10 @@
 
 //! Percolator: Single-file Solana program with embedded Risk Engine.
 
-use solana_program::{
-    account_info::AccountInfo,
-    entrypoint::ProgramResult,
-    pubkey::Pubkey,
-    program_error::ProgramError,
-    msg,
-    sysvar::{clock::Clock, rent::Rent, Sysvar},
-};
-
 // 1. mod constants
 pub mod constants {
     use core::mem::{size_of, align_of};
-    use crate::state::{SlabHeader, MarketConfig};
+    use crate::state::MarketConfig;
     use percolator::RiskEngine;
 
     pub const MAGIC: u64 = 0x504552434f4c4154; // "PERCOLAT"
@@ -524,7 +515,7 @@ pub mod processor {
         ix::Instruction,
         state::{self, SlabHeader, MarketConfig},
         accounts,
-        constants::{MAGIC, VERSION, SLAB_LEN},
+        constants::{MAGIC, VERSION, SLAB_LEN, HEADER_LEN},
         error::{PercolatorError, map_risk_error},
         oracle,
         collateral,
@@ -599,12 +590,23 @@ pub mod processor {
 
                 accounts::expect_signer(a_admin)?;
                 accounts::expect_writable(a_slab)?;
+                accounts::expect_owner(a_slab, program_id)?;
                 
-                // Guard (checks owner and length)
-                let mut data = state::slab_data_mut(a_slab)?;
-                slab_guard(program_id, a_slab, &data)?;
+                // Assert HEADER_LEN in debug
+                #[cfg(debug_assertions)]
+                {
+                    if core::mem::size_of::<SlabHeader>() != HEADER_LEN {
+                        return Err(ProgramError::InvalidAccountData);
+                    }
+                }
 
-                // Attempt align check via zero-copy borrow
+                let mut data = state::slab_data_mut(a_slab)?;
+                if data.len() != SLAB_LEN {
+                    return Err(PercolatorError::InvalidSlabLen.into());
+                }
+
+                // Verify engine alignment by attempting mutable borrow
+                // This ensures we never initialize a slab that we can't zero-copy later
                 let _ = zc::engine_mut(&mut data)?;
 
                 let header = state::read_header(&data);
@@ -618,9 +620,8 @@ pub mod processor {
                 // Vault MUST exist and be valid now
                 verify_vault(a_vault, &auth, a_mint.key, a_vault.key)?;
 
-                // Zero engine region before writing
-                let engine_region = state::engine_region_mut(&mut data);
-                for b in engine_region.iter_mut() { *b = 0; }
+                // Zero entire slab data (not just engine)
+                for b in data.iter_mut() { *b = 0; }
 
                 // Create fresh engine (on stack) and write BY VALUE
                 let engine = RiskEngine::new(risk_params);
@@ -693,8 +694,6 @@ pub mod processor {
                 require_initialized(&data)?;
                 let config = state::read_config(&data);
 
-                verify_vault(a_vault, &Pubkey::new_from_array(config.vault_pubkey), &Pubkey::new_from_array(config.collateral_mint), &Pubkey::new_from_array(config.vault_pubkey))?;
-                // Wait, verify_vault 2nd arg is owner. config.vault_pubkey is wrong. Need derived PDA.
                 let (auth, _) = accounts::derive_vault_authority(program_id, a_slab.key);
                 verify_vault(a_vault, &auth, &Pubkey::new_from_array(config.collateral_mint), &Pubkey::new_from_array(config.vault_pubkey))?;
 
@@ -870,7 +869,11 @@ pub mod processor {
                 engine.execute_trade(&NoOpMatcher, lp_idx, user_idx, clock.slot, price, size).map_err(map_risk_error)?;
             },
             Instruction::LiquidateAtOracle { target_idx } => {
+                accounts::expect_len(accounts, 4)?;
                 let a_slab = &accounts[1];
+                
+                accounts::expect_writable(a_slab)?;
+
                 let mut data = state::slab_data_mut(a_slab)?;
                 slab_guard(program_id, a_slab, &data)?;
                 require_initialized(&data)?;
@@ -887,6 +890,7 @@ pub mod processor {
             },
             Instruction::CloseAccount { user_idx } => {
                 // 0 user, 1 slab, 2 vault, 3 user_ata, 4 pda, 5 token, 6 clock, 7 oracle
+                accounts::expect_len(accounts, 8)?;
                 let a_user = &accounts[0];
                 let a_slab = &accounts[1];
                 let a_vault = &accounts[2];
@@ -895,6 +899,7 @@ pub mod processor {
                 let a_token = &accounts[5];
 
                 accounts::expect_signer(a_user)?;
+                accounts::expect_writable(a_slab)?;
                 
                 let mut data = state::slab_data_mut(a_slab)?;
                 slab_guard(program_id, a_slab, &data)?;
@@ -929,10 +934,12 @@ pub mod processor {
             },
             Instruction::TopUpInsurance { amount } => {
                 // 0 user, 1 slab, 2 user_ata, 3 vault, 4 token
+                accounts::expect_len(accounts, 5)?;
                 let a_user = &accounts[0];
                 let a_slab = &accounts[1];
                 let a_vault = &accounts[3];
                 accounts::expect_signer(a_user)?;
+                accounts::expect_writable(a_slab)?;
                 
                 let mut data = state::slab_data_mut(a_slab)?;
                 slab_guard(program_id, a_slab, &data)?;
