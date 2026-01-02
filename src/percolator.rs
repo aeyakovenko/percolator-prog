@@ -98,16 +98,15 @@ pub mod zc {
     #[allow(unsafe_code)]
     pub fn invoke_signed_trade<'a>(
         ix: &SolInstruction,
-        a_slab: &AccountInfo<'a>,
         a_lp_pda: &AccountInfo<'a>,
         a_matcher_ctx: &AccountInfo<'a>,
         seeds: &[&[u8]],
     ) -> Result<(), ProgramError> {
-        // SAFETY: All three AccountInfos have lifetime 'a from the caller.
+        // SAFETY: AccountInfos have lifetime 'a from the caller.
         // We clone them to get owned values (still with 'a lifetime internally).
         // The invoke_signed call consumes them by reference and returns.
         // No lifetime extension occurs.
-        let infos = [a_slab.clone(), a_lp_pda.clone(), a_matcher_ctx.clone()];
+        let infos = [a_lp_pda.clone(), a_matcher_ctx.clone()];
         invoke_signed(ix, &infos, &[seeds])
     }
 }
@@ -115,6 +114,11 @@ pub mod zc {
 pub mod matcher_abi {
     use solana_program::program_error::ProgramError;
     use crate::constants::MATCHER_ABI_VERSION;
+
+    /// Matcher return flags
+    pub const FLAG_VALID: u32 = 1;       // bit0: response is valid
+    pub const FLAG_PARTIAL_OK: u32 = 2;  // bit1: partial fill including zero allowed
+    pub const FLAG_REJECTED: u32 = 4;    // bit2: trade rejected by matcher
 
     #[repr(C)]
     #[derive(Debug, Clone, Copy)]
@@ -146,20 +150,35 @@ pub mod matcher_abi {
     }
 
     pub fn validate_matcher_return(ret: &MatcherReturn, lp_account_id: u64, oracle_price_e6: u64, req_size: i128, req_id: u64) -> Result<(), ProgramError> {
+        // Check ABI version
         if ret.abi_version != MATCHER_ABI_VERSION { return Err(ProgramError::InvalidAccountData); }
-        if (ret.flags & 1) == 0 { return Err(ProgramError::InvalidAccountData); }
-        if (ret.flags & 4) != 0 { return Err(ProgramError::InvalidAccountData); }
+        // Must have VALID flag set
+        if (ret.flags & FLAG_VALID) == 0 { return Err(ProgramError::InvalidAccountData); }
+        // Must not have REJECTED flag set
+        if (ret.flags & FLAG_REJECTED) != 0 { return Err(ProgramError::InvalidAccountData); }
 
-        if ret.exec_price_e6 == 0 { return Err(ProgramError::InvalidAccountData); }
-
+        // Validate echoed fields match request
         if ret.lp_account_id != lp_account_id { return Err(ProgramError::InvalidAccountData); }
         if ret.oracle_price_e6 != oracle_price_e6 { return Err(ProgramError::InvalidAccountData); }
         if ret.reserved != 0 { return Err(ProgramError::InvalidAccountData); }
         if ret.req_id != req_id { return Err(ProgramError::InvalidAccountData); }
-        
+
+        // Step 5: Zero exec_size requires PARTIAL_OK flag
+        if ret.exec_size == 0 {
+            if (ret.flags & FLAG_PARTIAL_OK) == 0 {
+                return Err(ProgramError::InvalidAccountData);
+            }
+            // Zero fill with PARTIAL_OK is allowed - return early
+            return Ok(());
+        }
+
+        // Non-zero exec: must have valid price
+        if ret.exec_price_e6 == 0 { return Err(ProgramError::InvalidAccountData); }
+
+        // Size constraints
         if ret.exec_size.abs() > req_size.abs() { return Err(ProgramError::InvalidAccountData); }
         if req_size != 0 {
-             if ret.exec_size.signum() != req_size.signum() && ret.exec_size != 0 { return Err(ProgramError::InvalidAccountData); }
+            if ret.exec_size.signum() != req_size.signum() { return Err(ProgramError::InvalidAccountData); }
         }
         Ok(())
     }
@@ -439,6 +458,7 @@ pub mod accounts {
 pub mod state {
     use bytemuck::{Pod, Zeroable};
     use core::cell::RefMut;
+    use core::mem::offset_of;
     use solana_program::account_info::AccountInfo;
     use solana_program::program_error::ProgramError;
     use crate::constants::{HEADER_LEN, CONFIG_LEN};
@@ -454,6 +474,13 @@ pub mod state {
         pub _reserved: [u8; 16],
     }
 
+    /// Offset of _reserved field in SlabHeader.
+    /// Layout: magic(8) + version(4) + bump(1) + _padding(3) + admin(32) = 48
+    pub const RESERVED_OFF: usize = 48;
+
+    // Compile-time assertion that RESERVED_OFF matches offset_of!
+    const _: () = assert!(RESERVED_OFF == offset_of!(SlabHeader, _reserved));
+
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable)]
     pub struct MarketConfig {
@@ -464,7 +491,7 @@ pub mod state {
         pub max_staleness_slots: u64,
         pub conf_filter_bps: u16,
         pub vault_authority_bump: u8,
-        pub _padding: [u8; 5], 
+        pub _padding: [u8; 5],
     }
 
     pub fn slab_data_mut<'a, 'b>(ai: &'b AccountInfo<'a>) -> Result<RefMut<'b, &'a mut [u8]>, ProgramError> {
@@ -486,18 +513,18 @@ pub mod state {
     }
 
     /// Read the request nonce from the reserved field in slab header.
-    /// The nonce is stored in _reserved[0..8] as little-endian u64.
+    /// The nonce is stored at RESERVED_OFF..RESERVED_OFF+8 as little-endian u64.
     pub fn read_req_nonce(data: &[u8]) -> u64 {
-        let h = read_header(data);
-        u64::from_le_bytes(h._reserved[0..8].try_into().unwrap())
+        u64::from_le_bytes(data[RESERVED_OFF..RESERVED_OFF + 8].try_into().unwrap())
     }
 
     /// Write the request nonce to the reserved field in slab header.
     /// The nonce is stored in _reserved[0..8] as little-endian u64.
+    /// Uses offset_of! for correctness even if SlabHeader layout changes.
     pub fn write_req_nonce(data: &mut [u8], nonce: u64) {
-        // Offset of _reserved in SlabHeader: magic(8) + version(4) + bump(1) + _padding(3) + admin(32) = 48
-        const NONCE_OFF: usize = 48;
-        data[NONCE_OFF..NONCE_OFF + 8].copy_from_slice(&nonce.to_le_bytes());
+        #[cfg(debug_assertions)]
+        debug_assert!(HEADER_LEN >= RESERVED_OFF + 16);
+        data[RESERVED_OFF..RESERVED_OFF + 8].copy_from_slice(&nonce.to_le_bytes());
     }
 
     pub fn read_config(data: &[u8]) -> MarketConfig {
@@ -660,6 +687,7 @@ pub mod processor {
         sysvar::{clock::Clock, Sysvar},
         program_error::ProgramError,
         program_pack::Pack,
+        msg,
     };
     use crate::{
         ix::Instruction,
@@ -792,6 +820,8 @@ pub mod processor {
                     _reserved: [0; 16],
                 };
                 state::write_header(&mut data, &new_header);
+                // Step 4: Explicitly initialize nonce to 0 for determinism
+                state::write_req_nonce(&mut data, 0);
             },
             Instruction::InitUser { fee_payment } => {
                 accounts::expect_len(accounts, 7)?;
@@ -1022,7 +1052,7 @@ pub mod processor {
                 if a_matcher_ctx.owner != a_matcher_prog.key { return Err(ProgramError::IllegalOwner); }
                 if a_matcher_ctx.data_len() < MATCHER_CONTEXT_LEN { return Err(ProgramError::InvalidAccountData); }
 
-                // Phase 1: Validate lp_pda is the correct PDA, system-owned, empty data
+                // Phase 1: Validate lp_pda is the correct PDA, system-owned, empty data, 0 lamports
                 let lp_bytes = lp_idx.to_le_bytes();
                 let (expected_lp_pda, bump) = Pubkey::find_program_address(
                     &[b"lp", a_slab.key.as_ref(), &lp_bytes],
@@ -1037,21 +1067,26 @@ pub mod processor {
                 if a_lp_pda.data_len() != 0 {
                     return Err(ProgramError::InvalidAccountData);
                 }
+                // Pure identity PDA: must have 0 lamports (not funded)
+                if **a_lp_pda.lamports.borrow() != 0 {
+                    return Err(ProgramError::InvalidAccountData);
+                }
 
                 // Phase 3 & 4: Read engine state, generate nonce, validate matcher identity
+                // Note: Use immutable borrow for reading to avoid ExternalAccountDataModified
+                // Nonce write is deferred until after execute_trade
                 let (lp_account_id, config, req_id, lp_matcher_prog, lp_matcher_ctx) = {
-                    let mut data = state::slab_data_mut(a_slab)?;
-                    slab_guard(program_id, a_slab, &data)?;
-                    require_initialized(&data)?;
-                    let config = state::read_config(&data);
+                    let data = a_slab.try_borrow_data()?;
+                    slab_guard(program_id, a_slab, &*data)?;
+                    require_initialized(&*data)?;
+                    let config = state::read_config(&*data);
 
-                    // Phase 3: Read and increment monotonic nonce for req_id
-                    let nonce = state::read_req_nonce(&data);
-                    let new_nonce = nonce.wrapping_add(1);
-                    state::write_req_nonce(&mut data, new_nonce);
-                    let req_id = new_nonce; // Option A: simple monotonic nonce
+                    // Phase 3: Monotonic nonce for req_id (prevents replay attacks)
+                    let nonce = state::read_req_nonce(&*data);
+                    let req_id = nonce.checked_add(1).ok_or(ProgramError::ArithmeticOverflow)?;
+                    // Nonce write is deferred until after execute_trade
 
-                    let engine = zc::engine_ref(&data)?;
+                    let engine = zc::engine_ref(&*data)?;
 
                     check_idx(engine, lp_idx)?;
                     check_idx(engine, user_idx)?;
@@ -1078,11 +1113,7 @@ pub mod processor {
                 let clock = Clock::from_account_info(a_clock)?;
                 let price = oracle::read_pyth_price_e6(a_oracle, clock.slot, config.max_staleness_slots, config.conf_filter_bps)?;
 
-                // Phase 5: Zero context prefix before CPI (prevents stale data)
-                {
-                    let mut ctx_data = a_matcher_ctx.try_borrow_mut_data()?;
-                    ctx_data[..MATCHER_CONTEXT_PREFIX_LEN].fill(0);
-                }
+                // Note: matcher is responsible for zeroing its own context prefix
 
                 let mut cpi_data = alloc::vec::Vec::with_capacity(MATCHER_CALL_LEN);
                 cpi_data.push(MATCHER_CALL_TAG);
@@ -1101,7 +1132,6 @@ pub mod processor {
                 }
 
                 let metas = alloc::vec![
-                    AccountMeta::new_readonly(*a_slab.key, false),
                     AccountMeta::new_readonly(*a_lp_pda.key, true), // Will become signer via invoke_signed
                     AccountMeta::new(*a_matcher_ctx.key, false),
                 ];
@@ -1115,8 +1145,8 @@ pub mod processor {
                 let bump_arr = [bump];
                 let seeds: &[&[u8]] = &[b"lp", a_slab.key.as_ref(), &lp_bytes, &bump_arr];
 
-                // Phase 2: Use zc helper for CPI - no unsafe in processor
-                zc::invoke_signed_trade(&ix, a_slab, a_lp_pda, a_matcher_ctx, seeds)?;
+                // Phase 2: Use zc helper for CPI - slab not passed to avoid ExternalAccountDataModified
+                zc::invoke_signed_trade(&ix, a_lp_pda, a_matcher_ctx, seeds)?;
 
                 let ctx_data = a_matcher_ctx.try_borrow_data()?;
                 let ret = crate::matcher_abi::read_matcher_return(&ctx_data)?;
@@ -1128,6 +1158,8 @@ pub mod processor {
                     let mut data = state::slab_data_mut(a_slab)?;
                     let engine = zc::engine_mut(&mut data)?;
                     engine.execute_trade(&matcher, lp_idx, user_idx, clock.slot, price, size).map_err(map_risk_error)?;
+                    // Write nonce AFTER CPI and execute_trade to avoid ExternalAccountDataModified
+                    state::write_req_nonce(&mut data, req_id);
                 }
             },
             Instruction::LiquidateAtOracle { target_idx } => {
