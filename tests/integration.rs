@@ -86,7 +86,7 @@ fn encode_init_market(admin: &Pubkey, mint: &Pubkey, pyth_index: &Pubkey, pyth_c
     v.extend_from_slice(pyth_collateral.as_ref());
     v.extend_from_slice(&max_staleness.to_le_bytes());
     v.extend_from_slice(&conf_bps.to_le_bytes());
-    v.extend_from_slice(&0u64.to_le_bytes()); // RiskParams...
+    v.extend_from_slice(&0u64.to_le_bytes()); 
     v.extend_from_slice(&0u64.to_le_bytes());
     v.extend_from_slice(&0u64.to_le_bytes());
     v.extend_from_slice(&0u64.to_le_bytes());
@@ -172,10 +172,6 @@ async fn integration_trade_cpi_success_writes_ctx_prefix() {
     pt.add_account(matcher_ctx.pubkey(), Account { lamports: 1_000_000_000, data: vec![0u8; MATCHER_CONTEXT_LEN], owner: matcher_id, executable: false, rent_epoch: 0 });
     pt.add_account(dummy_ata, Account { lamports: 1_000_000, data: vec![], owner: solana_sdk::system_program::ID, executable: false, rent_epoch: 0 });
 
-    // Pre-allocate LP PDA (idx=1) to ensure existence for CPI
-    let (lp_pda_assumed, _) = Pubkey::find_program_address(&[b"lp", slab.pubkey().as_ref(), &1u16.to_le_bytes()], &percolator_id);
-    pt.add_account(lp_pda_assumed, Account { lamports: 1_000_000, data: vec![], owner: solana_sdk::system_program::ID, executable: false, rent_epoch: 0 });
-
     let (mut banks, payer, recent_hash) = pt.start().await;
 
     let ix = Instruction {
@@ -220,8 +216,7 @@ async fn integration_trade_cpi_success_writes_ctx_prefix() {
     banks.process_transaction(tx).await.unwrap();
 
     let (lp_pda, _) = Pubkey::find_program_address(&[b"lp", slab.pubkey().as_ref(), &lp_idx.to_le_bytes()], &percolator_id);
-    assert_eq!(lp_pda, lp_pda_assumed, "Assumed LP PDA matches actual");
-
+    
     let ix = Instruction {
         program_id: percolator_id,
         accounts: vec![AccountMeta::new(user.pubkey(), true), AccountMeta::new(lp.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false), AccountMeta::new_readonly(pyth_index, false), AccountMeta::new_readonly(matcher_id, false), AccountMeta::new(matcher_ctx.pubkey(), false), AccountMeta::new_readonly(lp_pda, false)],
