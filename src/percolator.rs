@@ -30,13 +30,17 @@ pub mod constants {
     pub const ENGINE_OFF: usize = align_up(HEADER_LEN + CONFIG_LEN, ENGINE_ALIGN);
     pub const ENGINE_LEN: usize = size_of::<RiskEngine>();
     pub const SLAB_LEN: usize = ENGINE_OFF + ENGINE_LEN;
-    pub const MATCHER_CONTEXT_LEN: usize = 24;
+    pub const MATCHER_ABI_VERSION: u32 = 1;
+    pub const MATCHER_CONTEXT_PREFIX_LEN: usize = 64;
+    pub const MATCHER_CONTEXT_LEN: usize = MATCHER_CONTEXT_PREFIX_LEN;
 }
 
 // 2. mod zc (Zero-Copy unsafe island)
 #[allow(unsafe_code)]
 pub mod zc {
     use solana_program::program_error::ProgramError;
+    use solana_program::account_info::AccountInfo;
+    use solana_program::pubkey::Pubkey;
     use percolator::RiskEngine;
     use crate::constants::{ENGINE_OFF, ENGINE_LEN, ENGINE_ALIGN};
 
@@ -76,6 +80,76 @@ pub mod zc {
         unsafe { core::ptr::write(ptr as *mut RiskEngine, engine) };
         Ok(())
     }
+
+    pub fn create_pda_account_info<'a>(
+        key: &Pubkey,
+        lamports: &mut u64,
+        data: &mut [u8],
+        owner: &Pubkey,
+    ) -> AccountInfo<'a> {
+        let info = AccountInfo::new(
+            key,
+            true, // is_signer
+            false, // is_writable
+            lamports,
+            data,
+            owner,
+            false,
+            0,
+        );
+        unsafe { core::mem::transmute(info) }
+    }
+}
+
+pub mod matcher_abi {
+    use solana_program::program_error::ProgramError;
+    use crate::constants::MATCHER_ABI_VERSION;
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy)]
+    pub struct MatcherReturn {
+        pub abi_version: u32,
+        pub flags: u32,
+        pub exec_price_e6: u64,
+        pub exec_size: i128,
+        pub req_id: u64,
+        pub lp_account_id: u64,
+        pub oracle_price_e6: u64,
+        pub reserved: u64,
+    }
+
+    pub fn read_matcher_return(ctx: &[u8]) -> Result<MatcherReturn, ProgramError> {
+        if ctx.len() < 64 { return Err(ProgramError::InvalidAccountData); }
+        let abi_version = u32::from_le_bytes(ctx[0..4].try_into().unwrap());
+        let flags = u32::from_le_bytes(ctx[4..8].try_into().unwrap());
+        let exec_price_e6 = u64::from_le_bytes(ctx[8..16].try_into().unwrap());
+        let exec_size = i128::from_le_bytes(ctx[16..32].try_into().unwrap());
+        let req_id = u64::from_le_bytes(ctx[32..40].try_into().unwrap());
+        let lp_account_id = u64::from_le_bytes(ctx[40..48].try_into().unwrap());
+        let oracle_price_e6 = u64::from_le_bytes(ctx[48..56].try_into().unwrap());
+        let reserved = u64::from_le_bytes(ctx[56..64].try_into().unwrap());
+
+        Ok(MatcherReturn {
+            abi_version, flags, exec_price_e6, exec_size, req_id, lp_account_id, oracle_price_e6, reserved
+        })
+    }
+
+    pub fn validate_matcher_return(ret: &MatcherReturn, lp_account_id: u64, oracle_price_e6: u64, req_size: i128) -> Result<(), ProgramError> {
+        if ret.abi_version != MATCHER_ABI_VERSION { return Err(ProgramError::InvalidAccountData); }
+        if (ret.flags & 1) == 0 { return Err(ProgramError::InvalidAccountData); }
+        if (ret.flags & 4) != 0 { return Err(ProgramError::InvalidAccountData); }
+
+        if ret.exec_price_e6 == 0 { return Err(ProgramError::InvalidAccountData); }
+
+        if ret.lp_account_id != lp_account_id { return Err(ProgramError::InvalidAccountData); }
+        if ret.oracle_price_e6 != oracle_price_e6 { return Err(ProgramError::InvalidAccountData); }
+        
+        if ret.exec_size.abs() > req_size.abs() { return Err(ProgramError::InvalidAccountData); }
+        if req_size != 0 {
+             if ret.exec_size.signum() != req_size.signum() && ret.exec_size != 0 { return Err(ProgramError::InvalidAccountData); }
+        }
+        Ok(())
+    }
 }
 
 // 3. mod error
@@ -98,7 +172,6 @@ pub mod error {
         ExpectedSigner,
         ExpectedWritable,
         OracleInvalid,
-        // Engine errors mapped:
         EngineInsufficientBalance,
         EngineUndercollateralized,
         EngineUnauthorized,
@@ -901,29 +974,30 @@ pub mod processor {
                 engine.execute_trade(&NoOpMatcher, lp_idx, user_idx, clock.slot, price, size).map_err(map_risk_error)?;
             },
             Instruction::TradeCpi { lp_idx, user_idx, size } => {
-                accounts::expect_len(accounts, 8)?;
+                accounts::expect_len(accounts, 7)?;
                 let a_user = &accounts[0];
-                let a_lp = &accounts[1];
+                let a_lp_owner = &accounts[1];
                 let a_slab = &accounts[2];
                 let a_clock = &accounts[3];
                 let a_oracle = &accounts[4];
-                let a_matcher = &accounts[5];
-                let a_context = &accounts[6];
-                let a_lp_signer = &accounts[7];
+                let a_matcher_prog = &accounts[5];
+                let a_matcher_ctx = &accounts[6];
 
                 accounts::expect_signer(a_user)?;
-                accounts::expect_signer(a_lp)?;
+                accounts::expect_signer(a_lp_owner)?;
                 accounts::expect_writable(a_slab)?;
-                accounts::expect_writable(a_context)?;
-                if a_context.executable { return Err(ProgramError::InvalidAccountData); }
-                if a_context.data_len() < MATCHER_CONTEXT_LEN { return Err(ProgramError::InvalidAccountData); }
+                accounts::expect_writable(a_matcher_ctx)?;
+                
+                if !a_matcher_prog.executable { return Err(ProgramError::InvalidAccountData); }
+                if a_matcher_ctx.executable { return Err(ProgramError::InvalidAccountData); }
+                if a_matcher_ctx.owner != a_matcher_prog.key { return Err(ProgramError::IllegalOwner); }
+                if a_matcher_ctx.data_len() < MATCHER_CONTEXT_LEN { return Err(ProgramError::InvalidAccountData); }
 
                 let (lp_account_id, config) = {
                     let mut data = state::slab_data_mut(a_slab)?;
                     slab_guard(program_id, a_slab, &data)?;
                     require_initialized(&data)?;
                     let config = state::read_config(&data);
-
                     let engine = zc::engine_ref(&data)?;
 
                     check_idx(engine, lp_idx)?;
@@ -932,7 +1006,7 @@ pub mod processor {
                     let u_owner = engine.accounts[user_idx as usize].owner;
                     if Pubkey::new_from_array(u_owner) != *a_user.key { return Err(PercolatorError::EngineUnauthorized.into()); }
                     let l_owner = engine.accounts[lp_idx as usize].owner;
-                    if Pubkey::new_from_array(l_owner) != *a_lp.key { return Err(PercolatorError::EngineUnauthorized.into()); }
+                    if Pubkey::new_from_array(l_owner) != *a_lp_owner.key { return Err(PercolatorError::EngineUnauthorized.into()); }
                     
                     (engine.accounts[lp_idx as usize].account_id, config)
                 };
@@ -944,9 +1018,16 @@ pub mod processor {
                     &[b"lp", a_slab.key.as_ref(), &lp_bytes],
                     program_id
                 );
-                if *a_lp_signer.key != lp_pda {
-                    return Err(PercolatorError::EngineUnauthorized.into());
-                }
+                
+                let mut lp_lamports = 0;
+                let mut lp_data = [];
+                let lp_owner = solana_program::system_program::ID;
+                let a_lp_pda = zc::create_pda_account_info(
+                    &lp_pda,
+                    &mut lp_lamports,
+                    &mut lp_data,
+                    &lp_owner,
+                );
 
                 let clock = Clock::from_account_info(a_clock)?;
                 let price = oracle::read_pyth_price_e6(a_oracle, clock.slot, config.max_staleness_slots, config.conf_filter_bps)?;
@@ -961,16 +1042,12 @@ pub mod processor {
 
                 let mut metas = alloc::vec![
                     AccountMeta::new_readonly(*a_slab.key, false),
-                    AccountMeta::new_readonly(*a_lp_signer.key, true),
-                    AccountMeta::new(*a_context.key, false),
+                    AccountMeta::new_readonly(lp_pda, true),
+                    AccountMeta::new(*a_matcher_ctx.key, false),
                 ];
-                for i in 8..accounts.len() {
-                    let acc = &accounts[i];
-                    metas.push(if acc.is_writable { AccountMeta::new(*acc.key, acc.is_signer) } else { AccountMeta::new_readonly(*acc.key, acc.is_signer) });
-                }
 
                 let ix = SolInstruction {
-                    program_id: *a_matcher.key,
+                    program_id: *a_matcher_prog.key,
                     accounts: metas,
                     data: cpi_data,
                 };
@@ -978,22 +1055,20 @@ pub mod processor {
                 let bump_arr = [bump];
                 let seeds: &[&[u8]] = &[b"lp", a_slab.key.as_ref(), &lp_bytes, &bump_arr];
                 
-                let mut cpi_infos: alloc::vec::Vec<AccountInfo> = alloc::vec::Vec::with_capacity(3 + (accounts.len().saturating_sub(8)));
-                cpi_infos.push(a_slab.clone());
-                cpi_infos.push(a_lp_signer.clone());
-                cpi_infos.push(a_context.clone());
-                for i in 8..accounts.len() {
-                    cpi_infos.push(accounts[i].clone());
-                }
+                let cpi_infos = [
+                    a_slab.clone(),
+                    a_lp_pda.clone(),
+                    a_matcher_ctx.clone(),
+                ];
 
                 invoke_signed(&ix, &cpi_infos, &[seeds])?;
 
-                let ctx_data = a_context.try_borrow_data()?;
-                let exec_price = u64::from_le_bytes(ctx_data[0..8].try_into().unwrap());
-                let exec_size = i128::from_le_bytes(ctx_data[8..24].try_into().unwrap());
+                let ctx_data = a_matcher_ctx.try_borrow_data()?;
+                let ret = crate::matcher_abi::read_matcher_return(&ctx_data)?;
+                crate::matcher_abi::validate_matcher_return(&ret, lp_account_id, price, size)?;
                 drop(ctx_data);
 
-                let matcher = CpiMatcher { exec_price, exec_size };
+                let matcher = CpiMatcher { exec_price: ret.exec_price_e6, exec_size: ret.exec_size };
                 {
                     let mut data = state::slab_data_mut(a_slab)?;
                     let engine = zc::engine_mut(&mut data)?;
@@ -1126,7 +1201,7 @@ mod tests {
     use spl_token::state::{Account as TokenAccount, AccountState};
     use crate::{
         processor::process_instruction,
-        constants::{SLAB_LEN, MAGIC, VERSION},
+        constants::{MAGIC, VERSION},
         zc,
         error::PercolatorError,
         state,
@@ -1142,11 +1217,12 @@ mod tests {
         data: Vec<u8>,
         is_signer: bool,
         is_writable: bool,
+        executable: bool,
     }
 
     impl TestAccount {
         fn new(key: Pubkey, owner: Pubkey, lamports: u64, data: Vec<u8>) -> Self {
-            Self { key, owner, lamports, data, is_signer: false, is_writable: false }
+            Self { key, owner, lamports, data, is_signer: false, is_writable: false, executable: false }
         }
         fn signer(mut self) -> Self { self.is_signer = true; self }
         fn writable(mut self) -> Self { self.is_writable = true; self }
@@ -1159,7 +1235,7 @@ mod tests {
                 &mut self.lamports,
                 &mut self.data,
                 &self.owner,
-                false,
+                self.executable,
                 0,
             )
         }
@@ -1645,7 +1721,11 @@ mod tests {
         let mut lp = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
         let mut lp_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, lp.key, 1000)).writable();
         let mut matcher_program = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+        matcher_program.executable = true; // Mark as executable
         let mut matcher_ctx = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+        matcher_ctx.owner = matcher_program.key;
+        matcher_ctx.data = vec![0u8; 64];
+        matcher_ctx.is_writable = true;
         {
             let matcher_prog_key = matcher_program.key;
             let matcher_ctx_key = matcher_ctx.key;
@@ -1664,8 +1744,14 @@ mod tests {
         );
         let mut lp_pda_acc = TestAccount::new(lp_pda, solana_program::system_program::id(), 0, vec![]); 
 
-        matcher_ctx.data = vec![0u8; 24];
-        matcher_ctx.is_writable = true;
+        // Update context to have valid ABI return (otherwise execute_trade fails)
+        // Set exec_price > 0.
+        // abi_version = 1 (at 0..4)
+        // flags = 1 (at 4..8)
+        // price at 8..16
+        matcher_ctx.data[0] = 1;
+        matcher_ctx.data[4] = 1;
+        matcher_ctx.data[8] = 1; // price > 0
 
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let out = {
@@ -1685,17 +1771,16 @@ mod tests {
         }));
         
         match res {
-            Ok(Ok(_)) => {}, // Success is fine (stubs present)
+            Ok(Ok(_)) => {}, // Success
             Ok(Err(e)) => {
-                // Must NOT be EngineUnauthorized
                 assert_ne!(e, PercolatorError::EngineUnauthorized.into());
             }
-            Err(_) => {} // Panic acceptable
+            Err(_) => {}
         }
     }
 
     #[test]
-    fn test_trade_cpi_wrong_lp_pda_rejected() {
+    fn test_trade_cpi_wrong_lp_owner_rejected() {
         let mut f = setup_market();
         let init_data = encode_init_market(&f, 100);
         {
@@ -1721,7 +1806,11 @@ mod tests {
         let mut lp = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
         let mut lp_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, lp.key, 1000)).writable();
         let mut matcher_program = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+        matcher_program.executable = true;
         let mut matcher_ctx = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+        matcher_ctx.owner = matcher_program.key;
+        matcher_ctx.data = vec![0u8; 64];
+        matcher_ctx.is_writable = true;
         {
             let matcher_prog_key = matcher_program.key;
             let matcher_ctx_key = matcher_ctx.key;
@@ -1733,21 +1822,25 @@ mod tests {
         }
         let lp_idx = find_idx_by_owner(&f.slab.data, lp.key).unwrap();
 
-        let mut lp_pda_acc = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]); 
+        let lp_bytes = lp_idx.to_le_bytes();
+        let (lp_pda, _) = Pubkey::find_program_address(
+            &[b"lp", f.slab.key.as_ref(), &lp_bytes],
+            &f.program_id
+        );
+        let mut lp_pda_acc = TestAccount::new(lp_pda, solana_program::system_program::id(), 0, vec![]); 
 
-        matcher_ctx.data = vec![0u8; 24];
-        matcher_ctx.is_writable = true;
+        let mut wrong_lp = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
 
         let res = {
             let accs = vec![
                 user.to_info(), // 0
-                lp.to_info(), // 1
+                wrong_lp.to_info(), // 1 (WRONG OWNER)
                 f.slab.to_info(), // 2
                 f.clock.to_info(), // 3
                 f.pyth_index.to_info(), // 4 oracle
                 matcher_program.to_info(), // 5 matcher
                 matcher_ctx.to_info(), // 6 context
-                lp_pda_acc.to_info(), // 7 lp_signer_pda (WRONG KEY)
+                lp_pda_acc.to_info(), // 7 lp_signer_pda
             ];
             process_instruction(&f.program_id, &accs, &encode_trade_cpi(lp_idx, user_idx, 100))
         };
@@ -1781,7 +1874,11 @@ mod tests {
         let mut lp = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
         let mut lp_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, lp.key, 1000)).writable();
         let mut matcher_program = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+        matcher_program.executable = true;
         let mut matcher_ctx = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+        matcher_ctx.owner = matcher_program.key;
+        matcher_ctx.data = vec![0u8; 64];
+        matcher_ctx.is_writable = true;
         {
             let matcher_prog_key = matcher_program.key;
             let matcher_ctx_key = matcher_ctx.key;
@@ -1800,10 +1897,7 @@ mod tests {
         );
         let mut lp_pda_acc = TestAccount::new(lp_pda, solana_program::system_program::id(), 0, vec![]); 
 
-        matcher_ctx.data = vec![0u8; 24];
-        matcher_ctx.is_writable = true;
-
-        let mut wrong_oracle = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+        let mut wrong_oracle = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![0u8; 208]);
 
         let res = {
             let accs = vec![

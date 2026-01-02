@@ -22,9 +22,8 @@ use percolator_prog::{
 };
 use percolator::MAX_ACCOUNTS;
 
-/// ------------------------
-/// Mock matcher "program"
-/// ------------------------
+pub const PERCOLATOR_ID: Pubkey = solana_program::pubkey!("Perco1ator111111111111111111111111111111111");
+
 fn matcher_mock_process_instruction(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -47,13 +46,25 @@ fn matcher_mock_process_instruction(
     let slab_pk = Pubkey::new_from_array(data[1..33].try_into().unwrap());
     if slab_pk != *a_slab.key { return Err(ProgramError::InvalidArgument); }
 
+    let lp_account_id = u64::from_le_bytes(data[35..43].try_into().unwrap());
     let oracle_price_e6 = u64::from_le_bytes(data[43..51].try_into().unwrap());
     let req_size = i128::from_le_bytes(data[51..67].try_into().unwrap());
 
     {
         let mut ctx = a_ctx.try_borrow_mut_data()?;
-        ctx[0..8].copy_from_slice(&oracle_price_e6.to_le_bytes());
-        ctx[8..24].copy_from_slice(&req_size.to_le_bytes());
+        let abi_version = 1u32;
+        let flags = 1u32; // OK
+        let req_id = 0u64;
+        let reserved = 0u64;
+
+        ctx[0..4].copy_from_slice(&abi_version.to_le_bytes());
+        ctx[4..8].copy_from_slice(&flags.to_le_bytes());
+        ctx[8..16].copy_from_slice(&oracle_price_e6.to_le_bytes());
+        ctx[16..32].copy_from_slice(&req_size.to_le_bytes());
+        ctx[32..40].copy_from_slice(&req_id.to_le_bytes());
+        ctx[40..48].copy_from_slice(&lp_account_id.to_le_bytes());
+        ctx[48..56].copy_from_slice(&oracle_price_e6.to_le_bytes());
+        ctx[56..64].copy_from_slice(&reserved.to_le_bytes());
     }
     Ok(())
 }
@@ -122,8 +133,8 @@ fn encode_trade_cpi(lp_idx: u16, user_idx: u16, size: i128) -> Vec<u8> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn integration_trade_cpi_lp_pda_is_signer() {
-    let percolator_id = percolator_prog::ID;
+async fn integration_trade_cpi_success_writes_ctx_prefix() {
+    let percolator_id = PERCOLATOR_ID;
     let matcher_id = Pubkey::new_unique();
     let mut pt = ProgramTest::new("percolator_prog", percolator_id, processor!(percolator_processor::process_instruction));
     pt.add_program("matcher_mock", matcher_id, processor!(matcher_mock_process_instruction));
@@ -161,7 +172,11 @@ async fn integration_trade_cpi_lp_pda_is_signer() {
     pt.add_account(matcher_ctx.pubkey(), Account { lamports: 1_000_000_000, data: vec![0u8; MATCHER_CONTEXT_LEN], owner: matcher_id, executable: false, rent_epoch: 0 });
     pt.add_account(dummy_ata, Account { lamports: 1_000_000, data: vec![], owner: solana_sdk::system_program::ID, executable: false, rent_epoch: 0 });
 
-    let (mut banks, payer, _recent_hash) = pt.start().await;
+    // Pre-allocate LP PDA (idx=1) to ensure existence for CPI
+    let (lp_pda_assumed, _) = Pubkey::find_program_address(&[b"lp", slab.pubkey().as_ref(), &1u16.to_le_bytes()], &percolator_id);
+    pt.add_account(lp_pda_assumed, Account { lamports: 1_000_000, data: vec![], owner: solana_sdk::system_program::ID, executable: false, rent_epoch: 0 });
+
+    let (mut banks, payer, recent_hash) = pt.start().await;
 
     let ix = Instruction {
         program_id: percolator_id,
@@ -205,6 +220,8 @@ async fn integration_trade_cpi_lp_pda_is_signer() {
     banks.process_transaction(tx).await.unwrap();
 
     let (lp_pda, _) = Pubkey::find_program_address(&[b"lp", slab.pubkey().as_ref(), &lp_idx.to_le_bytes()], &percolator_id);
+    assert_eq!(lp_pda, lp_pda_assumed, "Assumed LP PDA matches actual");
+
     let ix = Instruction {
         program_id: percolator_id,
         accounts: vec![AccountMeta::new(user.pubkey(), true), AccountMeta::new(lp.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false), AccountMeta::new_readonly(pyth_index, false), AccountMeta::new_readonly(matcher_id, false), AccountMeta::new(matcher_ctx.pubkey(), false), AccountMeta::new_readonly(lp_pda, false)],
@@ -215,13 +232,13 @@ async fn integration_trade_cpi_lp_pda_is_signer() {
     banks.process_transaction(tx).await.unwrap();
 
     let ctx_acc = banks.get_account(matcher_ctx.pubkey()).await.unwrap().unwrap();
-    let written_price = u64::from_le_bytes(ctx_acc.data[0..8].try_into().unwrap());
+    let written_price = u64::from_le_bytes(ctx_acc.data[8..16].try_into().unwrap());
     assert_eq!(written_price, 1_000_000, "Price mismatch");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn integration_trade_cpi_wrong_lp_pda_rejected() {
-    let percolator_id = percolator_prog::ID;
+async fn integration_trade_cpi_wrong_lp_signer_rejected() {
+    let percolator_id = PERCOLATOR_ID;
     let matcher_id = Pubkey::new_unique();
     let mut pt = ProgramTest::new("percolator_prog", percolator_id, processor!(percolator_processor::process_instruction));
     pt.add_program("matcher_mock", matcher_id, processor!(matcher_mock_process_instruction));
@@ -234,18 +251,17 @@ async fn integration_trade_cpi_wrong_lp_pda_rejected() {
     let pyth_index = Pubkey::new_unique();
     let pyth_collateral = Pubkey::new_unique();
     let matcher_ctx = Keypair::new();
-    let (vault_auth, _) = Pubkey::find_program_address(&[b"vault", slab.pubkey().as_ref()], &percolator_id);
-    let vault = Pubkey::new_unique();
     let user_ata = Pubkey::new_unique();
     let lp_ata = Pubkey::new_unique();
+    let vault = Pubkey::new_unique();
     let dummy_ata = Pubkey::new_unique();
-    let wrong_lp_pda = Pubkey::new_unique();
+    let wrong_lp = Keypair::new();
 
     pt.add_account(slab.pubkey(), Account { lamports: 10_000_000_000, data: vec![0u8; SLAB_LEN], owner: percolator_id, executable: false, rent_epoch: 0 });
     let mut token_data = vec![0u8; spl_token::state::Account::LEN];
     let mut token_state = spl_token::state::Account::default();
     token_state.mint = mint;
-    token_state.owner = vault_auth;
+    token_state.owner = vault_auth(&slab.pubkey(), &percolator_id);
     token_state.state = spl_token::state::AccountState::Initialized;
     spl_token::state::Account::pack(token_state, &mut token_data).unwrap();
     pt.add_account(vault, Account { lamports: 1_000_000_000, data: token_data.clone(), owner: spl_token::ID, executable: false, rent_epoch: 0 });
@@ -259,36 +275,15 @@ async fn integration_trade_cpi_wrong_lp_pda_rejected() {
     pt.add_account(pyth_collateral, Account { lamports: 1_000_000_000, data: make_pyth(1_000_000, -6, 1, 0), owner: Pubkey::new_unique(), executable: false, rent_epoch: 0 });
     pt.add_account(matcher_ctx.pubkey(), Account { lamports: 1_000_000_000, data: vec![0u8; MATCHER_CONTEXT_LEN], owner: matcher_id, executable: false, rent_epoch: 0 });
     pt.add_account(dummy_ata, Account { lamports: 1_000_000, data: vec![], owner: solana_sdk::system_program::ID, executable: false, rent_epoch: 0 });
-    pt.add_account(wrong_lp_pda, Account { lamports: 1, data: vec![], owner: solana_sdk::system_program::ID, executable: false, rent_epoch: 0 });
 
-    let (mut banks, payer, _recent_hash) = pt.start().await;
+    let (mut banks, payer, recent_hash) = pt.start().await;
 
-    let ix = Instruction {
-        program_id: percolator_id,
-        accounts: vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new_readonly(mint, false), AccountMeta::new(vault, false), AccountMeta::new_readonly(spl_token::ID, false), AccountMeta::new_readonly(dummy_ata, false), AccountMeta::new_readonly(solana_sdk::system_program::ID, false), AccountMeta::new_readonly(solana_sdk::sysvar::rent::ID, false), AccountMeta::new_readonly(pyth_index, false), AccountMeta::new_readonly(pyth_collateral, false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false)],
-        data: encode_init_market(&admin.pubkey(), &mint, &pyth_index, &pyth_collateral, 100, 500, 100),
-    };
-    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
-    tx.sign(&[&payer, &admin], banks.get_latest_blockhash().await.unwrap());
-    banks.process_transaction(tx).await.unwrap();
-
-    let ix = Instruction {
-        program_id: percolator_id,
-        accounts: vec![AccountMeta::new(user.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new(user_ata, false), AccountMeta::new(vault, false), AccountMeta::new_readonly(spl_token::ID, false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false), AccountMeta::new_readonly(pyth_collateral, false)],
-        data: encode_init_user(0),
-    };
-    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
-    tx.sign(&[&payer, &user], banks.get_latest_blockhash().await.unwrap());
-    banks.process_transaction(tx).await.unwrap();
-
-    let ix = Instruction {
-        program_id: percolator_id,
-        accounts: vec![AccountMeta::new(lp.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new(lp_ata, false), AccountMeta::new(vault, false), AccountMeta::new_readonly(spl_token::ID, false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false), AccountMeta::new_readonly(pyth_collateral, false)],
-        data: encode_init_lp(&matcher_id, &matcher_ctx.pubkey(), 0),
-    };
-    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
-    tx.sign(&[&payer, &lp], banks.get_latest_blockhash().await.unwrap());
-    banks.process_transaction(tx).await.unwrap();
+    let ix = Instruction { program_id: percolator_id, accounts: vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new_readonly(mint, false), AccountMeta::new(vault, false), AccountMeta::new_readonly(spl_token::ID, false), AccountMeta::new_readonly(dummy_ata, false), AccountMeta::new_readonly(solana_sdk::system_program::ID, false), AccountMeta::new_readonly(solana_sdk::sysvar::rent::ID, false), AccountMeta::new_readonly(pyth_index, false), AccountMeta::new_readonly(pyth_collateral, false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false)], data: encode_init_market(&admin.pubkey(), &mint, &pyth_index, &pyth_collateral, 100, 500, 100) };
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey())); tx.sign(&[&payer, &admin], banks.get_latest_blockhash().await.unwrap()); banks.process_transaction(tx).await.unwrap();
+    let ix = Instruction { program_id: percolator_id, accounts: vec![AccountMeta::new(user.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new(user_ata, false), AccountMeta::new(vault, false), AccountMeta::new_readonly(spl_token::ID, false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false), AccountMeta::new_readonly(pyth_collateral, false)], data: encode_init_user(0) };
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey())); tx.sign(&[&payer, &user], banks.get_latest_blockhash().await.unwrap()); banks.process_transaction(tx).await.unwrap();
+    let ix = Instruction { program_id: percolator_id, accounts: vec![AccountMeta::new(lp.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new(lp_ata, false), AccountMeta::new(vault, false), AccountMeta::new_readonly(spl_token::ID, false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false), AccountMeta::new_readonly(pyth_collateral, false)], data: encode_init_lp(&matcher_id, &matcher_ctx.pubkey(), 0) };
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey())); tx.sign(&[&payer, &lp], banks.get_latest_blockhash().await.unwrap()); banks.process_transaction(tx).await.unwrap();
 
     let slab_acc = banks.get_account(slab.pubkey()).await.unwrap().unwrap();
     let engine = zc::engine_ref(&slab_acc.data).unwrap();
@@ -297,18 +292,18 @@ async fn integration_trade_cpi_wrong_lp_pda_rejected() {
 
     let ix = Instruction {
         program_id: percolator_id,
-        accounts: vec![AccountMeta::new(user.pubkey(), true), AccountMeta::new(lp.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false), AccountMeta::new_readonly(pyth_index, false), AccountMeta::new_readonly(matcher_id, false), AccountMeta::new(matcher_ctx.pubkey(), false), AccountMeta::new_readonly(wrong_lp_pda, false)],
+        accounts: vec![AccountMeta::new(user.pubkey(), true), AccountMeta::new(wrong_lp.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false), AccountMeta::new_readonly(pyth_index, false), AccountMeta::new_readonly(matcher_id, false), AccountMeta::new(matcher_ctx.pubkey(), false)],
         data: encode_trade_cpi(lp_idx, user_idx, 0),
     };
     let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
-    tx.sign(&[&payer, &user, &lp], banks.get_latest_blockhash().await.unwrap());
+    tx.sign(&[&payer, &user, &wrong_lp], banks.get_latest_blockhash().await.unwrap());
     let err = banks.process_transaction(tx).await.unwrap_err();
-    assert!(format!("{err:?}").contains(&format!("Custom({})", percolator_prog::error::PercolatorError::EngineUnauthorized as u32)), "Should be EngineUnauthorized");
+    assert!(format!("{err:?}").contains(&format!("Custom({})", percolator_prog::error::PercolatorError::EngineUnauthorized as u32)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn integration_trade_cpi_wrong_oracle_rejected() {
-    let percolator_id = percolator_prog::ID;
+async fn integration_trade_cpi_wrong_oracle_fails() {
+    let percolator_id = PERCOLATOR_ID;
     let matcher_id = Pubkey::new_unique();
     let mut pt = ProgramTest::new("percolator_prog", percolator_id, processor!(percolator_processor::process_instruction));
     pt.add_program("matcher_mock", matcher_id, processor!(matcher_mock_process_instruction));
@@ -321,10 +316,9 @@ async fn integration_trade_cpi_wrong_oracle_rejected() {
     let pyth_index = Pubkey::new_unique();
     let pyth_collateral = Pubkey::new_unique();
     let matcher_ctx = Keypair::new();
-    let (vault_auth, _) = Pubkey::find_program_address(&[b"vault", slab.pubkey().as_ref()], &percolator_id);
-    let vault = Pubkey::new_unique();
     let user_ata = Pubkey::new_unique();
     let lp_ata = Pubkey::new_unique();
+    let vault = Pubkey::new_unique();
     let dummy_ata = Pubkey::new_unique();
     let wrong_oracle = Pubkey::new_unique();
 
@@ -332,7 +326,7 @@ async fn integration_trade_cpi_wrong_oracle_rejected() {
     let mut token_data = vec![0u8; spl_token::state::Account::LEN];
     let mut token_state = spl_token::state::Account::default();
     token_state.mint = mint;
-    token_state.owner = vault_auth;
+    token_state.owner = vault_auth(&slab.pubkey(), &percolator_id);
     token_state.state = spl_token::state::AccountState::Initialized;
     spl_token::state::Account::pack(token_state, &mut token_data).unwrap();
     pt.add_account(vault, Account { lamports: 1_000_000_000, data: token_data.clone(), owner: spl_token::ID, executable: false, rent_epoch: 0 });
@@ -348,34 +342,14 @@ async fn integration_trade_cpi_wrong_oracle_rejected() {
     pt.add_account(dummy_ata, Account { lamports: 1_000_000, data: vec![], owner: solana_sdk::system_program::ID, executable: false, rent_epoch: 0 });
     pt.add_account(wrong_oracle, Account { lamports: 1, data: vec![0u8; 208], owner: Pubkey::new_unique(), executable: false, rent_epoch: 0 });
 
-    let (mut banks, payer, _recent_hash) = pt.start().await;
+    let (mut banks, payer, recent_hash) = pt.start().await;
 
-    let ix = Instruction {
-        program_id: percolator_id,
-        accounts: vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new_readonly(mint, false), AccountMeta::new(vault, false), AccountMeta::new_readonly(spl_token::ID, false), AccountMeta::new_readonly(dummy_ata, false), AccountMeta::new_readonly(solana_sdk::system_program::ID, false), AccountMeta::new_readonly(solana_sdk::sysvar::rent::ID, false), AccountMeta::new_readonly(pyth_index, false), AccountMeta::new_readonly(pyth_collateral, false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false)],
-        data: encode_init_market(&admin.pubkey(), &mint, &pyth_index, &pyth_collateral, 100, 500, 100),
-    };
-    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
-    tx.sign(&[&payer, &admin], banks.get_latest_blockhash().await.unwrap());
-    banks.process_transaction(tx).await.unwrap();
-
-    let ix = Instruction {
-        program_id: percolator_id,
-        accounts: vec![AccountMeta::new(user.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new(user_ata, false), AccountMeta::new(vault, false), AccountMeta::new_readonly(spl_token::ID, false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false), AccountMeta::new_readonly(pyth_collateral, false)],
-        data: encode_init_user(0),
-    };
-    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
-    tx.sign(&[&payer, &user], banks.get_latest_blockhash().await.unwrap());
-    banks.process_transaction(tx).await.unwrap();
-
-    let ix = Instruction {
-        program_id: percolator_id,
-        accounts: vec![AccountMeta::new(lp.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new(lp_ata, false), AccountMeta::new(vault, false), AccountMeta::new_readonly(spl_token::ID, false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false), AccountMeta::new_readonly(pyth_collateral, false)],
-        data: encode_init_lp(&matcher_id, &matcher_ctx.pubkey(), 0),
-    };
-    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
-    tx.sign(&[&payer, &lp], banks.get_latest_blockhash().await.unwrap());
-    banks.process_transaction(tx).await.unwrap();
+    let ix = Instruction { program_id: percolator_id, accounts: vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new_readonly(mint, false), AccountMeta::new(vault, false), AccountMeta::new_readonly(spl_token::ID, false), AccountMeta::new_readonly(dummy_ata, false), AccountMeta::new_readonly(solana_sdk::system_program::ID, false), AccountMeta::new_readonly(solana_sdk::sysvar::rent::ID, false), AccountMeta::new_readonly(pyth_index, false), AccountMeta::new_readonly(pyth_collateral, false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false)], data: encode_init_market(&admin.pubkey(), &mint, &pyth_index, &pyth_collateral, 100, 500, 100) };
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey())); tx.sign(&[&payer, &admin], banks.get_latest_blockhash().await.unwrap()); banks.process_transaction(tx).await.unwrap();
+    let ix = Instruction { program_id: percolator_id, accounts: vec![AccountMeta::new(user.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new(user_ata, false), AccountMeta::new(vault, false), AccountMeta::new_readonly(spl_token::ID, false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false), AccountMeta::new_readonly(pyth_collateral, false)], data: encode_init_user(0) };
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey())); tx.sign(&[&payer, &user], banks.get_latest_blockhash().await.unwrap()); banks.process_transaction(tx).await.unwrap();
+    let ix = Instruction { program_id: percolator_id, accounts: vec![AccountMeta::new(lp.pubkey(), true), AccountMeta::new(slab.pubkey(), false), AccountMeta::new(lp_ata, false), AccountMeta::new(vault, false), AccountMeta::new_readonly(spl_token::ID, false), AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false), AccountMeta::new_readonly(pyth_collateral, false)], data: encode_init_lp(&matcher_id, &matcher_ctx.pubkey(), 0) };
+    let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey())); tx.sign(&[&payer, &lp], banks.get_latest_blockhash().await.unwrap()); banks.process_transaction(tx).await.unwrap();
 
     let slab_acc = banks.get_account(slab.pubkey()).await.unwrap().unwrap();
     let engine = zc::engine_ref(&slab_acc.data).unwrap();
@@ -391,5 +365,10 @@ async fn integration_trade_cpi_wrong_oracle_rejected() {
     let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
     tx.sign(&[&payer, &user, &lp], banks.get_latest_blockhash().await.unwrap());
     let err = banks.process_transaction(tx).await.unwrap_err();
-    assert!(format!("{err:?}").contains("InvalidArgument"), "Should be InvalidArgument");
+    assert!(format!("{err:?}").contains("InvalidArgument"));
+}
+
+fn vault_auth(slab: &Pubkey, prog: &Pubkey) -> Pubkey {
+    let (pda, _) = Pubkey::find_program_address(&[b"vault", slab.as_ref()], prog);
+    pda
 }
