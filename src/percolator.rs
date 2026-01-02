@@ -352,7 +352,7 @@ pub mod state {
     use core::cell::RefMut;
     use solana_program::account_info::AccountInfo;
     use solana_program::program_error::ProgramError;
-    use crate::constants::{HEADER_LEN, CONFIG_LEN, ENGINE_OFF, ENGINE_LEN};
+    use crate::constants::{HEADER_LEN, CONFIG_LEN};
 
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable)]
@@ -981,9 +981,6 @@ pub mod processor {
 
                 invoke_signed(&ix, &cpi_infos, &[seeds])?;
 
-                if a_context.data_len() < MATCHER_CONTEXT_LEN {
-                    return Err(ProgramError::InvalidAccountData);
-                }
                 let ctx_data = a_context.try_borrow_data()?;
                 let exec_price = u64::from_le_bytes(ctx_data[0..8].try_into().unwrap());
                 let exec_size = i128::from_le_bytes(ctx_data[8..24].try_into().unwrap());
@@ -1118,7 +1115,7 @@ mod tests {
     use spl_token::state::{Account as TokenAccount, AccountState};
     use crate::{
         processor::process_instruction,
-        constants::{MAGIC, VERSION},
+        constants::{SLAB_LEN, MAGIC, VERSION},
         zc,
         error::PercolatorError,
         state,
@@ -1321,147 +1318,6 @@ mod tests {
     // --- Tests ---
 
     #[test]
-    fn test_trade_cpi_pda_derivation() {
-        let mut f = setup_market();
-        let init_data = encode_init_market(&f, 100);
-        {
-            let mut dummy = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
-            let accs = vec![
-                f.admin.to_info(), f.slab.to_info(), f.mint.to_info(), f.vault.to_info(), f.token_prog.to_info(),
-                dummy.to_info(), f.system.to_info(), f.rent.to_info(), f.pyth_index.to_info(), f.pyth_col.to_info(), f.clock.to_info(),
-            ];
-            process_instruction(&f.program_id, &accs, &init_data).unwrap();
-        }
-
-        let mut user = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
-        let mut user_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, user.key, 1000)).writable();
-        {
-            let accs = vec![
-                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
-                f.clock.to_info(), f.pyth_col.to_info(),
-            ];
-            process_instruction(&f.program_id, &accs, &encode_init_user(0)).unwrap();
-        }
-        let user_idx = find_idx_by_owner(&f.slab.data, user.key).unwrap();
-
-        let mut lp = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
-        let mut lp_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, lp.key, 1000)).writable();
-        let mut matcher_program = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
-        let mut matcher_ctx = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
-        {
-            let matcher_prog_key = matcher_program.key;
-            let matcher_ctx_key = matcher_ctx.key;
-            let accs = vec![
-                lp.to_info(), f.slab.to_info(), lp_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
-                matcher_program.to_info(), matcher_ctx.to_info()
-            ];
-            process_instruction(&f.program_id, &accs, &encode_init_lp(matcher_prog_key, matcher_ctx_key, 0)).unwrap();
-        }
-        let lp_idx = find_idx_by_owner(&f.slab.data, lp.key).unwrap();
-
-        // TradeCpi
-        let lp_bytes = lp_idx.to_le_bytes();
-        let (lp_pda, _) = Pubkey::find_program_address(
-            &[b"lp", f.slab.key.as_ref(), &lp_bytes],
-            &f.program_id
-        );
-        let mut lp_pda_acc = TestAccount::new(lp_pda, solana_program::system_program::id(), 0, vec![]); // signer verified in processor
-
-        // Matcher context needs 24 bytes
-        matcher_ctx.data = vec![0u8; 24];
-        matcher_ctx.is_writable = true;
-
-        let accs = vec![
-            user.to_info(), // 0
-            lp.to_info(), // 1
-            f.slab.to_info(), // 2
-            f.clock.to_info(), // 3
-            f.pyth_index.to_info(), // 4 oracle
-            matcher_program.to_info(), // 5 matcher
-            matcher_ctx.to_info(), // 6 context
-            lp_pda_acc.to_info(), // 7 lp_signer_pda
-        ];
-
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            process_instruction(&f.program_id, &accs, &encode_trade_cpi(lp_idx, user_idx, 100))
-        }));
-        
-        match res {
-            Ok(Ok(_)) => panic!("unexpected success: CPI shouldn't succeed in unit tests"),
-            Ok(Err(e)) => {
-                // Must NOT be EngineUnauthorized
-                assert_ne!(e, ProgramError::Custom(PercolatorError::EngineUnauthorized as u32));
-            }
-            Err(_) => {
-                // Panic is acceptable here (invoke_signed syscall not supported)
-            }
-        }
-    }
-
-    #[test]
-    fn test_trade_cpi_wrong_lp_pda_rejected() {
-        let mut f = setup_market();
-        let init_data = encode_init_market(&f, 100);
-        {
-            let mut dummy = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
-            let accs = vec![
-                f.admin.to_info(), f.slab.to_info(), f.mint.to_info(), f.vault.to_info(), f.token_prog.to_info(),
-                dummy.to_info(), f.system.to_info(), f.rent.to_info(), f.pyth_index.to_info(), f.pyth_col.to_info(), f.clock.to_info(),
-            ];
-            process_instruction(&f.program_id, &accs, &init_data).unwrap();
-        }
-
-        let mut user = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
-        let mut user_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, user.key, 1000)).writable();
-        {
-            let accs = vec![
-                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
-                f.clock.to_info(), f.pyth_col.to_info(),
-            ];
-            process_instruction(&f.program_id, &accs, &encode_init_user(0)).unwrap();
-        }
-        let user_idx = find_idx_by_owner(&f.slab.data, user.key).unwrap();
-
-        let mut lp = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
-        let mut lp_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, lp.key, 1000)).writable();
-        let mut matcher_program = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
-        let mut matcher_ctx = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
-        {
-            let matcher_prog_key = matcher_program.key;
-            let matcher_ctx_key = matcher_ctx.key;
-            let accs = vec![
-                lp.to_info(), f.slab.to_info(), lp_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
-                matcher_program.to_info(), matcher_ctx.to_info()
-            ];
-            process_instruction(&f.program_id, &accs, &encode_init_lp(matcher_prog_key, matcher_ctx_key, 0)).unwrap();
-        }
-        let lp_idx = find_idx_by_owner(&f.slab.data, lp.key).unwrap();
-
-        // Use WRONG PDA
-        let mut lp_pda_acc = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]); 
-
-        matcher_ctx.data = vec![0u8; 24];
-        matcher_ctx.is_writable = true;
-
-        let accs = vec![
-            user.to_info(), // 0
-            lp.to_info(), // 1
-            f.slab.to_info(), // 2
-            f.clock.to_info(), // 3
-            f.pyth_index.to_info(), // 4 oracle
-            matcher_program.to_info(), // 5 matcher
-            matcher_ctx.to_info(), // 6 context
-            lp_pda_acc.to_info(), // 7 lp_signer_pda (WRONG KEY)
-        ];
-
-        // Should fail with EngineUnauthorized because PDA key is wrong
-        let res = process_instruction(&f.program_id, &accs, &encode_trade_cpi(lp_idx, user_idx, 100));
-        assert_eq!(res, Err(PercolatorError::EngineUnauthorized.into()));
-    }
-
-    // --- Tests ---
-
-    #[test]
     fn test_init_market() {
         let mut f = setup_market();
         let data = encode_init_market(&f, 100);
@@ -1615,11 +1471,13 @@ mod tests {
         let mut d1 = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
         let mut d2 = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
         {
-            let accounts = vec![
+            let matcher_prog_key = d1.key;
+            let matcher_ctx_key = d2.key;
+            let accs = vec![
                 lp.to_info(), f.slab.to_info(), lp_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
                 d1.to_info(), d2.to_info()
             ];
-            process_instruction(&f.program_id, &accounts, &encode_init_lp(Pubkey::default(), Pubkey::default(), 0)).unwrap();
+            process_instruction(&f.program_id, &accs, &encode_init_lp(matcher_prog_key, matcher_ctx_key, 0)).unwrap();
         }
         let lp_idx = find_idx_by_owner(&f.slab.data, lp.key).unwrap();
         {
@@ -1659,7 +1517,6 @@ mod tests {
         }
         let user_idx = find_idx_by_owner(&f.slab.data, user.key).unwrap();
 
-        // Deposit
         {
             let accounts = vec![
                 user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()
@@ -1667,7 +1524,6 @@ mod tests {
             process_instruction(&f.program_id, &accounts, &encode_deposit(user_idx, 500)).unwrap();
         }
 
-        // Crank
         {
             let accs = vec![
                 user.to_info(), f.slab.to_info(), f.clock.to_info(), f.pyth_col.to_info()
@@ -1678,13 +1534,14 @@ mod tests {
         let mut attacker = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
         let mut vault_pda = TestAccount::new(f.vault_pda, solana_program::system_program::id(), 0, vec![]);
         
-        let accounts = vec![
-            attacker.to_info(),
-            f.slab.to_info(), f.vault.to_info(), user_ata.to_info(), vault_pda.to_info(),
-            f.token_prog.to_info(), f.clock.to_info(), f.pyth_index.to_info()
-        ];
-        
-        let res = process_instruction(&f.program_id, &accounts, &encode_withdraw(user_idx, 100));
+        let res = {
+            let accounts = vec![
+                attacker.to_info(),
+                f.slab.to_info(), f.vault.to_info(), user_ata.to_info(), vault_pda.to_info(),
+                f.token_prog.to_info(), f.clock.to_info(), f.pyth_index.to_info()
+            ];
+            process_instruction(&f.program_id, &accounts, &encode_withdraw(user_idx, 100))
+        };
         assert_eq!(res, Err(PercolatorError::EngineUnauthorized.into()));
     }
 
@@ -1717,34 +1574,26 @@ mod tests {
         let mut d1 = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
         let mut d2 = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
         {
+            let matcher_prog_key = d1.key;
+            let matcher_ctx_key = d2.key;
             let accs = vec![
-                lp.to_info(), f.slab.to_info(), lp_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(), d1.to_info(), d2.to_info()
+                lp.to_info(), f.slab.to_info(), lp_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
+                d1.to_info(), d2.to_info()
             ];
-            process_instruction(&f.program_id, &accs, &encode_init_lp(Pubkey::default(), Pubkey::default(), 0)).unwrap();
+            process_instruction(&f.program_id, &accs, &encode_init_lp(matcher_prog_key, matcher_ctx_key, 0)).unwrap();
         }
         let lp_idx = find_idx_by_owner(&f.slab.data, lp.key).unwrap();
 
-        // Deposit User
         {
-            let accs = vec![
-                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()
-            ];
+            let accs = vec![user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()];
             process_instruction(&f.program_id, &accs, &encode_deposit(user_idx, 1000)).unwrap();
         }
-
-        // Deposit LP
         {
-            let accs = vec![
-                lp.to_info(), f.slab.to_info(), lp_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()
-            ];
+            let accs = vec![lp.to_info(), f.slab.to_info(), lp_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()];
             process_instruction(&f.program_id, &accs, &encode_deposit(lp_idx, 1000)).unwrap();
         }
-
-        // Crank
         {
-            let accs = vec![
-                user.to_info(), f.slab.to_info(), f.clock.to_info(), f.pyth_col.to_info()
-            ];
+            let accs = vec![user.to_info(), f.slab.to_info(), f.clock.to_info(), f.pyth_col.to_info()];
             process_instruction(&f.program_id, &accs, &encode_crank(user_idx, 0, 0)).unwrap();
         }
 
@@ -1756,5 +1605,207 @@ mod tests {
             let res = process_instruction(&f.program_id, &accs, &encode_trade(lp_idx, user_idx, 100));
             assert_eq!(res, Err(PercolatorError::EngineUnauthorized.into()));
         }
+    }
+
+    #[test]
+    fn test_trade_cpi_pda_derivation() {
+        let mut f = setup_market();
+        let init_data = encode_init_market(&f, 100);
+        {
+            let mut dummy = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+            let accs = vec![
+                f.admin.to_info(), f.slab.to_info(), f.mint.to_info(), f.vault.to_info(), f.token_prog.to_info(),
+                dummy.to_info(), f.system.to_info(), f.rent.to_info(), f.pyth_index.to_info(), f.pyth_col.to_info(), f.clock.to_info(),
+            ];
+            process_instruction(&f.program_id, &accs, &init_data).unwrap();
+        }
+
+        let mut user = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
+        let mut user_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, user.key, 1000)).writable();
+        {
+            let accs = vec![
+                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
+                f.clock.to_info(), f.pyth_col.to_info(),
+            ];
+            process_instruction(&f.program_id, &accs, &encode_init_user(0)).unwrap();
+        }
+        let user_idx = find_idx_by_owner(&f.slab.data, user.key).unwrap();
+
+        let mut lp = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
+        let mut lp_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, lp.key, 1000)).writable();
+        let mut matcher_program = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+        let mut matcher_ctx = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+        {
+            let matcher_prog_key = matcher_program.key;
+            let matcher_ctx_key = matcher_ctx.key;
+            let accs = vec![
+                lp.to_info(), f.slab.to_info(), lp_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
+                matcher_program.to_info(), matcher_ctx.to_info()
+            ];
+            process_instruction(&f.program_id, &accs, &encode_init_lp(matcher_prog_key, matcher_ctx_key, 0)).unwrap();
+        }
+        let lp_idx = find_idx_by_owner(&f.slab.data, lp.key).unwrap();
+
+        let lp_bytes = lp_idx.to_le_bytes();
+        let (lp_pda, _) = Pubkey::find_program_address(
+            &[b"lp", f.slab.key.as_ref(), &lp_bytes],
+            &f.program_id
+        );
+        let mut lp_pda_acc = TestAccount::new(lp_pda, solana_program::system_program::id(), 0, vec![]); 
+
+        matcher_ctx.data = vec![0u8; 24];
+        matcher_ctx.is_writable = true;
+
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let out = {
+                let accs = vec![
+                    user.to_info(), // 0
+                    lp.to_info(), // 1
+                    f.slab.to_info(), // 2
+                    f.clock.to_info(), // 3
+                    f.pyth_index.to_info(), // 4 oracle
+                    matcher_program.to_info(), // 5 matcher
+                    matcher_ctx.to_info(), // 6 context
+                    lp_pda_acc.to_info(), // 7 lp_signer_pda
+                ];
+                process_instruction(&f.program_id, &accs, &encode_trade_cpi(lp_idx, user_idx, 100))
+            };
+            out
+        }));
+        
+        match res {
+            Ok(Ok(_)) => panic!("unexpected success: CPI shouldn't succeed in unit tests"),
+            Ok(Err(e)) => {
+                assert_ne!(e, PercolatorError::EngineUnauthorized.into());
+            }
+            Err(_) => {}
+        }
+    }
+
+    #[test]
+    fn test_trade_cpi_wrong_lp_pda_rejected() {
+        let mut f = setup_market();
+        let init_data = encode_init_market(&f, 100);
+        {
+            let mut dummy = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+            let accs = vec![
+                f.admin.to_info(), f.slab.to_info(), f.mint.to_info(), f.vault.to_info(), f.token_prog.to_info(),
+                dummy.to_info(), f.system.to_info(), f.rent.to_info(), f.pyth_index.to_info(), f.pyth_col.to_info(), f.clock.to_info(),
+            ];
+            process_instruction(&f.program_id, &accs, &init_data).unwrap();
+        }
+
+        let mut user = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
+        let mut user_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, user.key, 1000)).writable();
+        {
+            let accs = vec![
+                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
+                f.clock.to_info(), f.pyth_col.to_info(),
+            ];
+            process_instruction(&f.program_id, &accs, &encode_init_user(0)).unwrap();
+        }
+        let user_idx = find_idx_by_owner(&f.slab.data, user.key).unwrap();
+
+        let mut lp = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
+        let mut lp_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, lp.key, 1000)).writable();
+        let mut matcher_program = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+        let mut matcher_ctx = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+        {
+            let matcher_prog_key = matcher_program.key;
+            let matcher_ctx_key = matcher_ctx.key;
+            let accs = vec![
+                lp.to_info(), f.slab.to_info(), lp_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
+                matcher_program.to_info(), matcher_ctx.to_info()
+            ];
+            process_instruction(&f.program_id, &accs, &encode_init_lp(matcher_prog_key, matcher_ctx_key, 0)).unwrap();
+        }
+        let lp_idx = find_idx_by_owner(&f.slab.data, lp.key).unwrap();
+
+        let mut lp_pda_acc = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]); 
+
+        matcher_ctx.data = vec![0u8; 24];
+        matcher_ctx.is_writable = true;
+
+        let res = {
+            let accs = vec![
+                user.to_info(), // 0
+                lp.to_info(), // 1
+                f.slab.to_info(), // 2
+                f.clock.to_info(), // 3
+                f.pyth_index.to_info(), // 4 oracle
+                matcher_program.to_info(), // 5 matcher
+                matcher_ctx.to_info(), // 6 context
+                lp_pda_acc.to_info(), // 7 lp_signer_pda (WRONG KEY)
+            ];
+            process_instruction(&f.program_id, &accs, &encode_trade_cpi(lp_idx, user_idx, 100))
+        };
+        assert_eq!(res, Err(PercolatorError::EngineUnauthorized.into()));
+    }
+
+    #[test]
+    fn test_trade_cpi_wrong_oracle_key_rejected() {
+        let mut f = setup_market();
+        let init_data = encode_init_market(&f, 100);
+        {
+            let mut dummy = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+            let accs = vec![
+                f.admin.to_info(), f.slab.to_info(), f.mint.to_info(), f.vault.to_info(), f.token_prog.to_info(),
+                dummy.to_info(), f.system.to_info(), f.rent.to_info(), f.pyth_index.to_info(), f.pyth_col.to_info(), f.clock.to_info(),
+            ];
+            process_instruction(&f.program_id, &accs, &init_data).unwrap();
+        }
+
+        let mut user = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
+        let mut user_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, user.key, 1000)).writable();
+        {
+            let accs = vec![
+                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
+                f.clock.to_info(), f.pyth_col.to_info(),
+            ];
+            process_instruction(&f.program_id, &accs, &encode_init_user(0)).unwrap();
+        }
+        let user_idx = find_idx_by_owner(&f.slab.data, user.key).unwrap();
+
+        let mut lp = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
+        let mut lp_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, lp.key, 1000)).writable();
+        let mut matcher_program = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+        let mut matcher_ctx = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+        {
+            let matcher_prog_key = matcher_program.key;
+            let matcher_ctx_key = matcher_ctx.key;
+            let accs = vec![
+                lp.to_info(), f.slab.to_info(), lp_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
+                matcher_program.to_info(), matcher_ctx.to_info()
+            ];
+            process_instruction(&f.program_id, &accs, &encode_init_lp(matcher_prog_key, matcher_ctx_key, 0)).unwrap();
+        }
+        let lp_idx = find_idx_by_owner(&f.slab.data, lp.key).unwrap();
+
+        let lp_bytes = lp_idx.to_le_bytes();
+        let (lp_pda, _) = Pubkey::find_program_address(
+            &[b"lp", f.slab.key.as_ref(), &lp_bytes],
+            &f.program_id
+        );
+        let mut lp_pda_acc = TestAccount::new(lp_pda, solana_program::system_program::id(), 0, vec![]); 
+
+        matcher_ctx.data = vec![0u8; 24];
+        matcher_ctx.is_writable = true;
+
+        let mut wrong_oracle = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+
+        let res = {
+            let accs = vec![
+                user.to_info(), // 0
+                lp.to_info(), // 1
+                f.slab.to_info(), // 2
+                f.clock.to_info(), // 3
+                wrong_oracle.to_info(), // 4 oracle (WRONG KEY)
+                matcher_program.to_info(), // 5 matcher
+                matcher_ctx.to_info(), // 6 context
+                lp_pda_acc.to_info(), // 7 lp_signer_pda
+            ];
+            process_instruction(&f.program_id, &accs, &encode_trade_cpi(lp_idx, user_idx, 100))
+        };
+        assert_eq!(res, Err(ProgramError::InvalidArgument));
     }
 }
