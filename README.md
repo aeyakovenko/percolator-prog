@@ -1,214 +1,214 @@
 # Percolator (Solana Program)
 
-Percolator is a minimal Solana program that embeds a formally-verified-style `RiskEngine` (from the `percolator` crate) inside a single “slab” account and exposes a small instruction set for:
-- market init
-- user / LP account creation
-- collateral deposit / withdraw
-- keeper crank
-- trades (no-CPI and CPI via external matcher)
-- liquidation
-- close account
-- insurance top-up
+Percolator is a minimal Solana program that wraps the `percolator` crate’s `RiskEngine` in a single on-chain “slab” account and exposes a small, composable API for deploying and operating perpetual markets.
 
-Key design goals:
-- **Single-account state**: all market state + risk engine live in one slab account (`SLAB_LEN` bytes).
-- **Zero-copy engine**: `RiskEngine` is stored in-place at a fixed offset with an explicit alignment check.
-- **Unsafe island**: the only `unsafe` is in the `zc` module used for zero-copy references.
-- **Stable matcher ABI**: matcher returns execution results by writing a fixed prefix at the start of a context account.
+This README focuses on **design**, **trust boundaries**, and the **high-level API / deployment flow** (not a line-by-line restatement of the code).
 
 ---
 
-## Accounts & Layout
+## Design Summary
 
-### Slab account
-Owned by this program. Fixed size:
+### 1) One market = one slab account
+Each market lives in exactly one program-owned account (the “slab”). The slab contains:
 
-- `HEADER_LEN` bytes: `SlabHeader` (magic/version/admin/bump)
-- `CONFIG_LEN` bytes: `MarketConfig` (mints, vault, oracle keys, staleness/conf filters, bump)
-- `RiskEngine` bytes: stored in-place at `ENGINE_OFF` (aligned to `align_of::<RiskEngine>()`)
+- a fixed header (magic/version/admin + small reserved fields)
+- a market config (mints, vault, oracle keys, policy knobs)
+- the `RiskEngine` stored in-place (zero-copy)
 
-Constants are in `constants::*`:
-- `MAGIC`, `VERSION`
-- `SLAB_LEN`
-- `ENGINE_OFF`, `ENGINE_LEN`, `ENGINE_ALIGN`
+This gives you:
+- simple on-chain address model (one market account)
+- easy snapshotting / replication / archival
+- deterministic layout (good for audits and fuzzing)
 
-### Vault token account
-A SPL token account holding collateral. Must satisfy:
-- `owner == spl_token::ID`
-- mint == `MarketConfig.collateral_mint`
-- owner == derived vault authority PDA:
-  - `PDA = find_program_address(["vault", slab_pubkey])`
+### 2) Clear trust boundaries
+Percolator enforces a hard separation:
 
-### Oracles
-This code reads **Pyh v1 style price account** data directly (208-byte minimum) and converts to `price_e6` (scaled to 1e6). Enforces:
-- positive price
-- staleness window (`max_staleness_slots`)
-- confidence constraint (`conf_filter_bps`)
+- **RiskEngine**: pure state machine + accounting. No CPI. No token transfers. No signatures. It assumes Solana atomicity (on error, state reverts).
+- **Percolator program**: does identity checks, token transfers, oracle reading, and optional matcher CPI. It’s the “glue” that makes the engine usable on-chain.
+- **Matcher program (optional)**: provides price/size execution for LPs. It is trusted by *the LP that registered it*, not by the protocol.
 
----
+### 3) Two execution modes
+- **TradeNoCpi**: for local testing / simplest deployment; uses a trivial matcher implementation.
+- **TradeCpi**: production path; calls an external matcher program and reads a return prefix from a matcher-owned context account.
 
-## Instruction Set
+### 4) Risk-reduction gating (anti-grief / anti-DoS policy)
+When insurance falls below a threshold, Percolator can enforce “risk-reduction-only” behavior **at the wrapper layer**:
+- compute a system risk metric from LP exposures
+- auto-adjust the threshold over time (rate-limited + smoothed + step-clamped)
+- if insurance < threshold, reject **risk-increasing** trades (allow only risk-reducing trades)
 
-Instruction enum lives in `ix::Instruction` and is decoded manually from bytes.
-
-### 0. `InitMarket`
-Initializes a slab and writes a fresh engine + config + header.
-
-**Accounts (11)**
-0. `admin` (signer)
-1. `slab` (writable, program-owned, len == `SLAB_LEN`)
-2. `collateral_mint` (readonly)
-3. `vault` (readonly; must be correct SPL token account)
-4. `token_program` (readonly)
-5. dummy/unused (readonly) *(kept for compatibility with earlier tests)*
-6. `system_program` (readonly)
-7. `rent` (readonly)
-8. `pyth_index` (readonly)
-9. `pyth_collateral` (readonly)
-10. `clock` (readonly)
-
-### 1. `InitUser { fee_payment }`
-Adds a user slot in the engine and assigns ownership to the signer.
-
-**Accounts (7)**
-0. `user` (signer)
-1. `slab` (writable)
-2. `user_ata` (writable)
-3. `vault` (writable)
-4. `token_program` (readonly)
-5. `clock` (readonly)
-6. `pyth_collateral` (readonly)
-
-### 2. `InitLP { matcher_program, matcher_context, fee_payment }`
-Adds an LP slot. Stores `(matcher_program, matcher_context)` in the engine.
-
-**Accounts (7)**
-0. `lp_owner` (signer)
-1. `slab` (writable)
-2. `lp_ata` (writable)
-3. `vault` (writable)
-4. `token_program` (readonly)
-5. (unused in program logic; legacy in tests)
-6. (unused in program logic; legacy in tests)
-
-### 3. `DepositCollateral { user_idx, amount }`
-Transfers tokens into the vault and credits engine capital.
-
-**Accounts (5)**
-0. `user` (signer)
-1. `slab` (writable)
-2. `user_ata` (writable)
-3. `vault` (writable)
-4. `token_program` (readonly)
-
-### 4. `WithdrawCollateral { user_idx, amount }`
-Runs risk checks against the index oracle and withdraws tokens from vault to user ATA.
-
-**Accounts (8)**
-0. `user` (signer)
-1. `slab` (writable)
-2. `vault` (writable)
-3. `user_ata` (writable)
-4. `vault_authority_pda` (readonly; must match derived PDA)
-5. `token_program` (readonly)
-6. `clock` (readonly)
-7. `index_oracle` (readonly; must match config)
-
-### 5. `KeeperCrank { caller_idx, funding_rate_bps_per_slot, allow_panic }`
-Keeper updates engine funding/fees and enforces crank staleness rules.
-
-**Accounts (4)**
-0. `caller` (signer)
-1. `slab` (writable)
-2. `clock` (readonly)
-3. `index_oracle` (readonly)
-
-### 6. `TradeNoCpi { lp_idx, user_idx, size }`
-Executes a trade using `NoOpMatcher` (used for local testing).
-
-**Accounts (5)**
-0. `user` (signer)
-1. `lp_owner` (signer)
-2. `slab` (writable)
-3. `clock` (readonly)
-4. `index_oracle` (readonly)
-
-### 7. `LiquidateAtOracle { target_idx }`
-Liquidates a position using the index oracle.
-
-**Accounts (4)**
-0. (unused)
-1. `slab` (writable)
-2. `clock` (readonly)
-3. `index_oracle` (readonly)
-
-### 8. `CloseAccount { user_idx }`
-Closes a user account in the engine and withdraws remaining collateral.
-
-**Accounts (8)**
-0. `user` (signer)
-1. `slab` (writable)
-2. `vault` (writable)
-3. `user_ata` (writable)
-4. `vault_authority_pda` (readonly; must match)
-5. `token_program` (readonly)
-6. `clock` (readonly)
-7. `index_oracle` (readonly)
-
-### 9. `TopUpInsurance { amount }`
-Transfers tokens into the vault and credits the engine insurance fund.
-
-**Accounts (5)**
-0. `payer` (signer)
-1. `slab` (writable)
-2. `payer_ata` (writable)
-3. `vault` (writable)
-4. `token_program` (readonly)
-
-### 10. `TradeCpi { lp_idx, user_idx, size }`
-Calls an external **matcher program** via CPI. The matcher writes the execution result into the **matcher context account** prefix. Percolator then validates the prefix and applies the trade to the engine.
-
-**Accounts (7)**
-0. `user` (signer)
-1. `lp_owner` (signer)
-2. `slab` (writable)
-3. `clock` (readonly)
-4. `index_oracle` (readonly; must match config)
-5. `matcher_program` (executable)
-6. `matcher_context` (writable; owned by matcher_program; `data_len >= MATCHER_CONTEXT_LEN`)
-
-The LP PDA is **not passed as an account**. It is synthesized as a pure signer via `invoke_signed` seeds:
-- `PDA = find_program_address(["lp", slab_pubkey, lp_idx_le], percolator_program_id)`
+This reduces griefing vectors where attackers spam risk-increasing actions when the system is under-insured.
 
 ---
 
-## Matcher ABI (Stable)
+## High-Level API: Deploying a Market
 
-The matcher returns execution data by writing the first 64 bytes of the context account.
+A “market” is defined by:
+- collateral mint (SPL token mint)
+- vault token account (holds collateral for this market)
+- oracles (index + collateral)
+- `RiskParams` (engine parameters, including warmup, margins, crank staleness, fees, liquidation knobs)
 
-`MatcherReturn` layout (little-endian, total 64 bytes):
-- `u32 abi_version`
-- `u32 flags` (bit0 = valid; bit2 = rejected)
-- `u64 exec_price_e6`
-- `i128 exec_size`
-- `u64 req_id`
-- `u64 lp_account_id`
-- `u64 oracle_price_e6`
-- `u64 reserved` (must be 0)
+### Step 0 — Create accounts off-chain
+You create:
+1) **Slab account** (program-owned, fixed size `SLAB_LEN`)
+2) **Vault token account** for the collateral mint
+   - owner must be the vault authority PDA derived from (program_id, slab_pubkey)
 
-Percolator validates:
-- `abi_version == MATCHER_ABI_VERSION`
-- `flags` indicates valid and not rejected
-- `exec_price_e6 != 0`
-- `lp_account_id` matches the engine LP account id
-- `oracle_price_e6` matches the oracle used in this instruction
-- `reserved == 0`
-- `exec_size` is bounded and direction-consistent with requested `size`
+**Vault authority PDA**
+- seeds: `["vault", slab_pubkey]`
+
+### Step 1 — Initialize market
+Call **InitMarket** with:
+- admin signer (controls governance knobs like threshold and admin rotation)
+- slab account
+- collateral mint + vault token account
+- oracle pubkeys
+- policy knobs (staleness/conf filters)
+- `RiskParams`
+
+InitMarket:
+- zeroes slab memory (fresh start)
+- writes config + header
+- constructs `RiskEngine::new(risk_params)` in-place
+
+### Step 2 — Create participants (User / LP)
+- **InitUser** creates a user slot in the engine and sets `owner = signer`.
+- **InitLP** creates an LP slot and records:
+  - `matcher_program`
+  - `matcher_context` (a matcher-owned account the matcher writes results into)
+  - `owner = signer`
+
+### Step 3 — Fund accounts
+- **DepositCollateral** transfers collateral tokens into the vault and credits engine capital for the indexed account.
+- **TopUpInsurance** transfers collateral into the vault and credits the engine’s insurance fund.
+
+### Step 4 — Keep the market live
+- **KeeperCrank** is the permissionless “advance global state” entrypoint:
+  - accrues funding
+  - charges maintenance fees (best-effort for caller)
+  - scans and liquidates undercollateralized accounts
+  - may trigger stress actions depending on engine state
+  - (optionally) updates the risk threshold policy (auto-threshold)
+
+The market is intended to require periodic cranks; engine logic can enforce freshness via `max_crank_staleness_slots`.
+
+### Step 5 — Trade
+Two options:
+
+#### A) TradeNoCpi (testing / minimal)
+Executes a trade through a trivial matcher. Useful for:
+- program-test
+- engine/property testing
+- baseline integration tests
+
+#### B) TradeCpi (production)
+Per trade, Percolator:
+1) derives the LP PDA signer for this LP slot
+2) CPIs into the LP’s matcher program
+3) reads execution result (price/size) from matcher context prefix
+4) validates the returned prefix fields
+5) calls `engine.execute_trade(matcher, ...)`
+
+**LP PDA (pure signer identity)**
+- seeds: `["lp", slab_pubkey, lp_idx_le]`
+- used only as a signer for CPI; must be system-owned, empty data, and unfunded
+
+---
+
+## Operational API Overview (What you call on-chain)
+
+### Market lifecycle
+- `InitMarket`
+- `UpdateAdmin` (rotate admin; can burn admin to zero to freeze governance)
+- `SetRiskThreshold` (manual override; optional if using auto-threshold)
+
+### Participant lifecycle
+- `InitUser`
+- `InitLP`
+- `DepositCollateral`
+- `WithdrawCollateral`
+- `CloseAccount`
+
+### Risk / maintenance
+- `KeeperCrank`
+- `LiquidateAtOracle`
+- `TopUpInsurance`
+
+### Trading
+- `TradeNoCpi`
+- `TradeCpi`
+
+---
+
+## Matcher Integration Model (CPI Path)
+
+Percolator treats the matcher as a **price/size oracle with rules** chosen by the LP.
+
+### What the matcher controls
+- execution price and executed size (can be partial fill)
+- acceptance / rejection of a trade (via return flags)
+
+### What Percolator controls
+- signatures (user + LP owner)
+- LP identity (LP PDA signer is derived, not user-supplied)
+- oracle used for risk checks
+- risk engine solvency checks (margin, warmup rules, liquidation rules, etc.)
+
+### Context ownership constraint
+The matcher context account is **owned by the matcher program**, so Percolator must treat it as read-only in general. The matcher writes the return prefix.
+
+(Percolator *may* zero a prefix in production only if it has write access; but in general the safe assumption is: the matcher owns it.)
+
+---
+
+## Risk Threshold Policy (Auto + Anti-Grief)
+
+### Why it exists
+Warmup prevents instant extraction of manipulated profits, but you can still get **grief / DoS** when:
+- insurance is low
+- attackers repeatedly push risk higher (forcing more crank work / liquidations)
+- or try to keep the system oscillating in/out of stress states
+
+### What Percolator does in v1
+1) **Measure system risk** from LP exposure (a deterministic function of engine state).
+2) **Auto-adjust** `risk_reduction_threshold` at most once per interval:
+   - EWMA smoothing (avoids twitchy threshold)
+   - step clamp (avoids sudden jumps)
+3) **Gate risk-increasing trades** when `insurance < threshold`
+   - allow only risk-reducing trades until insurance recovers
+
+This gives you:
+- bounded churn on the control parameter
+- reduced incentive/ability to grief the system when under-insured
+- keeps the RiskEngine unchanged (policy lives in the wrapper)
+
+---
+
+## Recommended “Deploy a Market” Checklist
+
+1) Choose collateral mint (SPL mint) and create the vault token account owned by the vault PDA.
+2) Create slab account of size `SLAB_LEN` owned by Percolator.
+3) Call `InitMarket` with:
+   - admin signer
+   - oracle keys (index + collateral)
+   - staleness/conf filters
+   - `RiskParams` (warmup, margins, crank staleness, fees, liquidation params)
+4) LP onboarding:
+   - deploy matcher program (or pick an existing one)
+   - create matcher context account owned by matcher program
+   - call `InitLP(matcher_program, matcher_context)`
+   - deposit collateral
+5) User onboarding:
+   - `InitUser`
+   - deposit collateral
+6) Operations:
+   - ensure `KeeperCrank` is run (permissionless)
+   - enable `TradeCpi` for real execution (or `TradeNoCpi` for tests)
 
 ---
 
 ## Building & Testing
 
-### Unit tests
 ```bash
 cargo test
