@@ -65,14 +65,61 @@ pub mod constants {
     // Auto-threshold policy constants
     /// Base floor for risk_reduction_threshold (can be 0 for demo)
     pub const THRESH_FLOOR: u128 = 0;
-    /// Basis points of OI notional to add to floor (50 = 0.50%)
-    pub const THRESH_OI_BPS: u64 = 50;
+    /// BPS of risk metric for threshold calculation (50 = 0.50%)
+    pub const THRESH_RISK_BPS: u64 = 50;
+    /// Minimum slots between threshold updates (prevents churn)
+    pub const THRESH_UPDATE_INTERVAL_SLOTS: u64 = 10;
+    /// Maximum BPS change in threshold per update (step clamp)
+    pub const THRESH_STEP_BPS: u64 = 500; // 5%
+    /// EWMA alpha in BPS (higher = faster response, 1000 = 10% new value)
+    pub const THRESH_ALPHA_BPS: u64 = 1000;
     /// Minimum threshold value
     pub const THRESH_MIN: u128 = 0;
     /// Maximum threshold value (cap to prevent overflow)
     pub const THRESH_MAX: u128 = 10_000_000_000_000_000_000u128;
     /// Minimum step size to avoid churn on tiny changes
     pub const THRESH_MIN_STEP: u128 = 1;
+}
+
+// 1b. Risk metric helpers (pure functions for anti-DoS threshold calculation)
+/// Compute system risk units: net_exposure + max_concentration.
+/// net_exposure = abs(sum of all LP positions)
+/// max_concentration = max(abs(LP position_size))
+/// Only LP accounts are counted (not users).
+fn compute_system_risk_units(engine: &percolator::RiskEngine) -> u128 {
+    let mut sum_pos: i128 = 0;
+    let mut max_abs: u128 = 0;
+    for i in 0..engine.accounts.len() {
+        if engine.is_used(i) && engine.accounts[i].is_lp() {
+            let pos = engine.accounts[i].position_size; // i64
+            sum_pos = sum_pos.saturating_add(pos as i128);
+            let abs_pos = (pos as i128).unsigned_abs();
+            max_abs = max_abs.max(abs_pos);
+        }
+    }
+    let net_exp = sum_pos.unsigned_abs();
+    net_exp.saturating_add(max_abs)
+}
+
+/// Returns true if the trade would INCREASE system risk (LP exposure).
+/// Called before trade execution with proposed delta on one LP position.
+fn trade_increases_risk(engine: &percolator::RiskEngine, lp_idx: u32, delta: i128) -> bool {
+    let old_risk = compute_system_risk_units(engine);
+    // Simulate new risk after trade - only LP positions matter
+    let mut sum_pos: i128 = 0;
+    let mut max_abs: u128 = 0;
+    for i in 0..engine.accounts.len() {
+        if engine.is_used(i) && engine.accounts[i].is_lp() {
+            let mut pos = engine.accounts[i].position_size as i128;
+            if i == lp_idx as usize {
+                pos = pos.saturating_add(delta);
+            }
+            sum_pos = sum_pos.saturating_add(pos);
+            max_abs = max_abs.max(pos.unsigned_abs());
+        }
+    }
+    let new_risk = sum_pos.unsigned_abs().saturating_add(max_abs);
+    new_risk > old_risk
 }
 
 // 2. mod zc (Zero-Copy unsafe island)
@@ -255,6 +302,7 @@ pub mod error {
         EngineAccountKindMismatch,
         InvalidTokenAccount,
         InvalidTokenProgram,
+        SystemRiskTooHigh,
     }
 
     impl From<PercolatorError> for ProgramError {
@@ -576,6 +624,16 @@ pub mod state {
         data[RESERVED_OFF..RESERVED_OFF + 8].copy_from_slice(&nonce.to_le_bytes());
     }
 
+    /// Read the last threshold update slot from _reserved[8..16].
+    pub fn read_last_thr_update_slot(data: &[u8]) -> u64 {
+        u64::from_le_bytes(data[RESERVED_OFF + 8..RESERVED_OFF + 16].try_into().unwrap())
+    }
+
+    /// Write the last threshold update slot to _reserved[8..16].
+    pub fn write_last_thr_update_slot(data: &mut [u8], slot: u64) {
+        data[RESERVED_OFF + 8..RESERVED_OFF + 16].copy_from_slice(&slot.to_le_bytes());
+    }
+
     pub fn read_config(data: &[u8]) -> MarketConfig {
         let mut c = MarketConfig::zeroed();
         let src = &data[HEADER_LEN..HEADER_LEN + CONFIG_LEN];
@@ -758,7 +816,8 @@ pub mod processor {
         ix::Instruction,
         state::{self, SlabHeader, MarketConfig},
         accounts,
-        constants::{MAGIC, VERSION, SLAB_LEN, CONFIG_LEN, MATCHER_CONTEXT_LEN, MATCHER_CALL_TAG, MATCHER_CALL_LEN, MATCHER_CONTEXT_PREFIX_LEN},
+        constants::{MAGIC, VERSION, SLAB_LEN, CONFIG_LEN, MATCHER_CONTEXT_LEN, MATCHER_CALL_TAG, MATCHER_CALL_LEN, MATCHER_CONTEXT_PREFIX_LEN,
+            THRESH_FLOOR, THRESH_RISK_BPS, THRESH_UPDATE_INTERVAL_SLOTS, THRESH_STEP_BPS, THRESH_ALPHA_BPS, THRESH_MIN, THRESH_MAX, THRESH_MIN_STEP},
         error::{PercolatorError, map_risk_error},
         oracle,
         collateral,
@@ -875,55 +934,6 @@ pub mod processor {
             }
         }
         Ok(())
-    }
-
-    use crate::constants::{THRESH_FLOOR, THRESH_OI_BPS, THRESH_MIN, THRESH_MAX, THRESH_MIN_STEP};
-
-    /// Compute new risk threshold based on total open interest.
-    /// Formula: threshold = FLOOR + (OI_notional * THRESH_OI_BPS / 10000)
-    /// where OI_notional = total_open_interest * oracle_price_e6 / 1_000_000
-    ///
-    /// Hysteresis: only updates if change >= max(THRESH_MIN_STEP, old_threshold / 100)
-    /// Returns: new threshold to set, or old threshold if change is too small
-    fn compute_auto_threshold(old: u128, total_oi: u128, price_e6: u64) -> u128 {
-        // Compute OI notional: total_oi * price / 1e6
-        let oi_notional = total_oi
-            .saturating_mul(price_e6 as u128)
-            .checked_div(1_000_000)
-            .unwrap_or(0);
-
-        // Variable component: oi_notional * THRESH_OI_BPS / 10000
-        let variable = oi_notional
-            .saturating_mul(THRESH_OI_BPS as u128)
-            .checked_div(10_000)
-            .unwrap_or(0);
-
-        // New threshold = floor + variable
-        let mut new_threshold = THRESH_FLOOR.saturating_add(variable);
-
-        // Clamp to [THRESH_MIN, THRESH_MAX]
-        if new_threshold < THRESH_MIN {
-            new_threshold = THRESH_MIN;
-        }
-        if new_threshold > THRESH_MAX {
-            new_threshold = THRESH_MAX;
-        }
-
-        // Hysteresis: only update if change is significant
-        // Threshold: max(THRESH_MIN_STEP, old / 100)
-        let hysteresis_threshold = core::cmp::max(THRESH_MIN_STEP, old / 100);
-        let abs_diff = if new_threshold > old {
-            new_threshold - old
-        } else {
-            old - new_threshold
-        };
-
-        if abs_diff < hysteresis_threshold {
-            // Change too small, keep old value
-            old
-        } else {
-            new_threshold
-        }
     }
 
     pub fn process_instruction<'a, 'b>(
@@ -1159,7 +1169,7 @@ pub mod processor {
             },
             Instruction::KeeperCrank { caller_idx, funding_rate_bps_per_slot, allow_panic } => {
                 accounts::expect_len(accounts, 4)?;
-                let a_caller = &accounts[0]; 
+                let a_caller = &accounts[0];
                 let a_slab = &accounts[1];
                 let a_clock = &accounts[2];
                 let a_oracle = &accounts[3];
@@ -1171,6 +1181,8 @@ pub mod processor {
                 slab_guard(program_id, a_slab, &data)?;
                 require_initialized(&data)?;
                 let config = state::read_config(&data);
+                // Read last threshold update slot BEFORE mutable engine borrow
+                let last_thr_slot = state::read_last_thr_update_slot(&data);
 
                 let engine = zc::engine_mut(&mut data)?;
 
@@ -1186,15 +1198,35 @@ pub mod processor {
                 let clock = Clock::from_account_info(a_clock)?;
                 let price = oracle::read_pyth_price_e6(a_oracle, clock.slot, config.max_staleness_slots, config.conf_filter_bps)?;
 
-                // Capture old threshold before crank
-                let old_thr = engine.risk_reduction_threshold();
-
                 // Execute crank
                 let _outcome = engine.keeper_crank(caller_idx, clock.slot, price, funding_rate_bps_per_slot, allow_panic != 0).map_err(map_risk_error)?;
 
-                // After successful crank, update threshold based on total open interest
-                let new_thr = compute_auto_threshold(old_thr, engine.total_open_interest, price);
-                engine.set_risk_reduction_threshold(new_thr);
+                // --- Threshold auto-update (rate-limited + EWMA smoothed + step-clamped)
+                if clock.slot >= last_thr_slot.saturating_add(THRESH_UPDATE_INTERVAL_SLOTS) {
+                    let risk_units = crate::compute_system_risk_units(engine);
+                    // raw target: floor + risk_units * THRESH_RISK_BPS / 10000
+                    let raw_target = THRESH_FLOOR
+                        .saturating_add(
+                            (risk_units as u128)
+                                .saturating_mul(THRESH_RISK_BPS as u128)
+                                / 10_000
+                        );
+                    let clamped_target = raw_target.clamp(THRESH_MIN, THRESH_MAX);
+                    let current = engine.risk_reduction_threshold();
+                    // EWMA: new = alpha * target + (1 - alpha) * current
+                    let alpha = THRESH_ALPHA_BPS as u128;
+                    let smoothed = (alpha * clamped_target + (10_000 - alpha) * current) / 10_000;
+                    // Step clamp: max step = THRESH_STEP_BPS / 10000 of current (but at least THRESH_MIN_STEP)
+                    let max_step = (current * THRESH_STEP_BPS as u128 / 10_000)
+                        .max(THRESH_MIN_STEP);
+                    let final_thresh = if smoothed > current {
+                        current.saturating_add(max_step.min(smoothed - current))
+                    } else {
+                        current.saturating_sub(max_step.min(current - smoothed))
+                    };
+                    engine.set_risk_reduction_threshold(final_thresh.clamp(THRESH_MIN, THRESH_MAX));
+                    state::write_last_thr_update_slot(&mut data, clock.slot);
+                }
             },
             Instruction::TradeNoCpi { lp_idx, user_idx, size } => {
                 accounts::expect_len(accounts, 5)?;
@@ -1223,6 +1255,15 @@ pub mod processor {
 
                 let clock = Clock::from_account_info(&accounts[3])?;
                 let price = oracle::read_pyth_price_e6(&accounts[4], clock.slot, config.max_staleness_slots, config.conf_filter_bps)?;
+
+                // Gate: if insurance_fund < threshold, only allow risk-reducing trades
+                let bal = engine.insurance_fund.balance;
+                let thr = engine.risk_reduction_threshold();
+                if bal < thr {
+                    if crate::trade_increases_risk(engine, lp_idx as u32, size) {
+                        return Err(PercolatorError::SystemRiskTooHigh.into());
+                    }
+                }
 
                 engine.execute_trade(&NoOpMatcher, lp_idx, user_idx, clock.slot, price, size).map_err(map_risk_error)?;
             },
@@ -1291,6 +1332,15 @@ pub mod processor {
                     if Pubkey::new_from_array(u_owner) != *a_user.key { return Err(PercolatorError::EngineUnauthorized.into()); }
                     let l_owner = engine.accounts[lp_idx as usize].owner;
                     if Pubkey::new_from_array(l_owner) != *a_lp_owner.key { return Err(PercolatorError::EngineUnauthorized.into()); }
+
+                    // Gate: if insurance_fund < threshold, only allow risk-reducing trades
+                    let bal = engine.insurance_fund.balance;
+                    let thr = engine.risk_reduction_threshold();
+                    if bal < thr {
+                        if crate::trade_increases_risk(engine, lp_idx as u32, size) {
+                            return Err(PercolatorError::SystemRiskTooHigh.into());
+                        }
+                    }
 
                     let lp_acc = &engine.accounts[lp_idx as usize];
                     (lp_acc.account_id, config, req_id, lp_acc.matcher_program, lp_acc.matcher_context)
@@ -2305,8 +2355,8 @@ mod tests {
     }
 
     #[test]
-    fn test_crank_updates_threshold_from_open_interest() {
-        use crate::constants::{THRESH_FLOOR, THRESH_OI_BPS};
+    fn test_crank_updates_threshold_from_risk_metric() {
+        use crate::constants::{THRESH_FLOOR, THRESH_RISK_BPS, THRESH_ALPHA_BPS, THRESH_MIN_STEP, THRESH_STEP_BPS};
 
         let mut f = setup_market();
         let init_data = encode_init_market(&f, 100);
@@ -2364,7 +2414,7 @@ mod tests {
             process_instruction(&f.program_id, &accs, &encode_deposit(lp_idx, 1_000_000)).unwrap();
         }
 
-        // Execute trade to create open interest (following test_trade pattern - no crank before trade)
+        // Execute trade to create positions
         let trade_size: i128 = 100_000;
         {
             let accs = vec![
@@ -2373,12 +2423,17 @@ mod tests {
             process_instruction(&f.program_id, &accs, &encode_trade(lp_idx, user_idx, trade_size)).unwrap();
         }
 
-        // Check OI increased after trade and capture it
-        let total_oi = {
+        // Verify positions were set by trade
+        {
             let engine = zc::engine_ref(&f.slab.data).unwrap();
-            assert!(engine.total_open_interest > 0, "OI should be non-zero after trade");
-            engine.total_open_interest
-        };
+            let lp_pos = engine.accounts[lp_idx as usize].position_size;
+            let user_pos = engine.accounts[user_idx as usize].position_size;
+            assert_ne!(lp_pos, 0, "LP should have non-zero position after trade");
+            assert_ne!(user_pos, 0, "User should have non-zero position after trade");
+            // Verify LP is marked as LP
+            assert!(engine.accounts[lp_idx as usize].is_lp(), "LP account should be marked as LP");
+            assert!(engine.is_used(lp_idx as usize), "LP should be marked as used");
+        }
 
         // Capture threshold before crank
         let threshold_before = {
@@ -2387,35 +2442,58 @@ mod tests {
         };
         assert_eq!(threshold_before, 0, "Threshold should be 0 before crank");
 
-        // Now call crank - this should update threshold based on OI at crank time
+        // Verify compute_system_risk_units returns non-zero
+        {
+            let engine = zc::engine_ref(&f.slab.data).unwrap();
+            let risk_units = crate::compute_system_risk_units(engine);
+            assert!(risk_units > 0, "risk_units should be > 0 when there are LP positions");
+        }
+
+        // Now call crank - this should update threshold based on risk metric
+        // Clock slot defaults to 0 in test, but last_thr_slot is also 0,
+        // so update won't trigger unless slot >= 0 + THRESH_UPDATE_INTERVAL_SLOTS
+        // We need to advance the clock
+        f.clock.data = make_clock(100); // Advance past rate limit
         {
             let accs = vec![user.to_info(), f.slab.to_info(), f.clock.to_info(), f.pyth_col.to_info()];
             process_instruction(&f.program_id, &accs, &encode_crank(user_idx, 0, 0)).unwrap();
         }
 
-        // Verify threshold was updated based on OI
+        // Verify threshold update ran by checking last_thr_update_slot
+        let last_thr_slot_after = state::read_last_thr_update_slot(&f.slab.data);
+        assert_eq!(last_thr_slot_after, 100, "last_thr_update_slot should be set to clock.slot after crank");
+
+        // Check if positions are still non-zero after crank
+        {
+            let engine = zc::engine_ref(&f.slab.data).unwrap();
+            let lp_pos = engine.accounts[lp_idx as usize].position_size;
+            // Crank may liquidate positions. Check if LP still has position.
+            let risk_units_after = crate::compute_system_risk_units(engine);
+            // If risk_units is 0 after crank, positions were liquidated
+            if risk_units_after == 0 {
+                // This is expected if crank liquidated - threshold stays at 0
+                return;
+            }
+        }
+
+        // Verify threshold was updated based on risk metric
         {
             let engine = zc::engine_ref(&f.slab.data).unwrap();
             let threshold = engine.risk_reduction_threshold();
-            let oi_after = engine.total_open_interest;
 
-            // Calculate expected threshold using OI after crank (crank may liquidate positions)
-            // Oracle price: make_pyth(1000, -6, ...) -> scale = -6+6 = 0 -> price_e6 = 1000
-            let oracle_price_e6: u64 = 1000;
-            let oi_notional = (oi_after * oracle_price_e6 as u128) / 1_000_000;
-            let variable = (oi_notional * THRESH_OI_BPS as u128) / 10_000;
-            let expected = THRESH_FLOOR + variable;
+            // With trade_size=100000, LP position is -100000 (counterparty to user's +100000)
+            // Only LP positions are counted for risk:
+            //   net_exposure = |-100000| = 100000
+            //   max_concentration = 100000
+            //   risk_units = 100000 + 100000 = 200000
+            // raw_target = THRESH_FLOOR + (200000 * THRESH_RISK_BPS / 10000) = 0 + (200000 * 50 / 10000) = 1000
+            // EWMA with current=0, alpha=1000: smoothed = (1000 * 1000 + 9000 * 0) / 10000 = 100
+            // Step clamp: max_step = max(0 * 500 / 10000, 1) = 1
+            // final = 0 + min(1, 100) = 1
 
-            assert_eq!(threshold, expected, "Threshold should match formula based on OI at crank time");
-
-            // Also verify that for this test scenario, the formula produces expected results:
-            // If OI changed during crank, threshold should reflect that
-            // With total_oi=200000 originally:
-            //   oi_notional = 200000 * 1000 / 1_000_000 = 200
-            //   variable = 200 * 50 / 10_000 = 1
-            //   expected = 0 + 1 = 1
-            // But if OI was cleared by crank (to 0), threshold = 0
-            // Either way, threshold should match the formula with current OI
+            assert!(threshold > 0, "Threshold should be > 0 after crank with positions");
+            // Due to step clamping from 0, the first update will be capped at THRESH_MIN_STEP
+            assert_eq!(threshold, 1, "First update from 0 should be step-clamped to THRESH_MIN_STEP");
         }
     }
 
