@@ -4,8 +4,8 @@
 
 **Date:** 2026-01-04
 **Kani Version:** 0.66.0
-**Total Proofs:** 85
-**Passed:** 85
+**Total Proofs:** 86
+**Passed:** 86
 **Failed:** 0
 
 ## Proof Categories
@@ -189,6 +189,11 @@ These subsume all specific nonce proofs with universal quantification.
 | Harness | Property |
 |---------|----------|
 | kani_reject_has_no_chosen_size | Reject variant has no chosen_size field |
+
+### X. i128::MIN Boundary Regression (1 proof)
+| Harness | Property |
+|---------|----------|
+| kani_min_abs_boundary_rejected | exec_size=i128::MIN, req_size=i128::MIN+1 -> rejected (|exec| > |req|) |
 
 ## Key Security Properties Proven
 

@@ -138,11 +138,9 @@ fn kani_matcher_rejects_wrong_req_id() {
     let oracle_price: u64 = ret.oracle_price_e6;
     let req_size: i128 = kani::any();
     kani::assume(req_size != 0);
-    kani::assume(req_size != i128::MIN);
     kani::assume(ret.exec_size != 0);
-    kani::assume(ret.exec_size != i128::MIN);
     kani::assume(ret.exec_size.signum() == req_size.signum());
-    kani::assume(ret.exec_size.abs() <= req_size.abs());
+    kani::assume(ret.exec_size.unsigned_abs() <= req_size.unsigned_abs());
 
     let req_id: u64 = kani::any();
     kani::assume(ret.req_id != req_id);
@@ -255,15 +253,13 @@ fn kani_matcher_rejects_exec_size_exceeds_req() {
     ret.reserved = 0;
     kani::assume(ret.exec_price_e6 != 0);
     kani::assume(ret.exec_size != 0);
-    kani::assume(ret.exec_size != i128::MIN);
 
     let lp_account_id: u64 = ret.lp_account_id;
     let oracle_price: u64 = ret.oracle_price_e6;
     let req_id: u64 = ret.req_id;
 
     let req_size: i128 = kani::any();
-    kani::assume(req_size != i128::MIN);
-    kani::assume(ret.exec_size.abs() > req_size.abs());
+    kani::assume(ret.exec_size.unsigned_abs() > req_size.unsigned_abs());
 
     let result = validate_matcher_return(&ret, lp_account_id, oracle_price, req_size, req_id);
     assert!(result.is_err(), "exec_size exceeding req_size must be rejected");
@@ -278,7 +274,6 @@ fn kani_matcher_rejects_sign_mismatch() {
     ret.reserved = 0;
     kani::assume(ret.exec_price_e6 != 0);
     kani::assume(ret.exec_size != 0);
-    kani::assume(ret.exec_size != i128::MIN);
 
     let lp_account_id: u64 = ret.lp_account_id;
     let oracle_price: u64 = ret.oracle_price_e6;
@@ -286,9 +281,8 @@ fn kani_matcher_rejects_sign_mismatch() {
 
     let req_size: i128 = kani::any();
     kani::assume(req_size != 0);
-    kani::assume(req_size != i128::MIN);
     kani::assume(ret.exec_size.signum() != req_size.signum());
-    kani::assume(ret.exec_size.abs() <= req_size.abs());
+    kani::assume(ret.exec_size.unsigned_abs() <= req_size.unsigned_abs());
 
     let result = validate_matcher_return(&ret, lp_account_id, oracle_price, req_size, req_id);
     assert!(result.is_err(), "sign mismatch must be rejected");
@@ -1532,4 +1526,41 @@ fn kani_reject_has_no_chosen_size() {
             panic!("expected Reject, got Accept");
         }
     }
+}
+
+// =============================================================================
+// X. i128::MIN BOUNDARY REGRESSION (1 proof)
+// =============================================================================
+
+/// Regression proof: i128::MIN boundary case is correctly rejected
+/// This proves that exec_size=i128::MIN, req_size=i128::MIN+1 is rejected
+/// because |i128::MIN| = 2^127 > |i128::MIN+1| = 2^127-1
+/// The old .abs() implementation would panic; .unsigned_abs() handles this correctly.
+#[kani::proof]
+fn kani_min_abs_boundary_rejected() {
+    let ret = MatcherReturn {
+        abi_version: MATCHER_ABI_VERSION,
+        flags: FLAG_VALID,
+        exec_price_e6: 1_000_000, // non-zero price
+        exec_size: i128::MIN,     // -2^127
+        req_id: 42,
+        lp_account_id: 100,
+        oracle_price_e6: 50_000_000,
+        reserved: 0,
+    };
+
+    let req_size = i128::MIN + 1; // -2^127 + 1, so |req_size| = 2^127 - 1
+
+    // |exec_size| = 2^127, |req_size| = 2^127 - 1
+    // Since |exec_size| > |req_size|, this must be rejected
+    let result = validate_matcher_return(
+        &ret,
+        ret.lp_account_id,
+        ret.oracle_price_e6,
+        req_size,
+        ret.req_id,
+    );
+
+    assert!(result.is_err(),
+        "i128::MIN exec_size with req_size=i128::MIN+1 must be rejected (|exec| > |req|)");
 }
