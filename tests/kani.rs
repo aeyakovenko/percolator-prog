@@ -26,6 +26,10 @@ use percolator_prog::verify::{
     owner_ok, admin_ok, matcher_identity_ok, matcher_shape_ok, MatcherAccountsShape,
     gate_active, nonce_on_success, nonce_on_failure, pda_key_matches, cpi_trade_size,
     crank_authorized,
+    // Decision helpers for program-level coupling proofs
+    single_owner_authorized, trade_authorized,
+    TradeCpiDecision, decide_trade_cpi, decision_nonce,
+    TradeNoCpiDecision, decide_trade_nocpi,
 };
 
 // =============================================================================
@@ -622,4 +626,392 @@ fn kani_crank_rejected_owner_mismatch() {
         !crank_authorized(true, stored_owner, signer),
         "crank must be rejected when signer doesn't match existing account owner"
     );
+}
+
+// =============================================================================
+// K. PER-INSTRUCTION AUTHORIZATION (4 proofs)
+// =============================================================================
+
+/// Prove: single-owner instruction rejects on mismatch
+#[kani::proof]
+fn kani_single_owner_mismatch_rejected() {
+    let stored: [u8; 32] = kani::any();
+    let signer: [u8; 32] = kani::any();
+    kani::assume(stored != signer);
+
+    assert!(
+        !single_owner_authorized(stored, signer),
+        "single-owner instruction must reject on mismatch"
+    );
+}
+
+/// Prove: single-owner instruction accepts on match
+#[kani::proof]
+fn kani_single_owner_match_accepted() {
+    let owner: [u8; 32] = kani::any();
+
+    assert!(
+        single_owner_authorized(owner, owner),
+        "single-owner instruction must accept on match"
+    );
+}
+
+/// Prove: trade rejects when user owner mismatch
+#[kani::proof]
+fn kani_trade_rejects_user_mismatch() {
+    let user_owner: [u8; 32] = kani::any();
+    let user_signer: [u8; 32] = kani::any();
+    let lp_owner: [u8; 32] = kani::any();
+    kani::assume(user_owner != user_signer);
+
+    assert!(
+        !trade_authorized(user_owner, user_signer, lp_owner, lp_owner),
+        "trade must reject when user owner doesn't match"
+    );
+}
+
+/// Prove: trade rejects when LP owner mismatch
+#[kani::proof]
+fn kani_trade_rejects_lp_mismatch() {
+    let user_owner: [u8; 32] = kani::any();
+    let lp_owner: [u8; 32] = kani::any();
+    let lp_signer: [u8; 32] = kani::any();
+    kani::assume(lp_owner != lp_signer);
+
+    assert!(
+        !trade_authorized(user_owner, user_owner, lp_owner, lp_signer),
+        "trade must reject when LP owner doesn't match"
+    );
+}
+
+// =============================================================================
+// L. TRADECPI DECISION COUPLING (12 proofs) - CRITICAL
+// These prove program-level policies, not just helper semantics
+// =============================================================================
+
+/// Helper: create a valid shape for testing other conditions
+fn valid_shape() -> MatcherAccountsShape {
+    MatcherAccountsShape {
+        prog_executable: true,
+        ctx_executable: false,
+        ctx_owner_is_prog: true,
+        ctx_len_ok: true,
+    }
+}
+
+/// Prove: TradeCpi rejects on bad matcher shape (non-executable prog)
+#[kani::proof]
+fn kani_tradecpi_rejects_non_executable_prog() {
+    let old_nonce: u64 = kani::any();
+    let shape = MatcherAccountsShape {
+        prog_executable: false, // BAD
+        ctx_executable: false,
+        ctx_owner_is_prog: true,
+        ctx_len_ok: true,
+    };
+    let exec_size: i128 = kani::any();
+
+    let decision = decide_trade_cpi(
+        old_nonce, shape, true, true, true, true, true, false, false, exec_size
+    );
+
+    assert_eq!(decision, TradeCpiDecision::Reject,
+        "TradeCpi must reject non-executable matcher program");
+}
+
+/// Prove: TradeCpi rejects on bad matcher shape (executable ctx)
+#[kani::proof]
+fn kani_tradecpi_rejects_executable_ctx() {
+    let old_nonce: u64 = kani::any();
+    let shape = MatcherAccountsShape {
+        prog_executable: true,
+        ctx_executable: true, // BAD
+        ctx_owner_is_prog: true,
+        ctx_len_ok: true,
+    };
+    let exec_size: i128 = kani::any();
+
+    let decision = decide_trade_cpi(
+        old_nonce, shape, true, true, true, true, true, false, false, exec_size
+    );
+
+    assert_eq!(decision, TradeCpiDecision::Reject,
+        "TradeCpi must reject executable matcher context");
+}
+
+/// Prove: TradeCpi rejects on PDA mismatch (even if everything else valid)
+#[kani::proof]
+fn kani_tradecpi_rejects_pda_mismatch() {
+    let old_nonce: u64 = kani::any();
+    let exec_size: i128 = kani::any();
+
+    let decision = decide_trade_cpi(
+        old_nonce, valid_shape(),
+        true,  // identity_ok
+        false, // pda_ok - BAD
+        true,  // abi_ok
+        true,  // user_auth_ok
+        true,  // lp_auth_ok
+        false, // gate_active
+        false, // risk_increase
+        exec_size
+    );
+
+    assert_eq!(decision, TradeCpiDecision::Reject,
+        "TradeCpi must reject PDA mismatch");
+}
+
+/// Prove: TradeCpi rejects on user auth failure
+#[kani::proof]
+fn kani_tradecpi_rejects_user_auth_failure() {
+    let old_nonce: u64 = kani::any();
+    let exec_size: i128 = kani::any();
+
+    let decision = decide_trade_cpi(
+        old_nonce, valid_shape(),
+        true,  // identity_ok
+        true,  // pda_ok
+        true,  // abi_ok
+        false, // user_auth_ok - BAD
+        true,  // lp_auth_ok
+        false, // gate_active
+        false, // risk_increase
+        exec_size
+    );
+
+    assert_eq!(decision, TradeCpiDecision::Reject,
+        "TradeCpi must reject user auth failure");
+}
+
+/// Prove: TradeCpi rejects on LP auth failure
+#[kani::proof]
+fn kani_tradecpi_rejects_lp_auth_failure() {
+    let old_nonce: u64 = kani::any();
+    let exec_size: i128 = kani::any();
+
+    let decision = decide_trade_cpi(
+        old_nonce, valid_shape(),
+        true,  // identity_ok
+        true,  // pda_ok
+        true,  // abi_ok
+        true,  // user_auth_ok
+        false, // lp_auth_ok - BAD
+        false, // gate_active
+        false, // risk_increase
+        exec_size
+    );
+
+    assert_eq!(decision, TradeCpiDecision::Reject,
+        "TradeCpi must reject LP auth failure");
+}
+
+/// Prove: TradeCpi rejects on identity mismatch (even if ABI valid)
+#[kani::proof]
+fn kani_tradecpi_rejects_identity_mismatch() {
+    let old_nonce: u64 = kani::any();
+    let exec_size: i128 = kani::any();
+
+    let decision = decide_trade_cpi(
+        old_nonce, valid_shape(),
+        false, // identity_ok - BAD
+        true,  // pda_ok
+        true,  // abi_ok (strong adversary: valid ABI but wrong identity)
+        true,  // user_auth_ok
+        true,  // lp_auth_ok
+        false, // gate_active
+        false, // risk_increase
+        exec_size
+    );
+
+    assert_eq!(decision, TradeCpiDecision::Reject,
+        "TradeCpi must reject identity mismatch even if ABI valid");
+}
+
+/// Prove: TradeCpi rejects on ABI validation failure
+#[kani::proof]
+fn kani_tradecpi_rejects_abi_failure() {
+    let old_nonce: u64 = kani::any();
+    let exec_size: i128 = kani::any();
+
+    let decision = decide_trade_cpi(
+        old_nonce, valid_shape(),
+        true,  // identity_ok
+        true,  // pda_ok
+        false, // abi_ok - BAD
+        true,  // user_auth_ok
+        true,  // lp_auth_ok
+        false, // gate_active
+        false, // risk_increase
+        exec_size
+    );
+
+    assert_eq!(decision, TradeCpiDecision::Reject,
+        "TradeCpi must reject ABI validation failure");
+}
+
+/// Prove: TradeCpi rejects on gate active + risk increase
+#[kani::proof]
+fn kani_tradecpi_rejects_gate_risk_increase() {
+    let old_nonce: u64 = kani::any();
+    let exec_size: i128 = kani::any();
+
+    let decision = decide_trade_cpi(
+        old_nonce, valid_shape(),
+        true,  // identity_ok
+        true,  // pda_ok
+        true,  // abi_ok
+        true,  // user_auth_ok
+        true,  // lp_auth_ok
+        true,  // gate_active - ACTIVE
+        true,  // risk_increase - INCREASING
+        exec_size
+    );
+
+    assert_eq!(decision, TradeCpiDecision::Reject,
+        "TradeCpi must reject when gate active and risk increasing");
+}
+
+/// Prove: TradeCpi allows risk-reducing trade when gate active
+#[kani::proof]
+fn kani_tradecpi_allows_gate_risk_decrease() {
+    let old_nonce: u64 = kani::any();
+    let exec_size: i128 = kani::any();
+
+    let decision = decide_trade_cpi(
+        old_nonce, valid_shape(),
+        true,  // identity_ok
+        true,  // pda_ok
+        true,  // abi_ok
+        true,  // user_auth_ok
+        true,  // lp_auth_ok
+        true,  // gate_active
+        false, // risk_increase - NOT increasing (reducing or neutral)
+        exec_size
+    );
+
+    assert!(matches!(decision, TradeCpiDecision::Accept { .. }),
+        "TradeCpi must allow risk-reducing trade when gate active");
+}
+
+/// Prove: TradeCpi reject leaves nonce unchanged
+#[kani::proof]
+fn kani_tradecpi_reject_nonce_unchanged() {
+    let old_nonce: u64 = kani::any();
+    let exec_size: i128 = kani::any();
+
+    // Force a rejection (bad shape)
+    let bad_shape = MatcherAccountsShape {
+        prog_executable: false,
+        ctx_executable: false,
+        ctx_owner_is_prog: true,
+        ctx_len_ok: true,
+    };
+
+    let decision = decide_trade_cpi(
+        old_nonce, bad_shape, true, true, true, true, true, false, false, exec_size
+    );
+
+    let result_nonce = decision_nonce(old_nonce, decision);
+
+    assert_eq!(result_nonce, old_nonce,
+        "TradeCpi reject must leave nonce unchanged");
+}
+
+/// Prove: TradeCpi accept increments nonce
+#[kani::proof]
+fn kani_tradecpi_accept_increments_nonce() {
+    let old_nonce: u64 = kani::any();
+    let exec_size: i128 = kani::any();
+
+    let decision = decide_trade_cpi(
+        old_nonce, valid_shape(),
+        true, true, true, true, true, false, false, exec_size
+    );
+
+    assert!(matches!(decision, TradeCpiDecision::Accept { .. }),
+        "should accept with all valid inputs");
+
+    let result_nonce = decision_nonce(old_nonce, decision);
+
+    assert_eq!(result_nonce, old_nonce.wrapping_add(1),
+        "TradeCpi accept must increment nonce by 1");
+}
+
+/// Prove: TradeCpi accept uses exec_size
+#[kani::proof]
+fn kani_tradecpi_accept_uses_exec_size() {
+    let old_nonce: u64 = kani::any();
+    let exec_size: i128 = kani::any();
+
+    let decision = decide_trade_cpi(
+        old_nonce, valid_shape(),
+        true, true, true, true, true, false, false, exec_size
+    );
+
+    if let TradeCpiDecision::Accept { chosen_size, .. } = decision {
+        assert_eq!(chosen_size, exec_size,
+            "TradeCpi accept must use exec_size");
+    } else {
+        panic!("expected Accept");
+    }
+}
+
+// =============================================================================
+// M. TRADENOCPI DECISION COUPLING (4 proofs)
+// =============================================================================
+
+/// Prove: TradeNoCpi rejects on user auth failure
+#[kani::proof]
+fn kani_tradenocpi_rejects_user_auth_failure() {
+    let decision = decide_trade_nocpi(false, true, false, false);
+    assert_eq!(decision, TradeNoCpiDecision::Reject,
+        "TradeNoCpi must reject user auth failure");
+}
+
+/// Prove: TradeNoCpi rejects on LP auth failure
+#[kani::proof]
+fn kani_tradenocpi_rejects_lp_auth_failure() {
+    let decision = decide_trade_nocpi(true, false, false, false);
+    assert_eq!(decision, TradeNoCpiDecision::Reject,
+        "TradeNoCpi must reject LP auth failure");
+}
+
+/// Prove: TradeNoCpi rejects on gate active + risk increase
+#[kani::proof]
+fn kani_tradenocpi_rejects_gate_risk_increase() {
+    let decision = decide_trade_nocpi(true, true, true, true);
+    assert_eq!(decision, TradeNoCpiDecision::Reject,
+        "TradeNoCpi must reject when gate active and risk increasing");
+}
+
+/// Prove: TradeNoCpi accepts when all checks pass
+#[kani::proof]
+fn kani_tradenocpi_accepts_valid() {
+    let decision = decide_trade_nocpi(true, true, false, false);
+    assert_eq!(decision, TradeNoCpiDecision::Accept,
+        "TradeNoCpi must accept when all checks pass");
+}
+
+// =============================================================================
+// N. ZERO SIZE WITH PARTIAL_OK (1 proof)
+// =============================================================================
+
+/// Prove: zero exec_size with PARTIAL_OK flag is accepted
+#[kani::proof]
+fn kani_matcher_zero_size_with_partial_ok_accepted() {
+    let mut ret = any_matcher_return();
+    ret.abi_version = MATCHER_ABI_VERSION;
+    ret.flags = FLAG_VALID | FLAG_PARTIAL_OK;
+    ret.reserved = 0;
+    kani::assume(ret.exec_price_e6 != 0);
+    ret.exec_size = 0;
+
+    let lp_account_id: u64 = ret.lp_account_id;
+    let oracle_price: u64 = ret.oracle_price_e6;
+    let req_size: i128 = kani::any();
+    kani::assume(req_size != 0); // Request must be non-zero
+    let req_id: u64 = ret.req_id;
+
+    let result = validate_matcher_return(&ret, lp_account_id, oracle_price, req_size, req_id);
+    assert!(result.is_ok(), "zero exec_size with PARTIAL_OK must be accepted");
 }

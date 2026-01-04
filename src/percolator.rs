@@ -259,6 +259,136 @@ pub mod verify {
             true // Anyone can crank non-existent accounts
         }
     }
+
+    // =========================================================================
+    // Per-instruction authorization helpers
+    // =========================================================================
+
+    /// Single-owner instruction authorization (Deposit, Withdraw, Close).
+    #[inline]
+    pub fn single_owner_authorized(stored_owner: [u8; 32], signer: [u8; 32]) -> bool {
+        owner_ok(stored_owner, signer)
+    }
+
+    /// Trade authorization: both user and LP owners must match signers.
+    #[inline]
+    pub fn trade_authorized(
+        user_owner: [u8; 32],
+        user_signer: [u8; 32],
+        lp_owner: [u8; 32],
+        lp_signer: [u8; 32],
+    ) -> bool {
+        owner_ok(user_owner, user_signer) && owner_ok(lp_owner, lp_signer)
+    }
+
+    // =========================================================================
+    // TradeCpi decision logic - models the full wrapper policy
+    // =========================================================================
+
+    /// Decision outcome for TradeCpi instruction.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TradeCpiDecision {
+        /// Reject the trade - nonce unchanged, no engine call
+        Reject,
+        /// Accept the trade - nonce incremented, engine called with chosen_size
+        Accept { new_nonce: u64, chosen_size: i128 },
+    }
+
+    /// Pure decision function for TradeCpi instruction.
+    /// Models the wrapper's full policy without touching the risk engine.
+    ///
+    /// # Arguments
+    /// * `old_nonce` - Current nonce before this trade
+    /// * `shape` - Matcher account shape validation inputs
+    /// * `identity_ok` - Whether matcher identity matches LP registration
+    /// * `pda_ok` - Whether LP PDA matches expected derivation
+    /// * `abi_ok` - Whether matcher return passes ABI validation
+    /// * `user_auth_ok` - Whether user signer matches user owner
+    /// * `lp_auth_ok` - Whether LP signer matches LP owner
+    /// * `gate_active` - Whether the risk-reduction gate is active
+    /// * `risk_increase` - Whether this trade would increase system risk
+    /// * `exec_size` - The exec_size from matcher return
+    #[inline]
+    pub fn decide_trade_cpi(
+        old_nonce: u64,
+        shape: MatcherAccountsShape,
+        identity_ok: bool,
+        pda_ok: bool,
+        abi_ok: bool,
+        user_auth_ok: bool,
+        lp_auth_ok: bool,
+        gate_active: bool,
+        risk_increase: bool,
+        exec_size: i128,
+    ) -> TradeCpiDecision {
+        // Check in order of actual program execution:
+        // 1. Matcher shape validation
+        if !matcher_shape_ok(shape) {
+            return TradeCpiDecision::Reject;
+        }
+        // 2. PDA validation
+        if !pda_ok {
+            return TradeCpiDecision::Reject;
+        }
+        // 3. Owner authorization (user and LP)
+        if !user_auth_ok || !lp_auth_ok {
+            return TradeCpiDecision::Reject;
+        }
+        // 4. Matcher identity binding
+        if !identity_ok {
+            return TradeCpiDecision::Reject;
+        }
+        // 5. ABI validation (after CPI returns)
+        if !abi_ok {
+            return TradeCpiDecision::Reject;
+        }
+        // 6. Risk gate check
+        if gate_active && risk_increase {
+            return TradeCpiDecision::Reject;
+        }
+        // All checks passed - accept the trade
+        TradeCpiDecision::Accept {
+            new_nonce: nonce_on_success(old_nonce),
+            chosen_size: cpi_trade_size(exec_size, 0), // 0 is placeholder for requested_size
+        }
+    }
+
+    /// Extract nonce from TradeCpiDecision.
+    #[inline]
+    pub fn decision_nonce(old_nonce: u64, decision: TradeCpiDecision) -> u64 {
+        match decision {
+            TradeCpiDecision::Reject => nonce_on_failure(old_nonce),
+            TradeCpiDecision::Accept { new_nonce, .. } => new_nonce,
+        }
+    }
+
+    // =========================================================================
+    // TradeNoCpi decision logic
+    // =========================================================================
+
+    /// Decision outcome for TradeNoCpi instruction.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TradeNoCpiDecision {
+        Reject,
+        Accept,
+    }
+
+    /// Pure decision function for TradeNoCpi instruction.
+    #[inline]
+    pub fn decide_trade_nocpi(
+        user_auth_ok: bool,
+        lp_auth_ok: bool,
+        gate_active: bool,
+        risk_increase: bool,
+    ) -> TradeNoCpiDecision {
+        if !user_auth_ok || !lp_auth_ok {
+            return TradeNoCpiDecision::Reject;
+        }
+        if gate_active && risk_increase {
+            return TradeNoCpiDecision::Reject;
+        }
+        TradeNoCpiDecision::Accept
+    }
 }
 
 // 2. mod zc (Zero-Copy unsafe island)
