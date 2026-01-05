@@ -36,6 +36,9 @@ pub mod constants {
     pub const MATCHER_CALL_TAG: u8 = 0;
     pub const MATCHER_CALL_LEN: usize = 67;
 
+    /// Sentinel value for permissionless crank (no caller account required)
+    pub const CRANK_NO_CALLER: u16 = u16::MAX;
+
     // Matcher call ABI offsets (67-byte layout)
     // byte 0: tag (u8)
     // 1..9: req_id (u64)
@@ -1694,13 +1697,21 @@ pub mod processor {
                 )?;
             },
             Instruction::KeeperCrank { caller_idx, funding_rate_bps_per_slot, allow_panic } => {
+                use crate::constants::CRANK_NO_CALLER;
+
                 accounts::expect_len(accounts, 4)?;
                 let a_caller = &accounts[0];
                 let a_slab = &accounts[1];
                 let a_clock = &accounts[2];
                 let a_oracle = &accounts[3];
 
-                accounts::expect_signer(a_caller)?;
+                // Permissionless mode: caller_idx == u16::MAX means anyone can crank
+                let permissionless = caller_idx == CRANK_NO_CALLER;
+
+                if !permissionless {
+                    // Self-crank mode: require signer + owner authorization
+                    accounts::expect_signer(a_caller)?;
+                }
                 accounts::expect_writable(a_slab)?;
 
                 let mut data = state::slab_data_mut(a_slab)?;
@@ -1713,14 +1724,18 @@ pub mod processor {
                 let engine = zc::engine_mut(&mut data)?;
 
                 // Crank authorization via verify helper (Kani-provable)
-                let idx_exists = (caller_idx as usize) < MAX_ACCOUNTS && engine.is_used(caller_idx as usize);
-                let stored_owner = if idx_exists {
-                    engine.accounts[caller_idx as usize].owner
-                } else {
-                    [0u8; 32] // Doesn't matter for non-existent accounts
-                };
-                if !crate::verify::crank_authorized(idx_exists, stored_owner, a_caller.key.to_bytes()) {
-                    return Err(PercolatorError::EngineUnauthorized.into());
+                // In permissionless mode, idx_exists is false (u16::MAX >= MAX_ACCOUNTS),
+                // so crank_authorized returns true for anyone.
+                if !permissionless {
+                    let idx_exists = (caller_idx as usize) < MAX_ACCOUNTS && engine.is_used(caller_idx as usize);
+                    let stored_owner = if idx_exists {
+                        engine.accounts[caller_idx as usize].owner
+                    } else {
+                        [0u8; 32]
+                    };
+                    if !crate::verify::crank_authorized(idx_exists, stored_owner, a_caller.key.to_bytes()) {
+                        return Err(PercolatorError::EngineUnauthorized.into());
+                    }
                 }
 
                 let clock = Clock::from_account_info(a_clock)?;
@@ -2337,6 +2352,10 @@ mod tests {
         data.extend_from_slice(&rate.to_le_bytes());
         data.push(panic);
         data
+    }
+
+    fn encode_crank_permissionless(rate: i64, panic: u8) -> Vec<u8> {
+        encode_crank(u16::MAX, rate, panic)
     }
 
     fn encode_trade(lp: u16, user: u16, size: i128) -> Vec<u8> {
@@ -3103,6 +3122,46 @@ mod tests {
             assert!(threshold > 0, "Threshold should be > 0 after crank with positions");
             // Due to step clamping from 0, the first update will be capped at THRESH_MIN_STEP
             assert_eq!(threshold, 1, "First update from 0 should be step-clamped to THRESH_MIN_STEP");
+        }
+    }
+
+    #[test]
+    fn test_permissionless_crank() {
+        // Test that anyone can call crank with caller_idx = u16::MAX (permissionless mode)
+        let mut f = setup_market();
+        let init_data = encode_init_market(&f, 100);
+
+        // Init market
+        {
+            let mut dummy_ata = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+            let accounts = vec![
+                f.admin.to_info(), f.slab.to_info(), f.mint.to_info(), f.vault.to_info(),
+                f.token_prog.to_info(), dummy_ata.to_info(),
+                f.system.to_info(), f.rent.to_info(), f.pyth_index.to_info(), f.pyth_col.to_info(), f.clock.to_info()
+            ];
+            process_instruction(&f.program_id, &accounts, &init_data).unwrap();
+        }
+
+        // Create a random "keeper" account that is NOT a signer
+        let mut keeper = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]);
+        // Note: keeper is NOT marked as signer
+
+        // Call permissionless crank - should succeed even though keeper is not a signer
+        {
+            let accs = vec![
+                keeper.to_info(),  // Not a signer!
+                f.slab.to_info(),
+                f.clock.to_info(),
+                f.pyth_index.to_info(),
+            ];
+            // Use encode_crank_permissionless which passes u16::MAX as caller_idx
+            process_instruction(&f.program_id, &accs, &encode_crank_permissionless(0, 0)).unwrap();
+        }
+
+        // Verify crank was executed (we can check that the engine is still valid)
+        {
+            let engine = zc::engine_ref(&f.slab.data).unwrap();
+            assert_eq!(engine.vault, 0); // No deposits yet, vault should be 0
         }
     }
 
