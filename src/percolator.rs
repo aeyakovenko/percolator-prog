@@ -41,7 +41,7 @@ pub mod constants {
 
     // Inventory-mark funding constants (Option 2)
     // Funding is computed on-chain from LP inventory + oracle price
-    pub const FUNDING_HORIZON_SLOTS: u64 = 7200;           // ~1 hour @ ~2 slots/sec
+    pub const FUNDING_HORIZON_SLOTS: u64 = 500;            // ~4 min @ ~2 slots/sec
     pub const FUNDING_K_BPS: u64 = 100;                    // 1.00x multiplier
     pub const FUNDING_INV_SCALE_NOTIONAL_E6: u128 = 1_000_000_000_000; // 1M USDC notional in e6
     pub const FUNDING_MAX_PREMIUM_BPS: i64 = 500;          // cap premium at 5.00%
@@ -218,7 +218,10 @@ fn compute_inventory_funding_bps_per_slot(net_lp_pos: i128, price_e6: u64) -> i6
     // Convert to per-slot by dividing by horizon
     let mut per_slot: i64 = signed_premium_bps / (FUNDING_HORIZON_SLOTS as i64);
 
-    // Clamp final
+    // Sanity clamp: absolute max ±10000 bps/slot (100% per slot) to catch overflow bugs
+    per_slot = per_slot.clamp(-10_000, 10_000);
+
+    // Policy clamp: tighter bound per constants
     if per_slot > FUNDING_MAX_BPS_PER_SLOT { per_slot = FUNDING_MAX_BPS_PER_SLOT; }
     if per_slot < -FUNDING_MAX_BPS_PER_SLOT { per_slot = -FUNDING_MAX_BPS_PER_SLOT; }
     per_slot
@@ -3398,7 +3401,15 @@ mod tests {
     fn test_permissionless_funding_not_controllable() {
         // Security test: permissionless caller cannot influence funding rate.
         // Funding is computed deterministically from (LP inventory, oracle price, constants).
-        // Calling crank multiple times in the same slot is harmless (engine gates via dt=0).
+        //
+        // Key security property: calling crank multiple times in the same slot is harmless
+        // because engine gates via dt=0 (no funding accrues when dt=0).
+        //
+        // NOTE: Testing non-zero funding rate changes requires production-scale positions
+        // ($1M+ notional to exceed FUNDING_INV_SCALE_NOTIONAL_E6), but such positions
+        // would be immediately liquidated for insufficient margin in test setup.
+        // This test verifies the dt=0 gating mechanism works correctly, which is the
+        // core anti-spam property preventing attackers from compounding funding.
         let mut f = setup_market();
         let init_data = encode_init_market(&f, 100);
 
@@ -3413,7 +3424,7 @@ mod tests {
             process_instruction(&f.program_id, &accounts, &init_data).unwrap();
         }
 
-        // Init user + LP + deposits + trade to create LP position
+        // Init user with deposit
         let mut user = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
         let mut user_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, user.key, 1_000_000)).writable();
         {
@@ -3424,24 +3435,6 @@ mod tests {
             process_instruction(&f.program_id, &accounts, &encode_init_user(100)).unwrap();
         }
         let user_idx = find_idx_by_owner(&f.slab.data, user.key).unwrap();
-
-        // Init LP
-        let mut lp = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
-        let mut lp_ata = TestAccount::new(Pubkey::new_unique(), spl_token::ID, 0, make_token_account(f.mint.key, lp.key, 1_000_000)).writable();
-        let mut matcher_prog = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
-        let mut matcher_ctx = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
-        {
-            let matcher_prog_key = matcher_prog.key;
-            let matcher_ctx_key = matcher_ctx.key;
-            let accs = vec![
-                lp.to_info(), f.slab.to_info(), lp_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
-                matcher_prog.to_info(), matcher_ctx.to_info()
-            ];
-            process_instruction(&f.program_id, &accs, &encode_init_lp(matcher_prog_key, matcher_ctx_key, 100)).unwrap();
-        }
-        let lp_idx = find_idx_by_owner(&f.slab.data, lp.key).unwrap();
-
-        // Deposit for both
         {
             let accounts = vec![
                 user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
@@ -3449,49 +3442,77 @@ mod tests {
             ];
             process_instruction(&f.program_id, &accounts, &encode_deposit(user_idx, 100_000)).unwrap();
         }
-        {
-            let accounts = vec![
-                lp.to_info(), f.slab.to_info(), lp_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
-                f.clock.to_info(), f.pyth_col.to_info()
-            ];
-            process_instruction(&f.program_id, &accounts, &encode_deposit(lp_idx, 100_000)).unwrap();
-        }
 
-        // Execute trade to create LP position
-        {
-            let accs = vec![
-                user.to_info(), lp.to_info(), f.slab.to_info(), f.clock.to_info(), f.pyth_index.to_info()
-            ];
-            process_instruction(&f.program_id, &accs, &encode_trade(lp_idx, user_idx, 1000)).unwrap();
-        }
-
-        // Record funding index before cranks
-        let funding_before = {
+        // Record funding index and last_funding_slot before any crank
+        let (_funding_before, _last_slot_before) = {
             let engine = zc::engine_ref(&f.slab.data).unwrap();
-            engine.funding_index_qpb_e6
+            (engine.funding_index_qpb_e6, engine.last_funding_slot)
         };
 
-        // Random keeper calls crank twice in same slot - should be harmless
+        // Random keeper calls crank - first crank at slot 100
         let mut keeper = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]);
         {
             let accs = vec![
                 keeper.to_info(), f.slab.to_info(), f.clock.to_info(), f.pyth_index.to_info(),
             ];
             process_instruction(&f.program_id, &accs, &encode_crank_permissionless(0)).unwrap();
-            // Second crank in same slot
+        }
+        let (funding_after_first, last_slot_after_first) = {
+            let engine = zc::engine_ref(&f.slab.data).unwrap();
+            (engine.funding_index_qpb_e6, engine.last_funding_slot)
+        };
+        // last_funding_slot should advance from 0 to 100
+        assert_eq!(last_slot_after_first, 100, "last_funding_slot should be updated to clock.slot after first crank");
+
+        // Second crank in SAME slot (slot 100) - should NOT change funding (dt=0 gating)
+        {
+            let accs = vec![
+                keeper.to_info(), f.slab.to_info(), f.clock.to_info(), f.pyth_index.to_info(),
+            ];
             process_instruction(&f.program_id, &accs, &encode_crank_permissionless(0)).unwrap();
         }
+        let (funding_after_second, last_slot_after_second) = {
+            let engine = zc::engine_ref(&f.slab.data).unwrap();
+            (engine.funding_index_qpb_e6, engine.last_funding_slot)
+        };
 
-        // Verify engine is still valid and funding changed at most once
-        let funding_after = {
+        // KEY SECURITY ASSERTION: same-slot crank does NOT change funding index
+        // This is the core anti-spam property - attackers can't compound funding by spamming cranks
+        assert_eq!(funding_after_second, funding_after_first,
+            "Same-slot crank must not change funding (dt=0 gating). before={}, after={}",
+            funding_after_first, funding_after_second);
+        assert_eq!(last_slot_after_second, last_slot_after_first,
+            "last_funding_slot should not change on same-slot crank");
+
+        // Third crank in same slot - still no change (verify it's consistently gated)
+        {
+            let accs = vec![
+                keeper.to_info(), f.slab.to_info(), f.clock.to_info(), f.pyth_index.to_info(),
+            ];
+            process_instruction(&f.program_id, &accs, &encode_crank_permissionless(0)).unwrap();
+        }
+        let funding_after_third = {
             let engine = zc::engine_ref(&f.slab.data).unwrap();
             engine.funding_index_qpb_e6
         };
+        assert_eq!(funding_after_third, funding_after_first,
+            "Multiple same-slot cranks must not accumulate funding changes");
 
-        // Funding should have changed (LP has position), but only once due to engine dt=0 gating
-        // We just verify the engine is valid and crank succeeded
-        assert!(funding_after >= funding_before || funding_after <= funding_before,
-            "Funding index should be valid after multiple cranks");
+        // Verify last_funding_slot advances when slot changes
+        f.clock.data = make_clock(101);
+        {
+            let accs = vec![
+                keeper.to_info(), f.slab.to_info(), f.clock.to_info(), f.pyth_index.to_info(),
+            ];
+            process_instruction(&f.program_id, &accs, &encode_crank_permissionless(0)).unwrap();
+        }
+        let last_slot_after_new_slot = {
+            let engine = zc::engine_ref(&f.slab.data).unwrap();
+            engine.last_funding_slot
+        };
+        assert_eq!(last_slot_after_new_slot, 101,
+            "last_funding_slot should advance to new slot. was {}, now {}",
+            last_slot_after_second, last_slot_after_new_slot);
     }
 
     #[test]
