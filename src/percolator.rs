@@ -1741,8 +1741,10 @@ pub mod processor {
                 let clock = Clock::from_account_info(a_clock)?;
                 let price = oracle::read_pyth_price_e6(a_oracle, clock.slot, config.max_staleness_slots, config.conf_filter_bps)?;
 
-                // Execute crank
-                let _outcome = engine.keeper_crank(caller_idx, clock.slot, price, funding_rate_bps_per_slot, allow_panic != 0).map_err(map_risk_error)?;
+                // Execute crank with effective_caller_idx for clarity
+                // In permissionless mode, pass CRANK_NO_CALLER to engine (out-of-range = no caller settle)
+                let effective_caller_idx = if permissionless { CRANK_NO_CALLER } else { caller_idx };
+                let _outcome = engine.keeper_crank(effective_caller_idx, clock.slot, price, funding_rate_bps_per_slot, allow_panic != 0).map_err(map_risk_error)?;
 
                 // --- Threshold auto-update (rate-limited + EWMA smoothed + step-clamped)
                 if clock.slot >= last_thr_slot.saturating_add(THRESH_UPDATE_INTERVAL_SLOTS) {
