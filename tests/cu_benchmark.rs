@@ -24,13 +24,15 @@ use solana_sdk::{
 };
 use spl_token::state::{Account as TokenAccount, AccountState};
 use std::path::PathBuf;
+// Note: Can't read BPF slab from native - struct layouts differ:
+// BPF SLAB_LEN: ~1.1MB, Native SLAB_LEN: ~1.2MB (even with repr(C) and same MAX_ACCOUNTS)
 
 // SLAB_LEN for SBF - differs between test and production
 #[cfg(feature = "test")]
 const SLAB_LEN: usize = 17696;  // MAX_ACCOUNTS=64
 
 #[cfg(not(feature = "test"))]
-const SLAB_LEN: usize = 1102968;  // MAX_ACCOUNTS=4096 (0x10d478)
+const SLAB_LEN: usize = 1107176;  // MAX_ACCOUNTS=4096 (0x10e4e8)
 
 #[cfg(feature = "test")]
 const MAX_ACCOUNTS: usize = 64;
@@ -428,7 +430,7 @@ impl TestEnv {
         }).unwrap();
     }
 
-    fn try_crank(&mut self) -> Result<u64, String> {
+    fn try_crank(&mut self) -> Result<(u64, Vec<String>), String> {
         let caller = Keypair::new();
         self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
 
@@ -449,9 +451,33 @@ impl TestEnv {
             &[budget_ix, crank_ix], Some(&caller.pubkey()), &[&caller], self.svm.latest_blockhash(),
         );
         match self.svm.send_transaction(tx) {
-            Ok(result) => Ok(result.compute_units_consumed),
+            Ok(result) => Ok((result.compute_units_consumed, result.logs)),
             Err(e) => Err(format!("{:?}", e)),
         }
+    }
+
+    fn top_up_insurance(&mut self, funder: &Keypair, amount: u64) {
+        let ata = self.create_ata(&funder.pubkey(), amount);
+
+        // Instruction 9: TopUpInsurance { amount: u64 }
+        let mut data = vec![9u8];
+        data.extend_from_slice(&amount.to_le_bytes());
+
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(funder.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data,
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&funder.pubkey()), &[funder], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).expect("top_up_insurance failed");
     }
 }
 
@@ -495,7 +521,12 @@ fn create_users(env: &mut TestEnv, count: usize, deposit_amount: u64) -> Vec<Key
 fn benchmark_worst_case_scenarios() {
     println!("\n=== WORST-CASE CRANK CU BENCHMARK ===");
     println!("MAX_ACCOUNTS: {}", MAX_ACCOUNTS);
+    println!("SLAB_LEN: {}", SLAB_LEN);
     println!("Solana max CU per tx: 1,400,000\n");
+
+    // Assert we're testing with production config (4096 accounts)
+    assert_eq!(MAX_ACCOUNTS, 4096, "Expected MAX_ACCOUNTS=4096 for production benchmark");
+    assert!(SLAB_LEN > 1_000_000, "Expected SLAB_LEN > 1M for production benchmark, got {}", SLAB_LEN);
 
     let path = program_path();
     if !path.exists() {
@@ -567,7 +598,7 @@ fn benchmark_worst_case_scenarios() {
 
         env.set_price(100_000_000, 200);
         match env.try_crank() {
-            Ok(cu) => {
+            Ok((cu, _logs)) => {
                 let cu_per_account = cu / (users_created + 1) as u64;
                 println!("  CU: {:>10} total, ~{} CU/account", cu, cu_per_account);
             }
@@ -625,7 +656,7 @@ fn benchmark_worst_case_scenarios() {
 
             env.set_price(100_000_000, 200);
             match env.try_crank() {
-                Ok(cu) => {
+                Ok((cu, _logs)) => {
                     let cu_per_account = cu / (num_users + 1) as u64;
                     println!("  {:>4} users: {:>10} CU (~{} CU/user)", num_users, cu, cu_per_account);
                     last_success = cu;
@@ -672,7 +703,7 @@ fn benchmark_worst_case_scenarios() {
 
             env.set_price(100_000_000, 200);
             match env.try_crank() {
-                Ok(cu) => {
+                Ok((cu, _logs)) => {
                     let cu_per_account = cu / (num_users + 1) as u64;
                     println!("  {:>4} users: {:>10} CU (~{} CU/user)", num_users, cu, cu_per_account);
                 }
@@ -714,7 +745,7 @@ fn benchmark_worst_case_scenarios() {
             env.set_price(50_000_000, 200);
 
             match env.try_crank() {
-                Ok(cu) => {
+                Ok((cu, _logs)) => {
                     let cu_per_account = cu / (num_users + 1) as u64;
                     println!("  {:>4} liquidations: {:>10} CU (~{} CU/user)", num_users, cu, cu_per_account);
                 }
@@ -758,7 +789,7 @@ fn benchmark_worst_case_scenarios() {
             env.set_price(85_000_000, 200);
 
             match env.try_crank() {
-                Ok(cu) => {
+                Ok((cu, _logs)) => {
                     let cu_per_account = cu / (num_users + 1) as u64;
                     println!("  {:>4} users at edge: {:>10} CU (~{} CU/user)", num_users, cu, cu_per_account);
                 }
@@ -867,7 +898,7 @@ fn benchmark_worst_case_scenarios() {
             env.set_price(50_000_000, 200); // $100 -> $50
 
             match env.try_crank() {
-                Ok(cu) => {
+                Ok((cu, _logs)) => {
                     let cu_per_account = cu / (num_users + 1) as u64;
                     println!("  {:>4} ADL accounts: {:>10} CU (~{} CU/user)", num_users, cu, cu_per_account);
                 }
@@ -883,14 +914,14 @@ fn benchmark_worst_case_scenarios() {
         }
     }
 
-    // Scenario 8: 🔥🔥 Full 4096 sweep - worst single crank across 8 calls
+    // Scenario 8: 🔥🔥 Full 4096 sweep - worst single crank across 16 calls
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("Scenario 8: 🔥🔥 Full sweep worst-case (8 cranks, 512 each)");
-    println!("  Testing worst single crank CU across 8-crank full sweep");
+    println!("Scenario 8: 🔥🔥 Full sweep worst-case (16 cranks, 256 each)");
+    println!("  Testing worst single crank CU across 16-crank full sweep");
     println!("  8a: Healthy accounts with positions (no liquidations)");
     {
         // Test with increasing account counts - find threshold
-        let test_sizes = [100, 200, 256, 300, 350, 400, 450, 512];
+        let test_sizes = [100, 200, 256, 512, 768, 1024, 1536, 2048, 3072, 4095];
 
         for &num_users in &test_sizes {
             if num_users >= MAX_ACCOUNTS {
@@ -953,14 +984,14 @@ fn benchmark_worst_case_scenarios() {
             // No price crash - healthy accounts
             env.set_price(100_000_000, 200);
 
-            // Call crank 8 times and track worst CU
+            // Call crank 16 times and track worst CU
             let mut worst_cu: u64 = 0;
             let mut total_cu: u64 = 0;
             let mut any_failed = false;
 
-            for crank_num in 0..8 {
+            for crank_num in 0..16 {
                 match env.try_crank() {
-                    Ok(cu) => {
+                    Ok((cu, _logs)) => {
                         if cu > worst_cu {
                             worst_cu = cu;
                         }
@@ -981,7 +1012,7 @@ fn benchmark_worst_case_scenarios() {
                 println!("  {:>4} users: ❌ Single crank exceeded 1.4M CU limit", num_users);
             } else {
                 let pct = (worst_cu as f64 / 1_400_000.0) * 100.0;
-                println!("  {:>4} users: worst={:>10} CU ({:.1}% of limit), total={} CU across 8 cranks",
+                println!("  {:>4} users: worst={:>10} CU ({:.1}% of limit), total={} CU across 16 cranks",
                     num_users, worst_cu, pct, total_cu);
             }
         }
@@ -990,7 +1021,7 @@ fn benchmark_worst_case_scenarios() {
     // Scenario 8b: Full sweep with liquidations - find threshold
     println!("\n  8b: With 50% crash (liquidations/ADL)");
     {
-        let test_sizes = [100, 200, 256, 300, 350, 400, 450, 512];
+        let test_sizes = [100, 200, 256, 512, 768, 1024, 1536, 2048, 3072, 4095];
 
         for &num_users in &test_sizes {
             if num_users >= MAX_ACCOUNTS {
@@ -1053,14 +1084,16 @@ fn benchmark_worst_case_scenarios() {
             let mut worst_cu: u64 = 0;
             let mut total_cu: u64 = 0;
             let mut any_failed = false;
+            let mut last_logs: Vec<String> = Vec::new();
 
-            for crank_num in 0..8 {
+            for crank_num in 0..16 {
                 match env.try_crank() {
-                    Ok(cu) => {
+                    Ok((cu, logs)) => {
                         if cu > worst_cu {
                             worst_cu = cu;
                         }
                         total_cu += cu;
+                        last_logs = logs;
                     }
                     Err(e) => {
                         if e.contains("exceeded CUs") || e.contains("ProgramFailedToComplete") {
@@ -1076,15 +1109,238 @@ fn benchmark_worst_case_scenarios() {
                 println!("  {:>4} users: ❌ Single crank exceeded 1.4M CU limit", num_users);
             } else {
                 let pct = (worst_cu as f64 / 1_400_000.0) * 100.0;
-                println!("  {:>4} users: worst={:>10} CU ({:.1}% of limit), total={} CU across 8 cranks",
-                    num_users, worst_cu, pct, total_cu);
+                // Extract CRANK_STATS from logs - sol_log_64 format: "Program log: 0xtag, 0xliqs, 0xforce, 0xmax_accounts, 0x0"
+                let mut liquidations: u64 = 0;
+                let mut force_realize: u64 = 0;
+                let mut max_accounts: u64 = 0;
+                let mut found_stats = false;
+
+                // Helper to parse hex or decimal
+                fn parse_hex_or_dec(s: &str) -> u64 {
+                    let s = s.trim();
+                    if let Some(hex) = s.strip_prefix("0x") {
+                        u64::from_str_radix(hex, 16).unwrap_or(0)
+                    } else {
+                        s.parse().unwrap_or(0)
+                    }
+                }
+
+                for (i, log) in last_logs.iter().enumerate() {
+                    if log.contains("CRANK_STATS") {
+                        // Next log line should have the sol_log_64 output
+                        if i + 1 < last_logs.len() {
+                            let next_log = &last_logs[i + 1];
+                            // Format: "Program log: 0xc8a4c, 0x0, 0x200, 0x1000, 0x0"
+                            if let Some(rest) = next_log.strip_prefix("Program log: ") {
+                                let parts: Vec<&str> = rest.split(", ").collect();
+                                if parts.len() >= 4 {
+                                    liquidations = parse_hex_or_dec(parts[1]);
+                                    force_realize = parse_hex_or_dec(parts[2]);
+                                    max_accounts = parse_hex_or_dec(parts[3]);
+                                    found_stats = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if found_stats {
+                    println!("  {:>4} users: worst={:>10} CU ({:.1}%), total={} | liqs={} force={} max_acc={}",
+                        num_users, worst_cu, pct, total_cu, liquidations, force_realize, max_accounts);
+                } else {
+                    println!("  {:>4} users: worst={:>10} CU ({:.1}% of limit), total={} CU across 16 cranks",
+                        num_users, worst_cu, pct, total_cu);
+                }
+            }
+        }
+    }
+
+    // Scenario 9: Worst-case liquidation with late-window underwater accounts
+    // Tests true liquidation path with MTM margin check (insurance > threshold)
+    println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Scenario 9: 🔥🔥🔥 Worst-case liquidation (MTM margin check)");
+    println!("  1 LP + 4095 users, insurance > threshold for liquidation path");
+    println!("  Each window: first half safe, second half deeply underwater");
+    {
+        let num_users = 4095;
+
+        let mut env = TestEnv::new();
+        // threshold=0, warmup=0
+        env.init_market_with_params(0, 0);
+
+        // Top up insurance so force_realize is OFF and liquidation path runs
+        let insurance_funder = Keypair::new();
+        env.svm.airdrop(&insurance_funder.pubkey(), 1_000_000_000).unwrap();
+        env.top_up_insurance(&insurance_funder, 1_000_000_000); // 1B tokens
+
+        let lp = Keypair::new();
+        env.init_lp(&lp);
+        // LP needs massive collateral to absorb all user positions
+        env.deposit(&lp, 0, 100_000_000_000_000_000); // 100M tokens
+
+        println!("  Creating {} users with varied collateral...", num_users);
+
+        // Create users: for each 256-account window, first 128 are "safe", last 128 are "liq"
+        // Safe users: more collateral, smaller position -> stay above maintenance
+        // Liq users: less collateral, same position -> fall below maintenance
+        let mut users = Vec::with_capacity(num_users);
+
+        for i in 0..num_users {
+            let user = Keypair::new();
+            env.svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
+
+            // Create ATA (fee=0 since new_account_fee in params is 0)
+            let ata = env.create_ata(&user.pubkey(), 0);
+
+            let ix = Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(user.pubkey(), true),
+                    AccountMeta::new(env.slab, false),
+                    AccountMeta::new(ata, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new_readonly(sysvar::clock::ID, false),
+                    AccountMeta::new_readonly(env.pyth_col, false),
+                ],
+                data: encode_init_user(0),
+            };
+            let tx = Transaction::new_signed_with_payer(
+                &[ix], Some(&user.pubkey()), &[&user], env.svm.latest_blockhash(),
+            );
+            env.svm.send_transaction(tx).unwrap();
+
+            let user_idx = (i + 1) as u16;
+
+            // Determine if this user is in "safe" or "liq" half of their window
+            let window_offset = i % 256;
+            let is_liq_user = window_offset >= 128;
+
+            // Position: 1000 contracts at $100 = 100K notional
+            // Initial margin 10% = 10K (need capital >= 10K)
+            // After 50% crash: notional = 50K, loss = 50K
+            // Maintenance 5% of 50K = 2.5K
+            // For liquidation: equity = capital - 50K < 2.5K → capital < 52.5K
+            // Liq users: 50K capital (after 50K loss, equity = 0 < 2.5K → liquidatable)
+            // Safe users: 1M capital (after 50K loss, equity = 950K >> 2.5K → safe)
+            let deposit = if is_liq_user { 50_000u64 } else { 1_000_000u64 };
+            env.deposit(&user, user_idx, deposit);
+
+            users.push(user);
+
+            if (i + 1) % 1000 == 0 {
+                println!("    Created {} users...", i + 1);
+            }
+        }
+        println!("    Created {} users total", num_users);
+
+        // Open positions: all users go long with same size
+        // Try 1000 contracts like Scenario 5 - with 10K liq collateral should go underwater
+        // Safe users (10B) will easily survive, liq users (10K) should be liquidated
+        println!("  Opening positions (all users long)...");
+        let position_size = 1000i128; // 1K contracts like Scenario 5
+
+        for (i, user) in users.iter().enumerate() {
+            let user_idx = (i + 1) as u16;
+            env.trade(user, &lp, 0, user_idx, position_size);
+
+            if (i + 1) % 1000 == 0 {
+                println!("    Opened {} positions...", i + 1);
+            }
+        }
+
+        // Price crash: $100 -> $50 (50% drop)
+        // Longs lose 50% of position value ($5K loss on $10K position)
+        // Safe users (1B collateral) should survive
+        // Liq users (1K collateral) should be underwater and liquidated
+        println!("  Crashing price 50%: $100 -> $50");
+        env.set_price(50_000_000, 200);
+
+        // Run enough cranks to close all liq users
+        // FORCE_REALIZE_BUDGET_PER_CRANK=32, ~2048 liq users → need ~64 cranks
+        println!("  Running 64 cranks (32 force_realize per crank)...");
+        let mut worst_cu: u64 = 0;
+        let mut total_cu: u64 = 0;
+        let mut total_liqs: u64 = 0;
+        let mut total_force: u64 = 0;
+        let mut any_failed = false;
+        let mut last_max_acc: u64 = 0;
+        let mut last_insurance: u64 = 0;
+
+        // Helper to parse hex or decimal
+        fn parse_hex_or_dec(s: &str) -> u64 {
+            let s = s.trim();
+            if let Some(hex) = s.strip_prefix("0x") {
+                u64::from_str_radix(hex, 16).unwrap_or(0)
+            } else {
+                s.parse().unwrap_or(0)
+            }
+        }
+
+        for crank_num in 0..64 {
+            match env.try_crank() {
+                Ok((cu, logs)) => {
+                    if cu > worst_cu {
+                        worst_cu = cu;
+                    }
+                    total_cu += cu;
+
+                    // Parse stats from logs
+                    for (i, log) in logs.iter().enumerate() {
+                        if log.contains("CRANK_STATS") {
+                            if i + 1 < logs.len() {
+                                let next_log = &logs[i + 1];
+                                if let Some(rest) = next_log.strip_prefix("Program log: ") {
+                                    let parts: Vec<&str> = rest.split(", ").collect();
+                                    if parts.len() >= 5 {
+                                        let liqs = parse_hex_or_dec(parts[1]);
+                                        let force = parse_hex_or_dec(parts[2]);
+                                        last_max_acc = parse_hex_or_dec(parts[3]);
+                                        last_insurance = parse_hex_or_dec(parts[4]);
+                                        total_liqs = liqs;  // cumulative from engine
+                                        total_force = force;
+
+                                        println!("    Crank {:>2}: {:>7} CU | liqs={} force={}",
+                                            crank_num + 1, cu, liqs, force);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if e.contains("exceeded CUs") || e.contains("ProgramFailedToComplete") {
+                        println!("    Crank {} EXCEEDED 1.4M CU!", crank_num + 1);
+                        any_failed = true;
+                        break;
+                    } else {
+                        println!("    Crank {} error: {}", crank_num + 1, e);
+                    }
+                }
+            }
+        }
+
+        println!();
+        if any_failed {
+            println!("  ❌ FAILED: Single crank exceeded 1.4M CU limit");
+        } else {
+            let pct = (worst_cu as f64 / 1_400_000.0) * 100.0;
+            println!("  ✓ RESULT: worst={} CU ({:.1}%), total={} CU", worst_cu, pct, total_cu);
+            println!("    Liquidations: {}, Force-realize: {}", total_liqs, total_force);
+            println!("    MAX_ACCOUNTS: {}", last_max_acc);
+            if total_liqs == 0 && total_force == 0 {
+                println!("    ⚠️  WARNING: No liquidations or force-realize - check params");
+            }
+            // Expected: ~2048 liquidations (half of 4095 users are liq users)
+            let expected_liq = num_users / 2;
+            if total_liqs > 0 {
+                println!("    ✓ MTM margin check working - {} liquidations triggered", total_liqs);
             }
         }
     }
 
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("=== SUMMARY ===");
-    println!("• Crank sweeps 512 accounts max per call (8 cranks for full 4096)");
+    println!("• Crank sweeps 256 accounts max per call (16 cranks for full 4096)");
     println!("• With MAX_ACCOUNTS={}, baseline scan alone is ~194K CU", MAX_ACCOUNTS);
     println!("• Key metric: worst single crank must stay under 1.4M CU");
     println!("• ADL/liquidation processing adds CU overhead per affected account");
