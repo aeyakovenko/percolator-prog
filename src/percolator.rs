@@ -1367,7 +1367,7 @@ pub mod processor {
         program_error::ProgramError,
         program_pack::Pack,
         msg,
-        log::sol_log_compute_units,
+        log::{sol_log_compute_units, sol_log_64},
     };
     use crate::{
         ix::Instruction,
@@ -1808,6 +1808,11 @@ pub mod processor {
                     sol_log_compute_units();
                 }
 
+                // Copy stats before threshold update (avoid borrow conflict)
+                let liqs = engine.lifetime_liquidations;
+                let force = engine.lifetime_force_realize_closes;
+                let ins_low = engine.insurance_fund.balance as u64;
+
                 // --- Threshold auto-update (rate-limited + EWMA smoothed + step-clamped)
                 if clock.slot >= last_thr_slot.saturating_add(THRESH_UPDATE_INTERVAL_SLOTS) {
                     let risk_units = crate::compute_system_risk_units(engine);
@@ -1836,8 +1841,13 @@ pub mod processor {
                         current.saturating_sub(max_step.min(current - smoothed))
                     };
                     engine.set_risk_reduction_threshold(final_thresh.clamp(THRESH_MIN, THRESH_MAX));
+                    drop(engine);
                     state::write_last_thr_update_slot(&mut data, clock.slot);
                 }
+
+                // Debug: log lifetime counters (sol_log_64: tag, liqs, force, max_accounts, insurance)
+                msg!("CRANK_STATS");
+                sol_log_64(0xC8A4C, liqs, force, MAX_ACCOUNTS as u64, ins_low);
             },
             Instruction::TradeNoCpi { lp_idx, user_idx, size } => {
                 accounts::expect_len(accounts, 5)?;
