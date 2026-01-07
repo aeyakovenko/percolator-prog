@@ -1188,6 +1188,14 @@ pub mod oracle {
     use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
     use crate::error::PercolatorError;
 
+    // SECURITY (H5): The "devnet" feature disables critical oracle safety checks:
+    // - Staleness validation (stale prices accepted)
+    // - Confidence interval validation (wide confidence accepted)
+    // - Trading status validation (halted prices accepted)
+    //
+    // WARNING: NEVER deploy to mainnet with the "devnet" feature enabled!
+    // Build for mainnet with: cargo build-sbf (without --features devnet)
+
     /// Pyth mainnet price program ID
     #[cfg(not(feature = "devnet"))]
     pub const PYTH_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
@@ -1206,6 +1214,15 @@ pub mod oracle {
         0xb6, 0x47, 0xb9, 0xee, 0x90, 0x99, 0xaf, 0xb4,
     ]); // gSbePebfvPy7tRqimPoVecS2UsBvYv46ynrzWocc92s
 
+    // Pyth price account constants
+    const PYTH_MAGIC: u32 = 0xa1b2c3d4;
+    const PYTH_VERSION_2: u32 = 2;
+    const PYTH_ACCOUNT_TYPE_PRICE: u32 = 3;
+    const PYTH_STATUS_TRADING: u32 = 1;
+
+    // Maximum supported exponent to prevent overflow (10^38 fits in u128)
+    const MAX_EXPO_ABS: i32 = 18;
+
     pub fn read_pyth_price_e6(price_ai: &AccountInfo, now_slot: u64, max_staleness: u64, conf_bps: u16) -> Result<u64, ProgramError> {
         // Validate oracle owner (skip in tests to allow mock oracles)
         #[cfg(not(test))]
@@ -1220,13 +1237,49 @@ pub mod oracle {
             return Err(ProgramError::InvalidAccountData);
         }
 
+        // SECURITY (C2): Validate Pyth account magic, version, and type
+        // This prevents passing non-price Pyth accounts (mapping, product, etc.)
+        #[cfg(not(test))]
+        {
+            let magic = u32::from_le_bytes(data[0..4].try_into().unwrap());
+            let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
+            let account_type = u32::from_le_bytes(data[8..12].try_into().unwrap());
+
+            if magic != PYTH_MAGIC {
+                return Err(PercolatorError::OracleInvalid.into());
+            }
+            if version != PYTH_VERSION_2 {
+                return Err(PercolatorError::OracleInvalid.into());
+            }
+            if account_type != PYTH_ACCOUNT_TYPE_PRICE {
+                return Err(PercolatorError::OracleInvalid.into());
+            }
+        }
+
         let expo = i32::from_le_bytes(data[20..24].try_into().unwrap());
+
+        // SECURITY (C3): Bound exponent to prevent overflow in pow()
+        // Exponents outside [-18, +18] would overflow u128 or produce 0
+        if expo.abs() > MAX_EXPO_ABS {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+
+        // SECURITY (H4): Validate Pyth trading status
+        // Status 1 = Trading, other values indicate halted/unknown
+        #[cfg(not(feature = "devnet"))]
+        {
+            let status = u32::from_le_bytes(data[136..140].try_into().unwrap());
+            if status != PYTH_STATUS_TRADING {
+                return Err(PercolatorError::OracleInvalid.into());
+            }
+        }
+
         let price = i64::from_le_bytes(data[176..184].try_into().unwrap());
         let conf = u64::from_le_bytes(data[184..192].try_into().unwrap());
         let pub_slot = u64::from_le_bytes(data[200..208].try_into().unwrap());
 
         if price <= 0 {
-            return Err(PercolatorError::OracleInvalid.into()); 
+            return Err(PercolatorError::OracleInvalid.into());
         }
 
         // Skip staleness check on devnet since oracles aren't actively updated
@@ -1255,9 +1308,12 @@ pub mod oracle {
 
         let scale = expo + 6;
         let final_price_u128 = if scale >= 0 {
+            // SECURITY (C3): Use checked_mul to catch overflow
             let mul = 10u128.pow(scale as u32);
             price_u.checked_mul(mul).ok_or(PercolatorError::EngineOverflow)?
         } else {
+            // SECURITY (C3): Exponent already bounded, so div cannot be 0
+            // (scale >= -18-6 = -24, so pow <= 10^24 which fits u128)
             let div = 10u128.pow((-scale) as u32);
             price_u / div
         };
@@ -1454,6 +1510,11 @@ pub mod processor {
         let tok = spl_token::state::Account::unpack(&data)?;
         if tok.mint != *expected_mint { return Err(PercolatorError::InvalidMint.into()); }
         if tok.owner != *expected_owner { return Err(PercolatorError::InvalidVaultAta.into()); }
+        // SECURITY (H3): Verify vault token account is initialized
+        // Uninitialized vault could brick deposits/withdrawals
+        if tok.state != spl_token::state::AccountState::Initialized {
+            return Err(PercolatorError::InvalidVaultAta.into());
+        }
         Ok(())
     }
 
@@ -1510,7 +1571,7 @@ pub mod processor {
 
         match instruction {
             Instruction::InitMarket {
-                admin, collateral_mint: _collateral_mint, pyth_index, pyth_collateral,
+                admin, collateral_mint, pyth_index, pyth_collateral,
                 max_staleness_slots, conf_filter_bps, risk_params
             } => {
                 accounts::expect_len(accounts, 11)?;
@@ -1525,6 +1586,29 @@ pub mod processor {
                 // Ensure instruction data matches the signer
                 if admin != *a_admin.key {
                     return Err(ProgramError::InvalidInstructionData);
+                }
+
+                // SECURITY (H1): Enforce collateral_mint matches the account
+                // This prevents signers from being confused by mismatched instruction data
+                if collateral_mint != *a_mint.key {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+
+                // SECURITY (H2): Validate mint is a real SPL Token mint
+                // Check owner == spl_token::ID and data length == Mint::LEN (82 bytes)
+                #[cfg(not(test))]
+                {
+                    use spl_token::state::Mint;
+                    use solana_program::program_pack::Pack;
+                    if *a_mint.owner != spl_token::ID {
+                        return Err(ProgramError::IllegalOwner);
+                    }
+                    if a_mint.data_len() != Mint::LEN {
+                        return Err(ProgramError::InvalidAccountData);
+                    }
+                    // Verify mint is initialized by unpacking
+                    let mint_data = a_mint.try_borrow_data()?;
+                    let _ = Mint::unpack(&mint_data)?;
                 }
 
                 #[cfg(debug_assertions)]
@@ -1763,8 +1847,18 @@ pub mod processor {
                 slab_guard(program_id, a_slab, &data)?;
                 require_initialized(&data)?;
                 let config = state::read_config(&data);
+                let header = state::read_header(&data);
                 // Read last threshold update slot BEFORE mutable engine borrow
                 let last_thr_slot = state::read_last_thr_update_slot(&data);
+
+                // SECURITY (C4): allow_panic triggers global settlement - admin only
+                // This prevents griefing attacks where anyone triggers panic at worst moment
+                if allow_panic != 0 {
+                    accounts::expect_signer(a_caller)?;
+                    if !crate::verify::admin_ok(header.admin, a_caller.key.to_bytes()) {
+                        return Err(PercolatorError::EngineUnauthorized.into());
+                    }
+                }
 
                 // Oracle key validation via verify helper (Kani-provable)
                 if !crate::verify::oracle_key_ok(config.index_oracle, a_oracle.key.to_bytes()) {
@@ -1881,7 +1975,16 @@ pub mod processor {
                 }
 
                 let clock = Clock::from_account_info(&accounts[3])?;
-                let price = oracle::read_pyth_price_e6(&accounts[4], clock.slot, config.max_staleness_slots, config.conf_filter_bps)?;
+                let a_oracle = &accounts[4];
+
+                // Oracle key validation via verify helper (Kani-provable)
+                // SECURITY: Prevents oracle substitution attacks where attacker provides
+                // a different Pyth feed to manipulate trade execution price
+                if !crate::verify::oracle_key_ok(config.index_oracle, a_oracle.key.to_bytes()) {
+                    return Err(ProgramError::InvalidArgument);
+                }
+
+                let price = oracle::read_pyth_price_e6(a_oracle, clock.slot, config.max_staleness_slots, config.conf_filter_bps)?;
 
                 // Gate: if insurance_fund <= threshold, only allow risk-reducing trades
                 // LP delta is -size (LP takes opposite side of user's trade)
