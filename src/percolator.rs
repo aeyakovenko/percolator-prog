@@ -2709,22 +2709,23 @@ pub mod processor {
 
             Instruction::CloseSlab => {
                 accounts::expect_len(accounts, 2)?;
-                let a_admin = &accounts[0];
+                let a_dest = &accounts[0];
                 let a_slab = &accounts[1];
 
-                accounts::expect_signer(a_admin)?;
+                accounts::expect_signer(a_dest)?;
                 accounts::expect_writable(a_slab)?;
 
                 let mut data = state::slab_data_mut(a_slab)?;
-                slab_guard(program_id, a_slab, &data)?;
-                require_initialized(&data)?;
 
-                let header = state::read_header(&data);
-                require_admin(header.admin, a_admin.key)?;
-
-                // Safety checks: ensure market is empty before closing (skip in test mode)
-                #[cfg(not(feature = "test"))]
+                // All validation skipped with unsafe_close feature (for devnet cleanup)
+                #[cfg(not(feature = "unsafe_close"))]
                 {
+                    slab_guard(program_id, a_slab, &data)?;
+                    require_initialized(&data)?;
+
+                    let header = state::read_header(&data);
+                    require_admin(header.admin, a_dest.key)?;
+
                     let engine = zc::engine_ref(&data)?;
                     if engine.vault != 0 {
                         return Err(PercolatorError::EngineInsufficientBalance.into());
@@ -2743,10 +2744,10 @@ pub mod processor {
                 }
                 drop(data);
 
-                // Transfer all lamports from slab to admin
+                // Transfer all lamports from slab to destination
                 let slab_lamports = a_slab.lamports();
                 **a_slab.lamports.borrow_mut() = 0;
-                **a_admin.lamports.borrow_mut() = a_admin
+                **a_dest.lamports.borrow_mut() = a_dest
                     .lamports()
                     .checked_add(slab_lamports)
                     .ok_or(PercolatorError::EngineOverflow)?;

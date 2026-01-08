@@ -15,6 +15,7 @@ test-sbf = []
 devnet = []
 test = ["percolator/test"]  # Use MAX_ACCOUNTS=64 for tests
 cu-audit = []  # Enable compute unit checkpoints for CU auditing
+unsafe_close = []  # Skip all validation in CloseSlab instruction
 
 [dependencies]
 solana-program = "1.18"
