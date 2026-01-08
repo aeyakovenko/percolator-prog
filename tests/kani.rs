@@ -1751,7 +1751,8 @@ fn kani_crank_no_panic_self_crank_accepts_owner_match() {
 // AA. ORACLE INVERSION MATH PROOFS (5 proofs)
 // =============================================================================
 
-/// Prove: invert==0 returns raw unchanged
+/// Prove: invert==0 returns raw unchanged (for any raw including 0)
+/// Note: invert==0 is "no inversion" - raw passes through unchanged
 #[kani::proof]
 fn kani_invert_zero_returns_raw() {
     let raw: u64 = kani::any();
@@ -1759,23 +1760,23 @@ fn kani_invert_zero_returns_raw() {
     assert_eq!(result, Some(raw), "invert==0 must return raw unchanged");
 }
 
-/// Prove: invert!=0 with raw>0 returns floor(1e12/raw)
+/// Prove: invert!=0 with valid raw returns correct floor(1e12/raw)
+/// NON-VACUOUS: forces success path by constraining raw to valid range
 #[kani::proof]
 fn kani_invert_nonzero_computes_correctly() {
     let raw: u64 = kani::any();
+    // Constrain to valid range where inversion must succeed
     kani::assume(raw > 0);
-    // Limit raw to avoid trivial cases
-    kani::assume(raw <= 1_000_000_000_000); // reasonable price range
+    kani::assume(raw <= INVERSION_CONSTANT as u64); // ensures result >= 1
 
     let result = invert_price_e6(raw, 1);
 
-    if let Some(inverted) = result {
-        // Verify: inverted == floor(1e12 / raw)
-        let expected = INVERSION_CONSTANT / (raw as u128);
-        if expected <= u64::MAX as u128 && expected > 0 {
-            assert_eq!(inverted as u128, expected, "inversion must be floor(1e12/raw)");
-        }
-    }
+    // Force success - must not be None in valid range
+    let inverted = result.expect("inversion must succeed for raw in (0, 1e12]");
+
+    // Verify correctness
+    let expected = INVERSION_CONSTANT / (raw as u128);
+    assert_eq!(inverted as u128, expected, "inversion must be floor(1e12/raw)");
 }
 
 /// Prove: raw==0 always returns None (div by zero protection)
@@ -2213,33 +2214,122 @@ fn kani_tradecpi_variants_consistent() {
 }
 
 /// Prove: decide_trade_cpi_from_ret computes req_id as nonce_on_success(old_nonce)
+/// NON-VACUOUS: forces acceptance by constraining ret to be ABI-valid
 #[kani::proof]
 fn kani_tradecpi_from_ret_req_id_is_nonce_plus_one() {
     let old_nonce: u64 = kani::any();
     let shape = valid_shape();
-    let ret = any_matcher_return_fields();
+
+    // Compute the expected req_id that decide_trade_cpi_from_ret will use
+    let expected_req_id = nonce_on_success(old_nonce);
+
+    // Constrain ret to be ABI-valid for this req_id
+    let mut ret = any_matcher_return_fields();
+    ret.abi_version = MATCHER_ABI_VERSION;
+    ret.flags = FLAG_VALID | FLAG_PARTIAL_OK; // PARTIAL_OK allows exec_size=0
+    ret.reserved = 0;
+    kani::assume(ret.exec_price_e6 != 0);
+    ret.req_id = expected_req_id; // Must match nonce_on_success(old_nonce)
+    ret.exec_size = 0; // With PARTIAL_OK, zero size is always valid
+
     let lp_account_id: u64 = ret.lp_account_id;
     let oracle_price_e6: u64 = ret.oracle_price_e6;
     let req_size: i128 = kani::any();
 
-    // Force valid conditions so we get to ABI check
-    // Constrain ret to pass ABI
-    let expected_req_id = nonce_on_success(old_nonce);
-
-    // The abi_ok call inside decide_trade_cpi_from_ret uses nonce_on_success(old_nonce) as req_id
-    // So if ret.req_id != expected_req_id, ABI will fail
-
-    // If ret.req_id == expected_req_id and other ABI conditions pass, ABI succeeds
-    // This proves the coupling: decide_trade_cpi_from_ret uses nonce_on_success for req_id
-
+    // All other checks pass
     let decision = decide_trade_cpi_from_ret(
-        old_nonce, shape, true, true, true, true, false, false,
+        old_nonce, shape,
+        true,  // identity_ok
+        true,  // pda_ok
+        true,  // user_auth_ok
+        true,  // lp_auth_ok
+        false, // gate_active (inactive)
+        false, // risk_increase
         ret, lp_account_id, oracle_price_e6, req_size
     );
 
-    // If we got Accept, the req_id used was nonce_on_success(old_nonce)
-    if let TradeCpiDecision::Accept { new_nonce, .. } = decision {
-        assert_eq!(new_nonce, expected_req_id,
-            "accepted trade must have new_nonce == nonce_on_success(old_nonce)");
+    // FORCE acceptance - with valid ABI inputs, must accept
+    match decision {
+        TradeCpiDecision::Accept { new_nonce, .. } => {
+            assert_eq!(new_nonce, expected_req_id,
+                "new_nonce must equal nonce_on_success(old_nonce)");
+        }
+        TradeCpiDecision::Reject => {
+            panic!("must accept with valid ABI inputs");
+        }
     }
+}
+
+// =============================================================================
+// AG. UNIVERSAL GATE PROOF (missing from AE)
+// =============================================================================
+
+/// Universal: gate_active && risk_increase => Reject (the kill switch)
+/// This is the canonical risk-reduction enforcement property
+#[kani::proof]
+fn kani_universal_gate_risk_increase_rejects() {
+    let old_nonce: u64 = kani::any();
+    let shape = valid_shape();
+    let identity_ok = true;
+    let pda_ok = true;
+    let abi_ok = true;
+    let user_auth_ok = true;
+    let lp_auth_ok = true;
+    let gate_active = true;     // Gate IS active
+    let risk_increase = true;   // Trade WOULD increase risk
+    let exec_size: i128 = kani::any();
+
+    let decision = decide_trade_cpi(
+        old_nonce, shape, identity_ok, pda_ok, abi_ok,
+        user_auth_ok, lp_auth_ok, gate_active, risk_increase, exec_size
+    );
+
+    assert_eq!(decision, TradeCpiDecision::Reject,
+        "gate_active && risk_increase must ALWAYS reject");
+}
+
+// =============================================================================
+// AH. ADDITIONAL STRENGTHENING PROOFS
+// =============================================================================
+
+/// Unit conversion: if dust==0 after base_to_units, roundtrip is exact
+#[kani::proof]
+fn kani_units_roundtrip_exact_when_no_dust() {
+    let base: u64 = kani::any();
+    let scale: u32 = kani::any();
+    kani::assume(scale > 0);
+
+    let (units, dust) = base_to_units(base, scale);
+
+    // Only consider cases where there's no dust
+    kani::assume(dust == 0);
+
+    // Roundtrip must be exact
+    let recovered = units_to_base(units, scale);
+    assert_eq!(recovered, base, "roundtrip must be exact when dust==0");
+}
+
+/// Universal: allow_panic != 0 && !admin_ok => Reject (for all other inputs)
+#[kani::proof]
+fn kani_universal_panic_requires_admin() {
+    let allow_panic: u8 = kani::any();
+    kani::assume(allow_panic != 0); // Panic requested
+
+    let admin: [u8; 32] = kani::any();
+    let signer: [u8; 32] = kani::any();
+
+    // Admin check fails (either burned or mismatch)
+    kani::assume(!admin_ok(admin, signer));
+
+    // Other inputs can be anything
+    let permissionless: bool = kani::any();
+    let idx_exists: bool = kani::any();
+    let stored_owner: [u8; 32] = kani::any();
+
+    let decision = decide_keeper_crank_with_panic(
+        allow_panic, admin, signer, permissionless, idx_exists, stored_owner
+    );
+
+    assert_eq!(decision, SimpleDecision::Reject,
+        "allow_panic without admin auth must ALWAYS reject");
 }
