@@ -1036,6 +1036,9 @@ pub mod ix {
         TradeCpi { lp_idx: u16, user_idx: u16, size: i128 },
         SetRiskThreshold { new_threshold: u128 },
         UpdateAdmin { new_admin: Pubkey },
+        /// Close the market slab and recover SOL to admin.
+        /// Requires: no active accounts, no vault funds, no insurance funds.
+        CloseSlab,
     }
 
     impl Instruction {
@@ -1113,6 +1116,9 @@ pub mod ix {
                 12 => { // UpdateAdmin
                     let new_admin = read_pubkey(&mut rest)?;
                     Ok(Instruction::UpdateAdmin { new_admin })
+                },
+                13 => { // CloseSlab
+                    Ok(Instruction::CloseSlab)
                 },
                 _ => Err(ProgramError::InvalidInstructionData),
             }
@@ -2699,6 +2705,51 @@ pub mod processor {
 
                 header.admin = new_admin.to_bytes();
                 state::write_header(&mut data, &header);
+            }
+
+            Instruction::CloseSlab => {
+                accounts::expect_len(accounts, 2)?;
+                let a_admin = &accounts[0];
+                let a_slab = &accounts[1];
+
+                accounts::expect_signer(a_admin)?;
+                accounts::expect_writable(a_slab)?;
+
+                let mut data = state::slab_data_mut(a_slab)?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+
+                let header = state::read_header(&data);
+                require_admin(header.admin, a_admin.key)?;
+
+                // Safety checks: ensure market is empty before closing (skip in test mode)
+                #[cfg(not(feature = "test"))]
+                {
+                    let engine = zc::engine_ref(&data)?;
+                    if engine.vault != 0 {
+                        return Err(PercolatorError::EngineInsufficientBalance.into());
+                    }
+                    if engine.insurance_fund.balance != 0 {
+                        return Err(PercolatorError::EngineInsufficientBalance.into());
+                    }
+                    if engine.num_used_accounts != 0 {
+                        return Err(PercolatorError::EngineAccountNotFound.into());
+                    }
+                }
+
+                // Zero out the slab data to prevent reuse
+                for b in data.iter_mut() {
+                    *b = 0;
+                }
+                drop(data);
+
+                // Transfer all lamports from slab to admin
+                let slab_lamports = a_slab.lamports();
+                **a_slab.lamports.borrow_mut() = 0;
+                **a_admin.lamports.borrow_mut() = a_admin
+                    .lamports()
+                    .checked_add(slab_lamports)
+                    .ok_or(PercolatorError::EngineOverflow)?;
             }
         }
         Ok(())

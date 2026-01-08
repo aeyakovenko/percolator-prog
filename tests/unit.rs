@@ -272,6 +272,10 @@ fn encode_init_market_invert(fixture: &MarketFixture, crank_staleness: u64, inve
         data
     }
 
+    fn encode_close_slab() -> Vec<u8> {
+        vec![13u8]
+    }
+
     fn encode_topup_insurance(amount: u64) -> Vec<u8> {
         let mut data = vec![9u8];
         encode_u64(amount, &mut data);
@@ -1962,4 +1966,71 @@ fn encode_init_market_invert(fixture: &MarketFixture, crank_staleness: u64, inve
         assert_eq!(engine.vault, engine.insurance_fund.balance + sum_capital,
             "INVARIANT #2: vault({}) != insurance({}) + capital({})",
             engine.vault, engine.insurance_fund.balance, sum_capital);
+    }
+
+    #[test]
+    fn test_close_slab() {
+        let mut f = setup_market();
+        let init_data = encode_init_market(&f, 100);
+
+        // Record admin's initial lamports
+        let admin_lamports_before = f.admin.lamports;
+        let slab_lamports = f.slab.lamports;
+
+        // Init market
+        {
+            let mut dummy_ata = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+            let accounts = vec![
+                f.admin.to_info(), f.slab.to_info(), f.mint.to_info(), f.vault.to_info(),
+                f.token_prog.to_info(), f.clock.to_info(), f.rent.to_info(), dummy_ata.to_info(), f.system.to_info(),
+            ];
+            process_instruction(&f.program_id, &accounts, &init_data).unwrap();
+        }
+
+        // Verify market is initialized
+        let header = state::read_header(&f.slab.data);
+        assert_eq!(header.magic, MAGIC);
+
+        // Close the slab
+        {
+            let accounts = vec![f.admin.to_info(), f.slab.to_info()];
+            process_instruction(&f.program_id, &accounts, &encode_close_slab()).unwrap();
+        }
+
+        // Verify slab is zeroed
+        assert!(f.slab.data.iter().all(|&b| b == 0), "Slab data should be zeroed after close");
+
+        // Verify lamports transferred to admin
+        assert_eq!(f.slab.lamports, 0, "Slab should have 0 lamports after close");
+        assert_eq!(f.admin.lamports, admin_lamports_before + slab_lamports,
+            "Admin should receive slab's lamports");
+    }
+
+    #[test]
+    fn test_close_slab_non_admin_rejected() {
+        let mut f = setup_market();
+        let init_data = encode_init_market(&f, 100);
+
+        // Init market
+        {
+            let mut dummy_ata = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+            let accounts = vec![
+                f.admin.to_info(), f.slab.to_info(), f.mint.to_info(), f.vault.to_info(),
+                f.token_prog.to_info(), f.clock.to_info(), f.rent.to_info(), dummy_ata.to_info(), f.system.to_info(),
+            ];
+            process_instruction(&f.program_id, &accounts, &init_data).unwrap();
+        }
+
+        // Attacker tries to close
+        let mut attacker = TestAccount::new(Pubkey::new_unique(), solana_program::system_program::id(), 0, vec![]).signer();
+
+        {
+            let accounts = vec![attacker.to_info(), f.slab.to_info()];
+            let res = process_instruction(&f.program_id, &accounts, &encode_close_slab());
+            assert_eq!(res, Err(PercolatorError::EngineUnauthorized.into()));
+        }
+
+        // Verify slab unchanged
+        let header = state::read_header(&f.slab.data);
+        assert_eq!(header.magic, MAGIC, "Slab should still be initialized after failed close");
     }
