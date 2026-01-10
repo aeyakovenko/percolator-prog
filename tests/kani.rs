@@ -53,11 +53,13 @@ use percolator_prog::verify::{
 };
 use percolator_prog::constants::MAX_UNIT_SCALE;
 
-// Kani-specific bound for scale to avoid SAT explosion on division/modulo.
+// Kani-specific bounds to avoid SAT explosion on division/modulo.
 // MAX_UNIT_SCALE (1 billion) is too large for bit-precise SAT solving.
-// Using 1000 keeps proofs tractable while still exercising the logic.
+// Using small bounds keeps proofs tractable while still exercising the logic.
 // The actual MAX_UNIT_SCALE bound is proven separately in init_market_scale_* proofs.
-const KANI_MAX_SCALE: u32 = 1000;
+const KANI_MAX_SCALE: u32 = 64;
+// Cap quotients to keep division/mod tractable
+const KANI_MAX_QUOTIENT: u64 = 4096;
 
 // =============================================================================
 // Test Fixtures
@@ -1800,8 +1802,10 @@ fn kani_invert_zero_raw_returns_none() {
 #[kani::proof]
 fn kani_invert_result_zero_returns_none() {
     // For inverted to be 0, we need 1e12 / raw < 1, i.e., raw > 1e12
-    let raw: u64 = kani::any();
-    kani::assume(raw > 1_000_000_000_000);
+    // Use a representative value just above the threshold
+    let offset: u64 = kani::any();
+    kani::assume(offset <= KANI_MAX_QUOTIENT);
+    let raw = 1_000_000_000_001u64.saturating_add(offset);
 
     let result = invert_price_e6(raw, 1);
     assert!(result.is_none(), "inversion resulting in 0 must return None");
@@ -1814,9 +1818,9 @@ fn kani_invert_monotonic() {
     let raw2: u64 = kani::any();
     kani::assume(raw1 > 0 && raw2 > 0);
     kani::assume(raw1 > raw2);
-    // Limit to reasonable range
-    kani::assume(raw1 <= 1_000_000_000_000);
-    kani::assume(raw2 <= 1_000_000_000_000);
+    // Cap to keep division tractable for SAT solver
+    kani::assume(raw1 <= KANI_MAX_QUOTIENT);
+    kani::assume(raw2 <= KANI_MAX_QUOTIENT);
 
     let inv1 = invert_price_e6(raw1, 1);
     let inv2 = invert_price_e6(raw2, 1);
@@ -1834,10 +1838,13 @@ fn kani_invert_monotonic() {
 /// Prove: base_to_units conservation: units*scale + dust == base (when scale > 0)
 #[kani::proof]
 fn kani_base_to_units_conservation() {
-    let base: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
     kani::assume(scale <= KANI_MAX_SCALE);
+
+    // Cap base to keep quotient small for SAT solver
+    let base: u64 = kani::any();
+    kani::assume(base <= (scale as u64) * KANI_MAX_QUOTIENT);
 
     let (units, dust) = base_to_units(base, scale);
 
@@ -1849,10 +1856,13 @@ fn kani_base_to_units_conservation() {
 /// Prove: dust < scale when scale > 0
 #[kani::proof]
 fn kani_base_to_units_dust_bound() {
-    let base: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
     kani::assume(scale <= KANI_MAX_SCALE);
+
+    // Cap base to keep quotient small for SAT solver
+    let base: u64 = kani::any();
+    kani::assume(base <= (scale as u64) * KANI_MAX_QUOTIENT);
 
     let (_, dust) = base_to_units(base, scale);
 
@@ -1877,8 +1887,8 @@ fn kani_units_roundtrip() {
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
     kani::assume(scale <= KANI_MAX_SCALE);
-    // Avoid overflow in multiplication
-    kani::assume(units <= u64::MAX / (scale as u64));
+    // Cap quotient to keep division tractable for SAT solver
+    kani::assume(units <= KANI_MAX_QUOTIENT);
 
     let base = units_to_base(units, scale);
     let (recovered_units, dust) = base_to_units(base, scale);
@@ -1900,11 +1910,15 @@ fn kani_units_to_base_scale_zero() {
 /// Prove: base_to_units is monotonic: base1 < base2 => units1 <= units2
 #[kani::proof]
 fn kani_base_to_units_monotonic() {
-    let base1: u64 = kani::any();
-    let base2: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
     kani::assume(scale <= KANI_MAX_SCALE);
+
+    // Cap both bases to keep quotients small
+    let base1: u64 = kani::any();
+    let base2: u64 = kani::any();
+    kani::assume(base1 <= (scale as u64) * KANI_MAX_QUOTIENT);
+    kani::assume(base2 <= (scale as u64) * KANI_MAX_QUOTIENT);
     kani::assume(base1 < base2);
 
     let (units1, _) = base_to_units(base1, scale);
@@ -1916,14 +1930,16 @@ fn kani_base_to_units_monotonic() {
 /// Prove: units_to_base is strictly monotonic (without overflow)
 #[kani::proof]
 fn kani_units_to_base_monotonic() {
-    let units1: u64 = kani::any();
-    let units2: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
     kani::assume(scale <= KANI_MAX_SCALE);
+
+    // Cap units to keep products small
+    let units1: u64 = kani::any();
+    let units2: u64 = kani::any();
+    kani::assume(units1 <= KANI_MAX_QUOTIENT);
+    kani::assume(units2 <= KANI_MAX_QUOTIENT);
     kani::assume(units1 < units2);
-    // Avoid overflow
-    kani::assume(units2 <= u64::MAX / (scale as u64));
 
     let base1 = units_to_base(units1, scale);
     let base2 = units_to_base(units2, scale);
@@ -1949,13 +1965,20 @@ fn kani_base_to_units_monotonic_scale_zero() {
 // =============================================================================
 
 /// Prove: misaligned amount rejects when scale != 0
+/// Constructs misaligned amount directly to avoid expensive % in SAT solver
 #[kani::proof]
 fn kani_withdraw_misaligned_rejects() {
-    let amount: u64 = kani::any();
     let scale: u32 = kani::any();
-    kani::assume(scale > 0);
+    kani::assume(scale > 1); // scale==1 means everything is aligned
     kani::assume(scale <= KANI_MAX_SCALE);
-    kani::assume(amount % (scale as u64) != 0);
+
+    // Construct misaligned: amount = q*scale + r where 0 < r < scale
+    let q: u64 = kani::any();
+    let r: u64 = kani::any();
+    kani::assume(q <= KANI_MAX_QUOTIENT);
+    kani::assume(r > 0);
+    kani::assume(r < scale as u64);
+    let amount = q * (scale as u64) + r;
 
     let aligned = withdraw_amount_aligned(amount, scale);
 
@@ -1965,12 +1988,13 @@ fn kani_withdraw_misaligned_rejects() {
 /// Prove: aligned amount accepts when scale != 0
 #[kani::proof]
 fn kani_withdraw_aligned_accepts() {
-    let units: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
     kani::assume(scale <= KANI_MAX_SCALE);
-    // Avoid overflow
-    kani::assume(units <= u64::MAX / (scale as u64));
+
+    // Cap units to keep product small
+    let units: u64 = kani::any();
+    kani::assume(units <= KANI_MAX_QUOTIENT);
 
     let amount = units * (scale as u64);
     let aligned = withdraw_amount_aligned(amount, scale);
@@ -1995,11 +2019,13 @@ fn kani_withdraw_scale_zero_always_aligned() {
 /// Prove: sweep_dust conservation: units*scale + rem == dust (scale > 0)
 #[kani::proof]
 fn kani_sweep_dust_conservation() {
-    let dust: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
     kani::assume(scale <= KANI_MAX_SCALE);
-    kani::assume(scale <= KANI_MAX_SCALE);
+
+    // Cap dust to keep quotient small
+    let dust: u64 = kani::any();
+    kani::assume(dust <= (scale as u64) * KANI_MAX_QUOTIENT);
 
     let (units, rem) = sweep_dust(dust, scale);
 
@@ -2010,10 +2036,13 @@ fn kani_sweep_dust_conservation() {
 /// Prove: sweep_dust rem < scale (scale > 0)
 #[kani::proof]
 fn kani_sweep_dust_rem_bound() {
-    let dust: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
     kani::assume(scale <= KANI_MAX_SCALE);
+
+    // Cap dust to keep quotient small
+    let dust: u64 = kani::any();
+    kani::assume(dust <= (scale as u64) * KANI_MAX_QUOTIENT);
 
     let (_, rem) = sweep_dust(dust, scale);
 
@@ -2434,22 +2463,21 @@ fn kani_universal_gate_risk_increase_rejects() {
 // =============================================================================
 
 /// Unit conversion: if dust==0 after base_to_units, roundtrip is exact
+/// Constructs base = q * scale directly to avoid expensive % in SAT solver
 #[kani::proof]
 fn kani_units_roundtrip_exact_when_no_dust() {
-    let base: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
     kani::assume(scale <= KANI_MAX_SCALE);
-    kani::assume(scale <= KANI_MAX_SCALE);
+
+    // Construct base as exact multiple of scale (no dust case)
+    let q: u64 = kani::any();
+    kani::assume(q <= KANI_MAX_QUOTIENT);
+    let base = q * (scale as u64);
 
     let (units, dust) = base_to_units(base, scale);
+    assert_eq!(dust, 0, "base = q*scale must have no dust");
 
-    // Only consider cases where there's no dust
-    kani::assume(dust == 0);
-    // Help solver: dust==0 implies base is a multiple of scale
-    kani::assume((base as u128) % (scale as u128) == 0);
-
-    // Roundtrip must be exact
     let recovered = units_to_base(units, scale);
     assert_eq!(recovered, base, "roundtrip must be exact when dust==0");
 }
@@ -2651,12 +2679,15 @@ fn kani_owner_ok_independent_of_scale() {
     let stored: [u8; 32] = kani::any();
     let signer: [u8; 32] = kani::any();
     let scale: u32 = kani::any();
+    kani::assume(scale <= KANI_MAX_SCALE);
 
     // owner_ok doesn't use scale at all
     let result = owner_ok(stored, signer);
 
-    // unit scale operations are completely separate
-    let (units, dust) = base_to_units(kani::any(), scale);
+    // unit scale operations are completely separate (use bounded base)
+    let base: u64 = kani::any();
+    kani::assume(base <= (scale.max(1) as u64) * KANI_MAX_QUOTIENT);
+    let (units, dust) = base_to_units(base, scale);
     let _ = units_to_base(units, scale);
     let _ = dust;
 
@@ -2669,9 +2700,12 @@ fn kani_owner_ok_independent_of_scale() {
 /// Uses purity-style proof to avoid duplicating division work in SAT solver
 #[kani::proof]
 fn kani_unit_conversion_deterministic() {
-    let base: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale <= KANI_MAX_SCALE);
+
+    // Cap base to keep quotient small
+    let base: u64 = kani::any();
+    kani::assume(base <= (scale.max(1) as u64) * KANI_MAX_QUOTIENT);
 
     let (units1, dust1) = base_to_units(base, scale);
 

@@ -1421,10 +1421,10 @@ pub mod oracle {
     /// Chainlink OCR2 Store program ID (same for mainnet and devnet)
     /// HEvSKofvBgfaexv23kMabbYqxasxU3mQ4ibBMEmJWHny
     pub const CHAINLINK_OCR2_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
-        0xf3, 0x23, 0x2a, 0x0f, 0x76, 0x2d, 0x11, 0x07,
-        0x8a, 0x4c, 0x97, 0x8c, 0xb7, 0x48, 0x88, 0x68,
-        0x8a, 0x2f, 0xf1, 0xb3, 0x3c, 0x4e, 0x7c, 0x63,
-        0x9c, 0xb8, 0xb8, 0x75, 0x8e, 0xb3, 0x5a, 0x5c,
+        0xf1, 0x4b, 0xf6, 0x5a, 0xd5, 0x6b, 0xd2, 0xba,
+        0x71, 0x5e, 0x45, 0x74, 0x2c, 0x23, 0x1f, 0x27,
+        0xd6, 0x36, 0x21, 0xcf, 0x5b, 0x77, 0x8f, 0x37,
+        0xc1, 0xa2, 0x48, 0x95, 0x1d, 0x17, 0x56, 0x02,
     ]);
 
     // PriceUpdateV2 account layout offsets (134 bytes minimum)
@@ -1436,17 +1436,16 @@ pub mod oracle {
     const OFF_EXPO: usize = 90;         // i32
     const OFF_PUBLISH_TIME: usize = 94; // i64
 
-    // Chainlink OCR2 Transmissions account layout offsets
-    // See: https://github.com/smartcontractkit/chainlink-solana/blob/develop/contracts/programs/store/src/state.rs
-    const CL_HEADER_LEN: usize = 160;   // discriminator(8) + header fields
-    const CL_OFF_DECIMALS: usize = 138; // u8
-    const CL_OFF_LATEST_ROUND_ID: usize = 143; // u32
-    const CL_OFF_LIVE_LENGTH: usize = 148; // u32
-    const CL_OFF_LIVE_CURSOR: usize = 152; // u32
-    const CL_TRANSMISSION_SIZE: usize = 48;
-    // Within each Transmission:
-    const CL_TX_OFF_TIMESTAMP: usize = 8;  // u32
-    const CL_TX_OFF_ANSWER: usize = 16;    // i128
+    // Chainlink OCR2 State/Aggregator account layout offsets (devnet format)
+    // This is the simpler account format used on Solana devnet
+    // Note: Different from the Transmissions ring buffer format in older docs
+    const CL_MIN_LEN: usize = 224;       // Minimum required length
+    const CL_OFF_DECIMALS: usize = 138;  // u8 - number of decimals
+    // Skip unused: latest_round_id (143), live_length (148), live_cursor (152)
+    // The actual price data is stored directly at tail:
+    const CL_OFF_SLOT: usize = 200;      // u64 - slot when updated
+    const CL_OFF_TIMESTAMP: usize = 208; // u64 - unix timestamp (seconds)
+    const CL_OFF_ANSWER: usize = 216;    // i128 - price answer
 
     // Maximum supported exponent to prevent overflow (10^18 fits in u128)
     const MAX_EXPO_ABS: i32 = 18;
@@ -1546,10 +1545,10 @@ pub mod oracle {
         Ok(final_price_u128 as u64)
     }
 
-    /// Read price from a Chainlink OCR2 Transmissions account.
+    /// Read price from a Chainlink OCR2 State/Aggregator account.
     ///
     /// Parameters:
-    /// - price_ai: The Chainlink Transmissions account
+    /// - price_ai: The Chainlink aggregator account
     /// - expected_feed_pubkey: The expected feed account pubkey (for validation)
     /// - now_unix_ts: Current unix timestamp (from clock.unix_timestamp)
     /// - max_staleness_secs: Maximum age in seconds
@@ -1576,26 +1575,20 @@ pub mod oracle {
         }
 
         let data = price_ai.try_borrow_data()?;
-        if data.len() < CL_HEADER_LEN + CL_TRANSMISSION_SIZE {
+        if data.len() < CL_MIN_LEN {
             return Err(ProgramError::InvalidAccountData);
         }
 
         // Read header fields
         let decimals = data[CL_OFF_DECIMALS];
-        let live_cursor = u32::from_le_bytes(data[CL_OFF_LIVE_CURSOR..CL_OFF_LIVE_CURSOR + 4].try_into().unwrap());
 
-        // Calculate offset to latest transmission in ringbuffer
-        let tx_offset = CL_HEADER_LEN + (live_cursor as usize * CL_TRANSMISSION_SIZE);
-        if data.len() < tx_offset + CL_TRANSMISSION_SIZE {
-            return Err(ProgramError::InvalidAccountData);
-        }
-
-        // Read transmission fields
-        let timestamp = u32::from_le_bytes(
-            data[tx_offset + CL_TX_OFF_TIMESTAMP..tx_offset + CL_TX_OFF_TIMESTAMP + 4].try_into().unwrap()
+        // Read price data directly from fixed offsets
+        let timestamp = u64::from_le_bytes(
+            data[CL_OFF_TIMESTAMP..CL_OFF_TIMESTAMP + 8].try_into().unwrap()
         );
+        // Read answer as i128 (16 bytes), but only bottom 8 bytes are typically used
         let answer = i128::from_le_bytes(
-            data[tx_offset + CL_TX_OFF_ANSWER..tx_offset + CL_TX_OFF_ANSWER + 16].try_into().unwrap()
+            data[CL_OFF_ANSWER..CL_OFF_ANSWER + 16].try_into().unwrap()
         );
 
         if answer <= 0 {
