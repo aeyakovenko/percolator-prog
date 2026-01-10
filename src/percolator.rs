@@ -1418,6 +1418,15 @@ pub mod oracle {
         0xe6, 0xc4, 0xdf, 0x98, 0xcc, 0x38, 0x58, 0x81,
     ]);
 
+    /// Chainlink OCR2 Store program ID (same for mainnet and devnet)
+    /// HEvSKofvBgfaexv23kMabbYqxasxU3mQ4ibBMEmJWHny
+    pub const CHAINLINK_OCR2_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+        0xf3, 0x23, 0x2a, 0x0f, 0x76, 0x2d, 0x11, 0x07,
+        0x8a, 0x4c, 0x97, 0x8c, 0xb7, 0x48, 0x88, 0x68,
+        0x8a, 0x2f, 0xf1, 0xb3, 0x3c, 0x4e, 0x7c, 0x63,
+        0x9c, 0xb8, 0xb8, 0x75, 0x8e, 0xb3, 0x5a, 0x5c,
+    ]);
+
     // PriceUpdateV2 account layout offsets (134 bytes minimum)
     // See: https://github.com/pyth-network/pyth-crosschain/blob/main/target_chains/solana/pyth_solana_receiver_sdk/src/price_update.rs
     const PRICE_UPDATE_V2_MIN_LEN: usize = 134;
@@ -1426,6 +1435,18 @@ pub mod oracle {
     const OFF_CONF: usize = 82;         // u64
     const OFF_EXPO: usize = 90;         // i32
     const OFF_PUBLISH_TIME: usize = 94; // i64
+
+    // Chainlink OCR2 Transmissions account layout offsets
+    // See: https://github.com/smartcontractkit/chainlink-solana/blob/develop/contracts/programs/store/src/state.rs
+    const CL_HEADER_LEN: usize = 160;   // discriminator(8) + header fields
+    const CL_OFF_DECIMALS: usize = 138; // u8
+    const CL_OFF_LATEST_ROUND_ID: usize = 143; // u32
+    const CL_OFF_LIVE_LENGTH: usize = 148; // u32
+    const CL_OFF_LIVE_CURSOR: usize = 152; // u32
+    const CL_TRANSMISSION_SIZE: usize = 48;
+    // Within each Transmission:
+    const CL_TX_OFF_TIMESTAMP: usize = 8;  // u32
+    const CL_TX_OFF_ANSWER: usize = 16;    // i128
 
     // Maximum supported exponent to prevent overflow (10^18 fits in u128)
     const MAX_EXPO_ABS: i32 = 18;
@@ -1525,12 +1546,111 @@ pub mod oracle {
         Ok(final_price_u128 as u64)
     }
 
+    /// Read price from a Chainlink OCR2 Transmissions account.
+    ///
+    /// Parameters:
+    /// - price_ai: The Chainlink Transmissions account
+    /// - expected_feed_pubkey: The expected feed account pubkey (for validation)
+    /// - now_unix_ts: Current unix timestamp (from clock.unix_timestamp)
+    /// - max_staleness_secs: Maximum age in seconds
+    ///
+    /// Returns the price in e6 format (e.g., 150_000_000 = $150.00).
+    /// Note: Chainlink doesn't have confidence intervals, so conf_bps is not used.
+    pub fn read_chainlink_price_e6(
+        price_ai: &AccountInfo,
+        expected_feed_pubkey: &[u8; 32],
+        now_unix_ts: i64,
+        max_staleness_secs: u64,
+    ) -> Result<u64, ProgramError> {
+        // Validate oracle owner (skip in tests to allow mock oracles)
+        #[cfg(not(feature = "test"))]
+        {
+            if *price_ai.owner != CHAINLINK_OCR2_PROGRAM_ID {
+                return Err(ProgramError::IllegalOwner);
+            }
+        }
+
+        // Validate feed pubkey matches expected
+        if price_ai.key.to_bytes() != *expected_feed_pubkey {
+            return Err(PercolatorError::InvalidOracleKey.into());
+        }
+
+        let data = price_ai.try_borrow_data()?;
+        if data.len() < CL_HEADER_LEN + CL_TRANSMISSION_SIZE {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        // Read header fields
+        let decimals = data[CL_OFF_DECIMALS];
+        let live_cursor = u32::from_le_bytes(data[CL_OFF_LIVE_CURSOR..CL_OFF_LIVE_CURSOR + 4].try_into().unwrap());
+
+        // Calculate offset to latest transmission in ringbuffer
+        let tx_offset = CL_HEADER_LEN + (live_cursor as usize * CL_TRANSMISSION_SIZE);
+        if data.len() < tx_offset + CL_TRANSMISSION_SIZE {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        // Read transmission fields
+        let timestamp = u32::from_le_bytes(
+            data[tx_offset + CL_TX_OFF_TIMESTAMP..tx_offset + CL_TX_OFF_TIMESTAMP + 4].try_into().unwrap()
+        );
+        let answer = i128::from_le_bytes(
+            data[tx_offset + CL_TX_OFF_ANSWER..tx_offset + CL_TX_OFF_ANSWER + 16].try_into().unwrap()
+        );
+
+        if answer <= 0 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+
+        // SECURITY (C3): Bound decimals to prevent overflow in pow()
+        if decimals > MAX_EXPO_ABS as u8 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+
+        // Staleness check (skip on devnet)
+        #[cfg(not(feature = "devnet"))]
+        {
+            let age = now_unix_ts.saturating_sub(timestamp as i64);
+            if age < 0 || age as u64 > max_staleness_secs {
+                return Err(PercolatorError::OracleStale.into());
+            }
+        }
+        #[cfg(feature = "devnet")]
+        let _ = (timestamp, max_staleness_secs, now_unix_ts);
+
+        // Convert to e6 format
+        // Chainlink decimals work like: price = answer / 10^decimals
+        // We want e6, so: price_e6 = answer * 10^6 / 10^decimals = answer * 10^(6-decimals)
+        let price_u = answer as u128;
+        let scale = 6i32 - decimals as i32;
+        let final_price_u128 = if scale >= 0 {
+            let mul = 10u128.pow(scale as u32);
+            price_u.checked_mul(mul).ok_or(PercolatorError::EngineOverflow)?
+        } else {
+            let div = 10u128.pow((-scale) as u32);
+            price_u / div
+        };
+
+        if final_price_u128 == 0 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        if final_price_u128 > u64::MAX as u128 {
+            return Err(PercolatorError::EngineOverflow.into());
+        }
+
+        Ok(final_price_u128 as u64)
+    }
+
     /// Read oracle price for engine use, applying inversion if configured.
+    ///
+    /// Automatically detects oracle type by account owner:
+    /// - PYTH_RECEIVER_PROGRAM_ID: reads Pyth PriceUpdateV2
+    /// - CHAINLINK_OCR2_PROGRAM_ID: reads Chainlink OCR2 Transmissions
     ///
     /// If invert == 0: returns USD_per_SOL_e6 (normal)
     /// If invert != 0: returns SOL_per_USD_e6 = 1e12 / USD_per_SOL_e6 (inverted)
     ///
-    /// The raw oracle is validated (staleness, confidence) BEFORE inversion.
+    /// The raw oracle is validated (staleness, confidence for Pyth) BEFORE inversion.
     pub fn read_engine_price_e6(
         price_ai: &AccountInfo,
         expected_feed_id: &[u8; 32],
@@ -1539,7 +1659,22 @@ pub mod oracle {
         conf_bps: u16,
         invert: u8,
     ) -> Result<u64, ProgramError> {
-        let raw_price = read_pyth_price_e6(price_ai, expected_feed_id, now_unix_ts, max_staleness_secs, conf_bps)?;
+        // Detect oracle type by account owner and dispatch
+        let raw_price = if *price_ai.owner == PYTH_RECEIVER_PROGRAM_ID {
+            read_pyth_price_e6(price_ai, expected_feed_id, now_unix_ts, max_staleness_secs, conf_bps)?
+        } else if *price_ai.owner == CHAINLINK_OCR2_PROGRAM_ID {
+            read_chainlink_price_e6(price_ai, expected_feed_id, now_unix_ts, max_staleness_secs)?
+        } else {
+            // In test mode, try Pyth format first (for existing tests)
+            #[cfg(feature = "test")]
+            {
+                read_pyth_price_e6(price_ai, expected_feed_id, now_unix_ts, max_staleness_secs, conf_bps)?
+            }
+            #[cfg(not(feature = "test"))]
+            {
+                return Err(ProgramError::IllegalOwner);
+            }
+        };
 
         if invert == 0 {
             return Ok(raw_price);

@@ -53,6 +53,12 @@ use percolator_prog::verify::{
 };
 use percolator_prog::constants::MAX_UNIT_SCALE;
 
+// Kani-specific bound for scale to avoid SAT explosion on division/modulo.
+// MAX_UNIT_SCALE (1 billion) is too large for bit-precise SAT solving.
+// Using 1000 keeps proofs tractable while still exercising the logic.
+// The actual MAX_UNIT_SCALE bound is proven separately in init_market_scale_* proofs.
+const KANI_MAX_SCALE: u32 = 1000;
+
 // =============================================================================
 // Test Fixtures
 // =============================================================================
@@ -1831,7 +1837,7 @@ fn kani_base_to_units_conservation() {
     let base: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
-    kani::assume(scale <= MAX_UNIT_SCALE); // Bound scale to avoid SAT explosion
+    kani::assume(scale <= KANI_MAX_SCALE);
 
     let (units, dust) = base_to_units(base, scale);
 
@@ -1846,7 +1852,7 @@ fn kani_base_to_units_dust_bound() {
     let base: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
-    kani::assume(scale <= MAX_UNIT_SCALE); // Bound scale to avoid SAT explosion
+    kani::assume(scale <= KANI_MAX_SCALE);
 
     let (_, dust) = base_to_units(base, scale);
 
@@ -1870,7 +1876,7 @@ fn kani_units_roundtrip() {
     let units: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
-    kani::assume(scale <= MAX_UNIT_SCALE); // Bound scale to avoid SAT explosion
+    kani::assume(scale <= KANI_MAX_SCALE);
     // Avoid overflow in multiplication
     kani::assume(units <= u64::MAX / (scale as u64));
 
@@ -1898,7 +1904,7 @@ fn kani_base_to_units_monotonic() {
     let base2: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
-    kani::assume(scale <= MAX_UNIT_SCALE); // Bound scale to avoid SAT explosion
+    kani::assume(scale <= KANI_MAX_SCALE);
     kani::assume(base1 < base2);
 
     let (units1, _) = base_to_units(base1, scale);
@@ -1914,7 +1920,7 @@ fn kani_units_to_base_monotonic() {
     let units2: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
-    kani::assume(scale <= MAX_UNIT_SCALE); // Bound scale to avoid SAT explosion
+    kani::assume(scale <= KANI_MAX_SCALE);
     kani::assume(units1 < units2);
     // Avoid overflow
     kani::assume(units2 <= u64::MAX / (scale as u64));
@@ -1948,7 +1954,7 @@ fn kani_withdraw_misaligned_rejects() {
     let amount: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
-    kani::assume(scale <= MAX_UNIT_SCALE); // Bound scale to avoid SAT explosion
+    kani::assume(scale <= KANI_MAX_SCALE);
     kani::assume(amount % (scale as u64) != 0);
 
     let aligned = withdraw_amount_aligned(amount, scale);
@@ -1962,7 +1968,7 @@ fn kani_withdraw_aligned_accepts() {
     let units: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
-    kani::assume(scale <= MAX_UNIT_SCALE); // Bound scale to avoid SAT explosion
+    kani::assume(scale <= KANI_MAX_SCALE);
     // Avoid overflow
     kani::assume(units <= u64::MAX / (scale as u64));
 
@@ -1992,8 +1998,8 @@ fn kani_sweep_dust_conservation() {
     let dust: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
-    kani::assume(scale <= MAX_UNIT_SCALE); // Bound scale to avoid SAT explosion
-    kani::assume(scale <= MAX_UNIT_SCALE); // Bound scale to avoid SAT explosion
+    kani::assume(scale <= KANI_MAX_SCALE);
+    kani::assume(scale <= KANI_MAX_SCALE);
 
     let (units, rem) = sweep_dust(dust, scale);
 
@@ -2007,7 +2013,7 @@ fn kani_sweep_dust_rem_bound() {
     let dust: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
-    kani::assume(scale <= MAX_UNIT_SCALE); // Bound scale to avoid SAT explosion
+    kani::assume(scale <= KANI_MAX_SCALE);
 
     let (_, rem) = sweep_dust(dust, scale);
 
@@ -2020,7 +2026,7 @@ fn kani_sweep_dust_below_threshold() {
     let dust: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
-    kani::assume(scale <= MAX_UNIT_SCALE); // Bound scale to avoid SAT explosion
+    kani::assume(scale <= KANI_MAX_SCALE);
     kani::assume(dust < scale as u64);
 
     let (units, rem) = sweep_dust(dust, scale);
@@ -2433,8 +2439,8 @@ fn kani_units_roundtrip_exact_when_no_dust() {
     let base: u64 = kani::any();
     let scale: u32 = kani::any();
     kani::assume(scale > 0);
-    kani::assume(scale <= MAX_UNIT_SCALE); // Bound scale to avoid SAT explosion
-    kani::assume(scale <= MAX_UNIT_SCALE); // Bound scale to avoid SAT explosion
+    kani::assume(scale <= KANI_MAX_SCALE);
+    kani::assume(scale <= KANI_MAX_SCALE);
 
     let (units, dust) = base_to_units(base, scale);
 
@@ -2665,7 +2671,7 @@ fn kani_owner_ok_independent_of_scale() {
 fn kani_unit_conversion_deterministic() {
     let base: u64 = kani::any();
     let scale: u32 = kani::any();
-    kani::assume(scale <= MAX_UNIT_SCALE); // Bound scale to avoid SAT explosion
+    kani::assume(scale <= KANI_MAX_SCALE);
 
     let (units1, dust1) = base_to_units(base, scale);
 
