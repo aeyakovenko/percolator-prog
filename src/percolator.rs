@@ -2453,8 +2453,14 @@ pub mod processor {
                     let alpha = config.thresh_alpha_bps as u128;
                     let smoothed = (alpha * clamped_target + (10_000 - alpha) * current) / 10_000;
                     // Step clamp: max step = thresh_step_bps / 10000 of current (but at least thresh_min_step)
-                    let max_step = (current * config.thresh_step_bps as u128 / 10_000)
-                        .max(config.thresh_min_step);
+                    // Bug #6 fix: When current == 0, allow stepping to clamped_target directly
+                    // Otherwise threshold would only increase by thresh_min_step (=1) per update
+                    let max_step = if current == 0 {
+                        clamped_target // Allow full jump when starting from zero
+                    } else {
+                        (current * config.thresh_step_bps as u128 / 10_000)
+                            .max(config.thresh_min_step)
+                    };
                     let final_thresh = if smoothed > current {
                         current.saturating_add(max_step.min(smoothed - current))
                     } else {
@@ -2968,6 +2974,12 @@ pub mod processor {
                     }
                     if engine.num_used_accounts != 0 {
                         return Err(PercolatorError::EngineAccountNotFound.into());
+                    }
+
+                    // Bug #3 fix: Check dust_base to prevent closing with unaccounted funds
+                    let dust_base = state::read_dust_base(&data);
+                    if dust_base != 0 {
+                        return Err(PercolatorError::EngineInsufficientBalance.into());
                     }
 
                     // Zero out the slab data to prevent reuse

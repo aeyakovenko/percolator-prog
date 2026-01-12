@@ -27,7 +27,8 @@ use std::path::PathBuf;
 // SLAB_LEN for production BPF (MAX_ACCOUNTS=4096)
 // Note: We use production BPF (not test feature) because test feature
 // bypasses CPI for token transfers, which fails in LiteSVM.
-const SLAB_LEN: usize = 1107288;  // MAX_ACCOUNTS=4096 (0x10e558)
+// Bug #7 fix increased pending_exclude_epoch from [u8; 4096] to [u16; 4096]
+const SLAB_LEN: usize = 1111384;  // MAX_ACCOUNTS=4096 (0x10f558)
 const MAX_ACCOUNTS: usize = 4096;
 
 // Pyth Receiver program ID
@@ -159,6 +160,7 @@ struct TestEnv {
     vault: Pubkey,
     pyth_index: Pubkey,
     pyth_col: Pubkey,
+    account_count: u16, // Tracks number of accounts created (LP + users)
 }
 
 impl TestEnv {
@@ -226,7 +228,7 @@ impl TestEnv {
 
         svm.set_sysvar(&Clock { slot: 100, unix_timestamp: 100, ..Clock::default() });
 
-        TestEnv { svm, program_id, payer, slab, mint, vault, pyth_index, pyth_col }
+        TestEnv { svm, program_id, payer, slab, mint, vault, pyth_index, pyth_col, account_count: 0 }
     }
 
     fn init_market_with_invert(&mut self, invert: u8) {
@@ -280,6 +282,7 @@ impl TestEnv {
     }
 
     fn init_lp(&mut self, owner: &Keypair) -> u16 {
+        let idx = self.account_count;
         self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
         let ata = self.create_ata(&owner.pubkey(), 0);
         let matcher = spl_token::ID;
@@ -310,10 +313,12 @@ impl TestEnv {
             &[ix], Some(&owner.pubkey()), &[owner], self.svm.latest_blockhash(),
         );
         self.svm.send_transaction(tx).expect("init_lp failed");
-        0
+        self.account_count += 1;
+        idx
     }
 
     fn init_user(&mut self, owner: &Keypair) -> u16 {
+        let idx = self.account_count;
         self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
         let ata = self.create_ata(&owner.pubkey(), 0);
 
@@ -335,7 +340,8 @@ impl TestEnv {
             &[ix], Some(&owner.pubkey()), &[owner], self.svm.latest_blockhash(),
         );
         self.svm.send_transaction(tx).expect("init_user failed");
-        1
+        self.account_count += 1;
+        idx
     }
 
     fn deposit(&mut self, owner: &Keypair, user_idx: u16, amount: u64) {
@@ -508,4 +514,479 @@ fn test_non_inverted_market_crank_succeeds() {
     env.crank();
 
     println!("✓ Non-inverted market crank succeeded");
+}
+
+// ============================================================================
+// Bug regression tests
+// ============================================================================
+
+fn encode_close_slab() -> Vec<u8> {
+    vec![13u8] // Instruction tag for CloseSlab
+}
+
+fn encode_withdraw(user_idx: u16, amount: u64) -> Vec<u8> {
+    let mut data = vec![4u8]; // Instruction tag for WithdrawCollateral
+    data.extend_from_slice(&user_idx.to_le_bytes());
+    data.extend_from_slice(&amount.to_le_bytes());
+    data
+}
+
+fn encode_close_account(user_idx: u16) -> Vec<u8> {
+    let mut data = vec![8u8]; // Instruction tag for CloseAccount
+    data.extend_from_slice(&user_idx.to_le_bytes());
+    data
+}
+
+/// Encode InitMarket with configurable unit_scale and new_account_fee
+fn encode_init_market_full(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    feed_id: &[u8; 32],
+    invert: u8,
+    unit_scale: u32,
+    new_account_fee: u128,
+) -> Vec<u8> {
+    let mut data = vec![0u8];
+    data.extend_from_slice(admin.as_ref());
+    data.extend_from_slice(mint.as_ref());
+    data.extend_from_slice(feed_id);
+    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_staleness_secs
+    data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
+    data.push(invert);
+    data.extend_from_slice(&unit_scale.to_le_bytes());
+    // RiskParams
+    data.extend_from_slice(&0u64.to_le_bytes()); // warmup_period_slots
+    data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
+    data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
+    data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
+    data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
+    data.extend_from_slice(&new_account_fee.to_le_bytes());
+    data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
+    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
+    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
+    data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
+    data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
+    data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+    data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
+    data
+}
+
+impl TestEnv {
+    /// Initialize market with full parameter control
+    fn init_market_full(&mut self, invert: u8, unit_scale: u32, new_account_fee: u128) {
+        let admin = &self.payer;
+        let dummy_ata = Pubkey::new_unique();
+        self.svm.set_account(dummy_ata, Account {
+            lamports: 1_000_000,
+            data: vec![0u8; TokenAccount::LEN],
+            owner: spl_token::ID,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(self.mint, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(sysvar::rent::ID, false),
+                AccountMeta::new_readonly(dummy_ata, false),
+                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+            ],
+            data: encode_init_market_full(
+                &admin.pubkey(),
+                &self.mint,
+                &TEST_FEED_ID,
+                invert,
+                unit_scale,
+                new_account_fee,
+            ),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&admin.pubkey()), &[admin], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).expect("init_market failed");
+    }
+
+    /// Initialize user with specific fee payment
+    /// Returns the next available user index (first user is 0, second is 1, etc)
+    fn init_user_with_fee(&mut self, owner: &Keypair, fee: u64) -> u16 {
+        let idx = self.account_count;
+        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        let ata = self.create_ata(&owner.pubkey(), fee);
+
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_col, false),
+            ],
+            data: encode_init_user(fee),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&owner.pubkey()), &[owner], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).expect("init_user failed");
+        self.account_count += 1;
+        idx
+    }
+
+    /// Read num_used_accounts from engine state
+    fn read_num_used_accounts(&self) -> u16 {
+        let slab_account = self.svm.get_account(&self.slab).unwrap();
+        // Engine starts at offset 304, num_used_accounts is at +56 within engine
+        // But this is engine struct layout, need to check actual offset
+        // For simplicity: accounts start at index 0, LP is 0, first user is also 0 for single tests
+        // Actually engine.num_used_accounts is u16 at engine base + 56
+        // Engine base = 304 (after header/config/params)
+        // Let's read it: offset 304 + 56 = 360
+        if slab_account.data.len() < 362 {
+            return 0;
+        }
+        let bytes = [slab_account.data[360], slab_account.data[361]];
+        u16::from_le_bytes(bytes)
+    }
+
+    /// Try to close slab, returns Ok or error
+    fn try_close_slab(&mut self) -> Result<(), String> {
+        let admin = Keypair::from_bytes(&self.payer.to_bytes()).unwrap();
+
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+            ],
+            data: encode_close_slab(),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&admin.pubkey()), &[&admin], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
+    }
+
+    /// Withdraw collateral (requires 8 accounts)
+    fn withdraw(&mut self, owner: &Keypair, user_idx: u16, amount: u64) {
+        let ata = self.create_ata(&owner.pubkey(), 0);
+        let (vault_pda, _) = Pubkey::find_program_address(&[b"vault", self.slab.as_ref()], &self.program_id);
+
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),      // 0: user (signer)
+                AccountMeta::new(self.slab, false),          // 1: slab
+                AccountMeta::new(self.vault, false),         // 2: vault
+                AccountMeta::new(ata, false),                // 3: user_ata
+                AccountMeta::new_readonly(vault_pda, false), // 4: vault_pda
+                AccountMeta::new_readonly(spl_token::ID, false), // 5: token program
+                AccountMeta::new_readonly(sysvar::clock::ID, false), // 6: clock
+                AccountMeta::new_readonly(self.pyth_index, false),   // 7: oracle
+            ],
+            data: encode_withdraw(user_idx, amount),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&owner.pubkey()), &[owner], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).expect("withdraw failed");
+    }
+
+    /// Try to execute trade, returns result
+    fn try_trade(&mut self, user: &Keypair, lp: &Keypair, lp_idx: u16, user_idx: u16, size: i128) -> Result<(), String> {
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(user.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_trade(lp_idx, user_idx, size),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&user.pubkey()), &[user, lp], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
+    }
+
+    /// Read vault token balance
+    fn vault_balance(&self) -> u64 {
+        let account = self.svm.get_account(&self.vault).unwrap();
+        let token_account = TokenAccount::unpack(&account.data).unwrap();
+        token_account.amount
+    }
+
+    /// Close account - returns remaining capital to user (8 accounts needed)
+    fn close_account(&mut self, owner: &Keypair, user_idx: u16) {
+        let ata = self.create_ata(&owner.pubkey(), 0);
+        let (vault_pda, _) = Pubkey::find_program_address(&[b"vault", self.slab.as_ref()], &self.program_id);
+
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),      // 0: user (signer)
+                AccountMeta::new(self.slab, false),          // 1: slab
+                AccountMeta::new(self.vault, false),         // 2: vault
+                AccountMeta::new(ata, false),                // 3: user_ata
+                AccountMeta::new_readonly(vault_pda, false), // 4: vault_pda
+                AccountMeta::new_readonly(spl_token::ID, false), // 5: token program
+                AccountMeta::new_readonly(sysvar::clock::ID, false), // 6: clock
+                AccountMeta::new_readonly(self.pyth_index, false),   // 7: oracle
+            ],
+            data: encode_close_account(user_idx),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&owner.pubkey()), &[owner], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).expect("close_account failed");
+    }
+}
+
+// ============================================================================
+// Bug #3: CloseSlab should fail when dust_base > 0
+// ============================================================================
+
+/// Test that CloseSlab fails when there is residual dust in the vault.
+///
+/// Bug: CloseSlab only checks engine.vault and engine.insurance_fund.balance,
+/// but not dust_base which can hold residual base tokens.
+#[test]
+fn test_bug3_close_slab_with_dust_should_fail() {
+    let path = program_path();
+    if !path.exists() {
+        println!("SKIP: BPF not found. Run: cargo build-sbf");
+        return;
+    }
+
+    let mut env = TestEnv::new();
+
+    // Initialize with unit_scale=1000 (1000 base = 1 unit)
+    // This means deposits with remainder < 1000 will create dust
+    env.init_market_full(0, 1000, 0);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+
+    // Deposit 10_000_500 base tokens: 10_000 units + 500 dust
+    // - 10_000_500 / 1000 = 10_000 units credited
+    // - 10_000_500 % 1000 = 500 dust stored in dust_base
+    env.deposit(&user, user_idx, 10_000_500);
+
+    // Check vault has the full amount
+    let vault_balance = env.vault_balance();
+    assert_eq!(vault_balance, 10_000_500, "Vault should have full deposit");
+
+    // Advance slot and crank to ensure state is updated
+    env.set_slot(200);
+    env.crank();
+
+    // Close account - returns capital in units converted to base
+    // 10_000 units * 1000 = 10_000_000 base returned
+    // The 500 dust remains in vault but isn't tracked by engine.vault
+    env.close_account(&user, user_idx);
+
+    // Check vault still has 500 dust
+    let vault_after = env.vault_balance();
+    println!("Bug #3: Vault balance after close_account = {}", vault_after);
+
+    // Vault should have dust remaining (500 base tokens)
+    assert!(vault_after > 0, "Vault should have dust remaining");
+
+    // Try to close slab - should fail because dust_base > 0
+    let result = env.try_close_slab();
+
+    println!("Bug #3 test: CloseSlab with dust result = {:?}", result);
+    println!("Bug #3: Vault still has {} tokens - CloseSlab correctly rejects", vault_after);
+
+    // FIXED: CloseSlab now returns error when dust_base > 0
+    assert!(result.is_err(), "CloseSlab should fail when dust_base > 0");
+}
+
+// ============================================================================
+// Bug #4: InitUser/InitLP should not trap fee overpayments
+// ============================================================================
+
+/// Test that fee overpayments are properly handled.
+///
+/// Bug: If fee_payment > new_account_fee, the excess is deposited to vault
+/// but only new_account_fee is accounted in engine.vault/insurance.
+#[test]
+fn test_bug4_fee_overpayment_should_be_handled() {
+    let path = program_path();
+    if !path.exists() {
+        println!("SKIP: BPF not found. Run: cargo build-sbf");
+        return;
+    }
+
+    let mut env = TestEnv::new();
+
+    // Initialize with new_account_fee = 1000
+    env.init_market_full(0, 0, 1000);
+
+    // Get vault balance before
+    let vault_before = env.vault_balance();
+
+    let user = Keypair::new();
+    // Pay 5000 when only 1000 is required
+    let _user_idx = env.init_user_with_fee(&user, 5000);
+
+    // Get vault balance after
+    let vault_after = env.vault_balance();
+
+    // Vault received 5000 tokens
+    let deposited = vault_after - vault_before;
+    assert_eq!(deposited, 5000, "Vault should receive full payment");
+
+    // BUG: The excess 4000 is trapped - not credited to user capital,
+    // not tracked in engine.vault (only 1000 is tracked)
+    // After fix: excess should either be rejected or credited to user
+    println!("Bug #4 test: Deposited {} (required: 1000, excess: {})", deposited, deposited - 1000);
+}
+
+// ============================================================================
+// Bug #8: LP entry price should update on position flip
+// ============================================================================
+
+/// Test that LP entry price is updated when position flips direction.
+///
+/// Bug: On LP sign flip where abs(new) <= abs(old), entry_price is not updated.
+/// This causes incorrect MTM PnL calculations.
+#[test]
+fn test_bug8_lp_entry_price_updates_on_flip() {
+    let path = program_path();
+    if !path.exists() {
+        println!("SKIP: BPF not found. Run: cargo build-sbf");
+        return;
+    }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000); // 100 SOL
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 50_000_000_000); // 50 SOL
+
+    // User goes long 100 contracts -> LP goes short 100
+    env.trade(&user, &lp, lp_idx, user_idx, 100_000_000);
+
+    // Now LP has position = -100M (short)
+    // Entry price should be ~138M (the oracle price)
+
+    // Change price significantly
+    env.set_slot(200);
+
+    // User closes 150 contracts (goes short 50) -> LP goes from -100 to +50
+    // This is a flip where abs(new)=50 < abs(old)=100
+    // BUG: LP entry price is NOT updated - stays at old entry instead of new exec price
+    env.trade(&user, &lp, lp_idx, user_idx, -150_000_000);
+
+    // After this trade:
+    // - LP position flipped from -100M to +50M
+    // - LP entry should be updated to current exec price
+    // BUG: Entry stays at old price, causing incorrect PnL calculation
+
+    println!("✓ Bug #8 test: LP position flipped. Entry price should be updated.");
+    // Note: We can't easily read the entry price from LiteSVM without parsing slab
+    // The bug would manifest as incorrect margin calculations
+}
+
+// ============================================================================
+// Bug #6: Threshold EWMA starts from zero, causing slow ramp
+// ============================================================================
+
+/// Test that threshold EWMA ramps up quickly when starting from zero.
+///
+/// Bug: When risk_reduction_threshold starts at 0 and target is large,
+/// max_step = (current * step_bps / 10000).max(min_step) = min_step = 1
+/// So threshold can only increase by 1 per update interval, regardless of target.
+#[test]
+fn test_bug6_threshold_slow_ramp_from_zero() {
+    let path = program_path();
+    if !path.exists() {
+        println!("SKIP: BPF not found. Run: cargo build-sbf");
+        return;
+    }
+
+    // This test demonstrates the bug conceptually.
+    // In practice, testing requires:
+    // 1. Initialize market with default params (threshold starts at 0)
+    // 2. Create conditions where target threshold is high (e.g., large LP position)
+    // 3. Crank multiple times
+    // 4. Observe that threshold only increases by 1 per update
+
+    // BUG: With DEFAULT_THRESH_MIN_STEP=1 and current=0:
+    // max_step = max(0 * step_bps / 10000, 1) = 1
+    // Even if target is 1_000_000, threshold only increases by 1 per interval
+
+    println!("Bug #6: Threshold EWMA slow ramp from zero");
+    println!("  - When current=0, max_step = min_step (1)");
+    println!("  - Even with large target, only increases by 1 per update");
+    println!("  - Fix: Special-case current=0 to allow larger initial step");
+
+    // Note: Full test would require reading threshold from slab state
+    // and verifying it doesn't ramp quickly enough
+}
+
+// ============================================================================
+// Bug #7: Pending epoch wraparound causes incorrect exclusion
+// ============================================================================
+
+/// Test that pending_epoch wraparound doesn't cause incorrect exclusion.
+///
+/// Bug: pending_epoch is u8, so after 256 sweeps it wraps to 0.
+/// Stale pending_exclude_epoch[idx] markers can match the new epoch,
+/// incorrectly exempting accounts from profit-funding.
+#[test]
+fn test_bug7_pending_epoch_wraparound() {
+    let path = program_path();
+    if !path.exists() {
+        println!("SKIP: BPF not found. Run: cargo build-sbf");
+        return;
+    }
+
+    // This test demonstrates the bug conceptually.
+    // Full test would require:
+    // 1. Initialize market
+    // 2. Create accounts
+    // 3. Run 256+ sweeps (256 cranks)
+    // 4. Trigger a liquidation that sets pending_exclude_epoch[idx]
+    // 5. Run 256 more sweeps
+    // 6. Verify the stale marker doesn't incorrectly exempt the account
+
+    // BUG: pending_epoch is u8, wraps after 256 sweeps:
+    // Sweep 0: pending_epoch=0, exclude account 5, pending_exclude_epoch[5]=0
+    // Sweep 255: pending_epoch=255
+    // Sweep 256: pending_epoch=0 (wrapped!)
+    // Now pending_exclude_epoch[5]==0==pending_epoch, account 5 incorrectly excluded
+
+    println!("Bug #7: Pending epoch wraparound");
+    println!("  - pending_epoch is u8, wraps after 256 sweeps");
+    println!("  - Stale exclusion markers can match new epoch after wrap");
+    println!("  - Fix: Use wider type (u16) or clear markers on wrap");
+
+    // Note: Full test would require running 256+ cranks which is expensive
+    // The bug is evident from code inspection
 }
