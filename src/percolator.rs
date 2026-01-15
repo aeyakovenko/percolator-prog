@@ -1020,7 +1020,7 @@ pub mod error {
 // 4. mod ix
 pub mod ix {
     use solana_program::{pubkey::Pubkey, program_error::ProgramError};
-    use percolator::RiskParams;
+    use percolator::{RiskParams, U128};
 
     #[derive(Debug)]
     pub enum Instruction {
@@ -1245,14 +1245,14 @@ pub mod ix {
             initial_margin_bps: read_u64(input)?,
             trading_fee_bps: read_u64(input)?,
             max_accounts: read_u64(input)?,
-            new_account_fee: read_u128(input)?,
-            risk_reduction_threshold: read_u128(input)?,
-            maintenance_fee_per_slot: read_u128(input)?,
+            new_account_fee: U128::new(read_u128(input)?),
+            risk_reduction_threshold: U128::new(read_u128(input)?),
+            maintenance_fee_per_slot: U128::new(read_u128(input)?),
             max_crank_staleness_slots: read_u64(input)?,
             liquidation_fee_bps: read_u64(input)?,
-            liquidation_fee_cap: read_u128(input)?,
+            liquidation_fee_cap: U128::new(read_u128(input)?),
             liquidation_buffer_bps: read_u64(input)?,
-            min_liquidation_abs: read_u128(input)?,
+            min_liquidation_abs: U128::new(read_u128(input)?),
         })
     }
 }
@@ -2449,7 +2449,7 @@ pub mod processor {
                 // Copy stats before threshold update (avoid borrow conflict)
                 let liqs = engine.lifetime_liquidations;
                 let force = engine.lifetime_force_realize_closes;
-                let ins_low = engine.insurance_fund.balance as u64;
+                let ins_low = engine.insurance_fund.balance.get() as u64;
 
                 // --- Threshold auto-update (rate-limited + EWMA smoothed + step-clamped)
                 if clock.slot >= last_thr_slot.saturating_add(config.thresh_update_interval_slots) {
@@ -2548,7 +2548,7 @@ pub mod processor {
                 // LP delta is -size (LP takes opposite side of user's trade)
                 // O(1) check after single O(n) scan
                 // Gate activation via verify helper (Kani-provable)
-                let bal = engine.insurance_fund.balance;
+                let bal = engine.insurance_fund.balance.get();
                 let thr = engine.risk_reduction_threshold();
                 if crate::verify::gate_active(thr, bal) {
                     #[cfg(feature = "cu-audit")]
@@ -2562,7 +2562,7 @@ pub mod processor {
                         msg!("CU_CHECKPOINT: trade_nocpi_compute_end");
                         sol_log_compute_units();
                     }
-                    let old_lp_pos = engine.accounts[lp_idx as usize].position_size;
+                    let old_lp_pos = engine.accounts[lp_idx as usize].position_size.get();
                     if risk_state.would_increase_risk(old_lp_pos, -size) {
                         return Err(PercolatorError::EngineRiskReductionOnlyMode.into());
                     }
@@ -2747,7 +2747,7 @@ pub mod processor {
                     // Use actual exec_size from matcher (LP delta is -exec_size)
                     // O(1) check after single O(n) scan
                     // Gate activation via verify helper (Kani-provable)
-                    let bal = engine.insurance_fund.balance;
+                    let bal = engine.insurance_fund.balance.get();
                     let thr = engine.risk_reduction_threshold();
                     if crate::verify::gate_active(thr, bal) {
                         #[cfg(feature = "cu-audit")]
@@ -2761,7 +2761,7 @@ pub mod processor {
                             msg!("CU_CHECKPOINT: trade_cpi_compute_end");
                             sol_log_compute_units();
                         }
-                        let old_lp_pos = engine.accounts[lp_idx as usize].position_size;
+                        let old_lp_pos = engine.accounts[lp_idx as usize].position_size.get();
                         if risk_state.would_increase_risk(old_lp_pos, -ret.exec_size) {
                             return Err(PercolatorError::EngineRiskReductionOnlyMode.into());
                         }
@@ -2988,10 +2988,10 @@ pub mod processor {
                     require_admin(header.admin, a_dest.key)?;
 
                     let engine = zc::engine_ref(&data)?;
-                    if engine.vault != 0 {
+                    if !engine.vault.is_zero() {
                         return Err(PercolatorError::EngineInsufficientBalance.into());
                     }
-                    if engine.insurance_fund.balance != 0 {
+                    if !engine.insurance_fund.balance.is_zero() {
                         return Err(PercolatorError::EngineInsufficientBalance.into());
                     }
                     if engine.num_used_accounts != 0 {
