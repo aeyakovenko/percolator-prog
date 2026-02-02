@@ -29,10 +29,10 @@ use std::path::PathBuf;
 
 // SLAB_LEN for SBF - differs between test and production
 #[cfg(feature = "test")]
-const SLAB_LEN: usize = 18200;  // MAX_ACCOUNTS=64 (0x4718) - includes oracle_authority fields
+const SLAB_LEN: usize = 16816;  // MAX_ACCOUNTS=64 (0x41B0) - haircut-ratio engine
 
 #[cfg(not(feature = "test"))]
-const SLAB_LEN: usize = 1111440;  // MAX_ACCOUNTS=4096 (0x10f590) - includes oracle_authority fields
+const SLAB_LEN: usize = 1025320;  // MAX_ACCOUNTS=4096 (0xFA528) - haircut-ratio engine
 
 #[cfg(feature = "test")]
 const MAX_ACCOUNTS: usize = 64;

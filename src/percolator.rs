@@ -103,8 +103,8 @@ impl LpRiskState {
     #[inline]
     pub fn compute(engine: &percolator::RiskEngine) -> Self {
         Self {
-            sum_abs: engine.get_lp_sum_abs(),
-            max_abs: engine.get_lp_max_abs(),
+            sum_abs: engine.lp_sum_abs.get(),
+            max_abs: engine.lp_max_abs.get(),
         }
     }
 
@@ -155,14 +155,14 @@ impl LpRiskState {
 /// Uses engine's maintained LP aggregates instead of scanning.
 #[inline]
 pub fn compute_system_risk_units(engine: &percolator::RiskEngine) -> u128 {
-    engine.compute_lp_risk_units()
+    LpRiskState::compute(engine).risk()
 }
 
 /// Compute net LP position for inventory-based funding. O(1).
 /// Uses engine's maintained net_lp_pos instead of scanning.
 #[inline]
 fn compute_net_lp_pos(engine: &percolator::RiskEngine) -> i128 {
-    engine.get_net_lp_pos()
+    engine.net_lp_pos.get()
 }
 
 /// Compute inventory-based funding rate (bps per slot).
@@ -1016,7 +1016,6 @@ pub mod error {
             RiskError::AccountNotFound => PercolatorError::EngineAccountNotFound,
             RiskError::NotAnLPAccount => PercolatorError::EngineNotAnLPAccount,
             RiskError::PositionSizeMismatch => PercolatorError::EnginePositionSizeMismatch,
-            RiskError::RiskReductionOnlyMode => PercolatorError::EngineRiskReductionOnlyMode,
             RiskError::AccountKindMismatch => PercolatorError::EngineAccountKindMismatch,
         };
         ProgramError::Custom(err as u32)

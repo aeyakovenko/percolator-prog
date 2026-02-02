@@ -27,8 +27,8 @@ use std::path::PathBuf;
 // SLAB_LEN for production BPF (MAX_ACCOUNTS=4096)
 // Note: We use production BPF (not test feature) because test feature
 // bypasses CPI for token transfers, which fails in LiteSVM.
-// Includes oracle_authority fields (32 + 8 + 8 = 48 bytes + alignment)
-const SLAB_LEN: usize = 1111440;  // MAX_ACCOUNTS=4096 (0x10f590)
+// Haircut-ratio engine (ADL/socialization scratch arrays removed)
+const SLAB_LEN: usize = 1025320;  // MAX_ACCOUNTS=4096 (0xFA528)
 const MAX_ACCOUNTS: usize = 4096;
 
 // Pyth Receiver program ID

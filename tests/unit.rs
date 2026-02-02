@@ -417,7 +417,7 @@ fn encode_init_market_invert(fixture: &MarketFixture, crank_staleness: u64, inve
 
         {
             let accounts = vec![
-                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()
+                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(), f.clock.to_info()
             ];
             process_instruction(&f.program_id, &accounts, &encode_deposit(user_idx, 500)).unwrap();
         }
@@ -534,7 +534,7 @@ fn encode_init_market_invert(fixture: &MarketFixture, crank_staleness: u64, inve
 
         {
             let accounts = vec![
-                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()
+                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(), f.clock.to_info()
             ];
             process_instruction(&f.program_id, &accounts, &encode_deposit(user_idx, 500)).unwrap();
         }
@@ -1017,17 +1017,17 @@ fn encode_init_market_invert(fixture: &MarketFixture, crank_staleness: u64, inve
 
             // With trade_size=100000, LP position is -100000 (counterparty to user's +100000)
             // Only LP positions are counted for risk:
-            //   net_exposure = |-100000| = 100000
-            //   max_concentration = 100000
-            //   risk_units = 100000 + 100000 = 200000
-            // raw_target = THRESH_FLOOR + (200000 * THRESH_RISK_BPS / 10000) = 0 + (200000 * 50 / 10000) = 1000
-            // EWMA with current=0, alpha=1000: smoothed = (1000 * 1000 + 9000 * 0) / 10000 = 100
-            // Step clamp: max_step = max(0 * 500 / 10000, 1) = 1
-            // final = 0 + min(1, 100) = 1
+            //   lp_sum_abs = 100000, lp_max_abs = 100000
+            //   risk_units = max_abs + sum_abs/8 = 100000 + 12500 = 112500
+            //   risk_notional = 112500 * 100_000_000 / 1_000_000 = 11_250_000
+            //   raw_target = 0 + 11_250_000 * 50 / 10_000 = 56_250
+            //   EWMA: (1000 * 56250 + 9000 * 0) / 10000 = 5625
+            //   max_step = 56250 (current == 0 → full jump allowed, Bug #6 fix)
+            //   final = 0 + min(56250, 5625) = 5625
 
             assert!(threshold > 0, "Threshold should be > 0 after crank with positions");
-            // Due to step clamping from 0, the first update will be capped at THRESH_MIN_STEP
-            assert_eq!(threshold, 1, "First update from 0 should be step-clamped to THRESH_MIN_STEP");
+            // Bug #6: when current == 0, full jump to clamped_target allowed (no min_step clamp)
+            assert_eq!(threshold, 5625, "First update from 0 should be EWMA-smoothed raw target");
         }
     }
 
@@ -1190,7 +1190,7 @@ fn encode_init_market_invert(fixture: &MarketFixture, crank_staleness: u64, inve
         let user_idx = find_idx_by_owner(&f.slab.data, user.key).unwrap();
         {
             let accounts = vec![
-                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(),
+                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(), f.clock.to_info(),
             ];
             process_instruction(&f.program_id, &accounts, &encode_deposit(user_idx, 100_000)).unwrap();
         }
@@ -1591,7 +1591,7 @@ fn encode_init_market_invert(fixture: &MarketFixture, crank_staleness: u64, inve
         // Deposit 1000 (aligned to unit_scale=100)
         {
             let accounts = vec![
-                f.admin.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()
+                f.admin.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(), f.clock.to_info()
             ];
             process_instruction(&f.program_id, &accounts, &encode_deposit(0, 1000)).unwrap();
         }
@@ -1682,7 +1682,7 @@ fn encode_init_market_invert(fixture: &MarketFixture, crank_staleness: u64, inve
         let deposit_amount: u64 = 123;
         {
             let accounts = vec![
-                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()
+                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(), f.clock.to_info()
             ];
             process_instruction(&f.program_id, &accounts, &encode_deposit(user_idx, deposit_amount)).unwrap();
         }
@@ -1762,13 +1762,13 @@ fn encode_init_market_invert(fixture: &MarketFixture, crank_staleness: u64, inve
         // Deposit different amounts (aligned to avoid dust complicating this test)
         {
             let accounts = vec![
-                user1.to_info(), f.slab.to_info(), user1_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()
+                user1.to_info(), f.slab.to_info(), user1_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(), f.clock.to_info()
             ];
             process_instruction(&f.program_id, &accounts, &encode_deposit(user1_idx, 500)).unwrap(); // 50 units
         }
         {
             let accounts = vec![
-                user2.to_info(), f.slab.to_info(), user2_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()
+                user2.to_info(), f.slab.to_info(), user2_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(), f.clock.to_info()
             ];
             process_instruction(&f.program_id, &accounts, &encode_deposit(user2_idx, 300)).unwrap(); // 30 units
         }
@@ -1822,7 +1822,7 @@ fn encode_init_market_invert(fixture: &MarketFixture, crank_staleness: u64, inve
         // Deposit 230 base tokens (creates 23 units + 0 dust)
         {
             let accounts = vec![
-                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()
+                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(), f.clock.to_info()
             ];
             process_instruction(&f.program_id, &accounts, &encode_deposit(user_idx, 230)).unwrap();
         }
@@ -1899,13 +1899,13 @@ fn encode_init_market_invert(fixture: &MarketFixture, crank_staleness: u64, inve
         // After 2 deposits: 4 units + 14 dust (14 >= 10, so sweep will happen)
         {
             let accounts = vec![
-                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()
+                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(), f.clock.to_info()
             ];
             process_instruction(&f.program_id, &accounts, &encode_deposit(user_idx, 27)).unwrap();
         }
         {
             let accounts = vec![
-                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()
+                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(), f.clock.to_info()
             ];
             process_instruction(&f.program_id, &accounts, &encode_deposit(user_idx, 27)).unwrap();
         }
@@ -1988,7 +1988,7 @@ fn encode_init_market_invert(fixture: &MarketFixture, crank_staleness: u64, inve
         // Deposit any amount - should create 0 dust
         {
             let accounts = vec![
-                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info()
+                user.to_info(), f.slab.to_info(), user_ata.to_info(), f.vault.to_info(), f.token_prog.to_info(), f.clock.to_info()
             ];
             process_instruction(&f.program_id, &accounts, &encode_deposit(user_idx, 123)).unwrap();
         }
