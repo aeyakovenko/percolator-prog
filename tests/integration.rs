@@ -90,6 +90,28 @@ fn encode_init_market_with_invert(
     feed_id: &[u8; 32],
     invert: u8,
 ) -> Vec<u8> {
+    encode_init_market_full_v2(admin, mint, feed_id, invert, 0, 0)
+}
+
+/// Encode InitMarket with initial_mark_price_e6 for Hyperp mode
+fn encode_init_market_hyperp(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    initial_mark_price_e6: u64,
+) -> Vec<u8> {
+    // Hyperp mode: feed_id = [0; 32], invert = 0 (not inverted internally)
+    encode_init_market_full_v2(admin, mint, &[0u8; 32], 0, initial_mark_price_e6, 0)
+}
+
+/// Full InitMarket encoder with all new fields
+fn encode_init_market_full_v2(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    feed_id: &[u8; 32],
+    invert: u8,
+    initial_mark_price_e6: u64,
+    warmup_period_slots: u64,
+) -> Vec<u8> {
     let mut data = vec![0u8];
     data.extend_from_slice(admin.as_ref());
     data.extend_from_slice(mint.as_ref());
@@ -98,8 +120,9 @@ fn encode_init_market_with_invert(
     data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
     data.push(invert); // invert flag
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
+    data.extend_from_slice(&initial_mark_price_e6.to_le_bytes()); // initial_mark_price_e6 (NEW)
     // RiskParams
-    data.extend_from_slice(&0u64.to_le_bytes()); // warmup_period_slots
+    data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // warmup_period_slots
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
@@ -608,6 +631,7 @@ fn encode_init_market_full(
     data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
     data.push(invert);
     data.extend_from_slice(&unit_scale.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6 (0 for non-Hyperp)
     // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // warmup_period_slots
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
@@ -641,6 +665,7 @@ fn encode_init_market_with_warmup(
     data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
     data.push(invert);
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale = 0 (no scaling)
+    data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6 (0 for non-Hyperp)
     // RiskParams
     data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // warmup_period_slots
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps (5%)
@@ -1338,4 +1363,272 @@ fn test_idle_account_can_close_after_crank() {
     );
 
     println!("Idle account closed successfully - basic zombie prevention works");
+}
+
+// ============================================================================
+// HYPERP MODE SECURITY TESTS
+// ============================================================================
+
+/// Security Issue: Hyperp mode requires non-zero initial_mark_price_e6
+///
+/// If Hyperp mode is enabled (index_feed_id == [0; 32]) but initial_mark_price_e6 == 0,
+/// the market would have no valid price and trades would fail with OracleInvalid.
+/// This test verifies the validation in InitMarket rejects this configuration.
+#[test]
+fn test_hyperp_rejects_zero_initial_mark_price() {
+    let path = program_path();
+    if !path.exists() {
+        println!("SKIP: BPF not found. Run: cargo build-sbf");
+        return;
+    }
+
+    let mut svm = LiteSVM::new();
+    let program_id = Pubkey::new_unique();
+    let program_bytes = std::fs::read(&path).expect("Failed to read program");
+    svm.add_program(program_id, &program_bytes);
+
+    let payer = Keypair::new();
+    let slab = Pubkey::new_unique();
+    let mint = Pubkey::new_unique();
+    let (vault_pda, _) = Pubkey::find_program_address(&[b"vault", slab.as_ref()], &program_id);
+    let vault = Pubkey::new_unique();
+
+    svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+
+    svm.set_account(slab, Account {
+        lamports: 1_000_000_000,
+        data: vec![0u8; SLAB_LEN],
+        owner: program_id,
+        executable: false,
+        rent_epoch: 0,
+    }).unwrap();
+
+    svm.set_account(mint, Account {
+        lamports: 1_000_000,
+        data: make_mint_data(),
+        owner: spl_token::ID,
+        executable: false,
+        rent_epoch: 0,
+    }).unwrap();
+
+    svm.set_account(vault, Account {
+        lamports: 1_000_000,
+        data: make_token_account_data(&mint, &vault_pda, 0),
+        owner: spl_token::ID,
+        executable: false,
+        rent_epoch: 0,
+    }).unwrap();
+
+    let dummy_ata = Pubkey::new_unique();
+    svm.set_account(dummy_ata, Account {
+        lamports: 1_000_000,
+        data: vec![0u8; TokenAccount::LEN],
+        owner: spl_token::ID,
+        executable: false,
+        rent_epoch: 0,
+    }).unwrap();
+
+    svm.set_sysvar(&Clock { slot: 100, unix_timestamp: 100, ..Clock::default() });
+
+    // Try to init market with Hyperp mode (feed_id = 0) but initial_mark_price = 0
+    // This should FAIL because Hyperp mode requires a non-zero initial price
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new(slab, false),
+            AccountMeta::new_readonly(mint, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(sysvar::rent::ID, false),
+            AccountMeta::new_readonly(dummy_ata, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+        ],
+        data: encode_init_market_full_v2(
+            &payer.pubkey(),
+            &mint,
+            &[0u8; 32],  // Hyperp mode: feed_id = 0
+            0,           // invert
+            0,           // initial_mark_price_e6 = 0 (INVALID for Hyperp!)
+            0,           // warmup
+        ),
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[ix], Some(&payer.pubkey()), &[&payer], svm.latest_blockhash(),
+    );
+
+    let result = svm.send_transaction(tx);
+
+    assert!(
+        result.is_err(),
+        "SECURITY: InitMarket should reject Hyperp mode with zero initial_mark_price_e6. \
+         Got: {:?}", result
+    );
+
+    println!("HYPERP VALIDATION VERIFIED: Rejects zero initial_mark_price_e6 in Hyperp mode");
+}
+
+/// Security Issue: TradeNoCpi sets mark = index, making premium always 0
+///
+/// In Hyperp mode, TradeNoCpi:
+/// 1. Reads price from index (last_effective_price_e6)
+/// 2. Executes trade at that price
+/// 3. Sets mark (authority_price_e6) = price (index)
+///
+/// This means mark = index after every trade, so premium = (mark - index) / index = 0.
+/// Premium-based funding will always be zero, defeating the purpose of Hyperp funding.
+///
+/// This is a KNOWN ISSUE that demonstrates the design flaw.
+#[test]
+fn test_hyperp_issue_trade_nocpi_sets_mark_equals_index() {
+    let path = program_path();
+    if !path.exists() {
+        println!("SKIP: BPF not found. Run: cargo build-sbf");
+        return;
+    }
+
+    println!("HYPERP DESIGN ISSUE: TradeNoCpi sets mark = index");
+    println!("After any TradeNoCpi, mark == index, so premium == 0");
+    println!("Premium-based funding will always compute to 0 after trades");
+    println!("");
+    println!("This is expected behavior in current implementation.");
+    println!("For meaningful premium-based funding, either:");
+    println!("  1. Use TradeCpi with a matcher that provides exec_price != index");
+    println!("  2. Have an external system push mark prices via PushOraclePrice");
+    println!("  3. Modify TradeNoCpi to not update mark (let it drift naturally)");
+
+    // This test documents the known issue - no assertion needed
+    // The issue is architectural and the current behavior is "correct" per the code
+}
+
+/// Security Issue: Default oracle_price_cap = 0 bypasses index smoothing
+///
+/// In clamp_toward_with_dt():
+///   if cap_e2bps == 0 || dt_slots == 0 { return mark; }
+///
+/// When oracle_price_cap_e2bps == 0 (the InitMarket default), the index
+/// immediately jumps to mark without any rate limiting.
+///
+/// This means the "smooth index chase" feature is disabled by default!
+/// Admin must call SetOraclePriceCap after InitMarket to enable smoothing.
+///
+/// This is a KNOWN CONFIGURATION ISSUE.
+#[test]
+fn test_hyperp_issue_default_cap_zero_bypasses_smoothing() {
+    let path = program_path();
+    if !path.exists() {
+        println!("SKIP: BPF not found. Run: cargo build-sbf");
+        return;
+    }
+
+    println!("HYPERP CONFIGURATION ISSUE: Default oracle_price_cap_e2bps = 0");
+    println!("In InitMarket, oracle_price_cap_e2bps defaults to 0.");
+    println!("When cap == 0, clamp_toward_with_dt() returns mark immediately.");
+    println!("This means index smoothing is DISABLED by default!");
+    println!("");
+    println!("Fix: Admin must call SetOraclePriceCap to set a non-zero value");
+    println!("     after InitMarket to enable rate-limited index smoothing.");
+    println!("");
+    println!("Example: SetOraclePriceCap with max_change_e2bps = 1000 (0.1% per slot)");
+
+    // This test documents the configuration requirement
+}
+
+/// Test: Hyperp mode InitMarket succeeds with valid initial_mark_price
+#[test]
+fn test_hyperp_init_market_with_valid_price() {
+    let path = program_path();
+    if !path.exists() {
+        println!("SKIP: BPF not found. Run: cargo build-sbf");
+        return;
+    }
+
+    let mut svm = LiteSVM::new();
+    let program_id = Pubkey::new_unique();
+    let program_bytes = std::fs::read(&path).expect("Failed to read program");
+    svm.add_program(program_id, &program_bytes);
+
+    let payer = Keypair::new();
+    let slab = Pubkey::new_unique();
+    let mint = Pubkey::new_unique();
+    let (vault_pda, _) = Pubkey::find_program_address(&[b"vault", slab.as_ref()], &program_id);
+    let vault = Pubkey::new_unique();
+
+    svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+
+    svm.set_account(slab, Account {
+        lamports: 1_000_000_000,
+        data: vec![0u8; SLAB_LEN],
+        owner: program_id,
+        executable: false,
+        rent_epoch: 0,
+    }).unwrap();
+
+    svm.set_account(mint, Account {
+        lamports: 1_000_000,
+        data: make_mint_data(),
+        owner: spl_token::ID,
+        executable: false,
+        rent_epoch: 0,
+    }).unwrap();
+
+    svm.set_account(vault, Account {
+        lamports: 1_000_000,
+        data: make_token_account_data(&mint, &vault_pda, 0),
+        owner: spl_token::ID,
+        executable: false,
+        rent_epoch: 0,
+    }).unwrap();
+
+    let dummy_ata = Pubkey::new_unique();
+    svm.set_account(dummy_ata, Account {
+        lamports: 1_000_000,
+        data: vec![0u8; TokenAccount::LEN],
+        owner: spl_token::ID,
+        executable: false,
+        rent_epoch: 0,
+    }).unwrap();
+
+    svm.set_sysvar(&Clock { slot: 100, unix_timestamp: 100, ..Clock::default() });
+
+    // Init market with Hyperp mode and valid initial_mark_price
+    let initial_price_e6 = 100_000_000u64; // $100 in e6 format
+
+    let ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new(slab, false),
+            AccountMeta::new_readonly(mint, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(sysvar::rent::ID, false),
+            AccountMeta::new_readonly(dummy_ata, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+        ],
+        data: encode_init_market_full_v2(
+            &payer.pubkey(),
+            &mint,
+            &[0u8; 32],       // Hyperp mode: feed_id = 0
+            0,                // invert
+            initial_price_e6, // Valid initial mark price
+            0,                // warmup
+        ),
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[ix], Some(&payer.pubkey()), &[&payer], svm.latest_blockhash(),
+    );
+
+    let result = svm.send_transaction(tx);
+
+    assert!(
+        result.is_ok(),
+        "Hyperp InitMarket with valid initial_mark_price should succeed. Got: {:?}", result
+    );
+
+    println!("HYPERP INIT VERIFIED: Market initialized with $100 initial mark/index price");
 }
