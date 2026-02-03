@@ -1632,3 +1632,413 @@ fn test_hyperp_init_market_with_valid_price() {
 
     println!("HYPERP INIT VERIFIED: Market initialized with $100 initial mark/index price");
 }
+
+// ============================================================================
+// Matcher Context Initialization Tests
+// ============================================================================
+
+fn matcher_program_path() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.pop(); // Go up from percolator-prog
+    path.push("percolator-match/target/deploy/percolator_match.so");
+    path
+}
+
+/// Matcher context layout constants (from percolator-match)
+const MATCHER_CONTEXT_LEN: usize = 320;
+const MATCHER_RETURN_LEN: usize = 64;
+const MATCHER_CALL_LEN: usize = 67;
+const MATCHER_CALL_TAG: u8 = 0;
+const MATCHER_INIT_VAMM_TAG: u8 = 2;
+const CTX_VAMM_OFFSET: usize = 64;
+const VAMM_MAGIC: u64 = 0x5045_5243_4d41_5443; // "PERCMATC"
+
+/// Matcher mode enum
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum MatcherMode {
+    Passive = 0,
+    Vamm = 1,
+}
+
+/// Encode InitVamm instruction (Tag 2)
+fn encode_init_vamm(
+    mode: MatcherMode,
+    trading_fee_bps: u32,
+    base_spread_bps: u32,
+    max_total_bps: u32,
+    impact_k_bps: u32,
+    liquidity_notional_e6: u128,
+    max_fill_abs: u128,
+    max_inventory_abs: u128,
+) -> Vec<u8> {
+    let mut data = vec![0u8; 66];
+    data[0] = MATCHER_INIT_VAMM_TAG;
+    data[1] = mode as u8;
+    data[2..6].copy_from_slice(&trading_fee_bps.to_le_bytes());
+    data[6..10].copy_from_slice(&base_spread_bps.to_le_bytes());
+    data[10..14].copy_from_slice(&max_total_bps.to_le_bytes());
+    data[14..18].copy_from_slice(&impact_k_bps.to_le_bytes());
+    data[18..34].copy_from_slice(&liquidity_notional_e6.to_le_bytes());
+    data[34..50].copy_from_slice(&max_fill_abs.to_le_bytes());
+    data[50..66].copy_from_slice(&max_inventory_abs.to_le_bytes());
+    data
+}
+
+/// Encode a matcher call instruction (Tag 0)
+fn encode_matcher_call(
+    req_id: u64,
+    lp_idx: u16,
+    lp_account_id: u64,
+    oracle_price_e6: u64,
+    req_size: i128,
+) -> Vec<u8> {
+    let mut data = vec![0u8; MATCHER_CALL_LEN];
+    data[0] = MATCHER_CALL_TAG;
+    data[1..9].copy_from_slice(&req_id.to_le_bytes());
+    data[9..11].copy_from_slice(&lp_idx.to_le_bytes());
+    data[11..19].copy_from_slice(&lp_account_id.to_le_bytes());
+    data[19..27].copy_from_slice(&oracle_price_e6.to_le_bytes());
+    data[27..43].copy_from_slice(&req_size.to_le_bytes());
+    // bytes 43..67 are reserved (zero)
+    data
+}
+
+/// Read MatcherReturn from context account data
+fn read_matcher_return(data: &[u8]) -> (u32, u32, u64, i128, u64) {
+    let abi_version = u32::from_le_bytes(data[0..4].try_into().unwrap());
+    let flags = u32::from_le_bytes(data[4..8].try_into().unwrap());
+    let exec_price = u64::from_le_bytes(data[8..16].try_into().unwrap());
+    let exec_size = i128::from_le_bytes(data[16..32].try_into().unwrap());
+    let req_id = u64::from_le_bytes(data[32..40].try_into().unwrap());
+    (abi_version, flags, exec_price, exec_size, req_id)
+}
+
+/// Test that the matcher context can be initialized with Passive mode
+#[test]
+fn test_matcher_init_vamm_passive_mode() {
+    let path = matcher_program_path();
+    if !path.exists() {
+        println!("SKIP: Matcher BPF not found at {:?}. Run: cd ../percolator-match && cargo build-sbf", path);
+        return;
+    }
+
+    let mut svm = LiteSVM::new();
+    let payer = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 10_000_000_000).unwrap();
+
+    // Load matcher program
+    let program_bytes = std::fs::read(&path).expect("Failed to read matcher program");
+    let matcher_program_id = Pubkey::new_unique();
+    svm.add_program(matcher_program_id, &program_bytes);
+
+    // Create context account owned by matcher program
+    let ctx_pubkey = Pubkey::new_unique();
+    let ctx_account = Account {
+        lamports: 10_000_000,
+        data: vec![0u8; MATCHER_CONTEXT_LEN],
+        owner: matcher_program_id,
+        executable: false,
+        rent_epoch: 0,
+    };
+    svm.set_account(ctx_pubkey, ctx_account).unwrap();
+
+    // Initialize in Passive mode
+    let ix = Instruction {
+        program_id: matcher_program_id,
+        accounts: vec![
+            AccountMeta::new(ctx_pubkey, false),
+        ],
+        data: encode_init_vamm(
+            MatcherMode::Passive,
+            5,      // 0.05% trading fee
+            10,     // 0.10% base spread
+            200,    // 2% max total
+            0,      // impact_k not used in Passive
+            0,      // liquidity not needed for Passive
+            1_000_000_000_000, // max fill
+            0,      // no inventory limit
+        ),
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&payer.pubkey()),
+        &[&payer],
+        svm.latest_blockhash(),
+    );
+
+    let result = svm.send_transaction(tx);
+    assert!(result.is_ok(), "Init vAMM failed: {:?}", result);
+
+    // Verify context was written
+    let ctx_data = svm.get_account(&ctx_pubkey).unwrap().data;
+    let magic = u64::from_le_bytes(ctx_data[CTX_VAMM_OFFSET..CTX_VAMM_OFFSET+8].try_into().unwrap());
+    assert_eq!(magic, VAMM_MAGIC, "Magic mismatch");
+
+    println!("MATCHER INIT VERIFIED: Passive mode initialized successfully");
+}
+
+/// Test that the matcher can execute a call after initialization
+#[test]
+fn test_matcher_call_after_init() {
+    let path = matcher_program_path();
+    if !path.exists() {
+        println!("SKIP: Matcher BPF not found at {:?}. Run: cd ../percolator-match && cargo build-sbf", path);
+        return;
+    }
+
+    let mut svm = LiteSVM::new();
+    let payer = Keypair::new();
+    let lp = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 10_000_000_000).unwrap();
+    svm.airdrop(&lp.pubkey(), 1_000_000_000).unwrap();
+
+    // Load matcher program
+    let program_bytes = std::fs::read(&path).expect("Failed to read matcher program");
+    let matcher_program_id = Pubkey::new_unique();
+    svm.add_program(matcher_program_id, &program_bytes);
+
+    // Create context account
+    let ctx_pubkey = Pubkey::new_unique();
+    let ctx_account = Account {
+        lamports: 10_000_000,
+        data: vec![0u8; MATCHER_CONTEXT_LEN],
+        owner: matcher_program_id,
+        executable: false,
+        rent_epoch: 0,
+    };
+    svm.set_account(ctx_pubkey, ctx_account).unwrap();
+
+    // Initialize in Passive mode: 10 bps spread + 5 bps fee = 15 bps total
+    let init_ix = Instruction {
+        program_id: matcher_program_id,
+        accounts: vec![AccountMeta::new(ctx_pubkey, false)],
+        data: encode_init_vamm(
+            MatcherMode::Passive,
+            5, 10, 200, 0, 0,
+            1_000_000_000_000, // max fill
+            0,
+        ),
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[init_ix],
+        Some(&payer.pubkey()),
+        &[&payer],
+        svm.latest_blockhash(),
+    );
+    svm.send_transaction(tx).expect("Init failed");
+
+    // Execute a buy order
+    let oracle_price = 100_000_000u64; // $100 in e6
+    let req_size = 1_000_000i128; // 1M base units (buy)
+
+    let call_ix = Instruction {
+        program_id: matcher_program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(lp.pubkey(), true), // LP signer
+            AccountMeta::new(ctx_pubkey, false),
+        ],
+        data: encode_matcher_call(1, 0, 100, oracle_price, req_size),
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[call_ix],
+        Some(&payer.pubkey()),
+        &[&payer, &lp],
+        svm.latest_blockhash(),
+    );
+
+    let result = svm.send_transaction(tx);
+    assert!(result.is_ok(), "Matcher call failed: {:?}", result);
+
+    // Read result from context
+    let ctx_data = svm.get_account(&ctx_pubkey).unwrap().data;
+    let (abi_version, flags, exec_price, exec_size, req_id) = read_matcher_return(&ctx_data);
+
+    println!("Matcher return:");
+    println!("  abi_version: {}", abi_version);
+    println!("  flags: {}", flags);
+    println!("  exec_price: {}", exec_price);
+    println!("  exec_size: {}", exec_size);
+    println!("  req_id: {}", req_id);
+
+    assert_eq!(abi_version, 1, "ABI version mismatch");
+    assert_eq!(flags & 1, 1, "FLAG_VALID should be set");
+    assert_eq!(req_id, 1, "req_id mismatch");
+    assert_eq!(exec_size, req_size, "exec_size mismatch");
+
+    // Price = oracle * (10000 + spread + fee) / 10000 = 100M * 10015 / 10000 = 100_150_000
+    let expected_price = 100_150_000u64;
+    assert_eq!(exec_price, expected_price, "exec_price mismatch: expected {} got {}", expected_price, exec_price);
+
+    println!("MATCHER CALL VERIFIED: Correct pricing with 15 bps (10 spread + 5 fee)");
+}
+
+/// Test that double initialization is rejected
+#[test]
+fn test_matcher_rejects_double_init() {
+    let path = matcher_program_path();
+    if !path.exists() {
+        println!("SKIP: Matcher BPF not found at {:?}. Run: cd ../percolator-match && cargo build-sbf", path);
+        return;
+    }
+
+    let mut svm = LiteSVM::new();
+    let payer = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 10_000_000_000).unwrap();
+
+    // Load matcher program
+    let program_bytes = std::fs::read(&path).expect("Failed to read matcher program");
+    let matcher_program_id = Pubkey::new_unique();
+    svm.add_program(matcher_program_id, &program_bytes);
+
+    // Create context account
+    let ctx_pubkey = Pubkey::new_unique();
+    let ctx_account = Account {
+        lamports: 10_000_000,
+        data: vec![0u8; MATCHER_CONTEXT_LEN],
+        owner: matcher_program_id,
+        executable: false,
+        rent_epoch: 0,
+    };
+    svm.set_account(ctx_pubkey, ctx_account).unwrap();
+
+    // First init succeeds
+    let ix1 = Instruction {
+        program_id: matcher_program_id,
+        accounts: vec![AccountMeta::new(ctx_pubkey, false)],
+        data: encode_init_vamm(MatcherMode::Passive, 5, 10, 200, 0, 0, 1_000_000_000_000, 0),
+    };
+
+    let tx1 = Transaction::new_signed_with_payer(
+        &[ix1],
+        Some(&payer.pubkey()),
+        &[&payer],
+        svm.latest_blockhash(),
+    );
+    let result1 = svm.send_transaction(tx1);
+    assert!(result1.is_ok(), "First init failed: {:?}", result1);
+
+    // Second init should fail
+    let ix2 = Instruction {
+        program_id: matcher_program_id,
+        accounts: vec![AccountMeta::new(ctx_pubkey, false)],
+        data: encode_init_vamm(MatcherMode::Passive, 5, 10, 200, 0, 0, 1_000_000_000_000, 0),
+    };
+
+    let tx2 = Transaction::new_signed_with_payer(
+        &[ix2],
+        Some(&payer.pubkey()),
+        &[&payer],
+        svm.latest_blockhash(),
+    );
+    let result2 = svm.send_transaction(tx2);
+    assert!(result2.is_err(), "Second init should fail (already initialized)");
+
+    println!("MATCHER DOUBLE INIT REJECTED: AccountAlreadyInitialized");
+}
+
+/// Test vAMM mode with impact pricing
+#[test]
+fn test_matcher_vamm_mode_with_impact() {
+    let path = matcher_program_path();
+    if !path.exists() {
+        println!("SKIP: Matcher BPF not found at {:?}. Run: cd ../percolator-match && cargo build-sbf", path);
+        return;
+    }
+
+    let mut svm = LiteSVM::new();
+    let payer = Keypair::new();
+    let lp = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 10_000_000_000).unwrap();
+    svm.airdrop(&lp.pubkey(), 1_000_000_000).unwrap();
+
+    // Load matcher program
+    let program_bytes = std::fs::read(&path).expect("Failed to read matcher program");
+    let matcher_program_id = Pubkey::new_unique();
+    svm.add_program(matcher_program_id, &program_bytes);
+
+    // Create context account
+    let ctx_pubkey = Pubkey::new_unique();
+    let ctx_account = Account {
+        lamports: 10_000_000,
+        data: vec![0u8; MATCHER_CONTEXT_LEN],
+        owner: matcher_program_id,
+        executable: false,
+        rent_epoch: 0,
+    };
+    svm.set_account(ctx_pubkey, ctx_account).unwrap();
+
+    // Initialize in vAMM mode
+    // abs_notional_e6 = fill_abs * oracle / 1e6 = 10M * 100M / 1M = 1e9 (1 billion)
+    // Liquidity: 10B notional_e6, impact_k: 50 bps at full liquidity
+    // Trade notional: 1B notional_e6 = 10% of liquidity
+    // Impact = 50 * (1B / 10B) = 50 * 0.1 = 5 bps
+    let init_ix = Instruction {
+        program_id: matcher_program_id,
+        accounts: vec![AccountMeta::new(ctx_pubkey, false)],
+        data: encode_init_vamm(
+            MatcherMode::Vamm,
+            5,      // 0.05% trading fee
+            10,     // 0.10% base spread
+            200,    // 2% max total
+            50,     // 0.50% impact at full liquidity
+            10_000_000_000, // 10B notional_e6 liquidity
+            1_000_000_000_000, // max fill
+            0,
+        ),
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[init_ix],
+        Some(&payer.pubkey()),
+        &[&payer],
+        svm.latest_blockhash(),
+    );
+    svm.send_transaction(tx).expect("Init failed");
+
+    // Execute a buy for 1B notional_e6 (10% of liquidity)
+    // At $100 price: abs_notional_e6 = size * price / 1e6 = 10M * 100M / 1M = 1B
+    let oracle_price = 100_000_000u64; // $100 in e6
+    let req_size = 10_000_000i128; // 10M base units -> 1B notional_e6 at $100
+
+    let call_ix = Instruction {
+        program_id: matcher_program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(lp.pubkey(), true),
+            AccountMeta::new(ctx_pubkey, false),
+        ],
+        data: encode_matcher_call(1, 0, 100, oracle_price, req_size),
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[call_ix],
+        Some(&payer.pubkey()),
+        &[&payer, &lp],
+        svm.latest_blockhash(),
+    );
+
+    let result = svm.send_transaction(tx);
+    assert!(result.is_ok(), "Matcher call failed: {:?}", result);
+
+    // Read result
+    let ctx_data = svm.get_account(&ctx_pubkey).unwrap().data;
+    let (abi_version, flags, exec_price, exec_size, _) = read_matcher_return(&ctx_data);
+
+    println!("vAMM Matcher return:");
+    println!("  exec_price: {}", exec_price);
+    println!("  exec_size: {}", exec_size);
+
+    assert_eq!(abi_version, 1, "ABI version mismatch");
+    assert_eq!(flags & 1, 1, "FLAG_VALID should be set");
+
+    // Impact = impact_k_bps * notional / liquidity = 50 * 1M / 10M = 5 bps
+    // Total = spread (10) + fee (5) + impact (5) = 20 bps
+    // exec_price = 100M * 10020 / 10000 = 100_200_000
+    let expected_price = 100_200_000u64;
+    assert_eq!(exec_price, expected_price, "vAMM exec_price mismatch: expected {} got {}", expected_price, exec_price);
+
+    println!("VAMM MODE VERIFIED: Correct pricing with 20 bps (10 spread + 5 fee + 5 impact)");
+}
