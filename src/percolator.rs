@@ -1032,7 +1032,8 @@ pub mod ix {
         InitMarket {
             admin: Pubkey,
             collateral_mint: Pubkey,
-            /// Pyth feed ID for the index price (32 bytes)
+            /// Pyth feed ID for the index price (32 bytes).
+            /// If all zeros, enables Hyperp mode (internal mark/index, no external oracle).
             index_feed_id: [u8; 32],
             /// Maximum staleness in seconds
             max_staleness_secs: u64,
@@ -1041,6 +1042,8 @@ pub mod ix {
             invert: u8,
             /// Lamports per Unit for boundary conversion (0 = no scaling)
             unit_scale: u32,
+            /// Initial mark price in e6 format. Required (non-zero) if Hyperp mode.
+            initial_mark_price_e6: u64,
             risk_params: RiskParams,
         },
         InitUser { fee_payment: u64 },
@@ -1101,10 +1104,12 @@ pub mod ix {
                     let conf_filter_bps = read_u16(&mut rest)?;
                     let invert = read_u8(&mut rest)?;
                     let unit_scale = read_u32(&mut rest)?;
+                    let initial_mark_price_e6 = read_u64(&mut rest)?;
                     let risk_params = read_risk_params(&mut rest)?;
                     Ok(Instruction::InitMarket {
                         admin, collateral_mint, index_feed_id,
-                        max_staleness_secs, conf_filter_bps, invert, unit_scale, risk_params
+                        max_staleness_secs, conf_filter_bps, invert, unit_scale,
+                        initial_mark_price_e6, risk_params
                     })
                 },
                 1 => { // InitUser
@@ -1910,6 +1915,102 @@ pub mod oracle {
         config.last_effective_price_e6 = clamped;
         Ok(clamped)
     }
+
+    // =========================================================================
+    // Hyperp mode helpers (internal mark/index, no external oracle)
+    // =========================================================================
+
+    /// Check if Hyperp mode is active (internal mark/index pricing).
+    /// Hyperp mode is active when index_feed_id is all zeros.
+    #[inline]
+    pub fn is_hyperp_mode(config: &super::state::MarketConfig) -> bool {
+        config.index_feed_id == [0u8; 32]
+    }
+
+    /// Move `index` toward `mark`, but clamp movement by cap_e2bps * dt_slots.
+    /// cap_e2bps units: 1_000_000 = 100.00%
+    /// Returns the new index value.
+    pub fn clamp_toward_with_dt(index: u64, mark: u64, cap_e2bps: u64, dt_slots: u64) -> u64 {
+        if index == 0 { return mark; }
+        if cap_e2bps == 0 || dt_slots == 0 { return mark; }
+
+        let max_delta_u128 =
+            (index as u128)
+            .saturating_mul(cap_e2bps as u128)
+            .saturating_mul(dt_slots as u128)
+            / 1_000_000u128;
+
+        let max_delta = core::cmp::min(max_delta_u128, u64::MAX as u128) as u64;
+        let lo = index.saturating_sub(max_delta);
+        let hi = index.saturating_add(max_delta);
+        mark.clamp(lo, hi)
+    }
+
+    /// Get engine oracle price (unified: external oracle vs Hyperp mode).
+    /// In Hyperp mode: updates index toward mark with rate limiting.
+    /// In external mode: reads from Pyth/Chainlink/authority with circuit breaker.
+    pub fn get_engine_oracle_price_e6(
+        engine_last_slot: u64,
+        now_slot: u64,
+        now_unix_ts: i64,
+        config: &mut super::state::MarketConfig,
+        a_oracle: &AccountInfo,
+    ) -> Result<u64, ProgramError> {
+        // Hyperp mode: index_feed_id == 0
+        if is_hyperp_mode(config) {
+            let mark = config.authority_price_e6;
+            if mark == 0 {
+                return Err(super::error::PercolatorError::OracleInvalid.into());
+            }
+
+            let prev_index = config.last_effective_price_e6;
+            let dt = now_slot.saturating_sub(engine_last_slot);
+            let new_index = clamp_toward_with_dt(
+                prev_index.max(1),
+                mark,
+                config.oracle_price_cap_e2bps,
+                dt,
+            );
+
+            config.last_effective_price_e6 = new_index;
+            return Ok(new_index);
+        }
+
+        // Non-Hyperp: existing behavior (authority -> Pyth/Chainlink) + circuit breaker
+        read_price_clamped(config, a_oracle, now_unix_ts)
+    }
+
+    /// Compute premium-based funding rate (Hyperp funding model).
+    /// Premium = (mark - index) / index, converted to bps per slot.
+    /// Returns signed bps per slot (positive = longs pay shorts).
+    pub fn compute_premium_funding_bps_per_slot(
+        mark_e6: u64,
+        index_e6: u64,
+        funding_horizon_slots: u64,
+        funding_k_bps: u64,       // 100 = 1.00x multiplier
+        max_premium_bps: i64,     // e.g. 500 = 5%
+        max_bps_per_slot: i64,
+    ) -> i64 {
+        if mark_e6 == 0 || index_e6 == 0 || funding_horizon_slots == 0 { return 0; }
+
+        let diff = mark_e6 as i128 - index_e6 as i128;
+        let mut premium_bps = diff
+            .saturating_mul(10_000)
+            / (index_e6 as i128);
+
+        // Clamp premium
+        premium_bps = premium_bps.clamp(-(max_premium_bps as i128), max_premium_bps as i128);
+
+        // Apply k multiplier (100 => 1.00x)
+        let scaled = premium_bps.saturating_mul(funding_k_bps as i128) / 100i128;
+
+        // Convert to per-slot by dividing by horizon
+        let mut per_slot = (scaled / (funding_horizon_slots as i128)) as i64;
+
+        // Policy clamp
+        per_slot = per_slot.clamp(-max_bps_per_slot, max_bps_per_slot);
+        per_slot
+    }
 }
 
 // 9. mod collateral
@@ -2159,7 +2260,8 @@ pub mod processor {
         match instruction {
             Instruction::InitMarket {
                 admin, collateral_mint, index_feed_id,
-                max_staleness_secs, conf_filter_bps, invert, unit_scale, risk_params
+                max_staleness_secs, conf_filter_bps, invert, unit_scale,
+                initial_mark_price_e6, risk_params
             } => {
                 // Reduced from 11 to 9: removed pyth_index and pyth_collateral accounts
                 // (feed_id is now passed in instruction data, not as account)
@@ -2202,6 +2304,13 @@ pub mod processor {
 
                 // Validate unit_scale: reject huge values that make most deposits credit 0 units
                 if !crate::verify::init_market_scale_ok(unit_scale) {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+
+                // Hyperp mode validation: if index_feed_id is all zeros, require initial_mark_price_e6
+                let is_hyperp = index_feed_id == [0u8; 32];
+                if is_hyperp && initial_mark_price_e6 == 0 {
+                    // Hyperp mode requires a non-zero initial mark price
                     return Err(ProgramError::InvalidInstructionData);
                 }
 
@@ -2263,12 +2372,14 @@ pub mod processor {
                     thresh_max: DEFAULT_THRESH_MAX,
                     thresh_min_step: DEFAULT_THRESH_MIN_STEP,
                     // Oracle authority (disabled by default - use Pyth/Chainlink)
+                    // In Hyperp mode: authority_price_e6 = mark, last_effective_price_e6 = index
                     oracle_authority: [0u8; 32],
-                    authority_price_e6: 0,
-                    authority_timestamp: 0,
+                    authority_price_e6: if is_hyperp { initial_mark_price_e6 } else { 0 },
+                    authority_timestamp: 0, // In Hyperp mode: stores funding rate (bps per slot)
                     // Oracle price circuit breaker (disabled by default)
+                    // In Hyperp mode: used for rate-limited index smoothing
                     oracle_price_cap_e2bps: 0,
-                    last_effective_price_e6: 0,
+                    last_effective_price_e6: if is_hyperp { initial_mark_price_e6 } else { 0 },
                 };
                 state::write_config(&mut data, &config);
 
@@ -2433,12 +2544,17 @@ pub mod processor {
                 verify_token_account(a_user_ata, a_user.key, &mint)?;
 
                 let clock = Clock::from_account_info(a_clock)?;
-                // Read oracle price with circuit-breaker clamping
-                let price = oracle::read_price_clamped(
-                    &mut config,
-                    a_oracle_idx,
-                    clock.unix_timestamp,
-                )?;
+                // Read oracle price: Hyperp mode uses index directly, otherwise circuit-breaker clamping
+                let is_hyperp = oracle::is_hyperp_mode(&config);
+                let price = if is_hyperp {
+                    let idx = config.last_effective_price_e6;
+                    if idx == 0 {
+                        return Err(PercolatorError::OracleInvalid.into());
+                    }
+                    idx
+                } else {
+                    oracle::read_price_clamped(&mut config, a_oracle_idx, clock.unix_timestamp)?
+                };
                 state::write_config(&mut data, &config);
 
                 let engine = zc::engine_mut(&mut data)?;
@@ -2522,12 +2638,54 @@ pub mod processor {
                 let unit_scale = config.unit_scale;
 
                 let clock = Clock::from_account_info(a_clock)?;
-                // Read oracle price with circuit-breaker clamping
-                let price = oracle::read_price_clamped(
-                    &mut config,
-                    a_oracle,
-                    clock.unix_timestamp,
-                )?;
+
+                // Hyperp mode: use get_engine_oracle_price_e6 for rate-limited index smoothing
+                // Otherwise: use read_price_clamped as before
+                let is_hyperp = oracle::is_hyperp_mode(&config);
+                let engine_last_slot = {
+                    let engine = zc::engine_ref(&data)?;
+                    engine.current_slot
+                };
+
+                let price = if is_hyperp {
+                    // Hyperp mode: update index toward mark with rate limiting
+                    oracle::get_engine_oracle_price_e6(
+                        engine_last_slot,
+                        clock.slot,
+                        clock.unix_timestamp,
+                        &mut config,
+                        a_oracle,
+                    )?
+                } else {
+                    oracle::read_price_clamped(&mut config, a_oracle, clock.unix_timestamp)?
+                };
+
+                // Hyperp mode: compute and store funding rate BEFORE engine borrow
+                // This avoids borrow conflicts with config read/write
+                let hyperp_funding_rate = if is_hyperp {
+                    // Read previous funding rate (piecewise-constant: use stored rate, then update)
+                    // authority_timestamp is reinterpreted as i64 funding rate in Hyperp mode
+                    let prev_rate = config.authority_timestamp;
+
+                    // Compute new rate from premium
+                    let mark_e6 = config.authority_price_e6;
+                    let index_e6 = config.last_effective_price_e6;
+                    let new_rate = oracle::compute_premium_funding_bps_per_slot(
+                        mark_e6,
+                        index_e6,
+                        config.funding_horizon_slots,
+                        config.funding_k_bps,
+                        config.funding_max_premium_bps,
+                        config.funding_max_bps_per_slot,
+                    );
+
+                    // Store new rate in config for next crank
+                    config.authority_timestamp = new_rate;
+
+                    Some(prev_rate) // Use PREVIOUS rate for this crank (piecewise-constant model)
+                } else {
+                    None
+                };
                 state::write_config(&mut data, &config);
 
                 let engine = zc::engine_mut(&mut data)?;
@@ -2546,22 +2704,26 @@ pub mod processor {
                 // In permissionless mode, pass CRANK_NO_CALLER to engine (out-of-range = no caller settle)
                 let effective_caller_idx = if permissionless { CRANK_NO_CALLER } else { caller_idx };
 
-                // Compute inventory-based funding rate from LP net position.
-                // Engine internally gates same-slot compounding via dt = now_slot - last_funding_slot,
-                // so passing the same rate multiple times in the same slot is harmless (dt=0 => no change).
-                //
-                // Uses market price (may be inverted). For inverted markets, configure
-                // funding_inv_scale_notional_e6 appropriately at market init to handle precision.
-                let net_lp_pos = crate::compute_net_lp_pos(engine);
-                let effective_funding_rate = crate::compute_inventory_funding_bps_per_slot(
-                    net_lp_pos,
-                    price,
-                    config.funding_horizon_slots,
-                    config.funding_k_bps,
-                    config.funding_inv_scale_notional_e6,
-                    config.funding_max_premium_bps,
-                    config.funding_max_bps_per_slot,
-                );
+                // Compute funding rate:
+                // - Hyperp mode: use pre-computed rate (avoids borrow conflict)
+                // - Normal mode: inventory-based funding from LP net position
+                let effective_funding_rate = if let Some(rate) = hyperp_funding_rate {
+                    rate
+                } else {
+                    // Normal mode: inventory-based funding from LP net position
+                    // Engine internally gates same-slot compounding via dt = now_slot - last_funding_slot,
+                    // so passing the same rate multiple times in the same slot is harmless (dt=0 => no change).
+                    let net_lp_pos = crate::compute_net_lp_pos(engine);
+                    crate::compute_inventory_funding_bps_per_slot(
+                        net_lp_pos,
+                        price,
+                        config.funding_horizon_slots,
+                        config.funding_k_bps,
+                        config.funding_inv_scale_notional_e6,
+                        config.funding_max_premium_bps,
+                        config.funding_max_bps_per_slot,
+                    )
+                };
                 #[cfg(feature = "cu-audit")]
                 {
                     msg!("CU_CHECKPOINT: keeper_crank_start");
@@ -2659,12 +2821,18 @@ pub mod processor {
                 let clock = Clock::from_account_info(&accounts[3])?;
                 let a_oracle = &accounts[4];
 
-                // Read oracle price with circuit-breaker clamping
-                let price = oracle::read_price_clamped(
-                    &mut config,
-                    a_oracle,
-                    clock.unix_timestamp,
-                )?;
+                // Read oracle price: Hyperp mode uses index directly, otherwise circuit-breaker clamping
+                let is_hyperp = oracle::is_hyperp_mode(&config);
+                let price = if is_hyperp {
+                    // Hyperp mode: use current index price for trade execution
+                    let idx = config.last_effective_price_e6;
+                    if idx == 0 {
+                        return Err(PercolatorError::OracleInvalid.into());
+                    }
+                    idx
+                } else {
+                    oracle::read_price_clamped(&mut config, a_oracle, clock.unix_timestamp)?
+                };
                 state::write_config(&mut data, &config);
 
                 let engine = zc::engine_mut(&mut data)?;
@@ -2717,6 +2885,13 @@ pub mod processor {
                 {
                     msg!("CU_CHECKPOINT: trade_nocpi_execute_end");
                     sol_log_compute_units();
+                }
+
+                // Hyperp mode: update mark price after successful trade
+                if is_hyperp {
+                    let mut config = state::read_config(&data);
+                    config.authority_price_e6 = price;
+                    state::write_config(&mut data, &config);
                 }
             },
             Instruction::TradeCpi { lp_idx, user_idx, size } => {
@@ -2811,12 +2986,18 @@ pub mod processor {
                 }
 
                 let clock = Clock::from_account_info(a_clock)?;
-                // Read oracle price with circuit-breaker clamping
-                let price = oracle::read_price_clamped(
-                    &mut config,
-                    a_oracle,
-                    clock.unix_timestamp,
-                )?;
+                // Read oracle price: Hyperp mode uses index directly, otherwise circuit-breaker clamping
+                let is_hyperp = oracle::is_hyperp_mode(&config);
+                let price = if is_hyperp {
+                    // Hyperp mode: use current index price for trade execution
+                    let idx = config.last_effective_price_e6;
+                    if idx == 0 {
+                        return Err(PercolatorError::OracleInvalid.into());
+                    }
+                    idx
+                } else {
+                    oracle::read_price_clamped(&mut config, a_oracle, clock.unix_timestamp)?
+                };
 
                 // Note: We don't zero the matcher_ctx before CPI because we don't own it.
                 // Security is maintained by ABI validation which checks req_id (nonce),
@@ -2918,6 +3099,13 @@ pub mod processor {
                     }
                     // Write nonce AFTER CPI and execute_trade to avoid ExternalAccountDataModified
                     state::write_req_nonce(&mut data, req_id);
+
+                    // Hyperp mode: update mark price with execution price
+                    if is_hyperp {
+                        let mut config = state::read_config(&data);
+                        config.authority_price_e6 = ret.exec_price_e6;
+                        state::write_config(&mut data, &config);
+                    }
                 }
             },
             Instruction::LiquidateAtOracle { target_idx } => {
@@ -2932,12 +3120,17 @@ pub mod processor {
                 let mut config = state::read_config(&data);
 
                 let clock = Clock::from_account_info(&accounts[2])?;
-                // Read oracle price with circuit-breaker clamping
-                let price = oracle::read_price_clamped(
-                    &mut config,
-                    a_oracle,
-                    clock.unix_timestamp,
-                )?;
+                // Read oracle price: Hyperp mode uses index directly, otherwise circuit-breaker clamping
+                let is_hyperp = oracle::is_hyperp_mode(&config);
+                let price = if is_hyperp {
+                    let idx = config.last_effective_price_e6;
+                    if idx == 0 {
+                        return Err(PercolatorError::OracleInvalid.into());
+                    }
+                    idx
+                } else {
+                    oracle::read_price_clamped(&mut config, a_oracle, clock.unix_timestamp)?
+                };
                 state::write_config(&mut data, &config);
 
                 let engine = zc::engine_mut(&mut data)?;
@@ -2999,12 +3192,17 @@ pub mod processor {
                 accounts::expect_key(a_pda, &auth)?;
 
                 let clock = Clock::from_account_info(&accounts[6])?;
-                // Read oracle price with circuit-breaker clamping
-                let price = oracle::read_price_clamped(
-                    &mut config,
-                    a_oracle,
-                    clock.unix_timestamp,
-                )?;
+                // Read oracle price: Hyperp mode uses index directly, otherwise circuit-breaker clamping
+                let is_hyperp = oracle::is_hyperp_mode(&config);
+                let price = if is_hyperp {
+                    let idx = config.last_effective_price_e6;
+                    if idx == 0 {
+                        return Err(PercolatorError::OracleInvalid.into());
+                    }
+                    idx
+                } else {
+                    oracle::read_price_clamped(&mut config, a_oracle, clock.unix_timestamp)?
+                };
                 state::write_config(&mut data, &config);
 
                 let engine = zc::engine_mut(&mut data)?;
