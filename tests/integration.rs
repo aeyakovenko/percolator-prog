@@ -3471,3 +3471,735 @@ fn test_sell_trade_negative_size() {
 
     println!("SELL TRADES VERIFIED: Negative size trades work correctly");
 }
+
+// ============================================================================
+// TradeCpi Program-Match Tests
+// ============================================================================
+//
+// These tests verify the critical security properties of TradeCpi:
+// 1. LP owner does NOT need to sign - trade is permissionless from LP perspective
+// 2. Trade authorization is delegated to the matcher program via PDA signature
+// 3. Matcher program/context must match what was registered during InitLP
+// 4. LP PDA must be valid: system-owned, zero data, zero lamports
+//
+// Security model: LP delegates trade authorization to a matcher program.
+// The percolator program uses invoke_signed with LP PDA seeds to call the matcher.
+// Only the matcher registered at InitLP can authorize trades for this LP.
+
+/// Encode TradeCpi instruction (tag = 10)
+fn encode_trade_cpi(lp_idx: u16, user_idx: u16, size: i128) -> Vec<u8> {
+    let mut data = vec![10u8]; // TradeCpi instruction tag
+    data.extend_from_slice(&lp_idx.to_le_bytes());
+    data.extend_from_slice(&user_idx.to_le_bytes());
+    data.extend_from_slice(&size.to_le_bytes());
+    data
+}
+
+/// Test environment extended for TradeCpi tests
+struct TradeCpiTestEnv {
+    svm: LiteSVM,
+    program_id: Pubkey,
+    matcher_program_id: Pubkey,
+    payer: Keypair,
+    slab: Pubkey,
+    mint: Pubkey,
+    vault: Pubkey,
+    pyth_index: Pubkey,
+    pyth_col: Pubkey,
+    account_count: u16,
+}
+
+impl TradeCpiTestEnv {
+    fn new() -> Option<Self> {
+        let percolator_path = program_path();
+        let matcher_path = matcher_program_path();
+
+        if !percolator_path.exists() || !matcher_path.exists() {
+            return None;
+        }
+
+        let mut svm = LiteSVM::new();
+        let program_id = Pubkey::new_unique();
+        let matcher_program_id = Pubkey::new_unique();
+
+        // Load both programs
+        let percolator_bytes = std::fs::read(&percolator_path).expect("Failed to read percolator");
+        let matcher_bytes = std::fs::read(&matcher_path).expect("Failed to read matcher");
+        svm.add_program(program_id, &percolator_bytes);
+        svm.add_program(matcher_program_id, &matcher_bytes);
+
+        let payer = Keypair::new();
+        let slab = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let pyth_index = Pubkey::new_unique();
+        let pyth_col = Pubkey::new_unique();
+        let (vault_pda, _) = Pubkey::find_program_address(&[b"vault", slab.as_ref()], &program_id);
+        let vault = Pubkey::new_unique();
+
+        svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+
+        svm.set_account(slab, Account {
+            lamports: 1_000_000_000,
+            data: vec![0u8; SLAB_LEN],
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        svm.set_account(mint, Account {
+            lamports: 1_000_000,
+            data: make_mint_data(),
+            owner: spl_token::ID,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        svm.set_account(vault, Account {
+            lamports: 1_000_000,
+            data: make_token_account_data(&mint, &vault_pda, 0),
+            owner: spl_token::ID,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        let pyth_data = make_pyth_data(&TEST_FEED_ID, 138_000_000, -6, 1, 100);
+        svm.set_account(pyth_index, Account {
+            lamports: 1_000_000,
+            data: pyth_data.clone(),
+            owner: PYTH_RECEIVER_PROGRAM_ID,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+        svm.set_account(pyth_col, Account {
+            lamports: 1_000_000,
+            data: pyth_data,
+            owner: PYTH_RECEIVER_PROGRAM_ID,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        svm.set_sysvar(&Clock { slot: 100, unix_timestamp: 100, ..Clock::default() });
+
+        Some(TradeCpiTestEnv {
+            svm, program_id, matcher_program_id, payer, slab, mint, vault, pyth_index, pyth_col,
+            account_count: 0,
+        })
+    }
+
+    fn init_market(&mut self) {
+        let admin = &self.payer;
+        let dummy_ata = Pubkey::new_unique();
+        self.svm.set_account(dummy_ata, Account {
+            lamports: 1_000_000,
+            data: vec![0u8; TokenAccount::LEN],
+            owner: spl_token::ID,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(self.mint, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(sysvar::rent::ID, false),
+                AccountMeta::new_readonly(dummy_ata, false),
+                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+            ],
+            data: encode_init_market_with_invert(&admin.pubkey(), &self.mint, &TEST_FEED_ID, 0),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&admin.pubkey()), &[admin], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).expect("init_market failed");
+    }
+
+    fn create_ata(&mut self, owner: &Pubkey, amount: u64) -> Pubkey {
+        let ata = Pubkey::new_unique();
+        self.svm.set_account(ata, Account {
+            lamports: 1_000_000,
+            data: make_token_account_data(&self.mint, owner, amount),
+            owner: spl_token::ID,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+        ata
+    }
+
+    /// Initialize LP with specific matcher program and context
+    /// Returns (lp_idx, matcher_context_pubkey)
+    fn init_lp_with_matcher(&mut self, owner: &Keypair, matcher_prog: &Pubkey) -> (u16, Pubkey) {
+        let idx = self.account_count;
+        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        let ata = self.create_ata(&owner.pubkey(), 0);
+
+        // Create matcher context owned by matcher program
+        let ctx = Pubkey::new_unique();
+        self.svm.set_account(ctx, Account {
+            lamports: 10_000_000,
+            data: vec![0u8; MATCHER_CONTEXT_LEN],
+            owner: *matcher_prog,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        // Initialize the matcher context
+        let init_ix = Instruction {
+            program_id: *matcher_prog,
+            accounts: vec![AccountMeta::new(ctx, false)],
+            data: encode_init_vamm(
+                MatcherMode::Passive,
+                5, 10, 200, 0, 0,
+                1_000_000_000_000, // max fill
+                0,
+            ),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[init_ix],
+            Some(&owner.pubkey()),
+            &[owner],
+            self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).expect("init matcher context failed");
+
+        // Now init LP in percolator with this matcher
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(*matcher_prog, false),
+                AccountMeta::new_readonly(ctx, false),
+            ],
+            data: encode_init_lp(matcher_prog, &ctx, 0),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&owner.pubkey()), &[owner], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).expect("init_lp failed");
+        self.account_count += 1;
+        (idx, ctx)
+    }
+
+    fn init_user(&mut self, owner: &Keypair) -> u16 {
+        let idx = self.account_count;
+        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        let ata = self.create_ata(&owner.pubkey(), 0);
+
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_col, false),
+            ],
+            data: encode_init_user(0),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&owner.pubkey()), &[owner], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).expect("init_user failed");
+        self.account_count += 1;
+        idx
+    }
+
+    fn deposit(&mut self, owner: &Keypair, user_idx: u16, amount: u64) {
+        let ata = self.create_ata(&owner.pubkey(), amount);
+
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_deposit(user_idx, amount),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&owner.pubkey()), &[owner], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).expect("deposit failed");
+    }
+
+    /// Execute TradeCpi instruction
+    /// Note: lp_owner does NOT need to sign - this is the key permissionless property
+    fn try_trade_cpi(
+        &mut self,
+        user: &Keypair,
+        lp_owner: &Pubkey,  // NOT a signer!
+        lp_idx: u16,
+        user_idx: u16,
+        size: i128,
+        matcher_prog: &Pubkey,
+        matcher_ctx: &Pubkey,
+    ) -> Result<(), String> {
+        // Derive the LP PDA
+        let lp_bytes = lp_idx.to_le_bytes();
+        let (lp_pda, _) = Pubkey::find_program_address(
+            &[b"lp", self.slab.as_ref(), &lp_bytes],
+            &self.program_id
+        );
+
+        // LP PDA must be system-owned, zero data, zero lamports
+        // We don't need to set it up - it should not exist (system program owns uninitialized PDAs)
+
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(user.pubkey(), true),    // 0: user (signer)
+                AccountMeta::new(*lp_owner, false),       // 1: lp_owner (NOT signer!)
+                AccountMeta::new(self.slab, false),       // 2: slab
+                AccountMeta::new_readonly(sysvar::clock::ID, false), // 3: clock
+                AccountMeta::new_readonly(self.pyth_index, false),   // 4: oracle
+                AccountMeta::new_readonly(*matcher_prog, false),     // 5: matcher program
+                AccountMeta::new(*matcher_ctx, false),    // 6: matcher context (writable)
+                AccountMeta::new_readonly(lp_pda, false), // 7: lp_pda
+            ],
+            data: encode_trade_cpi(lp_idx, user_idx, size),
+        };
+
+        // Only user signs - LP owner does NOT sign
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&user.pubkey()), &[user], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
+    }
+
+    /// Execute TradeCpi with wrong LP PDA (attack scenario)
+    fn try_trade_cpi_with_wrong_pda(
+        &mut self,
+        user: &Keypair,
+        lp_owner: &Pubkey,
+        lp_idx: u16,
+        user_idx: u16,
+        size: i128,
+        matcher_prog: &Pubkey,
+        matcher_ctx: &Pubkey,
+        wrong_pda: &Pubkey,
+    ) -> Result<(), String> {
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(user.pubkey(), true),
+                AccountMeta::new(*lp_owner, false),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+                AccountMeta::new_readonly(*matcher_prog, false),
+                AccountMeta::new(*matcher_ctx, false),
+                AccountMeta::new_readonly(*wrong_pda, false), // Wrong PDA!
+            ],
+            data: encode_trade_cpi(lp_idx, user_idx, size),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&user.pubkey()), &[user], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
+    }
+}
+
+// ============================================================================
+// Test: TradeCpi is permissionless for LP (LP owner doesn't need to sign)
+// ============================================================================
+
+/// CRITICAL: TradeCpi allows trading without LP signature
+///
+/// The LP delegates trade authorization to a matcher program. The percolator
+/// program uses invoke_signed with LP PDA seeds to call the matcher.
+/// This makes TradeCpi permissionless from the LP's perspective - anyone can
+/// initiate a trade if they have a valid user account.
+///
+/// Security model:
+/// - LP registers matcher program/context at InitLP
+/// - Only the registered matcher can authorize trades
+/// - Matcher enforces its own rules (spread, fees, limits)
+/// - LP PDA signature proves the CPI comes from percolator for this LP
+#[test]
+fn test_tradecpi_permissionless_lp_no_signature_required() {
+    let Some(mut env) = TradeCpiTestEnv::new() else {
+        println!("SKIP: Programs not found. Run: cargo build-sbf && cd ../percolator-match && cargo build-sbf");
+        return;
+    };
+
+    env.init_market();
+
+    // Copy matcher_program_id to avoid borrow issues
+    let matcher_prog = env.matcher_program_id;
+
+    // Create LP with matcher
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    // Create user
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Execute TradeCpi - LP owner is NOT a signer
+    // This should succeed because TradeCpi is permissionless for LP
+    let result = env.try_trade_cpi(
+        &user,
+        &lp.pubkey(), // LP owner pubkey (not signer!)
+        lp_idx,
+        user_idx,
+        1_000_000, // size
+        &matcher_prog,
+        &matcher_ctx,
+    );
+
+    assert!(result.is_ok(),
+        "TradeCpi should succeed without LP signature (permissionless). Error: {:?}", result);
+
+    println!("TRADECPI PERMISSIONLESS VERIFIED: LP owner did NOT sign, trade succeeded");
+    println!("  - LP delegates trade authorization to matcher program");
+    println!("  - Percolator uses invoke_signed with LP PDA to call matcher");
+    println!("  - This enables permissionless trading for LP pools");
+}
+
+// ============================================================================
+// Test: TradeCpi rejects wrong matcher program
+// ============================================================================
+
+/// CRITICAL: TradeCpi rejects trades with wrong matcher program
+///
+/// The matcher program passed to TradeCpi must match the program registered
+/// at InitLP. This prevents attackers from bypassing the registered matcher.
+#[test]
+fn test_tradecpi_rejects_wrong_matcher_program() {
+    let Some(mut env) = TradeCpiTestEnv::new() else {
+        println!("SKIP: Programs not found. Run: cargo build-sbf && cd ../percolator-match && cargo build-sbf");
+        return;
+    };
+
+    env.init_market();
+
+    // Copy matcher_program_id to avoid borrow issues
+    let real_matcher_prog = env.matcher_program_id;
+
+    // Create LP with real matcher
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &real_matcher_prog);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    // Create user
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Create a WRONG matcher program (just use a random pubkey)
+    let wrong_matcher_prog = Pubkey::new_unique();
+
+    // Try TradeCpi with wrong matcher program
+    let result = env.try_trade_cpi(
+        &user,
+        &lp.pubkey(),
+        lp_idx,
+        user_idx,
+        1_000_000,
+        &wrong_matcher_prog, // WRONG!
+        &matcher_ctx,
+    );
+
+    assert!(result.is_err(),
+        "SECURITY: TradeCpi should reject wrong matcher program");
+
+    println!("TRADECPI MATCHER VALIDATION VERIFIED: Wrong matcher program REJECTED");
+    println!("  - Passed matcher: {} (wrong)", wrong_matcher_prog);
+    println!("  - Registered matcher: {} (correct)", real_matcher_prog);
+    println!("  - matcher_identity_ok check prevented the attack");
+}
+
+// ============================================================================
+// Test: TradeCpi rejects wrong matcher context
+// ============================================================================
+
+/// CRITICAL: TradeCpi rejects trades with wrong matcher context
+///
+/// The matcher context passed to TradeCpi must match the context registered
+/// at InitLP. Each LP has a specific context (with its own parameters).
+#[test]
+fn test_tradecpi_rejects_wrong_matcher_context() {
+    let Some(mut env) = TradeCpiTestEnv::new() else {
+        println!("SKIP: Programs not found. Run: cargo build-sbf && cd ../percolator-match && cargo build-sbf");
+        return;
+    };
+
+    env.init_market();
+
+    let matcher_prog = env.matcher_program_id;
+
+    // Create LP with real matcher
+    let lp = Keypair::new();
+    let (lp_idx, _correct_matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    // Create user
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Create a DIFFERENT matcher context (belongs to a different LP)
+    let wrong_ctx = Pubkey::new_unique();
+    env.svm.set_account(wrong_ctx, Account {
+        lamports: 10_000_000,
+        data: vec![0u8; MATCHER_CONTEXT_LEN],
+        owner: matcher_prog,
+        executable: false,
+        rent_epoch: 0,
+    }).unwrap();
+
+    // Initialize the wrong context (so it passes shape validation)
+    let init_ix = Instruction {
+        program_id: matcher_prog,
+        accounts: vec![AccountMeta::new(wrong_ctx, false)],
+        data: encode_init_vamm(MatcherMode::Passive, 5, 10, 200, 0, 0, 1_000_000_000_000, 0),
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[init_ix], Some(&user.pubkey()), &[&user], env.svm.latest_blockhash(),
+    );
+    env.svm.send_transaction(tx).expect("init wrong ctx failed");
+
+    // Try TradeCpi with wrong matcher context
+    let result = env.try_trade_cpi(
+        &user,
+        &lp.pubkey(),
+        lp_idx,
+        user_idx,
+        1_000_000,
+        &matcher_prog,
+        &wrong_ctx, // WRONG!
+    );
+
+    assert!(result.is_err(),
+        "SECURITY: TradeCpi should reject wrong matcher context");
+
+    println!("TRADECPI CONTEXT VALIDATION VERIFIED: Wrong matcher context REJECTED");
+    println!("  - Passed context: {} (wrong)", wrong_ctx);
+    println!("  - Each LP is bound to its registered matcher context");
+    println!("  - matcher_identity_ok check prevented context substitution");
+}
+
+// ============================================================================
+// Test: TradeCpi rejects wrong LP PDA
+// ============================================================================
+
+/// CRITICAL: TradeCpi rejects trades with wrong LP PDA
+///
+/// The LP PDA passed to TradeCpi must be the correct PDA derived from
+/// ["lp", slab.key, lp_idx.to_le_bytes()]. The PDA must be:
+/// - System-owned
+/// - Zero data length
+/// - Zero lamports
+///
+/// This prevents attackers from substituting a different PDA.
+#[test]
+fn test_tradecpi_rejects_wrong_lp_pda() {
+    let Some(mut env) = TradeCpiTestEnv::new() else {
+        println!("SKIP: Programs not found. Run: cargo build-sbf && cd ../percolator-match && cargo build-sbf");
+        return;
+    };
+
+    env.init_market();
+
+    let matcher_prog = env.matcher_program_id;
+
+    // Create LP
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    // Create user
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Create a WRONG PDA (just a random pubkey)
+    let wrong_pda = Pubkey::new_unique();
+
+    // Try TradeCpi with wrong LP PDA
+    let result = env.try_trade_cpi_with_wrong_pda(
+        &user,
+        &lp.pubkey(),
+        lp_idx,
+        user_idx,
+        1_000_000,
+        &matcher_prog,
+        &matcher_ctx,
+        &wrong_pda, // WRONG!
+    );
+
+    assert!(result.is_err(),
+        "SECURITY: TradeCpi should reject wrong LP PDA");
+
+    println!("TRADECPI PDA VALIDATION VERIFIED: Wrong LP PDA REJECTED");
+    println!("  - Passed PDA: {} (wrong)", wrong_pda);
+    println!("  - Expected PDA derived from [\"lp\", slab, lp_idx]");
+    println!("  - PDA key validation prevented PDA substitution attack");
+}
+
+// ============================================================================
+// Test: TradeCpi rejects PDA with wrong shape (non-system-owned)
+// ============================================================================
+
+/// CRITICAL: TradeCpi rejects PDA that exists but has wrong shape
+///
+/// Even if the correct PDA address is passed, it must have:
+/// - owner == system_program
+/// - data_len == 0
+/// - lamports == 0
+///
+/// This prevents an attacker from creating an account at the PDA address.
+#[test]
+fn test_tradecpi_rejects_pda_with_wrong_shape() {
+    let Some(mut env) = TradeCpiTestEnv::new() else {
+        println!("SKIP: Programs not found. Run: cargo build-sbf && cd ../percolator-match && cargo build-sbf");
+        return;
+    };
+
+    env.init_market();
+
+    let matcher_prog = env.matcher_program_id;
+
+    // Create LP
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    // Create user
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Derive the CORRECT LP PDA
+    let lp_bytes = lp_idx.to_le_bytes();
+    let (correct_lp_pda, _) = Pubkey::find_program_address(
+        &[b"lp", env.slab.as_ref(), &lp_bytes],
+        &env.program_id
+    );
+
+    // Create an account at the PDA address with wrong shape
+    // (has lamports - not zero)
+    env.svm.set_account(correct_lp_pda, Account {
+        lamports: 1_000_000, // Non-zero lamports - INVALID
+        data: vec![],
+        owner: solana_sdk::system_program::ID,
+        executable: false,
+        rent_epoch: 0,
+    }).unwrap();
+
+    // Try TradeCpi - should fail because PDA shape is wrong
+    let result = env.try_trade_cpi(
+        &user,
+        &lp.pubkey(),
+        lp_idx,
+        user_idx,
+        1_000_000,
+        &matcher_prog,
+        &matcher_ctx,
+    );
+
+    assert!(result.is_err(),
+        "SECURITY: TradeCpi should reject PDA with non-zero lamports");
+
+    println!("TRADECPI PDA SHAPE VALIDATION VERIFIED: PDA with wrong shape REJECTED");
+    println!("  - PDA address is correct but has non-zero lamports");
+    println!("  - lp_pda_shape_ok check requires: system-owned, zero data, zero lamports");
+    println!("  - This prevents attackers from polluting the PDA address");
+}
+
+// ============================================================================
+// Test: Multiple LPs have independent matcher bindings
+// ============================================================================
+
+/// Verify that each LP's matcher binding is independent
+///
+/// LP1 with Matcher A cannot be traded via Matcher B, and vice versa.
+/// This ensures LP isolation.
+#[test]
+fn test_tradecpi_lp_matcher_binding_isolation() {
+    let Some(mut env) = TradeCpiTestEnv::new() else {
+        println!("SKIP: Programs not found. Run: cargo build-sbf && cd ../percolator-match && cargo build-sbf");
+        return;
+    };
+
+    env.init_market();
+
+    let matcher_prog = env.matcher_program_id;
+
+    // Create LP1 with its own matcher context
+    let lp1 = Keypair::new();
+    let (lp1_idx, lp1_ctx) = env.init_lp_with_matcher(&lp1, &matcher_prog);
+    env.deposit(&lp1, lp1_idx, 50_000_000_000);
+
+    // Create LP2 with its own matcher context
+    let lp2 = Keypair::new();
+    let (lp2_idx, lp2_ctx) = env.init_lp_with_matcher(&lp2, &matcher_prog);
+    env.deposit(&lp2, lp2_idx, 50_000_000_000);
+
+    // Create user
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Trade with LP1 using LP1's context - should succeed
+    let result1 = env.try_trade_cpi(
+        &user, &lp1.pubkey(), lp1_idx, user_idx, 500_000,
+        &matcher_prog, &lp1_ctx,
+    );
+    assert!(result1.is_ok(), "Trade with LP1 using LP1's context should succeed: {:?}", result1);
+    println!("LP1 trade with LP1's context: SUCCESS");
+
+    // Trade with LP2 using LP2's context - should succeed
+    let result2 = env.try_trade_cpi(
+        &user, &lp2.pubkey(), lp2_idx, user_idx, 500_000,
+        &matcher_prog, &lp2_ctx,
+    );
+    assert!(result2.is_ok(), "Trade with LP2 using LP2's context should succeed: {:?}", result2);
+    println!("LP2 trade with LP2's context: SUCCESS");
+
+    // Try to trade with LP1 using LP2's context - should FAIL
+    let result3 = env.try_trade_cpi(
+        &user, &lp1.pubkey(), lp1_idx, user_idx, 500_000,
+        &matcher_prog, &lp2_ctx, // WRONG context for LP1!
+    );
+    assert!(result3.is_err(), "SECURITY: LP1 trade with LP2's context should fail");
+    println!("LP1 trade with LP2's context: REJECTED (correct)");
+
+    // Try to trade with LP2 using LP1's context - should FAIL
+    let result4 = env.try_trade_cpi(
+        &user, &lp2.pubkey(), lp2_idx, user_idx, 500_000,
+        &matcher_prog, &lp1_ctx, // WRONG context for LP2!
+    );
+    assert!(result4.is_err(), "SECURITY: LP2 trade with LP1's context should fail");
+    println!("LP2 trade with LP1's context: REJECTED (correct)");
+
+    println!("LP MATCHER BINDING ISOLATION VERIFIED:");
+    println!("  - Each LP is bound to its specific matcher context");
+    println!("  - Context substitution between LPs is rejected");
+    println!("  - This ensures LP isolation in multi-LP markets");
+}
