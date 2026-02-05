@@ -751,6 +751,50 @@ Inventory limits:
 - Proper direction handling (LP takes opposite side)
 - Boundary conditions handled correctly
 
+## Continued Session 5 Exploration (Part 10)
+
+#### 56. Threshold EWMA Auto-Update ✓
+**Location**: `percolator-prog/src/percolator.rs:2772-2808`
+**Status**: SECURE
+
+- Rate-limited: `slot >= last_thr_slot + thresh_update_interval_slots`
+- EWMA smoothing: `alpha * target + (1 - alpha) * current`
+- Bug #6 fix: Full jump allowed when `current == 0`
+- Step clamp prevents rapid changes
+- Final clamp ensures `thresh_min <= result <= thresh_max`
+- Overflow safe: all u128 math within bounds
+
+#### 57. I128/U128 BPF-Safe Types (Detailed) ✓
+**Location**: `percolator/src/i128.rs`
+**Status**: SECURE (with note)
+
+- All Add/Sub/Mul ops use saturating_* (no panic/wrap)
+- Checked ops return Option
+- Note: Neg trait uses raw negation (line 911: `-self.get()`)
+  - Could panic on i128::MIN, but NEVER USED in codebase
+  - Kani version uses saturating_neg
+  - Not a practical issue since Neg isn't invoked
+
+#### 58. LP Risk Aggregates ✓
+**Location**: `percolator-prog/src/percolator.rs:102-167`
+**Status**: SECURE
+
+LpRiskState helpers:
+- O(1) risk calculation: `max_abs + sum_abs/8`
+- Conservative `would_increase_risk`: keeps old max when LP shrinks
+- Uses saturating arithmetic throughout
+
+compute_inventory_funding_bps_per_slot:
+- Zero checks for all divisors
+- Rate capped at ±10,000 bps/slot
+- Policy clamp per config
+
+## Session 5 Final Summary (Part 10)
+
+**Total Areas Verified This Session**: 58
+**New Vulnerabilities Found**: 0
+**All 57 Integration Tests**: PASS
+
 ## Known Open Issue
 
 **Bug #9**: Hyperp index smoothing bypass (clamp_toward_with_dt returns mark when dt=0)
