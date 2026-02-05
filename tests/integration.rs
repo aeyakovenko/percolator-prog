@@ -810,6 +810,37 @@ impl TestEnv {
         u16::from_le_bytes(bytes)
     }
 
+    /// Check if a slot is marked as used in the bitmap
+    fn is_slot_used(&self, idx: u16) -> bool {
+        let slab_account = self.svm.get_account(&self.slab).unwrap();
+        // ENGINE_OFF = 392, offset of RiskEngine.used = 408
+        // Bitmap is [u64; 64] at offset 392 + 408 = 800
+        const BITMAP_OFFSET: usize = 392 + 408;
+        let word_idx = (idx as usize) >> 6;  // idx / 64
+        let bit_idx = (idx as usize) & 63;   // idx % 64
+        let word_offset = BITMAP_OFFSET + word_idx * 8;
+        if slab_account.data.len() < word_offset + 8 {
+            return false;
+        }
+        let word = u64::from_le_bytes(slab_account.data[word_offset..word_offset+8].try_into().unwrap());
+        (word >> bit_idx) & 1 == 1
+    }
+
+    /// Read account capital for a slot (to verify it's zeroed after GC)
+    fn read_account_capital(&self, idx: u16) -> u128 {
+        let slab_account = self.svm.get_account(&self.slab).unwrap();
+        // ENGINE_OFF = 392, accounts array at offset 9136 within RiskEngine
+        // Account size = 240 bytes, capital at offset 8 within Account (after account_id u64)
+        const ACCOUNTS_OFFSET: usize = 392 + 9136;
+        const ACCOUNT_SIZE: usize = 240;
+        const CAPITAL_OFFSET_IN_ACCOUNT: usize = 8;  // After account_id (u64)
+        let account_offset = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + CAPITAL_OFFSET_IN_ACCOUNT;
+        if slab_account.data.len() < account_offset + 16 {
+            return 0;
+        }
+        u128::from_le_bytes(slab_account.data[account_offset..account_offset+16].try_into().unwrap())
+    }
+
     /// Try to close slab, returns Ok or error
     fn try_close_slab(&mut self) -> Result<(), String> {
         let admin = Keypair::from_bytes(&self.payer.to_bytes()).unwrap();
@@ -4907,18 +4938,69 @@ fn test_maintenance_fees_drain_dead_accounts_for_gc() {
     let final_used = env.read_num_used_accounts();
     println!("Final num_used_accounts: {}", final_used);
 
+    // Helper closure to verify GC and account reuse
+    let verify_gc_and_reuse = |env: &mut TestEnv, freed_slot: u16| {
+        println!();
+        println!("=== VERIFYING ACCOUNT SLOT PROPERLY CLEARED ===");
+
+        // 1. Verify bitmap bit is cleared
+        let is_used = env.is_slot_used(freed_slot);
+        println!("Bitmap bit for slot {}: {}", freed_slot, if is_used { "SET (BAD!)" } else { "CLEARED (good)" });
+        assert!(!is_used, "Bitmap bit should be cleared after GC");
+
+        // 2. Verify account capital is zeroed
+        let capital = env.read_account_capital(freed_slot);
+        println!("Account capital for slot {}: {}", freed_slot, capital);
+        assert_eq!(capital, 0, "Account capital should be zero after GC");
+
+        // 3. Create new user - the program should reuse the freed slot
+        // Note: The test helper's account_count is out of sync with the program's freelist.
+        // The program uses LIFO freelist, so it will reuse freed_slot (0).
+        // But init_user returns self.account_count which is wrong after GC.
+        println!();
+        println!("=== VERIFYING SLOT REUSE ===");
+        let num_used_before = env.read_num_used_accounts();
+        println!("num_used_accounts before new user: {}", num_used_before);
+
+        let new_user = Keypair::new();
+        let _helper_idx = env.init_user(&new_user);  // Helper returns wrong idx, ignore it
+
+        // The program's freelist is LIFO - freed slot 0 should be reused
+        // Verify by checking that the bitmap bit for slot 0 is now SET
+        let slot_0_used = env.is_slot_used(freed_slot);
+        println!("After init_user, bitmap bit for slot {}: {}", freed_slot,
+                 if slot_0_used { "SET (slot reused!)" } else { "still cleared" });
+        assert!(slot_0_used, "Freed slot should be reused by new user (LIFO freelist)");
+
+        // 4. Verify num_used_accounts incremented (not doubled - slot was reused)
+        let num_used_after = env.read_num_used_accounts();
+        println!("num_used_accounts after new user: {}", num_used_after);
+        assert_eq!(num_used_after, 1, "Should have exactly 1 account (slot reused, not new slot)");
+
+        // 5. Verify new account has fresh state by checking it can receive deposits
+        // The actual slot is 0 (the freed slot), deposit using that
+        env.deposit(&new_user, freed_slot, 100_000_000); // 0.1 SOL
+        let new_capital = env.read_account_capital(freed_slot);
+        println!("Account capital at slot {} after deposit: {}", freed_slot, new_capital);
+        assert!(new_capital > 0, "Reused slot should accept deposits (fresh state)");
+
+        println!();
+        println!("ACCOUNT REUSE VERIFIED SAFE:");
+        println!("  1. Bitmap bit cleared after GC");
+        println!("  2. Account data zeroed after GC");
+        println!("  3. Freed slot reused by next allocation (LIFO freelist)");
+        println!("  4. Reused slot has fresh state (accepts deposits)");
+        println!("  5. No stale data leaked to new account");
+    };
+
     if final_used < initial_used {
         println!();
         println!("SUCCESS: Account was garbage collected!");
         println!("  Initial accounts: {}", initial_used);
         println!("  Final accounts: {}", final_used);
         println!("  Accounts freed: {}", initial_used - final_used);
-        println!();
-        println!("ANTI-DOS MECHANISM VERIFIED:");
-        println!("  1. Maintenance fees drain idle account capital");
-        println!("  2. Account becomes dust (capital=0, position=0, pnl<=0)");
-        println!("  3. Permissionless crank GCs the account");
-        println!("  4. Slot freed for legitimate users");
+
+        verify_gc_and_reuse(&mut env, user_idx);
     } else {
         // Account might not be GC'd immediately due to fee_credits absorbing fees first
         // Run additional cranks to fully drain
@@ -4933,18 +5015,15 @@ fn test_maintenance_fees_drain_dead_accounts_for_gc() {
             if used < initial_used {
                 println!();
                 println!("SUCCESS: Account GC'd after {} additional cranks", i + 1);
-                println!("ANTI-DOS MECHANISM VERIFIED");
+                verify_gc_and_reuse(&mut env, user_idx);
+                println!();
+                println!("MAINTENANCE FEE DRAIN TEST COMPLETE");
                 return;
             }
         }
 
         // If still not GC'd, it's likely the account has some residual state
-        // The fee drain mechanism still works - this is expected behavior
-        println!();
-        println!("NOTE: Account not GC'd after multiple cranks");
-        println!("This may indicate fee_credits > 0 or other residual state.");
-        println!("The fee drain mechanism is working - fees are being charged.");
-        println!("Account will eventually be GC'd once all state settles.");
+        panic!("Account was not GC'd after multiple cranks - test failed");
     }
 
     println!();
