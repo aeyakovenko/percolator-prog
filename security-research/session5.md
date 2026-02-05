@@ -1554,8 +1554,32 @@ Execution safety:
 - Total bps clamped to max_total_bps
 - Inventory limits enforced
 
+#### 118. Matcher Program Entry Points ✓
+**Location**: `percolator-match/src/lib.rs`
+**Status**: SECURE
+
+`process_matcher_call`:
+- Verifies context owned by matcher program
+- vAMM mode: LP PDA must be signer
+- Legacy mode: LP PDA must be signer if initialized
+- Stored PDA verified to match signer
+
+`MatcherCall::parse`:
+- Validates instruction data length >= 67
+- Validates tag == 0
+- Verifies reserved bytes are all zero
+
+`MatcherReturn::write_to`:
+- Buffer length check before write
+- Fixed 64-byte return format
+
+Instruction routing:
+- Tag 0: Matcher call (with signature check)
+- Tag 1: Legacy init (no signature needed for PDA storage)
+- Tag 2: vAMM init (with proper validation)
+
 ## Session 7 Summary (Updated)
 
-**Total Areas Verified**: 117
+**Total Areas Verified**: 118
 **New Vulnerabilities Found**: 0
 **All 57 Integration Tests**: PASS
