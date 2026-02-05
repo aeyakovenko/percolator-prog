@@ -1159,11 +1159,34 @@ The Percolator codebase demonstrates excellent security practices across all rev
 - Sanity clamp to ±10,000 bps/slot
 - Policy clamp per config
 
+#### 89. Error Handling Patterns ✓
+**Location**: Multiple files
+**Status**: SECURE
+
+- All `.unwrap()` calls preceded by length checks
+- No `.ok()` discarding Results
+- Proper `?` propagation throughout
+- All error paths return specific error codes
+- Solana atomicity relied upon (Err → rollback)
+
+#### 90. Proptest Fuzzing Suite ✓
+**Location**: `percolator/tests/fuzzing.rs`
+**Status**: 20/21 tests pass (1 ignored = extended)
+
+Verified invariants:
+- Conservation: vault >= C_tot + sum(settled_pnl) + insurance
+- Aggregate consistency: c_tot, pnl_pos_tot match account sums
+- Withdrawable monotone in slot
+- Funding zero-sum (bounded)
+- Touch/settle idempotent
+- Add fails at capacity
+
 ## Session 6 Summary
 
-**Total Areas Verified This Session**: 88
+**Total Areas Verified This Session**: 90
 **Bug #9 Fixed**: Yes (clamp_toward_with_dt now returns index when dt=0)
 **New Vulnerabilities Found**: 0
 **All 57 Integration Tests**: PASS
+**All 20 Proptest Fuzzing Tests**: PASS
 
 The codebase continues to demonstrate robust security practices. All identified areas have been verified as secure, with comprehensive input validation, overflow protection, and proper authorization checks throughout.
