@@ -898,12 +898,45 @@ State machine fuzzer:
 - 21 proptest tests pass (500+ cases each)
 - Deterministic fuzzer with 500 seeds × 200 steps
 
-## Session 5 Final Summary (Part 14)
+## Session 5 Final Summary
 
 **Total Areas Verified This Session**: 66
 **New Vulnerabilities Found**: 0
 **All 57 Integration Tests**: PASS
-**Proptest Suite**: 21 tests pass
+**Proptest Suite**: 21 tests pass (500+ cases each)
+**Kani Proofs**: 271 verified
+
+### Coverage Summary
+
+**Wrapper Program (percolator-prog/src/percolator.rs)**:
+- All 19 instructions reviewed
+- Instruction parsing validated (length checks)
+- State serialization (bytemuck) verified
+- Account validation patterns confirmed
+- Feature flags documented (devnet, unsafe_close, test)
+
+**Engine Crate (percolator/src/percolator.rs)**:
+- All core functions reviewed (execute_trade, withdraw, deposit, etc.)
+- Haircut, warmup, funding calculations verified
+- Conservation invariant enforcement confirmed
+- Aggregate maintenance validated
+- BPF-safe types (I128/U128) verified
+
+**Matcher Program (percolator-match)**:
+- lib.rs: Entry point, account validation, signature checks
+- vamm.rs: vAMM pricing, overflow protection, inventory limits
+
+### Conclusion
+
+The codebase demonstrates excellent security practices:
+1. Comprehensive input validation
+2. Saturating/checked arithmetic throughout
+3. Proper authorization checks
+4. State consistency via aggregates
+5. Formal verification with Kani
+6. Extensive fuzzing coverage
+
+**Only known issue**: Bug #9 (Hyperp index smoothing bypass when dt=0)
 
 ## Known Open Issue
 
