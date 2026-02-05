@@ -811,9 +811,38 @@ compute_inventory_funding_bps_per_slot:
 - Uses actual exec_size from matcher (not requested)
 - Returns EngineRiskReductionOnlyMode error when blocked
 
-## Session 5 Final Summary (Part 11)
+## Continued Session 5 Exploration (Part 12)
 
-**Total Areas Verified This Session**: 60
+#### 61. OI Tracking ✓
+**Location**: `percolator/src/percolator.rs:3045-3053`
+**Status**: SECURE
+
+- Uses saturating_abs_i128 for safe absolute value
+- Delta-based update: new_oi - old_oi or old_oi - new_oi
+- saturating_add/saturating_sub prevents overflow
+- Consistent with oracle_close_position and partial close
+
+#### 62. Clock Sysvar Usage ✓
+**Location**: Multiple (lines 2357, 2508, 2653, 2992, etc.)
+**Status**: SECURE
+
+- Uses Clock::from_account_info() which validates sysvar
+- Slot used for: timing guards, funding accrual, threshold updates
+- Unix timestamp used for: oracle staleness checks
+
+#### 63. Unwrap Safety ✓
+**Location**: `percolator-prog/src/percolator.rs` (multiple)
+**Status**: SECURE
+
+All `.unwrap()` calls are preceded by length checks:
+- read_* functions: `if input.len() < N` check before split_at
+- read_matcher_return: `if ctx.len() < 64` check first
+- State read functions: slab_guard ensures SLAB_LEN
+- Oracle parsing: length checks before field access
+
+## Session 5 Final Summary (Part 12)
+
+**Total Areas Verified This Session**: 63
 **New Vulnerabilities Found**: 0
 **All 57 Integration Tests**: PASS
 
