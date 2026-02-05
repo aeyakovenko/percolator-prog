@@ -2041,3 +2041,185 @@ Analysis:
 **New Vulnerabilities Found**: 0
 **State Consistency**: Protected by Solana atomicity
 **Integer Boundaries**: Comprehensive guards in place
+
+---
+
+## Session 10 (2026-02-05 continued)
+
+### LP-Specific Vulnerability Analysis
+
+#### 146. LP Matcher Binding ✓
+**Location**: `percolator-prog/src/percolator.rs:2987-2995`
+**Status**: SECURE (Kani-proven)
+
+Defenses:
+- Immutable registration at InitLP (program + context stored)
+- Byte-for-byte comparison via `matcher_identity_ok`
+- Dual verification prevents substitution attacks
+
+**Risk**: None (cryptographically verified binding)
+
+#### 147. LP Inventory Manipulation ✓
+**Location**: `percolator-prog/src/percolator.rs:3072-3094`
+**Status**: SECURE
+
+Defenses:
+- Risk state computed O(1) via aggregates
+- Conservative dual metrics (max_abs + sum_abs/8)
+- Gate activation Kani-proven
+- Threshold admin-controlled
+
+**Risk**: None (attacker cannot force gate bypass)
+
+#### 148. LP PDA Security ✓
+**Location**: `percolator-prog/src/percolator.rs:2934-2952`
+**Status**: SECURE (Kani-proven)
+
+Validation chain:
+- Deterministic derivation: `["lp", slab_key, lp_idx]`
+- Shape validation: system-owned, zero data, zero lamports
+- Solana invoke_signed validates seeds at runtime
+
+**Risk**: None (unforgeable PDA)
+
+#### 149. LP Aggregate Maintenance ✓
+**Location**: `percolator/src/percolator.rs:3055-3070`
+**Status**: SECURE
+
+Updates:
+- net_lp_pos: delta-based (old → new)
+- lp_sum_abs: delta of absolute values
+- lp_max_abs: monotone increase only
+
+All paths covered:
+- execute_trade, oracle_close_position, partial_close, force_realize
+
+**Risk**: None (consistent updates across all code paths)
+
+#### 150. Risk Reduction Gate ✓
+**Location**: `percolator-prog/src/percolator.rs:3074-3094`
+**Status**: SECURE
+
+Protections:
+- Post-CPI check uses actual exec_size
+- threshold > 0 guard prevents activation with threshold=0
+- Kani-proven gate_active function
+
+**Risk**: None (cannot bypass gate checks)
+
+#### 151. LP Capital Protection ✓
+**Location**: `percolator/src/percolator.rs:2970-3009`
+**Status**: SECURE
+
+Margin enforcement:
+- Pre-trade margin check before position commit
+- Dual levels: initial (10%) for risk-increasing, maintenance (5%) for risk-reducing
+- Position flips use initial margin
+- Haircut applied before margin calculation
+- Fee debt subtracted from equity
+
+**Risk**: None (comprehensive margin enforcement)
+
+### Timing and Slot Attack Analysis
+
+#### 152. Same-Slot Double-Crank (Bug #9) ✓
+**Location**: `percolator-prog/src/percolator.rs:1938-1953`
+**Status**: FIXED
+
+Original vulnerability:
+- dt=0 returned mark price directly
+- Allowed 2x circuit breaker movement per slot
+
+Fix:
+- dt=0 or cap=0 returns index (no movement)
+- Same-slot cranks are now no-ops for index smoothing
+
+**Risk**: None (fixed)
+
+#### 153. Stale State Guards ✓
+**Location**: `percolator/src/percolator.rs:1433-1450`
+**Status**: SECURE
+
+Guards:
+- `require_fresh_crank`: blocks trades with stale last_crank_slot
+- `require_recent_full_sweep`: blocks risk-increasing trades with stale sweep
+- Both use saturating_sub to prevent underflow
+
+Usage:
+- execute_trade (lines 2706, 2708)
+- withdraw (lines 2427, 2429)
+
+**Risk**: None (double timing gate prevents exploitation)
+
+#### 154. Funding Anti-Retroactivity ✓
+**Location**: `percolator/src/percolator.rs:2106-2162`
+**Status**: SECURE
+
+Design:
+- Rate from PREVIOUS interval used for accrual
+- New rate set AFTER accrual completes
+- Atomic within single transaction
+
+**Risk**: None (architectural prevention)
+
+#### 155. Funding Rate Clamping ✓
+**Location**: Multiple
+**Status**: SECURE
+
+Triple-layer clamping:
+1. Policy clamp: `funding_max_bps_per_slot` (default 5)
+2. Sanity clamp: ±10,000 bps/slot
+3. Engine execution guard: rejects rate > hard cap
+
+**Risk**: None (extreme rates impossible)
+
+#### 156. Circuit Breaker Tracking ✓
+**Location**: `percolator-prog/src/percolator.rs:1897-1917`
+**Status**: SECURE
+
+Per-read updates:
+- `last_effective_price_e6` updated after each clamp
+- Subsequent reads in same slot use new baseline
+- No cascade effect possible
+
+**Risk**: None (proper per-read tracking)
+
+#### 157. Warmup Period Safety ✓
+**Location**: `percolator/src/percolator.rs:2055-2094`
+**Status**: SECURE
+
+Protections:
+- Slope minimum = 1 when avail > 0 (prevents zero-slope zombie)
+- Haircut applied BEFORE capital increase
+- Solana slots not attacker-controllable
+
+**Risk**: None (correct warmup mechanics)
+
+### LP Security Summary
+
+| Attack Vector | Status | Defense |
+|---------------|--------|---------|
+| Wrong matcher binding | SECURE | Byte-for-byte + Kani-proven |
+| Inventory manipulation | SECURE | O(1) aggregates + dual metrics |
+| PDA spoofing | SECURE | Deterministic + shape validation |
+| Aggregate desync | SECURE | Atomic updates in all paths |
+| Gate bypass | SECURE | Post-CPI + Kani-proven |
+| Capital drain | SECURE | Pre-trade margin + haircut |
+
+### Timing Attack Summary
+
+| Attack Vector | Status | Defense |
+|---------------|--------|---------|
+| Same-slot double-crank | FIXED | dt=0 returns index |
+| Stale state trade | SECURE | require_fresh_crank |
+| Funding retroactivity | SECURE | Anti-retroactivity design |
+| Rate manipulation | SECURE | Triple-layer clamp |
+| Circuit breaker bypass | SECURE | Per-read tracking |
+| Warmup gaming | SECURE | Slope minimum + haircut |
+
+## Session 10 Summary
+
+**Total Areas Verified**: 157
+**New Vulnerabilities Found**: 0
+**LP Security**: All 6 attack vectors defended
+**Timing Security**: All 6 attack vectors defended
