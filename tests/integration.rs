@@ -2011,11 +2011,15 @@ fn test_matcher_init_vamm_passive_mode() {
     };
     svm.set_account(ctx_pubkey, ctx_account).unwrap();
 
+    // Create LP PDA placeholder (stored in context for signature verification)
+    let lp_pda = Pubkey::new_unique();
+
     // Initialize in Passive mode
     let ix = Instruction {
         program_id: matcher_program_id,
         accounts: vec![
-            AccountMeta::new(ctx_pubkey, false),
+            AccountMeta::new_readonly(lp_pda, false),  // LP PDA
+            AccountMeta::new(ctx_pubkey, false),       // Context account
         ],
         data: encode_init_vamm(
             MatcherMode::Passive,
@@ -2079,9 +2083,13 @@ fn test_matcher_call_after_init() {
     svm.set_account(ctx_pubkey, ctx_account).unwrap();
 
     // Initialize in Passive mode: 10 bps spread + 5 bps fee = 15 bps total
+    // Use LP pubkey as the LP PDA so later calls can sign with LP key
     let init_ix = Instruction {
         program_id: matcher_program_id,
-        accounts: vec![AccountMeta::new(ctx_pubkey, false)],
+        accounts: vec![
+            AccountMeta::new_readonly(lp.pubkey(), false),  // LP PDA
+            AccountMeta::new(ctx_pubkey, false),             // Context account
+        ],
         data: encode_init_vamm(
             MatcherMode::Passive,
             5, 10, 200, 0, 0,
@@ -2173,10 +2181,16 @@ fn test_matcher_rejects_double_init() {
     };
     svm.set_account(ctx_pubkey, ctx_account).unwrap();
 
+    // Create LP PDA placeholder
+    let lp_pda = Pubkey::new_unique();
+
     // First init succeeds
     let ix1 = Instruction {
         program_id: matcher_program_id,
-        accounts: vec![AccountMeta::new(ctx_pubkey, false)],
+        accounts: vec![
+            AccountMeta::new_readonly(lp_pda, false),  // LP PDA
+            AccountMeta::new(ctx_pubkey, false),       // Context account
+        ],
         data: encode_init_vamm(MatcherMode::Passive, 5, 10, 200, 0, 0, 1_000_000_000_000, 0),
     };
 
@@ -2192,7 +2206,10 @@ fn test_matcher_rejects_double_init() {
     // Second init should fail
     let ix2 = Instruction {
         program_id: matcher_program_id,
-        accounts: vec![AccountMeta::new(ctx_pubkey, false)],
+        accounts: vec![
+            AccountMeta::new_readonly(lp_pda, false),  // LP PDA
+            AccountMeta::new(ctx_pubkey, false),       // Context account
+        ],
         data: encode_init_vamm(MatcherMode::Passive, 5, 10, 200, 0, 0, 1_000_000_000_000, 0),
     };
 
@@ -2244,9 +2261,13 @@ fn test_matcher_vamm_mode_with_impact() {
     // Liquidity: 10B notional_e6, impact_k: 50 bps at full liquidity
     // Trade notional: 1B notional_e6 = 10% of liquidity
     // Impact = 50 * (1B / 10B) = 50 * 0.1 = 5 bps
+    // Use LP pubkey as the LP PDA so later calls can sign with LP key
     let init_ix = Instruction {
         program_id: matcher_program_id,
-        accounts: vec![AccountMeta::new(ctx_pubkey, false)],
+        accounts: vec![
+            AccountMeta::new_readonly(lp.pubkey(), false),  // LP PDA
+            AccountMeta::new(ctx_pubkey, false),             // Context account
+        ],
         data: encode_init_vamm(
             MatcherMode::Vamm,
             5,      // 0.05% trading fee
@@ -3732,6 +3753,13 @@ impl TradeCpiTestEnv {
         self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
         let ata = self.create_ata(&owner.pubkey(), 0);
 
+        // Derive the LP PDA that will be used later (must match percolator derivation)
+        let lp_bytes = idx.to_le_bytes();
+        let (lp_pda, _) = Pubkey::find_program_address(
+            &[b"lp", self.slab.as_ref(), &lp_bytes],
+            &self.program_id
+        );
+
         // Create matcher context owned by matcher program
         let ctx = Pubkey::new_unique();
         self.svm.set_account(ctx, Account {
@@ -3742,10 +3770,13 @@ impl TradeCpiTestEnv {
             rent_epoch: 0,
         }).unwrap();
 
-        // Initialize the matcher context
+        // Initialize the matcher context with LP PDA
         let init_ix = Instruction {
             program_id: *matcher_prog,
-            accounts: vec![AccountMeta::new(ctx, false)],
+            accounts: vec![
+                AccountMeta::new_readonly(lp_pda, false),  // LP PDA (stored for signature verification)
+                AccountMeta::new(ctx, false),              // Context account
+            ],
             data: encode_init_vamm(
                 MatcherMode::Passive,
                 5, 10, 200, 0, 0,
@@ -4067,10 +4098,16 @@ fn test_tradecpi_rejects_wrong_matcher_context() {
         rent_epoch: 0,
     }).unwrap();
 
+    // Use a different LP PDA for the wrong context
+    let wrong_lp_pda = Pubkey::new_unique();
+
     // Initialize the wrong context (so it passes shape validation)
     let init_ix = Instruction {
         program_id: matcher_prog,
-        accounts: vec![AccountMeta::new(wrong_ctx, false)],
+        accounts: vec![
+            AccountMeta::new_readonly(wrong_lp_pda, false),  // Different LP PDA
+            AccountMeta::new(wrong_ctx, false),
+        ],
         data: encode_init_vamm(MatcherMode::Passive, 5, 10, 200, 0, 0, 1_000_000_000_000, 0),
     };
     let tx = Transaction::new_signed_with_payer(
