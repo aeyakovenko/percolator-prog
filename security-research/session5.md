@@ -840,9 +840,40 @@ All `.unwrap()` calls are preceded by length checks:
 - State read functions: slab_guard ensures SLAB_LEN
 - Oracle parsing: length checks before field access
 
-## Session 5 Final Summary (Part 12)
+## Continued Session 5 Exploration (Part 13)
 
-**Total Areas Verified This Session**: 63
+#### 64. Feature Flags Analysis ✓
+**Location**: `Cargo.toml`, `percolator-prog/src/percolator.rs`
+**Status**: DOCUMENTED (DANGEROUS)
+
+**devnet feature**:
+- Disables oracle staleness checks (line 1664)
+- Disables oracle confidence checks (line 1677)
+- NEVER use on mainnet
+
+**unsafe_close feature**:
+- Skips ALL CloseSlab validation (line 3338)
+- Skips admin check, balance checks, zeroing
+- NEVER deploy with this enabled
+
+**test/cu-audit features**:
+- test: Enables mock token transfers
+- cu-audit: Adds compute unit logging
+- Both safe for development
+
+#### 65. Account Validation Pattern ✓
+**Location**: Multiple (verify module, accounts module)
+**Status**: SECURE
+
+Consistent pattern across all instructions:
+- expect_signer: `ai.is_signer` check
+- expect_writable: `ai.is_writable` check
+- Owner validation: Slab (program), vault (spl_token), oracle (Pyth/CL)
+- LP PDA: system-owned, zero data, zero lamports
+
+## Session 5 Final Summary (Part 13)
+
+**Total Areas Verified This Session**: 65
 **New Vulnerabilities Found**: 0
 **All 57 Integration Tests**: PASS
 
