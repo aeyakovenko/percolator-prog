@@ -763,6 +763,153 @@ The premarket resolution feature is implemented securely with:
 3. **Monitor CU in Production**: Actual BPF CU consumption should be measured
    on devnet to confirm estimates.
 
-### Open Issues: None
+### Open Issues: 1 CRITICAL
 
-All identified attack vectors have adequate mitigations.
+---
+
+## H. CRITICAL VULNERABILITY: Stale `pnl_pos_tot` After Force-Close
+
+### H1. Root Cause
+
+The force-close logic in KeeperCrank (lines 2726-2730) directly modifies `acc.pnl` without
+using the `set_pnl()` helper:
+
+```rust
+// VULNERABLE CODE (src/percolator.rs:2726-2730):
+let old_pnl = acc.pnl.get();
+acc.pnl = percolator::I128::new(old_pnl.saturating_add(pnl_delta));
+acc.position_size = percolator::I128::ZERO;
+```
+
+The `set_pnl()` helper (percolator/src/percolator.rs:772) maintains the `pnl_pos_tot`
+aggregate which tracks the sum of all positive PnL values:
+
+```rust
+pub fn set_pnl(&mut self, idx: usize, new_pnl: i128) {
+    let old = self.accounts[idx].pnl.get();
+    let old_pos = if old > 0 { old as u128 } else { 0 };
+    let new_pos = if new_pnl > 0 { new_pnl as u128 } else { 0 };
+    self.pnl_pos_tot = U128::new(
+        self.pnl_pos_tot.get().saturating_add(new_pos).saturating_sub(old_pos),
+    );
+    self.accounts[idx].pnl = I128::new(new_pnl);
+}
+```
+
+By bypassing `set_pnl()`, force-close leaves `pnl_pos_tot` stale after settlement.
+
+### H2. Impact: Value Extraction via Incorrect Haircut
+
+The `haircut_ratio()` function uses `pnl_pos_tot` to compute withdrawal limits:
+
+```rust
+pub fn haircut_ratio(&self) -> (u128, u128) {
+    let pnl_pos_tot = self.pnl_pos_tot.get();
+    if pnl_pos_tot == 0 {
+        return (1, 1);  // No haircut when pnl_pos_tot = 0
+    }
+    let residual = vault - c_tot - insurance;
+    let h_num = min(residual, pnl_pos_tot);
+    (h_num, pnl_pos_tot)  // haircut = h_num / pnl_pos_tot
+}
+```
+
+**Attack Scenario:**
+
+| State | Before Resolution | After Force-Close |
+|-------|-------------------|-------------------|
+| User A pnl | 0 | +500 (winner) |
+| User B pnl | 0 | -500 (loser) |
+| pnl_pos_tot | 0 | **0 (STALE!)** |
+| Actual pos PnL sum | 0 | 500 |
+
+When pnl_pos_tot = 0, `haircut_ratio()` returns (1, 1) meaning NO haircut is applied.
+
+**Exploitation:**
+1. Market resolves with imbalanced positions (common in prediction markets)
+2. Force-close cranks complete, pnl_pos_tot stays at pre-resolution value
+3. If residual < actual positive PnL sum, there's not enough to pay all winners
+4. But haircut_ratio incorrectly returns (1, 1) due to stale pnl_pos_tot
+5. **First withdrawers extract full PnL value**
+6. **Later withdrawers find vault depleted**
+
+### H3. Severity Assessment
+
+| Factor | Assessment |
+|--------|------------|
+| **Exploitability** | HIGH - Any user can withdraw after force-close |
+| **Impact** | HIGH - Direct fund loss for later withdrawers |
+| **Likelihood** | HIGH - Occurs in ANY imbalanced market resolution |
+| **CVSS Estimate** | 8.5+ (High) |
+
+### H4. Proof of Concept
+
+```rust
+#[test]
+fn exploit_stale_pnl_pos_tot() {
+    // Setup: Imbalanced market - 2x more longs than shorts
+    // User A: +2000 position at entry 500,000
+    // User B: -1000 position at entry 500,000
+    // LP covers difference
+
+    // Resolution at 1,000,000 (YES outcome):
+    // User A PnL: +2000 * 500,000 / 1e6 = +1000
+    // User B PnL: -1000 * 500,000 / 1e6 = -500
+    // LP PnL: -1000 * 500,000 / 1e6 = -500
+    // Total positive PnL = 1000, residual might be < 1000
+
+    // pnl_pos_tot stays at pre-resolution value (likely 0)
+    // haircut_ratio returns (1, 1)
+    // User A withdraws full 1000 PnL
+    // Vault depleted, other users stuck
+}
+```
+
+### H5. Recommended Fix
+
+**Option A: Use set_pnl() in force-close (Preferred)**
+
+```rust
+// In force-close loop:
+if pos != 0 {
+    let entry = acc.entry_price as i128;
+    let settle = settlement_price as i128;
+    let pnl_delta = pos.saturating_mul(settle.saturating_sub(entry)) / 1_000_000i128;
+
+    // FIX: Use set_pnl to maintain pnl_pos_tot aggregate
+    let old_pnl = acc.pnl.get();
+    let new_pnl = old_pnl.saturating_add(pnl_delta);
+    engine.set_pnl(idx as usize, new_pnl);  // Maintains pnl_pos_tot
+
+    acc.position_size = percolator::I128::ZERO;
+    acc.entry_price = 0;
+}
+```
+
+**Option B: Call recompute_aggregates() after all force-closes complete**
+
+```rust
+// After force-close loop completes (crank_cursor wraps to 0):
+if end >= MAX_ACCOUNTS as u16 {
+    engine.crank_cursor = 0;
+    engine.recompute_aggregates();  // O(n) but only once
+}
+```
+
+Option A is preferred because:
+- O(1) per account instead of O(n) final pass
+- Maintains invariant continuously
+- Consistent with how all other PnL modifications work
+
+### H6. Additional Stale Aggregates
+
+The following aggregates are also not updated during force-close:
+
+| Aggregate | Impact | Fix Needed |
+|-----------|--------|------------|
+| `total_open_interest` | Low - trading blocked | Optional |
+| `net_lp_pos` | Low - LP-specific | Optional |
+| `lp_sum_abs` | Low - LP-specific | Optional |
+| `lp_max_abs` | Low - LP-specific | Optional |
+
+Only `pnl_pos_tot` is critical because it affects user withdrawals.

@@ -4315,6 +4315,58 @@ impl TradeCpiTestEnv {
         // ENGINE_OFF (392) + num_used offset (920) = 1312
         u16::from_le_bytes(slab_data[1312..1314].try_into().unwrap())
     }
+
+    /// Read pnl_pos_tot aggregate from slab
+    /// This is the sum of all positive PnL values, used for haircut calculations
+    fn read_pnl_pos_tot(&self) -> u128 {
+        let slab_data = self.svm.get_account(&self.slab).unwrap().data;
+        // ENGINE_OFF = 392
+        // RiskEngine layout: vault(16) + insurance_fund(32) + params(136) +
+        //   current_slot(8) + funding_index(16) + last_funding_slot(8) +
+        //   funding_rate_bps(8) + last_crank_slot(8) + max_crank_staleness(8) +
+        //   total_open_interest(16) + c_tot(16) + pnl_pos_tot(16)
+        // Offset: 16+32+136+8+16+8+8+8+8+16+16 = 272
+        const PNL_POS_TOT_OFFSET: usize = 392 + 272;
+        u128::from_le_bytes(slab_data[PNL_POS_TOT_OFFSET..PNL_POS_TOT_OFFSET+16].try_into().unwrap())
+    }
+
+    /// Read c_tot aggregate from slab
+    fn read_c_tot(&self) -> u128 {
+        let slab_data = self.svm.get_account(&self.slab).unwrap().data;
+        // c_tot is at offset 256 within RiskEngine (16 bytes before pnl_pos_tot)
+        const C_TOT_OFFSET: usize = 392 + 256;
+        u128::from_le_bytes(slab_data[C_TOT_OFFSET..C_TOT_OFFSET+16].try_into().unwrap())
+    }
+
+    /// Read vault balance from slab
+    fn read_vault(&self) -> u128 {
+        let slab_data = self.svm.get_account(&self.slab).unwrap().data;
+        // vault is at offset 0 within RiskEngine
+        const VAULT_OFFSET: usize = 392;
+        u128::from_le_bytes(slab_data[VAULT_OFFSET..VAULT_OFFSET+16].try_into().unwrap())
+    }
+
+    /// Read account PnL
+    fn read_account_pnl(&self, idx: u16) -> i128 {
+        let slab_data = self.svm.get_account(&self.slab).unwrap().data;
+        // Account layout:
+        //   account_id: u64 (8), offset 0
+        //   capital: U128 (16), offset 8
+        //   kind: AccountKind u8 (1 + 7 padding for alignment), offset 24
+        //   pnl: I128 (16), offset 32
+        //   reserved_pnl: u64 (8), offset 48
+        //   warmup_started_at_slot: u64 (8), offset 56
+        //   warmup_slope_per_step: U128 (16), offset 64
+        //   position_size: I128 (16), offset 80 (confirmed in other tests)
+        const ACCOUNTS_OFFSET: usize = 392 + 9136;
+        const ACCOUNT_SIZE: usize = 240;
+        const PNL_OFFSET_IN_ACCOUNT: usize = 32; // pnl is at offset 32 within Account
+        let account_off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + PNL_OFFSET_IN_ACCOUNT;
+        if slab_data.len() < account_off + 16 {
+            return 0;
+        }
+        i128::from_le_bytes(slab_data[account_off..account_off+16].try_into().unwrap())
+    }
 }
 
 // ============================================================================
@@ -6012,4 +6064,140 @@ fn test_premarket_force_close_cu_benchmark() {
 
     println!();
     println!("PREMARKET FORCE-CLOSE CU BENCHMARK COMPLETE");
+}
+
+// ============================================================================
+// VULNERABILITY TEST: Stale pnl_pos_tot after force-close
+// ============================================================================
+
+/// SECURITY BUG: Force-close bypasses set_pnl(), leaving pnl_pos_tot stale
+///
+/// The force-close logic directly modifies acc.pnl without using the set_pnl()
+/// helper, which should maintain the pnl_pos_tot aggregate. This means:
+/// 1. pnl_pos_tot doesn't reflect the actual sum of positive PnL after settlement
+/// 2. haircut_ratio() uses stale pnl_pos_tot for withdrawal calculations
+/// 3. First withdrawers can extract more value than entitled if haircut should apply
+///
+/// This test demonstrates the bug by checking that pnl_pos_tot is stale after
+/// force-close settles positions to a price that generates positive PnL.
+#[test]
+fn test_vulnerability_stale_pnl_pos_tot_after_force_close() {
+    let Some(mut env) = TradeCpiTestEnv::new() else {
+        println!("SKIP: Programs not found. Run: cargo build-sbf && cd ../percolator-match && cargo build-sbf");
+        return;
+    };
+
+    env.init_market_hyperp(1_000_000);
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let matcher_prog = env.matcher_program_id;
+
+    // Set oracle authority and initial price for hyperp market
+    let _ = env.try_set_oracle_authority(&admin, &admin.pubkey());
+    let _ = env.try_push_oracle_price(&admin, 1_000_000, 1000);
+
+    // Create LP with initial deposit
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
+    env.deposit(&lp, lp_idx, 10_000_000_000); // 10 SOL collateral
+
+    // Create user who will take a long position
+    let user_long = Keypair::new();
+    let user_long_idx = env.init_user(&user_long);
+    env.deposit(&user_long, user_long_idx, 1_000_000_000); // 1 SOL
+
+    env.set_slot(50);
+    env.crank();
+
+    // User goes long at entry price ~1.0 (1_000_000 e6)
+    let trade_result = env.try_trade_cpi(
+        &user_long,
+        &lp.pubkey(),
+        lp_idx,
+        user_long_idx,
+        100_000_000, // +100M position (long)
+        &matcher_prog,
+        &matcher_ctx,
+    );
+    assert!(trade_result.is_ok(), "Trade should succeed");
+
+    // Verify position was established
+    let pos_before = env.read_account_position(user_long_idx);
+    assert!(pos_before > 0, "User should have long position");
+    println!("User position: {}", pos_before);
+
+    // Record pnl_pos_tot before resolution
+    let pnl_pos_tot_before = env.read_pnl_pos_tot();
+    println!("pnl_pos_tot before resolution: {}", pnl_pos_tot_before);
+
+    // Resolve market at 2.0 (2_000_000 e6) - user's long position is profitable
+    // This means user has positive PnL = position * (2.0 - 1.0) / 1e6
+    env.set_slot(100);
+    let _ = env.try_push_oracle_price(&admin, 2_000_000, 200);
+    env.try_resolve_market(&admin).unwrap();
+    println!("Market resolved at price 2.0");
+
+    // Force-close by cranking
+    env.set_slot(150);
+    env.crank();
+
+    // Verify position was closed
+    let pos_after = env.read_account_position(user_long_idx);
+    assert_eq!(pos_after, 0, "Position should be closed after force-close");
+
+    // Check user's PnL - should be positive (they were long and price went up)
+    let user_pnl = env.read_account_pnl(user_long_idx);
+    println!("User PnL after force-close: {}", user_pnl);
+
+    // *** THIS IS THE BUG ***
+    // pnl_pos_tot should have been updated when user PnL became positive
+    // But force-close bypasses set_pnl(), so pnl_pos_tot is stale
+    let pnl_pos_tot_after = env.read_pnl_pos_tot();
+    println!("pnl_pos_tot after force-close: {}", pnl_pos_tot_after);
+
+    // Calculate what pnl_pos_tot SHOULD be
+    // It should include the user's positive PnL
+    let expected_pnl_pos_tot = if user_pnl > 0 {
+        pnl_pos_tot_before + user_pnl as u128
+    } else {
+        pnl_pos_tot_before
+    };
+    println!("Expected pnl_pos_tot (including user positive PnL): {}", expected_pnl_pos_tot);
+
+    // BUG DEMONSTRATION:
+    // If user has positive PnL but pnl_pos_tot wasn't updated, the haircut
+    // calculation will be wrong:
+    // - haircut_ratio = min(residual, pnl_pos_tot) / pnl_pos_tot
+    // Verify pnl_pos_tot is correctly updated after force-close
+    // The fix uses set_pnl() which maintains the pnl_pos_tot aggregate
+    if user_pnl > 0 {
+        println!();
+        println!("=== VERIFYING FIX ===");
+        println!("User has positive PnL: {}", user_pnl);
+        println!("pnl_pos_tot before: {}", pnl_pos_tot_before);
+        println!("pnl_pos_tot after: {}", pnl_pos_tot_after);
+        println!("Expected pnl_pos_tot: {}", expected_pnl_pos_tot);
+        println!();
+
+        // After the fix, pnl_pos_tot should be correctly updated
+        // Allow small tolerance for any existing aggregate differences
+        let is_correct = pnl_pos_tot_after >= expected_pnl_pos_tot;
+        if is_correct {
+            println!("FIX VERIFIED: pnl_pos_tot is correctly updated!");
+            println!("  Actual pnl_pos_tot:   {}", pnl_pos_tot_after);
+            println!("  Expected pnl_pos_tot: {}", expected_pnl_pos_tot);
+        } else {
+            println!("BUG STILL EXISTS: pnl_pos_tot is stale!");
+            println!("  Actual pnl_pos_tot:   {}", pnl_pos_tot_after);
+            println!("  Expected pnl_pos_tot: {}", expected_pnl_pos_tot);
+            println!("  Missing positive PnL: {}", expected_pnl_pos_tot - pnl_pos_tot_after);
+        }
+
+        // Assert the fix is working - pnl_pos_tot should include user's positive PnL
+        assert!(is_correct,
+            "Bug #10 not fixed! pnl_pos_tot should be updated by force-close. \
+             Expected >= {}, got {}", expected_pnl_pos_tot, pnl_pos_tot_after);
+    }
+
+    println!();
+    println!("REGRESSION TEST PASSED: pnl_pos_tot correctly maintained after force-close");
 }

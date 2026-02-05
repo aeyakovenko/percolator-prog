@@ -2712,7 +2712,7 @@ pub mod processor {
 
                     for idx in start..end {
                         if engine.is_used(idx as usize) {
-                            let acc = &mut engine.accounts[idx as usize];
+                            let acc = &engine.accounts[idx as usize];
                             let pos = acc.position_size.get();
                             if pos != 0 {
                                 // Settle position at settlement price
@@ -2723,11 +2723,15 @@ pub mod processor {
                                     .saturating_mul(settle.saturating_sub(entry))
                                     / 1_000_000i128;
 
-                                // Add to PnL and clear position
+                                // Add to PnL using set_pnl() to maintain pnl_pos_tot aggregate
+                                // SECURITY: Must use set_pnl() for correct haircut calculations
                                 let old_pnl = acc.pnl.get();
-                                acc.pnl = percolator::I128::new(old_pnl.saturating_add(pnl_delta));
-                                acc.position_size = percolator::I128::ZERO;
-                                acc.entry_price = 0;
+                                let new_pnl = old_pnl.saturating_add(pnl_delta);
+                                engine.set_pnl(idx as usize, new_pnl);
+
+                                // Clear position
+                                engine.accounts[idx as usize].position_size = percolator::I128::ZERO;
+                                engine.accounts[idx as usize].entry_price = 0;
                             }
                         }
                     }
