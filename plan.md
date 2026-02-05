@@ -763,11 +763,18 @@ The premarket resolution feature is implemented securely with:
 3. **Monitor CU in Production**: Actual BPF CU consumption should be measured
    on devnet to confirm estimates.
 
-### Open Issues: 1 CRITICAL
+### Open Issues: None (Bug #10 FIXED)
 
 ---
 
-## H. CRITICAL VULNERABILITY: Stale `pnl_pos_tot` After Force-Close
+## H. [FIXED] Stale `pnl_pos_tot` After Force-Close
+
+**Status: FIXED** (commit f66f2d2, 2026-02-05)
+
+**Fix Applied:** Force-close now uses `engine.set_pnl()` to maintain `pnl_pos_tot` aggregate.
+Test `test_vulnerability_stale_pnl_pos_tot_after_force_close` verifies the fix.
+
+### H1. Original Root Cause
 
 ### H1. Root Cause
 
@@ -865,38 +872,30 @@ fn exploit_stale_pnl_pos_tot() {
 }
 ```
 
-### H5. Recommended Fix
+### H5. Fix Applied (Option A)
 
-**Option A: Use set_pnl() in force-close (Preferred)**
+**Fix committed in f66f2d2:**
 
 ```rust
-// In force-close loop:
+// Fixed force-close loop (src/percolator.rs):
 if pos != 0 {
     let entry = acc.entry_price as i128;
     let settle = settlement_price as i128;
     let pnl_delta = pos.saturating_mul(settle.saturating_sub(entry)) / 1_000_000i128;
 
-    // FIX: Use set_pnl to maintain pnl_pos_tot aggregate
+    // Add to PnL using set_pnl() to maintain pnl_pos_tot aggregate
+    // SECURITY: Must use set_pnl() for correct haircut calculations
     let old_pnl = acc.pnl.get();
     let new_pnl = old_pnl.saturating_add(pnl_delta);
-    engine.set_pnl(idx as usize, new_pnl);  // Maintains pnl_pos_tot
+    engine.set_pnl(idx as usize, new_pnl);
 
-    acc.position_size = percolator::I128::ZERO;
-    acc.entry_price = 0;
+    // Clear position
+    engine.accounts[idx as usize].position_size = percolator::I128::ZERO;
+    engine.accounts[idx as usize].entry_price = 0;
 }
 ```
 
-**Option B: Call recompute_aggregates() after all force-closes complete**
-
-```rust
-// After force-close loop completes (crank_cursor wraps to 0):
-if end >= MAX_ACCOUNTS as u16 {
-    engine.crank_cursor = 0;
-    engine.recompute_aggregates();  // O(n) but only once
-}
-```
-
-Option A is preferred because:
+**Why Option A was chosen:**
 - O(1) per account instead of O(n) final pass
 - Maintains invariant continuously
 - Consistent with how all other PnL modifications work
