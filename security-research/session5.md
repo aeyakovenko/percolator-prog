@@ -186,10 +186,88 @@ PushOraclePrice:
 - Admin-only
 - No validation needed (any u64 is valid; 0 = disabled)
 
-## Session 5 Final Summary
+## Continued Session 5 Exploration (Part 2)
 
-**Total Areas Verified This Session**: 17
+#### 18. TopUpInsurance ✓
+**Location**: `percolator-prog/src/percolator.rs:3255-3289`
+**Status**: SECURE
+
+- Permissionless (anyone can top up, intentional design)
+- Token transfer via deposit() happens first
+- Base-to-units conversion with dust accumulation
+- Engine's top_up_insurance_fund uses saturating add_u128
+- Updates both vault and insurance_fund.balance
+
+#### 19. InitUser/InitLP Account Creation ✓
+**Location**: `percolator/src/percolator.rs:893-945, 948-1006`
+**Status**: SECURE
+
+- O(1) counter check (num_used_accounts) - fixes H2 TOCTOU
+- Fee requirement enforced (required_fee check)
+- Excess payment credited to user capital (Bug #4 fix)
+- Vault updated with full fee_payment, insurance with required_fee
+- next_account_id incremented with saturating_add
+- c_tot updated when excess > 0
+- LP also stores matcher_program and matcher_context
+
+#### 20. UpdateAdmin ✓
+**Location**: `percolator-prog/src/percolator.rs:3309-3326`
+**Status**: SECURE
+
+- Admin-only via require_admin
+- Simple header.admin update
+- No additional validation needed
+
+#### 21. CloseSlab ✓
+**Location**: `percolator-prog/src/percolator.rs:3328-3377`
+**Status**: SECURE
+
+- Admin-only via require_admin
+- Requires: vault=0, insurance_fund.balance=0, num_used_accounts=0
+- Bug #3 fix: checks dust_base != 0
+- Zeros out slab data to prevent reuse
+- Lamports transfer with checked_add
+- **WARNING**: unsafe_close feature skips ALL validation
+
+#### 22. UpdateConfig ✓
+**Location**: `percolator-prog/src/percolator.rs:3379-3429`
+**Status**: SECURE
+
+- Admin-only via require_admin
+- Parameter validation:
+  - funding_horizon_slots != 0
+  - funding_inv_scale_notional_e6 != 0
+  - thresh_alpha_bps <= 10,000
+  - thresh_min <= thresh_max
+
+#### 23. SetMaintenanceFee ✓
+**Location**: `percolator-prog/src/percolator.rs:3431-3448`
+**Status**: SECURE
+
+- Admin-only via require_admin
+- No param validation needed (any fee valid)
+- Direct update to engine.params.maintenance_fee_per_slot
+
+#### 24. check_idx Validation Pattern ✓
+**Location**: `percolator-prog/src/percolator.rs:2188-2193`
+**Status**: SECURE
+
+Pattern consistently applied:
+- Bounds check: `idx as usize >= MAX_ACCOUNTS`
+- Used check: `!engine.is_used(idx as usize)`
+- Called BEFORE account access in:
+  - DepositCollateral (line 2522)
+  - WithdrawCollateral (line 2575)
+  - KeeperCrank self-crank (line 2710)
+  - TradeNoCpi (lines 2849, 2850)
+  - TradeCpi (lines 2965, 2966)
+  - LiquidateAtOracle (line 3150)
+  - CloseAccount (line 3222)
+
+## Session 5 Final Summary (Updated)
+
+**Total Areas Verified This Session**: 24
 **New Vulnerabilities Found**: 0
 **All 57 Integration Tests**: PASS
 
-The codebase continues to demonstrate strong security practices with comprehensive validation, authorization, overflow protection, and proper error handling across all 17 additional areas reviewed.
+The codebase continues to demonstrate strong security practices with comprehensive validation, authorization, overflow protection, and proper error handling across all 24 additional areas reviewed.
