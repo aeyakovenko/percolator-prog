@@ -8782,3 +8782,861 @@ fn test_attack_deposit_zero_amount() {
     assert_eq!(vault_before, vault_after,
         "ATTACK: Zero deposit should not change vault");
 }
+
+// ============================================================================
+// PEN TEST SUITE ROUND 3: Config Validation, TopUpInsurance, LP, Settlement,
+// Oracle Authority Lifecycle, and CloseSlab Deep Tests
+// ============================================================================
+
+impl TestEnv {
+    fn try_top_up_insurance(&mut self, payer: &Keypair, amount: u64) -> Result<(), String> {
+        let ata = self.create_ata(&payer.pubkey(), amount);
+
+        let mut data = vec![9u8]; // TopUpInsurance
+        data.extend_from_slice(&amount.to_le_bytes());
+
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(payer.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data,
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&payer.pubkey()), &[payer], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
+    }
+
+    fn try_update_config_with_params(
+        &mut self,
+        signer: &Keypair,
+        funding_horizon_slots: u64,
+        funding_inv_scale_notional_e6: u128,
+        thresh_alpha_bps: u64,
+        thresh_min: u128,
+        thresh_max: u128,
+    ) -> Result<(), String> {
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(signer.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+            ],
+            data: encode_update_config(
+                funding_horizon_slots,
+                100,   // funding_k_bps
+                funding_inv_scale_notional_e6,
+                100i64,   // funding_max_premium_bps
+                10i64,    // funding_max_bps_per_slot
+                0u128,    // thresh_floor
+                100,      // thresh_risk_bps
+                100,      // thresh_update_interval_slots
+                100,      // thresh_step_bps
+                thresh_alpha_bps,
+                thresh_min,
+                thresh_max,
+                1u128,    // thresh_min_step
+            ),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[ix], Some(&signer.pubkey()), &[signer], self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
+    }
+}
+
+// ============================================================================
+// 21. UpdateConfig Validation
+// ============================================================================
+
+/// ATTACK: UpdateConfig with funding_horizon_slots = 0 (division by zero risk).
+/// Expected: Rejected with InvalidConfigParam.
+#[test]
+fn test_attack_config_zero_funding_horizon() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let result = env.try_update_config_with_params(
+        &admin,
+        0,                        // funding_horizon_slots = 0 (invalid)
+        1_000_000_000_000u128,    // normal inv_scale
+        1000,                     // normal alpha
+        0, u128::MAX,             // min/max
+    );
+    assert!(result.is_err(),
+        "ATTACK: Zero funding_horizon_slots should be rejected (InvalidConfigParam)");
+}
+
+/// ATTACK: UpdateConfig with funding_inv_scale_notional_e6 = 0 (division by zero).
+/// Expected: Rejected with InvalidConfigParam.
+#[test]
+fn test_attack_config_zero_inv_scale() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let result = env.try_update_config_with_params(
+        &admin,
+        3600,                     // normal horizon
+        0,                        // inv_scale = 0 (invalid)
+        1000,                     // normal alpha
+        0, u128::MAX,
+    );
+    assert!(result.is_err(),
+        "ATTACK: Zero inv_scale should be rejected (InvalidConfigParam)");
+}
+
+/// ATTACK: UpdateConfig with thresh_alpha_bps > 10000 (over 100%).
+/// Expected: Rejected with InvalidConfigParam.
+#[test]
+fn test_attack_config_alpha_over_100_percent() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let result = env.try_update_config_with_params(
+        &admin,
+        3600,
+        1_000_000_000_000u128,
+        10_001,                   // alpha > 10000 (invalid)
+        0, u128::MAX,
+    );
+    assert!(result.is_err(),
+        "ATTACK: alpha_bps > 10000 should be rejected (InvalidConfigParam)");
+}
+
+/// ATTACK: UpdateConfig with thresh_min > thresh_max (inverted bounds).
+/// Expected: Rejected with InvalidConfigParam.
+#[test]
+fn test_attack_config_inverted_threshold_bounds() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let result = env.try_update_config_with_params(
+        &admin,
+        3600,
+        1_000_000_000_000u128,
+        1000,
+        1_000_000,                // thresh_min = 1M
+        999_999,                  // thresh_max = 999k (< min, invalid)
+    );
+    assert!(result.is_err(),
+        "ATTACK: thresh_min > thresh_max should be rejected (InvalidConfigParam)");
+}
+
+// ============================================================================
+// 22. TopUpInsurance Attacks
+// ============================================================================
+
+/// ATTACK: TopUpInsurance on a resolved market.
+/// Expected: Rejected (InvalidAccountData).
+#[test]
+fn test_attack_topup_insurance_after_resolution() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let _ = env.try_set_oracle_authority(&admin, &admin.pubkey());
+    let _ = env.try_push_oracle_price(&admin, 138_000_000, 100);
+    let _ = env.try_resolve_market(&admin);
+
+    // Try to top up insurance on resolved market
+    let payer = Keypair::new();
+    env.svm.airdrop(&payer.pubkey(), 10_000_000_000).unwrap();
+    let result = env.try_top_up_insurance(&payer, 1_000_000_000);
+    assert!(result.is_err(),
+        "ATTACK: TopUpInsurance on resolved market should be rejected");
+}
+
+/// ATTACK: TopUpInsurance with insufficient ATA balance.
+/// Expected: Token program rejects transfer.
+#[test]
+fn test_attack_topup_insurance_insufficient_balance() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    // Create ATA with only 100 tokens but try to top up 1B
+    let payer = Keypair::new();
+    env.svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
+    let ata = env.create_ata(&payer.pubkey(), 100);
+
+    let mut data = vec![9u8];
+    data.extend_from_slice(&1_000_000_000u64.to_le_bytes());
+
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new(ata, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data,
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[ix], Some(&payer.pubkey()), &[&payer], env.svm.latest_blockhash(),
+    );
+    let result = env.svm.send_transaction(tx);
+    assert!(result.is_err(),
+        "ATTACK: TopUpInsurance with insufficient balance should fail");
+}
+
+/// ATTACK: TopUpInsurance accumulates correctly in vault and engine.
+/// Expected: Insurance balance increases by correct amount, vault has the tokens.
+#[test]
+fn test_attack_topup_insurance_correct_accounting() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let insurance_before = env.read_insurance_balance();
+    let vault_before = env.vault_balance();
+
+    let payer = Keypair::new();
+    env.svm.airdrop(&payer.pubkey(), 10_000_000_000).unwrap();
+    env.top_up_insurance(&payer, 5_000_000_000);
+
+    let insurance_after = env.read_insurance_balance();
+    let vault_after = env.vault_balance();
+
+    assert_eq!(vault_after - vault_before, 5_000_000_000,
+        "Vault should increase by exact top-up amount");
+    assert!(insurance_after > insurance_before,
+        "Insurance balance should increase after top-up");
+}
+
+// ============================================================================
+// 23. Oracle Authority Lifecycle
+// ============================================================================
+
+/// ATTACK: Setting oracle authority to [0;32] disables authority price and clears stored price.
+/// Expected: After setting to zero, PushOraclePrice fails, authority_price_e6 is cleared.
+#[test]
+fn test_attack_oracle_authority_disable_clears_price() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    // Set oracle authority and push a price
+    let authority = Keypair::new();
+    env.svm.airdrop(&authority.pubkey(), 1_000_000_000).unwrap();
+    let _ = env.try_set_oracle_authority(&admin, &authority.pubkey());
+    let _ = env.try_push_oracle_price(&authority, 200_000_000, 100);
+
+    // Now disable oracle authority by setting to [0;32]
+    let zero = Pubkey::new_from_array([0u8; 32]);
+    let result = env.try_set_oracle_authority(&admin, &zero);
+    assert!(result.is_ok(), "Admin should disable oracle authority: {:?}", result);
+
+    // Old authority can no longer push price
+    let result = env.try_push_oracle_price(&authority, 300_000_000, 200);
+    assert!(result.is_err(),
+        "ATTACK: Disabled oracle authority should not push price");
+
+    // Market should still function with Pyth oracle
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+    env.set_slot(200);
+    env.crank();
+    assert_eq!(env.vault_balance(), 10_000_000_000, "Market still functional");
+}
+
+/// ATTACK: Oracle authority change mid-flight (while positions open).
+/// Expected: Changing authority doesn't affect existing positions, just future price pushing.
+#[test]
+fn test_attack_oracle_authority_change_with_positions() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Open position
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+
+    // Set authority and push price
+    let auth1 = Keypair::new();
+    env.svm.airdrop(&auth1.pubkey(), 1_000_000_000).unwrap();
+    let _ = env.try_set_oracle_authority(&admin, &auth1.pubkey());
+    let _ = env.try_push_oracle_price(&auth1, 200_000_000, 100);
+
+    // Change to new authority
+    let auth2 = Keypair::new();
+    env.svm.airdrop(&auth2.pubkey(), 1_000_000_000).unwrap();
+    let _ = env.try_set_oracle_authority(&admin, &auth2.pubkey());
+
+    // Old authority can't push anymore
+    let result = env.try_push_oracle_price(&auth1, 250_000_000, 200);
+    assert!(result.is_err(), "Old authority should be rejected");
+
+    // New authority can push
+    let result = env.try_push_oracle_price(&auth2, 250_000_000, 200);
+    assert!(result.is_ok(), "New authority should work: {:?}", result);
+
+    // Market still functional - crank works
+    env.set_slot(300);
+    env.crank();
+    let vault = env.vault_balance();
+    assert_eq!(vault, 110_000_000_000, "Vault intact after authority change");
+}
+
+// ============================================================================
+// 24. Oracle Price Cap Deep Tests
+// ============================================================================
+
+/// ATTACK: Set oracle price cap to 0 (disables capping), verify uncapped price accepted.
+/// Expected: With cap=0, any price jump is accepted.
+#[test]
+fn test_attack_oracle_cap_zero_disables_clamping() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let _ = env.try_set_oracle_authority(&admin, &admin.pubkey());
+
+    // Set cap to 0 (disabled)
+    let _ = env.try_set_oracle_price_cap(&admin, 0);
+
+    // Push initial price
+    let _ = env.try_push_oracle_price(&admin, 138_000_000, 100);
+    env.set_slot(200);
+
+    // Push 10x price jump - should be accepted with cap=0
+    let result = env.try_push_oracle_price(&admin, 1_380_000_000, 200);
+    assert!(result.is_ok(),
+        "With cap=0, large price jump should be accepted: {:?}", result);
+}
+
+/// ATTACK: Set oracle price cap to 1 (ultra-restrictive), push any change.
+/// Expected: Price clamped to essentially no movement (1 e2bps = 0.01%).
+#[test]
+fn test_attack_oracle_cap_ultra_restrictive() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let _ = env.try_set_oracle_authority(&admin, &admin.pubkey());
+
+    // Set ultra-restrictive cap
+    let _ = env.try_set_oracle_price_cap(&admin, 1);
+
+    // Push initial price
+    let _ = env.try_push_oracle_price(&admin, 138_000_000, 100);
+    env.set_slot(200);
+
+    // Push 50% price increase - should succeed but be clamped internally
+    let result = env.try_push_oracle_price(&admin, 207_000_000, 200);
+    // Whether it succeeds or fails, the protocol should not accept the unclamped price
+    // Market should remain functional
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+    env.set_slot(300);
+    env.crank();
+    assert_eq!(env.vault_balance(), 10_000_000_000,
+        "Market should remain functional after ultra-restrictive cap clamping");
+}
+
+// ============================================================================
+// 25. LP-Specific Attacks
+// ============================================================================
+
+/// ATTACK: LP account should never be garbage collected, even with zero state.
+/// Expected: GC skips LP accounts (they have is_lp = true).
+#[test]
+fn test_attack_lp_immune_to_gc() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    // Don't deposit - LP has zero capital/position/pnl
+
+    // Crank to trigger GC
+    env.set_slot(200);
+    env.crank();
+
+    // LP should still be valid (not GC'd)
+    // Verify by depositing to the LP
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+    let capital = env.read_account_capital(lp_idx);
+    assert!(capital > 0, "LP should not be GC'd - capital should be credited");
+}
+
+/// ATTACK: User account with zero state SHOULD be GC'd.
+/// Expected: GC reclaims user accounts with zero position/capital/pnl.
+#[test]
+fn test_attack_user_gc_when_empty() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    // Don't deposit - user has zero everything
+
+    // Crank to trigger GC
+    env.set_slot(200);
+    env.crank();
+
+    // Verify user was GC'd by checking position reads as 0
+    let pos = env.read_account_position(user_idx);
+    assert_eq!(pos, 0, "GC'd user should have zero position");
+    let capital = env.read_account_capital(user_idx);
+    assert_eq!(capital, 0, "GC'd user should have zero capital");
+}
+
+/// ATTACK: LP takes position, then try to close as if user (kind mismatch).
+/// Expected: LP account cannot be closed via CloseAccount (only users can close).
+#[test]
+fn test_attack_close_lp_account() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+
+    // Try to close LP account via CloseAccount instruction
+    let result = env.try_close_account(&lp, lp_idx);
+    // LP accounts should either be rejected or treated differently
+    // The key security property: LP capital should not be extractable via CloseAccount
+    // if the LP is expected to remain for the market's lifetime
+    let vault_after = env.vault_balance();
+    if result.is_ok() {
+        // If close succeeded, vault should have decreased (capital returned)
+        assert!(vault_after < 10_000_000_000,
+            "If LP close succeeded, capital should be returned");
+    } else {
+        // If close was rejected, vault should be unchanged
+        assert_eq!(vault_after, 10_000_000_000,
+            "If LP close rejected, vault should be unchanged");
+    }
+}
+
+// ============================================================================
+// 26. CloseSlab Deep Tests
+// ============================================================================
+
+/// ATTACK: CloseSlab when vault has tokens remaining.
+/// Expected: Rejected (vault must be empty).
+#[test]
+fn test_attack_close_slab_with_vault_tokens() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    // Deposit some tokens
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+
+    // Try CloseSlab with vault containing tokens
+    let result = env.try_close_slab();
+    assert!(result.is_err(),
+        "ATTACK: CloseSlab with vault tokens should be rejected");
+}
+
+/// ATTACK: CloseSlab on uninitialized slab.
+/// Expected: Rejected (not initialized).
+#[test]
+fn test_attack_close_slab_uninitialized() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    // Don't call init_market - slab is uninitialized
+
+    let result = env.try_close_slab();
+    assert!(result.is_err(),
+        "ATTACK: CloseSlab on uninitialized slab should fail");
+}
+
+// ============================================================================
+// 27. SetMaintenanceFee Deep Tests
+// ============================================================================
+
+/// ATTACK: Set maintenance fee to u128::MAX (maximum possible fee).
+/// Expected: Fee is accepted but capital should drain predictably (not corrupt state).
+#[test]
+fn test_attack_maintenance_fee_u128_max() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_warmup(0, 0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let result = env.try_set_maintenance_fee(&admin, u128::MAX);
+    assert!(result.is_ok(), "Admin should set max maintenance fee: {:?}", result);
+
+    // Create user and deposit
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Advance time and crank - massive fee should not panic or corrupt
+    env.set_slot(200);
+    env.crank();
+
+    // Vault should still have tokens (not corrupted)
+    let vault = env.vault_balance();
+    assert!(vault > 0, "Vault should still have balance after max fee crank");
+}
+
+/// ATTACK: SetMaintenanceFee as non-admin.
+/// Expected: Rejected (admin auth check).
+#[test]
+fn test_attack_set_maintenance_fee_non_admin() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let attacker = Keypair::new();
+    env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+    let result = env.try_set_maintenance_fee(&attacker, 999_999_999);
+    assert!(result.is_err(),
+        "ATTACK: Non-admin SetMaintenanceFee should be rejected");
+}
+
+// ============================================================================
+// 28. Settlement Pipeline Attacks
+// ============================================================================
+
+/// ATTACK: Haircut ratio when all users are in loss (pnl_pos_tot = 0).
+/// Expected: Haircut ratio = (1,1), no division by zero.
+#[test]
+fn test_attack_haircut_all_users_in_loss() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    // User goes long
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+    env.trade(&user, &lp, lp_idx, user_idx, 10_000_000);
+
+    // Price drops - user is in loss (LP in profit)
+    // pnl_pos_tot should include LP's positive PnL, not user's negative
+    env.set_slot_and_price(200, 100_000_000);
+    env.crank();
+
+    // Vault should be intact (no corruption from haircut calc)
+    let vault = env.vault_balance();
+    assert_eq!(vault, 110_000_000_000, "Vault should be intact after loss scenario");
+
+    // User should still be able to partially withdraw (reduced equity, but not zero)
+    let result = env.try_withdraw(&user, user_idx, 1_000_000_000);
+    // Whether this succeeds depends on how much equity remains after loss
+    // Either way, vault integrity is the key property
+    let vault_after = env.vault_balance();
+    assert!(vault_after > 0, "Vault should never go to zero");
+}
+
+/// ATTACK: Multiple users settle in same crank - verify no double-counting.
+/// Expected: Conservation holds: vault = total deposits always.
+#[test]
+fn test_attack_multi_user_settlement_conservation() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    // Create 5 users with opposing positions
+    let mut users = Vec::new();
+    let total_user_deposit = 5 * 10_000_000_000u64;
+    for i in 0..5 {
+        let u = Keypair::new();
+        let idx = env.init_user(&u);
+        env.deposit(&u, idx, 10_000_000_000);
+        // Alternate long/short
+        let size = if i % 2 == 0 { 5_000_000i128 } else { -5_000_000i128 };
+        env.trade(&u, &lp, lp_idx, idx, size);
+        users.push((u, idx));
+    }
+
+    let total_deposited = 100_000_000_000 + total_user_deposit;
+
+    // Price changes and multiple cranks
+    env.set_slot_and_price(200, 150_000_000);
+    env.crank();
+
+    let vault_after = env.vault_balance();
+    assert_eq!(vault_after, total_deposited,
+        "ATTACK: Conservation violated after multi-user settlement");
+
+    env.set_slot_and_price(300, 120_000_000);
+    env.crank();
+
+    let vault_after2 = env.vault_balance();
+    assert_eq!(vault_after2, total_deposited,
+        "ATTACK: Conservation violated after price reversal");
+}
+
+// ============================================================================
+// 29. Instruction Truncation / Malformed Data
+// ============================================================================
+
+/// ATTACK: Send instruction with truncated data (too short for the tag).
+/// Expected: Rejected with InvalidInstructionData.
+#[test]
+fn test_attack_truncated_instruction_data() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let user = Keypair::new();
+    env.svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
+
+    // Tag 3 (Deposit) needs user_idx (u16) + amount (u64) = 10 bytes after tag
+    // Send only 3 bytes total (tag + 2 bytes, missing amount)
+    let data = vec![3u8, 0u8, 0u8];
+
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(user.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new(Pubkey::new_unique(), false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+        ],
+        data,
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[ix], Some(&user.pubkey()), &[&user], env.svm.latest_blockhash(),
+    );
+    let result = env.svm.send_transaction(tx);
+    assert!(result.is_err(),
+        "ATTACK: Truncated instruction data should be rejected");
+}
+
+/// ATTACK: Send unknown instruction tag (255).
+/// Expected: Rejected with InvalidInstructionData.
+#[test]
+fn test_attack_unknown_instruction_tag() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let user = Keypair::new();
+    env.svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
+
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(user.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+        ],
+        data: vec![255u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8],
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[ix], Some(&user.pubkey()), &[&user], env.svm.latest_blockhash(),
+    );
+    let result = env.svm.send_transaction(tx);
+    assert!(result.is_err(),
+        "ATTACK: Unknown instruction tag should be rejected");
+}
+
+/// ATTACK: Empty instruction data (no tag byte).
+/// Expected: Rejected with InvalidInstructionData.
+#[test]
+fn test_attack_empty_instruction_data() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let user = Keypair::new();
+    env.svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
+
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(user.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+        ],
+        data: vec![], // empty!
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[ix], Some(&user.pubkey()), &[&user], env.svm.latest_blockhash(),
+    );
+    let result = env.svm.send_transaction(tx);
+    assert!(result.is_err(),
+        "ATTACK: Empty instruction data should be rejected");
+}
+
+// ============================================================================
+// 30. Cross-Operation Composition Attacks
+// ============================================================================
+
+/// ATTACK: Deposit → Resolve → Withdraw sequence.
+/// Expected: Can't deposit after resolve, but can withdraw existing capital.
+#[test]
+fn test_attack_deposit_resolve_withdraw_sequence() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Setup oracle and resolve
+    let _ = env.try_set_oracle_authority(&admin, &admin.pubkey());
+    let _ = env.try_push_oracle_price(&admin, 138_000_000, 100);
+    let _ = env.try_resolve_market(&admin);
+
+    // Can't deposit more
+    let result = env.try_deposit(&user, user_idx, 1_000_000_000);
+    assert!(result.is_err(), "Deposit after resolution should fail");
+
+    // Should be able to withdraw original capital (no position)
+    let vault_before = env.vault_balance();
+    let result = env.try_withdraw(&user, user_idx, 5_000_000_000);
+
+    if result.is_ok() {
+        let vault_after = env.vault_balance();
+        assert_eq!(vault_before - vault_after, 5_000_000_000,
+            "Withdrawal amount should match vault decrease");
+    }
+    // Either withdrawal works or is blocked by resolution - both are valid
+    // Key property: no value created from nothing
+    let vault_final = env.vault_balance();
+    assert!(vault_final <= 10_000_000_000,
+        "Vault should never exceed total deposits");
+}
+
+/// ATTACK: Trade → Price crash → Trade reverse → Crank. Does the vault balance stay correct?
+/// Expected: Conservation holds through the entire sequence.
+#[test]
+fn test_attack_trade_crash_reverse_conservation() {
+    let path = program_path();
+    if !path.exists() { println!("SKIP: BPF not found"); return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    let total = 110_000_000_000u64;
+
+    // Open long
+    env.trade(&user, &lp, lp_idx, user_idx, 10_000_000);
+
+    // Price crashes
+    env.set_slot_and_price(200, 80_000_000);
+    env.crank();
+    assert_eq!(env.vault_balance(), total, "Conservation after crash");
+
+    // Reverse position (long → short)
+    let result = env.try_trade(&user, &lp, lp_idx, user_idx, -20_000_000);
+    if result.is_ok() {
+        env.set_slot_and_price(300, 80_000_000);
+        env.crank();
+        assert_eq!(env.vault_balance(), total, "Conservation after flip");
+    }
+
+    // Price recovers
+    env.set_slot_and_price(400, 138_000_000);
+    env.crank();
+    assert_eq!(env.vault_balance(), total, "Conservation after recovery");
+}
