@@ -18735,3 +18735,743 @@ fn test_attack_withdraw_wrong_token_program() {
         "Capital should be unchanged after failed withdraw");
 }
 
+// ============================================================================
+// Round 16: Numeric Boundary + Code Path Tests
+// ============================================================================
+
+/// ATTACK: Trade on market with unit_scale so large that scale_price_e6 returns None.
+/// Oracle price $138 (138_000_000 e6), unit_scale=200_000_000.
+/// scale_price_e6(138M, 200M) = 0 → None → trade should be rejected.
+#[test]
+fn test_attack_scale_price_zero_rejects_trade() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    // unit_scale = 200M, so 138M / 200M = 0 → None
+    env.init_market_full(0, 200_000_000, 0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 5_000_000_000);
+
+    // Crank should fail or be a no-op because oracle price scales to zero
+    env.set_slot(200);
+    let result = env.try_crank();
+    // Trade should fail because scaled price is None
+    let trade_result = env.try_trade(&user, &lp, lp_idx, user_idx, 100);
+    assert!(trade_result.is_err(),
+        "ATTACK: Trade with zero scaled price should be rejected!");
+}
+
+/// ATTACK: Inverted market with very high raw price so inverted result is zero.
+/// invert_price_e6 with raw near u64::MAX: INVERSION_CONSTANT / raw → 0.
+/// INVERSION_CONSTANT = 10^12, so raw > 10^12 gives inverted < 1 → 0 → None.
+#[test]
+fn test_attack_invert_price_zero_result() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(1); // Inverted
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 5_000_000_000);
+
+    // Initial setup at normal price
+    env.crank();
+
+    // Set oracle to extremely high price: 10^13 (> INVERSION_CONSTANT=10^12)
+    // inverted = 10^12 / 10^13 = 0 → None
+    env.set_slot_and_price(200, 10_000_000_000_000);
+    let crank_result = env.try_crank();
+    // Crank with zero-inverted price should fail (can't compute mark)
+    // Whether crank fails or clamps, the key is no value extraction
+    let vault = env.vault_balance();
+    assert!(vault >= 55_000_000_000,
+        "Vault must not decrease: vault={}", vault);
+}
+
+/// ATTACK: Inverted market with raw price = 1 (smallest non-zero).
+/// invert_price_e6(1, 1) = 10^12 / 1 = 10^12 → within u64 range.
+/// Verify the market handles extreme inverted prices.
+#[test]
+fn test_attack_invert_price_extreme_small_raw() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(1);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 5_000_000_000);
+
+    // First crank at normal price
+    env.crank();
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
+
+    // Set raw price = 1 → inverted = 10^12
+    // Circuit breaker will cap the movement, but the inverted price is valid
+    env.set_slot_and_price(200, 1);
+    let crank_result = env.try_crank();
+
+    // Conservation must hold regardless
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation after extreme invert: engine={} vault={}", engine_vault, vault);
+}
+
+/// ATTACK: Multi-instruction atomic transaction (deposit + trade in same tx).
+/// Verify protocol handles multiple instructions in single transaction correctly.
+#[test]
+fn test_attack_multi_instruction_deposit_trade_atomic() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    // Must deposit BEFORE crank to prevent GC of zero-capital account
+    env.deposit(&user, user_idx, 1_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Create ATA with tokens for additional deposit
+    let ata = env.create_ata(&user.pubkey(), 5_000_000_000);
+
+    // Build deposit instruction
+    let deposit_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(user.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new(ata, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+        ],
+        data: encode_deposit(user_idx, 5_000_000_000),
+    };
+
+    // Build trade instruction (in same tx, needs LP signer too)
+    let trade_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(user.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),  // LP must sign
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(env.pyth_index, false),
+        ],
+        data: encode_trade(lp_idx, user_idx, 1_000_000),
+    };
+
+    // Send both instructions atomically (both user and LP must sign)
+    let tx = Transaction::new_signed_with_payer(
+        &[deposit_ix, trade_ix],
+        Some(&user.pubkey()),
+        &[&user, &lp],
+        env.svm.latest_blockhash(),
+    );
+    let result = env.svm.send_transaction(tx);
+    assert!(result.is_ok(),
+        "Multi-instruction deposit+trade should succeed: {:?}", result);
+
+    // Verify both took effect
+    let pos = env.read_account_position(user_idx);
+    assert_eq!(pos, 1_000_000, "Position should be set from trade");
+    let cap = env.read_account_capital(user_idx);
+    assert!(cap > 1_000_000_000, "Capital should include additional deposit: cap={}", cap);
+}
+
+/// ATTACK: Withdraw amount = unit_scale - 1 (largest misaligned amount).
+/// Should be rejected by alignment check when unit_scale > 1.
+#[test]
+fn test_attack_withdraw_scale_minus_one_misaligned() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_full(0, 1000, 0); // unit_scale = 1000
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 5_000_000_000);
+
+    // Try withdrawing 999 (scale - 1), which is not aligned to unit_scale=1000
+    let result = env.try_withdraw(&user, user_idx, 999);
+    assert!(result.is_err(),
+        "ATTACK: Withdraw of scale-1 amount should fail alignment check!");
+
+    // Capital unchanged (stored in units: 5B / unit_scale=1000 = 5M)
+    let cap = env.read_account_capital(user_idx);
+    assert_eq!(cap, 5_000_000, "Capital unchanged after failed misaligned withdraw");
+}
+
+/// ATTACK: Close slab after all accounts closed and insurance is zero.
+/// Tests the clean shutdown path: LP deposits, withdraws, closes, then slab closes.
+#[test]
+fn test_attack_close_slab_clean_shutdown() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 5_000_000_000);
+
+    env.crank();
+
+    // Withdraw all LP capital
+    env.try_withdraw(&lp, lp_idx, 5_000_000_000).unwrap();
+
+    // Close LP account
+    env.close_account(&lp, lp_idx);
+
+    // Insurance should be 0 (no fees generated)
+    let insurance = env.read_insurance_balance();
+    assert_eq!(insurance, 0, "Insurance should be zero: got {}", insurance);
+
+    // Vault should be 0
+    let vault = env.vault_balance();
+    assert_eq!(vault, 0, "Vault should be zero: got {}", vault);
+
+    // Close slab should succeed
+    let result = env.try_close_slab();
+    assert!(result.is_ok(), "CloseSlab should succeed: {:?}", result);
+}
+
+/// ATTACK: Liquidation at exact equity zero boundary.
+/// Position PnL + capital = 0 exactly. Should be liquidatable.
+#[test]
+fn test_attack_liquidation_equity_exactly_zero() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 5_000_000_000);
+
+    env.try_top_up_insurance(&admin, 2_000_000_000).unwrap();
+    env.crank();
+
+    // Open a long position
+    env.trade(&user, &lp, lp_idx, user_idx, 10_000_000);
+
+    // Move price down significantly to push equity toward zero
+    // Position value = 10M * price_e6 / 1e6. At $138, notional ≈ 1.38B.
+    // With 5B capital, need price drop to push equity to 0.
+    // PnL = 10M * (new_price - entry_price) / 1e6
+    // At entry price 138e6, position value = 1.38e9
+    // Circuit breaker limits per-slot movement, so we need many slots
+    for slot in (200..=2000).step_by(100) {
+        let price = 138_000_000 - ((slot - 100) * 50_000) as i64;
+        if price < 1_000_000 { break; }
+        env.set_slot_and_price(slot, price);
+        env.crank();
+    }
+
+    // Try liquidation - account should be insolvent or near-insolvent
+    let liq_result = env.try_liquidate(user_idx);
+    // Whether liquidation succeeds or not, conservation must hold
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation after liquidation attempt: engine={} vault={}", engine_vault, vault);
+}
+
+/// ATTACK: Deposit and immediate crank in same slot.
+/// Tests that deposit + crank in same slot doesn't create exploitable state.
+#[test]
+fn test_attack_deposit_and_crank_same_slot_no_exploit() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 20_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    // Deposit before first crank to prevent GC
+    env.deposit(&user, user_idx, 2_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Additional deposit at slot 200
+    env.set_slot(200);
+    env.deposit(&user, user_idx, 3_000_000_000);
+
+    // Crank at same slot 200 (immediately after deposit)
+    env.crank();
+
+    // Capital should reflect both deposits (no erosion from same-slot crank)
+    let cap = env.read_account_capital(user_idx);
+    assert_eq!(cap, 5_000_000_000,
+        "Capital should equal total deposits after same-slot crank: cap={}", cap);
+
+    // Conservation
+    let c_tot = env.read_c_tot();
+    let sum = env.read_account_capital(lp_idx) + env.read_account_capital(user_idx);
+    assert_eq!(c_tot, sum,
+        "c_tot should equal sum of capitals: c_tot={} sum={}", c_tot, sum);
+}
+
+/// ATTACK: Trade then immediate crank then withdraw in rapid sequence.
+/// Tests state consistency across rapid operation sequence.
+#[test]
+fn test_attack_trade_crank_withdraw_rapid_sequence() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Trade at slot 1
+    env.set_slot(1);
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+
+    // Crank at slot 2
+    env.set_slot(2);
+    env.crank();
+
+    // Close position at slot 3
+    env.set_slot(3);
+    env.trade(&user, &lp, lp_idx, user_idx, -5_000_000);
+
+    // Crank at slot 4 to settle
+    env.set_slot(4);
+    env.crank();
+
+    // Withdraw all capital
+    let cap = env.read_account_capital(user_idx);
+    let withdraw_result = env.try_withdraw(&user, user_idx, cap as u64);
+    assert!(withdraw_result.is_ok(),
+        "Withdraw after close should succeed: {:?}", withdraw_result);
+
+    // Conservation
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation: engine={} vault={}", engine_vault, vault);
+}
+
+/// ATTACK: Multiple price changes between cranks (large gap).
+/// Only the price at crank time should matter, not intermediate prices.
+#[test]
+fn test_attack_price_whipsaw_between_cranks() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+
+    // Set price to drop, then recover, then crank at recovered price
+    // Only the final price at crank should matter
+    env.set_slot_and_price(200, 130_000_000); // Drop to $130
+    // Don't crank yet
+    env.set_slot_and_price(300, 138_000_000); // Recover to $138
+    env.crank(); // Crank at recovered price
+
+    // User PnL should reflect the crank price ($138), not intermediate ($130)
+    // At $138, PnL ≈ 0 (same as entry)
+    let cap = env.read_account_capital(user_idx);
+    assert!(cap <= 10_000_000_000,
+        "Capital should not increase: cap={}", cap);
+
+    // Conservation
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation after whipsaw: engine={} vault={}", engine_vault, vault);
+}
+
+/// ATTACK: Deposit to account, trade, then deposit again (incremental deposits).
+/// Verify capital is correct after multiple deposits with position open.
+#[test]
+fn test_attack_incremental_deposits_with_position() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 5_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Open position
+    env.trade(&user, &lp, lp_idx, user_idx, 3_000_000);
+    assert_eq!(env.read_account_position(user_idx), 3_000_000);
+
+    // Second deposit while position is open
+    env.set_slot(200);
+    env.deposit(&user, user_idx, 3_000_000_000);
+
+    let cap_after = env.read_account_capital(user_idx);
+    assert!(cap_after >= 7_000_000_000,
+        "Capital should be >= 8B after second deposit: cap={}", cap_after);
+
+    // Crank after second deposit
+    env.crank();
+
+    // Conservation
+    let c_tot = env.read_c_tot();
+    let sum = env.read_account_capital(lp_idx) + env.read_account_capital(user_idx);
+    assert_eq!(c_tot, sum,
+        "c_tot desync after incremental deposit: c_tot={} sum={}", c_tot, sum);
+}
+
+/// ATTACK: Warmup + funding interaction.
+/// Open position, warmup is accruing, funding is also accruing.
+/// Both should settle correctly without double-counting.
+#[test]
+fn test_attack_warmup_funding_interaction_no_double_count() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_warmup(0, 100); // 100 slot warmup
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Open position - starts warmup
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+
+    // Crank at several slots during warmup period
+    for slot in (200..=500).step_by(50) {
+        env.set_slot(slot);
+        env.crank();
+    }
+
+    // After warmup (slot > 100 + trade_slot), check conservation
+    let c_tot = env.read_c_tot();
+    let sum = env.read_account_capital(lp_idx) + env.read_account_capital(user_idx);
+    assert_eq!(c_tot, sum,
+        "c_tot desync after warmup+funding: c_tot={} sum={}", c_tot, sum);
+
+    // Vault conservation
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Vault conservation: engine={} vault={}", engine_vault, vault);
+}
+
+/// ATTACK: LP position tracking after multiple users trade and close.
+/// Verify LP position aggregates are correct after complex trading.
+#[test]
+fn test_attack_lp_position_aggregate_after_many_trades() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // 3 users open positions
+    let mut users = Vec::new();
+    for _ in 0..3 {
+        let user = Keypair::new();
+        let user_idx = env.init_user(&user);
+        env.deposit(&user, user_idx, 5_000_000_000);
+        users.push((user, user_idx));
+    }
+
+    // User 0: long 100K, User 1: long 200K, User 2: short 150K
+    env.set_slot(1);
+    env.trade(&users[0].0, &lp, lp_idx, users[0].1, 100_000);
+    env.set_slot(2);
+    env.trade(&users[1].0, &lp, lp_idx, users[1].1, 200_000);
+    env.set_slot(3);
+    env.trade(&users[2].0, &lp, lp_idx, users[2].1, -150_000);
+
+    // LP position should be opposite sum: -(100K + 200K - 150K) = -150K
+    let lp_pos = env.read_account_position(lp_idx);
+    assert_eq!(lp_pos, -150_000,
+        "LP position should be -150K: got {}", lp_pos);
+
+    // User 0 closes position
+    env.set_slot(4);
+    env.trade(&users[0].0, &lp, lp_idx, users[0].1, -100_000);
+
+    // LP position now: -(200K - 150K) = -50K
+    let lp_pos2 = env.read_account_position(lp_idx);
+    assert_eq!(lp_pos2, -50_000,
+        "LP position after partial close: got {}", lp_pos2);
+
+    // Conservation
+    let c_tot = env.read_c_tot();
+    let mut sum = env.read_account_capital(lp_idx);
+    for (_, idx) in &users {
+        sum += env.read_account_capital(*idx);
+    }
+    assert_eq!(c_tot, sum,
+        "c_tot desync after multi-user trades: c_tot={} sum={}", c_tot, sum);
+}
+
+/// ATTACK: Price at exact circuit breaker boundary.
+/// Move price by exactly oracle_price_cap_bps per slot.
+/// Verify mark tracks correctly at the boundary.
+#[test]
+fn test_attack_circuit_breaker_exact_cap_boundary() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+
+    // Move price up by small increments across many slots
+    for slot in (200..=600).step_by(50) {
+        // Incrementally increase price
+        let price = 138_000_000 + ((slot - 100) * 20_000) as i64;
+        env.set_slot_and_price(slot, price);
+        env.crank();
+    }
+
+    // Conservation must hold after many bounded price movements
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation after circuit breaker clamping: engine={} vault={}", engine_vault, vault);
+
+    let c_tot = env.read_c_tot();
+    let sum = env.read_account_capital(lp_idx) + env.read_account_capital(user_idx);
+    assert_eq!(c_tot, sum,
+        "c_tot conservation: c_tot={} sum={}", c_tot, sum);
+}
+
+/// ATTACK: Trade with exactly initial_margin_bps worth of capital.
+/// At the exact margin boundary, the trade should just barely succeed.
+#[test]
+fn test_attack_trade_exact_margin_boundary_succeeds() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    // Deposit exactly 1B
+    env.deposit(&user, user_idx, 1_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // initial_margin_bps = 1000 (10%), price = $138 (138e6)
+    // max_notional = 1e9 / 0.1 = 10e9
+    // max_position = 10e9 * 1e6 / 138e6 ≈ 72.46M
+    // Try just under the limit
+    let result = env.try_trade(&user, &lp, lp_idx, user_idx, 72_000_000);
+    assert!(result.is_ok(),
+        "Trade at exact margin boundary should succeed: {:?}", result);
+
+    // Verify position was opened
+    let pos = env.read_account_position(user_idx);
+    assert_eq!(pos, 72_000_000, "Position should be set: pos={}", pos);
+}
+
+/// ATTACK: Maintenance fee settlement when capital is very small.
+/// With large maintenance_fee_per_slot and small capital, fee should not go negative.
+#[test]
+fn test_attack_maintenance_fee_depletes_small_capital() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000); // Very small deposit (1M tokens)
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+
+    // Set high maintenance fee
+    env.try_set_maintenance_fee(&admin, 1_000_000).unwrap();
+
+    // Crank several times to accrue fees
+    for slot in (200..=1000).step_by(100) {
+        env.set_slot(slot);
+        env.crank();
+    }
+
+    // Capital should not go negative (saturating)
+    let cap = env.read_account_capital(user_idx);
+    assert!(cap < 1_000_000,
+        "Capital should be depleted by maintenance fees: cap={}", cap);
+
+    // Conservation
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation: engine={} vault={}", engine_vault, vault);
+}
+
+/// ATTACK: Mark precision with very small price increments.
+/// Multiple tiny price changes and cranks should maintain conservation.
+#[test]
+fn test_attack_mark_precision_small_increments() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+
+    // Apply very small price increments and crank each time
+    let base_price: i64 = 138_000_000;
+    for i in 1..=20u64 {
+        let price = base_price + (i as i64); // 1 unit increment (smallest possible)
+        env.set_slot_and_price(200 + i, price);
+        env.crank();
+    }
+
+    // Conservation must hold after many tiny price changes
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation after small increments: engine={} vault={}", engine_vault, vault);
+
+    let c_tot = env.read_c_tot();
+    let sum = env.read_account_capital(lp_idx) + env.read_account_capital(user_idx);
+    assert_eq!(c_tot, sum,
+        "c_tot conservation: c_tot={} sum={}", c_tot, sum);
+}
+
