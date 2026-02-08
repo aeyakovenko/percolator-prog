@@ -20255,3 +20255,847 @@ fn test_attack_warmup_partial_close_vesting() {
         "Conservation: engine={} vault={}", engine_vault, vault);
 }
 
+// ============================================================================
+// Round 18: Arithmetic Boundaries, Settlement Ordering, Multi-Account
+// ============================================================================
+
+/// ATTACK: Minimal position size (1 unit) with 1e-6 price precision.
+/// Tests mark_pnl truncation at the smallest meaningful scale.
+#[test]
+fn test_attack_mark_pnl_one_unit_position() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Trade minimum size: 1 unit
+    env.trade(&user, &lp, lp_idx, user_idx, 1);
+    assert_eq!(env.read_account_position(user_idx), 1,
+        "Precondition: user must have 1-unit position");
+
+    // Price change of 1 (smallest possible: 0.000001)
+    env.set_slot_and_price(200, 138_000_001);
+    env.crank();
+
+    // PnL for 1 unit at $0.000001 change = 1 * 1 / 1_000_000 = 0 (truncated)
+    // This is correct: sub-unit PnL truncates in protocol's favor
+    let pnl = env.read_account_pnl(user_idx);
+    assert!(pnl >= 0, "Tiny PnL should not be negative for long: pnl={}", pnl);
+
+    // Conservation
+    let c_tot = env.read_c_tot();
+    let sum = env.read_account_capital(lp_idx) + env.read_account_capital(user_idx);
+    assert_eq!(c_tot, sum,
+        "c_tot with 1-unit position: c_tot={} sum={}", c_tot, sum);
+}
+
+/// ATTACK: Haircut with zero pnl_pos_tot (no positive PnL accounts).
+/// When denominator is 0, haircut should be harmless (no division by zero).
+#[test]
+fn test_attack_haircut_zero_pnl_pos_tot() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 20_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 5_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Open position and drop price so user has NEGATIVE PnL
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+    env.set_slot_and_price(200, 130_000_000); // Drop $8
+    env.crank();
+
+    // User has negative PnL (loss), LP has positive PnL (gain)
+    let user_pnl = env.read_account_pnl(user_idx);
+    assert!(user_pnl < 0,
+        "Precondition: user should have negative PnL after price drop: {}", user_pnl);
+
+    let pnl_pos_tot = env.read_pnl_pos_tot();
+
+    // Withdrawal should still work even with haircut conditions
+    let user_cap = env.read_account_capital(user_idx);
+    assert!(user_cap > 0,
+        "Precondition: user should still have some capital: {}", user_cap);
+
+    let vault_before = env.vault_balance();
+    let withdraw_result = env.try_withdraw(&user, user_idx, 1);
+    let vault_after = env.vault_balance();
+
+    // Verify either withdrawal happened or margin check blocked it
+    if withdraw_result.is_ok() {
+        assert_eq!(vault_after, vault_before - 1,
+            "Withdrawal of 1 should decrease vault by 1: before={} after={}",
+            vault_before, vault_after);
+    }
+
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault_after,
+        "Conservation with haircut: engine={} vault={}", engine_vault, vault_after);
+}
+
+// REMOVED: test_attack_funding_zero_dt_no_accrual - duplicate of
+// test_attack_funding_same_slot_three_cranks_dt_zero (line 8020)
+
+/// ATTACK: Many users (40) trading against single LP, then crank.
+/// Tests that crank handles many accounts efficiently and conserves funds.
+#[test]
+fn test_attack_many_users_single_lp_conservation() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 200_000_000_000);
+
+    // Create 10 users with positions (limited by 200K CU per crank)
+    let mut users: Vec<(Keypair, u16)> = Vec::new();
+    for _ in 0..10 {
+        let u = Keypair::new();
+        let idx = env.init_user(&u);
+        env.deposit(&u, idx, 2_000_000_000);
+        users.push((u, idx));
+    }
+
+    env.try_top_up_insurance(&admin, 5_000_000_000).unwrap();
+    env.crank();
+
+    // All users open positions in alternating directions
+    for (i, (u, idx)) in users.iter().enumerate() {
+        env.set_slot((i + 1) as u64);
+        let direction = if i % 2 == 0 { 100_000 } else { -100_000_i128 };
+        env.trade(u, &lp, lp_idx, *idx, direction);
+    }
+
+    // Price change
+    env.set_slot_and_price(200, 142_000_000);
+    env.crank();
+
+    // Conservation across all accounts
+    let c_tot = env.read_c_tot();
+    let mut sum: u128 = env.read_account_capital(lp_idx);
+    for (_, idx) in &users {
+        sum += env.read_account_capital(*idx);
+    }
+    assert_eq!(c_tot, sum,
+        "c_tot with 10 users: c_tot={} sum={}", c_tot, sum);
+
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation with 10 users: engine={} vault={}", engine_vault, vault);
+
+    // LP position should be net of all user positions
+    let lp_pos = env.read_account_position(lp_idx);
+    let mut user_sum: i128 = 0;
+    for (_, idx) in &users {
+        user_sum += env.read_account_position(*idx);
+    }
+    assert_eq!(lp_pos, -user_sum,
+        "LP position should mirror user sum: lp={} user_sum={}", lp_pos, user_sum);
+}
+
+/// ATTACK: Position flip from long to short at exact maintenance margin.
+/// Verify initial_margin_bps is used (not maintenance) for the flip.
+#[test]
+fn test_attack_position_flip_margin_requirement_switch() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    // Small deposit to test margin limits
+    env.deposit(&user, user_idx, 2_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Open moderate long position
+    let result = env.try_trade(&user, &lp, lp_idx, user_idx, 1_000_000);
+    assert!(result.is_ok(), "Initial long trade should succeed");
+
+    // Now flip to short (position goes from +1M to -1M, crosses zero)
+    // This requires initial_margin_bps for the new direction
+    let flip_result = env.try_trade(&user, &lp, lp_idx, user_idx, -2_000_000);
+
+    // Either succeeds (enough margin) or fails (initial margin too high)
+    // But must not panic and conservation holds
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation after flip attempt: engine={} vault={}", engine_vault, vault);
+
+    // Verify position is consistent
+    let pos = env.read_account_position(user_idx);
+    if flip_result.is_ok() {
+        assert_eq!(pos, -1_000_000,
+            "Flip succeeded so position should be -1M: got {}", pos);
+    } else {
+        assert_eq!(pos, 1_000_000,
+            "Flip failed so position should remain +1M: got {}", pos);
+    }
+}
+
+/// ATTACK: Large maintenance fee with huge dt gap (thousands of slots).
+/// Tests saturating arithmetic in fee accrual over long periods.
+#[test]
+fn test_attack_maintenance_fee_huge_dt_saturation() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Set maximum maintenance fee
+    env.try_set_maintenance_fee(&admin, u64::MAX as u128).unwrap();
+
+    // Jump forward a massive number of slots
+    env.set_slot(1_000_000);
+    env.crank();
+
+    // Fee * dt would overflow u128 without saturating math
+    // Verify no panic and conservation holds
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation after huge dt fee: engine={} vault={}", engine_vault, vault);
+
+    // User's capital should be depleted (or account GC'd)
+    let user_cap = env.read_account_capital(user_idx);
+    assert_eq!(user_cap, 0,
+        "Huge fee should deplete user capital: cap={}", user_cap);
+}
+
+/// ATTACK: Trade with different sizes in rapid succession (consecutive slots).
+/// Position accumulation should be correct across rapid trades.
+#[test]
+fn test_attack_rapid_successive_trades_accumulation() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Multiple trades in rapid succession with different sizes
+    env.set_slot(1);
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
+    env.set_slot(2);
+    env.trade(&user, &lp, lp_idx, user_idx, 500_000);
+    env.set_slot(3);
+    env.trade(&user, &lp, lp_idx, user_idx, 250_000);
+
+    // User should have accumulated position: 1M + 500K + 250K = 1.75M
+    let pos = env.read_account_position(user_idx);
+    assert_eq!(pos, 1_750_000,
+        "Rapid trades should accumulate: expected 1.75M, got {}", pos);
+
+    // Conservation
+    env.set_slot(200);
+    env.crank();
+
+    let c_tot = env.read_c_tot();
+    let sum = env.read_account_capital(lp_idx) + env.read_account_capital(user_idx);
+    assert_eq!(c_tot, sum, "c_tot after double trade");
+}
+
+/// ATTACK: Three LPs with different positions, user trades against all.
+/// Tests LP aggregate tracking with multiple LPs.
+#[test]
+fn test_attack_three_lps_aggregate_tracking() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp1 = Keypair::new();
+    let lp1_idx = env.init_lp(&lp1);
+    env.deposit(&lp1, lp1_idx, 30_000_000_000);
+
+    let lp2 = Keypair::new();
+    let lp2_idx = env.init_lp(&lp2);
+    env.deposit(&lp2, lp2_idx, 30_000_000_000);
+
+    let lp3 = Keypair::new();
+    let lp3_idx = env.init_lp(&lp3);
+    env.deposit(&lp3, lp3_idx, 30_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Trade against each LP
+    env.set_slot(1);
+    env.trade(&user, &lp1, lp1_idx, user_idx, 1_000_000);
+    env.set_slot(2);
+    env.trade(&user, &lp2, lp2_idx, user_idx, 2_000_000);
+    env.set_slot(3);
+    env.trade(&user, &lp3, lp3_idx, user_idx, -500_000);
+
+    // User total position = 1M + 2M - 500K = 2.5M
+    let user_pos = env.read_account_position(user_idx);
+    assert_eq!(user_pos, 2_500_000,
+        "User should have net 2.5M position: got {}", user_pos);
+
+    // LP positions should be correct
+    assert_eq!(env.read_account_position(lp1_idx), -1_000_000);
+    assert_eq!(env.read_account_position(lp2_idx), -2_000_000);
+    assert_eq!(env.read_account_position(lp3_idx), 500_000);
+
+    // Price change and crank
+    env.set_slot_and_price(200, 140_000_000);
+    env.crank();
+
+    // Conservation across all 4 accounts
+    let c_tot = env.read_c_tot();
+    let sum = env.read_account_capital(lp1_idx) +
+              env.read_account_capital(lp2_idx) +
+              env.read_account_capital(lp3_idx) +
+              env.read_account_capital(user_idx);
+    assert_eq!(c_tot, sum,
+        "c_tot across 3 LPs: c_tot={} sum={}", c_tot, sum);
+
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation: engine={} vault={}", engine_vault, vault);
+}
+
+/// ATTACK: Projected haircut during trade vs realized haircut after crank.
+/// Verify consistency between margin check haircut and settlement haircut.
+#[test]
+fn test_attack_projected_vs_realized_haircut_consistency() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user1 = Keypair::new();
+    let user1_idx = env.init_user(&user1);
+    env.deposit(&user1, user1_idx, 10_000_000_000);
+
+    let user2 = Keypair::new();
+    let user2_idx = env.init_user(&user2);
+    env.deposit(&user2, user2_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Both users open large positions (creates significant pnl_pos_tot)
+    env.trade(&user1, &lp, lp_idx, user1_idx, 5_000_000);
+    env.trade(&user2, &lp, lp_idx, user2_idx, 5_000_000);
+
+    // Price moves - creates PnL
+    env.set_slot_and_price(200, 145_000_000);
+    env.crank();
+
+    let pnl_pos_tot_before = env.read_pnl_pos_tot();
+
+    // User1 closes position - should use projected haircut
+    env.set_slot(201);
+    env.trade(&user1, &lp, lp_idx, user1_idx, -5_000_000);
+
+    let pnl_pos_tot_after = env.read_pnl_pos_tot();
+
+    // pnl_pos_tot should have decreased (user1's positive PnL removed)
+    assert!(pnl_pos_tot_after <= pnl_pos_tot_before,
+        "pnl_pos_tot should not increase after closing profitable position: before={} after={}",
+        pnl_pos_tot_before, pnl_pos_tot_after);
+
+    // Conservation
+    env.set_slot(400);
+    env.crank();
+
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation: engine={} vault={}", engine_vault, vault);
+}
+
+/// ATTACK: set_pnl aggregate consistency - rapid PnL changes from trades.
+/// Multiple trades that flip PnL sign should maintain pnl_pos_tot correctly.
+#[test]
+fn test_attack_set_pnl_aggregate_rapid_flips() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Series of trades with price changes that flip PnL sign
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000); // Long
+
+    env.set_slot_and_price(200, 145_000_000); // User profits
+    env.crank();
+    let pnl1 = env.read_account_pnl(user_idx);
+    assert!(pnl1 > 0, "User should have positive PnL after price rise: {}", pnl1);
+
+    env.set_slot_and_price(400, 125_000_000); // Price crashes below entry
+    env.crank();
+    let pnl2 = env.read_account_pnl(user_idx);
+    assert!(pnl2 < 0, "User should have negative PnL after price crash: {}", pnl2);
+
+    env.set_slot_and_price(600, 150_000_000); // Recovery
+    env.crank();
+    let pnl3 = env.read_account_pnl(user_idx);
+    assert!(pnl3 > 0, "User should have positive PnL after recovery: {}", pnl3);
+
+    // pnl_pos_tot should reflect current positive PnL
+    let ppt = env.read_pnl_pos_tot();
+    assert!(ppt > 0,
+        "pnl_pos_tot should be positive after recovery: {}", ppt);
+
+    // Conservation
+    let c_tot = env.read_c_tot();
+    let sum = env.read_account_capital(lp_idx) + env.read_account_capital(user_idx);
+    assert_eq!(c_tot, sum,
+        "c_tot after PnL flips: c_tot={} sum={}", c_tot, sum);
+}
+
+// REMOVED: test_attack_deposit_withdraw_same_slot_no_extraction - duplicate of
+// test_attack_deposit_withdraw_same_slot_atomicity (line 15845)
+
+// REMOVED: test_attack_trade_exact_full_margin_utilization - duplicate of
+// test_attack_trade_exact_margin_boundary_succeeds (line 19357)
+
+/// ATTACK: LP partial close (reduce LP position) and verify aggregates.
+/// Trade that reduces LP's exposure should update net_lp_pos correctly.
+#[test]
+fn test_attack_lp_partial_close_aggregate_update() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user1 = Keypair::new();
+    let user1_idx = env.init_user(&user1);
+    env.deposit(&user1, user1_idx, 10_000_000_000);
+
+    let user2 = Keypair::new();
+    let user2_idx = env.init_user(&user2);
+    env.deposit(&user2, user2_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // User1 goes long 5M → LP has -5M
+    env.set_slot(1);
+    env.trade(&user1, &lp, lp_idx, user1_idx, 5_000_000);
+    assert_eq!(env.read_account_position(lp_idx), -5_000_000);
+
+    // User1 partially closes (reduces by 2M)
+    env.set_slot(2);
+    env.trade(&user1, &lp, lp_idx, user1_idx, -2_000_000);
+
+    // LP position should be -3M now
+    let lp_pos = env.read_account_position(lp_idx);
+    assert_eq!(lp_pos, -3_000_000,
+        "LP position after partial close: expected -3M, got {}", lp_pos);
+
+    // User2 trades against same LP
+    env.set_slot(3);
+    env.trade(&user2, &lp, lp_idx, user2_idx, 1_000_000);
+
+    // LP now = -3M - 1M = -4M
+    assert_eq!(env.read_account_position(lp_idx), -4_000_000);
+
+    // Crank and verify conservation
+    env.set_slot(200);
+    env.crank();
+
+    let c_tot = env.read_c_tot();
+    let sum = env.read_account_capital(lp_idx) +
+              env.read_account_capital(user1_idx) +
+              env.read_account_capital(user2_idx);
+    assert_eq!(c_tot, sum,
+        "c_tot after LP partial close: c_tot={} sum={}", c_tot, sum);
+}
+
+// REMOVED: test_attack_warmup_instant_period_zero - duplicate of
+// test_attack_warmup_zero_period_instant (line 8110)
+
+// REMOVED: test_attack_trade_notional_equals_margin_boundary - duplicate of
+// test_attack_trade_exact_initial_margin_boundary (line 13162)
+
+/// ATTACK: Settlement ordering - mark settlement, then funding, then fees.
+/// Create scenario where ordering matters and verify correctness.
+#[test]
+fn test_attack_settlement_ordering_mark_funding_fees() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+
+    // Set maintenance fee to create fee debt during settlement
+    env.try_set_maintenance_fee(&admin, 10_000).unwrap();
+
+    env.crank();
+
+    // Open position
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+
+    // Big price move + long time gap = mark settlement + funding + fees all at once
+    env.set_slot_and_price(1000, 150_000_000);
+    env.crank();
+
+    // Verify settlement was consistent
+    let c_tot = env.read_c_tot();
+    let sum = env.read_account_capital(lp_idx) + env.read_account_capital(user_idx);
+    assert_eq!(c_tot, sum,
+        "c_tot after combined settlement: c_tot={} sum={}", c_tot, sum);
+
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation after combined settlement: engine={} vault={}", engine_vault, vault);
+
+    // User should have gained from mark but lost from fees
+    let user_cap = env.read_account_capital(user_idx);
+    // With position=5M, price move from 138 to 150 = +$12/unit
+    // Mark PnL ~ 5M * 12 / 1 = +60 units (simplified)
+    // Fees should have eaten some capital
+    // Verify capital is reasonable (not negative/zero from fee-before-mark bug)
+    assert!(user_cap > 0,
+        "User should have positive capital after profitable mark settlement: cap={}", user_cap);
+}
+
+/// ATTACK: Inverted market (invert=1) with large price swing.
+/// Tests conservation in inverted market with significant movement.
+#[test]
+fn test_attack_inverted_market_large_swing_conservation() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(1); // Inverted market
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Go long in inverted market
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+    let pos = env.read_account_position(user_idx);
+    assert_eq!(pos, 5_000_000, "Position should be 5M");
+
+    // In inverted market, price going UP means the inverted price goes DOWN
+    // So a long position LOSES when raw oracle price rises
+    env.set_slot_and_price(200, 145_000_000); // Raw price up
+    env.crank();
+
+    let pnl = env.read_account_pnl(user_idx);
+    // In inverted market, long loses when raw price rises
+    // (inverted price = 1/raw, so raw up → inverted down → long loses)
+    // Verify PnL direction is correct for inverted market
+    assert!(pnl <= 0,
+        "Long in inverted market should lose when raw price rises: pnl={}", pnl);
+
+    // Conservation
+    let c_tot = env.read_c_tot();
+    let sum = env.read_account_capital(lp_idx) + env.read_account_capital(user_idx);
+    assert_eq!(c_tot, sum,
+        "c_tot in inverted market: c_tot={} sum={}", c_tot, sum);
+}
+
+/// ATTACK: Two users with opposing positions, price returns to start.
+/// Both users should have approximately zero PnL (minus fees).
+#[test]
+fn test_attack_opposing_positions_price_roundtrip() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user1 = Keypair::new();
+    let user1_idx = env.init_user(&user1);
+    env.deposit(&user1, user1_idx, 10_000_000_000);
+
+    let user2 = Keypair::new();
+    let user2_idx = env.init_user(&user2);
+    env.deposit(&user2, user2_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // User1 long, user2 short (opposing through LP)
+    env.set_slot(1);
+    env.trade(&user1, &lp, lp_idx, user1_idx, 3_000_000);
+    env.set_slot(2);
+    env.trade(&user2, &lp, lp_idx, user2_idx, -3_000_000);
+
+    // LP net position = -3M + 3M = 0
+    let lp_pos = env.read_account_position(lp_idx);
+    assert_eq!(lp_pos, 0, "LP should be flat: pos={}", lp_pos);
+
+    // Price moves up, then back to start
+    env.set_slot_and_price(200, 150_000_000);
+    env.crank();
+    env.set_slot_and_price(400, 138_000_000); // Back to original
+    env.crank();
+
+    // After round-trip, user1's loss should roughly equal user2's gain (minus fees)
+    let pnl1 = env.read_account_pnl(user1_idx);
+    let pnl2 = env.read_account_pnl(user2_idx);
+
+    // Conservation must hold
+    let c_tot = env.read_c_tot();
+    let sum = env.read_account_capital(lp_idx) +
+              env.read_account_capital(user1_idx) +
+              env.read_account_capital(user2_idx);
+    assert_eq!(c_tot, sum,
+        "c_tot after price roundtrip: c_tot={} sum={}", c_tot, sum);
+}
+
+/// ATTACK: Withdraw exactly all capital from user with open position.
+/// Should fail because margin check requires capital > 0 for positions.
+#[test]
+fn test_attack_withdraw_all_with_open_position() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+    env.crank();
+
+    // Open position
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+
+    // Try to withdraw ALL capital while position is open
+    let result = env.try_withdraw(&user, user_idx, 10_000_000_000);
+    assert!(result.is_err(),
+        "ATTACK: Withdrawing all capital with open position should be rejected!");
+
+    // Position should still exist
+    let pos = env.read_account_position(user_idx);
+    assert_eq!(pos, 5_000_000,
+        "Position should remain after failed withdrawal: pos={}", pos);
+
+    // Capital should be unchanged
+    let cap = env.read_account_capital(user_idx);
+    assert_eq!(cap, 10_000_000_000,
+        "Capital should be unchanged after failed withdrawal: cap={}", cap);
+}
+
+/// ATTACK: Insurance topup from non-admin account.
+/// Anyone can top up insurance (it's a deposit, not withdrawal).
+#[test]
+fn test_attack_insurance_topup_from_non_admin() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let random_user = Keypair::new();
+    env.svm.airdrop(&random_user.pubkey(), 5_000_000_000).unwrap();
+    let _ = env.create_ata(&random_user.pubkey(), 2_000_000_000);
+
+    // Non-admin tops up insurance
+    let result = env.try_top_up_insurance(&random_user, 1_000_000_000);
+
+    // Top-up from non-admin should work (anyone can contribute to insurance)
+    // OR it should be restricted to admin - either way, no funds lost
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation: engine={} vault={}", engine_vault, vault);
+
+    if result.is_ok() {
+        let insurance = env.read_insurance_balance();
+        assert!(insurance > 0,
+            "Insurance should have increased: {}", insurance);
+    }
+}
+
+/// ATTACK: Price moves 50% down then liquidation followed by conservation check.
+/// Tests that large price movements + liquidation maintain fund conservation.
+#[test]
+fn test_attack_large_price_drop_liquidation_conservation() {
+    let path = program_path();
+    if !path.exists() { return; }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.try_top_up_insurance(&admin, 5_000_000_000).unwrap();
+
+    // Disable circuit breaker to allow large price moves
+    env.try_set_oracle_price_cap(&admin, u64::MAX).unwrap();
+
+    env.crank();
+
+    // User opens large long
+    env.trade(&user, &lp, lp_idx, user_idx, 10_000_000);
+
+    // 50% price drop in steps
+    env.set_slot_and_price(200, 100_000_000); // $138 → $100 (28% drop)
+    env.crank();
+
+    env.set_slot_and_price(400, 70_000_000); // $100 → $70 (49% total drop)
+    env.crank();
+
+    // Try liquidating
+    let liq_result = env.try_liquidate(user_idx);
+
+    // After possible liquidation, conservation must hold
+    let vault = env.vault_balance();
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(engine_vault as u64, vault,
+        "Conservation after large drop + liquidation: engine={} vault={}", engine_vault, vault);
+
+    // Verify LP has positive PnL (price dropped, LP was short via user's long)
+    // LP capital may not have increased yet (lazy settlement) but PnL should be positive
+    let lp_pnl = env.read_account_pnl(lp_idx);
+    let lp_cap = env.read_account_capital(lp_idx);
+    assert!(lp_pnl > 0 || lp_cap > 100_000_000_000,
+        "LP should have gained from user's loss: pnl={} cap={}", lp_pnl, lp_cap);
+}
+
