@@ -28866,3 +28866,132 @@ fn test_honest_participants_standard_market_full_lifecycle() {
 
     println!("HONEST PARTICIPANTS STANDARD MARKET FULL LIFECYCLE: PASSED");
 }
+
+// ============================================================================
+// WithdrawInsurance vault accounting regression test
+// ============================================================================
+
+/// Regression test: WithdrawInsurance must decrement engine.vault so CloseSlab succeeds.
+///
+/// Bug: WithdrawInsurance zeroed insurance_fund.balance and transferred SPL tokens,
+/// but did NOT decrement engine.vault. This left engine.vault > 0 after all funds
+/// were drained, permanently blocking CloseSlab (which requires vault == 0).
+///
+/// This caused ~6.9 SOL of slab rent to be locked on mainnet (GFzXi..., immutable).
+///
+/// Test scenario:
+/// 1. Init market, create LP + user
+/// 2. TopUpInsurance to fund the insurance pool
+/// 3. Deposit, trade (creates positions), flatten positions
+/// 4. Resolve market
+/// 5. Force-close all accounts
+/// 6. Withdraw insurance
+/// 7. Verify engine.vault == 0
+/// 8. Close slab -- must succeed (this is the regression)
+#[test]
+fn test_withdraw_insurance_then_close_slab() {
+    let path = program_path();
+    if !path.exists() {
+        println!("SKIP: BPF not found. Run: cargo build-sbf");
+        return;
+    }
+
+    let mut env = TestEnv::new();
+
+    // Init market with no account fee, no unit scaling
+    env.init_market_full(0, 0, 0);
+
+    // Create LP and user (free, no account fee)
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000); // 10 SOL
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000); // 1 SOL
+
+    // Fund insurance via TopUpInsurance (admin deposits tokens)
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 500_000_000); // 0.5 SOL to insurance
+
+    // Verify insurance fund is now funded
+    let ins_balance = env.read_insurance_balance();
+    assert!(ins_balance > 0, "Insurance fund should have balance from TopUpInsurance");
+    println!("Insurance fund balance after top-up: {}", ins_balance);
+
+    // Open and close a small position so accounts have traded
+    let size: i128 = 100_000;
+    env.trade(&user, &lp, lp_idx, user_idx, size);
+
+    env.set_slot(200);
+    env.crank();
+
+    // Flatten positions
+    env.trade(&user, &lp, lp_idx, user_idx, -size);
+
+    env.set_slot(300);
+    env.crank();
+
+    // Set oracle authority and push settlement price (required for ResolveMarket)
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .expect("SetOracleAuthority should succeed");
+    env.try_push_oracle_price(&admin, 138_000_000, 300)
+        .expect("PushOraclePrice should succeed");
+
+    // Resolve market
+    let resolve_result = env.try_resolve_market(&admin);
+    assert!(resolve_result.is_ok(), "ResolveMarket should succeed: {:?}", resolve_result);
+    assert!(env.is_market_resolved(), "Market should be resolved");
+
+    // Force-close all accounts (admin only after resolve)
+    let user_pub = user.pubkey();
+    let force_close_user = env.try_admin_force_close_account(&admin, user_idx, &user_pub);
+    assert!(
+        force_close_user.is_ok(),
+        "AdminForceCloseAccount(user) should succeed: {:?}",
+        force_close_user
+    );
+
+    let lp_pub = lp.pubkey();
+    let force_close_lp = env.try_admin_force_close_account(&admin, lp_idx, &lp_pub);
+    assert!(
+        force_close_lp.is_ok(),
+        "AdminForceCloseAccount(LP) should succeed: {:?}",
+        force_close_lp
+    );
+
+    assert_eq!(env.read_num_used_accounts(), 0, "All accounts should be closed");
+
+    // Withdraw insurance
+    let ins_before = env.read_insurance_balance();
+    assert!(ins_before > 0, "Insurance should still have balance before withdrawal");
+
+    let vault_before = env.read_engine_vault();
+    println!("Before WithdrawInsurance: engine.vault={}, insurance={}", vault_before, ins_before);
+
+    let withdraw_ins_result = env.try_withdraw_insurance(&admin);
+    assert!(
+        withdraw_ins_result.is_ok(),
+        "WithdrawInsurance should succeed: {:?}",
+        withdraw_ins_result
+    );
+
+    // Verify engine.vault == 0 (the fix: vault was decremented by insurance amount)
+    let vault_after = env.read_engine_vault();
+    let ins_after = env.read_insurance_balance();
+    println!("After WithdrawInsurance: engine.vault={}, insurance={}", vault_after, ins_after);
+
+    assert_eq!(ins_after, 0, "Insurance fund should be zeroed");
+    assert_eq!(vault_after, 0, "engine.vault must be 0 after all withdrawals");
+
+    // Close slab -- THE REGRESSION CHECK
+    // Before the fix, engine.vault was still > 0 here, causing CloseSlab to fail
+    let close_slab_result = env.try_close_slab();
+    assert!(
+        close_slab_result.is_ok(),
+        "CloseSlab MUST succeed after WithdrawInsurance (regression for vault accounting bug): {:?}",
+        close_slab_result
+    );
+
+    println!("WITHDRAW INSURANCE VAULT ACCOUNTING FIX VERIFIED: CloseSlab succeeded");
+}

@@ -4226,6 +4226,13 @@ pub mod processor {
                 // Zero out insurance fund
                 engine.insurance_fund.balance = percolator::U128::ZERO;
 
+                // Decrement vault to maintain conservation invariant (vault >= C_tot + insurance)
+                let ins = percolator::U128::new(insurance_units);
+                if ins > engine.vault {
+                    return Err(PercolatorError::EngineInsufficientBalance.into());
+                }
+                engine.vault = engine.vault - ins;
+
                 // Transfer from vault to admin
                 let seed1: &[u8] = b"vault";
                 let seed2: &[u8] = a_slab.key.as_ref();
