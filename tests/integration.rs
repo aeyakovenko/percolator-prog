@@ -28866,3 +28866,94 @@ fn test_honest_participants_standard_market_full_lifecycle() {
 
     println!("HONEST PARTICIPANTS STANDARD MARKET FULL LIFECYCLE: PASSED");
 }
+
+/// Regression test for PR #1: WithdrawInsurance must decrement engine.vault.
+///
+/// Without the fix, WithdrawInsurance zeroes insurance_fund.balance and transfers
+/// SPL tokens out of the vault, but does NOT decrement engine.vault. This leaves
+/// engine.vault non-zero after all capital is withdrawn, causing CloseSlab to fail
+/// (it requires engine.vault.is_zero()).
+#[test]
+fn test_withdraw_insurance_decrements_engine_vault() {
+    let path = program_path();
+    if !path.exists() {
+        println!("SKIP: BPF not found");
+        return;
+    }
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+    let admin = env.payer.insecure_clone();
+
+    // Create LP and user
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000); // 100 SOL
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000); // 10 SOL
+
+    // Top up insurance so we can test withdrawal
+    env.top_up_insurance(&admin, 5_000_000_000); // 5 SOL
+
+    let insurance_before = env.read_insurance_balance();
+    assert!(insurance_before > 0, "Insurance should be funded");
+
+    // Trade to create positions
+    let size: i128 = 100_000;
+    env.trade(&user, &lp, lp_idx, user_idx, size);
+
+    // Setup oracle authority and push price (required for ResolveMarket)
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .expect("oracle authority setup must succeed");
+    env.try_push_oracle_price(&admin, 138_000_000, 100)
+        .expect("oracle price push must succeed");
+
+    // Resolve market (premarket resolution)
+    let result = env.try_resolve_market(&admin);
+    assert!(result.is_ok(), "Resolve should succeed: {:?}", result);
+    assert!(env.is_market_resolved(), "Market should be resolved");
+
+    // Crank to force-close positions
+    env.crank();
+
+    // Verify positions are zeroed after crank
+    assert_eq!(env.read_account_position(user_idx), 0, "User position should be 0 after force-close crank");
+    assert_eq!(env.read_account_position(lp_idx), 0, "LP position should be 0 after force-close crank");
+
+    // Admin force-close both accounts (handles PnL settlement, fee forgiveness)
+    let result = env.try_admin_force_close_account(&admin, user_idx, &user.pubkey());
+    assert!(result.is_ok(), "Admin force close user should succeed: {:?}", result);
+
+    let result = env.try_admin_force_close_account(&admin, lp_idx, &lp.pubkey());
+    assert!(result.is_ok(), "Admin force close LP should succeed: {:?}", result);
+
+    assert_eq!(env.read_num_used_accounts(), 0, "All accounts should be closed");
+
+    // Record vault before WithdrawInsurance
+    let vault_before = env.read_engine_vault();
+    let insurance = env.read_insurance_balance();
+    assert!(insurance > 0, "Insurance should still have balance before withdrawal");
+    assert!(vault_before > 0, "Vault should be non-zero before withdrawal");
+
+    // Withdraw insurance
+    let result = env.try_withdraw_insurance(&admin);
+    assert!(result.is_ok(), "WithdrawInsurance should succeed: {:?}", result);
+
+    // CRITICAL ASSERTION: engine.vault must be decremented by the insurance amount
+    let vault_after = env.read_engine_vault();
+    assert_eq!(
+        vault_after,
+        vault_before - insurance,
+        "engine.vault must be decremented by insurance amount. \
+         Before: {}, Insurance: {}, After: {} (expected {})",
+        vault_before, insurance, vault_after, vault_before - insurance
+    );
+
+    // CloseSlab requires engine.vault == 0
+    let result = env.try_close_slab();
+    assert!(result.is_ok(), "CloseSlab should succeed after WithdrawInsurance: {:?}", result);
+
+    println!("WITHDRAW INSURANCE DECREMENTS ENGINE VAULT: PASSED");
+}

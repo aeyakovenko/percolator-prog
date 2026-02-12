@@ -821,6 +821,18 @@ pub mod verify {
     pub fn init_market_scale_ok(unit_scale: u32) -> bool {
         unit_scale <= crate::constants::MAX_UNIT_SCALE
     }
+
+    // =========================================================================
+    // WithdrawInsurance vault accounting (pure logic)
+    // =========================================================================
+
+    /// Compute vault balance after withdrawing insurance.
+    /// Returns None if insurance exceeds vault (should never happen).
+    /// Invariant: vault_after = vault_before - insurance_amount
+    #[inline]
+    pub fn withdraw_insurance_vault(vault_before: u128, insurance_amount: u128) -> Option<u128> {
+        vault_before.checked_sub(insurance_amount)
+    }
 }
 
 // 2. mod zc (Zero-Copy unsafe island)
@@ -4223,8 +4235,13 @@ pub mod processor {
                 let base_amount = crate::units::units_to_base_checked(units_u64, config.unit_scale)
                     .ok_or(PercolatorError::EngineOverflow)?;
 
-                // Zero out insurance fund
+                // Zero out insurance fund and decrement engine.vault
                 engine.insurance_fund.balance = percolator::U128::ZERO;
+                let ins = percolator::U128::new(insurance_units);
+                if ins > engine.vault {
+                    return Err(PercolatorError::EngineInsufficientBalance.into());
+                }
+                engine.vault = engine.vault - ins;
 
                 // Transfer from vault to admin
                 let seed1: &[u8] = b"vault";

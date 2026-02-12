@@ -69,6 +69,8 @@ use percolator_prog::verify::{
     units_to_base,
     // New: Withdraw alignment
     withdraw_amount_aligned,
+    // New: WithdrawInsurance vault accounting
+    withdraw_insurance_vault,
     writable_ok,
     LpPdaShape,
     MatcherAccountsShape,
@@ -3427,4 +3429,72 @@ fn kani_clamp_toward_formula_concrete() {
         result, expected,
         "result must equal mark.clamp(990_000, 1_010_000)"
     );
+}
+
+// =========================================================================
+// WithdrawInsurance vault accounting proofs
+// =========================================================================
+
+/// Prove: withdraw_insurance_vault correctly decrements vault by insurance amount.
+/// For all valid inputs (insurance <= vault), vault_after == vault_before - insurance.
+#[kani::proof]
+fn kani_withdraw_insurance_vault_correct() {
+    let vault_before: u128 = kani::any();
+    let insurance: u128 = kani::any();
+
+    // Precondition: insurance must not exceed vault
+    kani::assume(insurance <= vault_before);
+
+    let result = withdraw_insurance_vault(vault_before, insurance);
+    assert!(result.is_some(), "must succeed when insurance <= vault");
+    assert_eq!(
+        result.unwrap(),
+        vault_before - insurance,
+        "vault must be decremented by exact insurance amount"
+    );
+}
+
+/// Prove: withdraw_insurance_vault returns None when insurance exceeds vault.
+#[kani::proof]
+fn kani_withdraw_insurance_vault_overflow() {
+    let vault_before: u128 = kani::any();
+    let insurance: u128 = kani::any();
+
+    // Precondition: insurance exceeds vault
+    kani::assume(insurance > vault_before);
+
+    let result = withdraw_insurance_vault(vault_before, insurance);
+    assert!(result.is_none(), "must fail when insurance > vault");
+}
+
+/// Prove: After withdraw_insurance, if all capital is already withdrawn,
+/// vault reaches zero (enabling CloseSlab).
+#[kani::proof]
+fn kani_withdraw_insurance_vault_reaches_zero() {
+    let insurance: u128 = kani::any();
+    // When vault == insurance (all capital already withdrawn, only insurance remains)
+    let vault_before = insurance;
+
+    let result = withdraw_insurance_vault(vault_before, insurance);
+    assert!(result.is_some(), "must succeed when vault == insurance");
+    assert_eq!(result.unwrap(), 0, "vault must be zero after withdrawing all insurance");
+}
+
+/// Negative proof: Demonstrate that NOT decrementing vault breaks the invariant.
+/// This models the pre-fix bug where WithdrawInsurance zeroed insurance_fund.balance
+/// but did NOT decrement engine.vault.
+#[kani::proof]
+fn kani_withdraw_insurance_vault_skip_decrement_breaks_invariant() {
+    let insurance: u128 = kani::any();
+    kani::assume(insurance > 0); // Non-trivial withdrawal
+
+    let vault_before = insurance; // Only insurance remains in vault
+
+    // Correct behavior: use withdraw_insurance_vault
+    let correct_vault = withdraw_insurance_vault(vault_before, insurance).unwrap();
+    assert_eq!(correct_vault, 0, "correct path reaches zero");
+
+    // Buggy behavior: vault unchanged (the pre-fix bug)
+    let buggy_vault = vault_before; // No decrement!
+    assert_ne!(buggy_vault, 0, "buggy path leaves vault non-zero, blocking CloseSlab");
 }
