@@ -2,10 +2,10 @@
 
 ## Kani Proofs Summary
 
-**Date:** 2026-02-06
+**Date:** 2026-02-12
 **Kani Version:** 0.66.0
-**Total Proofs:** 143
-**Passed:** 143
+**Total Proofs:** 147
+**Passed:** 147
 **Failed:** 0
 
 ## Proof Categories
@@ -287,6 +287,14 @@ Risk engine internals are NOT modeled - only wrapper authorization, binding logi
 | 141 | kani_clamp_toward_bootstrap_when_index_zero | index=0 -> jumps to mark |
 | 142 | kani_clamp_toward_movement_bounded_concrete | Movement bounded by cap*dt |
 | 143 | kani_clamp_toward_formula_concrete | Formula matches specification |
+
+### HH. WithdrawInsurance Vault Accounting (4 proofs) - Bug #12
+| # | Harness | Property |
+|---|---------|----------|
+| 144 | kani_withdraw_insurance_vault_correct | vault_after == vault_before - insurance |
+| 145 | kani_withdraw_insurance_vault_overflow | insurance > vault -> returns None |
+| 146 | kani_withdraw_insurance_vault_reaches_zero | vault == insurance -> vault reaches 0 |
+| 147 | kani_withdraw_insurance_vault_skip_decrement_breaks_invariant | Skipping vault decrement breaks invariant |
 
 ## Key Security Properties Proven
 
