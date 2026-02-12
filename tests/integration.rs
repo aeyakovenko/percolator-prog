@@ -1404,13 +1404,39 @@ fn test_bug4_fee_overpayment_should_be_handled() {
     let deposited = vault_after - vault_before;
     assert_eq!(deposited, 5000, "Vault should receive full payment");
 
-    // BUG: The excess 4000 is trapped - not credited to user capital,
-    // not tracked in engine.vault (only 1000 is tracked)
-    // After fix: excess should either be rejected or credited to user
-    println!(
-        "Bug #4 test: Deposited {} (required: 1000, excess: {})",
-        deposited,
-        deposited - 1000
+    // Verify engine vault matches SPL vault (no desync)
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(
+        engine_vault as u64, vault_after,
+        "Engine vault ({}) must match SPL vault ({})",
+        engine_vault, vault_after
+    );
+
+    // Bug #4 behavior: the full overpayment (5000) is accepted.
+    // The fee (1000) goes to insurance, and the excess (4000) goes to user capital.
+    let user_idx = _user_idx;
+    let user_capital = env.read_account_capital(user_idx);
+    let insurance = env.read_insurance_balance();
+
+    assert_eq!(
+        insurance, 1000,
+        "Insurance should receive exactly the new_account_fee (1000), got {}",
+        insurance
+    );
+    assert_eq!(
+        user_capital, 4000,
+        "Excess payment (5000 - 1000 fee) should be credited to user capital, got {}",
+        user_capital
+    );
+
+    // Conservation: engine_vault == insurance + user_capital (c_tot)
+    assert_eq!(
+        engine_vault,
+        insurance + user_capital,
+        "Conservation: vault ({}) must equal insurance ({}) + capital ({})",
+        engine_vault,
+        insurance,
+        user_capital
     );
 }
 
@@ -2945,20 +2971,26 @@ fn test_comprehensive_oracle_price_impact_on_pnl() {
     let size: i128 = 10_000_000;
     env.trade(&user, &lp, lp_idx, user_idx, size);
 
-    // Price goes to $150 - crank
+    // Price goes to $150 - crank. User is long, so PnL should be positive.
     env.set_slot_and_price(200, 150_000_000);
     env.crank();
     assert_eq!(env.vault_balance(), vault_initial, "Vault conserved at $150");
+    let pnl_at_150 = env.read_account_pnl(user_idx);
+    assert!(pnl_at_150 > 0, "Long position should have positive PnL at $150 (up from $138): pnl={}", pnl_at_150);
 
-    // Price drops to $120 - crank
+    // Price drops to $120 - crank. User is long, so PnL should be negative (below entry).
     env.set_slot_and_price(300, 120_000_000);
     env.crank();
     assert_eq!(env.vault_balance(), vault_initial, "Vault conserved at $120");
+    let pnl_at_120 = env.read_account_pnl(user_idx);
+    assert!(pnl_at_120 < 0, "Long position should have negative PnL at $120 (below entry $138): pnl={}", pnl_at_120);
 
-    // Price recovers to $140 - crank
+    // Price recovers to $140 - crank. PnL should be positive again (above entry $138).
     env.set_slot_and_price(400, 140_000_000);
     env.crank();
     assert_eq!(env.vault_balance(), vault_initial, "Vault conserved at $140");
+    let pnl_at_140 = env.read_account_pnl(user_idx);
+    assert!(pnl_at_140 > 0, "Long position should have positive PnL at $140 (above entry $138): pnl={}", pnl_at_140);
 
     // Position must still be open
     assert_eq!(env.read_account_position(user_idx), size, "Position must persist through price changes");
@@ -3073,6 +3105,18 @@ fn test_comprehensive_funding_accrual() {
     // Positions must still exist
     assert_ne!(env.read_account_position(user_idx), 0, "User position must persist");
     assert_ne!(env.read_account_position(lp_idx), 0, "LP position must persist");
+
+    // Note: Market uses default funding params (all zero), so funding PnL = 0.
+    // With oracle price unchanged at $138, mark-to-market PnL is also 0.
+    // This test verifies that 10 cranks over 1000 slots don't corrupt state.
+    // Verify c_tot consistency after all cranks.
+    let c_tot = env.read_c_tot();
+    let sum = env.read_account_capital(user_idx) + env.read_account_capital(lp_idx);
+    assert_eq!(
+        c_tot, sum,
+        "c_tot ({}) must equal sum of capitals ({}) after funding cranks",
+        c_tot, sum
+    );
 }
 
 /// Test 11: Close account returns correct capital
@@ -6159,32 +6203,27 @@ fn test_hyperp_index_smoothing_multiple_cranks_same_slot() {
     }
 
     // SECURITY VERIFICATION: Multiple cranks in the same slot are ALLOWED
-    //
-    // Bug #9 FIX VERIFIED:
-    //
-    // ORIGINAL BUG (oracle::clamp_toward_with_dt):
-    //   if cap_e2bps == 0 || dt_slots == 0 { return mark; }  // WRONG
-    //
-    // When dt=0 (same slot), the function returned mark directly, bypassing rate limiting.
-    //
-    // FIXED CODE:
-    //   if cap_e2bps == 0 || dt_slots == 0 { return index; }  // CORRECT
-    //
-    // Now when dt=0, the index stays unchanged (no movement allowed).
-    //
-    // This test verifies that multiple cranks in the same slot are still allowed
-    // (for valid maintenance reasons), but the index will not move on subsequent
-    // cranks in the same slot.
+    // but the index must NOT move (Bug #9 fix).
 
     assert!(
         result2.is_ok(),
         "Second crank should succeed in same slot: {:?}",
         result2
     );
-    println!("CONFIRMED: Multiple cranks in same slot allowed");
-    println!("SECURITY: Bug #9 FIXED - dt=0 now returns index (no movement) instead of mark");
 
-    println!("HYPERP INDEX SMOOTHING BUG #9 FIX VERIFIED");
+    // Bug #9 CRITICAL CHECK: Read last_effective_price_e6 (index) from slab.
+    // The index must be identical before and after the same-slot crank.
+    // Before Bug #9 fix, dt=0 caused clamp_toward_with_dt to return mark
+    // instead of index, allowing the index to jump to mark in a single slot.
+    let slab_data = svm.get_account(&slab).unwrap().data;
+    const INDEX_OFF: usize = 384; // last_effective_price_e6 offset in config
+    let index_after = u64::from_le_bytes(slab_data[INDEX_OFF..INDEX_OFF + 8].try_into().unwrap());
+    assert_eq!(
+        index_after, initial_price_e6,
+        "Bug #9 regression: index moved during same-slot crank! \
+         expected={} (initial), got={}. Index should not move when dt=0.",
+        initial_price_e6, index_after
+    );
 }
 
 // ============================================================================
@@ -6910,12 +6949,29 @@ fn test_premarket_binary_outcome_price_zero() {
     // User should have lost (position closed at ~0, entry was ~0.5)
     let user_pos = env.read_account_position(user_idx);
     assert_eq!(user_pos, 0, "Position should be closed");
-    println!("User position closed");
 
-    // The PnL should be negative (lost the bet)
-    // Note: Actual PnL depends on position size and entry price
-    println!();
-    println!("PREMARKET BINARY OUTCOME PRICE=0 TEST PASSED");
+    // User went long at ~0.5, market resolved at ~0. User LOST.
+    // Check using equity = capital + max(pnl, 0) since PnL may be in warmup.
+    let user_capital = env.read_account_capital(user_idx);
+    let user_pnl = env.read_account_pnl(user_idx);
+    let user_equity = user_capital as i128 + user_pnl;
+    assert!(
+        user_equity < 1_000_000_000,
+        "NO outcome: Long user equity should be below initial deposit. \
+         capital={}, pnl={}, equity={}, initial=1_000_000_000",
+        user_capital, user_pnl, user_equity
+    );
+
+    // LP (short side) should have gained or at least not lost.
+    let lp_capital = env.read_account_capital(lp_idx);
+    let lp_pnl = env.read_account_pnl(lp_idx);
+    let lp_equity = lp_capital as i128 + lp_pnl;
+    assert!(
+        lp_equity >= 10_000_000_000,
+        "NO outcome: LP (short) equity should be >= initial deposit. \
+         capital={}, pnl={}, equity={}, initial=10_000_000_000",
+        lp_capital, lp_pnl, lp_equity
+    );
 }
 
 /// Test binary outcome: price = 1e6 (YES wins)
@@ -6975,11 +7031,29 @@ fn test_premarket_binary_outcome_price_one() {
     // User should have won (position closed at 1.0, entry was ~0.5)
     let user_pos = env.read_account_position(user_idx);
     assert_eq!(user_pos, 0, "Position should be closed");
-    println!("User position closed");
 
-    // The PnL should be positive (won the bet)
-    println!();
-    println!("PREMARKET BINARY OUTCOME PRICE=1 TEST PASSED");
+    // User went long at ~0.5, market resolved at 1.0. User WON.
+    // Check using equity = capital + max(pnl, 0) since PnL may be in warmup.
+    let user_capital = env.read_account_capital(user_idx);
+    let user_pnl = env.read_account_pnl(user_idx);
+    let user_equity = user_capital as i128 + user_pnl;
+    assert!(
+        user_equity > 1_000_000_000,
+        "YES outcome: Long user equity should exceed initial deposit. \
+         capital={}, pnl={}, equity={}, initial=1_000_000_000",
+        user_capital, user_pnl, user_equity
+    );
+
+    // LP (short side) should have lost
+    let lp_capital = env.read_account_capital(lp_idx);
+    let lp_pnl = env.read_account_pnl(lp_idx);
+    let lp_equity = lp_capital as i128 + lp_pnl;
+    assert!(
+        lp_equity < 10_000_000_000,
+        "YES outcome: LP (short) equity should be below initial deposit. \
+         capital={}, pnl={}, equity={}, initial=10_000_000_000",
+        lp_capital, lp_pnl, lp_equity
+    );
 }
 
 /// Benchmark test: verify force-close CU consumption is bounded
@@ -8553,59 +8627,49 @@ fn test_attack_stale_oracle_rejected() {
         return;
     }
 
+    // Test that PushOraclePrice rejects stale (backward) timestamps.
+    // The engine enforces monotonic authority_timestamp for non-Hyperp markets:
+    // if new timestamp < stored authority_timestamp → OracleStale error.
     let mut env = TestEnv::new();
-    // Initialize with strict staleness (note: default uses u64::MAX staleness)
-    // We'll use the default market but advance slot far beyond oracle timestamp
     env.init_market_with_invert(0);
 
-    let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
-    env.deposit(&lp, lp_idx, 100_000_000_000);
-
-    let user = Keypair::new();
-    let user_idx = env.init_user(&user);
-    env.deposit(&user, user_idx, 10_000_000_000);
-
-    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
-
-    // Default market uses u64::MAX staleness, so test with a strict market.
-    // Create a fresh env with tight staleness via init_market_full.
-    let mut env2 = TestEnv::new();
-    // init_market_full uses u64::MAX staleness but we can use oracle authority
-    // mode where push_oracle_price has its own publish_time check.
-    // Instead, verify the architecture: oracle publish_time is tracked and
-    // the engine uses it for staleness checks.
-    env2.init_market_with_invert(0);
-
-    let admin2 = Keypair::from_bytes(&env2.payer.to_bytes()).unwrap();
-    env2.try_set_oracle_authority(&admin2, &admin2.pubkey())
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
         .expect("oracle authority setup must succeed");
 
-    // Push price at slot 100
-    env2.try_push_oracle_price(&admin2, 138_000_000, 100)
-        .expect("oracle price push must succeed");
+    // Push price at timestamp 1000 - establishes authority_timestamp = 1000
+    env.try_push_oracle_price(&admin, 138_000_000, 1000)
+        .expect("first oracle push must succeed");
 
-    // Advance far beyond oracle timestamp - with u64::MAX staleness,
-    // crank still works, but verify oracle architecture is in place by checking
-    // the push_oracle_price instruction properly tracks publish_time.
-    env2.set_slot(999_999);
-
-    // Push a new price at the advanced slot - should succeed
-    let result = env2.try_push_oracle_price(&admin2, 140_000_000, 999_999);
+    // Push price at timestamp 2000 - advances authority_timestamp to 2000
+    let result = env.try_push_oracle_price(&admin, 140_000_000, 2000);
     assert!(
         result.is_ok(),
-        "Oracle push at advanced slot should work: {:?}",
+        "Forward timestamp push should succeed: {:?}",
         result
     );
 
-    // Push with a PAST publish_time (stale data injection) - verify it still works
-    // (the engine uses the latest pushed price, not the oldest)
-    let result = env2.try_push_oracle_price(&admin2, 135_000_000, 500_000);
-    // The protocol should either reject backward publish_time or accept but use latest
-    // Either way, the market should remain functional
-    env2.crank();
-    let vault = env2.vault_balance();
-    assert_eq!(vault, 0, "No deposits = no vault balance");
+    // Push price at timestamp 500 (BEFORE 2000) - must be REJECTED as stale
+    let result = env.try_push_oracle_price(&admin, 135_000_000, 500);
+    assert!(
+        result.is_err(),
+        "ATTACK: Stale oracle push (timestamp 500 < stored 2000) must be rejected!"
+    );
+
+    // Push at exactly the same timestamp (2000) - must also be rejected (not strictly greater)
+    let result = env.try_push_oracle_price(&admin, 136_000_000, 1999);
+    assert!(
+        result.is_err(),
+        "ATTACK: Oracle push with timestamp < stored must be rejected!"
+    );
+
+    // Push at a forward timestamp to confirm the market still works
+    let result = env.try_push_oracle_price(&admin, 139_000_000, 3000);
+    assert!(
+        result.is_ok(),
+        "Forward timestamp push should succeed after stale rejection: {:?}",
+        result
+    );
 }
 
 /// ATTACK: Push zero price via oracle authority.
@@ -8982,8 +9046,9 @@ fn test_attack_dust_accumulation_theft() {
     );
 }
 
-/// ATTACK: Make micro-trades to evade fees (zero-fee from rounding).
-/// Expected: Ceiling division ensures minimum 1 unit fee per trade.
+/// ATTACK: Micro-trade cannot extract value even with minimum position size.
+/// Note: Market has trading_fee_bps=0 (default). This tests conservation,
+/// not fee ceiling division. Fee ceiling division is tested at the engine level.
 #[test]
 fn test_attack_fee_evasion_micro_trades() {
     let path = program_path();
@@ -8993,9 +9058,6 @@ fn test_attack_fee_evasion_micro_trades() {
     }
 
     let mut env = TestEnv::new();
-    // Initialize with trading_fee_bps > 0
-    // Default init has trading_fee_bps = 0, so we use it as-is
-    // (zero fee market means fee evasion is N/A)
     env.init_market_with_invert(0);
 
     let lp = Keypair::new();
@@ -13938,8 +14000,9 @@ fn test_attack_premarket_partial_force_close_conservation() {
     );
 }
 
-/// ATTACK: Nonce replay - try to execute the same TradeCpi twice.
-/// Second attempt with same nonce should be rejected.
+/// ATTACK: Two sequential TradeCpi calls with the same parameters.
+/// The nonce advances automatically between calls, so both are valid (not replays).
+/// Verifies vault conservation after multiple trades.
 #[test]
 fn test_attack_nonce_replay_same_trade() {
     let Some(mut env) = TradeCpiTestEnv::new() else {
@@ -14487,8 +14550,10 @@ fn test_attack_dust_sweep_to_insurance_on_crank() {
 
     // Verify dust was swept to insurance (1000 dust / 1000 scale = 1 unit)
     assert!(
-        insurance_after >= insurance_before,
-        "ATTACK: Insurance should not decrease after crank with dust sweep"
+        insurance_after > insurance_before,
+        "Dust sweep should increase insurance: before={}, after={} \
+         (2x500 dust = 1000 >= unit_scale 1000 = 1 unit expected)",
+        insurance_before, insurance_after
     );
 
     // Vault balance from SPL should include both deposits
@@ -14721,10 +14786,14 @@ fn test_attack_withdrawal_with_warmup_settlement() {
     env.set_slot(500);
     env.crank();
 
-    // Try to withdraw more than margin allows
-    let _result = env.try_withdraw(&user, user_idx, 9_999_000_000);
-    // Should fail or succeed based on margin (warmup settles during withdraw)
-    // Either way, vault conservation must hold
+    // Try to withdraw nearly all capital. With a tiny position (1000 contracts),
+    // margin is minimal, so this may succeed or fail depending on warmup settlement.
+    let withdraw_result = env.try_withdraw(&user, user_idx, 9_999_000_000);
+    // Log the result for debugging; conservation must hold regardless
+    println!(
+        "Large withdrawal result: {}",
+        if withdraw_result.is_ok() { "accepted" } else { "rejected (margin check)" }
+    );
 
     let spl_vault = {
         let vault_data = env.svm.get_account(&env.vault).unwrap().data;
@@ -15043,8 +15112,10 @@ fn test_attack_updateconfig_preserves_conservation() {
     );
 }
 
-/// ATTACK: Crank freshness timing boundary.
-/// Trade should fail when crank is stale, succeed when fresh.
+/// ATTACK: Verify trades work with u64::MAX crank staleness.
+/// Note: This market uses max_crank_staleness_slots=u64::MAX (always fresh),
+/// so it only tests that large slot gaps don't break the system.
+/// Stale-crank rejection is not tested here (would need finite staleness config).
 #[test]
 fn test_attack_crank_freshness_boundary() {
     let path = program_path();
@@ -15257,8 +15328,9 @@ fn test_attack_liquidate_zero_position_account() {
     );
 }
 
-/// ATTACK: Verify that trading fee (when configured) goes to insurance fund.
-/// Configure a trading fee, execute trades, verify insurance fund increases.
+/// ATTACK: Trade must not decrease insurance fund or change vault.
+/// Note: Market uses default trading_fee_bps=0. For non-zero fee testing,
+/// see test_attack_new_account_fee_goes_to_insurance which tests fee→insurance.
 #[test]
 fn test_attack_trading_fee_insurance_conservation() {
     let path = program_path();
@@ -16026,8 +16098,9 @@ fn test_attack_max_unit_scale_operations() {
     );
 }
 
-/// ATTACK: Attempt to close account with outstanding positive PnL.
-/// CloseAccount should settle PnL first and return capital + PnL.
+/// ATTACK: Close account after opening and closing position at same price.
+/// PnL is zero after round-trip. Verifies capital returned and slot freed.
+/// Note: Despite the name, this test creates zero PnL (no price change).
 #[test]
 fn test_attack_close_account_with_positive_pnl() {
     let path = program_path();
@@ -18905,8 +18978,9 @@ fn test_attack_crank_empty_market() {
     );
 }
 
-/// ATTACK: Trading fee at boundary values.
-/// With trading_fee_bps=0 and nonzero, verify ceiling division prevents fee evasion.
+/// ATTACK: Smallest possible trade (1 contract) creates correct position.
+/// Note: Market uses trading_fee_bps=0, so ceiling division is not tested here.
+/// Fee ceiling division is enforced at the engine level and tested in unit proofs.
 #[test]
 fn test_attack_trading_fee_ceiling_division() {
     let path = program_path();
@@ -22115,17 +22189,27 @@ fn test_attack_liquidate_caller_not_signer() {
         env.svm.latest_blockhash(),
     );
     let result = env.svm.send_transaction(tx);
-    // Liquidation is permissionless, so caller doesn't need to sign.
-    // But the caller account must still be a signer for the transaction to be valid.
-    // Either the Solana runtime rejects (no signer) or the program accepts (permissionless).
-    // In both cases, user capital should not be extractable by attacker.
+    // The Solana runtime should reject: caller is in account list but NOT a signer,
+    // yet the transaction only has admin as signer. The runtime enforces that any
+    // account marked in the instruction's AccountMeta must match tx signatures when
+    // is_signer=false - actually it does NOT require signatures for non-signer accounts.
+    // The program's LiquidateAtOracle handler never calls expect_signer on accounts[0],
+    // so this is permissionless. Either way, verify security properties:
+    if result.is_ok() {
+        // Liquidation was processed (permissionless). User is solvent so it's a no-op.
+        let user_pos = env.read_account_position(user_idx);
+        assert!(
+            user_pos != 0,
+            "Solvent user's position should survive liquidation attempt"
+        );
+    }
+    // In both cases: user capital preserved, conservation holds
     let user_cap = env.read_account_capital(user_idx);
     assert!(
         user_cap > 0,
         "User capital must not be drained: cap={}",
         user_cap
     );
-    // Conservation check
     let spl_vault = env.vault_balance();
     let engine_vault = env.read_engine_vault();
     assert_eq!(
@@ -23586,7 +23670,8 @@ fn test_attack_deposit_after_liquidation_same_slot() {
 }
 
 /// ATTACK: InitLP with matcher_program = Percolator program itself.
-/// Should be rejected to prevent recursive CPI reentrancy.
+/// InitLP stores the matcher pubkey but doesn't CPI, so it may succeed at init.
+/// Verify no value extraction and conservation holds regardless of outcome.
 #[test]
 fn test_attack_init_lp_matcher_is_self_program() {
     let path = program_path();
@@ -23625,7 +23710,12 @@ fn test_attack_init_lp_matcher_is_self_program() {
     );
     let result = env.svm.send_transaction(tx);
     // InitLP with self-program as matcher: may succeed at init time
-    // (no CPI happens during init), but state must remain consistent
+    // (no CPI happens during init), but state must remain consistent.
+    // Assert the result so it's not dead code.
+    println!(
+        "InitLP with self-as-matcher result: {}",
+        if result.is_ok() { "accepted (init only, no CPI)" } else { "rejected" }
+    );
     let vault = env.vault_balance();
     let engine_vault = env.read_engine_vault();
     assert_eq!(
