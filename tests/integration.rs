@@ -754,15 +754,23 @@ fn test_inverted_market_crank_succeeds() {
     // This causes non-zero funding rate when crank runs
     env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
 
+    // Top up insurance to prevent force-realize and dust-close (must exceed threshold after EWMA update)
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 1_000_000_000);
+    let vault_before = env.vault_balance();
+
     // Advance slot to allow funding accrual
     env.set_slot(200);
     env.crank();
 
-    // Run multiple cranks to verify stability
     env.set_slot(300);
     env.crank();
 
-    println!("✓ Inverted market crank succeeded with market price");
+    // Vault SPL balance must not change (funding is internal accounting)
+    assert_eq!(env.vault_balance(), vault_before, "Vault must be conserved through cranks");
+    // Positions must still exist
+    assert_ne!(env.read_account_position(user_idx), 0, "User position must persist");
+    assert_ne!(env.read_account_position(lp_idx), 0, "LP position must persist");
 }
 
 /// Test that a non-inverted market works correctly (control case).
@@ -793,13 +801,22 @@ fn test_non_inverted_market_crank_succeeds() {
 
     env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
 
+    // Top up insurance to prevent force-realize and dust-close (must exceed threshold after EWMA update)
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 1_000_000_000);
+    let vault_before = env.vault_balance();
+
     env.set_slot(200);
     env.crank();
 
     env.set_slot(300);
     env.crank();
 
-    println!("✓ Non-inverted market crank succeeded");
+    // Vault SPL balance must not change (funding is internal accounting)
+    assert_eq!(env.vault_balance(), vault_before, "Vault must be conserved through cranks");
+    // Positions must still exist
+    assert_ne!(env.read_account_position(user_idx), 0, "User position must persist");
+    assert_ne!(env.read_account_position(lp_idx), 0, "LP position must persist");
 }
 
 // ============================================================================
@@ -1397,206 +1414,12 @@ fn test_bug4_fee_overpayment_should_be_handled() {
     );
 }
 
-// ============================================================================
-// Bug #8: LP entry price should update on position flip
-// ============================================================================
+// Bug #6 (Threshold EWMA slow ramp), Bug #7 (Pending epoch wraparound),
+// Bug #8 (LP entry price on flip) — documented in MEMORY.md.
+// Engine-level fixes verified by code inspection; no stub tests needed.
 
-/// Test that LP entry price is updated when position flips direction.
-///
-/// Bug: On LP sign flip where abs(new) <= abs(old), entry_price is not updated.
-/// This causes incorrect MTM PnL calculations.
-#[test]
-fn test_bug8_lp_entry_price_updates_on_flip() {
-    let path = program_path();
-    if !path.exists() {
-        println!("SKIP: BPF not found. Run: cargo build-sbf");
-        return;
-    }
-
-    let mut env = TestEnv::new();
-    env.init_market_with_invert(0);
-
-    let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
-    env.deposit(&lp, lp_idx, 100_000_000_000); // 100 SOL
-
-    let user = Keypair::new();
-    let user_idx = env.init_user(&user);
-    env.deposit(&user, user_idx, 50_000_000_000); // 50 SOL
-
-    // User goes long 100 contracts -> LP goes short 100
-    env.trade(&user, &lp, lp_idx, user_idx, 100_000_000);
-
-    // Now LP has position = -100M (short)
-    // Entry price should be ~138M (the oracle price)
-
-    // Change price significantly
-    env.set_slot(200);
-
-    // User closes 150 contracts (goes short 50) -> LP goes from -100 to +50
-    // This is a flip where abs(new)=50 < abs(old)=100
-    // BUG: LP entry price is NOT updated - stays at old entry instead of new exec price
-    env.trade(&user, &lp, lp_idx, user_idx, -150_000_000);
-
-    // After this trade:
-    // - LP position flipped from -100M to +50M
-    // - LP entry should be updated to current exec price
-    // BUG: Entry stays at old price, causing incorrect PnL calculation
-
-    println!("✓ Bug #8 test: LP position flipped. Entry price should be updated.");
-    // Note: We can't easily read the entry price from LiteSVM without parsing slab
-    // The bug would manifest as incorrect margin calculations
-}
-
-// ============================================================================
-// Bug #6: Threshold EWMA starts from zero, causing slow ramp
-// ============================================================================
-
-/// Test that threshold EWMA ramps up quickly when starting from zero.
-///
-/// Bug: When risk_reduction_threshold starts at 0 and target is large,
-/// max_step = (current * step_bps / 10000).max(min_step) = min_step = 1
-/// So threshold can only increase by 1 per update interval, regardless of target.
-#[test]
-fn test_bug6_threshold_slow_ramp_from_zero() {
-    let path = program_path();
-    if !path.exists() {
-        println!("SKIP: BPF not found. Run: cargo build-sbf");
-        return;
-    }
-
-    // This test demonstrates the bug conceptually.
-    // In practice, testing requires:
-    // 1. Initialize market with default params (threshold starts at 0)
-    // 2. Create conditions where target threshold is high (e.g., large LP position)
-    // 3. Crank multiple times
-    // 4. Observe that threshold only increases by 1 per update
-
-    // BUG: With DEFAULT_THRESH_MIN_STEP=1 and current=0:
-    // max_step = max(0 * step_bps / 10000, 1) = 1
-    // Even if target is 1_000_000, threshold only increases by 1 per interval
-
-    println!("Bug #6: Threshold EWMA slow ramp from zero");
-    println!("  - When current=0, max_step = min_step (1)");
-    println!("  - Even with large target, only increases by 1 per update");
-    println!("  - Fix: Special-case current=0 to allow larger initial step");
-
-    // Note: Full test would require reading threshold from slab state
-    // and verifying it doesn't ramp quickly enough
-}
-
-// ============================================================================
-// Bug #7: Pending epoch wraparound causes incorrect exclusion
-// ============================================================================
-
-/// Test that pending_epoch wraparound doesn't cause incorrect exclusion.
-///
-/// Bug: pending_epoch is u8, so after 256 sweeps it wraps to 0.
-/// Stale pending_exclude_epoch[idx] markers can match the new epoch,
-/// incorrectly exempting accounts from profit-funding.
-#[test]
-fn test_bug7_pending_epoch_wraparound() {
-    let path = program_path();
-    if !path.exists() {
-        println!("SKIP: BPF not found. Run: cargo build-sbf");
-        return;
-    }
-
-    // This test demonstrates the bug conceptually.
-    // Full test would require:
-    // 1. Initialize market
-    // 2. Create accounts
-    // 3. Run 256+ sweeps (256 cranks)
-    // 4. Trigger a liquidation that sets pending_exclude_epoch[idx]
-    // 5. Run 256 more sweeps
-    // 6. Verify the stale marker doesn't incorrectly exempt the account
-
-    // BUG: pending_epoch is u8, wraps after 256 sweeps:
-    // Sweep 0: pending_epoch=0, exclude account 5, pending_exclude_epoch[5]=0
-    // Sweep 255: pending_epoch=255
-    // Sweep 256: pending_epoch=0 (wrapped!)
-    // Now pending_exclude_epoch[5]==0==pending_epoch, account 5 incorrectly excluded
-
-    println!("Bug #7: Pending epoch wraparound");
-    println!("  - pending_epoch is u8, wraps after 256 sweeps");
-    println!("  - Stale exclusion markers can match new epoch after wrap");
-    println!("  - Fix: Use wider type (u16) or clear markers on wrap");
-
-    // Note: Full test would require running 256+ cranks which is expensive
-    // The bug is evident from code inspection
-}
-
-// ============================================================================
-// Finding L: Margin check uses maintenance instead of initial margin
-// ============================================================================
-
-/// Test that execute_trade() incorrectly uses maintenance_margin_bps instead of
-/// initial_margin_bps, allowing users to open positions at 2x intended leverage.
-///
-/// Finding L from security audit:
-/// - maintenance_margin_bps = 500 (5%)
-/// - initial_margin_bps = 1000 (10%)
-/// - Bug: Trade opening checks 5% margin instead of 10%
-/// - Result: Users can open at ~20x leverage instead of max 10x
-#[test]
-fn test_bug_finding_l_margin_check_uses_maintenance_instead_of_initial() {
-    let path = program_path();
-    if !path.exists() {
-        println!("SKIP: BPF not found. Run: cargo build-sbf");
-        return;
-    }
-
-    // Finding L: execute_trade() uses maintenance_margin_bps (5%) instead of
-    // initial_margin_bps (10%), allowing 2x intended leverage.
-    //
-    // RiskParams in encode_init_market:
-    //   maintenance_margin_bps = 500 (5%)
-    //   initial_margin_bps = 1000 (10%)
-    //
-    // Test: deposit enough to pass maintenance but fail initial margin check.
-    // BUG: trade succeeds when it should be rejected.
-
-    let mut env = TestEnv::new();
-    env.init_market_with_invert(1);
-
-    // Create LP with sufficient capital
-    let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
-    env.deposit(&lp, lp_idx, 100_000_000_000); // 100 SOL
-
-    // Create user with capital between maintenance and initial margin requirements
-    let user = Keypair::new();
-    let user_idx = env.init_user(&user);
-
-    // For 10 SOL notional at $138 price:
-    //   Maintenance margin (5%) = 0.5 SOL
-    //   Initial margin (10%) = 1.0 SOL
-    // Deposit 0.6 SOL (above maint, below initial)
-    env.deposit(&user, user_idx, 600_000_000); // 0.6 SOL
-
-    // Calculate position size for ~10 SOL notional
-    // size * price / 1_000_000 = notional
-    // size = notional * 1_000_000 / price = 10_000_000_000 * 1_000_000 / 138_000_000
-    let size: i128 = 72_463_768; // ~10 SOL notional at $138
-
-    // BUG: This trade should be REJECTED (equity 0.6 < initial margin 1.0)
-    // But it is ACCEPTED (equity 0.6 > maintenance margin 0.5)
-    let result = env.try_trade(&user, &lp, lp_idx, user_idx, size);
-
-    assert!(
-        result.is_ok(),
-        "FINDING L REPRODUCED: Trade at ~16.7x leverage accepted. \
-         Should require 10% initial margin but only checks 5% maintenance. \
-         Expected: Ok (bug), Got: {:?}",
-        result
-    );
-
-    println!("FINDING L CONFIRMED: execute_trade() checks maintenance_margin_bps (5%)");
-    println!("instead of initial_margin_bps (10%). User opened position at ~16.7x leverage.");
-    println!("Position notional: ~10 SOL, Equity: 0.6 SOL");
-    println!("Maintenance margin required: 0.5 SOL (passes)");
-    println!("Initial margin required: 1.0 SOL (should fail but doesn't)");
-}
+// Finding L: Original test used invert=1 (making notional tiny), so the trade
+// passed for the wrong reason. The corrected test below uses invert=0.
 
 /// Corrected version of Finding L test - uses invert=0 for accurate notional calculation.
 /// The original test used invert=1, which inverts $138 to ~$7.25, resulting in
@@ -1937,133 +1760,9 @@ fn test_hyperp_rejects_zero_initial_mark_price() {
     println!("HYPERP VALIDATION VERIFIED: Rejects zero initial_mark_price_e6 in Hyperp mode");
 }
 
-/// Security Issue: TradeNoCpi sets mark = index, making premium always 0
-///
-/// In Hyperp mode, TradeNoCpi:
-/// 1. Reads price from index (last_effective_price_e6)
-/// 2. Executes trade at that price
-/// 3. Sets mark (authority_price_e6) = price (index)
-///
-/// Security Fix Verification: TradeNoCpi is disabled for Hyperp markets
-///
-/// TradeNoCpi would allow direct mark price manipulation in Hyperp mode,
-/// bypassing the matcher and setting mark = index after each trade.
-/// This would make premium-based funding always compute to 0.
-///
-/// FIX: TradeNoCpi now returns HyperpTradeNoCpiDisabled error for Hyperp markets.
-/// All trades must go through TradeCpi with a proper matcher.
-#[test]
-fn test_hyperp_issue_trade_nocpi_sets_mark_equals_index() {
-    let path = program_path();
-    if !path.exists() {
-        println!("SKIP: BPF not found. Run: cargo build-sbf");
-        return;
-    }
-
-    println!("HYPERP SECURITY FIX VERIFIED: TradeNoCpi disabled for Hyperp markets");
-    println!("TradeNoCpi now returns HyperpTradeNoCpiDisabled error.");
-    println!("All trades must use TradeCpi with a matcher to prevent mark price manipulation.");
-
-    // Note: Full integration test would require:
-    // 1. Init Hyperp market
-    // 2. Init LP and user accounts
-    // 3. Try TradeNoCpi -> expect HyperpTradeNoCpiDisabled error
-    // This is verified by the code change in percolator.rs
-}
-
-/// Security Issue: Default oracle_price_cap = 0 bypasses index smoothing
-///
-/// In clamp_toward_with_dt():
-///   if cap_e2bps == 0 || dt_slots == 0 { return mark; }
-///
-/// When oracle_price_cap_e2bps == 0 (the InitMarket default), the index
-/// immediately jumps to mark without any rate limiting.
-///
-/// This means the "smooth index chase" feature is disabled by default!
-/// Admin must call SetOraclePriceCap after InitMarket to enable smoothing.
-///
-/// This is a KNOWN CONFIGURATION ISSUE.
-#[test]
-fn test_hyperp_issue_default_cap_zero_bypasses_smoothing() {
-    let path = program_path();
-    if !path.exists() {
-        println!("SKIP: BPF not found. Run: cargo build-sbf");
-        return;
-    }
-
-    println!("HYPERP CONFIGURATION ISSUE: Default oracle_price_cap_e2bps = 0");
-    println!("In InitMarket, oracle_price_cap_e2bps defaults to 0.");
-    println!("When cap == 0, clamp_toward_with_dt() returns mark immediately.");
-    println!("This means index smoothing is DISABLED by default!");
-    println!("");
-    println!("Fix: Admin must call SetOraclePriceCap to set a non-zero value");
-    println!("     after InitMarket to enable rate-limited index smoothing.");
-    println!("");
-    println!("Example: SetOraclePriceCap with max_change_e2bps = 1000 (0.1% per slot)");
-
-    // This test documents the configuration requirement
-}
-
-// ============================================================================
-// Hyperp Security Analysis - Critical Findings
-// ============================================================================
-
-/// FIXED: exec_price bounds validation in TradeCpi for Hyperp
-///
-/// Previously, the matcher could return ANY non-zero exec_price_e6 which
-/// directly became the mark price, enabling price manipulation attacks.
-///
-/// FIX APPLIED:
-/// In TradeCpi, exec_price is now clamped via oracle::clamp_oracle_price()
-/// before being set as mark. Uses oracle_price_cap_e2bps (default 1% per slot
-/// for Hyperp) to limit how far mark can move from index.
-///
-/// Security controls now in place:
-/// 1. Mark price clamped against index via oracle_price_cap_e2bps
-/// 2. Index smoothing clamped against mark via same cap
-/// 3. Funding rate clamped by max_premium_bps (5%) and max_bps_per_slot
-/// 4. Liquidations use index price, not mark
-#[test]
-fn test_hyperp_security_no_exec_price_bounds() {
-    println!("HYPERP SECURITY FIX VERIFIED: exec_price bounds validation added");
-    println!("");
-    println!("In TradeCpi for Hyperp mode:");
-    println!("  1. Matcher returns exec_price_e6");
-    println!("  2. exec_price is CLAMPED via oracle::clamp_oracle_price()");
-    println!("  3. Clamped price written as mark (authority_price_e6)");
-    println!("");
-    println!("Clamp formula: mark = clamp(exec_price, index ± (index * cap_e2bps / 1M))");
-    println!("Default cap: 10,000 e2bps = 1% per slot");
-    println!("");
-    println!("This prevents extreme mark manipulation even with malicious matchers.");
-}
-
-/// FIXED: Default oracle_price_cap_e2bps for Hyperp mode
-///
-/// Previously, oracle_price_cap_e2bps defaulted to 0 for all markets,
-/// which disabled both index smoothing AND mark price clamping.
-///
-/// FIX APPLIED:
-/// Hyperp markets now default to oracle_price_cap_e2bps = 10,000 (1% per slot).
-/// This enables:
-/// 1. Rate-limited index smoothing (index chases mark slowly)
-/// 2. Mark price clamping in TradeCpi (exec_price bounded)
-///
-/// Non-Hyperp markets still default to 0 (circuit breaker disabled).
-#[test]
-fn test_hyperp_security_combined_smoothing_price_risk() {
-    println!("HYPERP SECURITY FIX VERIFIED: Default oracle_price_cap > 0");
-    println!("");
-    println!("Hyperp default configuration:");
-    println!("  oracle_price_cap_e2bps = 10,000 (1% per slot)");
-    println!("");
-    println!("This prevents:");
-    println!("  - Immediate index jumps to manipulated mark");
-    println!("  - Extreme exec_price setting extreme mark");
-    println!("  - Combined attack where index is instantly manipulated");
-    println!("");
-    println!("Price movement rate-limited to 1% of index per slot.");
-}
+// Hyperp security stubs (TradeNoCpi disabled, exec_price clamping,
+// default oracle_price_cap, index smoothing) — documented in MEMORY.md.
+// Verified by code inspection + Kani proofs for clamp_toward_with_dt.
 
 /// Test: Hyperp mode InitMarket succeeds with valid initial_mark_price
 #[test]
@@ -2984,29 +2683,27 @@ fn test_comprehensive_trading_lifecycle_with_pnl() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000); // 10 SOL
 
+    // Top up insurance to prevent force-realize mode during crank
+    let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&ins_payer, 1);
     let vault_after_deposit = env.vault_balance();
-    println!("Vault after deposits: {}", vault_after_deposit);
 
     // Open long position at $138
     let size: i128 = 10_000_000;
     env.trade(&user, &lp, lp_idx, user_idx, size);
-    println!("Step 1: Opened long position");
+    assert_eq!(env.read_account_position(user_idx), size, "User must be long after trade");
 
     // Move price up to $150, crank to settle
     env.set_slot_and_price(200, 150_000_000);
     env.crank();
-    println!("Step 2: Price moved to $150, crank executed");
 
     // Close position
     env.trade(&user, &lp, lp_idx, user_idx, -size);
-    println!("Step 3: Closed position");
+    assert_eq!(env.read_account_position(user_idx), 0, "User position must be zero after flatten");
 
-    // Crank to settle final state
-    env.set_slot_and_price(300, 150_000_000);
-    env.crank();
-    println!("Step 4: Final crank to settle");
-
-    println!("TRADING LIFECYCLE VERIFIED: Open -> Price move -> Close -> Crank");
+    // Vault balance must be conserved (no SPL tokens created or destroyed)
+    let vault_after = env.vault_balance();
+    assert_eq!(vault_after, vault_after_deposit, "Vault must be conserved through lifecycle");
 }
 
 /// Test 2: Liquidation attempt when user position goes underwater
@@ -3033,16 +2730,17 @@ fn test_comprehensive_liquidation_underwater_user() {
     // Open leveraged position
     let size: i128 = 8_000_000;
     env.trade(&user, &lp, lp_idx, user_idx, size);
-    println!("Step 1: User opened leveraged long position");
+    assert_eq!(env.read_account_position(user_idx), size, "User must have position");
 
     // Move price down significantly
     env.set_slot_and_price(200, 100_000_000);
     env.crank();
-    println!("Step 2: Price dropped from $138 to $100");
 
-    // Try to liquidate - may fail if force-realize already closed position during crank
-    // (insurance=0 triggers force-realize mode which zeroes all positions)
-    let _result = env.try_liquidate(user_idx);
+    // After crank with insurance=0 (force-realize mode), position is zeroed
+    assert_eq!(
+        env.read_account_position(user_idx), 0,
+        "Force-realize should zero user position (insurance=0)"
+    );
 }
 
 /// Test 3: Withdrawal limits - can't withdraw beyond margin requirements
@@ -3152,18 +2850,19 @@ fn test_comprehensive_position_flip_long_to_short() {
     // Open long
     let long_size: i128 = 5_000_000;
     env.trade(&user, &lp, lp_idx, user_idx, long_size);
-    println!("Step 1: Opened long position (+5M)");
+    assert_eq!(env.read_account_position(user_idx), long_size, "User must be long");
 
     // Flip to short (trade more than current position in opposite direction)
     let flip_size: i128 = -10_000_000; // -10M, net = -5M (short)
     env.trade(&user, &lp, lp_idx, user_idx, flip_size);
-    println!("Step 2: Flipped to short position (-10M trade, net -5M)");
-
-    // If we can close account, position was successfully managed
-    env.set_slot(200);
-    env.crank();
-
-    println!("POSITION FLIP VERIFIED: Long -> Short trade succeeded");
+    assert_eq!(
+        env.read_account_position(user_idx), -5_000_000,
+        "User must be short after flip"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx), 5_000_000,
+        "LP must be long (opposite of user)"
+    );
 }
 
 /// Test 6: Multiple participants - all trades succeed with single LP
@@ -3198,22 +2897,23 @@ fn test_comprehensive_multiple_participants() {
 
     // User1 goes long 5M
     env.trade(&user1, &lp, lp_idx, user1_idx, 5_000_000);
-    println!("User1: Opened long +5M");
+    assert_eq!(env.read_account_position(user1_idx), 5_000_000);
 
     // User2 goes long 3M
     env.trade(&user2, &lp, lp_idx, user2_idx, 3_000_000);
-    println!("User2: Opened long +3M");
+    assert_eq!(env.read_account_position(user2_idx), 3_000_000);
 
     // User3 goes short 2M
     env.trade(&user3, &lp, lp_idx, user3_idx, -2_000_000);
-    println!("User3: Opened short -2M");
-
-    // Crank to settle
-    env.set_slot(200);
-    env.crank();
+    assert_eq!(env.read_account_position(user3_idx), -2_000_000);
 
     // Net user position: +5M + 3M - 2M = +6M (LP takes opposite = -6M)
-    println!("MULTIPLE PARTICIPANTS VERIFIED: All 3 users traded with single LP");
+    assert_eq!(env.read_account_position(lp_idx), -6_000_000, "LP must hold net opposite");
+
+    // Vault conservation
+    let vault_after = env.vault_balance();
+    let expected_vault = 100_000_000_000u64 + 3 * 10_000_000_000;
+    assert_eq!(vault_after, expected_vault, "Vault must equal total deposits");
 }
 
 /// Test 7: Oracle price impact - crank succeeds at different prices
@@ -3236,27 +2936,32 @@ fn test_comprehensive_oracle_price_impact_on_pnl() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
+    // Top up insurance to prevent force-realize and dust-close (must exceed threshold after EWMA update)
+    let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&ins_payer, 1_000_000_000);
+    let vault_initial = env.vault_balance();
+
     // Open long at $138
     let size: i128 = 10_000_000;
     env.trade(&user, &lp, lp_idx, user_idx, size);
-    println!("Opened long at $138");
 
     // Price goes to $150 - crank
     env.set_slot_and_price(200, 150_000_000);
     env.crank();
-    println!("Crank at $150: success");
+    assert_eq!(env.vault_balance(), vault_initial, "Vault conserved at $150");
 
     // Price drops to $120 - crank
     env.set_slot_and_price(300, 120_000_000);
     env.crank();
-    println!("Crank at $120: success");
+    assert_eq!(env.vault_balance(), vault_initial, "Vault conserved at $120");
 
     // Price recovers to $140 - crank
     env.set_slot_and_price(400, 140_000_000);
     env.crank();
-    println!("Crank at $140: success");
+    assert_eq!(env.vault_balance(), vault_initial, "Vault conserved at $140");
 
-    println!("ORACLE PRICE IMPACT VERIFIED: Crank succeeds at various price levels");
+    // Position must still be open
+    assert_eq!(env.read_account_position(user_idx), size, "Position must persist through price changes");
 }
 
 /// Test 8: Insurance fund top-up succeeds
@@ -3351,16 +3056,23 @@ fn test_comprehensive_funding_accrual() {
 
     // Open long position (creates funding imbalance)
     env.trade(&user, &lp, lp_idx, user_idx, 20_000_000);
-    println!("Opened position, running funding cranks...");
+
+    // Top up insurance to prevent force-realize and dust-close (must exceed threshold after EWMA update)
+    let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&ins_payer, 1_000_000_000);
+    let vault_before = env.vault_balance();
 
     // Run many cranks to accrue funding
     for i in 0..10 {
         env.set_slot(200 + i * 100);
         env.crank();
-        println!("Crank {} at slot {}: success", i + 1, 200 + i * 100);
     }
 
-    println!("FUNDING ACCRUAL VERIFIED: 10 cranks completed successfully");
+    // Vault must be conserved (funding is internal accounting, no SPL transfers)
+    assert_eq!(env.vault_balance(), vault_before, "Vault must be conserved through funding cranks");
+    // Positions must still exist
+    assert_ne!(env.read_account_position(user_idx), 0, "User position must persist");
+    assert_ne!(env.read_account_position(lp_idx), 0, "LP position must persist");
 }
 
 /// Test 11: Close account returns correct capital
@@ -3396,10 +3108,8 @@ fn test_comprehensive_close_account_returns_capital() {
     let returned = vault_before - vault_after;
     println!("Returned to user: {}", returned);
 
-    // Should have returned approximately the deposit amount
-    assert!(returned > 0, "User should receive capital back");
-
-    println!("CLOSE ACCOUNT VERIFIED: Capital returned to user");
+    // No trades, no fees — should return exact deposit
+    assert_eq!(returned, deposit_amount, "User should receive exact deposit back");
 }
 
 // ============================================================================
@@ -6037,6 +5747,15 @@ fn test_extreme_price_movement_with_large_position() {
     // Small trade to verify market still functions (may fail if force-realize
     // mode closed LP's position since insurance=0)
     let _result = env.try_trade(&user2, &lp, lp_idx, user2_idx, 1_000_000);
+
+    // Vault conservation: engine.vault must match SPL vault balance
+    let engine_vault = env.read_engine_vault();
+    let spl_vault = env.vault_balance();
+    assert_eq!(
+        engine_vault as u64, spl_vault,
+        "Conservation after extreme price: engine={} spl={}",
+        engine_vault, spl_vault
+    );
 }
 
 // ============================================================================
@@ -6095,47 +5814,27 @@ fn test_minimum_margin_boundary() {
     env.crank();
 
     // Try to open position with reduced capital (simulated by creating new user)
+    // Use a larger position so 0.5 SOL is truly insufficient:
+    // size=50_000_000, notional = 50M * 138M / 1M = 6.9 SOL
+    // Initial margin (10%) = 0.69 SOL > 0.5 SOL → should be rejected
     let user2 = Keypair::new();
     let user2_idx = env.init_user(&user2);
-    env.deposit(&user2, user2_idx, 500_000_000); // 0.5 SOL (insufficient for 10 SOL position)
+    env.deposit(&user2, user2_idx, 500_000_000); // 0.5 SOL
 
-    // This should fail - 0.5 SOL < 1 SOL required margin
-    let vault_before_result2 = env.vault_balance();
-    let result2 = env.try_trade(&user2, &lp, lp_idx, user2_idx, size);
-    let vault_after_result2 = env.vault_balance();
-    println!(
-        "Trade with 0.5 SOL margin for 10 SOL position: {:?}",
+    let big_size: i128 = 50_000_000;
+    let result2 = env.try_trade(&user2, &lp, lp_idx, user2_idx, big_size);
+
+    // Finding L is FIXED: initial_margin_bps (10%) is enforced
+    // 0.5 SOL < 0.69 SOL required initial margin → trade must be rejected
+    assert!(
+        result2.is_err(),
+        "Trade with insufficient initial margin must be rejected: {:?}",
         result2
     );
-
-    // Note: Due to Finding L (margin check uses maintenance instead of initial),
-    // this trade might succeed when it shouldn't. Assert state-transition consistency either way.
     assert_eq!(
-        vault_after_result2, vault_before_result2,
-        "Trade execution must not move vault balance directly"
+        env.read_account_position(user2_idx), 0,
+        "Rejected trade must leave position at zero"
     );
-    let pos2 = env.read_account_position(user2_idx);
-    if result2.is_ok() {
-        assert_eq!(
-            pos2, size,
-            "Accepted trade must open the requested position size: expected={} got={}",
-            size, pos2
-        );
-    } else {
-        assert_eq!(
-            pos2, 0,
-            "Rejected trade must leave user2 position at zero: got={}",
-            pos2
-        );
-    }
-    let cap2 = env.read_account_capital(user2_idx);
-    assert!(
-        cap2 <= 500_000_000u128,
-        "Trade attempt should never increase user2 capital above deposit: cap={}",
-        cap2
-    );
-
-    println!("MINIMUM MARGIN BOUNDARY TEST COMPLETE");
 }
 
 /// Test rapid position flips within the same slot.
@@ -8780,7 +8479,7 @@ fn test_attack_close_slab_with_insurance_remaining() {
     env.top_up_insurance(&payer, 1_000_000_000);
 
     let insurance_bal = env.read_insurance_balance();
-    assert!(insurance_bal > 0, "Insurance should have balance");
+    assert_eq!(insurance_bal, 1_000_000_000, "Insurance should equal topped-up amount");
 
     // Try to close slab - should fail because insurance > 0
     let result = env.try_close_slab();
@@ -28460,8 +28159,8 @@ fn test_honest_user_standard_market_profitable_close() {
     env.init_market_with_invert(0);
 
     // Top up insurance to prevent force-realize mode (insurance=0 <= threshold=0 triggers it)
-    let payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.top_up_insurance(&payer, 1);
+    let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&ins_payer, 1);
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -28535,8 +28234,8 @@ fn test_honest_user_standard_market_losing_close() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.top_up_insurance(&payer, 1);
+    let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&ins_payer, 1);
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -28602,8 +28301,8 @@ fn test_honest_user_standard_market_warmup_close() {
     let mut env = TestEnv::new();
     env.init_market_with_warmup(0, 1000); // warmup_period_slots = 1000
 
-    let payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.top_up_insurance(&payer, 1);
+    let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&ins_payer, 1);
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -28666,8 +28365,8 @@ fn test_honest_user_inverted_market_close() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(1);
 
-    let payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.top_up_insurance(&payer, 1);
+    let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&ins_payer, 1);
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -28721,8 +28420,8 @@ fn test_honest_user_hyperp_trade_flatten_close() {
         .expect("oracle authority setup must succeed");
 
     // Top up insurance to prevent force-realize mode
-    let payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.top_up_insurance(&payer, 1);
+    let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&ins_payer, 1);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &mp);
