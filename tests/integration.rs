@@ -20306,11 +20306,54 @@ fn test_attack_close_slab_blocked_by_dormant_account() {
     let num_used = env.read_num_used_accounts();
     assert!(num_used > 0, "Precondition: LP account still exists");
 
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let insurance_before = env.read_insurance_balance();
+    let num_used_before = env.read_num_used_accounts();
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+
     // CloseSlab should fail
     let result = env.try_close_slab();
     assert!(
         result.is_err(),
         "ATTACK: CloseSlab succeeded with active LP account!"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected CloseSlab with dormant account must preserve LP position"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected CloseSlab with dormant account must preserve LP capital"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        insurance_before,
+        "Rejected CloseSlab with dormant account must preserve insurance"
+    );
+    assert_eq!(
+        env.read_num_used_accounts(),
+        num_used_before,
+        "Rejected CloseSlab with dormant account must preserve account usage"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected CloseSlab with dormant account must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before,
+        "Rejected CloseSlab with dormant account must preserve engine vault"
+    );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    assert_eq!(
+        slab_after, slab_before,
+        "Rejected CloseSlab with dormant account must preserve slab bytes"
     );
 }
 
