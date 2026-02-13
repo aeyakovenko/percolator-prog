@@ -940,24 +940,29 @@ fn kani_tradecpi_allows_gate_risk_decrease() {
     );
 }
 
-/// Prove: TradeCpi reject leaves nonce unchanged
-/// Note: Subsumed by kani_tradecpi_any_reject_nonce_unchanged (universal proof).
-/// Kept as a concrete regression test and documentation anchor.
+/// Prove: TradeCpi reject leaves nonce unchanged for all invalid matcher shapes.
 #[kani::proof]
 fn kani_tradecpi_reject_nonce_unchanged() {
     let old_nonce: u64 = kani::any();
     let exec_size: i128 = kani::any();
 
-    // Force a rejection (bad shape)
-    let bad_shape = MatcherAccountsShape {
-        prog_executable: false,
-        ctx_executable: false,
-        ctx_owner_is_prog: true,
-        ctx_len_ok: true,
+    // Quantify over all invalid matcher shapes, not just one witness.
+    let shape = MatcherAccountsShape {
+        prog_executable: kani::any(),
+        ctx_executable: kani::any(),
+        ctx_owner_is_prog: kani::any(),
+        ctx_len_ok: kani::any(),
     };
+    kani::assume(!matcher_shape_ok(shape));
 
     let decision = decide_trade_cpi(
-        old_nonce, bad_shape, true, true, true, true, true, false, false, exec_size,
+        old_nonce, shape, true, true, true, true, true, false, false, exec_size,
+    );
+
+    assert_eq!(
+        decision,
+        TradeCpiDecision::Reject,
+        "TradeCpi must reject for any invalid matcher shape"
     );
 
     let result_nonce = decision_nonce(old_nonce, decision);
