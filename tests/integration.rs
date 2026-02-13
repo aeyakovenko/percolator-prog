@@ -4939,15 +4939,22 @@ fn test_tradecpi_permissionless_lp_no_signature_required() {
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let vault_before = env.vault_balance();
+    let engine_vault_before = env.read_vault();
 
     // Execute TradeCpi - LP owner is NOT a signer
     // This should succeed because TradeCpi is permissionless for LP
+    let trade_size = 1_000_000i128;
     let result = env.try_trade_cpi(
         &user,
         &lp.pubkey(), // LP owner pubkey (not signer!)
         lp_idx,
         user_idx,
-        1_000_000, // size
+        trade_size,
         &matcher_prog,
         &matcher_ctx,
     );
@@ -4956,6 +4963,47 @@ fn test_tradecpi_permissionless_lp_no_signature_required() {
         result.is_ok(),
         "TradeCpi should succeed without LP signature (permissionless). Error: {:?}",
         result
+    );
+    let user_pos_after = env.read_account_position(user_idx);
+    let lp_pos_after = env.read_account_position(lp_idx);
+    let user_cap_after = env.read_account_capital(user_idx);
+    let lp_cap_after = env.read_account_capital(lp_idx);
+    let vault_after = env.vault_balance();
+    let engine_vault_after = env.read_vault();
+
+    assert_eq!(
+        user_pos_after,
+        user_pos_before + trade_size,
+        "Permissionless TradeCpi should apply requested user position delta: before={} after={} size={}",
+        user_pos_before,
+        user_pos_after,
+        trade_size
+    );
+    assert_eq!(
+        lp_pos_after,
+        lp_pos_before - trade_size,
+        "Permissionless TradeCpi should apply opposite LP position delta: before={} after={} size={}",
+        lp_pos_before,
+        lp_pos_after,
+        trade_size
+    );
+    let cap_sum_before = user_cap_before + lp_cap_before;
+    let cap_sum_after = user_cap_after + lp_cap_after;
+    assert!(
+        cap_sum_after <= cap_sum_before,
+        "Permissionless TradeCpi must not mint aggregate capital: before_sum={} after_sum={}",
+        cap_sum_before,
+        cap_sum_after
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "TradeCpi should not move SPL vault tokens directly: before={} after={}",
+        vault_before, vault_after
+    );
+    assert_eq!(
+        engine_vault_after, engine_vault_before,
+        "TradeCpi should not mutate engine vault aggregate directly: before={} after={}",
+        engine_vault_before, engine_vault_after
     );
 
     println!("TRADECPI PERMISSIONLESS VERIFIED: LP owner did NOT sign, trade succeeded");
