@@ -7633,11 +7633,36 @@ fn test_attack_withdraw_more_than_capital() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_000_000_000); // 1 SOL
 
+    let user_pos_before = env.read_account_position(user_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
+
     // Try to withdraw 2x the deposit
     let result = env.try_withdraw(&user, user_idx, 2_000_000_000);
     assert!(
         result.is_err(),
         "ATTACK: Should not withdraw more than capital"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Over-withdraw rejection must preserve user position"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Over-withdraw rejection must preserve user capital"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Over-withdraw rejection must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before,
+        "Over-withdraw rejection must preserve engine vault"
     );
 }
 
