@@ -17942,7 +17942,13 @@ fn test_attack_withdraw_to_different_users_ata() {
     let attacker_ata = env.create_ata(&attacker.pubkey(), 0);
 
     env.crank();
+    let withdraw_amount = 1_000_000_000u64;
+    let vault_before = env.vault_balance();
     let user_cap_before = env.read_account_capital(user_idx);
+    let attacker_ata_before = {
+        let ata_data = env.svm.get_account(&attacker_ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
 
     // User tries to withdraw to attacker's ATA
     let ix = Instruction {
@@ -17956,7 +17962,7 @@ fn test_attack_withdraw_to_different_users_ata() {
             AccountMeta::new_readonly(sysvar::clock::ID, false),
             AccountMeta::new_readonly(env.pyth_col, false),
         ],
-        data: encode_withdraw(user_idx, 1_000_000_000),
+        data: encode_withdraw(user_idx, withdraw_amount),
     };
     let tx = Transaction::new_signed_with_payer(
         &[ix],
@@ -17970,14 +17976,41 @@ fn test_attack_withdraw_to_different_users_ata() {
     // that was passed (which is normal SPL behavior - vault signs the transfer)
     // The security guarantee is: user must sign, and tokens go to the ATA they specify.
     // This is NOT an attack if user chooses to send to someone else's ATA.
-    // But verify the user's capital is correctly decremented.
+    // Verify exact accounting in both success and reject paths.
     let user_cap_after = env.read_account_capital(user_idx);
+    let attacker_ata_after = {
+        let ata_data = env.svm.get_account(&attacker_ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
+    let spl_vault = {
+        let vault_data = env.svm.get_account(&env.vault).unwrap().data;
+        TokenAccount::unpack(&vault_data).unwrap().amount
+    };
+
     if result.is_ok() {
-        assert!(
-            user_cap_after < user_cap_before,
-            "Withdrawal should reduce user capital: before={} after={}",
+        assert_eq!(
+            user_cap_after,
+            user_cap_before - withdraw_amount as u128,
+            "Successful withdrawal should decrement user capital by exact amount: before={} after={} amount={}",
             user_cap_before,
-            user_cap_after
+            user_cap_after,
+            withdraw_amount
+        );
+        assert_eq!(
+            spl_vault,
+            vault_before - withdraw_amount,
+            "Successful withdrawal should decrement vault by exact amount: before={} after={} amount={}",
+            vault_before,
+            spl_vault,
+            withdraw_amount
+        );
+        assert_eq!(
+            attacker_ata_after,
+            attacker_ata_before + withdraw_amount,
+            "Successful withdrawal should credit destination ATA by exact amount: before={} after={} amount={}",
+            attacker_ata_before,
+            attacker_ata_after,
+            withdraw_amount
         );
     } else {
         assert_eq!(
@@ -17985,17 +18018,23 @@ fn test_attack_withdraw_to_different_users_ata() {
             "Failed withdrawal should not change user capital: before={} after={}",
             user_cap_before, user_cap_after
         );
+        assert_eq!(
+            spl_vault, vault_before,
+            "Failed withdrawal should not change vault: before={} after={}",
+            vault_before, spl_vault
+        );
+        assert_eq!(
+            attacker_ata_after, attacker_ata_before,
+            "Failed withdrawal should not credit destination ATA: before={} after={}",
+            attacker_ata_before, attacker_ata_after
+        );
     }
-    // Either way, vault must be consistent
-    let spl_vault = {
-        let vault_data = env.svm.get_account(&env.vault).unwrap().data;
-        TokenAccount::unpack(&vault_data).unwrap().amount
-    };
-    // If withdrawal succeeded: 10B + 5B - 1B = 14B. If failed: 15B.
-    assert!(
-        spl_vault == 14_000_000_000 || spl_vault == 15_000_000_000,
-        "ATTACK: SPL vault in unexpected state: {}",
-        spl_vault
+
+    let engine_vault = env.read_engine_vault();
+    assert_eq!(
+        engine_vault as u64, spl_vault,
+        "Engine/SPL vault mismatch after cross-ATA withdrawal attempt: engine={} spl={}",
+        engine_vault, spl_vault
     );
 }
 
