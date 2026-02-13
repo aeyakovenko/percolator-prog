@@ -973,17 +973,24 @@ fn kani_tradecpi_reject_nonce_unchanged() {
     );
 }
 
-/// Prove: TradeCpi accept increments nonce
-/// Note: Subsumed by kani_tradecpi_any_accept_increments_nonce (universal proof).
-/// Kept as a concrete regression test and documentation anchor.
+/// Prove: TradeCpi accept increments nonce for all valid matcher shapes.
 #[kani::proof]
 fn kani_tradecpi_accept_increments_nonce() {
     let old_nonce: u64 = kani::any();
     let exec_size: i128 = kani::any();
 
+    // Quantify over all valid matcher shapes, not just one witness.
+    let shape = MatcherAccountsShape {
+        prog_executable: kani::any(),
+        ctx_executable: kani::any(),
+        ctx_owner_is_prog: kani::any(),
+        ctx_len_ok: kani::any(),
+    };
+    kani::assume(matcher_shape_ok(shape));
+
     let decision = decide_trade_cpi(
         old_nonce,
-        valid_shape(),
+        shape,
         true,
         true,
         true,
@@ -994,9 +1001,13 @@ fn kani_tradecpi_accept_increments_nonce() {
         exec_size,
     );
 
-    assert!(
-        matches!(decision, TradeCpiDecision::Accept { .. }),
-        "should accept with all valid inputs"
+    assert_eq!(
+        decision,
+        TradeCpiDecision::Accept {
+            new_nonce: old_nonce.wrapping_add(1),
+            chosen_size: exec_size,
+        },
+        "TradeCpi must accept for any valid matcher shape when all other checks pass"
     );
 
     let result_nonce = decision_nonce(old_nonce, decision);
