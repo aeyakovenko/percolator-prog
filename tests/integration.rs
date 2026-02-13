@@ -7751,11 +7751,36 @@ fn test_attack_withdraw_misaligned_amount() {
     env.set_slot(200);
     env.crank();
 
+    let user_pos_before = env.read_account_position(user_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
+
     // 1500 % 1000 != 0 => misaligned
     let result = env.try_withdraw(&user, user_idx, 1_500);
     assert!(
         result.is_err(),
         "ATTACK: Misaligned withdrawal should be rejected"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Misaligned withdraw rejection must preserve user position"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Misaligned withdraw rejection must preserve user capital"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Misaligned withdraw rejection must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before,
+        "Misaligned withdraw rejection must preserve engine vault"
     );
 }
 
