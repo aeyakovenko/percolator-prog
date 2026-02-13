@@ -14153,12 +14153,67 @@ fn test_attack_close_slab_before_insurance_withdrawal() {
     env.set_slot(200);
     env.crank();
 
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let insurance_before = env.read_insurance_balance();
+    let num_used_before = env.read_num_used_accounts();
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_vault();
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+
     // CloseSlab should fail even after force-close: vault still has tokens,
     // accounts still exist (num_used > 0), and possibly insurance > 0
     let result = env.try_close_slab();
     assert!(
         result.is_err(),
         "ATTACK: CloseSlab succeeded with active accounts and/or insurance remaining!"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Rejected CloseSlab before insurance withdrawal must preserve user position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected CloseSlab before insurance withdrawal must preserve LP position"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Rejected CloseSlab before insurance withdrawal must preserve user capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected CloseSlab before insurance withdrawal must preserve LP capital"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        insurance_before,
+        "Rejected CloseSlab before insurance withdrawal must preserve insurance"
+    );
+    assert_eq!(
+        env.read_num_used_accounts(),
+        num_used_before,
+        "Rejected CloseSlab before insurance withdrawal must preserve account usage"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected CloseSlab before insurance withdrawal must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_vault(),
+        engine_vault_before,
+        "Rejected CloseSlab before insurance withdrawal must preserve engine vault"
+    );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    assert_eq!(
+        slab_after, slab_before,
+        "Rejected CloseSlab before insurance withdrawal must preserve slab bytes"
     );
 
     // Verify at least one blocking condition holds
