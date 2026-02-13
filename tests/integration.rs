@@ -14228,13 +14228,35 @@ fn test_attack_withdrawal_with_warmup_settlement() {
 
     // Try to withdraw nearly all capital. With a tiny position (1000 contracts),
     // margin is minimal, so this may succeed or fail depending on warmup settlement.
+    let vault_before_withdraw = env.vault_balance();
+    let user_cap_before_withdraw = env.read_account_capital(user_idx);
     let withdraw_result = env.try_withdraw(&user, user_idx, 9_999_000_000);
+    let vault_after_withdraw = env.vault_balance();
+    let user_cap_after_withdraw = env.read_account_capital(user_idx);
     // With 1000-slot warmup at slot 500, only 50% of profit (if any) is vested.
     // The withdrawal may succeed (small position → small margin requirement)
     // or fail (warmup restricts available equity). Either way, conservation must hold.
     if withdraw_result.is_ok() {
-        let vault_decreased = env.vault_balance() < 20_000_000_000;
-        assert!(vault_decreased, "Successful withdrawal should decrease vault");
+        assert_eq!(
+            vault_before_withdraw - vault_after_withdraw,
+            9_999_000_000,
+            "Successful withdrawal should reduce vault by requested amount"
+        );
+        assert!(
+            user_cap_after_withdraw < user_cap_before_withdraw,
+            "Successful withdrawal should reduce user capital: before={} after={}",
+            user_cap_before_withdraw,
+            user_cap_after_withdraw
+        );
+    } else {
+        assert_eq!(
+            vault_after_withdraw, vault_before_withdraw,
+            "Failed withdrawal must leave vault unchanged"
+        );
+        assert_eq!(
+            user_cap_after_withdraw, user_cap_before_withdraw,
+            "Failed withdrawal must leave user capital unchanged"
+        );
     }
 
     let spl_vault = {
@@ -14256,9 +14278,8 @@ fn test_attack_withdrawal_with_warmup_settlement() {
     );
 
     // User capital should be >= 0
-    let user_cap = env.read_account_capital(user_idx);
     assert!(
-        user_cap <= 10_000_000_000,
+        user_cap_after_withdraw <= 10_000_000_000,
         "ATTACK: User capital exceeds original deposit after partial warmup withdrawal!"
     );
 }
