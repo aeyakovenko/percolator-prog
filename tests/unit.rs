@@ -1640,43 +1640,38 @@ fn test_crank_updates_threshold_from_risk_metric() {
         "last_thr_update_slot should be set to clock.slot after crank"
     );
 
-    // Check if positions are still non-zero after crank
-    {
-        let engine = zc::engine_ref(&f.slab.data).unwrap();
-        let lp_pos = engine.accounts[lp_idx as usize].position_size;
-        // Crank may liquidate positions. Check if LP still has position.
-        let risk_units_after = percolator_prog::compute_system_risk_units(engine);
-        // If risk_units is 0 after crank, positions were liquidated
-        if risk_units_after == 0 {
-            // This is expected if crank liquidated - threshold stays at 0
-            return;
-        }
-    }
-
-    // Verify threshold was updated based on risk metric
+    // Verify threshold update behavior. Two valid outcomes:
+    // 1) Positions remain open -> threshold should update from risk metric.
+    // 2) Crank liquidates all positions -> risk_units==0 and threshold stays at 0.
     {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
         let threshold = engine.risk_reduction_threshold();
+        let risk_units_after = percolator_prog::compute_system_risk_units(engine);
 
-        // With trade_size=100000, LP position is -100000 (counterparty to user's +100000)
-        // Only LP positions are counted for risk:
-        //   lp_sum_abs = 100000, lp_max_abs = 100000
-        //   risk_units = max_abs + sum_abs/8 = 100000 + 12500 = 112500
-        //   risk_notional = 112500 * 100_000_000 / 1_000_000 = 11_250_000
-        //   raw_target = 0 + 11_250_000 * 50 / 10_000 = 56_250
-        //   EWMA: (1000 * 56250 + 9000 * 0) / 10000 = 5625
-        //   max_step = 56250 (current == 0 → full jump allowed, Bug #6 fix)
-        //   final = 0 + min(56250, 5625) = 5625
-
-        assert!(
-            threshold > 0,
-            "Threshold should be > 0 after crank with positions"
-        );
-        // Bug #6: when current == 0, full jump to clamped_target allowed (no min_step clamp)
-        assert_eq!(
-            threshold, 5625,
-            "First update from 0 should be EWMA-smoothed raw target"
-        );
+        if risk_units_after == 0 {
+            assert_eq!(
+                threshold, 0,
+                "Threshold should remain 0 when crank liquidates all positions"
+            );
+        } else {
+            // With trade_size=100000, LP position is -100000 (counterparty to user's +100000)
+            // Only LP positions are counted for risk:
+            //   lp_sum_abs = 100000, lp_max_abs = 100000
+            //   risk_units = max_abs + sum_abs/8 = 100000 + 12500 = 112500
+            //   risk_notional = 112500 * 100_000_000 / 1_000_000 = 11_250_000
+            //   raw_target = 0 + 11_250_000 * 50 / 10_000 = 56_250
+            //   EWMA: (1000 * 56250 + 9000 * 0) / 10000 = 5625
+            //   max_step = 56250 (current == 0 -> full jump allowed, Bug #6 fix)
+            //   final = 0 + min(56250, 5625) = 5625
+            assert!(
+                threshold > 0,
+                "Threshold should be > 0 after crank with open LP positions"
+            );
+            assert_eq!(
+                threshold, 5625,
+                "First update from 0 should be EWMA-smoothed raw target"
+            );
+        }
     }
 }
 
@@ -2843,11 +2838,13 @@ fn test_withdraw_preserves_vault_accounting_invariant() {
 
     // Record pre-withdraw state
     let vault_base_before = TokenAccount::unpack(&f.vault.data).unwrap().amount;
+    let user_ata_before = TokenAccount::unpack(&user_ata.data).unwrap().amount;
     let engine_vault_before = zc::engine_ref(&f.slab.data).unwrap().vault;
     let dust_before = state::read_dust_base(&f.slab.data);
 
     // Withdraw 50 base tokens (aligned: 5 units)
     let mut vault_pda_account = TestAccount::new(f.vault_pda, Pubkey::default(), 0, vec![]);
+    let withdraw_res;
     {
         let accounts = vec![
             user.to_info(),
@@ -2859,15 +2856,36 @@ fn test_withdraw_preserves_vault_accounting_invariant() {
             f.clock.to_info(),
             f.pyth_index.to_info(),
         ];
-        // Note: token transfer CPI will fail in test env, but engine state updates happen first
-        let _ = process_instruction(&f.program_id, &accounts, &encode_withdraw(user_idx, 50));
+        // Unit-test harnesses can differ on CPI simulation behavior.
+        // Validate post-state against both acceptable outcomes below.
+        withdraw_res = process_instruction(&f.program_id, &accounts, &encode_withdraw(user_idx, 50));
     }
 
     // Read post-withdraw state
-    // Note: In test env, the SPL vault may not update due to CPI mock,
-    // but engine state DOES update. We verify engine state consistency.
+    // Engine accounting updates happen before transfer CPI; token balances depend
+    // on whether CPI succeeds in this harness.
+    let vault_base_after = TokenAccount::unpack(&f.vault.data).unwrap().amount;
+    let user_ata_after = TokenAccount::unpack(&user_ata.data).unwrap().amount;
     let engine_vault_after = zc::engine_ref(&f.slab.data).unwrap().vault;
     let dust_after = state::read_dust_base(&f.slab.data);
+
+    let vault_delta = vault_base_before.saturating_sub(vault_base_after);
+    let user_delta = user_ata_after.saturating_sub(user_ata_before);
+    assert_eq!(
+        vault_delta, user_delta,
+        "Withdraw token-side effects must be balanced (vault decrease == user increase)"
+    );
+    assert!(
+        vault_delta == 0 || vault_delta == 50,
+        "Withdraw token-side effects must be either full transfer (50) or no-op stub (0), got {}",
+        vault_delta
+    );
+    if withdraw_res.is_err() {
+        assert_eq!(
+            vault_delta, 0,
+            "If withdraw returns error, token balances must remain unchanged"
+        );
+    }
 
     // Verify engine vault decreased by expected units
     assert_eq!(
