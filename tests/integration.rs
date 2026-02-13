@@ -9178,12 +9178,36 @@ fn test_attack_withdraw_insurance_before_resolution() {
     env.top_up_insurance(&payer, 1_000_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let insurance_before = env.read_insurance_balance();
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
 
     // Try to withdraw insurance without resolving market
     let result = env.try_withdraw_insurance(&admin);
     assert!(
         result.is_err(),
         "ATTACK: Withdraw insurance on active market should fail"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        insurance_before,
+        "Rejected insurance withdraw on active market must preserve insurance balance"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected insurance withdraw on active market must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before,
+        "Rejected insurance withdraw on active market must preserve engine vault"
+    );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    assert_eq!(
+        slab_after, slab_before,
+        "Rejected insurance withdraw on active market must preserve slab state"
     );
 }
 
