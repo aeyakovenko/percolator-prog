@@ -7950,10 +7950,34 @@ fn test_attack_deposit_wrong_owner() {
     // Attacker tries to deposit to victim's account
     let attacker = Keypair::new();
     env.svm.airdrop(&attacker.pubkey(), 10_000_000_000).unwrap();
+    let victim_pos_before = env.read_account_position(victim_idx);
+    let victim_cap_before = env.read_account_capital(victim_idx);
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
     let result = env.try_deposit_unauthorized(&attacker, victim_idx, 1_000_000_000);
     assert!(
         result.is_err(),
         "ATTACK: Deposit to wrong owner's account should fail"
+    );
+    assert_eq!(
+        env.read_account_position(victim_idx),
+        victim_pos_before,
+        "Unauthorized deposit rejection must preserve victim position"
+    );
+    assert_eq!(
+        env.read_account_capital(victim_idx),
+        victim_cap_before,
+        "Unauthorized deposit rejection must preserve victim capital"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Unauthorized deposit rejection must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before,
+        "Unauthorized deposit rejection must preserve engine vault"
     );
 }
 
