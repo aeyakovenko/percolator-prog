@@ -10534,10 +10534,42 @@ fn test_attack_oracle_cap_ultra_restrictive() {
         .expect("oracle price push must succeed");
     env.set_slot(200);
 
+    // Config offset for authority_price_e6
+    const AUTH_PRICE_OFF: usize = 360;
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let auth_price_before = u64::from_le_bytes(
+        slab_before[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8]
+            .try_into()
+            .unwrap(),
+    );
+
     // Push 50% price increase - should succeed but be clamped internally
     let result = env.try_push_oracle_price(&admin, 207_000_000, 200);
-    // Whether it succeeds or fails, the protocol should not accept the unclamped price
-    // Market should remain functional
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let auth_price_after = u64::from_le_bytes(
+        slab_after[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8]
+            .try_into()
+            .unwrap(),
+    );
+    assert_ne!(
+        auth_price_after, 207_000_000,
+        "Ultra-restrictive cap must not accept the unclamped +50% push"
+    );
+    if result.is_ok() {
+        assert!(
+            auth_price_after >= auth_price_before,
+            "Accepted oracle push should not move authority price backwards (before={} after={})",
+            auth_price_before,
+            auth_price_after
+        );
+    } else {
+        assert_eq!(
+            auth_price_after, auth_price_before,
+            "Rejected oracle push must not mutate authority price"
+        );
+    }
+
+    // Market should remain functional regardless of clamp/reject path.
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
     env.deposit(&lp, lp_idx, 10_000_000_000);
