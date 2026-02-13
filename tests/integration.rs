@@ -11844,10 +11844,27 @@ fn test_attack_close_slab_uninitialized() {
     let mut env = TestEnv::new();
     // Don't call init_market - slab is uninitialized
 
+    let slab_before = env
+        .svm
+        .get_account(&env.slab)
+        .expect("slab account must exist before uninitialized close attempt");
+
     let result = env.try_close_slab();
     assert!(
         result.is_err(),
         "ATTACK: CloseSlab on uninitialized slab should fail"
+    );
+    let slab_after = env
+        .svm
+        .get_account(&env.slab)
+        .expect("slab account must exist after uninitialized close attempt");
+    assert_eq!(
+        slab_after.lamports, slab_before.lamports,
+        "Rejected CloseSlab on uninitialized slab must preserve lamports"
+    );
+    assert_eq!(
+        slab_after.data, slab_before.data,
+        "Rejected CloseSlab on uninitialized slab must preserve slab bytes"
     );
 }
 
