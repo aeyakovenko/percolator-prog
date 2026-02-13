@@ -8120,16 +8120,64 @@ fn test_attack_position_flip_requires_initial_margin() {
     // Open a moderate long position (uses some of the initial margin budget)
     // At $138, position=5M means notional = 5M * 138 = 690M, margin needed = 69M (10%)
     // 1 SOL = 1e9, so this should be within margin
-    let result = env.try_trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+    let initial_long_size = 5_000_000i128;
+    let result = env.try_trade(&user, &lp, lp_idx, user_idx, initial_long_size);
     assert!(result.is_ok(), "Initial long should work: {:?}", result);
+    assert_eq!(
+        env.read_account_position(user_idx),
+        initial_long_size,
+        "Initial margin-eligible long should set expected user position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        -initial_long_size,
+        "Initial margin-eligible long should set expected opposite LP position"
+    );
+    let user_pos_before_flip = env.read_account_position(user_idx);
+    let lp_pos_before_flip = env.read_account_position(lp_idx);
+    let user_cap_before_flip = env.read_account_capital(user_idx);
+    let lp_cap_before_flip = env.read_account_capital(lp_idx);
+    let spl_vault_before_flip = env.vault_balance();
+    let engine_vault_before_flip = env.read_engine_vault();
 
     // Try to flip to a very large short: -5M to close + -100M new short
     // The new short side notional = 100M * 138 = 13.8B, requiring 1.38B initial margin
     // User only has ~1 SOL = 1e9, so this should fail
-    let result = env.try_trade(&user, &lp, lp_idx, user_idx, -105_000_000);
+    let oversize_flip = -105_000_000i128;
+    let result = env.try_trade(&user, &lp, lp_idx, user_idx, oversize_flip);
     assert!(
         result.is_err(),
         "ATTACK: Position flip to oversized short should require initial margin"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before_flip,
+        "Rejected oversized flip must preserve user position from prior valid trade"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before_flip,
+        "Rejected oversized flip must preserve LP position from prior valid trade"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before_flip,
+        "Rejected oversized flip must preserve user capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before_flip,
+        "Rejected oversized flip must preserve LP capital"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before_flip,
+        "Rejected oversized flip must preserve SPL vault aggregate"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before_flip,
+        "Rejected oversized flip must preserve engine vault aggregate"
     );
 }
 
