@@ -9886,8 +9886,11 @@ fn test_attack_update_config_extreme_values() {
         env.svm.latest_blockhash(),
     );
     let result = env.svm.send_transaction(tx);
-    // Whether this succeeds or not, the engine should remain functional.
-    // Config changes should not corrupt the engine state.
+    assert!(
+        result.is_ok(),
+        "Extreme-but-valid UpdateConfig should be accepted: {:?}",
+        result
+    );
 
     // Set up positions to verify the engine still works
     let lp = Keypair::new();
