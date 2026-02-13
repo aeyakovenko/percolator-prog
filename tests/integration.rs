@@ -12999,6 +12999,11 @@ fn test_attack_fee_debt_accumulation_large_maintenance_fee() {
     let user_capital = env.read_account_capital(user_idx);
     // 10M/slot * 2000 slots = 20B total fees, split across accounts
     // User had 10B, LP had 100B - fees should drain proportionally or from all
+    assert!(
+        user_capital <= 10_000_000_000u128,
+        "Maintenance fee accrual must not increase user capital: {}",
+        user_capital
+    );
 
     // Key invariant: vault must still have tokens (system didn't panic/corrupt)
     let vault = env.vault_balance();
@@ -13060,6 +13065,12 @@ fn test_attack_extreme_maintenance_fee() {
     // Advance time and crank - system must not panic
     env.set_slot_and_price(100, 100_000_000);
     let crank_result = env.try_crank();
+    assert!(
+        crank_result.is_ok(),
+        "Crank failed after extreme fee update attempt. set_fee_result={:?} crank_result={:?}",
+        result,
+        crank_result
+    );
 
     // After crank, vault tokens still preserved (fees don't move SPL tokens)
     let vault_after = env.vault_balance();
