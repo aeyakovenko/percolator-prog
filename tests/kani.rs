@@ -3348,39 +3348,45 @@ fn kani_scale_price_and_base_to_units_use_same_divisor() {
     // Same ratio regardless of scale!
 }
 
-/// CONCRETE EXAMPLE using PRODUCTION functions.
-/// Verifies the fix works for a typical scenario.
+/// Prove scaled-price math preserves conservative margin behavior under unit scaling.
+/// Replaces single concrete witness with a bounded universal proof.
 #[kani::proof]
 fn kani_scale_price_e6_concrete_example() {
-    let oracle_price: u64 = 138_000_000; // $138 in e6
-    let unit_scale: u32 = 1000;
+    let oracle_price: u64 = kani::any();
+    let unit_scale: u32 = kani::any();
+    let base_tokens: u64 = kani::any();
+    let position_size: u128 = kani::any();
+    let margin_bps: u128 = kani::any();
 
-    // Call PRODUCTION function
-    let scaled = scale_price_e6(oracle_price, unit_scale);
+    // Bounded symbolic domain for tractable SAT solving.
+    kani::assume(unit_scale > 1);
+    kani::assume(unit_scale <= KANI_MAX_SCALE);
+    kani::assume(oracle_price >= unit_scale as u64);
+    kani::assume(oracle_price <= KANI_MAX_QUOTIENT as u64 * unit_scale as u64);
+    kani::assume(base_tokens <= KANI_MAX_QUOTIENT as u64 * unit_scale as u64);
+    kani::assume(position_size <= 1_000_000_000);
+    kani::assume(margin_bps <= 10_000);
 
-    assert!(scaled.is_some(), "Must succeed for valid input");
-    assert_eq!(scaled.unwrap(), 138_000, "138_000_000 / 1000 = 138_000");
+    let scaled = scale_price_e6(oracle_price, unit_scale).unwrap();
+    let (capital_units, _dust) = base_to_units(base_tokens, unit_scale);
 
-    // Also test with production base_to_units
-    let base_tokens: u64 = 1_000_000_000; // 1 SOL
-    let (capital_units, dust) = base_to_units(base_tokens, unit_scale);
+    // Conversion identities (floor division by same unit_scale).
+    assert_eq!(scaled, oracle_price / unit_scale as u64);
+    assert_eq!(capital_units, base_tokens / unit_scale as u64);
 
-    assert_eq!(capital_units, 1_000_000, "1B / 1000 = 1M");
-    assert_eq!(dust, 0, "1B is evenly divisible by 1000");
-
-    // Verify margin calculation uses consistent units:
-    // position_value = pos_size * oracle_scaled / 1e6
-    // margin_required = position_value * margin_bps / 10_000
-    let position_size: u128 = 1_000_000; // 1M contracts
-    let margin_bps: u128 = 500; // 5%
-
-    let position_value_scaled = position_size * scaled.unwrap() as u128 / 1_000_000;
-    let margin_required = position_value_scaled * margin_bps / 10_000;
-
-    // capital_units (1M) > margin_required (6.9K) → PASSES
+    // Scaled valuation is conservative: floor(price/scale) cannot increase value.
+    let position_value_unscaled = position_size * oracle_price as u128 / 1_000_000;
+    let position_value_scaled = position_size * scaled as u128 / 1_000_000;
     assert!(
-        capital_units as u128 > margin_required,
-        "With fix: capital and position_value are both in units scale, margin check passes"
+        position_value_scaled * unit_scale as u128 <= position_value_unscaled,
+        "scaled position value must not exceed unscaled value after re-scaling"
+    );
+
+    let margin_required_unscaled = position_value_unscaled * margin_bps / 10_000;
+    let margin_required_scaled = position_value_scaled * margin_bps / 10_000;
+    assert!(
+        margin_required_scaled * unit_scale as u128 <= margin_required_unscaled,
+        "scaled margin requirement must not exceed unscaled requirement after re-scaling"
     );
 }
 // Integer truncation can cause < 1 unit differences that flip results at exact
