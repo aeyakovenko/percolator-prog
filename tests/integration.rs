@@ -9243,11 +9243,54 @@ fn test_attack_withdraw_insurance_with_open_positions() {
     let result = env.try_resolve_market(&admin);
     assert!(result.is_ok(), "Should resolve: {:?}", result);
 
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let insurance_before = env.read_insurance_balance();
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
+
     // Try to withdraw insurance while position still open
     let result = env.try_withdraw_insurance(&admin);
     assert!(
         result.is_err(),
         "ATTACK: Withdraw insurance with open positions should fail"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Rejected insurance withdraw with open positions must preserve user position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected insurance withdraw with open positions must preserve LP position"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Rejected insurance withdraw with open positions must preserve user capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected insurance withdraw with open positions must preserve LP capital"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        insurance_before,
+        "Rejected insurance withdraw with open positions must preserve insurance balance"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected insurance withdraw with open positions must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before,
+        "Rejected insurance withdraw with open positions must preserve engine vault"
     );
 }
 
