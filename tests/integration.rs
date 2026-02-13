@@ -10764,10 +10764,21 @@ fn test_attack_haircut_all_users_in_loss() {
     );
 
     // User should still be able to partially withdraw (reduced equity, but not zero)
+    let vault_before = env.vault_balance();
     let result = env.try_withdraw(&user, user_idx, 1_000_000_000);
-    // Whether this succeeds depends on how much equity remains after loss
-    // Either way, vault integrity is the key property
     let vault_after = env.vault_balance();
+    if result.is_ok() {
+        assert_eq!(
+            vault_after,
+            vault_before - 1_000_000_000,
+            "Successful withdraw must decrement vault by requested amount"
+        );
+    } else {
+        assert_eq!(
+            vault_after, vault_before,
+            "Failed withdraw must leave vault unchanged"
+        );
+    }
     assert!(vault_after > 0, "Vault should never go to zero");
 }
 
@@ -13102,11 +13113,23 @@ fn test_attack_warmup_prevents_immediate_profit_withdrawal() {
 
     // Try to withdraw MORE than original deposit
     // Warmup should prevent extracting unvested profit
+    let vault_before = env.vault_balance();
     let result = env.try_withdraw(&user, user_idx, 10_000_000_001); // 1 more than deposited
                                                                     // This should fail because warmup locks profit
                                                                     // (even with profit, MTM equity minus warmup-locked amount < withdrawal)
-                                                                    // Whether it fails or succeeds, vault must still be >= LP deposit
     let vault_after = env.vault_balance();
+    if result.is_ok() {
+        assert_eq!(
+            vault_after,
+            vault_before - 10_000_000_001,
+            "Successful warmup withdraw must decrement vault by requested amount"
+        );
+    } else {
+        assert_eq!(
+            vault_after, vault_before,
+            "Failed warmup withdraw must leave vault unchanged"
+        );
+    }
     assert!(
         vault_after >= 100_000_000_000,
         "ATTACK: Warmup exploit drained vault below LP deposit! vault={}",
