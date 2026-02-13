@@ -7808,12 +7808,49 @@ fn test_attack_withdraw_during_undercollateralization() {
     env.set_slot_and_price(200, 200_000_000);
     env.crank();
 
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
+
     // Try to withdraw all original deposit + more (inflated equity)
     // The system should cap withdrawal at haircutted equity minus margin
     let result = env.try_withdraw(&user, user_idx, 50_000_000_000);
     assert!(
         result.is_err(),
         "ATTACK: Withdraw exceeding haircutted equity should fail"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Rejected haircut withdraw must preserve user position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected haircut withdraw must preserve LP position"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Rejected haircut withdraw must preserve user capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected haircut withdraw must preserve LP capital"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected haircut withdraw must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before,
+        "Rejected haircut withdraw must preserve engine vault"
     );
 }
 
