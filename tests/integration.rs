@@ -21140,6 +21140,8 @@ fn test_attack_liquidate_caller_not_signer() {
     env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
     env.crank();
     env.trade(&user, &lp, lp_idx, user_idx, 10_000_000);
+    let user_pos_before = env.read_account_position(user_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
 
     let caller = Keypair::new();
     env.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
@@ -21173,20 +21175,24 @@ fn test_attack_liquidate_caller_not_signer() {
     // is_signer=false - actually it does NOT require signatures for non-signer accounts.
     // The program's LiquidateAtOracle handler never calls expect_signer on accounts[0],
     // so this is permissionless. Either way, verify security properties:
-    if result.is_ok() {
-        // Liquidation was processed (permissionless). User is solvent so it's a no-op.
-        let user_pos = env.read_account_position(user_idx);
-        assert!(
-            user_pos != 0,
-            "Solvent user's position should survive liquidation attempt"
-        );
-    }
+    let user_pos_after = env.read_account_position(user_idx);
+    let user_cap_after = env.read_account_capital(user_idx);
+    assert_eq!(
+        user_pos_after, user_pos_before,
+        "Liquidation-by-non-signer path must not mutate solvent user position: before={} after={} result={:?}",
+        user_pos_before, user_pos_after, result
+    );
+    assert_eq!(
+        user_cap_after, user_cap_before,
+        "Liquidation-by-non-signer path must not mutate solvent user capital: before={} after={} result={:?}",
+        user_cap_before, user_cap_after, result
+    );
+
     // In both cases: user capital preserved, conservation holds
-    let user_cap = env.read_account_capital(user_idx);
     assert!(
-        user_cap > 0,
+        user_cap_after > 0,
         "User capital must not be drained: cap={}",
-        user_cap
+        user_cap_after
     );
     let spl_vault = env.vault_balance();
     let engine_vault = env.read_engine_vault();
