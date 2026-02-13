@@ -8087,6 +8087,9 @@ fn test_attack_admin_op_as_user() {
 
     let attacker = Keypair::new();
     env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
 
     // UpdateAdmin
     let result = env.try_update_admin(&attacker, &attacker.pubkey());
@@ -8132,6 +8135,21 @@ fn test_attack_admin_op_as_user() {
     assert!(
         result.is_err(),
         "ATTACK: Non-admin SetOraclePriceCap should fail"
+    );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    assert_eq!(
+        slab_after, slab_before,
+        "Non-admin admin-op attempts must leave slab state unchanged"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Non-admin admin-op attempts must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before,
+        "Non-admin admin-op attempts must preserve engine vault"
     );
 }
 
