@@ -5353,6 +5353,12 @@ fn test_tradecpi_rejects_pda_with_wrong_shape() {
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let vault_before = env.vault_balance();
+    let engine_vault_before = env.read_vault();
 
     // Derive the CORRECT LP PDA
     let lp_bytes = lp_idx.to_le_bytes();
@@ -5388,6 +5394,36 @@ fn test_tradecpi_rejects_pda_with_wrong_shape() {
     assert!(
         result.is_err(),
         "SECURITY: TradeCpi should reject PDA with non-zero lamports"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Rejected malformed-PDA TradeCpi must preserve user position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected malformed-PDA TradeCpi must preserve LP position"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Rejected malformed-PDA TradeCpi must preserve user capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected malformed-PDA TradeCpi must preserve LP capital"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        vault_before,
+        "Rejected malformed-PDA TradeCpi must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_vault(),
+        engine_vault_before,
+        "Rejected malformed-PDA TradeCpi must preserve engine vault aggregate"
     );
 
     println!("TRADECPI PDA SHAPE VALIDATION VERIFIED: PDA with wrong shape REJECTED");
