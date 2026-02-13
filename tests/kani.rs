@@ -3533,6 +3533,56 @@ fn kani_clamp_toward_formula_concrete() {
     assert_eq!(result, lo, "mark below lo must clamp to lo");
 }
 
+/// Companion proof: when mark is within the allowed band, result equals mark.
+/// Uses the same fixed cap/dt assumptions as kani_clamp_toward_formula_concrete.
+#[kani::proof]
+fn kani_clamp_toward_formula_within_bounds() {
+    let index_raw: u16 = kani::any();
+    let mark_raw: u16 = kani::any();
+
+    kani::assume(index_raw > 0);
+    kani::assume(index_raw <= 5_000);
+    kani::assume(mark_raw <= 10_000);
+
+    let index = index_raw as u64;
+    let mark = mark_raw as u64;
+    let cap_e2bps: u64 = 10_000; // 1.00%
+    let dt_slots: u64 = 1;
+
+    let max_delta = index / 100;
+    let lo = index - max_delta;
+    let hi = index + max_delta;
+    kani::assume(mark >= lo);
+    kani::assume(mark <= hi);
+
+    let result = clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots);
+    assert_eq!(result, mark, "mark inside [lo, hi] must remain unchanged");
+}
+
+/// Companion proof: when mark is above the allowed band, result clamps to `hi`.
+/// Uses the same fixed cap/dt assumptions as kani_clamp_toward_formula_concrete.
+#[kani::proof]
+fn kani_clamp_toward_formula_above_hi() {
+    let index_raw: u16 = kani::any();
+    let mark_raw: u16 = kani::any();
+
+    kani::assume(index_raw > 0);
+    kani::assume(index_raw <= 5_000);
+    kani::assume(mark_raw <= 10_000);
+
+    let index = index_raw as u64;
+    let mark = mark_raw as u64;
+    let cap_e2bps: u64 = 10_000; // 1.00%
+    let dt_slots: u64 = 1;
+
+    let max_delta = index / 100;
+    let hi = index + max_delta;
+    kani::assume(mark > hi);
+
+    let result = clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots);
+    assert_eq!(result, hi, "mark above hi must clamp to hi");
+}
+
 // =========================================================================
 // WithdrawInsurance vault accounting proofs
 // =========================================================================
