@@ -11272,10 +11272,18 @@ fn test_attack_liquidate_lp_account() {
 
     // Whether liquidation succeeds or fails, verify no corruption
     let capital_after = env.read_account_capital(lp_idx);
+    let pos_after = env.read_account_position(lp_idx);
     let vault = env.vault_balance();
     assert!(
         vault > 0,
         "Vault should still have balance after LP liquidation attempt"
+    );
+    assert!(
+        pos_after.unsigned_abs() <= pos_before.unsigned_abs(),
+        "LP liquidation attempt must not increase LP exposure. before={} after={} attempt={:?}",
+        pos_before,
+        pos_after,
+        liquidation_attempt
     );
     // LP capital should not have increased (no value extraction)
     assert!(
@@ -18950,8 +18958,6 @@ fn test_attack_close_slab_blocked_by_dormant_account() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
     env.deposit(&lp, lp_idx, 10_000_000_000);
@@ -20573,7 +20579,7 @@ fn test_attack_four_users_one_lp_conservation() {
     env.deposit(&lp, lp_idx, 100_000_000_000);
 
     let mut user_idxs = Vec::new();
-    for i in 0..4 {
+    for _ in 0..4 {
         let user = Keypair::new();
         let user_idx = env.init_user(&user);
         env.deposit(&user, user_idx, 5_000_000_000);
@@ -21138,7 +21144,7 @@ fn test_attack_deposit_wrong_oracle_account() {
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
 
-    let ata = env.create_ata(&user.pubkey(), 5_000_000_000);
+    env.create_ata(&user.pubkey(), 5_000_000_000);
 
     // Create a fake oracle account
     let fake_oracle = Pubkey::new_unique();
@@ -21779,7 +21785,16 @@ fn test_attack_liquidation_equity_exactly_zero() {
     }
 
     // Try liquidation - account should be insolvent or near-insolvent
+    let user_pos_before_liq = env.read_account_position(user_idx);
     let liq_result = env.try_liquidate(user_idx);
+    let user_pos_after_liq = env.read_account_position(user_idx);
+    assert!(
+        user_pos_after_liq.unsigned_abs() <= user_pos_before_liq.unsigned_abs(),
+        "Liquidation path must not increase user exposure. before={} after={} result={:?}",
+        user_pos_before_liq,
+        user_pos_after_liq,
+        liq_result
+    );
     // Whether liquidation succeeds or not, conservation must hold
     let vault = env.vault_balance();
     let engine_vault = env.read_engine_vault();
@@ -23116,10 +23131,40 @@ fn test_attack_slot_reuse_multi_user_gc_reinit() {
     env.crank();
 
     let num_after_gc = env.read_num_used_accounts();
+    let user1_slot_used_after_gc = env.is_slot_used(user1_idx);
+    if user1_slot_used_after_gc {
+        assert_eq!(
+            num_after_gc, 3,
+            "If user1 is not GC'd yet, all 3 accounts should remain (got {})",
+            num_after_gc
+        );
+    } else {
+        assert_eq!(
+            num_after_gc, 2,
+            "If user1 is GC'd, only LP+user2 should remain (got {})",
+            num_after_gc
+        );
+        assert_eq!(
+            env.read_account_capital(user1_idx),
+            0,
+            "GC'd user1 slot should have zero capital"
+        );
+        assert_eq!(
+            env.read_account_position(user1_idx),
+            0,
+            "GC'd user1 slot should have zero position"
+        );
+    }
 
     // New user3 takes the recycled slot
     let user3 = Keypair::new();
     let user3_idx = env.init_user(&user3);
+    if !user1_slot_used_after_gc {
+        assert_eq!(
+            user3_idx, user1_idx,
+            "Freed user1 slot should be reused by user3"
+        );
+    }
     env.deposit(&user3, user3_idx, 5_000_000_000);
 
     // user3 trades
@@ -23323,6 +23368,12 @@ fn test_attack_warmup_partial_close_vesting() {
     // Capital shouldn't have increased by the full unrealized profit
     // (warmup vesting limits profit conversion)
     let user_cap_after = env.read_account_capital(user_idx);
+    assert!(
+        user_cap_after <= user_cap_before + 200_000_000u128,
+        "Warmup partial close should bound immediate capital jump. before={} after={}",
+        user_cap_before,
+        user_cap_after
+    );
 
     // Conservation must hold
     let c_tot = env.read_c_tot();
@@ -23435,6 +23486,10 @@ fn test_attack_haircut_zero_pnl_pos_tot() {
     );
 
     let pnl_pos_tot = env.read_pnl_pos_tot();
+    assert!(
+        pnl_pos_tot > 0,
+        "Positive-pnl pool should be non-zero when LP offsets user's negative PnL"
+    );
 
     // Withdrawal should still work even with haircut conditions
     let user_cap = env.read_account_capital(user_idx);
@@ -24147,6 +24202,12 @@ fn test_attack_opposing_positions_price_roundtrip() {
     // After round-trip, user1's loss should roughly equal user2's gain (minus fees)
     let pnl1 = env.read_account_pnl(user1_idx);
     let pnl2 = env.read_account_pnl(user2_idx);
+    assert!(
+        (pnl1 <= 0 && pnl2 >= 0) || (pnl1 >= 0 && pnl2 <= 0),
+        "Opposite-direction users should have opposite-signed (or zero) PnL after round-trip. pnl1={} pnl2={}",
+        pnl1,
+        pnl2
+    );
 
     // Conservation must hold
     let c_tot = env.read_c_tot();
@@ -24283,7 +24344,16 @@ fn test_attack_large_price_drop_liquidation_conservation() {
     env.crank();
 
     // Try liquidating
+    let user_pos_before_liq = env.read_account_position(user_idx);
     let liq_result = env.try_liquidate(user_idx);
+    let user_pos_after_liq = env.read_account_position(user_idx);
+    assert!(
+        user_pos_after_liq.unsigned_abs() <= user_pos_before_liq.unsigned_abs(),
+        "Liquidation attempt must not increase user exposure. before={} after={} result={:?}",
+        user_pos_before_liq,
+        user_pos_after_liq,
+        liq_result
+    );
 
     // After possible liquidation, conservation must hold
     let vault = env.vault_balance();
@@ -24550,6 +24620,13 @@ fn test_attack_trade_long_then_short_net_zero() {
         engine_vault as u64, vault,
         "Conservation after net-zero trades: engine={} vault={}",
         engine_vault, vault
+    );
+    let cap_after = env.read_account_capital(user_idx);
+    assert!(
+        cap_after <= cap_before + 1,
+        "Net-zero round-trip trade should not increase user capital materially. before={} after={}",
+        cap_before,
+        cap_after
     );
 }
 
