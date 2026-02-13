@@ -8315,6 +8315,12 @@ fn test_attack_tradecpi_wrong_lp_pda() {
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_vault();
 
     // Use a random pubkey as the PDA
     let wrong_pda = Pubkey::new_unique();
@@ -8329,6 +8335,36 @@ fn test_attack_tradecpi_wrong_lp_pda() {
         &wrong_pda,
     );
     assert!(result.is_err(), "ATTACK: Wrong LP PDA should be rejected");
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Rejected wrong-LP-PDA TradeCpi must preserve user position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected wrong-LP-PDA TradeCpi must preserve LP position"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Rejected wrong-LP-PDA TradeCpi must preserve user capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected wrong-LP-PDA TradeCpi must preserve LP capital"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected wrong-LP-PDA TradeCpi must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_vault(),
+        engine_vault_before,
+        "Rejected wrong-LP-PDA TradeCpi must preserve engine vault"
+    );
 }
 
 /// ATTACK: Provide a PDA that has lamports (non-system shape).
