@@ -8482,6 +8482,14 @@ fn test_attack_tradecpi_cross_lp_matcher_binding() {
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_a_pos_before = env.read_account_position(lp_a_idx);
+    let lp_b_pos_before = env.read_account_position(lp_b_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_a_cap_before = env.read_account_capital(lp_a_idx);
+    let lp_b_cap_before = env.read_account_capital(lp_b_idx);
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_vault();
 
     // Try to use LP A's context for LP B's trade
     let result = env.try_trade_cpi(
@@ -8496,6 +8504,46 @@ fn test_attack_tradecpi_cross_lp_matcher_binding() {
     assert!(
         result.is_err(),
         "ATTACK: Cross-LP matcher binding should be rejected"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Rejected cross-LP matcher swap must preserve user position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_a_idx),
+        lp_a_pos_before,
+        "Rejected cross-LP matcher swap must preserve LP-A position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_b_idx),
+        lp_b_pos_before,
+        "Rejected cross-LP matcher swap must preserve LP-B position"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Rejected cross-LP matcher swap must preserve user capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_a_idx),
+        lp_a_cap_before,
+        "Rejected cross-LP matcher swap must preserve LP-A capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_b_idx),
+        lp_b_cap_before,
+        "Rejected cross-LP matcher swap must preserve LP-B capital"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected cross-LP matcher swap must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_vault(),
+        engine_vault_before,
+        "Rejected cross-LP matcher swap must preserve engine vault"
     );
 }
 
