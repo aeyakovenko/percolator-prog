@@ -20374,11 +20374,17 @@ fn test_attack_update_admin_old_admin_rejected() {
     env.try_update_admin(&admin, &new_admin.pubkey()).unwrap();
 
     // Old admin tries SetRiskThreshold - should fail
+    let slab_before_old_admin_attempt = env.svm.get_account(&env.slab).unwrap().data;
     env.set_slot(2);
     let result = env.try_set_risk_threshold(&admin, 500_000_000);
     assert!(
         result.is_err(),
         "ATTACK: Old admin still authorized after UpdateAdmin!"
+    );
+    let slab_after_old_admin_attempt = env.svm.get_account(&env.slab).unwrap().data;
+    assert_eq!(
+        slab_after_old_admin_attempt, slab_before_old_admin_attempt,
+        "Rejected SetRiskThreshold by old admin must preserve slab bytes"
     );
 
     // New admin can do it
