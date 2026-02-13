@@ -3482,22 +3482,32 @@ fn kani_clamp_toward_movement_bounded_concrete() {
     );
 }
 
-/// Prove: Formula correctness - concrete example.
-/// Uses fixed values to avoid SAT explosion from division.
+/// Prove: Formula correctness under non-special bounded inputs.
+/// Uses symbolic inputs with tractable bounds to avoid SAT explosion.
 #[kani::proof]
 fn kani_clamp_toward_formula_concrete() {
-    // Same concrete setup
-    let index: u64 = 1_000_000;
-    let cap_e2bps: u64 = 10_000; // 1%
-    let dt_slots: u64 = 1;
+    let index: u64 = kani::any();
+    let cap_e2bps: u64 = kani::any();
+    let dt_slots: u64 = kani::any();
     let mark: u64 = kani::any();
 
+    // Exclude special-case branches and bound search space for SAT.
+    kani::assume(index > 0);
+    kani::assume(cap_e2bps > 0);
+    kani::assume(dt_slots > 0);
+    kani::assume(index <= 1_000_000_000);
+    kani::assume(cap_e2bps <= 200_000); // <= 20% in e2bps
+    kani::assume(dt_slots <= 16);
+
     let result = clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots);
-    let expected = mark.clamp(990_000, 1_010_000);
+    let max_delta = ((index as u128 * cap_e2bps as u128 * dt_slots as u128) / 1_000_000u128) as u64;
+    let lo = index.saturating_sub(max_delta);
+    let hi = index.saturating_add(max_delta);
+    let expected = mark.clamp(lo, hi);
 
     assert_eq!(
         result, expected,
-        "result must equal mark.clamp(990_000, 1_010_000)"
+        "result must equal mark clamped to computed movement bounds"
     );
 }
 
