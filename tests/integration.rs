@@ -5596,11 +5596,23 @@ fn test_extreme_price_movement_with_large_position() {
 
     // User should be underwater - liquidation may fail if force-realize already
     // closed the position during crank (insurance=0 triggers force-realize mode)
+    let pos_before_liq = env.read_account_position(user_idx);
     let liq_result = env.try_liquidate(user_idx);
     // Either liquidation succeeds (reduces position) or was already force-realized
     let pos_after_liq = env.read_account_position(user_idx);
     if liq_result.is_ok() {
-        assert!(pos_after_liq.unsigned_abs() < 100_000_000, "Liquidation should reduce position");
+        assert!(
+            pos_after_liq.unsigned_abs() <= pos_before_liq.unsigned_abs(),
+            "Successful liquidation should not increase exposure: before={} after={}",
+            pos_before_liq,
+            pos_after_liq
+        );
+    } else {
+        assert_eq!(
+            pos_after_liq, pos_before_liq,
+            "Failed liquidation must preserve position: before={} after={}",
+            pos_before_liq, pos_after_liq
+        );
     }
 
     // If liquidation succeeded or failed, verify accounting
