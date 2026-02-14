@@ -15316,48 +15316,69 @@ fn test_attack_withdrawal_with_warmup_settlement() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
+    // Open and close a profitable position so profit enters warmup-locked PnL.
+    env.crank();
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+    env.set_slot_and_price(100, 100_000_000);
+    env.crank();
+    env.set_slot_and_price(200, 200_000_000);
+    env.crank();
+    env.trade(&user, &lp, lp_idx, user_idx, -5_000_000);
+    env.set_slot_and_price(300, 200_000_000);
     env.crank();
 
-    // Open position
-    env.trade(&user, &lp, lp_idx, user_idx, 1_000);
-    env.crank();
-
-    // Advance partially through warmup period
-    env.set_slot(500);
-    env.crank();
-
-    // Try to withdraw nearly all capital. With a tiny position (1000 contracts),
-    // margin is minimal, so this may succeed or fail depending on warmup settlement.
+    // Before warmup vests enough PnL, only settled capital is withdrawable.
     let vault_before_withdraw = env.vault_balance();
     let user_cap_before_withdraw = env.read_account_capital(user_idx);
-    let withdraw_result = env.try_withdraw(&user, user_idx, 9_999_000_000);
-    let vault_after_withdraw = env.vault_balance();
-    let user_cap_after_withdraw = env.read_account_capital(user_idx);
-    // With 1000-slot warmup at slot 500, only 50% of profit (if any) is vested.
-    // The withdrawal may succeed (small position → small margin requirement)
-    // or fail (warmup restricts available equity). Either way, conservation must hold.
-    if withdraw_result.is_ok() {
-        assert_eq!(
-            vault_before_withdraw - vault_after_withdraw,
-            9_999_000_000,
-            "Successful withdrawal should reduce vault by requested amount"
-        );
-        assert!(
-            user_cap_after_withdraw < user_cap_before_withdraw,
-            "Successful withdrawal should reduce user capital: before={} after={}",
-            user_cap_before_withdraw,
-            user_cap_after_withdraw
-        );
-    } else {
-        assert_eq!(
-            vault_after_withdraw, vault_before_withdraw,
-            "Failed withdrawal must leave vault unchanged"
-        );
-        assert_eq!(
-            user_cap_after_withdraw, user_cap_before_withdraw,
-            "Failed withdrawal must leave user capital unchanged"
-        );
-    }
+    assert!(
+        user_cap_before_withdraw <= 10_000_000_000,
+        "Settled capital should not exceed principal before warmup conversion: {}",
+        user_cap_before_withdraw
+    );
+    let settled_cap_u64 = u64::try_from(user_cap_before_withdraw)
+        .expect("settled capital should fit in u64 for withdrawal amount");
+    assert!(
+        settled_cap_u64 > 0,
+        "Precondition: settled capital should be positive before withdrawal test"
+    );
+    let overdraw_amount = settled_cap_u64.saturating_add(1);
+    let early_withdraw = env.try_withdraw(&user, user_idx, overdraw_amount);
+    let vault_after_early = env.vault_balance();
+    let user_cap_after_early = env.read_account_capital(user_idx);
+    assert!(
+        early_withdraw.is_err(),
+        "Warmup must block over-withdraw before vesting: {:?}",
+        early_withdraw
+    );
+    assert_eq!(
+        vault_after_early, vault_before_withdraw,
+        "Rejected early warmup withdrawal must leave vault unchanged"
+    );
+    assert_eq!(
+        user_cap_after_early, user_cap_before_withdraw,
+        "Rejected early warmup withdrawal must leave user capital unchanged"
+    );
+
+    // Settled principal should remain withdrawable despite warmup-locked profit.
+    let vested_withdraw = env.try_withdraw(&user, user_idx, settled_cap_u64);
+    let vault_after_vested = env.vault_balance();
+    let user_cap_after_vested = env.read_account_capital(user_idx);
+    assert!(
+        vested_withdraw.is_ok(),
+        "Settled-capital withdrawal should succeed even when profit is warmup-locked: {:?}",
+        vested_withdraw
+    );
+    assert_eq!(
+        vault_after_vested,
+        vault_before_withdraw - settled_cap_u64,
+        "Successful vested withdrawal must reduce vault by exact amount"
+    );
+    assert!(
+        user_cap_after_vested < user_cap_before_withdraw,
+        "Successful vested withdrawal should reduce user capital: before={} after={}",
+        user_cap_before_withdraw,
+        user_cap_after_vested
+    );
 
     let spl_vault = {
         let vault_data = env.svm.get_account(&env.vault).unwrap().data;
@@ -15372,15 +15393,15 @@ fn test_attack_withdrawal_with_warmup_settlement() {
     // Key assertion: SPL vault >= engine vault always
     assert!(
         spl_vault as u128 >= engine_vault,
-        "ATTACK: Withdrawal with warmup broke SPL/engine vault conservation! SPL={} engine={}",
+        "ATTACK: Warmup withdrawal broke SPL/engine vault conservation! SPL={} engine={}",
         spl_vault,
         engine_vault
     );
 
     // User capital should be >= 0
     assert!(
-        user_cap_after_withdraw <= 10_000_000_000,
-        "ATTACK: User capital exceeds original deposit after partial warmup withdrawal!"
+        user_cap_after_vested <= 10_000_000_000,
+        "ATTACK: User capital exceeds original deposit after vested withdrawal!"
     );
 }
 
