@@ -12111,42 +12111,32 @@ fn test_attack_deposit_resolve_withdraw_sequence() {
         .expect("market resolution setup must succeed");
 
     // Can't deposit more
-    let result = env.try_deposit(&user, user_idx, 1_000_000_000);
-    assert!(result.is_err(), "Deposit after resolution should fail");
+    let deposit_result = env.try_deposit(&user, user_idx, 1_000_000_000);
+    assert!(deposit_result.is_err(), "Deposit after resolution should fail");
 
     // Should be able to withdraw original capital (no position)
     let vault_before = env.vault_balance();
     let capital_before = env.read_account_capital(user_idx);
-    let result = env.try_withdraw(&user, user_idx, 5_000_000_000);
+    let withdraw_result = env.try_withdraw(&user, user_idx, 5_000_000_000);
     let vault_after = env.vault_balance();
     let capital_after = env.read_account_capital(user_idx);
+    assert!(
+        withdraw_result.is_ok(),
+        "Withdrawal on resolved market with no position should succeed: {:?}",
+        withdraw_result
+    );
+    assert_eq!(
+        vault_before - vault_after,
+        5_000_000_000,
+        "Withdrawal amount should match vault decrease"
+    );
+    assert_eq!(
+        capital_before - capital_after,
+        5_000_000_000u128,
+        "Withdrawal amount should match capital decrease"
+    );
 
-    if result.is_ok() {
-        assert_eq!(
-            vault_before - vault_after,
-            5_000_000_000,
-            "Withdrawal amount should match vault decrease"
-        );
-        assert!(
-            capital_after < capital_before,
-            "Successful withdrawal should reduce capital: before={} after={}",
-            capital_before,
-            capital_after
-        );
-    } else {
-        assert_eq!(
-            vault_after, vault_before,
-            "Failed withdrawal should not change vault: before={} after={}",
-            vault_before, vault_after
-        );
-        assert_eq!(
-            capital_after, capital_before,
-            "Failed withdrawal should not change capital: before={} after={}",
-            capital_before, capital_after
-        );
-    }
-    // Either withdrawal works or is blocked by resolution - both are valid
-    // Key property: no value created from nothing
+    // Key property: no value created from nothing.
     let vault_final = vault_after;
     assert!(
         vault_final <= 10_000_000_000,
