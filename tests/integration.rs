@@ -14599,18 +14599,26 @@ fn test_attack_nonce_replay_same_trade() {
     assert!(result.is_ok(), "First trade should succeed");
     let pos_after_first = env.read_account_position(user_idx);
 
-    // Second identical trade - nonce has advanced, so this is a NEW trade (not replay)
+    // Use a near-identical second trade to avoid tx-signature dedup artifacts in the harness.
+    // This still checks that the second operation is processed as a new trade (not replay).
     let result2 = env.try_trade_cpi(
         &user,
         &lp.pubkey(),
         lp_idx,
         user_idx,
-        100_000_000,
+        100_000_001,
         &matcher_prog,
         &matcher_ctx,
     );
 
-    // Whether second trade succeeds or fails, vault conservation must hold
+    // Second trade should also succeed because nonce advanced.
+    assert!(
+        result2.is_ok(),
+        "Second trade with advanced nonce should be accepted: {:?}",
+        result2
+    );
+
+    // Vault conservation must hold after both trades.
     let vault = env.read_vault();
     let expected_vault = 50_000_000_000u128 + 5_000_000_000u128; // LP + user deposits
     assert_eq!(
@@ -14625,23 +14633,14 @@ fn test_attack_nonce_replay_same_trade() {
         "First trade should have created a non-zero position"
     );
 
-    // If second trade succeeded, verify it created an additive position (not replay)
     let pos_after_second = env.read_account_position(user_idx);
-    if result2.is_ok() {
-        assert!(
-            pos_after_second.abs() > pos_after_first.abs(),
-            "ATTACK: Nonce replay - second trade didn't grow position! \
-             first_pos={}, second_pos={}",
-            pos_after_first,
-            pos_after_second
-        );
-    } else {
-        assert_eq!(
-            pos_after_second, pos_after_first,
-            "Rejected second trade must preserve position: first_pos={} second_pos={}",
-            pos_after_first, pos_after_second
-        );
-    }
+    assert!(
+        pos_after_second.abs() > pos_after_first.abs(),
+        "ATTACK: Nonce replay - second trade didn't grow position! \
+         first_pos={}, second_pos={}",
+        pos_after_first,
+        pos_after_second
+    );
 }
 
 /// ATTACK: Multiple deposits in same transaction should not create extra capital.
