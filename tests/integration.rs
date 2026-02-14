@@ -14233,11 +14233,15 @@ fn test_attack_extreme_maintenance_fee() {
     let lp_idx = env.init_lp(&lp);
     env.deposit(&lp, lp_idx, 100_000_000_000);
 
-    // Set extreme maintenance fee - should either be rejected or accepted safely
+    // Set extreme maintenance fee and verify it is accepted.
     let result = env.try_set_maintenance_fee(&admin, u128::MAX);
+    assert!(
+        result.is_ok(),
+        "Extreme maintenance fee update should be accepted: {:?}",
+        result
+    );
 
-    // Regardless of whether extreme fee was accepted, vault tokens must be preserved
-    // (maintenance fees are internal accounting, not SPL transfers)
+    // Vault tokens must be preserved (maintenance fees are internal accounting, not SPL transfers)
     let total_deposited = 1_000_000_000u64 + 100_000_000_000u64;
     let vault = env.vault_balance();
     assert_eq!(
