@@ -9770,20 +9770,16 @@ fn test_attack_fee_evasion_micro_trades() {
         capital
     );
     let pos = env.read_account_position(user_idx);
-    if result.is_ok() {
-        assert_eq!(
-            pos, 1,
-            "Successful min-size trade should produce 1-unit position: pos={}",
-            pos
-        );
-    } else {
-        assert_eq!(pos, 0, "Rejected trade should keep zero position: pos={}", pos);
-        assert_eq!(
-            capital, 10_000_000_000u128,
-            "Rejected trade should not change capital: cap={}",
-            capital
-        );
-    }
+    assert!(
+        result.is_ok(),
+        "Minimum-size trade should execute in this setup: {:?}",
+        result
+    );
+    assert_eq!(
+        pos, 1,
+        "Successful min-size trade should produce 1-unit position: pos={}",
+        pos
+    );
 }
 
 /// ATTACK: Deposit/withdraw cycle to manipulate haircut or extract extra tokens.
