@@ -26631,21 +26631,44 @@ fn test_attack_concurrent_max_withdrawals_conservation() {
     // Both try to withdraw maximum
     let cap1 = env.read_account_capital(user1_idx);
     let cap2 = env.read_account_capital(user2_idx);
+    let vault_before = env.vault_balance();
+    let cap1_before = env.read_account_capital(user1_idx);
+    let cap2_before = env.read_account_capital(user2_idx);
 
-    // At least one should succeed; neither should drain vault below obligations
+    // With open positions, full-capital withdrawals should be rejected.
     let withdraw1 = env.try_withdraw(&user1, user1_idx, cap1 as u64);
     let withdraw2 = env.try_withdraw(&user2, user2_idx, cap2 as u64);
-    if withdraw1.is_err() && withdraw2.is_err() {
-        let failures = format!("user1={:?} user2={:?}", withdraw1, withdraw2);
-        assert!(
-            failures.contains("custom program error") || failures.contains("Custom("),
-            "Concurrent max-withdraw failures were unexpected: {}",
-            failures
-        );
-    }
+    let vault_after = env.vault_balance();
+    let cap1_after = env.read_account_capital(user1_idx);
+    let cap2_after = env.read_account_capital(user2_idx);
+    assert!(
+        withdraw1.is_err(),
+        "User1 full-capital withdrawal should be rejected with open position: {:?}",
+        withdraw1
+    );
+    assert!(
+        withdraw2.is_err(),
+        "User2 full-capital withdrawal should be rejected with open position: {:?}",
+        withdraw2
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected concurrent max-withdrawals must not change vault: before={} after={}",
+        vault_before, vault_after
+    );
+    assert_eq!(
+        cap1_after, cap1_before,
+        "Rejected user1 max-withdrawal must not change capital: before={} after={}",
+        cap1_before, cap1_after
+    );
+    assert_eq!(
+        cap2_after, cap2_before,
+        "Rejected user2 max-withdrawal must not change capital: before={} after={}",
+        cap2_before, cap2_after
+    );
 
     // Conservation: vault >= c_tot + insurance
-    let vault = env.vault_balance();
+    let vault = vault_after;
     let c_tot = env.read_c_tot();
     let insurance = env.read_insurance_balance();
     assert!(
