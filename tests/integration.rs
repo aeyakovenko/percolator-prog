@@ -6051,7 +6051,12 @@ fn test_rapid_position_flips_same_slot() {
     let size2: i128 = -25_000_000; // Net: -15M units
     let result2 = env.try_trade(&user, &lp, lp_idx, user_idx, size2);
     let pos_after_trade2 = env.read_account_position(user_idx);
-    let expected_after_trade2 = if result2.is_ok() { size1 + size2 } else { size1 };
+    let expected_after_trade2 = size1 + size2;
+    assert!(
+        result2.is_ok(),
+        "Trade 2 should succeed within initial-margin limits: {:?}",
+        result2
+    );
     assert_eq!(
         pos_after_trade2, expected_after_trade2,
         "Trade 2 result/position mismatch: result={:?} expected_pos={} actual_pos={}",
@@ -6062,15 +6067,32 @@ fn test_rapid_position_flips_same_slot() {
     let size3: i128 = 30_000_000; // Net depends on Trade 2
     let result3 = env.try_trade(&user, &lp, lp_idx, user_idx, size3);
     let pos_after_trade3 = env.read_account_position(user_idx);
-    let expected_after_trade3 = if result3.is_ok() {
-        expected_after_trade2 + size3
-    } else {
-        expected_after_trade2
-    };
+    let expected_after_trade3 = expected_after_trade2 + size3;
+    assert!(
+        result3.is_ok(),
+        "Trade 3 should succeed within initial-margin limits: {:?}",
+        result3
+    );
     assert_eq!(
         pos_after_trade3, expected_after_trade3,
         "Trade 3 result/position mismatch: result={:?} expected_pos={} actual_pos={}",
         result3, expected_after_trade3, pos_after_trade3
+    );
+
+    // Trade 4: Oversized flip should be rejected by initial-margin checks.
+    // With 5 SOL capital and 10% initial margin, max notional is ~50 SOL (~36M units at $138).
+    let size4: i128 = 400_000_000; // Would move +15M -> +415M, well above initial-margin budget.
+    let result4 = env.try_trade(&user, &lp, lp_idx, user_idx, size4);
+    let pos_after_trade4 = env.read_account_position(user_idx);
+    assert!(
+        result4.is_err(),
+        "Trade 4 must be rejected when exceeding initial margin: {:?}",
+        result4
+    );
+    assert_eq!(
+        pos_after_trade4, expected_after_trade3,
+        "Rejected oversized flip must preserve position: before={} after={}",
+        expected_after_trade3, pos_after_trade4
     );
     assert_eq!(
         env.vault_balance(),
