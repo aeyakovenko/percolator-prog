@@ -14305,22 +14305,25 @@ fn test_attack_warmup_prevents_immediate_profit_withdrawal() {
     // Try to withdraw MORE than original deposit
     // Warmup should prevent extracting unvested profit
     let vault_before = env.vault_balance();
+    let capital_before = env.read_account_capital(user_idx);
     let result = env.try_withdraw(&user, user_idx, 10_000_000_001); // 1 more than deposited
                                                                     // This should fail because warmup locks profit
                                                                     // (even with profit, MTM equity minus warmup-locked amount < withdrawal)
     let vault_after = env.vault_balance();
-    if result.is_ok() {
-        assert_eq!(
-            vault_after,
-            vault_before - 10_000_000_001,
-            "Successful warmup withdraw must decrement vault by requested amount"
-        );
-    } else {
-        assert_eq!(
-            vault_after, vault_before,
-            "Failed warmup withdraw must leave vault unchanged"
-        );
-    }
+    let capital_after = env.read_account_capital(user_idx);
+    assert!(
+        result.is_err(),
+        "Warmup must block immediate profit withdrawal before vesting: {:?}",
+        result
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected warmup withdraw must leave vault unchanged"
+    );
+    assert_eq!(
+        capital_after, capital_before,
+        "Rejected warmup withdraw must leave user capital unchanged"
+    );
     assert!(
         vault_after >= 100_000_000_000,
         "ATTACK: Warmup exploit drained vault below LP deposit! vault={}",
