@@ -3515,28 +3515,59 @@ fn kani_clamp_toward_movement_bounded_concrete() {
     );
 }
 
-/// Prove formula correctness for a representative non-special branch:
-/// when mark is below the allowed band, result clamps to `lo`.
-/// Uses fixed cap/dt to keep this harness tractable under CBMC.
-#[kani::proof]
-fn kani_clamp_toward_formula_concrete() {
-    let index_raw: u16 = kani::any();
+/// Shared bounded symbolic domain for clamp branch formula proofs.
+/// Bounds are chosen to keep SAT tractable while preserving symbolic cap/dt.
+fn any_clamp_formula_inputs() -> (u64, u64, u64, u64, u64, u64) {
+    let index_raw: u8 = kani::any();
+    let cap_steps_raw: u8 = kani::any(); // 1 step = 10_000 e2bps (1.00%)
+    let dt_slots_raw: u8 = kani::any();
     let mark_raw: u16 = kani::any();
 
-    // Exclude special-case branches and keep bounded search space.
-    kani::assume(index_raw > 0);
-    kani::assume(index_raw <= 5_000);
-    kani::assume(mark_raw <= 10_000);
+    kani::assume(index_raw >= 100);
+    kani::assume(index_raw <= 200);
+    kani::assume(cap_steps_raw > 0);
+    kani::assume(cap_steps_raw <= 5); // 1%..5% cap
+    kani::assume(dt_slots_raw > 0);
+    kani::assume(dt_slots_raw <= 20);
+    kani::assume(mark_raw <= 400);
 
-    let index = index_raw as u64;
-    let mark = mark_raw as u64;
-    let cap_e2bps: u64 = 10_000; // 1.00%
-    let dt_slots: u64 = 1;
+    let index_u32 = index_raw as u32;
+    let cap_u32 = (cap_steps_raw as u32) * 10_000u32;
+    let dt_u32 = dt_slots_raw as u32;
 
-    // With fixed cap/dt this simplifies to index / 100.
-    let max_delta = index / 100;
-    kani::assume(max_delta <= index);
+    // With the bounds above, this product fits in u32 without overflow.
+    let max_delta = (index_u32 * cap_u32 * dt_u32 / 1_000_000u32) as u64;
+    let index = index_u32 as u64;
+    kani::assume(max_delta > 0); // Non-trivial clamping regime
+    kani::assume(max_delta <= index); // Prevent underflow in index - max_delta
+
     let lo = index - max_delta;
+    let hi = index + max_delta;
+    let mark = mark_raw as u64;
+
+    (index, mark, cap_u32 as u64, dt_u32 as u64, lo, hi)
+}
+
+/// Prove formula correctness for the `mark < lo` branch with symbolic cap/dt.
+#[kani::proof]
+fn kani_clamp_toward_formula_concrete() {
+    // Non-vacuity witness: below-band branch is reachable.
+    {
+        let index = 2_000u64;
+        let cap_e2bps = 20_000u64;
+        let dt_slots = 10u64;
+        let max_delta = (index * cap_e2bps * dt_slots) / 1_000_000u64;
+        let lo = index - max_delta;
+        let mark = 1_000u64;
+        assert!(mark < lo, "witness must exercise mark < lo branch");
+        assert_eq!(
+            clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots),
+            lo,
+            "non-vacuity witness: mark below lo clamps to lo"
+        );
+    }
+
+    let (index, mark, cap_e2bps, dt_slots, lo, _) = any_clamp_formula_inputs();
     kani::assume(mark < lo);
 
     let result = clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots);
@@ -3544,24 +3575,26 @@ fn kani_clamp_toward_formula_concrete() {
 }
 
 /// Companion proof: when mark is within the allowed band, result equals mark.
-/// Uses the same fixed cap/dt assumptions as kani_clamp_toward_formula_concrete.
 #[kani::proof]
 fn kani_clamp_toward_formula_within_bounds() {
-    let index_raw: u16 = kani::any();
-    let mark_raw: u16 = kani::any();
+    // Non-vacuity witness: within-band branch is reachable.
+    {
+        let index = 2_000u64;
+        let cap_e2bps = 20_000u64;
+        let dt_slots = 10u64;
+        let max_delta = (index * cap_e2bps * dt_slots) / 1_000_000u64;
+        let lo = index - max_delta;
+        let hi = index + max_delta;
+        let mark = 2_000u64;
+        assert!(mark >= lo && mark <= hi, "witness must be inside [lo, hi]");
+        assert_eq!(
+            clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots),
+            mark,
+            "non-vacuity witness: mark inside [lo, hi] remains unchanged"
+        );
+    }
 
-    kani::assume(index_raw > 0);
-    kani::assume(index_raw <= 5_000);
-    kani::assume(mark_raw <= 10_000);
-
-    let index = index_raw as u64;
-    let mark = mark_raw as u64;
-    let cap_e2bps: u64 = 10_000; // 1.00%
-    let dt_slots: u64 = 1;
-
-    let max_delta = index / 100;
-    let lo = index - max_delta;
-    let hi = index + max_delta;
+    let (index, mark, cap_e2bps, dt_slots, lo, hi) = any_clamp_formula_inputs();
     kani::assume(mark >= lo);
     kani::assume(mark <= hi);
 
@@ -3570,23 +3603,25 @@ fn kani_clamp_toward_formula_within_bounds() {
 }
 
 /// Companion proof: when mark is above the allowed band, result clamps to `hi`.
-/// Uses the same fixed cap/dt assumptions as kani_clamp_toward_formula_concrete.
 #[kani::proof]
 fn kani_clamp_toward_formula_above_hi() {
-    let index_raw: u16 = kani::any();
-    let mark_raw: u16 = kani::any();
+    // Non-vacuity witness: above-band branch is reachable.
+    {
+        let index = 2_000u64;
+        let cap_e2bps = 20_000u64;
+        let dt_slots = 10u64;
+        let max_delta = (index * cap_e2bps * dt_slots) / 1_000_000u64;
+        let hi = index + max_delta;
+        let mark = 3_000u64;
+        assert!(mark > hi, "witness must exercise mark > hi branch");
+        assert_eq!(
+            clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots),
+            hi,
+            "non-vacuity witness: mark above hi clamps to hi"
+        );
+    }
 
-    kani::assume(index_raw > 0);
-    kani::assume(index_raw <= 5_000);
-    kani::assume(mark_raw <= 10_000);
-
-    let index = index_raw as u64;
-    let mark = mark_raw as u64;
-    let cap_e2bps: u64 = 10_000; // 1.00%
-    let dt_slots: u64 = 1;
-
-    let max_delta = index / 100;
-    let hi = index + max_delta;
+    let (index, mark, cap_e2bps, dt_slots, _, hi) = any_clamp_formula_inputs();
     kani::assume(mark > hi);
 
     let result = clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots);
