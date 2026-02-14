@@ -11049,7 +11049,7 @@ fn test_attack_trade_size_i128_max() {
 }
 
 /// ATTACK: Trade with size = 0 (no-op trade attempt).
-/// Expected: Zero-size trade is rejected or is a safe no-op.
+/// Expected: Zero-size trade is rejected and must not mutate state.
 #[test]
 fn test_attack_trade_size_zero() {
     program_path();
@@ -11066,21 +11066,39 @@ fn test_attack_trade_size_zero() {
     env.deposit(&user, user_idx, 10_000_000_000);
 
     let capital_before = env.read_account_capital(user_idx);
+    let position_before = env.read_account_position(user_idx);
+    let vault_before = env.vault_balance();
 
     // Zero-size trade
     let result = env.try_trade(&user, &lp, lp_idx, user_idx, 0);
     println!("Zero-size trade: {:?}", result);
 
-    // Either rejected or no-op - capital should not change
+    assert!(
+        result.is_err(),
+        "ATTACK: Zero-size trade should be rejected: {:?}",
+        result
+    );
+
+    // Rejected trade must not mutate state.
     let capital_after = env.read_account_capital(user_idx);
+    let position_after = env.read_account_position(user_idx);
+    let vault_after = env.vault_balance();
     assert_eq!(
         capital_before, capital_after,
         "ATTACK: Zero-size trade should not change capital"
     );
+    assert_eq!(
+        position_before, position_after,
+        "ATTACK: Zero-size trade should not change position"
+    );
+    assert_eq!(
+        vault_before, vault_after,
+        "ATTACK: Zero-size trade should not change vault"
+    );
 }
 
 /// ATTACK: Withdraw with amount = 0 (no-op withdrawal).
-/// Expected: Zero withdrawal is rejected or safe no-op.
+/// Expected: Zero withdrawal is accepted as no-op and must not mutate state.
 #[test]
 fn test_attack_withdraw_zero_amount() {
     program_path();
@@ -11093,20 +11111,37 @@ fn test_attack_withdraw_zero_amount() {
     env.deposit(&user, user_idx, 10_000_000_000);
 
     let vault_before = env.vault_balance();
+    let capital_before = env.read_account_capital(user_idx);
+    let position_before = env.read_account_position(user_idx);
 
     // Zero withdrawal
     let result = env.try_withdraw(&user, user_idx, 0);
     println!("Zero withdrawal: {:?}", result);
 
     let vault_after = env.vault_balance();
+    let capital_after = env.read_account_capital(user_idx);
+    let position_after = env.read_account_position(user_idx);
+    assert!(
+        result.is_ok(),
+        "ATTACK: Zero withdrawal should be accepted as no-op: {:?}",
+        result
+    );
     assert_eq!(
         vault_before, vault_after,
         "ATTACK: Zero withdrawal should not change vault"
     );
+    assert_eq!(
+        capital_before, capital_after,
+        "ATTACK: Zero withdrawal should not change capital"
+    );
+    assert_eq!(
+        position_before, position_after,
+        "ATTACK: Zero withdrawal should not change position"
+    );
 }
 
 /// ATTACK: Deposit with amount = 0 (no-op deposit).
-/// Expected: Zero deposit is rejected or safe no-op.
+/// Expected: Zero deposit is accepted as no-op and must not mutate state.
 #[test]
 fn test_attack_deposit_zero_amount() {
     program_path();
@@ -11118,15 +11153,32 @@ fn test_attack_deposit_zero_amount() {
     let user_idx = env.init_user(&user);
 
     let vault_before = env.vault_balance();
+    let capital_before = env.read_account_capital(user_idx);
+    let position_before = env.read_account_position(user_idx);
 
     // Zero deposit
     let result = env.try_deposit(&user, user_idx, 0);
     println!("Zero deposit: {:?}", result);
 
     let vault_after = env.vault_balance();
+    let capital_after = env.read_account_capital(user_idx);
+    let position_after = env.read_account_position(user_idx);
+    assert!(
+        result.is_ok(),
+        "ATTACK: Zero deposit should be accepted as no-op: {:?}",
+        result
+    );
     assert_eq!(
         vault_before, vault_after,
         "ATTACK: Zero deposit should not change vault"
+    );
+    assert_eq!(
+        capital_before, capital_after,
+        "ATTACK: Zero deposit should not change capital"
+    );
+    assert_eq!(
+        position_before, position_after,
+        "ATTACK: Zero deposit should not change position"
     );
 }
 
@@ -18610,19 +18662,49 @@ fn test_attack_warmup_period_zero_instant_settlement() {
     env.set_slot_and_price(10, 150_000_000);
     env.crank();
 
-    let user_cap_after = env.read_account_capital(user_idx);
-    let user_pnl = env.read_account_pnl(user_idx);
+    // Close the position and settle immediately with warmup=0.
+    env.trade(&user, &lp, lp_idx, user_idx, -100_000);
+    env.set_slot_and_price(20, 150_000_000);
+    env.crank();
+
+    let user_cap_after_close = env.read_account_capital(user_idx);
+    let user_pos_after_close = env.read_account_position(user_idx);
     assert!(
-        user_cap_after >= user_cap_before || user_pnl > 0,
-        "With warmup=0 and favorable price move, user must realize positive effect: cap_before={} cap_after={} pnl={}",
+        user_pos_after_close == 0,
+        "Position should be closed before withdrawal test: pos={}",
+        user_pos_after_close
+    );
+    assert!(
+        user_cap_after_close > user_cap_before,
+        "With warmup=0 and favorable move, closing should realize profit immediately: cap_before={} cap_after_close={}",
         user_cap_before,
-        user_cap_after,
-        user_pnl
+        user_cap_after_close
     );
 
-    // With warmup=0, PnL should be fully settled into capital after crank
-    // (user_cap should have changed - either from PnL settlement or warmup conversion)
-    // At minimum, the system should be conserved
+    // Immediate withdrawal above original deposit must succeed with warmup=0.
+    let withdraw_amount = user_cap_before as u64 + 1;
+    let vault_before_withdraw = env.vault_balance();
+    let cap_before_withdraw = env.read_account_capital(user_idx);
+    let withdraw_result = env.try_withdraw(&user, user_idx, withdraw_amount);
+    assert!(
+        withdraw_result.is_ok(),
+        "Warmup=0 should allow immediate withdrawal of realized profit: {:?}",
+        withdraw_result
+    );
+    let cap_after_withdraw = env.read_account_capital(user_idx);
+    let vault_after_withdraw = env.vault_balance();
+    assert_eq!(
+        cap_after_withdraw,
+        cap_before_withdraw - withdraw_amount as u128,
+        "Immediate withdrawal should decrement capital exactly"
+    );
+    assert_eq!(
+        vault_after_withdraw,
+        vault_before_withdraw - withdraw_amount,
+        "Immediate withdrawal should decrement vault exactly"
+    );
+
+    // Conservation must still hold.
     let c_tot = env.read_c_tot();
     let sum = env.read_account_capital(lp_idx) + env.read_account_capital(user_idx);
     assert_eq!(
@@ -18637,8 +18719,9 @@ fn test_attack_warmup_period_zero_instant_settlement() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 26_000_000_000,
-        "ATTACK: SPL vault changed during warmup=0 settlement!"
+        spl_vault,
+        26_000_000_000 - withdraw_amount,
+        "ATTACK: SPL vault mismatch after immediate warmup=0 profit withdrawal!"
     );
 }
 
@@ -21540,7 +21623,23 @@ fn test_attack_liquidation_conservation() {
         env.crank();
     }
 
-    // Conservation must hold regardless of liquidation outcome
+    // Explicitly liquidate after crash and require reduced exposure.
+    let pos_before_liq = env.read_account_position(user_idx);
+    let liq_result = env.try_liquidate_target(user_idx);
+    assert!(
+        liq_result.is_ok(),
+        "Underwater account should be liquidatable in crash scenario: {:?}",
+        liq_result
+    );
+    let pos_after_liq = env.read_account_position(user_idx);
+    assert!(
+        pos_after_liq.unsigned_abs() <= pos_before_liq.unsigned_abs(),
+        "Successful liquidation should not increase exposure: before={} after={}",
+        pos_before_liq,
+        pos_after_liq
+    );
+
+    // Conservation must hold through liquidation.
     let c_tot = env.read_c_tot();
     let sum = env.read_account_capital(lp_idx) + env.read_account_capital(user_idx);
     assert_eq!(
