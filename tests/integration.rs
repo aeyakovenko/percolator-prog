@@ -11606,21 +11606,19 @@ fn test_attack_oracle_cap_ultra_restrictive() {
         auth_price_after, 207_000_000,
         "Ultra-restrictive cap must not accept the unclamped +50% push"
     );
-    if result.is_ok() {
-        assert!(
-            auth_price_after >= auth_price_before,
-            "Accepted oracle push should not move authority price backwards (before={} after={})",
-            auth_price_before,
-            auth_price_after
-        );
-    } else {
-        assert_eq!(
-            auth_price_after, auth_price_before,
-            "Rejected oracle push must not mutate authority price"
-        );
-    }
+    assert!(
+        result.is_ok(),
+        "Valid oracle-authority push should succeed and clamp: {:?}",
+        result
+    );
+    assert!(
+        auth_price_after >= auth_price_before,
+        "Accepted oracle push should not move authority price backwards (before={} after={})",
+        auth_price_before,
+        auth_price_after
+    );
 
-    // Market should remain functional regardless of clamp/reject path.
+    // Market should remain functional after clamp.
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
     env.deposit(&lp, lp_idx, 10_000_000_000);
