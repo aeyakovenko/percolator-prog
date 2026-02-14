@@ -9325,7 +9325,7 @@ fn test_attack_oracle_price_cap_circuit_breaker() {
             .unwrap(),
     );
 
-    // Push a 50% price jump one slot later - should be clamped or rejected.
+    // Push a 50% price jump one slot later - should succeed but be clamped.
     let result = env.try_push_oracle_price(&admin, 207_000_000, 101); // +50%
     let slab_after = env.svm.get_account(&env.slab).unwrap().data;
     let auth_price_after = u64::from_le_bytes(
@@ -9337,21 +9337,19 @@ fn test_attack_oracle_price_cap_circuit_breaker() {
         auth_price_after, 207_000_000,
         "Circuit breaker must not accept unclamped +50% move in one slot"
     );
-    if result.is_ok() {
-        assert!(
-            auth_price_after >= auth_price_before,
-            "Accepted push should not move authority price backwards (before={} after={})",
-            auth_price_before,
-            auth_price_after
-        );
-    } else {
-        assert_eq!(
-            auth_price_after, auth_price_before,
-            "Rejected push must leave authority price unchanged"
-        );
-    }
+    assert!(
+        result.is_ok(),
+        "Valid oracle-authority push should succeed and clamp: {:?}",
+        result
+    );
+    assert!(
+        auth_price_after >= auth_price_before,
+        "Accepted push should not move authority price backwards (before={} after={})",
+        auth_price_before,
+        auth_price_after
+    );
 
-    // Either way, vault should be intact.
+    // Vault should be intact.
     let vault = env.vault_balance();
     assert_eq!(
         vault, 0,
