@@ -17903,28 +17903,28 @@ fn test_attack_deposit_zero_amount_no_state_change() {
     env.crank();
 
     let cap_before = env.read_account_capital(user_idx);
+    let vault_before = env.vault_balance();
 
-    // Deposit 0 - should be rejected or accepted as no-op
+    // Deposit 0 should be accepted as a no-op.
     let result = env.try_deposit(&user, user_idx, 0);
 
     let cap_after = env.read_account_capital(user_idx);
-    if result.is_ok() {
-        // If accepted, must be a no-op (no state change)
-        assert_eq!(
-            cap_before, cap_after,
-            "ATTACK: Zero deposit accepted but changed capital! before={} after={}",
-            cap_before, cap_after
-        );
-    } else {
-        // If rejected, protocol correctly prevents zero deposits
-        // Verify state is unchanged (failed txns never modify state)
-        assert_eq!(
-            cap_before, cap_after,
-            "State changed despite failed zero deposit!"
-        );
-    }
-    // Either way: the test verified the protocol handles zero deposits correctly
-    // (either rejects them or treats them as no-ops)
+    let vault_after = env.vault_balance();
+    assert!(
+        result.is_ok(),
+        "Zero-value deposit should be accepted as no-op: {:?}",
+        result
+    );
+    assert_eq!(
+        cap_before, cap_after,
+        "ATTACK: Zero deposit accepted but changed capital! before={} after={}",
+        cap_before, cap_after
+    );
+    assert_eq!(
+        vault_before, vault_after,
+        "ATTACK: Zero deposit accepted but changed vault! before={} after={}",
+        vault_before, vault_after
+    );
 }
 
 /// ATTACK: Withdraw zero amount should be harmless.
