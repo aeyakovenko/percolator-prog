@@ -19468,32 +19468,24 @@ fn test_attack_funding_accrue_huge_dt_capped() {
         "Precondition: position open"
     );
     let user_pos_before = env.read_account_position(user_idx);
-    let lp_cap_before = env.read_account_capital(lp_idx);
-    let user_cap_before = env.read_account_capital(user_idx);
 
     // Jump 1 year worth of slots (~31.5M slots)
     // accrue_funding should cap dt at 31,536,000 (~1 year)
     env.set_slot(31_000_000);
     let crank_result = env.try_crank();
+    assert!(
+        crank_result.is_ok(),
+        "Huge-dt funding accrual should succeed with dt capping: {:?}",
+        crank_result
+    );
 
     let lp_cap_after = env.read_account_capital(lp_idx);
     let user_cap_after = env.read_account_capital(user_idx);
-    if crank_result.is_ok() {
-        assert_eq!(
-            env.read_account_position(user_idx),
-            user_pos_before,
-            "Crank should not change position size under huge-dt funding accrual"
-        );
-    } else {
-        assert_eq!(
-            lp_cap_after, lp_cap_before,
-            "Rejected huge-dt crank must preserve LP capital"
-        );
-        assert_eq!(
-            user_cap_after, user_cap_before,
-            "Rejected huge-dt crank must preserve user capital"
-        );
-    }
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Crank should not change position size under huge-dt funding accrual"
+    );
 
     // Conservation must hold regardless of crank result.
     let c_tot = env.read_c_tot();
@@ -19513,11 +19505,6 @@ fn test_attack_funding_accrue_huge_dt_capped() {
         "ATTACK: SPL vault changed after huge dt funding!"
     );
 
-    if crank_result.is_err() {
-        // If overflow detected, protocol correctly rejected the operation
-        // This IS the expected security behavior for extreme dt
-        println!("Crank correctly rejected extreme dt - conservation verified");
-    }
 }
 
 // ============================================================================
