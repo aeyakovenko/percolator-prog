@@ -821,6 +821,26 @@ fn encode_withdraw_insurance() -> Vec<u8> {
     vec![20u8] // Instruction tag for WithdrawInsurance
 }
 
+fn encode_set_insurance_withdraw_policy(
+    authority: &Pubkey,
+    min_withdraw_base: u64,
+    max_withdraw_bps: u16,
+    cooldown_slots: u64,
+) -> Vec<u8> {
+    let mut data = vec![22u8];
+    data.extend_from_slice(authority.as_ref());
+    data.extend_from_slice(&min_withdraw_base.to_le_bytes());
+    data.extend_from_slice(&max_withdraw_bps.to_le_bytes());
+    data.extend_from_slice(&cooldown_slots.to_le_bytes());
+    data
+}
+
+fn encode_withdraw_insurance_limited(amount: u64) -> Vec<u8> {
+    let mut data = vec![23u8];
+    data.extend_from_slice(&amount.to_le_bytes());
+    data
+}
+
 fn encode_withdraw(user_idx: u16, amount: u64) -> Vec<u8> {
     let mut data = vec![4u8]; // Instruction tag for WithdrawCollateral
     data.extend_from_slice(&user_idx.to_le_bytes());
@@ -1120,6 +1140,57 @@ impl TestEnv {
             slab_account.data[account_offset..account_offset + 16]
                 .try_into()
                 .unwrap(),
+        )
+    }
+
+    /// Snapshot config fields relevant to UpdateConfig validation tests.
+    fn read_update_config_snapshot(&self) -> (u64, u128, u64, u128, u128) {
+        let slab_account = self.svm.get_account(&self.slab).unwrap();
+        // Slab layout: header(72) + config(...)
+        // MarketConfig offsets (absolute):
+        // funding_horizon_slots: 72 + 112 = 184
+        // funding_inv_scale_notional_e6: 72 + 128 = 200
+        // thresh_alpha_bps: 72 + 200 = 272
+        // thresh_min: 72 + 208 = 280
+        // thresh_max: 72 + 224 = 296
+        const FUNDING_HORIZON_OFF: usize = 184;
+        const FUNDING_INV_SCALE_OFF: usize = 200;
+        const THRESH_ALPHA_OFF: usize = 272;
+        const THRESH_MIN_OFF: usize = 280;
+        const THRESH_MAX_OFF: usize = 296;
+
+        let funding_horizon = u64::from_le_bytes(
+            slab_account.data[FUNDING_HORIZON_OFF..FUNDING_HORIZON_OFF + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let funding_inv_scale = u128::from_le_bytes(
+            slab_account.data[FUNDING_INV_SCALE_OFF..FUNDING_INV_SCALE_OFF + 16]
+                .try_into()
+                .unwrap(),
+        );
+        let thresh_alpha = u64::from_le_bytes(
+            slab_account.data[THRESH_ALPHA_OFF..THRESH_ALPHA_OFF + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let thresh_min = u128::from_le_bytes(
+            slab_account.data[THRESH_MIN_OFF..THRESH_MIN_OFF + 16]
+                .try_into()
+                .unwrap(),
+        );
+        let thresh_max = u128::from_le_bytes(
+            slab_account.data[THRESH_MAX_OFF..THRESH_MAX_OFF + 16]
+                .try_into()
+                .unwrap(),
+        );
+
+        (
+            funding_horizon,
+            funding_inv_scale,
+            thresh_alpha,
+            thresh_min,
+            thresh_max,
         )
     }
 
@@ -1453,6 +1524,11 @@ fn test_verify_finding_l_fixed_with_invert_zero() {
 
     let size: i128 = 72_463_768; // ~10 SOL notional at $138
 
+    let user_cap_before = env.read_account_capital(user_idx);
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let vault_before = env.vault_balance();
+
     let result = env.try_trade(&user, &lp, lp_idx, user_idx, size);
 
     // With correct margin check (initial_margin_bps for risk-increasing trades):
@@ -1462,6 +1538,28 @@ fn test_verify_finding_l_fixed_with_invert_zero() {
         "Finding L should be FIXED: Trade at ~16.7x leverage should be rejected. \
          Initial margin (10%) = 1.0 SOL, User equity = 0.6 SOL. \
          Expected: Err (fixed), Got: Ok (bug still exists)"
+    );
+
+    let user_cap_after = env.read_account_capital(user_idx);
+    let user_pos_after = env.read_account_position(user_idx);
+    let lp_pos_after = env.read_account_position(lp_idx);
+    let vault_after = env.vault_balance();
+
+    assert_eq!(
+        user_cap_after, user_cap_before,
+        "Rejected high-leverage trade must not change user capital"
+    );
+    assert_eq!(
+        user_pos_after, user_pos_before,
+        "Rejected high-leverage trade must not change user position"
+    );
+    assert_eq!(
+        lp_pos_after, lp_pos_before,
+        "Rejected high-leverage trade must not change LP position"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected high-leverage trade must not move vault funds"
     );
 
     println!("FINDING L VERIFIED FIXED: Trade correctly rejected due to initial margin check.");
@@ -1608,12 +1706,28 @@ fn test_idle_account_can_close_after_crank() {
     env.crank();
 
     // User should be able to close account (no position, no PnL)
+    let used_before = env.read_num_used_accounts();
+    let capital_before = env.read_account_capital(user_idx);
+    let vault_before = env.vault_balance();
     let result = env.try_close_account(&user, user_idx);
 
     assert!(
         result.is_ok(),
         "Idle account with only capital should be closeable. Got: {:?}",
         result
+    );
+    let used_after = env.read_num_used_accounts();
+    let capital_after = env.read_account_capital(user_idx);
+    let pos_after = env.read_account_position(user_idx);
+    let vault_after = env.vault_balance();
+
+    assert!(capital_before > 0, "Precondition: idle user should have capital to close");
+    assert_eq!(used_after, used_before - 1, "CloseAccount should decrement num_used_accounts");
+    assert_eq!(capital_after, 0, "Closed account capital should be zeroed");
+    assert_eq!(pos_after, 0, "Closed account position should remain zero");
+    assert!(
+        vault_after < vault_before,
+        "Closing idle funded account should return funds from vault"
     );
 
     println!("Idle account closed successfully - basic zombie prevention works");
@@ -1725,6 +1839,17 @@ fn test_hyperp_rejects_zero_initial_mark_price() {
         ),
     };
 
+    // Snapshot state before the failing init attempt.
+    // Header+config region should remain unchanged on rejected tx.
+    const HEADER_CONFIG_LEN: usize = 392;
+    const NUM_USED_OFF: usize = 1312;
+    let slab_before = svm.get_account(&slab).unwrap().data;
+    let vault_before = {
+        let vault_data = svm.get_account(&vault).unwrap().data;
+        TokenAccount::unpack(&vault_data).unwrap().amount
+    };
+    let used_before = u16::from_le_bytes(slab_before[NUM_USED_OFF..NUM_USED_OFF + 2].try_into().unwrap());
+
     let tx = Transaction::new_signed_with_payer(
         &[ix],
         Some(&payer.pubkey()),
@@ -1739,6 +1864,27 @@ fn test_hyperp_rejects_zero_initial_mark_price() {
         "SECURITY: InitMarket should reject Hyperp mode with zero initial_mark_price_e6. \
          Got: {:?}",
         result
+    );
+
+    let slab_after = svm.get_account(&slab).unwrap().data;
+    let vault_after = {
+        let vault_data = svm.get_account(&vault).unwrap().data;
+        TokenAccount::unpack(&vault_data).unwrap().amount
+    };
+    let used_after = u16::from_le_bytes(slab_after[NUM_USED_OFF..NUM_USED_OFF + 2].try_into().unwrap());
+
+    assert_eq!(
+        &slab_after[..HEADER_CONFIG_LEN],
+        &slab_before[..HEADER_CONFIG_LEN],
+        "Rejected Hyperp init must not mutate slab header/config"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected Hyperp init must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected Hyperp init must not move vault tokens"
     );
 
     println!("HYPERP VALIDATION VERIFIED: Rejects zero initial_mark_price_e6 in Hyperp mode");
@@ -1861,6 +2007,41 @@ fn test_hyperp_init_market_with_valid_price() {
         "Hyperp InitMarket with valid initial_mark_price should succeed. Got: {:?}",
         result
     );
+
+    // Verify actual initialized config state, not just tx success.
+    const HEADER_MAGIC_OFF: usize = 0;
+    const CONFIG_OFF: usize = 72; // size_of::<SlabHeader>()
+    const FEED_ID_OFF: usize = CONFIG_OFF + 64;
+    const INVERT_OFF: usize = CONFIG_OFF + 107;
+    const AUTH_PRICE_OFF: usize = CONFIG_OFF + 288;
+    const ORACLE_CAP_OFF: usize = CONFIG_OFF + 304;
+    const INDEX_OFF: usize = CONFIG_OFF + 312;
+    const NUM_USED_OFF: usize = 1312;
+
+    let slab_data = svm.get_account(&slab).unwrap().data;
+    let magic = u64::from_le_bytes(slab_data[HEADER_MAGIC_OFF..HEADER_MAGIC_OFF + 8].try_into().unwrap());
+    let mark = u64::from_le_bytes(slab_data[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8].try_into().unwrap());
+    let index = u64::from_le_bytes(slab_data[INDEX_OFF..INDEX_OFF + 8].try_into().unwrap());
+    let cap = u64::from_le_bytes(slab_data[ORACLE_CAP_OFF..ORACLE_CAP_OFF + 8].try_into().unwrap());
+    let used = u16::from_le_bytes(slab_data[NUM_USED_OFF..NUM_USED_OFF + 2].try_into().unwrap());
+
+    assert_ne!(magic, 0, "InitMarket must write a non-zero slab magic");
+    assert_eq!(
+        &slab_data[FEED_ID_OFF..FEED_ID_OFF + 32],
+        &[0u8; 32],
+        "Hyperp market must store zeroed feed id"
+    );
+    assert_eq!(slab_data[INVERT_OFF], 0, "invert flag should be 0 for this test");
+    assert_eq!(
+        mark, initial_price_e6,
+        "Hyperp mark must equal initial_mark_price_e6 at init"
+    );
+    assert_eq!(
+        index, initial_price_e6,
+        "Hyperp index must equal initial_mark_price_e6 at init"
+    );
+    assert_eq!(cap, 10_000, "Hyperp default oracle cap should be 1% per slot");
+    assert_eq!(used, 0, "No user/LP accounts should exist immediately after market init");
 
     println!("HYPERP INIT VERIFIED: Market initialized with $100 initial mark/index price");
 }
@@ -1990,6 +2171,41 @@ fn test_hyperp_init_market_with_inverted_price() {
         "Hyperp InitMarket with inverted price should succeed. Got: {:?}",
         result
     );
+
+    // Verify inverted Hyperp initialization state.
+    const HEADER_MAGIC_OFF: usize = 0;
+    const CONFIG_OFF: usize = 72; // size_of::<SlabHeader>()
+    const FEED_ID_OFF: usize = CONFIG_OFF + 64;
+    const INVERT_OFF: usize = CONFIG_OFF + 107;
+    const AUTH_PRICE_OFF: usize = CONFIG_OFF + 288;
+    const ORACLE_CAP_OFF: usize = CONFIG_OFF + 304;
+    const INDEX_OFF: usize = CONFIG_OFF + 312;
+    const NUM_USED_OFF: usize = 1312;
+
+    let slab_data = svm.get_account(&slab).unwrap().data;
+    let magic = u64::from_le_bytes(slab_data[HEADER_MAGIC_OFF..HEADER_MAGIC_OFF + 8].try_into().unwrap());
+    let mark = u64::from_le_bytes(slab_data[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8].try_into().unwrap());
+    let index = u64::from_le_bytes(slab_data[INDEX_OFF..INDEX_OFF + 8].try_into().unwrap());
+    let cap = u64::from_le_bytes(slab_data[ORACLE_CAP_OFF..ORACLE_CAP_OFF + 8].try_into().unwrap());
+    let used = u16::from_le_bytes(slab_data[NUM_USED_OFF..NUM_USED_OFF + 2].try_into().unwrap());
+
+    assert_ne!(magic, 0, "InitMarket must write a non-zero slab magic");
+    assert_eq!(
+        &slab_data[FEED_ID_OFF..FEED_ID_OFF + 32],
+        &[0u8; 32],
+        "Hyperp market must store zeroed feed id"
+    );
+    assert_eq!(slab_data[INVERT_OFF], 1, "invert flag should be 1 for inverted Hyperp init");
+    assert_eq!(
+        mark, expected_inverted,
+        "Hyperp mark must be stored as inverted initial price"
+    );
+    assert_eq!(
+        index, expected_inverted,
+        "Hyperp index must be stored as inverted initial price"
+    );
+    assert_eq!(cap, 10_000, "Hyperp default oracle cap should be 1% per slot");
+    assert_eq!(used, 0, "No user/LP accounts should exist immediately after market init");
 
     println!("HYPERP INVERTED MARKET VERIFIED:");
     println!(
@@ -3322,6 +3538,74 @@ impl TestEnv {
             .map_err(|e| format!("{:?}", e))
     }
 
+    /// Configure limited insurance-withdraw policy (admin only, resolved market only).
+    fn try_set_insurance_withdraw_policy(
+        &mut self,
+        admin: &Keypair,
+        authority: &Pubkey,
+        min_withdraw_base: u64,
+        max_withdraw_bps: u16,
+        cooldown_slots: u64,
+    ) -> Result<(), String> {
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+            ],
+            data: encode_set_insurance_withdraw_policy(
+                authority,
+                min_withdraw_base,
+                max_withdraw_bps,
+                cooldown_slots,
+            ),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&admin.pubkey()),
+            &[admin],
+            self.svm.latest_blockhash(),
+        );
+        self.svm
+            .send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
+    }
+
+    /// Limited insurance withdraw by configured authority.
+    fn try_withdraw_insurance_limited(
+        &mut self,
+        authority: &Keypair,
+        amount: u64,
+    ) -> Result<(), String> {
+        let authority_ata = self.create_ata(&authority.pubkey(), 0);
+        let (vault_pda, _) =
+            Pubkey::find_program_address(&[b"vault", self.slab.as_ref()], &self.program_id);
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(authority_ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(vault_pda, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_withdraw_insurance_limited(amount),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&authority.pubkey()),
+            &[authority],
+            self.svm.latest_blockhash(),
+        );
+        self.svm
+            .send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
+    }
+
     /// Check if market is resolved (read flags from slab header)
     fn is_market_resolved(&self) -> bool {
         let slab_account = self.svm.get_account(&self.slab).unwrap();
@@ -3818,12 +4102,27 @@ fn test_critical_init_market_rejects_double_init() {
         &[admin],
         env.svm.latest_blockhash(),
     );
+    // Snapshot state after first init and before rejected second init.
+    const HEADER_CONFIG_LEN: usize = 392;
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
     let result = env.svm.send_transaction(tx);
 
     assert!(
         result.is_err(),
         "SECURITY: Double initialization should be rejected"
     );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+    assert_eq!(
+        &slab_after[..HEADER_CONFIG_LEN],
+        &slab_before[..HEADER_CONFIG_LEN],
+        "Rejected second InitMarket must not mutate slab header/config"
+    );
+    assert_eq!(used_after, used_before, "Rejected second InitMarket must not change num_used_accounts");
+    assert_eq!(vault_after, vault_before, "Rejected second InitMarket must not move vault funds");
     println!("Second InitMarket: REJECTED (correct)");
 
     println!("CRITICAL TEST PASSED: Double initialization rejection verified");
@@ -6883,6 +7182,675 @@ fn test_withdraw_insurance_requires_positions_closed() {
     println!("WITHDRAW INSURANCE REQUIRES POSITIONS CLOSED TEST PASSED");
 }
 
+#[test]
+fn test_limited_insurance_withdraw_defaults_enforced() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .expect("oracle authority setup must succeed");
+    env.try_push_oracle_price(&admin, 138_000_000, 100)
+        .expect("oracle price push must succeed");
+
+    // Seed insurance before resolution.
+    env.top_up_insurance(&admin, 10_000_000_000);
+    let insurance_before = env.read_insurance_balance();
+    assert_eq!(insurance_before, 10_000_000_000, "precondition: insurance seeded");
+
+    env.try_resolve_market(&admin)
+        .expect("resolve must succeed before insurance withdraw");
+    assert!(env.is_market_resolved(), "market should be resolved");
+
+    let non_admin = Keypair::new();
+    env.svm
+        .airdrop(&non_admin.pubkey(), 1_000_000_000)
+        .expect("airdrop non-admin");
+    let non_admin_attempt = env.try_withdraw_insurance_limited(&non_admin, 100_000_000);
+    assert!(
+        non_admin_attempt.is_err(),
+        "default-limited withdraw should only allow admin when no policy is configured"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        insurance_before,
+        "rejected non-admin default withdraw must not change insurance"
+    );
+
+    // Default policy: 1% max, 400_000-slot cooldown, min amount 1.
+    env.set_slot(1);
+    let first_amount = 100_000_000u64; // 1% of 10_000_000_000
+    let first = env.try_withdraw_insurance_limited(&admin, first_amount);
+    assert!(
+        first.is_ok(),
+        "default-limited withdraw at 1% should succeed: {:?}",
+        first
+    );
+    let insurance_after_first = env.read_insurance_balance();
+    assert_eq!(
+        insurance_after_first,
+        insurance_before - first_amount as u128,
+        "insurance must decrease by first limited withdraw amount"
+    );
+
+    // Same slot / before cooldown must fail.
+    let second_too_soon = env.try_withdraw_insurance_limited(&admin, 99_000_000);
+    assert!(
+        second_too_soon.is_err(),
+        "default-limited withdraw should enforce cooldown"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        insurance_after_first,
+        "rejected cooldown withdraw must not change insurance"
+    );
+
+    // After cooldown, next <=1% withdrawal should succeed.
+    env.set_slot(400_001);
+    let second_amount = 99_000_000u64; // 1% of 9_900_000_000
+    let second = env.try_withdraw_insurance_limited(&admin, second_amount);
+    assert!(
+        second.is_ok(),
+        "default-limited withdraw after cooldown should succeed: {:?}",
+        second
+    );
+    let insurance_after_second = env.read_insurance_balance();
+    assert_eq!(
+        insurance_after_second,
+        insurance_after_first - second_amount as u128,
+        "insurance must decrease by second limited withdraw amount"
+    );
+}
+
+#[test]
+fn test_limited_insurance_withdraw_custom_policy_enforced() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .expect("oracle authority setup must succeed");
+    env.try_push_oracle_price(&admin, 138_000_000, 100)
+        .expect("oracle price push must succeed");
+
+    env.top_up_insurance(&admin, 10_000_000_000);
+    env.try_resolve_market(&admin)
+        .expect("resolve must succeed before policy update");
+
+    let delegated = Keypair::new();
+    env.svm
+        .airdrop(&delegated.pubkey(), 1_000_000_000)
+        .expect("airdrop delegated authority");
+
+    // Authority is not admin, so it must not be able to set policy.
+    let delegated_set_attempt = env.try_set_insurance_withdraw_policy(
+        &delegated,
+        &delegated.pubkey(),
+        1,
+        10_000,
+        1,
+    );
+    assert!(
+        delegated_set_attempt.is_err(),
+        "non-admin authority must not be able to configure withdraw policy"
+    );
+
+    // Policy: delegated authority, min=100M, max=5%, cooldown=10 slots.
+    let set_policy =
+        env.try_set_insurance_withdraw_policy(&admin, &delegated.pubkey(), 100_000_000, 500, 10);
+    assert!(
+        set_policy.is_ok(),
+        "admin should configure limited insurance withdraw policy: {:?}",
+        set_policy
+    );
+
+    // Delegated authority still cannot mutate limits/authority.
+    let delegated_mutation_attempt = env.try_set_insurance_withdraw_policy(
+        &delegated,
+        &delegated.pubkey(),
+        1,
+        10_000,
+        1,
+    );
+    assert!(
+        delegated_mutation_attempt.is_err(),
+        "configured withdraw authority must not be able to change policy"
+    );
+
+    env.set_slot(2);
+
+    // Admin is no longer authorized for limited path after policy is set.
+    let admin_attempt = env.try_withdraw_insurance_limited(&admin, 100_000_000);
+    assert!(
+        admin_attempt.is_err(),
+        "non-delegated signer should be rejected for limited withdraw"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        10_000_000_000,
+        "rejected unauthorized limited withdraw must not change insurance"
+    );
+
+    // Above max percentage should fail (5% of 10B = 500M).
+    let above_max = env.try_withdraw_insurance_limited(&delegated, 600_000_000);
+    assert!(above_max.is_err(), "withdraw above policy max% should fail");
+    assert_eq!(
+        env.read_insurance_balance(),
+        10_000_000_000,
+        "rejected above-max limited withdraw must not change insurance"
+    );
+
+    // Exactly at max should pass.
+    let first_ok = env.try_withdraw_insurance_limited(&delegated, 500_000_000);
+    assert!(
+        first_ok.is_ok(),
+        "withdraw at policy max% should succeed: {:?}",
+        first_ok
+    );
+    let insurance_after_first = env.read_insurance_balance();
+    assert_eq!(
+        insurance_after_first, 9_500_000_000,
+        "insurance should decrease by successful delegated withdraw"
+    );
+
+    // Cooldown should block immediate second withdrawal.
+    let too_soon = env.try_withdraw_insurance_limited(&delegated, 100_000_000);
+    assert!(too_soon.is_err(), "policy cooldown must be enforced");
+    assert_eq!(
+        env.read_insurance_balance(),
+        insurance_after_first,
+        "rejected cooldown limited withdraw must not change insurance"
+    );
+
+    env.set_slot(12);
+    // Below policy min is now allowed as long as it is within the capped maximum.
+    // 5% of 9.5B = 475M, so 50M should pass even though policy min is 100M.
+    let second_ok = env.try_withdraw_insurance_limited(&delegated, 50_000_000);
+    assert!(
+        second_ok.is_ok(),
+        "below-min withdraw should be allowed when under capped max: {:?}",
+        second_ok
+    );
+    let insurance_after_second = env.read_insurance_balance();
+    assert_eq!(
+        insurance_after_second, 9_450_000_000,
+        "insurance should decrease by second successful delegated withdraw (below-min allowed)"
+    );
+}
+
+#[test]
+fn test_limited_insurance_withdraw_cooldown_enforced_from_slot_zero() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .expect("oracle authority setup must succeed");
+    env.try_push_oracle_price(&admin, 138_000_000, 100)
+        .expect("oracle price push must succeed");
+
+    env.top_up_insurance(&admin, 10_000_000_000);
+    env.try_resolve_market(&admin)
+        .expect("resolve must succeed before policy update");
+
+    // Use custom policy so cooldown must be enforced exactly from first successful withdraw.
+    env.try_set_insurance_withdraw_policy(&admin, &admin.pubkey(), 1, 100, 10)
+        .expect("policy setup should succeed");
+
+    env.set_slot(0);
+    let first = env.try_withdraw_insurance_limited(&admin, 100_000_000);
+    assert!(
+        first.is_ok(),
+        "first withdraw at slot zero should succeed: {:?}",
+        first
+    );
+    let insurance_after_first = env.read_insurance_balance();
+    assert_eq!(
+        insurance_after_first, 9_900_000_000,
+        "first withdraw should debit insurance by 1%"
+    );
+
+    // Same-slot second withdraw must fail due to cooldown (pathological slot-zero case).
+    let second_same_slot = env.try_withdraw_insurance_limited(&admin, 1);
+    assert!(
+        second_same_slot.is_err(),
+        "cooldown must block second withdraw in slot zero"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        insurance_after_first,
+        "rejected slot-zero cooldown withdraw must not change insurance"
+    );
+
+    // Boundary: at slot == last_slot + cooldown, withdraw should be allowed.
+    env.set_slot(10);
+    let at_boundary = env.try_withdraw_insurance_limited(&admin, 1);
+    assert!(
+        at_boundary.is_ok(),
+        "withdraw at cooldown boundary should succeed: {:?}",
+        at_boundary
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        insurance_after_first - 1,
+        "boundary withdraw should debit insurance"
+    );
+}
+
+#[test]
+fn test_limited_insurance_withdraw_min_floor_when_percent_cap_small() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .expect("oracle authority setup must succeed");
+    env.try_push_oracle_price(&admin, 138_000_000, 100)
+        .expect("oracle price push must succeed");
+
+    env.top_up_insurance(&admin, 10_000);
+    env.try_resolve_market(&admin)
+        .expect("resolve must succeed before policy update");
+
+    // min=1000, max=1% => percent cap on 10_000 is only 100.
+    env.try_set_insurance_withdraw_policy(&admin, &admin.pubkey(), 1_000, 100, 0)
+        .expect("policy setup should succeed");
+
+    env.set_slot(1);
+    // Less than min is allowed as long as it stays under max(min, pct*fund).
+    let below_min = env.try_withdraw_insurance_limited(&admin, 500);
+    assert!(
+        below_min.is_ok(),
+        "below-min withdraw should be allowed under cap floor semantics: {:?}",
+        below_min
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        9_500,
+        "successful below-min withdraw should debit insurance"
+    );
+
+    env.set_slot(2);
+    // pct cap is 95 now; min floor still allows withdrawing up to 1000.
+    let at_floor = env.try_withdraw_insurance_limited(&admin, 1_000);
+    assert!(
+        at_floor.is_ok(),
+        "withdraw equal to floor min should be allowed when pct cap is smaller: {:?}",
+        at_floor
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        8_500,
+        "withdraw at floor min should debit insurance"
+    );
+
+    env.set_slot(3);
+    let above_floor = env.try_withdraw_insurance_limited(&admin, 1_001);
+    assert!(
+        above_floor.is_err(),
+        "withdraw above floor min must be rejected when pct cap remains below min"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        8_500,
+        "rejected above-floor withdraw must not change insurance"
+    );
+}
+
+#[test]
+fn test_limited_insurance_withdraw_default_min_floor_respects_unit_scale() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_full(0, 1000, 0); // unit_scale = 1000
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .expect("oracle authority setup must succeed");
+    env.try_push_oracle_price(&admin, 138_000_000, 100)
+        .expect("oracle price push must succeed");
+
+    // 50_000 base => 50 units in insurance.
+    env.top_up_insurance(&admin, 50_000);
+    assert_eq!(
+        env.read_insurance_balance(),
+        50,
+        "precondition: insurance should be seeded in scaled units"
+    );
+
+    env.try_resolve_market(&admin)
+        .expect("resolve must succeed before limited withdraw");
+
+    // Sanity-check resolved config state for default-policy path.
+    let slab_data = env.svm.get_account(&env.slab).unwrap().data;
+    const UNIT_SCALE_OFF: usize = 180; // header(72) + unit_scale(108)
+    const AUTH_TS_OFF: usize = 368; // header(72) + authority_timestamp(296)
+    let unit_scale = u32::from_le_bytes(
+        slab_data[UNIT_SCALE_OFF..UNIT_SCALE_OFF + 4]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(
+        unit_scale, 1000,
+        "precondition: market unit_scale must be 1000"
+    );
+    let authority_timestamp = i64::from_le_bytes(
+        slab_data[AUTH_TS_OFF..AUTH_TS_OFF + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let stored_bps = ((authority_timestamp as u64 >> 48) & 0xFFFF) as u16;
+    assert_eq!(
+        stored_bps, 0,
+        "precondition: default path should be unconfigured before first limited withdraw"
+    );
+
+    // Default policy is 1% per withdraw. For 50 units that rounds to 0, so this test
+    // proves the default min floor still permits withdrawing one aligned unit (1000 base).
+    env.set_slot(1);
+    let first = env.try_withdraw_insurance_limited(&admin, 1_000);
+    assert!(
+        first.is_ok(),
+        "default policy should allow withdrawing one aligned unit when percent cap rounds to zero: {:?}",
+        first
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        49,
+        "successful default floor withdraw should debit one unit"
+    );
+
+    // Cooldown should still be enforced.
+    let too_soon = env.try_withdraw_insurance_limited(&admin, 1_000);
+    assert!(too_soon.is_err(), "default cooldown must be enforced");
+    assert_eq!(
+        env.read_insurance_balance(),
+        49,
+        "rejected cooldown withdraw must not change insurance"
+    );
+
+    env.set_slot(400_001);
+    let second = env.try_withdraw_insurance_limited(&admin, 1_000);
+    assert!(
+        second.is_ok(),
+        "default withdraw should succeed again after cooldown: {:?}",
+        second
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        48,
+        "post-cooldown withdraw should debit one unit"
+    );
+}
+
+#[test]
+fn test_limited_insurance_withdraw_failed_attempts_do_not_arm_cooldown() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .expect("oracle authority setup must succeed");
+    env.try_push_oracle_price(&admin, 138_000_000, 100)
+        .expect("oracle price push must succeed");
+
+    env.top_up_insurance(&admin, 10_000_000_000);
+    env.try_resolve_market(&admin)
+        .expect("resolve must succeed before policy update");
+
+    let delegated = Keypair::new();
+    env.svm
+        .airdrop(&delegated.pubkey(), 1_000_000_000)
+        .expect("airdrop delegated authority");
+
+    // 5% cap, 10-slot cooldown.
+    env.try_set_insurance_withdraw_policy(&admin, &delegated.pubkey(), 1, 500, 10)
+        .expect("policy setup should succeed");
+
+    env.set_slot(7);
+
+    // Unauthorized signer must fail and must not consume cooldown state.
+    let unauthorized = env.try_withdraw_insurance_limited(&admin, 100_000_000);
+    assert!(
+        unauthorized.is_err(),
+        "non-policy authority must be rejected for limited withdraw"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        10_000_000_000,
+        "rejected unauthorized withdraw must not change insurance"
+    );
+
+    // Authorized but above max must fail and must not consume cooldown state.
+    let above_max = env.try_withdraw_insurance_limited(&delegated, 600_000_000);
+    assert!(above_max.is_err(), "above-cap withdraw should fail");
+    assert_eq!(
+        env.read_insurance_balance(),
+        10_000_000_000,
+        "rejected above-cap withdraw must not change insurance"
+    );
+
+    // Same-slot valid withdraw should still succeed: failed attempts must not arm cooldown.
+    let first_valid = env.try_withdraw_insurance_limited(&delegated, 500_000_000);
+    assert!(
+        first_valid.is_ok(),
+        "first successful withdraw must still work in same slot after failed attempts: {:?}",
+        first_valid
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        9_500_000_000,
+        "successful withdraw should debit insurance"
+    );
+
+    // Cooldown is now armed from the successful withdraw at slot 7.
+    let same_slot_after_success = env.try_withdraw_insurance_limited(&delegated, 1);
+    assert!(
+        same_slot_after_success.is_err(),
+        "cooldown must block same-slot withdraw after a successful withdraw"
+    );
+    env.set_slot(16);
+    let before_boundary = env.try_withdraw_insurance_limited(&delegated, 1);
+    assert!(
+        before_boundary.is_err(),
+        "cooldown must block withdraw before slot 17 boundary"
+    );
+    env.set_slot(17);
+    let at_boundary = env.try_withdraw_insurance_limited(&delegated, 1);
+    assert!(
+        at_boundary.is_ok(),
+        "withdraw should succeed at cooldown boundary after successful slot-7 withdraw: {:?}",
+        at_boundary
+    );
+}
+
+#[test]
+fn test_limited_insurance_policy_validation_and_resolution_gates() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_full(0, 1000, 0); // unit_scale = 1000 for alignment checks
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let delegated = Keypair::new();
+    env.svm
+        .airdrop(&delegated.pubkey(), 1_000_000_000)
+        .expect("airdrop delegated");
+
+    // Policy configuration must be blocked before resolution.
+    let unresolved_set =
+        env.try_set_insurance_withdraw_policy(&admin, &delegated.pubkey(), 1000, 100, 2);
+    assert!(
+        unresolved_set.is_err(),
+        "policy configuration must fail before market resolution"
+    );
+
+    // Prepare resolvable state.
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .expect("oracle authority setup must succeed");
+    env.try_push_oracle_price(&admin, 138_000_000, 100)
+        .expect("oracle price push must succeed");
+    env.top_up_insurance(&admin, 1_000_000_000);
+    env.try_resolve_market(&admin)
+        .expect("resolve should succeed");
+
+    // Validation: min_withdraw_base > 0.
+    env.set_slot(10);
+    let zero_min = env.try_set_insurance_withdraw_policy(&admin, &delegated.pubkey(), 0, 100, 1);
+    assert!(zero_min.is_err(), "policy min=0 must be rejected");
+
+    // Validation: max_withdraw_bps in 1..=10_000.
+    env.set_slot(11);
+    let zero_bps = env.try_set_insurance_withdraw_policy(&admin, &delegated.pubkey(), 1000, 0, 1);
+    assert!(zero_bps.is_err(), "policy max_bps=0 must be rejected");
+    env.set_slot(12);
+    let over_bps = env.try_set_insurance_withdraw_policy(&admin, &delegated.pubkey(), 1000, 10_001, 1);
+    assert!(over_bps.is_err(), "policy max_bps>10_000 must be rejected");
+
+    // Validation: min_withdraw_base must be aligned with unit_scale when unit_scale != 0.
+    env.set_slot(13);
+    let misaligned_min =
+        env.try_set_insurance_withdraw_policy(&admin, &delegated.pubkey(), 1001, 100, 1);
+    assert!(
+        misaligned_min.is_err(),
+        "policy min must be aligned to unit_scale"
+    );
+
+    // Valid policy should pass.
+    env.set_slot(14);
+    let valid = env.try_set_insurance_withdraw_policy(&admin, &delegated.pubkey(), 1000, 100, 1);
+    assert!(valid.is_ok(), "valid policy should be accepted: {:?}", valid);
+}
+
+#[test]
+fn test_limited_insurance_withdraw_adversarial_guards() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_full(0, 1000, 0); // unit_scale = 1000 for alignment checks
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .expect("oracle authority setup must succeed");
+    env.try_push_oracle_price(&admin, 138_000_000, 100)
+        .expect("oracle price push must succeed");
+
+    // Seed insurance while unresolved.
+    let seeded_base = 10_000_000_000u64;
+    env.top_up_insurance(&admin, seeded_base);
+    let seeded_insurance = env.read_insurance_balance();
+    let expected_seeded_units = (seeded_base / 1000) as u128;
+    assert_eq!(
+        seeded_insurance, expected_seeded_units,
+        "precondition: insurance should be seeded"
+    );
+
+    // WithdrawInsuranceLimited must fail while unresolved.
+    let unresolved_withdraw = env.try_withdraw_insurance_limited(&admin, 2000);
+    assert!(
+        unresolved_withdraw.is_err(),
+        "limited withdraw must fail before market resolution"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        seeded_insurance,
+        "rejected unresolved limited withdraw must not change insurance"
+    );
+
+    // Create open positions so resolved-mode open-position guard can be tested.
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 20_000_000_000);
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 5_000_000_000);
+    env.trade(&user, &lp, lp_idx, user_idx, 100_000);
+    assert_ne!(
+        env.read_account_position(user_idx),
+        0,
+        "precondition: position should be open"
+    );
+
+    // Resolve and configure permissive policy to isolate guards under test.
+    env.try_resolve_market(&admin)
+        .expect("resolve should succeed");
+    env.try_set_insurance_withdraw_policy(&admin, &admin.pubkey(), 1000, 10_000, 0)
+        .expect("valid policy should be accepted");
+
+    // Open positions should still block limited withdraw after resolution.
+    let open_pos_withdraw = env.try_withdraw_insurance_limited(&admin, 3000);
+    assert!(
+        open_pos_withdraw.is_err(),
+        "limited withdraw must fail while any position remains open"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        seeded_insurance,
+        "rejected open-position limited withdraw must not change insurance"
+    );
+
+    // Close positions via resolved crank path.
+    env.set_slot(200);
+    env.crank();
+    assert_eq!(
+        env.read_account_position(user_idx),
+        0,
+        "precondition: user position should be closed after crank"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        0,
+        "precondition: lp position should be closed after crank"
+    );
+
+    // Misaligned amount should be rejected for unit_scale=1000.
+    let misaligned_withdraw = env.try_withdraw_insurance_limited(&admin, 1001);
+    assert!(
+        misaligned_withdraw.is_err(),
+        "limited withdraw amount must be aligned to unit_scale"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        seeded_insurance,
+        "rejected misaligned limited withdraw must not change insurance"
+    );
+
+    // Above available insurance must be rejected.
+    let total_base_available = (seeded_insurance as u64).saturating_mul(1000);
+    let too_large = total_base_available.saturating_add(1000);
+    let above_balance = env.try_withdraw_insurance_limited(&admin, too_large);
+    assert!(
+        above_balance.is_err(),
+        "limited withdraw above insurance balance must fail"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        seeded_insurance,
+        "rejected above-balance limited withdraw must not change insurance"
+    );
+
+    // Final sanity: valid aligned in-balance withdraw succeeds and debits insurance.
+    let valid_amount = 1000u64;
+    let valid = env.try_withdraw_insurance_limited(&admin, valid_amount);
+    assert!(valid.is_ok(), "valid limited withdraw should succeed: {:?}", valid);
+    let expected_units_delta = (valid_amount / 1000) as u128;
+    assert_eq!(
+        env.read_insurance_balance(),
+        seeded_insurance - expected_units_delta,
+        "successful limited withdraw must reduce insurance by amount"
+    );
+}
+
 /// Test paginated force-close with many accounts (simulates 4096 worst case)
 #[test]
 fn test_premarket_paginated_force_close() {
@@ -9451,6 +10419,15 @@ fn test_attack_push_oracle_zero_price() {
     // Push valid price first
     env.try_push_oracle_price(&admin, 138_000_000, 100)
         .expect("oracle price push must succeed");
+    const AUTH_PRICE_OFF: usize = 360;
+    const AUTH_TS_OFF: usize = 368;
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let auth_price_before =
+        u64::from_le_bytes(slab_before[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8].try_into().unwrap());
+    let auth_ts_before =
+        i64::from_le_bytes(slab_before[AUTH_TS_OFF..AUTH_TS_OFF + 8].try_into().unwrap());
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
 
     // Try to push zero price
     let result = env.try_push_oracle_price(&admin, 0, 200);
@@ -9458,6 +10435,24 @@ fn test_attack_push_oracle_zero_price() {
         result.is_err(),
         "ATTACK: Zero oracle price should be rejected"
     );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let auth_price_after =
+        u64::from_le_bytes(slab_after[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8].try_into().unwrap());
+    let auth_ts_after =
+        i64::from_le_bytes(slab_after[AUTH_TS_OFF..AUTH_TS_OFF + 8].try_into().unwrap());
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+
+    assert_eq!(
+        auth_price_after, auth_price_before,
+        "Rejected zero-price push must not change authority price"
+    );
+    assert_eq!(
+        auth_ts_after, auth_ts_before,
+        "Rejected zero-price push must not advance authority timestamp"
+    );
+    assert_eq!(used_after, used_before, "Rejected zero-price push must not change num_used_accounts");
+    assert_eq!(vault_after, vault_before, "Rejected zero-price push must not move vault funds");
 }
 
 /// ATTACK: Push oracle price when no oracle authority is configured.
@@ -9468,6 +10463,15 @@ fn test_attack_push_oracle_without_authority_set() {
 
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
+    const AUTH_PRICE_OFF: usize = 360;
+    const AUTH_TS_OFF: usize = 368;
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let auth_price_before =
+        u64::from_le_bytes(slab_before[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8].try_into().unwrap());
+    let auth_ts_before =
+        i64::from_le_bytes(slab_before[AUTH_TS_OFF..AUTH_TS_OFF + 8].try_into().unwrap());
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
 
     // Don't set oracle authority - default is [0;32]
     let random = Keypair::new();
@@ -9477,6 +10481,26 @@ fn test_attack_push_oracle_without_authority_set() {
         result.is_err(),
         "ATTACK: Push price without authority set should fail"
     );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let auth_price_after =
+        u64::from_le_bytes(slab_after[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8].try_into().unwrap());
+    let auth_ts_after =
+        i64::from_le_bytes(slab_after[AUTH_TS_OFF..AUTH_TS_OFF + 8].try_into().unwrap());
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+
+    assert_eq!(auth_price_before, 0, "Precondition: authority price should be unset");
+    assert_eq!(auth_ts_before, 0, "Precondition: authority timestamp should be unset");
+    assert_eq!(
+        auth_price_after, auth_price_before,
+        "Rejected unauthorized push must not change authority price"
+    );
+    assert_eq!(
+        auth_ts_after, auth_ts_before,
+        "Rejected unauthorized push must not change authority timestamp"
+    );
+    assert_eq!(used_after, used_before, "Rejected unauthorized push must not change num_used_accounts");
+    assert_eq!(vault_after, vault_before, "Rejected unauthorized push must not move vault funds");
 }
 
 // ============================================================================
@@ -9498,11 +10522,32 @@ fn test_attack_resolve_market_without_oracle_price() {
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .expect("oracle authority setup must succeed");
 
+    let resolved_before = env.is_market_resolved();
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
+
     // Try to resolve without pushing price
     let result = env.try_resolve_market(&admin);
     assert!(
         result.is_err(),
         "ATTACK: Resolve without oracle price should fail"
+    );
+    let resolved_after = env.is_market_resolved();
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+
+    assert!(!resolved_before, "Precondition: market should be unresolved");
+    assert_eq!(
+        resolved_after, resolved_before,
+        "Rejected resolve-without-price must not toggle resolved flag"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected resolve-without-price must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected resolve-without-price must not move vault funds"
     );
 }
 
@@ -9713,8 +10758,22 @@ fn test_attack_double_init_market() {
         &[admin],
         env.svm.latest_blockhash(),
     );
+    const HEADER_CONFIG_LEN: usize = 392;
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
     let result = env.svm.send_transaction(tx);
     assert!(result.is_err(), "ATTACK: Double InitMarket should fail");
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+    assert_eq!(
+        &slab_after[..HEADER_CONFIG_LEN],
+        &slab_before[..HEADER_CONFIG_LEN],
+        "Rejected double InitMarket must not mutate slab header/config"
+    );
+    assert_eq!(used_after, used_before, "Rejected double InitMarket must not change num_used_accounts");
+    assert_eq!(vault_after, vault_before, "Rejected double InitMarket must not move vault funds");
 }
 
 // ============================================================================
@@ -10774,12 +11833,30 @@ fn test_attack_deposit_then_trade_same_slot() {
 
     // Deposit and immediately trade (no crank in between)
     env.deposit(&user, user_idx, 10_000_000_000);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let vault_before = env.vault_balance();
     let result = env.try_trade(&user, &lp, lp_idx, user_idx, 5_000_000);
     assert!(
         result.is_ok(),
         "Deposit then trade in same slot should work: {:?}",
         result
     );
+    let user_cap_after = env.read_account_capital(user_idx);
+    let lp_cap_after = env.read_account_capital(lp_idx);
+    let user_pos_after = env.read_account_position(user_idx);
+    let lp_pos_after = env.read_account_position(lp_idx);
+    let vault_after = env.vault_balance();
+
+    assert_eq!(user_pos_before, 0, "Precondition: user should start flat");
+    assert_eq!(lp_pos_before, 0, "Precondition: LP should start flat");
+    assert_eq!(user_pos_after, 5_000_000, "Successful trade should open user long position");
+    assert_eq!(lp_pos_after, -5_000_000, "Successful trade should open LP short position");
+    assert_eq!(user_cap_after, user_cap_before, "Trade should not change user capital at entry");
+    assert_eq!(lp_cap_after, lp_cap_before, "Trade should not change LP capital at entry");
+    assert_eq!(vault_after, vault_before, "Trade should not move vault funds");
 }
 
 /// ATTACK: Trade, then withdraw max in same slot.
@@ -10985,6 +12062,9 @@ fn test_attack_deposit_u64_max() {
 
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
 
     // Mint only 1000 tokens but try to deposit 1_000_000_000_000
     // (more than the ATA holds)
@@ -11014,6 +12094,15 @@ fn test_attack_deposit_u64_max() {
         result.is_err(),
         "ATTACK: Depositing more than ATA balance should fail"
     );
+    let user_cap_after = env.read_account_capital(user_idx);
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+    assert_eq!(
+        user_cap_after, user_cap_before,
+        "Rejected over-deposit must not change user capital"
+    );
+    assert_eq!(used_after, used_before, "Rejected over-deposit must not change num_used_accounts");
+    assert_eq!(vault_after, vault_before, "Rejected over-deposit must not move vault funds");
 }
 
 /// ATTACK: Trade with size = i128::MAX (overflow boundary).
@@ -11276,6 +12365,8 @@ fn test_attack_config_zero_funding_horizon() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let cfg_before = env.read_update_config_snapshot();
+    let vault_before = env.vault_balance();
     let result = env.try_update_config_with_params(
         &admin,
         0,                     // funding_horizon_slots = 0 (invalid)
@@ -11288,6 +12379,13 @@ fn test_attack_config_zero_funding_horizon() {
         result.is_err(),
         "ATTACK: Zero funding_horizon_slots should be rejected (InvalidConfigParam)"
     );
+    let cfg_after = env.read_update_config_snapshot();
+    let vault_after = env.vault_balance();
+    assert_eq!(
+        cfg_after, cfg_before,
+        "Rejected UpdateConfig must not mutate funding/threshold config"
+    );
+    assert_eq!(vault_after, vault_before, "Rejected UpdateConfig must not move vault funds");
 }
 
 /// ATTACK: UpdateConfig with funding_inv_scale_notional_e6 = 0 (division by zero).
@@ -11300,6 +12398,8 @@ fn test_attack_config_zero_inv_scale() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let cfg_before = env.read_update_config_snapshot();
+    let vault_before = env.vault_balance();
     let result = env.try_update_config_with_params(
         &admin,
         3600, // normal horizon
@@ -11312,6 +12412,13 @@ fn test_attack_config_zero_inv_scale() {
         result.is_err(),
         "ATTACK: Zero inv_scale should be rejected (InvalidConfigParam)"
     );
+    let cfg_after = env.read_update_config_snapshot();
+    let vault_after = env.vault_balance();
+    assert_eq!(
+        cfg_after, cfg_before,
+        "Rejected UpdateConfig must not mutate funding/threshold config"
+    );
+    assert_eq!(vault_after, vault_before, "Rejected UpdateConfig must not move vault funds");
 }
 
 /// ATTACK: UpdateConfig with thresh_alpha_bps > 10000 (over 100%).
@@ -11324,6 +12431,8 @@ fn test_attack_config_alpha_over_100_percent() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let cfg_before = env.read_update_config_snapshot();
+    let vault_before = env.vault_balance();
     let result = env.try_update_config_with_params(
         &admin,
         3600,
@@ -11336,6 +12445,13 @@ fn test_attack_config_alpha_over_100_percent() {
         result.is_err(),
         "ATTACK: alpha_bps > 10000 should be rejected (InvalidConfigParam)"
     );
+    let cfg_after = env.read_update_config_snapshot();
+    let vault_after = env.vault_balance();
+    assert_eq!(
+        cfg_after, cfg_before,
+        "Rejected UpdateConfig must not mutate funding/threshold config"
+    );
+    assert_eq!(vault_after, vault_before, "Rejected UpdateConfig must not move vault funds");
 }
 
 /// ATTACK: UpdateConfig with thresh_min > thresh_max (inverted bounds).
@@ -11348,6 +12464,8 @@ fn test_attack_config_inverted_threshold_bounds() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let cfg_before = env.read_update_config_snapshot();
+    let vault_before = env.vault_balance();
     let result = env.try_update_config_with_params(
         &admin,
         3600,
@@ -11360,6 +12478,13 @@ fn test_attack_config_inverted_threshold_bounds() {
         result.is_err(),
         "ATTACK: thresh_min > thresh_max should be rejected (InvalidConfigParam)"
     );
+    let cfg_after = env.read_update_config_snapshot();
+    let vault_after = env.vault_balance();
+    assert_eq!(
+        cfg_after, cfg_before,
+        "Rejected UpdateConfig must not mutate funding/threshold config"
+    );
+    assert_eq!(vault_after, vault_before, "Rejected UpdateConfig must not move vault funds");
 }
 
 // ============================================================================
@@ -11383,6 +12508,11 @@ fn test_attack_topup_insurance_after_resolution() {
     env.try_resolve_market(&admin)
         .expect("market resolution setup must succeed");
 
+    let insurance_before = env.read_insurance_balance();
+    let vault_before = env.vault_balance();
+    let used_before = env.read_num_used_accounts();
+    let resolved_before = env.is_market_resolved();
+
     // Try to top up insurance on resolved market
     let payer = Keypair::new();
     env.svm.airdrop(&payer.pubkey(), 10_000_000_000).unwrap();
@@ -11390,6 +12520,27 @@ fn test_attack_topup_insurance_after_resolution() {
     assert!(
         result.is_err(),
         "ATTACK: TopUpInsurance on resolved market should be rejected"
+    );
+    let insurance_after = env.read_insurance_balance();
+    let vault_after = env.vault_balance();
+    let used_after = env.read_num_used_accounts();
+    let resolved_after = env.is_market_resolved();
+    assert!(resolved_before, "Precondition: market should already be resolved");
+    assert_eq!(
+        resolved_after, resolved_before,
+        "Rejected top-up on resolved market must not change resolved flag"
+    );
+    assert_eq!(
+        insurance_after, insurance_before,
+        "Rejected top-up on resolved market must not change insurance balance"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected top-up on resolved market must not move vault funds"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected top-up on resolved market must not change num_used_accounts"
     );
 }
 
@@ -11406,6 +12557,13 @@ fn test_attack_topup_insurance_insufficient_balance() {
     let payer = Keypair::new();
     env.svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
     let ata = env.create_ata(&payer.pubkey(), 100);
+    let insurance_before = env.read_insurance_balance();
+    let vault_before = env.vault_balance();
+    let used_before = env.read_num_used_accounts();
+    let ata_amount_before = {
+        let ata_data = env.svm.get_account(&ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
 
     let mut data = vec![9u8];
     data.extend_from_slice(&1_000_000_000u64.to_le_bytes());
@@ -11432,6 +12590,29 @@ fn test_attack_topup_insurance_insufficient_balance() {
     assert!(
         result.is_err(),
         "ATTACK: TopUpInsurance with insufficient balance should fail"
+    );
+    let insurance_after = env.read_insurance_balance();
+    let vault_after = env.vault_balance();
+    let used_after = env.read_num_used_accounts();
+    let ata_amount_after = {
+        let ata_data = env.svm.get_account(&ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
+    assert_eq!(
+        insurance_after, insurance_before,
+        "Rejected insufficient top-up must not change insurance balance"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected insufficient top-up must not change vault funds"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected insufficient top-up must not change num_used_accounts"
+    );
+    assert_eq!(
+        ata_amount_after, ata_amount_before,
+        "Rejected insufficient top-up must not debit payer ATA"
     );
 }
 
@@ -11920,11 +13101,20 @@ fn test_attack_set_maintenance_fee_non_admin() {
 
     let attacker = Keypair::new();
     env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let vault_before = env.vault_balance();
+    let used_before = env.read_num_used_accounts();
     let result = env.try_set_maintenance_fee(&attacker, 999_999_999);
     assert!(
         result.is_err(),
         "ATTACK: Non-admin SetMaintenanceFee should be rejected"
     );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let vault_after = env.vault_balance();
+    let used_after = env.read_num_used_accounts();
+    assert_eq!(slab_after, slab_before, "Rejected non-admin fee update must not mutate slab");
+    assert_eq!(vault_after, vault_before, "Rejected non-admin fee update must not move vault funds");
+    assert_eq!(used_after, used_before, "Rejected non-admin fee update must not change num_used_accounts");
 }
 
 // ============================================================================
@@ -12050,6 +13240,10 @@ fn test_attack_truncated_instruction_data() {
 
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
+    const HEADER_CONFIG_LEN: usize = 392;
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
 
     let user = Keypair::new();
     env.svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
@@ -12082,6 +13276,16 @@ fn test_attack_truncated_instruction_data() {
         result.is_err(),
         "ATTACK: Truncated instruction data should be rejected"
     );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+    assert_eq!(
+        &slab_after[..HEADER_CONFIG_LEN],
+        &slab_before[..HEADER_CONFIG_LEN],
+        "Rejected truncated instruction must not mutate slab header/config"
+    );
+    assert_eq!(used_after, used_before, "Rejected truncated instruction must not change num_used_accounts");
+    assert_eq!(vault_after, vault_before, "Rejected truncated instruction must not move vault funds");
 }
 
 /// ATTACK: Send unknown instruction tag (255).
@@ -12092,6 +13296,10 @@ fn test_attack_unknown_instruction_tag() {
 
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
+    const HEADER_CONFIG_LEN: usize = 392;
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
 
     let user = Keypair::new();
     env.svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
@@ -12116,6 +13324,16 @@ fn test_attack_unknown_instruction_tag() {
         result.is_err(),
         "ATTACK: Unknown instruction tag should be rejected"
     );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+    assert_eq!(
+        &slab_after[..HEADER_CONFIG_LEN],
+        &slab_before[..HEADER_CONFIG_LEN],
+        "Rejected unknown-tag instruction must not mutate slab header/config"
+    );
+    assert_eq!(used_after, used_before, "Rejected unknown-tag instruction must not change num_used_accounts");
+    assert_eq!(vault_after, vault_before, "Rejected unknown-tag instruction must not move vault funds");
 }
 
 /// ATTACK: Empty instruction data (no tag byte).
@@ -12126,6 +13344,10 @@ fn test_attack_empty_instruction_data() {
 
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
+    const HEADER_CONFIG_LEN: usize = 392;
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
 
     let user = Keypair::new();
     env.svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
@@ -12150,6 +13372,16 @@ fn test_attack_empty_instruction_data() {
         result.is_err(),
         "ATTACK: Empty instruction data should be rejected"
     );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+    assert_eq!(
+        &slab_after[..HEADER_CONFIG_LEN],
+        &slab_before[..HEADER_CONFIG_LEN],
+        "Rejected empty-data instruction must not mutate slab header/config"
+    );
+    assert_eq!(used_after, used_before, "Rejected empty-data instruction must not change num_used_accounts");
+    assert_eq!(vault_after, vault_before, "Rejected empty-data instruction must not move vault funds");
 }
 
 // ============================================================================
@@ -12404,12 +13636,37 @@ fn test_attack_trade_user_as_lp() {
     let user2_idx = env.init_user(&user2);
     env.deposit(&user2, user2_idx, 10_000_000_000);
 
+    let user1_cap_before = env.read_account_capital(user1_idx);
+    let user2_cap_before = env.read_account_capital(user2_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let user1_pos_before = env.read_account_position(user1_idx);
+    let user2_pos_before = env.read_account_position(user2_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let vault_before = env.vault_balance();
+    let used_before = env.read_num_used_accounts();
+
     // Try to trade user2 vs user1 (user1 as "LP") - should fail
     let result = env.try_trade_type_confused(&user2, &user1, user1_idx, user2_idx, 1_000_000);
     assert!(
         result.is_err(),
         "ATTACK: Using user account as LP in trade should fail (kind mismatch)"
     );
+    let user1_cap_after = env.read_account_capital(user1_idx);
+    let user2_cap_after = env.read_account_capital(user2_idx);
+    let lp_cap_after = env.read_account_capital(lp_idx);
+    let user1_pos_after = env.read_account_position(user1_idx);
+    let user2_pos_after = env.read_account_position(user2_idx);
+    let lp_pos_after = env.read_account_position(lp_idx);
+    let vault_after = env.vault_balance();
+    let used_after = env.read_num_used_accounts();
+    assert_eq!(user1_cap_after, user1_cap_before, "Rejected type-confused trade must not change victim capital");
+    assert_eq!(user2_cap_after, user2_cap_before, "Rejected type-confused trade must not change attacker capital");
+    assert_eq!(lp_cap_after, lp_cap_before, "Rejected type-confused trade must not change LP capital");
+    assert_eq!(user1_pos_after, user1_pos_before, "Rejected type-confused trade must not change victim position");
+    assert_eq!(user2_pos_after, user2_pos_before, "Rejected type-confused trade must not change attacker position");
+    assert_eq!(lp_pos_after, lp_pos_before, "Rejected type-confused trade must not change LP position");
+    assert_eq!(vault_after, vault_before, "Rejected type-confused trade must not move vault funds");
+    assert_eq!(used_after, used_before, "Rejected type-confused trade must not change num_used_accounts");
 }
 
 /// ATTACK: Deposit to an LP account using DepositCollateral.
@@ -12536,12 +13793,25 @@ fn test_attack_trade_out_of_bounds_index() {
     let user = Keypair::new();
     env.svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
 
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let vault_before = env.vault_balance();
+    let used_before = env.read_num_used_accounts();
+
     // Trade with user_idx = 9999 (non-existent)
     let result = env.try_trade(&user, &lp, lp_idx, 9999, 1_000_000);
     assert!(
         result.is_err(),
         "ATTACK: Trade with out-of-bounds user_idx should fail"
     );
+    let lp_cap_after = env.read_account_capital(lp_idx);
+    let lp_pos_after = env.read_account_position(lp_idx);
+    let vault_after = env.vault_balance();
+    let used_after = env.read_num_used_accounts();
+    assert_eq!(lp_cap_after, lp_cap_before, "Rejected out-of-bounds trade must not change LP capital");
+    assert_eq!(lp_pos_after, lp_pos_before, "Rejected out-of-bounds trade must not change LP position");
+    assert_eq!(vault_after, vault_before, "Rejected out-of-bounds trade must not move vault funds");
+    assert_eq!(used_after, used_before, "Rejected out-of-bounds trade must not change num_used_accounts");
 }
 
 /// ATTACK: Withdraw from out-of-bounds index.
@@ -12556,11 +13826,20 @@ fn test_attack_withdraw_out_of_bounds_index() {
     let user = Keypair::new();
     env.svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
 
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let vault_before = env.vault_balance();
+    let used_before = env.read_num_used_accounts();
     let result = env.try_withdraw(&user, u16::MAX, 1_000_000);
     assert!(
         result.is_err(),
         "ATTACK: Withdraw from out-of-bounds index should fail"
     );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let vault_after = env.vault_balance();
+    let used_after = env.read_num_used_accounts();
+    assert_eq!(slab_after, slab_before, "Rejected out-of-bounds withdraw must not mutate slab");
+    assert_eq!(vault_after, vault_before, "Rejected out-of-bounds withdraw must not move vault funds");
+    assert_eq!(used_after, used_before, "Rejected out-of-bounds withdraw must not change num_used_accounts");
 }
 
 /// ATTACK: LiquidateAtOracle with out-of-bounds target index.
@@ -12572,11 +13851,20 @@ fn test_attack_liquidate_out_of_bounds_index() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let vault_before = env.vault_balance();
+    let used_before = env.read_num_used_accounts();
     let result = env.try_liquidate_target(u16::MAX);
     assert!(
         result.is_err(),
         "ATTACK: Liquidate out-of-bounds index should fail"
     );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let vault_after = env.vault_balance();
+    let used_after = env.read_num_used_accounts();
+    assert_eq!(slab_after, slab_before, "Rejected out-of-bounds liquidation must not mutate slab");
+    assert_eq!(vault_after, vault_before, "Rejected out-of-bounds liquidation must not move vault funds");
+    assert_eq!(used_after, used_before, "Rejected out-of-bounds liquidation must not change num_used_accounts");
 }
 
 // ============================================================================
@@ -12600,6 +13888,10 @@ fn test_attack_init_lp_after_resolution() {
     env.try_resolve_market(&admin)
         .expect("market resolution setup must succeed");
 
+    let resolved_before = env.is_market_resolved();
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
+
     // Try InitLP after resolution
     let lp = Keypair::new();
     let result = env.try_init_lp(&lp);
@@ -12607,6 +13899,13 @@ fn test_attack_init_lp_after_resolution() {
         result.is_err(),
         "ATTACK: InitLP after resolution should be rejected"
     );
+    let resolved_after = env.is_market_resolved();
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+    assert!(resolved_before, "Precondition: market should be resolved");
+    assert_eq!(resolved_after, resolved_before, "Rejected InitLP must not change resolved flag");
+    assert_eq!(used_after, used_before, "Rejected InitLP must not change num_used_accounts");
+    assert_eq!(vault_after, vault_before, "Rejected InitLP must not move vault funds");
 }
 
 /// ATTACK: InitUser with zero fee_payment and verify clean initialization.
@@ -13378,6 +14677,11 @@ fn test_attack_withdraw_insurance_non_admin() {
     env.set_slot(100);
     env.crank();
 
+    let insurance_before = env.read_insurance_balance();
+    let vault_before = env.read_vault();
+    let used_before = env.read_num_used_accounts();
+    let resolved_before = env.is_market_resolved();
+
     // Non-admin tries to withdraw insurance
     let attacker = Keypair::new();
     env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
@@ -13385,6 +14689,27 @@ fn test_attack_withdraw_insurance_non_admin() {
     assert!(
         result.is_err(),
         "ATTACK: Non-admin was able to withdraw insurance funds!"
+    );
+    let insurance_after = env.read_insurance_balance();
+    let vault_after = env.read_vault();
+    let used_after = env.read_num_used_accounts();
+    let resolved_after = env.is_market_resolved();
+    assert!(resolved_before, "Precondition: market should be resolved");
+    assert_eq!(
+        resolved_after, resolved_before,
+        "Rejected non-admin insurance withdraw must not change resolved flag"
+    );
+    assert_eq!(
+        insurance_after, insurance_before,
+        "Rejected non-admin insurance withdraw must not change insurance balance"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected non-admin insurance withdraw must not change vault"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected non-admin insurance withdraw must not change num_used_accounts"
     );
 }
 
@@ -13485,6 +14810,13 @@ fn test_attack_tradecpi_after_resolution() {
 
     // Resolve market
     env.try_resolve_market(&admin).unwrap();
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let vault_before = env.read_vault();
+    let used_before = env.read_num_used_accounts();
+    let resolved_before = env.is_market_resolved();
 
     // Try TradeCpi after resolution - should fail
     let result = env.try_trade_cpi(
@@ -13500,6 +14832,21 @@ fn test_attack_tradecpi_after_resolution() {
         result.is_err(),
         "ATTACK: TradeCpi succeeded on resolved market!"
     );
+    let user_cap_after = env.read_account_capital(user_idx);
+    let lp_cap_after = env.read_account_capital(lp_idx);
+    let user_pos_after = env.read_account_position(user_idx);
+    let lp_pos_after = env.read_account_position(lp_idx);
+    let vault_after = env.read_vault();
+    let used_after = env.read_num_used_accounts();
+    let resolved_after = env.is_market_resolved();
+    assert!(resolved_before, "Precondition: market should be resolved");
+    assert_eq!(resolved_after, resolved_before, "Rejected post-resolution trade must not change resolved flag");
+    assert_eq!(user_cap_after, user_cap_before, "Rejected post-resolution trade must not change user capital");
+    assert_eq!(lp_cap_after, lp_cap_before, "Rejected post-resolution trade must not change LP capital");
+    assert_eq!(user_pos_after, user_pos_before, "Rejected post-resolution trade must not change user position");
+    assert_eq!(lp_pos_after, lp_pos_before, "Rejected post-resolution trade must not change LP position");
+    assert_eq!(vault_after, vault_before, "Rejected post-resolution trade must not change vault");
+    assert_eq!(used_after, used_before, "Rejected post-resolution trade must not change num_used_accounts");
 }
 
 /// ATTACK: Try to deposit after market resolution.
@@ -13521,9 +14868,17 @@ fn test_attack_hyperp_deposit_after_resolution() {
 
     // Resolve
     env.try_resolve_market(&admin).unwrap();
+    let user_cap_before = env.read_account_capital(user_idx);
+    let vault_before = env.read_vault();
+    let used_before = env.read_num_used_accounts();
+    let resolved_before = env.is_market_resolved();
 
     // Try to deposit more after resolution
     let ata = env.create_ata(&user.pubkey(), 1_000_000_000);
+    let ata_before = {
+        let ata_data = env.svm.get_account(&ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
     let ix = Instruction {
         program_id: env.program_id,
         accounts: vec![
@@ -13547,6 +14902,20 @@ fn test_attack_hyperp_deposit_after_resolution() {
         result.is_err(),
         "ATTACK: Deposit succeeded on resolved Hyperp market!"
     );
+    let user_cap_after = env.read_account_capital(user_idx);
+    let vault_after = env.read_vault();
+    let used_after = env.read_num_used_accounts();
+    let resolved_after = env.is_market_resolved();
+    let ata_after = {
+        let ata_data = env.svm.get_account(&ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
+    assert!(resolved_before, "Precondition: market should be resolved");
+    assert_eq!(resolved_after, resolved_before, "Rejected post-resolution deposit must not change resolved flag");
+    assert_eq!(user_cap_after, user_cap_before, "Rejected post-resolution deposit must not change user capital");
+    assert_eq!(vault_after, vault_before, "Rejected post-resolution deposit must not change vault");
+    assert_eq!(used_after, used_before, "Rejected post-resolution deposit must not change num_used_accounts");
+    assert_eq!(ata_after, ata_before, "Rejected post-resolution deposit must not debit user ATA");
 }
 
 /// ATTACK: Multi-LP conservation. Trade against 2 different LPs and verify
@@ -13727,6 +15096,15 @@ fn test_attack_hyperp_push_zero_mark_price() {
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .unwrap();
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    const AUTH_PRICE_OFF: usize = 360;
+    const AUTH_TS_OFF: usize = 368;
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let auth_price_before =
+        u64::from_le_bytes(slab_before[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8].try_into().unwrap());
+    let auth_ts_before =
+        i64::from_le_bytes(slab_before[AUTH_TS_OFF..AUTH_TS_OFF + 8].try_into().unwrap());
+    let vault_before = env.read_vault();
+    let used_before = env.read_num_used_accounts();
 
     // Try pushing zero price
     let result = env.try_push_oracle_price(&admin, 0, 2000);
@@ -13734,6 +15112,23 @@ fn test_attack_hyperp_push_zero_mark_price() {
         result.is_err(),
         "ATTACK: Zero price accepted in Hyperp mode!"
     );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let auth_price_after =
+        u64::from_le_bytes(slab_after[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8].try_into().unwrap());
+    let auth_ts_after =
+        i64::from_le_bytes(slab_after[AUTH_TS_OFF..AUTH_TS_OFF + 8].try_into().unwrap());
+    let vault_after = env.read_vault();
+    let used_after = env.read_num_used_accounts();
+    assert_eq!(
+        auth_price_after, auth_price_before,
+        "Rejected zero mark push must not change authority price"
+    );
+    assert_eq!(
+        auth_ts_after, auth_ts_before,
+        "Rejected zero mark push must not change authority timestamp"
+    );
+    assert_eq!(vault_after, vault_before, "Rejected zero mark push must not change vault");
+    assert_eq!(used_after, used_before, "Rejected zero mark push must not change num_used_accounts");
 }
 
 /// ATTACK: In Hyperp mode, crank at same slot should not move index (Bug #9 fix).
@@ -13900,6 +15295,9 @@ fn test_attack_hyperp_init_lp_after_resolution() {
 
     // Resolve market
     env.try_resolve_market(&admin).unwrap();
+    let resolved_before = env.is_market_resolved();
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
 
     // Try to init new LP
     let new_lp = Keypair::new();
@@ -13908,6 +15306,13 @@ fn test_attack_hyperp_init_lp_after_resolution() {
         result.is_err(),
         "ATTACK: InitLP succeeded on resolved market!"
     );
+    let resolved_after = env.is_market_resolved();
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+    assert!(resolved_before, "Precondition: market should be resolved");
+    assert_eq!(resolved_after, resolved_before, "Rejected InitLP must not change resolved flag");
+    assert_eq!(used_after, used_before, "Rejected InitLP must not change num_used_accounts");
+    assert_eq!(vault_after, vault_before, "Rejected InitLP must not move vault");
 }
 
 /// ATTACK: Push oracle price with extreme u64 value.
@@ -14421,6 +15826,13 @@ fn test_attack_extreme_position_size() {
     env.set_slot(100);
     env.crank();
 
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let vault_before = env.read_vault();
+    let used_before = env.read_num_used_accounts();
+
     // Try extremely large position
     let result = env.try_trade_cpi(
         &user,
@@ -14436,6 +15848,30 @@ fn test_attack_extreme_position_size() {
         result.is_err(),
         "ATTACK: Extreme position size (i128::MAX/2) accepted without error!"
     );
+    let user_cap_after = env.read_account_capital(user_idx);
+    let lp_cap_after = env.read_account_capital(lp_idx);
+    let user_pos_after = env.read_account_position(user_idx);
+    let lp_pos_after = env.read_account_position(lp_idx);
+    let vault_after = env.read_vault();
+    let used_after = env.read_num_used_accounts();
+    assert_eq!(
+        user_cap_after, user_cap_before,
+        "Rejected extreme-size trade must not change user capital"
+    );
+    assert_eq!(
+        lp_cap_after, lp_cap_before,
+        "Rejected extreme-size trade must not change LP capital"
+    );
+    assert_eq!(
+        user_pos_after, user_pos_before,
+        "Rejected extreme-size trade must not change user position"
+    );
+    assert_eq!(
+        lp_pos_after, lp_pos_before,
+        "Rejected extreme-size trade must not change LP position"
+    );
+    assert_eq!(vault_after, vault_before, "Rejected extreme-size trade must not change vault");
+    assert_eq!(used_after, used_before, "Rejected extreme-size trade must not change num_used_accounts");
 }
 
 /// ATTACK: Try to trade with i128::MIN position size (negative extreme).
@@ -14462,6 +15898,13 @@ fn test_attack_extreme_negative_position_size() {
     env.set_slot(100);
     env.crank();
 
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let vault_before = env.read_vault();
+    let used_before = env.read_num_used_accounts();
+
     let result = env.try_trade_cpi(
         &user,
         &lp.pubkey(),
@@ -14475,6 +15918,30 @@ fn test_attack_extreme_negative_position_size() {
         result.is_err(),
         "ATTACK: Extreme negative position (i128::MIN/2) accepted without error!"
     );
+    let user_cap_after = env.read_account_capital(user_idx);
+    let lp_cap_after = env.read_account_capital(lp_idx);
+    let user_pos_after = env.read_account_position(user_idx);
+    let lp_pos_after = env.read_account_position(lp_idx);
+    let vault_after = env.read_vault();
+    let used_after = env.read_num_used_accounts();
+    assert_eq!(
+        user_cap_after, user_cap_before,
+        "Rejected extreme-negative trade must not change user capital"
+    );
+    assert_eq!(
+        lp_cap_after, lp_cap_before,
+        "Rejected extreme-negative trade must not change LP capital"
+    );
+    assert_eq!(
+        user_pos_after, user_pos_before,
+        "Rejected extreme-negative trade must not change user position"
+    );
+    assert_eq!(
+        lp_pos_after, lp_pos_before,
+        "Rejected extreme-negative trade must not change LP position"
+    );
+    assert_eq!(vault_after, vault_before, "Rejected extreme-negative trade must not change vault");
+    assert_eq!(used_after, used_before, "Rejected extreme-negative trade must not change num_used_accounts");
 }
 
 /// ATTACK: Conservation invariant through trade + price movement + settlement.
@@ -14860,6 +16327,13 @@ fn test_attack_deposit_to_others_account() {
 
     // Attacker tries to deposit to victim's account index
     let ata = env.create_ata(&attacker.pubkey(), 1_000_000_000);
+    let victim_cap_before = env.read_account_capital(victim_idx);
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
+    let ata_before = {
+        let ata_data = env.svm.get_account(&ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
     let ix = Instruction {
         program_id: env.program_id,
         accounts: vec![
@@ -14882,6 +16356,29 @@ fn test_attack_deposit_to_others_account() {
     assert!(
         result.is_err(),
         "ATTACK: Attacker deposited to victim's account!"
+    );
+    let victim_cap_after = env.read_account_capital(victim_idx);
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+    let ata_after = {
+        let ata_data = env.svm.get_account(&ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
+    assert_eq!(
+        victim_cap_after, victim_cap_before,
+        "Rejected cross-account deposit must not change victim capital"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected cross-account deposit must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected cross-account deposit must not change vault"
+    );
+    assert_eq!(
+        ata_after, ata_before,
+        "Rejected cross-account deposit must not debit attacker ATA"
     );
 }
 
@@ -17516,12 +19013,46 @@ fn test_attack_trade_with_closed_account_index() {
 
     // Close user account
     env.try_close_account(&user, user_idx).unwrap();
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let used_before = env.read_num_used_accounts();
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
+    assert_eq!(
+        used_before, 1,
+        "Precondition: only LP should remain after closing user account"
+    );
 
     // Try trade referencing closed account
     let trade_result = env.try_trade(&user, &lp, lp_idx, user_idx, 100_000);
     assert!(
         trade_result.is_err(),
         "ATTACK: Trade with closed account index succeeded!"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected trade to closed index must preserve LP position"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected trade to closed index must preserve LP capital"
+    );
+    assert_eq!(
+        env.read_num_used_accounts(),
+        used_before,
+        "Rejected trade to closed index must preserve num_used_accounts"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected trade to closed index must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before,
+        "Rejected trade to closed index must preserve engine vault"
     );
 }
 
@@ -19102,10 +20633,40 @@ fn test_attack_deposit_wrong_mint_token_account() {
         &[&user],
         env.svm.latest_blockhash(),
     );
+    let user_cap_before = env.read_account_capital(user_idx);
+    let used_before = env.read_num_used_accounts();
+    let spl_vault_before = env.vault_balance();
+    let fake_ata_before = {
+        let ata_data = env.svm.get_account(&fake_ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
     let result = env.svm.send_transaction(tx);
     assert!(
         result.is_err(),
         "ATTACK: Deposit with wrong-mint ATA should be rejected!"
+    );
+    let user_cap_after = env.read_account_capital(user_idx);
+    let used_after = env.read_num_used_accounts();
+    let spl_vault_after = env.vault_balance();
+    let fake_ata_after = {
+        let ata_data = env.svm.get_account(&fake_ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
+    assert_eq!(
+        user_cap_after, user_cap_before,
+        "Rejected wrong-mint deposit must not change user capital"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected wrong-mint deposit must not change num_used_accounts"
+    );
+    assert_eq!(
+        spl_vault_after, spl_vault_before,
+        "Rejected wrong-mint deposit must not change SPL vault"
+    );
+    assert_eq!(
+        fake_ata_after, fake_ata_before,
+        "Rejected wrong-mint deposit must not debit source ATA"
     );
 }
 
@@ -19963,12 +21524,48 @@ fn test_attack_trade_nocpi_on_hyperp_rejected() {
     env.deposit(&user, user_idx, 5_000_000_000);
 
     env.crank();
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
 
     // TradeNoCpi should be blocked on hyperp markets
     let result = env.try_trade(&user, &lp, lp_idx, user_idx, 100_000);
     assert!(
         result.is_err(),
         "ATTACK: TradeNoCpi on hyperp market should be rejected!"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Rejected TradeNoCpi on hyperp must preserve user position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected TradeNoCpi on hyperp must preserve LP position"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Rejected TradeNoCpi on hyperp must preserve user capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected TradeNoCpi on hyperp must preserve LP capital"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected TradeNoCpi on hyperp must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before,
+        "Rejected TradeNoCpi on hyperp must preserve engine vault"
     );
 }
 
@@ -19989,19 +21586,59 @@ fn test_attack_non_admin_resolve_rejected() {
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
 
     let lp = Keypair::new();
-    let _lp_idx = env.init_lp(&lp);
-    env.deposit(&lp, _lp_idx, 10_000_000_000);
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
 
     env.crank();
 
     // Non-admin tries to resolve
     let attacker = Keypair::new();
     env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+    let resolved_before = env.is_market_resolved();
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let used_before = env.read_num_used_accounts();
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
 
     let result = env.try_resolve_market(&attacker);
     assert!(
         result.is_err(),
         "ATTACK: Non-admin resolve should be rejected!"
+    );
+    assert!(
+        !resolved_before,
+        "Precondition: market should be unresolved before non-admin resolve attempt"
+    );
+    assert_eq!(
+        env.is_market_resolved(),
+        resolved_before,
+        "Rejected non-admin resolve must not toggle resolved flag"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected non-admin resolve must preserve LP position"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected non-admin resolve must preserve LP capital"
+    );
+    assert_eq!(
+        env.read_num_used_accounts(),
+        used_before,
+        "Rejected non-admin resolve must preserve num_used_accounts"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected non-admin resolve must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before,
+        "Rejected non-admin resolve must preserve engine vault"
     );
 }
 
@@ -20473,6 +22110,15 @@ fn test_attack_set_oracle_authority_to_zero_disables_push() {
     let zero = Pubkey::new_from_array([0u8; 32]);
     env.set_slot(2);
     env.try_set_oracle_authority(&admin, &zero).unwrap();
+    const AUTH_PRICE_OFF: usize = 360;
+    const AUTH_TS_OFF: usize = 368;
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let auth_price_before =
+        u64::from_le_bytes(slab_before[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8].try_into().unwrap());
+    let auth_ts_before =
+        i64::from_le_bytes(slab_before[AUTH_TS_OFF..AUTH_TS_OFF + 8].try_into().unwrap());
+    let used_before = env.read_num_used_accounts();
+    let spl_vault_before = env.vault_balance();
 
     // Push should now fail
     env.set_slot(3);
@@ -20480,6 +22126,29 @@ fn test_attack_set_oracle_authority_to_zero_disables_push() {
     assert!(
         result.is_err(),
         "ATTACK: PushOraclePrice succeeded after authority cleared!"
+    );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let auth_price_after =
+        u64::from_le_bytes(slab_after[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8].try_into().unwrap());
+    let auth_ts_after =
+        i64::from_le_bytes(slab_after[AUTH_TS_OFF..AUTH_TS_OFF + 8].try_into().unwrap());
+    let used_after = env.read_num_used_accounts();
+    let spl_vault_after = env.vault_balance();
+    assert_eq!(
+        auth_price_after, auth_price_before,
+        "Rejected push after clearing authority must not change authority price"
+    );
+    assert_eq!(
+        auth_ts_after, auth_ts_before,
+        "Rejected push after clearing authority must not change authority timestamp"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected push after clearing authority must not change num_used_accounts"
+    );
+    assert_eq!(
+        spl_vault_after, spl_vault_before,
+        "Rejected push after clearing authority must not move vault funds"
     );
 }
 
@@ -20654,9 +22323,29 @@ fn test_attack_update_admin_same_address_noop() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    const HEADER_CONFIG_LEN: usize = 392;
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let used_before = env.read_num_used_accounts();
+    let spl_vault_before = env.vault_balance();
 
     // Update admin to same address
     env.try_update_admin(&admin, &admin.pubkey()).unwrap();
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let used_after = env.read_num_used_accounts();
+    let spl_vault_after = env.vault_balance();
+    assert_eq!(
+        &slab_after[..HEADER_CONFIG_LEN],
+        &slab_before[..HEADER_CONFIG_LEN],
+        "Self-update admin should be a no-op on slab header/config bytes"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Self-update admin must not change num_used_accounts"
+    );
+    assert_eq!(
+        spl_vault_after, spl_vault_before,
+        "Self-update admin must not move vault funds"
+    );
 
     // Admin should still work
     env.set_slot(2);
@@ -20665,6 +22354,13 @@ fn test_attack_update_admin_same_address_noop() {
         result.is_ok(),
         "Admin should still be authorized after self-update: {:?}",
         result
+    );
+    let random = Keypair::new();
+    env.svm.airdrop(&random.pubkey(), 1_000_000_000).unwrap();
+    let non_admin_result = env.try_set_maintenance_fee(&random, 100);
+    assert!(
+        non_admin_result.is_err(),
+        "Self-update admin must not broaden admin permissions"
     );
 }
 
@@ -21820,7 +23516,7 @@ fn test_attack_rapid_open_close_open_cycle() {
 //           account state checks, multi-account scenarios, edge cases
 // ============================================================================
 
-/// ATTACK: Send instruction with tag=22 (just above max valid tag=20).
+/// ATTACK: Send instruction with tag=24 (just above max valid tag=23).
 /// Should fail gracefully.
 #[test]
 fn test_attack_instruction_tag_just_above_max() {
@@ -21832,14 +23528,14 @@ fn test_attack_instruction_tag_just_above_max() {
     let user = Keypair::new();
     env.svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
 
-    // Tag = 22 (one above WithdrawInsurance=20)
+    // Tag = 24 (one above WithdrawInsuranceLimited=23)
     let ix = Instruction {
         program_id: env.program_id,
         accounts: vec![
             AccountMeta::new(user.pubkey(), true),
             AccountMeta::new(env.slab, false),
         ],
-        data: vec![22u8],
+        data: vec![24u8],
     };
 
     let tx = Transaction::new_signed_with_payer(
@@ -21848,10 +23544,30 @@ fn test_attack_instruction_tag_just_above_max() {
         &[&user],
         env.svm.latest_blockhash(),
     );
+    const HEADER_CONFIG_LEN: usize = 392;
+    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
+    let used_before = env.read_num_used_accounts();
+    let spl_vault_before = env.vault_balance();
     let result = env.svm.send_transaction(tx);
     assert!(
         result.is_err(),
-        "ATTACK: Invalid instruction tag 22 should be rejected!"
+        "ATTACK: Invalid instruction tag 24 should be rejected!"
+    );
+    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
+    let used_after = env.read_num_used_accounts();
+    let spl_vault_after = env.vault_balance();
+    assert_eq!(
+        &slab_after[..HEADER_CONFIG_LEN],
+        &slab_before[..HEADER_CONFIG_LEN],
+        "Rejected invalid-tag instruction must not mutate slab header/config"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected invalid-tag instruction must not change num_used_accounts"
+    );
+    assert_eq!(
+        spl_vault_after, spl_vault_before,
+        "Rejected invalid-tag instruction must not move vault funds"
     );
 }
 
@@ -21904,10 +23620,40 @@ fn test_attack_deposit_wrong_slab_owner() {
         &[&user],
         env.svm.latest_blockhash(),
     );
+    let user_cap_before = env.read_account_capital(user_idx);
+    let used_before = env.read_num_used_accounts();
+    let spl_vault_before = env.vault_balance();
+    let ata_before = {
+        let ata_data = env.svm.get_account(&ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
     let result = env.svm.send_transaction(tx);
     assert!(
         result.is_err(),
         "ATTACK: Deposit to slab with wrong owner should be rejected!"
+    );
+    let user_cap_after = env.read_account_capital(user_idx);
+    let used_after = env.read_num_used_accounts();
+    let spl_vault_after = env.vault_balance();
+    let ata_after = {
+        let ata_data = env.svm.get_account(&ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
+    assert_eq!(
+        user_cap_after, user_cap_before,
+        "Rejected wrong-slab-owner deposit must not change user capital"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected wrong-slab-owner deposit must not change num_used_accounts"
+    );
+    assert_eq!(
+        spl_vault_after, spl_vault_before,
+        "Rejected wrong-slab-owner deposit must not change SPL vault"
+    );
+    assert_eq!(
+        ata_after, ata_before,
+        "Rejected wrong-slab-owner deposit must not debit source ATA"
     );
 }
 
@@ -21947,10 +23693,40 @@ fn test_attack_deposit_without_signer() {
         &[&payer],
         env.svm.latest_blockhash(),
     );
+    let user_cap_before = env.read_account_capital(user_idx);
+    let used_before = env.read_num_used_accounts();
+    let spl_vault_before = env.vault_balance();
+    let ata_before = {
+        let ata_data = env.svm.get_account(&ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
     let result = env.svm.send_transaction(tx);
     assert!(
         result.is_err(),
         "ATTACK: Deposit without user signer should be rejected!"
+    );
+    let user_cap_after = env.read_account_capital(user_idx);
+    let used_after = env.read_num_used_accounts();
+    let spl_vault_after = env.vault_balance();
+    let ata_after = {
+        let ata_data = env.svm.get_account(&ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
+    assert_eq!(
+        user_cap_after, user_cap_before,
+        "Rejected deposit-without-signer must not change user capital"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected deposit-without-signer must not change num_used_accounts"
+    );
+    assert_eq!(
+        spl_vault_after, spl_vault_before,
+        "Rejected deposit-without-signer must not change SPL vault"
+    );
+    assert_eq!(
+        ata_after, ata_before,
+        "Rejected deposit-without-signer must not debit source ATA"
     );
 }
 
@@ -22177,10 +23953,24 @@ fn test_attack_init_market_admin_mismatch() {
         &[&admin],
         svm.latest_blockhash(),
     );
+    const HEADER_CONFIG_LEN: usize = 392;
+    let slab_before = svm.get_account(&slab).unwrap().data;
+    let vault_before = svm.get_account(&vault).unwrap().data;
     let result = svm.send_transaction(tx);
     assert!(
         result.is_err(),
         "ATTACK: InitMarket with admin mismatch should be rejected!"
+    );
+    let slab_after = svm.get_account(&slab).unwrap().data;
+    let vault_after = svm.get_account(&vault).unwrap().data;
+    assert_eq!(
+        &slab_after[..HEADER_CONFIG_LEN],
+        &slab_before[..HEADER_CONFIG_LEN],
+        "Rejected InitMarket admin mismatch must not mutate slab header/config"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected InitMarket admin mismatch must not mutate vault account data"
     );
 }
 
@@ -22277,10 +24067,24 @@ fn test_attack_init_market_mint_mismatch() {
         &[&admin],
         svm.latest_blockhash(),
     );
+    const HEADER_CONFIG_LEN: usize = 392;
+    let slab_before = svm.get_account(&slab).unwrap().data;
+    let vault_before = svm.get_account(&vault).unwrap().data;
     let result = svm.send_transaction(tx);
     assert!(
         result.is_err(),
         "ATTACK: InitMarket with mint mismatch should be rejected!"
+    );
+    let slab_after = svm.get_account(&slab).unwrap().data;
+    let vault_after = svm.get_account(&vault).unwrap().data;
+    assert_eq!(
+        &slab_after[..HEADER_CONFIG_LEN],
+        &slab_before[..HEADER_CONFIG_LEN],
+        "Rejected InitMarket mint mismatch must not mutate slab header/config"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected InitMarket mint mismatch must not mutate vault account data"
     );
 }
 
@@ -22328,10 +24132,40 @@ fn test_attack_withdraw_wrong_vault_pda() {
         &[&user],
         env.svm.latest_blockhash(),
     );
+    let user_cap_before = env.read_account_capital(user_idx);
+    let used_before = env.read_num_used_accounts();
+    let spl_vault_before = env.vault_balance();
+    let ata_before = {
+        let ata_data = env.svm.get_account(&ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
     let result = env.svm.send_transaction(tx);
     assert!(
         result.is_err(),
         "ATTACK: Withdraw with wrong vault PDA should be rejected!"
+    );
+    let user_cap_after = env.read_account_capital(user_idx);
+    let used_after = env.read_num_used_accounts();
+    let spl_vault_after = env.vault_balance();
+    let ata_after = {
+        let ata_data = env.svm.get_account(&ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
+    assert_eq!(
+        user_cap_after, user_cap_before,
+        "Rejected wrong-vault-PDA withdraw must not change user capital"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected wrong-vault-PDA withdraw must not change num_used_accounts"
+    );
+    assert_eq!(
+        spl_vault_after, spl_vault_before,
+        "Rejected wrong-vault-PDA withdraw must not change SPL vault"
+    );
+    assert_eq!(
+        ata_after, ata_before,
+        "Rejected wrong-vault-PDA withdraw must not credit destination ATA"
     );
 }
 
@@ -22382,10 +24216,34 @@ fn test_attack_close_account_wrong_vault_pda() {
         &[&user],
         env.svm.latest_blockhash(),
     );
+    let user_cap_before = env.read_account_capital(user_idx);
+    let user_pos_before = env.read_account_position(user_idx);
+    let used_before = env.read_num_used_accounts();
+    let spl_vault_before = env.vault_balance();
     let result = env.svm.send_transaction(tx);
     assert!(
         result.is_err(),
         "ATTACK: CloseAccount with wrong vault PDA should be rejected!"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Rejected wrong-vault-PDA close must not change user capital"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Rejected wrong-vault-PDA close must not change user position"
+    );
+    assert_eq!(
+        env.read_num_used_accounts(),
+        used_before,
+        "Rejected wrong-vault-PDA close must not change num_used_accounts"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected wrong-vault-PDA close must not change SPL vault"
     );
 }
 
@@ -22437,10 +24295,34 @@ fn test_attack_topup_insurance_wrong_vault() {
         &[&admin],
         env.svm.latest_blockhash(),
     );
+    let insurance_before = env.read_insurance_balance();
+    let spl_vault_before = env.vault_balance();
+    let ata_before = {
+        let ata_data = env.svm.get_account(&ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
     let result = env.svm.send_transaction(tx);
     assert!(
         result.is_err(),
         "ATTACK: TopUpInsurance with wrong vault should be rejected!"
+    );
+    let insurance_after = env.read_insurance_balance();
+    let spl_vault_after = env.vault_balance();
+    let ata_after = {
+        let ata_data = env.svm.get_account(&ata).unwrap().data;
+        TokenAccount::unpack(&ata_data).unwrap().amount
+    };
+    assert_eq!(
+        insurance_after, insurance_before,
+        "Rejected wrong-vault TopUpInsurance must not change insurance balance"
+    );
+    assert_eq!(
+        spl_vault_after, spl_vault_before,
+        "Rejected wrong-vault TopUpInsurance must not change SPL vault"
+    );
+    assert_eq!(
+        ata_after, ata_before,
+        "Rejected wrong-vault TopUpInsurance must not debit source ATA"
     );
 }
 
@@ -22564,6 +24446,12 @@ fn test_attack_deposit_wrong_oracle_account() {
     let lp_idx = env.init_lp(&lp);
     env.deposit(&lp, lp_idx, 20_000_000_000);
     env.deposit(&user, user_idx, 5_000_000_000);
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
 
     // Construct trade instruction with wrong oracle
     let mut trade_data = vec![6u8]; // Trade tag
@@ -22592,6 +24480,36 @@ fn test_attack_deposit_wrong_oracle_account() {
     assert!(
         result.is_err(),
         "ATTACK: Trade with wrong oracle account should be rejected!"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Rejected trade with wrong oracle must preserve user position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected trade with wrong oracle must preserve LP position"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Rejected trade with wrong oracle must preserve user capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected trade with wrong oracle must preserve LP capital"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected trade with wrong oracle must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before,
+        "Rejected trade with wrong oracle must preserve engine vault"
     );
 }
 
@@ -22718,10 +24636,46 @@ fn test_attack_crank_wrong_oracle() {
         &[&caller],
         env.svm.latest_blockhash(),
     );
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
     let result = env.svm.send_transaction(tx);
     assert!(
         result.is_err(),
         "ATTACK: Crank with wrong oracle should be rejected!"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Rejected crank with wrong oracle must preserve user position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected crank with wrong oracle must preserve LP position"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Rejected crank with wrong oracle must preserve user capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected crank with wrong oracle must preserve LP capital"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected crank with wrong oracle must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before,
+        "Rejected crank with wrong oracle must preserve engine vault"
     );
 }
 
@@ -23969,12 +25923,42 @@ fn test_attack_liquidate_target_u16_max() {
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
     env.deposit(&lp, lp_idx, 20_000_000_000);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let used_before = env.read_num_used_accounts();
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
 
     // Try liquidating index u16::MAX (should fail - no such account)
     let result = env.try_liquidate(u16::MAX);
     assert!(
         result.is_err(),
         "ATTACK: Liquidate with u16::MAX target should fail!"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected liquidation with u16::MAX target must preserve LP position"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected liquidation with u16::MAX target must preserve LP capital"
+    );
+    assert_eq!(
+        env.read_num_used_accounts(),
+        used_before,
+        "Rejected liquidation with u16::MAX target must preserve num_used_accounts"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected liquidation with u16::MAX target must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_engine_vault(),
+        engine_vault_before,
+        "Rejected liquidation with u16::MAX target must preserve engine vault"
     );
 }
 
@@ -27820,8 +29804,19 @@ fn test_binary_market_negative_pnl_close_immediate() {
     env.crank();
 
     // User has negative PnL from force-close
+    let user_pos_after_force_close = env.read_account_position(user_idx);
     let pnl = env.read_account_pnl(user_idx);
     println!("PnL after force-close: {}", pnl);
+    assert_eq!(
+        user_pos_after_force_close, 0,
+        "Force-close should zero user position before CloseAccount"
+    );
+    assert!(
+        pnl < 0,
+        "Precondition: user should have negative PnL after losing resolution, got {}",
+        pnl
+    );
+    let used_before_close = env.read_num_used_accounts();
 
     // Close should work immediately - losses settle to capital in one step
     // (settle_warmup_to_capital §6.1 deducts losses and writes off remainder)
@@ -27833,11 +29828,23 @@ fn test_binary_market_negative_pnl_close_immediate() {
     );
 
     let capital_after = env.read_account_capital(user_idx);
+    let used_after_close = env.read_num_used_accounts();
     println!(
         "Capital returned: {} (was {})",
         capital_after, capital_before
     );
     // Capital should be reduced (lost money on the trade)
+    assert_eq!(
+        used_after_close,
+        used_before_close - 1,
+        "Successful close should reduce num_used_accounts by one"
+    );
+    assert!(
+        capital_after <= capital_before,
+        "Losing path close must not increase capital: before={} after={}",
+        capital_before,
+        capital_after
+    );
     println!("BINARY MARKET NEGATIVE PNL CLOSE IMMEDIATE: PASSED");
 }
 
@@ -28074,9 +30081,43 @@ fn test_admin_force_close_account_requires_resolved() {
     env.set_slot(100);
     env.crank();
 
+    let capital_before = env.read_account_capital(user_idx);
+    let pos_before = env.read_account_position(user_idx);
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
+    let resolved_before = env.is_market_resolved();
+
     // Try force-close on non-resolved market — should fail
     let result = env.try_admin_force_close_account(&admin, user_idx, &user.pubkey());
     assert!(result.is_err(), "Should fail on non-resolved market");
+
+    let capital_after = env.read_account_capital(user_idx);
+    let pos_after = env.read_account_position(user_idx);
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+    let resolved_after = env.is_market_resolved();
+
+    assert!(!resolved_before, "Precondition: market should be unresolved");
+    assert_eq!(
+        resolved_after, resolved_before,
+        "Rejected force-close must not change resolved flag"
+    );
+    assert_eq!(
+        capital_after, capital_before,
+        "Rejected force-close must not change user capital"
+    );
+    assert_eq!(
+        pos_after, pos_before,
+        "Rejected force-close must not change user position"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected force-close must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected force-close must not move vault funds"
+    );
 
     println!("ADMIN FORCE CLOSE ACCOUNT REQUIRES RESOLVED: PASSED");
 }
@@ -28102,6 +30143,12 @@ fn test_admin_force_close_account_requires_admin() {
     env.set_slot(200);
     env.crank();
 
+    let capital_before = env.read_account_capital(user_idx);
+    let pos_before = env.read_account_position(user_idx);
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
+    let resolved_before = env.is_market_resolved();
+
     // Non-admin tries to force-close — should fail
     let fake_admin = Keypair::new();
     env.svm
@@ -28109,6 +30156,34 @@ fn test_admin_force_close_account_requires_admin() {
         .unwrap();
     let result = env.try_admin_force_close_account(&fake_admin, user_idx, &user.pubkey());
     assert!(result.is_err(), "Non-admin should be rejected");
+
+    let capital_after = env.read_account_capital(user_idx);
+    let pos_after = env.read_account_position(user_idx);
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+    let resolved_after = env.is_market_resolved();
+
+    assert!(resolved_before, "Precondition: market should be resolved");
+    assert_eq!(
+        resolved_after, resolved_before,
+        "Rejected non-admin force-close must not change resolved flag"
+    );
+    assert_eq!(
+        capital_after, capital_before,
+        "Rejected non-admin force-close must not change user capital"
+    );
+    assert_eq!(
+        pos_after, pos_before,
+        "Rejected non-admin force-close must not change user position"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected non-admin force-close must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected non-admin force-close must not move vault funds"
+    );
 
     println!("ADMIN FORCE CLOSE ACCOUNT REQUIRES ADMIN: PASSED");
 }
@@ -28154,9 +30229,52 @@ fn test_admin_force_close_account_requires_zero_position() {
         .expect("oracle price push must succeed");
     env.try_resolve_market(&admin).unwrap();
 
+    let user_cap_before = env.read_account_capital(user_idx);
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
+
     // Try force-close account without cranking — should fail (position != 0)
     let result = env.try_admin_force_close_account(&admin, user_idx, &user.pubkey());
     assert!(result.is_err(), "Should fail when position is not zero");
+
+    let user_cap_after = env.read_account_capital(user_idx);
+    let user_pos_after = env.read_account_position(user_idx);
+    let lp_cap_after = env.read_account_capital(lp_idx);
+    let lp_pos_after = env.read_account_position(lp_idx);
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+
+    assert_ne!(
+        user_pos_before, 0,
+        "Precondition: user must still have open position before force-close"
+    );
+    assert_eq!(
+        user_cap_after, user_cap_before,
+        "Rejected force-close (non-zero position) must not change user capital"
+    );
+    assert_eq!(
+        user_pos_after, user_pos_before,
+        "Rejected force-close (non-zero position) must not change user position"
+    );
+    assert_eq!(
+        lp_cap_after, lp_cap_before,
+        "Rejected force-close (non-zero position) must not change LP capital"
+    );
+    assert_eq!(
+        lp_pos_after, lp_pos_before,
+        "Rejected force-close (non-zero position) must not change LP position"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected force-close (non-zero position) must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected force-close (non-zero position) must not move vault funds"
+    );
 
     println!("ADMIN FORCE CLOSE ACCOUNT REQUIRES ZERO POSITION: PASSED");
 }
@@ -28275,13 +30393,27 @@ fn test_admin_force_close_account_with_negative_pnl() {
     let pnl = env.read_account_pnl(user_idx);
     let capital = env.read_account_capital(user_idx);
     println!("User PnL after force-close: {}, capital: {}", pnl, capital);
+    assert!(pnl < 0, "Precondition: user should have negative PnL in this scenario");
 
     // Admin force-close should succeed
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
     let result = env.try_admin_force_close_account(&admin, user_idx, &user.pubkey());
     assert!(
         result.is_ok(),
         "AdminForceCloseAccount should succeed: {:?}",
         result
+    );
+    let used_after = env.read_num_used_accounts();
+    let vault_after = env.vault_balance();
+    let user_cap_after = env.read_account_capital(user_idx);
+    let user_pos_after = env.read_account_position(user_idx);
+    assert_eq!(used_after, used_before - 1, "Force-close should remove exactly one account");
+    assert_eq!(user_cap_after, 0, "Force-closed account capital should be zeroed");
+    assert_eq!(user_pos_after, 0, "Force-closed account position should be zeroed");
+    assert!(
+        vault_after <= vault_before,
+        "Force-close should not increase vault balance"
     );
 
     println!("ADMIN FORCE CLOSE ACCOUNT WITH NEGATIVE PNL: PASSED");
@@ -28503,13 +30635,31 @@ fn test_honest_user_close_after_force_close_negative_pnl() {
 
     let pnl_after = env.read_account_pnl(user_idx);
     println!("After force-close: user PnL={}", pnl_after);
+    assert!(pnl_after < 0, "Precondition: user should have negative PnL after force-close");
 
     // Close should work immediately (negative PnL settled instantly)
+    let used_before = env.read_num_used_accounts();
+    let vault_before = env.vault_balance();
     let result = env.try_close_account(&user, user_idx);
     assert!(
         result.is_ok(),
         "Losing user should close immediately: {:?}",
         result
+    );
+    let used_after = env.read_num_used_accounts();
+    let cap_after = env.read_account_capital(user_idx);
+    let pos_after = env.read_account_position(user_idx);
+    let vault_after = env.vault_balance();
+
+    assert_eq!(
+        used_after, used_before - 1,
+        "CloseAccount should remove user slot after negative-PnL settlement"
+    );
+    assert_eq!(cap_after, 0, "Closed user account capital should be zeroed");
+    assert_eq!(pos_after, 0, "Closed user account position should be zeroed");
+    assert!(
+        vault_after <= vault_before,
+        "Closing user account should not increase vault balance"
     );
 
     println!("HONEST USER CLOSE AFTER FORCE-CLOSE NEGATIVE PNL: PASSED");

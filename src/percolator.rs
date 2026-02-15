@@ -51,6 +51,9 @@ pub mod constants {
     pub const DEFAULT_FUNDING_MAX_PREMIUM_BPS: i64 = 500; // cap premium at 5.00%
     pub const DEFAULT_FUNDING_MAX_BPS_PER_SLOT: i64 = 5; // cap per-slot funding
     pub const DEFAULT_HYPERP_PRICE_CAP_E2BPS: u64 = 10_000; // 1% per slot max price change for Hyperp
+    pub const DEFAULT_INSURANCE_WITHDRAW_MIN_BASE: u64 = 1;
+    pub const DEFAULT_INSURANCE_WITHDRAW_MAX_BPS: u16 = 100; // 1%
+    pub const DEFAULT_INSURANCE_WITHDRAW_COOLDOWN_SLOTS: u64 = 400_000;
 
     // Matcher call ABI offsets (67-byte layout)
     // byte 0: tag (u8)
@@ -168,6 +171,29 @@ pub fn compute_system_risk_units(engine: &percolator::RiskEngine) -> u128 {
 #[inline]
 fn compute_net_lp_pos(engine: &percolator::RiskEngine) -> i128 {
     engine.net_lp_pos.get()
+}
+
+// Packed insurance-withdraw metadata in config.authority_timestamp (i64/u64):
+// [max_withdraw_bps:16][last_withdraw_slot:48]
+const INS_WITHDRAW_LAST_SLOT_MASK: u64 = (1u64 << 48) - 1;
+// Sentinel in the 48-bit slot field meaning "no successful limited withdraw yet".
+const INS_WITHDRAW_LAST_SLOT_NONE: u64 = INS_WITHDRAW_LAST_SLOT_MASK;
+
+#[inline]
+fn pack_ins_withdraw_meta(max_bps: u16, last_slot: u64) -> Option<i64> {
+    if max_bps == 0 || max_bps > 10_000 || last_slot > INS_WITHDRAW_LAST_SLOT_MASK {
+        return None;
+    }
+    let packed = ((max_bps as u64) << 48) | last_slot;
+    Some(packed as i64)
+}
+
+#[inline]
+fn unpack_ins_withdraw_meta(packed: i64) -> (u16, u64) {
+    let raw = packed as u64;
+    let max_bps = ((raw >> 48) & 0xFFFF) as u16;
+    let last_slot = raw & INS_WITHDRAW_LAST_SLOT_MASK;
+    (max_bps, last_slot)
 }
 
 /// Compute inventory-based funding rate (bps per slot).
@@ -1191,6 +1217,17 @@ pub mod ix {
         ResolveMarket,
         /// Withdraw insurance fund balance (admin only, requires RESOLVED flag).
         WithdrawInsurance,
+        /// Set limited insurance-withdraw policy (admin only, resolved market).
+        SetInsuranceWithdrawPolicy {
+            authority: Pubkey,
+            min_withdraw_base: u64,
+            max_withdraw_bps: u16,
+            cooldown_slots: u64,
+        },
+        /// Withdraw insurance under configured min/max/cooldown constraints.
+        WithdrawInsuranceLimited {
+            amount: u64,
+        },
         /// Admin force-close an abandoned account after market resolution.
         /// Requires RESOLVED flag, zero position, admin signer.
         AdminForceCloseAccount {
@@ -1376,6 +1413,22 @@ pub mod ix {
                 21 => {
                     let user_idx = read_u16(&mut rest)?;
                     Ok(Instruction::AdminForceCloseAccount { user_idx })
+                }
+                22 => {
+                    let authority = read_pubkey(&mut rest)?;
+                    let min_withdraw_base = read_u64(&mut rest)?;
+                    let max_withdraw_bps = read_u16(&mut rest)?;
+                    let cooldown_slots = read_u64(&mut rest)?;
+                    Ok(Instruction::SetInsuranceWithdrawPolicy {
+                        authority,
+                        min_withdraw_base,
+                        max_withdraw_bps,
+                        cooldown_slots,
+                    })
+                }
+                23 => {
+                    let amount = read_u64(&mut rest)?;
+                    Ok(Instruction::WithdrawInsuranceLimited { amount })
                 }
                 _ => Err(ProgramError::InvalidInstructionData),
             }
@@ -2393,6 +2446,8 @@ pub mod processor {
             CONFIG_LEN, DEFAULT_FUNDING_HORIZON_SLOTS, DEFAULT_FUNDING_INV_SCALE_NOTIONAL_E6,
             DEFAULT_FUNDING_K_BPS, DEFAULT_FUNDING_MAX_BPS_PER_SLOT,
             DEFAULT_FUNDING_MAX_PREMIUM_BPS, DEFAULT_HYPERP_PRICE_CAP_E2BPS,
+            DEFAULT_INSURANCE_WITHDRAW_COOLDOWN_SLOTS, DEFAULT_INSURANCE_WITHDRAW_MAX_BPS,
+            DEFAULT_INSURANCE_WITHDRAW_MIN_BASE,
             DEFAULT_THRESH_ALPHA_BPS, DEFAULT_THRESH_FLOOR, DEFAULT_THRESH_MAX, DEFAULT_THRESH_MIN,
             DEFAULT_THRESH_MIN_STEP, DEFAULT_THRESH_RISK_BPS, DEFAULT_THRESH_STEP_BPS,
             DEFAULT_THRESH_UPDATE_INTERVAL_SLOTS, MAGIC, MATCHER_CALL_LEN, MATCHER_CALL_TAG,
@@ -2401,7 +2456,9 @@ pub mod processor {
         error::{map_risk_error, PercolatorError},
         ix::Instruction,
         oracle,
+        pack_ins_withdraw_meta,
         state::{self, MarketConfig, SlabHeader},
+        unpack_ins_withdraw_meta,
         zc,
     };
     use percolator::{
@@ -2942,19 +2999,30 @@ pub mod processor {
                 )?;
                 verify_token_account(a_user_ata, a_user.key, &mint)?;
 
+                let resolved = state::is_resolved(&data);
                 let clock = Clock::from_account_info(a_clock)?;
-                // Read oracle price: Hyperp mode uses index directly, otherwise circuit-breaker clamping
-                let is_hyperp = oracle::is_hyperp_mode(&config);
-                let price = if is_hyperp {
-                    let idx = config.last_effective_price_e6;
-                    if idx == 0 {
-                        return Err(PercolatorError::OracleInvalid.into());
+                // Resolved markets use fixed settlement price.
+                // Unresolved markets use regular oracle paths.
+                let price = if resolved {
+                    let settlement = config.authority_price_e6;
+                    if settlement == 0 {
+                        return Err(ProgramError::InvalidAccountData);
                     }
-                    idx
+                    settlement
                 } else {
-                    oracle::read_price_clamped(&mut config, a_oracle_idx, clock.unix_timestamp)?
+                    let is_hyperp = oracle::is_hyperp_mode(&config);
+                    let px = if is_hyperp {
+                        let idx = config.last_effective_price_e6;
+                        if idx == 0 {
+                            return Err(PercolatorError::OracleInvalid.into());
+                        }
+                        idx
+                    } else {
+                        oracle::read_price_clamped(&mut config, a_oracle_idx, clock.unix_timestamp)?
+                    };
+                    state::write_config(&mut data, &config);
+                    px
                 };
-                state::write_config(&mut data, &config);
 
                 let engine = zc::engine_mut(&mut data)?;
 
@@ -3650,16 +3718,26 @@ pub mod processor {
                 let mut config = state::read_config(&data);
 
                 let clock = Clock::from_account_info(&accounts[2])?;
-                // Read oracle price: Hyperp mode uses index directly, otherwise circuit-breaker clamping
-                let is_hyperp = oracle::is_hyperp_mode(&config);
-                let price = if is_hyperp {
-                    let idx = config.last_effective_price_e6;
-                    if idx == 0 {
-                        return Err(PercolatorError::OracleInvalid.into());
+                let resolved = state::is_resolved(&data);
+                // Resolved markets use fixed settlement price.
+                // Unresolved markets use normal oracle/index paths.
+                let price = if resolved {
+                    let settlement = config.authority_price_e6;
+                    if settlement == 0 {
+                        return Err(ProgramError::InvalidAccountData);
                     }
-                    idx
+                    settlement
                 } else {
-                    oracle::read_price_clamped(&mut config, a_oracle, clock.unix_timestamp)?
+                    let is_hyperp = oracle::is_hyperp_mode(&config);
+                    if is_hyperp {
+                        let idx = config.last_effective_price_e6;
+                        if idx == 0 {
+                            return Err(PercolatorError::OracleInvalid.into());
+                        }
+                        idx
+                    } else {
+                        oracle::read_price_clamped(&mut config, a_oracle, clock.unix_timestamp)?
+                    }
                 };
                 state::write_config(&mut data, &config);
 
@@ -3735,19 +3813,30 @@ pub mod processor {
                 verify_token_account(a_user_ata, a_user.key, &mint)?;
                 accounts::expect_key(a_pda, &auth)?;
 
+                let resolved = state::is_resolved(&data);
                 let clock = Clock::from_account_info(&accounts[6])?;
-                // Read oracle price: Hyperp mode uses index directly, otherwise circuit-breaker clamping
-                let is_hyperp = oracle::is_hyperp_mode(&config);
-                let price = if is_hyperp {
-                    let idx = config.last_effective_price_e6;
-                    if idx == 0 {
-                        return Err(PercolatorError::OracleInvalid.into());
+                // Resolved markets use fixed settlement price.
+                // Unresolved markets use regular oracle paths.
+                let price = if resolved {
+                    let settlement = config.authority_price_e6;
+                    if settlement == 0 {
+                        return Err(ProgramError::InvalidAccountData);
                     }
-                    idx
+                    settlement
                 } else {
-                    oracle::read_price_clamped(&mut config, a_oracle, clock.unix_timestamp)?
+                    let is_hyperp = oracle::is_hyperp_mode(&config);
+                    let px = if is_hyperp {
+                        let idx = config.last_effective_price_e6;
+                        if idx == 0 {
+                            return Err(PercolatorError::OracleInvalid.into());
+                        }
+                        idx
+                    } else {
+                        oracle::read_price_clamped(&mut config, a_oracle, clock.unix_timestamp)?
+                    };
+                    state::write_config(&mut data, &config);
+                    px
                 };
-                state::write_config(&mut data, &config);
 
                 let engine = zc::engine_mut(&mut data)?;
 
@@ -4261,6 +4350,209 @@ pub mod processor {
                 )?;
             }
 
+            Instruction::SetInsuranceWithdrawPolicy {
+                authority,
+                min_withdraw_base,
+                max_withdraw_bps,
+                cooldown_slots,
+            } => {
+                accounts::expect_len(accounts, 2)?;
+                let a_admin = &accounts[0];
+                let a_slab = &accounts[1];
+
+                accounts::expect_signer(a_admin)?;
+                accounts::expect_writable(a_slab)?;
+
+                let mut data = state::slab_data_mut(a_slab)?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+
+                // Policy is only relevant after resolution when insurance can be withdrawn.
+                if !state::is_resolved(&data) {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                let header = state::read_header(&data);
+                require_admin(header.admin, a_admin.key)?;
+
+                if min_withdraw_base == 0 {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
+                if max_withdraw_bps == 0 || max_withdraw_bps > 10_000 {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
+
+                let mut config = state::read_config(&data);
+                if config.unit_scale != 0 && min_withdraw_base % (config.unit_scale as u64) != 0 {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
+
+                let packed = pack_ins_withdraw_meta(
+                    max_withdraw_bps,
+                    crate::INS_WITHDRAW_LAST_SLOT_NONE,
+                )
+                    .ok_or(PercolatorError::InvalidConfigParam)?;
+
+                // Reuse these fields in resolved mode for policy state.
+                config.oracle_authority = authority.to_bytes();
+                config.last_effective_price_e6 = min_withdraw_base;
+                config.oracle_price_cap_e2bps = cooldown_slots;
+                config.authority_timestamp = packed;
+                state::write_config(&mut data, &config);
+            }
+
+            Instruction::WithdrawInsuranceLimited { amount } => {
+                // Limited insurance withdraw (configured authority + min/max/cooldown checks)
+                accounts::expect_len(accounts, 7)?;
+                let a_authority = &accounts[0];
+                let a_slab = &accounts[1];
+                let a_authority_ata = &accounts[2];
+                let a_vault = &accounts[3];
+                let a_token = &accounts[4];
+                let a_vault_pda = &accounts[5];
+                let a_clock = &accounts[6];
+
+                accounts::expect_signer(a_authority)?;
+                accounts::expect_writable(a_slab)?;
+                verify_token_program(a_token)?;
+
+                let mut data = state::slab_data_mut(a_slab)?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+                if !state::is_resolved(&data) {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                let header = state::read_header(&data);
+                let mut config = state::read_config(&data);
+                let clock = Clock::from_account_info(a_clock)?;
+
+                // Decode configured policy, or apply defaults when not explicitly configured.
+                let (stored_bps, stored_last_slot) = unpack_ins_withdraw_meta(config.authority_timestamp);
+                let configured = (1..=10_000).contains(&stored_bps);
+                let policy_authority = if configured {
+                    config.oracle_authority
+                } else {
+                    header.admin
+                };
+                let policy_min_base = if configured {
+                    config.last_effective_price_e6
+                } else {
+                    // Default floor should represent at least one withdrawable unit.
+                    // On scaled markets (unit_scale > 1), base amounts must be aligned
+                    // to unit_scale, so a base-min of 1 would otherwise collapse to 0 units.
+                    core::cmp::max(DEFAULT_INSURANCE_WITHDRAW_MIN_BASE, config.unit_scale as u64)
+                };
+                let policy_max_bps = if configured {
+                    stored_bps
+                } else {
+                    DEFAULT_INSURANCE_WITHDRAW_MAX_BPS
+                };
+                let policy_cooldown = if configured {
+                    config.oracle_price_cap_e2bps
+                } else {
+                    DEFAULT_INSURANCE_WITHDRAW_COOLDOWN_SLOTS
+                };
+                let last_withdraw_slot = if configured {
+                    stored_last_slot
+                } else {
+                    crate::INS_WITHDRAW_LAST_SLOT_NONE
+                };
+
+                if policy_min_base == 0 {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
+                if policy_authority != a_authority.key.to_bytes() {
+                    return Err(PercolatorError::EngineUnauthorized.into());
+                }
+                if config.unit_scale != 0 && amount % (config.unit_scale as u64) != 0 {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+                if last_withdraw_slot != crate::INS_WITHDRAW_LAST_SLOT_NONE
+                    && clock.slot < last_withdraw_slot.saturating_add(policy_cooldown)
+                {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                let mint = Pubkey::new_from_array(config.collateral_mint);
+                let (auth, _) = accounts::derive_vault_authority(program_id, a_slab.key);
+                verify_vault(
+                    a_vault,
+                    &auth,
+                    &mint,
+                    &Pubkey::new_from_array(config.vault_pubkey),
+                )?;
+                verify_token_account(a_authority_ata, a_authority.key, &mint)?;
+                accounts::expect_key(a_vault_pda, &auth)?;
+
+                let (units_u64, _) = crate::units::base_to_units(amount, config.unit_scale);
+                let units_requested = units_u64 as u128;
+                if units_requested == 0 {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+                let (policy_min_units_u64, _) =
+                    crate::units::base_to_units(policy_min_base, config.unit_scale);
+                let policy_min_units = policy_min_units_u64 as u128;
+
+                {
+                    let engine = zc::engine_mut(&mut data)?;
+
+                    // Require all positions to be closed.
+                    for i in 0..percolator::MAX_ACCOUNTS {
+                        if engine.is_used(i) && engine.accounts[i].position_size.get() != 0 {
+                            return Err(ProgramError::InvalidAccountData);
+                        }
+                    }
+
+                    let insurance_units = engine.insurance_fund.balance.get();
+                    if insurance_units == 0 {
+                        return Ok(());
+                    }
+                    if units_requested > insurance_units {
+                        return Err(PercolatorError::EngineInsufficientBalance.into());
+                    }
+
+                    let pct_limited_units =
+                        insurance_units.saturating_mul(policy_max_bps as u128) / 10_000u128;
+                    let max_allowed_units = core::cmp::max(pct_limited_units, policy_min_units);
+                    if units_requested > max_allowed_units {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
+
+                    let req = percolator::U128::new(units_requested);
+                    engine.insurance_fund.balance = engine.insurance_fund.balance - req;
+                    if req > engine.vault {
+                        return Err(PercolatorError::EngineInsufficientBalance.into());
+                    }
+                    engine.vault = engine.vault - req;
+                }
+
+                // Persist policy + new cooldown slot.
+                let packed = pack_ins_withdraw_meta(policy_max_bps, clock.slot)
+                    .ok_or(PercolatorError::EngineOverflow)?;
+                config.oracle_authority = policy_authority;
+                config.last_effective_price_e6 = policy_min_base;
+                config.oracle_price_cap_e2bps = policy_cooldown;
+                config.authority_timestamp = packed;
+                state::write_config(&mut data, &config);
+
+                let seed1: &[u8] = b"vault";
+                let seed2: &[u8] = a_slab.key.as_ref();
+                let bump_arr: [u8; 1] = [config.vault_authority_bump];
+                let seed3: &[u8] = &bump_arr;
+                let seeds: [&[u8]; 3] = [seed1, seed2, seed3];
+                let signer_seeds: [&[&[u8]]; 1] = [&seeds];
+
+                collateral::withdraw(
+                    a_token,
+                    a_vault,
+                    a_authority_ata,
+                    a_vault_pda,
+                    amount,
+                    &signer_seeds,
+                )?;
+            }
+
             Instruction::AdminForceCloseAccount { user_idx } => {
                 // Admin force-close an abandoned account after market resolution.
                 // Settles PnL (with haircut for positive), forgives fee debt,
@@ -4272,7 +4564,7 @@ pub mod processor {
                 let a_owner_ata = &accounts[3];
                 let a_pda = &accounts[4];
                 let a_token = &accounts[5];
-                let a_oracle = &accounts[7];
+                let _a_oracle = &accounts[7];
 
                 accounts::expect_signer(a_admin)?;
                 accounts::expect_writable(a_slab)?;
@@ -4290,7 +4582,7 @@ pub mod processor {
                     return Err(ProgramError::InvalidAccountData);
                 }
 
-                let mut config = state::read_config(&data);
+                let config = state::read_config(&data);
                 let mint = Pubkey::new_from_array(config.collateral_mint);
 
                 let (auth, _) = accounts::derive_vault_authority(program_id, a_slab.key);
@@ -4303,19 +4595,11 @@ pub mod processor {
                 accounts::expect_key(a_pda, &auth)?;
 
                 let clock = Clock::from_account_info(&accounts[6])?;
-
-                // Read oracle price (hyperp uses last_effective_price_e6)
-                let is_hyperp = oracle::is_hyperp_mode(&config);
-                let price = if is_hyperp {
-                    let idx = config.last_effective_price_e6;
-                    if idx == 0 {
-                        return Err(PercolatorError::OracleInvalid.into());
-                    }
-                    idx
-                } else {
-                    oracle::read_price_clamped(&mut config, a_oracle, clock.unix_timestamp)?
-                };
-                state::write_config(&mut data, &config);
+                // Resolved markets use fixed settlement price.
+                let price = config.authority_price_e6;
+                if price == 0 {
+                    return Err(ProgramError::InvalidAccountData);
+                }
 
                 let engine = zc::engine_mut(&mut data)?;
 
