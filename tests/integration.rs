@@ -7851,6 +7851,80 @@ fn test_limited_insurance_withdraw_adversarial_guards() {
     );
 }
 
+/// Verify admin can always use Tag 20 (WithdrawInsurance) to drain all insurance,
+/// even after a limited policy (Tag 22) is configured with a delegated authority.
+/// This is by design: admin retains ultimate authority over the insurance fund.
+#[test]
+fn test_admin_withdraw_insurance_bypasses_limited_policy() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .expect("oracle authority setup");
+    env.try_push_oracle_price(&admin, 138_000_000, 100)
+        .expect("oracle price push");
+
+    // Seed insurance before resolution
+    env.top_up_insurance(&admin, 10_000_000_000);
+    assert_eq!(env.read_insurance_balance(), 10_000_000_000, "precondition: insurance seeded");
+
+    env.try_resolve_market(&admin).expect("resolve");
+    assert!(env.is_market_resolved(), "market should be resolved");
+
+    // Configure a restrictive limited policy: delegated authority, 1% max, 100k-slot cooldown
+    let delegated = Keypair::new();
+    env.svm.airdrop(&delegated.pubkey(), 1_000_000_000).expect("airdrop delegated");
+    env.try_set_insurance_withdraw_policy(
+        &admin,
+        &delegated.pubkey(),
+        1,       // min_withdraw_base
+        100,     // max_withdraw_bps = 1%
+        100_000, // cooldown_slots
+    )
+    .expect("set policy");
+
+    // Delegated authority can only withdraw 1%
+    env.set_slot(1);
+    let limited = env.try_withdraw_insurance_limited(&delegated, 100_000_000); // 1% of 10B
+    assert!(limited.is_ok(), "delegated 1% withdraw should succeed: {:?}", limited);
+    assert_eq!(env.read_insurance_balance(), 9_900_000_000, "insurance after limited withdraw");
+
+    // Delegated authority cannot use Tag 20 (requires admin)
+    let delegated_tag20 = env.try_withdraw_insurance(&delegated);
+    assert!(
+        delegated_tag20.is_err(),
+        "Delegated authority must not be able to use Tag 20 full withdraw"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        9_900_000_000,
+        "failed delegated Tag 20 must not change insurance"
+    );
+
+    // Admin uses Tag 20 to drain ALL remaining insurance in one shot
+    let vault_before = env.vault_balance();
+    let drain = env.try_withdraw_insurance(&admin);
+    assert!(
+        drain.is_ok(),
+        "Admin Tag 20 should bypass limited policy and drain all insurance: {:?}",
+        drain
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        0,
+        "insurance should be zero after admin full withdraw"
+    );
+    let vault_after = env.vault_balance();
+    assert_eq!(
+        vault_before - vault_after,
+        9_900_000_000,
+        "vault SPL balance should decrease by the drained insurance amount"
+    );
+}
+
 /// Test paginated force-close with many accounts (simulates 4096 worst case)
 #[test]
 fn test_premarket_paginated_force_close() {
