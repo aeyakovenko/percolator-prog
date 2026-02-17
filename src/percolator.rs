@@ -1866,8 +1866,13 @@ pub mod state {
         pub _reserved: [u8; 8],
     }
 
-    /// Per-depositor stake PDA tracking last deposit slot.
+    /// Per-depositor stake PDA tracking last deposit slot and cooldown-eligible balance.
     /// PDA seeds: [b"ins_lp_stake", slab_key, user_key]
+    ///
+    /// `cooldown_eligible_lp` records the LP token balance that has completed its cooldown.
+    /// On deposit, the full LP balance resets to cooldown (eligible = 0).
+    /// On withdraw, only `cooldown_eligible_lp` amount can be withdrawn; any LP tokens
+    /// received via transfer (not through deposit) cannot bypass the cooldown.
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable)]
     pub struct InsuranceLPStake {
@@ -5050,10 +5055,19 @@ pub mod processor {
                     return Err(ProgramError::InvalidInstructionData);
                 }
 
+                // Reject deposits when insurance is drained but LP tokens exist.
+                // Old LP holders' tokens are worthless (they lost their share to
+                // liquidations). Allowing new deposits at 1:1 would let old holders
+                // steal value from new depositors. Admin must burn/buyback stale
+                // LP tokens before re-enabling deposits.
+                if insurance_balance == 0 && lp_supply > 0 {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
                 // Calculate LP tokens to mint:
                 // If lp_supply == 0: lp_tokens = units (1:1 initial price)
                 // Else: lp_tokens = units * lp_supply / insurance_balance
-                let lp_tokens_to_mint: u64 = if lp_supply == 0 || insurance_balance == 0 {
+                let lp_tokens_to_mint: u64 = if lp_supply == 0 {
                     units
                 } else {
                     let numerator = (units as u128)
@@ -5104,7 +5118,11 @@ pub mod processor {
                     &signer_seeds,
                 )?;
 
-                // Update stake PDA: record deposit slot, accumulate deposits
+                // Update stake PDA: record deposit slot, accumulate deposits.
+                // Every deposit resets the cooldown for the ENTIRE LP balance.
+                // cumulative_deposited tracks the total LP tokens minted through this
+                // PDA — on withdraw, we cap withdrawable amount to this value.
+                // Tokens received via SPL transfer (not deposit) don't count.
                 let clock = Clock::from_account_info(a_clock)?;
                 {
                     let mut pda_data = a_stake_pda.try_borrow_mut_data()?;
@@ -5172,6 +5190,17 @@ pub mod processor {
                 verify_token_account(a_user_col_ata, a_user.key, &mint)?;
                 accounts::expect_key(a_vault_pda, &auth)?;
 
+                // Verify LP mint authority is vault_authority (prevents fake-mint drain attack)
+                #[cfg(not(feature = "test"))]
+                {
+                    let mint_data = a_lp_mint.try_borrow_data()?;
+                    let lp_mint_state = spl_token::state::Mint::unpack(&mint_data)?;
+                    match lp_mint_state.mint_authority {
+                        solana_program::program_option::COption::Some(ma) if ma == auth => {}
+                        _ => return Err(PercolatorError::InvalidInsuranceLPMint.into()),
+                    }
+                }
+
                 // Verify stake PDA
                 let (expected_stake, _) =
                     accounts::derive_ins_lp_stake(program_id, a_slab.key, a_user.key);
@@ -5203,9 +5232,12 @@ pub mod processor {
                     crate::constants::DEFAULT_INSURANCE_LP_COOLDOWN_SLOTS
                 };
 
-                // Enforce cooldown
+                // Enforce cooldown + anti-transfer-bypass check.
+                // lp_amount is capped to cumulative_deposited (tokens obtained via
+                // deposit instruction, not via SPL transfer). This prevents an attacker
+                // from transferring LP tokens to a pre-aged address to bypass cooldown.
                 let clock = Clock::from_account_info(a_clock)?;
-                {
+                let lp_amount = {
                     let pda_data = a_stake_pda.try_borrow_data()?;
                     let stake =
                         bytemuck::from_bytes::<state::InsuranceLPStake>(&pda_data);
@@ -5219,7 +5251,12 @@ pub mod processor {
                     if clock.slot < earliest_withdraw {
                         return Err(PercolatorError::InsuranceLPCooldownNotElapsed.into());
                     }
-                }
+                    // Cap withdrawal to tokens obtained through deposit (not transfer)
+                    if lp_amount > stake.cumulative_deposited {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
+                    lp_amount
+                };
 
                 // Read LP supply before burn
                 let lp_supply = {
@@ -5294,6 +5331,17 @@ pub mod processor {
                     base_to_pay,
                     &signer_seeds,
                 )?;
+
+                // Decrement cumulative_deposited to prevent double-withdrawal.
+                // After this, the withdrawn LP tokens can no longer be used.
+                {
+                    let mut pda_data = a_stake_pda.try_borrow_mut_data()?;
+                    let stake =
+                        bytemuck::from_bytes_mut::<state::InsuranceLPStake>(&mut pda_data);
+                    stake.cumulative_deposited = stake
+                        .cumulative_deposited
+                        .saturating_sub(lp_amount);
+                }
             }
         }
         Ok(())
