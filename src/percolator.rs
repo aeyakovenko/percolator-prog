@@ -5172,6 +5172,19 @@ pub mod processor {
                 verify_token_account(a_user_col_ata, a_user.key, &mint)?;
                 accounts::expect_key(a_vault_pda, &auth)?;
 
+                // Verify LP mint authority is vault_authority
+                // (CRITICAL: without this, an attacker could pass a fake mint with
+                // supply=1, burn their fake token, and drain the entire insurance fund)
+                #[cfg(not(feature = "test"))]
+                {
+                    let mint_data = a_lp_mint.try_borrow_data()?;
+                    let lp_mint_state = spl_token::state::Mint::unpack(&mint_data)?;
+                    match lp_mint_state.mint_authority {
+                        solana_program::program_option::COption::Some(ma) if ma == auth => {}
+                        _ => return Err(PercolatorError::InvalidInsuranceLPMint.into()),
+                    }
+                }
+
                 // Verify stake PDA
                 let (expected_stake, _) =
                     accounts::derive_ins_lp_stake(program_id, a_slab.key, a_user.key);
