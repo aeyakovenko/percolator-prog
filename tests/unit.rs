@@ -3251,3 +3251,873 @@ fn test_close_slab_non_admin_rejected() {
         "Slab should still be initialized after failed close"
     );
 }
+
+// ============================================================================
+// Insurance LP Tests
+// ============================================================================
+
+fn encode_init_ins_lp_config(cooldown_slots: u64) -> Vec<u8> {
+    let mut data = vec![24u8]; // Tag 24
+    encode_u64(cooldown_slots, &mut data);
+    data
+}
+
+fn encode_deposit_ins_lp(amount: u64) -> Vec<u8> {
+    let mut data = vec![25u8]; // Tag 25
+    encode_u64(amount, &mut data);
+    data
+}
+
+fn encode_withdraw_ins_lp(lp_amount: u64) -> Vec<u8> {
+    let mut data = vec![26u8]; // Tag 26
+    encode_u64(lp_amount, &mut data);
+    data
+}
+
+fn make_lp_mint_account(mint_authority: &Pubkey) -> Vec<u8> {
+    use spl_token::state::Mint;
+    let mut data = vec![0u8; Mint::LEN];
+    let mint = Mint {
+        mint_authority: solana_program::program_option::COption::Some(*mint_authority),
+        supply: 0,
+        decimals: 6,
+        is_initialized: true,
+        freeze_authority: solana_program::program_option::COption::None,
+    };
+    Mint::pack(mint, &mut data).unwrap();
+    data
+}
+
+fn make_lp_token_account(lp_mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
+    make_token_account(lp_mint, owner, amount)
+}
+
+/// Helper: initialize market and top up insurance fund for LP tests.
+fn setup_insurance_lp_market() -> (MarketFixture, Pubkey, Pubkey) {
+    let mut f = setup_market();
+    let init_data = encode_init_market(&f, 100);
+    {
+        let mut dummy_ata = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+        let accounts = vec![
+            f.admin.to_info(),
+            f.slab.to_info(),
+            f.mint.to_info(),
+            f.vault.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+            f.rent.to_info(),
+            dummy_ata.to_info(),
+            f.system.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &init_data).unwrap();
+    }
+
+    let lp_mint_key = Pubkey::new_unique();
+
+    // Derive stake PDA key for later
+    let user_key = Pubkey::new_unique();
+
+    (f, lp_mint_key, user_key)
+}
+
+/// Top up insurance fund with collateral (tag 9).
+fn do_topup_insurance(f: &mut MarketFixture, amount: u64) {
+    let data = encode_topup_insurance(amount);
+    // Need a funder with tokens
+    let mut funder = TestAccount::new(
+        f.admin.key,
+        solana_program::system_program::id(),
+        0,
+        vec![],
+    )
+    .signer();
+    let mut funder_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_token_account(f.mint.key, funder.key, amount),
+    );
+    {
+        let accounts = vec![
+            funder.to_info(),
+            f.slab.to_info(),
+            funder_ata.to_info(),
+            f.vault.to_info(),
+            f.token_prog.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &data).unwrap();
+    }
+}
+
+#[test]
+#[cfg(feature = "test")]
+fn test_init_insurance_lp_config() {
+    let (mut f, _lp_mint_key, _user_key) = setup_insurance_lp_market();
+
+    let cooldown: u64 = 100_000;
+    let data = encode_init_ins_lp_config(cooldown);
+
+    // Derive config PDA
+    let (config_pda_key, _config_bump) =
+        percolator_prog::accounts::derive_ins_lp_config(&f.program_id, &f.slab.key);
+
+    let mut config_pda = TestAccount::new(
+        config_pda_key,
+        f.program_id,
+        0,
+        vec![0u8; percolator_prog::constants::INSURANCE_LP_CONFIG_LEN],
+    )
+    .writable();
+
+    {
+        let accounts = vec![
+            f.admin.to_info(),
+            f.slab.to_info(),
+            config_pda.to_info(),
+            f.system.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &data).unwrap();
+    }
+
+    // Verify config was written
+    let cfg = bytemuck::from_bytes::<percolator_prog::state::InsuranceLPConfig>(&config_pda.data);
+    assert_eq!(cfg.cooldown_slots, cooldown);
+    assert_eq!(cfg.slab, f.slab.key.to_bytes());
+}
+
+#[test]
+#[cfg(feature = "test")]
+fn test_init_insurance_lp_config_non_admin_fails() {
+    let (mut f, _lp_mint_key, _user_key) = setup_insurance_lp_market();
+
+    let data = encode_init_ins_lp_config(100_000);
+
+    let (config_pda_key, _) =
+        percolator_prog::accounts::derive_ins_lp_config(&f.program_id, &f.slab.key);
+
+    let mut config_pda = TestAccount::new(
+        config_pda_key,
+        f.program_id,
+        0,
+        vec![0u8; percolator_prog::constants::INSURANCE_LP_CONFIG_LEN],
+    )
+    .writable();
+
+    let mut non_admin = TestAccount::new(
+        Pubkey::new_unique(),
+        solana_program::system_program::id(),
+        0,
+        vec![],
+    )
+    .signer();
+
+    {
+        let accounts = vec![
+            non_admin.to_info(),
+            f.slab.to_info(),
+            config_pda.to_info(),
+            f.system.to_info(),
+        ];
+        let res = process_instruction(&f.program_id, &accounts, &data);
+        assert_eq!(res, Err(PercolatorError::EngineUnauthorized.into()));
+    }
+}
+
+#[test]
+#[cfg(feature = "test")]
+fn test_deposit_insurance_lp_happy_path() {
+    let (mut f, lp_mint_key, _) = setup_insurance_lp_market();
+
+    // Top up insurance so there's a fund to LP against
+    do_topup_insurance(&mut f, 1_000_000);
+
+    let user_key = Pubkey::new_unique();
+    let (stake_pda_key, _) =
+        percolator_prog::accounts::derive_ins_lp_stake(&f.program_id, &f.slab.key, &user_key);
+
+    let mut user = TestAccount::new(user_key, solana_program::system_program::id(), 0, vec![])
+        .signer();
+    let mut user_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_token_account(f.mint.key, user_key, 500_000),
+    );
+    let mut lp_mint = TestAccount::new(
+        lp_mint_key,
+        spl_token::ID,
+        0,
+        make_lp_mint_account(&f.vault_pda),
+    )
+    .writable();
+    let mut user_lp_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_lp_token_account(lp_mint_key, user_key, 0),
+    )
+    .writable();
+    let mut stake_pda = TestAccount::new(
+        stake_pda_key,
+        f.program_id,
+        0,
+        vec![0u8; percolator_prog::constants::INSURANCE_LP_STAKE_LEN],
+    )
+    .writable();
+    let mut vault_pda_account = TestAccount::new(f.vault_pda, Pubkey::default(), 0, vec![]);
+
+    let data = encode_deposit_ins_lp(500_000);
+    {
+        let accounts = vec![
+            user.to_info(),
+            f.slab.to_info(),
+            user_ata.to_info(),
+            f.vault.to_info(),
+            lp_mint.to_info(),
+            user_lp_ata.to_info(),
+            stake_pda.to_info(),
+            vault_pda_account.to_info(),
+            f.token_prog.to_info(),
+            f.system.to_info(),
+            f.clock.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &data).unwrap();
+    }
+
+    // Verify LP tokens were minted
+    let lp_tok = spl_token::state::Account::unpack(&user_lp_ata.data).unwrap();
+    assert!(lp_tok.amount > 0, "Should have received LP tokens");
+
+    // Verify stake PDA was updated
+    let stake = bytemuck::from_bytes::<percolator_prog::state::InsuranceLPStake>(&stake_pda.data);
+    assert_eq!(stake.deposit_slot, 100); // clock slot from fixture
+    assert_eq!(stake.slab, f.slab.key.to_bytes());
+    assert!(stake.cumulative_deposited > 0);
+
+    // Verify vault received collateral
+    let vault_tok = spl_token::state::Account::unpack(&f.vault.data).unwrap();
+    assert_eq!(vault_tok.amount, 1_000_000 + 500_000); // topup + deposit
+}
+
+#[test]
+#[cfg(feature = "test")]
+fn test_deposit_insurance_lp_zero_amount_fails() {
+    let (mut f, lp_mint_key, _) = setup_insurance_lp_market();
+    do_topup_insurance(&mut f, 1_000_000);
+
+    let user_key = Pubkey::new_unique();
+    let (stake_pda_key, _) =
+        percolator_prog::accounts::derive_ins_lp_stake(&f.program_id, &f.slab.key, &user_key);
+
+    let mut user = TestAccount::new(user_key, solana_program::system_program::id(), 0, vec![])
+        .signer();
+    let mut user_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_token_account(f.mint.key, user_key, 500_000),
+    );
+    let mut lp_mint = TestAccount::new(
+        lp_mint_key,
+        spl_token::ID,
+        0,
+        make_lp_mint_account(&f.vault_pda),
+    )
+    .writable();
+    let mut user_lp_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_lp_token_account(lp_mint_key, user_key, 0),
+    )
+    .writable();
+    let mut stake_pda = TestAccount::new(
+        stake_pda_key,
+        f.program_id,
+        0,
+        vec![0u8; percolator_prog::constants::INSURANCE_LP_STAKE_LEN],
+    )
+    .writable();
+    let mut vault_pda_account = TestAccount::new(f.vault_pda, Pubkey::default(), 0, vec![]);
+
+    let data = encode_deposit_ins_lp(0); // zero amount
+    {
+        let accounts = vec![
+            user.to_info(),
+            f.slab.to_info(),
+            user_ata.to_info(),
+            f.vault.to_info(),
+            lp_mint.to_info(),
+            user_lp_ata.to_info(),
+            stake_pda.to_info(),
+            vault_pda_account.to_info(),
+            f.token_prog.to_info(),
+            f.system.to_info(),
+            f.clock.to_info(),
+        ];
+        let res = process_instruction(&f.program_id, &accounts, &data);
+        assert_eq!(res, Err(ProgramError::InvalidInstructionData));
+    }
+}
+
+#[test]
+#[cfg(feature = "test")]
+fn test_withdraw_insurance_lp_cooldown_not_elapsed() {
+    let (mut f, lp_mint_key, _) = setup_insurance_lp_market();
+    do_topup_insurance(&mut f, 1_000_000);
+
+    let user_key = Pubkey::new_unique();
+    let (stake_pda_key, _) =
+        percolator_prog::accounts::derive_ins_lp_stake(&f.program_id, &f.slab.key, &user_key);
+
+    // First do a deposit
+    {
+        let mut user =
+            TestAccount::new(user_key, solana_program::system_program::id(), 0, vec![]).signer();
+        let mut user_ata = TestAccount::new(
+            Pubkey::new_unique(),
+            spl_token::ID,
+            0,
+            make_token_account(f.mint.key, user_key, 500_000),
+        );
+        let mut lp_mint = TestAccount::new(
+            lp_mint_key,
+            spl_token::ID,
+            0,
+            make_lp_mint_account(&f.vault_pda),
+        )
+        .writable();
+        let mut user_lp_ata = TestAccount::new(
+            Pubkey::new_unique(),
+            spl_token::ID,
+            0,
+            make_lp_token_account(lp_mint_key, user_key, 0),
+        )
+        .writable();
+        let mut stake_pda = TestAccount::new(
+            stake_pda_key,
+            f.program_id,
+            0,
+            vec![0u8; percolator_prog::constants::INSURANCE_LP_STAKE_LEN],
+        )
+        .writable();
+        let mut vault_pda_account = TestAccount::new(f.vault_pda, Pubkey::default(), 0, vec![]);
+
+        let accounts = vec![
+            user.to_info(),
+            f.slab.to_info(),
+            user_ata.to_info(),
+            f.vault.to_info(),
+            lp_mint.to_info(),
+            user_lp_ata.to_info(),
+            stake_pda.to_info(),
+            vault_pda_account.to_info(),
+            f.token_prog.to_info(),
+            f.system.to_info(),
+            f.clock.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &encode_deposit_ins_lp(500_000)).unwrap();
+    }
+
+    // Now try to withdraw immediately (slot still 100, default cooldown = 432,000)
+    // We need a stake PDA that has deposit_slot=100
+    let mut stake_pda_for_withdraw = TestAccount::new(
+        stake_pda_key,
+        f.program_id,
+        0,
+        vec![0u8; percolator_prog::constants::INSURANCE_LP_STAKE_LEN],
+    )
+    .writable();
+    // Write deposit_slot=100
+    {
+        let stake = bytemuck::from_bytes_mut::<percolator_prog::state::InsuranceLPStake>(
+            &mut stake_pda_for_withdraw.data,
+        );
+        stake.slab = f.slab.key.to_bytes();
+        stake.deposit_slot = 100;
+        stake.cumulative_deposited = 500_000;
+    }
+
+    // Config PDA not set → use default (432,000)
+    let mut config_pda_placeholder =
+        TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+
+    let mut user = TestAccount::new(user_key, solana_program::system_program::id(), 0, vec![])
+        .signer();
+    let mut user_lp_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_lp_token_account(lp_mint_key, user_key, 500_000),
+    )
+    .writable();
+    let mut user_col_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_token_account(f.mint.key, user_key, 0),
+    )
+    .writable();
+
+    // LP mint with supply=500_000
+    let mut lp_mint = TestAccount::new(
+        lp_mint_key,
+        spl_token::ID,
+        0,
+        {
+            use spl_token::state::Mint;
+            let mut data = vec![0u8; Mint::LEN];
+            let mint = Mint {
+                mint_authority: solana_program::program_option::COption::Some(f.vault_pda),
+                supply: 500_000,
+                decimals: 6,
+                is_initialized: true,
+                freeze_authority: solana_program::program_option::COption::None,
+            };
+            Mint::pack(mint, &mut data).unwrap();
+            data
+        },
+    )
+    .writable();
+
+    let mut vault_pda_account = TestAccount::new(f.vault_pda, Pubkey::default(), 0, vec![]);
+
+    // Clock still at slot=100, cooldown=432000, so earliest=100+432000=432100
+    let data = encode_withdraw_ins_lp(500_000);
+    {
+        let accounts = vec![
+            user.to_info(),
+            f.slab.to_info(),
+            user_lp_ata.to_info(),
+            user_col_ata.to_info(),
+            f.vault.to_info(),
+            lp_mint.to_info(),
+            stake_pda_for_withdraw.to_info(),
+            config_pda_placeholder.to_info(),
+            vault_pda_account.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+        ];
+        let res = process_instruction(&f.program_id, &accounts, &data);
+        assert_eq!(
+            res,
+            Err(PercolatorError::InsuranceLPCooldownNotElapsed.into()),
+            "Should fail: cooldown not elapsed"
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "test")]
+fn test_withdraw_insurance_lp_after_cooldown() {
+    let (mut f, lp_mint_key, _) = setup_insurance_lp_market();
+    do_topup_insurance(&mut f, 1_000_000);
+
+    let user_key = Pubkey::new_unique();
+    let (stake_pda_key, _) =
+        percolator_prog::accounts::derive_ins_lp_stake(&f.program_id, &f.slab.key, &user_key);
+
+    // First deposit at slot 100
+    let lp_tokens_minted;
+    {
+        let mut user =
+            TestAccount::new(user_key, solana_program::system_program::id(), 0, vec![]).signer();
+        let mut user_ata = TestAccount::new(
+            Pubkey::new_unique(),
+            spl_token::ID,
+            0,
+            make_token_account(f.mint.key, user_key, 500_000),
+        );
+        let mut lp_mint = TestAccount::new(
+            lp_mint_key,
+            spl_token::ID,
+            0,
+            make_lp_mint_account(&f.vault_pda),
+        )
+        .writable();
+        let mut user_lp_ata = TestAccount::new(
+            Pubkey::new_unique(),
+            spl_token::ID,
+            0,
+            make_lp_token_account(lp_mint_key, user_key, 0),
+        )
+        .writable();
+        let mut stake_pda = TestAccount::new(
+            stake_pda_key,
+            f.program_id,
+            0,
+            vec![0u8; percolator_prog::constants::INSURANCE_LP_STAKE_LEN],
+        )
+        .writable();
+        let mut vault_pda_account = TestAccount::new(f.vault_pda, Pubkey::default(), 0, vec![]);
+
+        let accounts = vec![
+            user.to_info(),
+            f.slab.to_info(),
+            user_ata.to_info(),
+            f.vault.to_info(),
+            lp_mint.to_info(),
+            user_lp_ata.to_info(),
+            stake_pda.to_info(),
+            vault_pda_account.to_info(),
+            f.token_prog.to_info(),
+            f.system.to_info(),
+            f.clock.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &encode_deposit_ins_lp(500_000)).unwrap();
+
+        let lp_tok = spl_token::state::Account::unpack(&user_lp_ata.data).unwrap();
+        lp_tokens_minted = lp_tok.amount;
+    }
+    assert!(lp_tokens_minted > 0);
+
+    // Now advance clock past cooldown and withdraw using custom config
+    let cooldown = 1000u64; // short cooldown for testing
+    let (config_pda_key, _) =
+        percolator_prog::accounts::derive_ins_lp_config(&f.program_id, &f.slab.key);
+
+    // Set up config PDA with short cooldown
+    let mut config_pda = TestAccount::new(
+        config_pda_key,
+        f.program_id,
+        0,
+        vec![0u8; percolator_prog::constants::INSURANCE_LP_CONFIG_LEN],
+    );
+    {
+        let cfg = bytemuck::from_bytes_mut::<percolator_prog::state::InsuranceLPConfig>(
+            &mut config_pda.data,
+        );
+        cfg.slab = f.slab.key.to_bytes();
+        cfg.cooldown_slots = cooldown;
+    }
+
+    // Set clock to slot 100 + 1000 + 1 = 1101
+    f.clock = TestAccount::new(
+        solana_program::sysvar::clock::id(),
+        solana_program::sysvar::id(),
+        0,
+        make_clock(1101, 1101),
+    );
+
+    // Create stake PDA with deposit_slot=100
+    let mut stake_pda = TestAccount::new(
+        stake_pda_key,
+        f.program_id,
+        0,
+        vec![0u8; percolator_prog::constants::INSURANCE_LP_STAKE_LEN],
+    )
+    .writable();
+    {
+        let stake = bytemuck::from_bytes_mut::<percolator_prog::state::InsuranceLPStake>(
+            &mut stake_pda.data,
+        );
+        stake.slab = f.slab.key.to_bytes();
+        stake.deposit_slot = 100;
+        stake.cumulative_deposited = lp_tokens_minted;
+    }
+
+    // LP mint with current supply
+    let lp_supply = {
+        use spl_token::state::Mint;
+        let mut data = vec![0u8; Mint::LEN];
+        let mint = Mint {
+            mint_authority: solana_program::program_option::COption::Some(f.vault_pda),
+            supply: lp_tokens_minted,
+            decimals: 6,
+            is_initialized: true,
+            freeze_authority: solana_program::program_option::COption::None,
+        };
+        Mint::pack(mint, &mut data).unwrap();
+        data
+    };
+    let mut lp_mint = TestAccount::new(lp_mint_key, spl_token::ID, 0, lp_supply).writable();
+
+    let mut user = TestAccount::new(user_key, solana_program::system_program::id(), 0, vec![])
+        .signer();
+    let mut user_lp_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_lp_token_account(lp_mint_key, user_key, lp_tokens_minted),
+    )
+    .writable();
+    let mut user_col_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_token_account(f.mint.key, user_key, 0),
+    )
+    .writable();
+    let mut vault_pda_account = TestAccount::new(f.vault_pda, Pubkey::default(), 0, vec![]);
+
+    let vault_before = spl_token::state::Account::unpack(&f.vault.data).unwrap().amount;
+
+    let data = encode_withdraw_ins_lp(lp_tokens_minted);
+    {
+        let accounts = vec![
+            user.to_info(),
+            f.slab.to_info(),
+            user_lp_ata.to_info(),
+            user_col_ata.to_info(),
+            f.vault.to_info(),
+            lp_mint.to_info(),
+            stake_pda.to_info(),
+            config_pda.to_info(),
+            vault_pda_account.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &data).unwrap();
+    }
+
+    // Verify LP tokens were burned
+    let lp_tok = spl_token::state::Account::unpack(&user_lp_ata.data).unwrap();
+    assert_eq!(lp_tok.amount, 0, "LP tokens should be fully burned");
+
+    // Verify user received collateral
+    let user_col = spl_token::state::Account::unpack(&user_col_ata.data).unwrap();
+    assert!(user_col.amount > 0, "User should have received collateral");
+
+    // Verify vault decreased
+    let vault_after = spl_token::state::Account::unpack(&f.vault.data).unwrap().amount;
+    assert!(vault_after < vault_before, "Vault should have decreased");
+}
+
+#[test]
+#[cfg(feature = "test")]
+fn test_withdraw_insurance_lp_zero_amount_fails() {
+    let (mut f, lp_mint_key, _) = setup_insurance_lp_market();
+
+    let user_key = Pubkey::new_unique();
+    let (stake_pda_key, _) =
+        percolator_prog::accounts::derive_ins_lp_stake(&f.program_id, &f.slab.key, &user_key);
+
+    let mut user = TestAccount::new(user_key, solana_program::system_program::id(), 0, vec![])
+        .signer();
+    let mut user_lp_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_lp_token_account(lp_mint_key, user_key, 0),
+    )
+    .writable();
+    let mut user_col_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_token_account(f.mint.key, user_key, 0),
+    )
+    .writable();
+    let mut lp_mint = TestAccount::new(
+        lp_mint_key,
+        spl_token::ID,
+        0,
+        make_lp_mint_account(&f.vault_pda),
+    )
+    .writable();
+    let mut stake_pda = TestAccount::new(
+        stake_pda_key,
+        f.program_id,
+        0,
+        vec![0u8; percolator_prog::constants::INSURANCE_LP_STAKE_LEN],
+    )
+    .writable();
+    let mut config_pda = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+    let mut vault_pda_account = TestAccount::new(f.vault_pda, Pubkey::default(), 0, vec![]);
+
+    let data = encode_withdraw_ins_lp(0);
+    {
+        let accounts = vec![
+            user.to_info(),
+            f.slab.to_info(),
+            user_lp_ata.to_info(),
+            user_col_ata.to_info(),
+            f.vault.to_info(),
+            lp_mint.to_info(),
+            stake_pda.to_info(),
+            config_pda.to_info(),
+            vault_pda_account.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+        ];
+        let res = process_instruction(&f.program_id, &accounts, &data);
+        assert_eq!(res, Err(ProgramError::InvalidInstructionData));
+    }
+}
+
+#[test]
+#[cfg(feature = "test")]
+fn test_multiple_deposits_reset_cooldown() {
+    let (mut f, lp_mint_key, _) = setup_insurance_lp_market();
+    do_topup_insurance(&mut f, 1_000_000);
+
+    let user_key = Pubkey::new_unique();
+    let (stake_pda_key, _) =
+        percolator_prog::accounts::derive_ins_lp_stake(&f.program_id, &f.slab.key, &user_key);
+
+    // First deposit at slot 100
+    let mut stake_pda = TestAccount::new(
+        stake_pda_key,
+        f.program_id,
+        0,
+        vec![0u8; percolator_prog::constants::INSURANCE_LP_STAKE_LEN],
+    )
+    .writable();
+
+    {
+        let mut user =
+            TestAccount::new(user_key, solana_program::system_program::id(), 0, vec![]).signer();
+        let mut user_ata = TestAccount::new(
+            Pubkey::new_unique(),
+            spl_token::ID,
+            0,
+            make_token_account(f.mint.key, user_key, 100_000),
+        );
+        let mut lp_mint = TestAccount::new(
+            lp_mint_key,
+            spl_token::ID,
+            0,
+            make_lp_mint_account(&f.vault_pda),
+        )
+        .writable();
+        let mut user_lp_ata = TestAccount::new(
+            Pubkey::new_unique(),
+            spl_token::ID,
+            0,
+            make_lp_token_account(lp_mint_key, user_key, 0),
+        )
+        .writable();
+        let mut vault_pda_account = TestAccount::new(f.vault_pda, Pubkey::default(), 0, vec![]);
+
+        let accounts = vec![
+            user.to_info(),
+            f.slab.to_info(),
+            user_ata.to_info(),
+            f.vault.to_info(),
+            lp_mint.to_info(),
+            user_lp_ata.to_info(),
+            stake_pda.to_info(),
+            vault_pda_account.to_info(),
+            f.token_prog.to_info(),
+            f.system.to_info(),
+            f.clock.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &encode_deposit_ins_lp(100_000)).unwrap();
+    }
+
+    // Verify deposit_slot = 100
+    let stake =
+        bytemuck::from_bytes::<percolator_prog::state::InsuranceLPStake>(&stake_pda.data);
+    assert_eq!(stake.deposit_slot, 100);
+
+    // Second deposit at slot 500
+    f.clock = TestAccount::new(
+        solana_program::sysvar::clock::id(),
+        solana_program::sysvar::id(),
+        0,
+        make_clock(500, 500),
+    );
+
+    {
+        let mut user =
+            TestAccount::new(user_key, solana_program::system_program::id(), 0, vec![]).signer();
+        let mut user_ata = TestAccount::new(
+            Pubkey::new_unique(),
+            spl_token::ID,
+            0,
+            make_token_account(f.mint.key, user_key, 50_000),
+        );
+        // LP mint with supply from first deposit
+        let lp_supply_data = {
+            use spl_token::state::Mint;
+            let mut data = vec![0u8; Mint::LEN];
+            let mint = Mint {
+                mint_authority: solana_program::program_option::COption::Some(f.vault_pda),
+                supply: 100_000, // from first deposit
+                decimals: 6,
+                is_initialized: true,
+                freeze_authority: solana_program::program_option::COption::None,
+            };
+            Mint::pack(mint, &mut data).unwrap();
+            data
+        };
+        let mut lp_mint = TestAccount::new(lp_mint_key, spl_token::ID, 0, lp_supply_data)
+            .writable();
+        let mut user_lp_ata = TestAccount::new(
+            Pubkey::new_unique(),
+            spl_token::ID,
+            0,
+            make_lp_token_account(lp_mint_key, user_key, 100_000),
+        )
+        .writable();
+        let mut vault_pda_account = TestAccount::new(f.vault_pda, Pubkey::default(), 0, vec![]);
+
+        let accounts = vec![
+            user.to_info(),
+            f.slab.to_info(),
+            user_ata.to_info(),
+            f.vault.to_info(),
+            lp_mint.to_info(),
+            user_lp_ata.to_info(),
+            stake_pda.to_info(),
+            vault_pda_account.to_info(),
+            f.token_prog.to_info(),
+            f.system.to_info(),
+            f.clock.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &encode_deposit_ins_lp(50_000)).unwrap();
+    }
+
+    // Verify deposit_slot was reset to 500
+    let stake =
+        bytemuck::from_bytes::<percolator_prog::state::InsuranceLPStake>(&stake_pda.data);
+    assert_eq!(
+        stake.deposit_slot, 500,
+        "Second deposit should reset cooldown"
+    );
+}
+
+#[test]
+#[cfg(feature = "test")]
+fn test_config_pda_update_changes_cooldown() {
+    let (mut f, _lp_mint_key, _user_key) = setup_insurance_lp_market();
+
+    let (config_pda_key, _) =
+        percolator_prog::accounts::derive_ins_lp_config(&f.program_id, &f.slab.key);
+
+    let mut config_pda = TestAccount::new(
+        config_pda_key,
+        f.program_id,
+        0,
+        vec![0u8; percolator_prog::constants::INSURANCE_LP_CONFIG_LEN],
+    )
+    .writable();
+
+    // First set cooldown to 100_000
+    {
+        let data = encode_init_ins_lp_config(100_000);
+        let accounts = vec![
+            f.admin.to_info(),
+            f.slab.to_info(),
+            config_pda.to_info(),
+            f.system.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &data).unwrap();
+    }
+    let cfg = bytemuck::from_bytes::<percolator_prog::state::InsuranceLPConfig>(&config_pda.data);
+    assert_eq!(cfg.cooldown_slots, 100_000);
+
+    // Update to 200_000
+    {
+        let data = encode_init_ins_lp_config(200_000);
+        let accounts = vec![
+            f.admin.to_info(),
+            f.slab.to_info(),
+            config_pda.to_info(),
+            f.system.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &data).unwrap();
+    }
+    let cfg = bytemuck::from_bytes::<percolator_prog::state::InsuranceLPConfig>(&config_pda.data);
+    assert_eq!(cfg.cooldown_slots, 200_000, "Config should be updateable");
+}
