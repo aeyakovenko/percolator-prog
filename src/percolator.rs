@@ -2743,6 +2743,13 @@ pub mod processor {
                 if max_risk_threshold == 0 {
                     return Err(ProgramError::InvalidInstructionData);
                 }
+                // Validate initial risk_params against per-market limits
+                if risk_params.risk_reduction_threshold.get() > max_risk_threshold {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+                if risk_params.maintenance_fee_per_slot.get() > max_maintenance_fee_per_slot {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
 
                 #[cfg(debug_assertions)]
                 {
@@ -2803,7 +2810,7 @@ pub mod processor {
                     thresh_step_bps: DEFAULT_THRESH_STEP_BPS,
                     thresh_alpha_bps: DEFAULT_THRESH_ALPHA_BPS,
                     thresh_min: DEFAULT_THRESH_MIN,
-                    thresh_max: DEFAULT_THRESH_MAX,
+                    thresh_max: DEFAULT_THRESH_MAX.min(max_risk_threshold),
                     thresh_min_step: DEFAULT_THRESH_MIN_STEP,
                     // Oracle authority (disabled by default - use Pyth/Chainlink)
                     // In Hyperp mode: authority_price_e6 = mark, last_effective_price_e6 = index
@@ -2814,7 +2821,7 @@ pub mod processor {
                     // In Hyperp mode: used for rate-limited index smoothing AND mark price clamping
                     // Default: disabled for non-Hyperp, 1% per slot for Hyperp
                     oracle_price_cap_e2bps: if is_hyperp {
-                        DEFAULT_HYPERP_PRICE_CAP_E2BPS
+                        DEFAULT_HYPERP_PRICE_CAP_E2BPS.max(min_oracle_price_cap_e2bps)
                     } else {
                         0
                     },
