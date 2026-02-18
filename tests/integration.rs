@@ -28,7 +28,7 @@ use std::path::PathBuf;
 // Note: We use production BPF (not test feature) because test feature
 // bypasses CPI for token transfers, which fails in LiteSVM.
 // Haircut-ratio engine (ADL/socialization scratch arrays removed)
-const SLAB_LEN: usize = 992560; // MAX_ACCOUNTS=4096 + oracle circuit breaker (no padding)
+const SLAB_LEN: usize = 992616; // MAX_ACCOUNTS=4096 + per-market admin limits
 const MAX_ACCOUNTS: usize = 4096;
 
 // Pyth Receiver program ID
@@ -125,8 +125,12 @@ fn encode_init_market_full_v2(
     data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
     data.push(invert); // invert flag
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
-    data.extend_from_slice(&initial_mark_price_e6.to_le_bytes()); // initial_mark_price_e6 (NEW)
-                                                                  // RiskParams
+    data.extend_from_slice(&initial_mark_price_e6.to_le_bytes()); // initial_mark_price_e6
+    // Per-market admin limits (uncapped defaults for tests)
+    data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_maintenance_fee_per_slot
+    data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_risk_threshold
+    data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
+    // RiskParams
     data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // warmup_period_slots
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
@@ -878,7 +882,11 @@ fn encode_init_market_full(
     data.push(invert);
     data.extend_from_slice(&unit_scale.to_le_bytes());
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6 (0 for non-Hyperp)
-                                                 // RiskParams
+    // Per-market admin limits (uncapped defaults for tests)
+    data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_maintenance_fee_per_slot
+    data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_risk_threshold
+    data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
+    // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // warmup_period_slots
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
@@ -912,7 +920,11 @@ fn encode_init_market_with_warmup(
     data.push(invert);
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale = 0 (no scaling)
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6 (0 for non-Hyperp)
-                                                 // RiskParams
+    // Per-market admin limits (uncapped defaults for tests)
+    data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_maintenance_fee_per_slot
+    data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_risk_threshold
+    data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
+    // RiskParams
     data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // warmup_period_slots
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps (5%)
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps (10%)
@@ -1064,12 +1076,12 @@ impl TestEnv {
     /// Read num_used_accounts from engine state
     fn read_num_used_accounts(&self) -> u16 {
         let slab_account = self.svm.get_account(&self.slab).unwrap();
-        // ENGINE_OFF = 392 (from constants, checked via test_struct_sizes)
+        // ENGINE_OFF = 440 (from constants, checked via test_struct_sizes)
         // offset of RiskEngine.used = 408 (bitmap array)
         // used is [u64; 64] = 512 bytes
         // num_used_accounts follows used at offset 408 + 512 = 920 within RiskEngine
-        // Total offset = 392 + 920 = 1312
-        const NUM_USED_OFFSET: usize = 392 + 920; // 1312
+        // Total offset = 440 + 920 = 1360
+        const NUM_USED_OFFSET: usize = 440 + 920; // 1360
         if slab_account.data.len() < NUM_USED_OFFSET + 2 {
             return 0;
         }
@@ -1083,9 +1095,9 @@ impl TestEnv {
     /// Check if a slot is marked as used in the bitmap
     fn is_slot_used(&self, idx: u16) -> bool {
         let slab_account = self.svm.get_account(&self.slab).unwrap();
-        // ENGINE_OFF = 392, offset of RiskEngine.used = 408
-        // Bitmap is [u64; 64] at offset 392 + 408 = 800
-        const BITMAP_OFFSET: usize = 392 + 408;
+        // ENGINE_OFF = 440, offset of RiskEngine.used = 408
+        // Bitmap is [u64; 64] at offset 440 + 408 = 800
+        const BITMAP_OFFSET: usize = 440 + 408;
         let word_idx = (idx as usize) >> 6; // idx / 64
         let bit_idx = (idx as usize) & 63; // idx % 64
         let word_offset = BITMAP_OFFSET + word_idx * 8;
@@ -1103,9 +1115,9 @@ impl TestEnv {
     /// Read account capital for a slot (to verify it's zeroed after GC)
     fn read_account_capital(&self, idx: u16) -> u128 {
         let slab_account = self.svm.get_account(&self.slab).unwrap();
-        // ENGINE_OFF = 392, accounts array at offset 9136 within RiskEngine
+        // ENGINE_OFF = 440, accounts array at offset 9136 within RiskEngine
         // Account size = 240 bytes, capital at offset 8 within Account (after account_id u64)
-        const ACCOUNTS_OFFSET: usize = 392 + 9136;
+        const ACCOUNTS_OFFSET: usize = 440 + 9136;
         const ACCOUNT_SIZE: usize = 240;
         const CAPITAL_OFFSET_IN_ACCOUNT: usize = 8; // After account_id (u64)
         let account_offset =
@@ -1123,12 +1135,12 @@ impl TestEnv {
     /// Read account position_size for a slot
     fn read_account_position(&self, idx: u16) -> i128 {
         let slab_account = self.svm.get_account(&self.slab).unwrap();
-        // ENGINE_OFF = 392, accounts array at offset 9136 within RiskEngine
+        // ENGINE_OFF = 440, accounts array at offset 9136 within RiskEngine
         // Account size = 240 bytes
         // Account layout: account_id(8) + capital(16) + kind(1) + padding(7) + pnl(16) + reserved_pnl(8) +
         //                 warmup_started_at_slot(8) + warmup_slope_per_step(16) + position_size(16) + ...
         // position_size is at offset: 8 + 16 + 1 + 7 + 16 + 8 + 8 + 16 = 80
-        const ACCOUNTS_OFFSET: usize = 392 + 9136;
+        const ACCOUNTS_OFFSET: usize = 440 + 9136;
         const ACCOUNT_SIZE: usize = 240;
         const POSITION_OFFSET_IN_ACCOUNT: usize = 80;
         let account_offset =
@@ -1841,8 +1853,8 @@ fn test_hyperp_rejects_zero_initial_mark_price() {
 
     // Snapshot state before the failing init attempt.
     // Header+config region should remain unchanged on rejected tx.
-    const HEADER_CONFIG_LEN: usize = 392;
-    const NUM_USED_OFF: usize = 1312;
+    const HEADER_CONFIG_LEN: usize = 440;
+    const NUM_USED_OFF: usize = 1360;
     let slab_before = svm.get_account(&slab).unwrap().data;
     let vault_before = {
         let vault_data = svm.get_account(&vault).unwrap().data;
@@ -2016,7 +2028,7 @@ fn test_hyperp_init_market_with_valid_price() {
     const AUTH_PRICE_OFF: usize = CONFIG_OFF + 288;
     const ORACLE_CAP_OFF: usize = CONFIG_OFF + 304;
     const INDEX_OFF: usize = CONFIG_OFF + 312;
-    const NUM_USED_OFF: usize = 1312;
+    const NUM_USED_OFF: usize = 1360;
 
     let slab_data = svm.get_account(&slab).unwrap().data;
     let magic = u64::from_le_bytes(slab_data[HEADER_MAGIC_OFF..HEADER_MAGIC_OFF + 8].try_into().unwrap());
@@ -2180,7 +2192,7 @@ fn test_hyperp_init_market_with_inverted_price() {
     const AUTH_PRICE_OFF: usize = CONFIG_OFF + 288;
     const ORACLE_CAP_OFF: usize = CONFIG_OFF + 304;
     const INDEX_OFF: usize = CONFIG_OFF + 312;
-    const NUM_USED_OFF: usize = 1312;
+    const NUM_USED_OFF: usize = 1360;
 
     let slab_data = svm.get_account(&slab).unwrap().data;
     let magic = u64::from_le_bytes(slab_data[HEADER_MAGIC_OFF..HEADER_MAGIC_OFF + 8].try_into().unwrap());
@@ -3618,10 +3630,10 @@ impl TestEnv {
     /// Read insurance fund balance from engine
     fn read_insurance_balance(&self) -> u128 {
         let slab_account = self.svm.get_account(&self.slab).unwrap();
-        // ENGINE_OFF = 392, InsuranceFund.balance is at offset 16 within engine
+        // ENGINE_OFF = 440, InsuranceFund.balance is at offset 16 within engine
         // (vault is 16 bytes at 0, insurance_fund starts at 16)
         // InsuranceFund { balance: U128, ... } - balance is first field
-        const INSURANCE_OFFSET: usize = 392 + 16;
+        const INSURANCE_OFFSET: usize = 440 + 16;
         u128::from_le_bytes(
             slab_account.data[INSURANCE_OFFSET..INSURANCE_OFFSET + 16]
                 .try_into()
@@ -4103,7 +4115,7 @@ fn test_critical_init_market_rejects_double_init() {
         env.svm.latest_blockhash(),
     );
     // Snapshot state after first init and before rejected second init.
-    const HEADER_CONFIG_LEN: usize = 392;
+    const HEADER_CONFIG_LEN: usize = 440;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let used_before = env.read_num_used_accounts();
     let vault_before = env.vault_balance();
@@ -4890,10 +4902,10 @@ impl TradeCpiTestEnv {
 
     fn read_insurance_balance(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        // ENGINE_OFF = 392
+        // ENGINE_OFF = 440
         // RiskEngine layout: vault(U128=16) + insurance_fund(balance(U128=16) + fee_revenue(16))
         // So insurance_fund.balance is at ENGINE_OFF + 16 = 408
-        const INSURANCE_BALANCE_OFFSET: usize = 392 + 16;
+        const INSURANCE_BALANCE_OFFSET: usize = 440 + 16;
         u128::from_le_bytes(
             slab_data[INSURANCE_BALANCE_OFFSET..INSURANCE_BALANCE_OFFSET + 16]
                 .try_into()
@@ -4903,9 +4915,9 @@ impl TradeCpiTestEnv {
 
     fn read_account_position(&self, idx: u16) -> i128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        // ENGINE_OFF = 392, accounts array at offset 9136 within RiskEngine
+        // ENGINE_OFF = 440, accounts array at offset 9136 within RiskEngine
         // Account size = 240 bytes, position at offset 80 within Account
-        const ACCOUNTS_OFFSET: usize = 392 + 9136;
+        const ACCOUNTS_OFFSET: usize = 440 + 9136;
         const ACCOUNT_SIZE: usize = 240;
         const POSITION_OFFSET_IN_ACCOUNT: usize = 80;
         let account_off =
@@ -4950,21 +4962,21 @@ impl TradeCpiTestEnv {
 
     fn read_num_used_accounts(&self) -> u16 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        // ENGINE_OFF (392) + num_used offset (920) = 1312
-        u16::from_le_bytes(slab_data[1312..1314].try_into().unwrap())
+        // ENGINE_OFF (440) + num_used offset (920) = 1360
+        u16::from_le_bytes(slab_data[1360..1362].try_into().unwrap())
     }
 
     /// Read pnl_pos_tot aggregate from slab
     /// This is the sum of all positive PnL values, used for haircut calculations
     fn read_pnl_pos_tot(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        // ENGINE_OFF = 392
+        // ENGINE_OFF = 440
         // RiskEngine layout: vault(16) + insurance_fund(32) + params(144) +
         //   current_slot(8) + funding_index(16) + last_funding_slot(8) +
         //   funding_rate_bps(8) + last_crank_slot(8) + max_crank_staleness(8) +
         //   total_open_interest(16) + c_tot(16) + pnl_pos_tot(16)
         // Offset: 16+32+144+8+16+8+8+8+8+16+16 = 280
-        const PNL_POS_TOT_OFFSET: usize = 392 + 280;
+        const PNL_POS_TOT_OFFSET: usize = 440 + 280;
         u128::from_le_bytes(
             slab_data[PNL_POS_TOT_OFFSET..PNL_POS_TOT_OFFSET + 16]
                 .try_into()
@@ -4976,7 +4988,7 @@ impl TradeCpiTestEnv {
     fn read_c_tot(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
         // c_tot is at offset 264 within RiskEngine (16 bytes before pnl_pos_tot)
-        const C_TOT_OFFSET: usize = 392 + 264;
+        const C_TOT_OFFSET: usize = 440 + 264;
         u128::from_le_bytes(
             slab_data[C_TOT_OFFSET..C_TOT_OFFSET + 16]
                 .try_into()
@@ -4988,7 +5000,7 @@ impl TradeCpiTestEnv {
     fn read_vault(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
         // vault is at offset 0 within RiskEngine
-        const VAULT_OFFSET: usize = 392;
+        const VAULT_OFFSET: usize = 440;
         u128::from_le_bytes(
             slab_data[VAULT_OFFSET..VAULT_OFFSET + 16]
                 .try_into()
@@ -5008,7 +5020,7 @@ impl TradeCpiTestEnv {
         //   warmup_started_at_slot: u64 (8), offset 56
         //   warmup_slope_per_step: U128 (16), offset 64
         //   position_size: I128 (16), offset 80 (confirmed in other tests)
-        const ACCOUNTS_OFFSET: usize = 392 + 9136;
+        const ACCOUNTS_OFFSET: usize = 440 + 9136;
         const ACCOUNT_SIZE: usize = 240;
         const PNL_OFFSET_IN_ACCOUNT: usize = 32; // pnl is at offset 32 within Account
         let account_off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + PNL_OFFSET_IN_ACCOUNT;
@@ -5164,7 +5176,7 @@ impl TradeCpiTestEnv {
 
     fn read_account_capital(&self, idx: u16) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 392 + 9136;
+        const ACCOUNTS_OFFSET: usize = 440 + 9136;
         const ACCOUNT_SIZE: usize = 240;
         const CAPITAL_OFFSET_IN_ACCOUNT: usize = 8;
         let account_off =
@@ -8523,7 +8535,7 @@ impl TestEnv {
     /// Read c_tot aggregate from slab
     fn read_c_tot(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const C_TOT_OFFSET: usize = 392 + 264;
+        const C_TOT_OFFSET: usize = 440 + 264;
         u128::from_le_bytes(
             slab_data[C_TOT_OFFSET..C_TOT_OFFSET + 16]
                 .try_into()
@@ -8534,7 +8546,7 @@ impl TestEnv {
     /// Read vault balance from engine state
     fn read_engine_vault(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const VAULT_OFFSET: usize = 392;
+        const VAULT_OFFSET: usize = 440;
         u128::from_le_bytes(
             slab_data[VAULT_OFFSET..VAULT_OFFSET + 16]
                 .try_into()
@@ -8545,7 +8557,7 @@ impl TestEnv {
     /// Read pnl_pos_tot aggregate from slab
     fn read_pnl_pos_tot(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const PNL_POS_TOT_OFFSET: usize = 392 + 280;
+        const PNL_POS_TOT_OFFSET: usize = 440 + 280;
         u128::from_le_bytes(
             slab_data[PNL_POS_TOT_OFFSET..PNL_POS_TOT_OFFSET + 16]
                 .try_into()
@@ -8556,7 +8568,7 @@ impl TestEnv {
     /// Read account PnL for a slot
     fn read_account_pnl(&self, idx: u16) -> i128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 392 + 9136;
+        const ACCOUNTS_OFFSET: usize = 440 + 9136;
         const ACCOUNT_SIZE: usize = 240;
         const PNL_OFFSET_IN_ACCOUNT: usize = 32;
         let account_off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + PNL_OFFSET_IN_ACCOUNT;
@@ -9172,8 +9184,8 @@ fn test_attack_admin_op_as_user() {
     );
 }
 
-/// ATTACK: After admin is burned (set to [0;32]), verify no one can act as admin.
-/// Expected: All admin ops fail since nobody can sign as the zero address.
+/// ATTACK: UpdateAdmin to zero address is now rejected (foot-gun guard).
+/// Expected: UpdateAdmin to zero fails with InvalidConfigParam.
 #[test]
 fn test_attack_burned_admin_cannot_act() {
     program_path();
@@ -9184,24 +9196,18 @@ fn test_attack_burned_admin_cannot_act() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let zero_pubkey = Pubkey::new_from_array([0u8; 32]);
 
-    // Burn admin by transferring to zero address
+    // Attempt to burn admin by transferring to zero address - now rejected
     let result = env.try_update_admin(&admin, &zero_pubkey);
-    assert!(result.is_ok(), "Admin should be able to burn admin key");
-
-    // Now old admin can no longer act
-    let result = env.try_set_risk_threshold(&admin, 999);
     assert!(
         result.is_err(),
-        "ATTACK: Burned admin - old admin should not work"
+        "UpdateAdmin to zero should be rejected (foot-gun guard)"
     );
 
-    // Random attacker also can't act (no one can sign as [0;32])
-    let attacker = Keypair::new();
-    env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
-    let result = env.try_set_risk_threshold(&attacker, 999);
+    // Admin still works because update was rejected
+    let result = env.try_set_risk_threshold(&admin, 999);
     assert!(
-        result.is_err(),
-        "ATTACK: Burned admin - attacker should not work"
+        result.is_ok(),
+        "Admin should still work after rejected zero update"
     );
 }
 
@@ -10832,7 +10838,7 @@ fn test_attack_double_init_market() {
         &[admin],
         env.svm.latest_blockhash(),
     );
-    const HEADER_CONFIG_LEN: usize = 392;
+    const HEADER_CONFIG_LEN: usize = 440;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let used_before = env.read_num_used_accounts();
     let vault_before = env.vault_balance();
@@ -11146,7 +11152,11 @@ impl TestEnv {
         data.push(0u8); // invert
         data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
         data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
-                                                     // RiskParams
+        // Per-market admin limits (uncapped defaults for tests)
+        data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_maintenance_fee_per_slot
+        data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_risk_threshold
+        data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
+        // RiskParams
         data.extend_from_slice(&0u64.to_le_bytes()); // warmup_period_slots
         data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
         data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
@@ -13314,7 +13324,7 @@ fn test_attack_truncated_instruction_data() {
 
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    const HEADER_CONFIG_LEN: usize = 392;
+    const HEADER_CONFIG_LEN: usize = 440;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let used_before = env.read_num_used_accounts();
     let vault_before = env.vault_balance();
@@ -13370,7 +13380,7 @@ fn test_attack_unknown_instruction_tag() {
 
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    const HEADER_CONFIG_LEN: usize = 392;
+    const HEADER_CONFIG_LEN: usize = 440;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let used_before = env.read_num_used_accounts();
     let vault_before = env.vault_balance();
@@ -13418,7 +13428,7 @@ fn test_attack_empty_instruction_data() {
 
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    const HEADER_CONFIG_LEN: usize = 392;
+    const HEADER_CONFIG_LEN: usize = 440;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let used_before = env.read_num_used_accounts();
     let vault_before = env.vault_balance();
@@ -15229,7 +15239,7 @@ fn test_attack_hyperp_same_slot_crank_no_index_movement() {
     // Config offset: header is 16 bytes, config starts after that
     // last_effective_price_e6 offset within config (check source for exact layout)
     // Read last_effective_price_e6 (the index) before same-slot crank
-    // It's the last u64 in the config section: slab bytes [384..392]
+    // last_effective_price_e6 is at config offset 312: slab bytes [384..392]
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     const INDEX_OFF: usize = 384;
     let index_before =
@@ -16643,9 +16653,8 @@ fn test_attack_rounding_extraction_rapid_trades() {
     );
 }
 
-/// ATTACK: After UpdateAdmin to zero address, no one can admin the market.
-/// admin_ok rejects zero-address admin, so this is a permanent lockout.
-/// Verify that zero-admin prevents all admin operations.
+/// ATTACK: UpdateAdmin to zero address is now rejected at the instruction level.
+/// Verify that the zero-admin foot-gun guard prevents the lockout.
 #[test]
 fn test_attack_update_admin_to_zero_locks_out() {
     program_path();
@@ -16655,7 +16664,7 @@ fn test_attack_update_admin_to_zero_locks_out() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
 
-    // Set admin to zero (may or may not succeed depending on validation)
+    // Attempt to set admin to zero - should be rejected
     let zero_pubkey = Pubkey::new_from_array([0u8; 32]);
     let ix = Instruction {
         program_id: env.program_id,
@@ -16676,24 +16685,17 @@ fn test_attack_update_admin_to_zero_locks_out() {
         env.svm.latest_blockhash(),
     );
     let result = env.svm.send_transaction(tx);
-    // UpdateAdmin to zero succeeds (protocol allows it)
-    assert!(result.is_ok(), "UpdateAdmin to zero should be accepted");
-
-    // Admin is now zero - admin_ok rejects zero address
-    // All admin operations must now fail permanently
-    let result = env.try_set_maintenance_fee(&admin, 100);
+    // UpdateAdmin to zero is now rejected (foot-gun guard)
     assert!(
         result.is_err(),
-        "ATTACK: Admin operation succeeded after admin set to zero!"
+        "UpdateAdmin to zero should be rejected (foot-gun guard)"
     );
 
-    // No key can act as admin when admin is zero
-    let random = Keypair::new();
-    env.svm.airdrop(&random.pubkey(), 1_000_000_000).unwrap();
-    let result2 = env.try_set_maintenance_fee(&random, 100);
+    // Admin still works because the update was rejected
+    let result = env.try_set_maintenance_fee(&admin, 100);
     assert!(
-        result2.is_err(),
-        "ATTACK: Random user became admin when admin is zero!"
+        result.is_ok(),
+        "Admin should still work after rejected zero update"
     );
 }
 
@@ -16927,7 +16929,7 @@ fn test_attack_funding_anti_retroactivity_zero_dt() {
     // Engine vault should still be correct
     let engine_vault = {
         let slab = env.svm.get_account(&env.slab).unwrap();
-        u128::from_le_bytes(slab.data[392..408].try_into().unwrap())
+        u128::from_le_bytes(slab.data[440..456].try_into().unwrap())
     };
     assert!(engine_vault > 0, "Engine vault should be positive");
 }
@@ -17020,7 +17022,7 @@ fn test_attack_withdrawal_with_warmup_settlement() {
     };
     let engine_vault = {
         let slab = env.svm.get_account(&env.slab).unwrap();
-        u128::from_le_bytes(slab.data[392..408].try_into().unwrap())
+        u128::from_le_bytes(slab.data[440..456].try_into().unwrap())
     };
 
     // Key assertion: SPL vault >= engine vault always
@@ -17193,7 +17195,7 @@ fn test_attack_multi_crank_funding_conservation() {
     // Engine vault should still be total deposited amount
     let engine_vault = {
         let slab = env.svm.get_account(&env.slab).unwrap();
-        u128::from_le_bytes(slab.data[392..408].try_into().unwrap())
+        u128::from_le_bytes(slab.data[440..456].try_into().unwrap())
     };
     assert_eq!(
         engine_vault, 20_000_000_000,
@@ -17284,7 +17286,7 @@ fn test_attack_updateconfig_preserves_conservation() {
     };
     let engine_vault_before = {
         let slab = env.svm.get_account(&env.slab).unwrap();
-        u128::from_le_bytes(slab.data[392..408].try_into().unwrap())
+        u128::from_le_bytes(slab.data[440..456].try_into().unwrap())
     };
 
     // UpdateConfig with different parameters
@@ -17309,7 +17311,7 @@ fn test_attack_updateconfig_preserves_conservation() {
     };
     let engine_vault_after = {
         let slab = env.svm.get_account(&env.slab).unwrap();
-        u128::from_le_bytes(slab.data[392..408].try_into().unwrap())
+        u128::from_le_bytes(slab.data[440..456].try_into().unwrap())
     };
 
     // Conservation: UpdateConfig must not change vault balances
@@ -22397,7 +22399,7 @@ fn test_attack_update_admin_same_address_noop() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    const HEADER_CONFIG_LEN: usize = 392;
+    const HEADER_CONFIG_LEN: usize = 440;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let used_before = env.read_num_used_accounts();
     let spl_vault_before = env.vault_balance();
@@ -23618,7 +23620,7 @@ fn test_attack_instruction_tag_just_above_max() {
         &[&user],
         env.svm.latest_blockhash(),
     );
-    const HEADER_CONFIG_LEN: usize = 392;
+    const HEADER_CONFIG_LEN: usize = 440;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let used_before = env.read_num_used_accounts();
     let spl_vault_before = env.vault_balance();
@@ -24027,7 +24029,7 @@ fn test_attack_init_market_admin_mismatch() {
         &[&admin],
         svm.latest_blockhash(),
     );
-    const HEADER_CONFIG_LEN: usize = 392;
+    const HEADER_CONFIG_LEN: usize = 440;
     let slab_before = svm.get_account(&slab).unwrap().data;
     let vault_before = svm.get_account(&vault).unwrap().data;
     let result = svm.send_transaction(tx);
@@ -24141,7 +24143,7 @@ fn test_attack_init_market_mint_mismatch() {
         &[&admin],
         svm.latest_blockhash(),
     );
-    const HEADER_CONFIG_LEN: usize = 392;
+    const HEADER_CONFIG_LEN: usize = 440;
     let slab_before = svm.get_account(&slab).unwrap().data;
     let vault_before = svm.get_account(&vault).unwrap().data;
     let result = svm.send_transaction(tx);
@@ -29445,15 +29447,17 @@ fn test_property_authorization_exhaustive() {
     let r = env.try_set_maintenance_fee(&new_admin, 200);
     assert!(r.is_ok(), "A8: New admin should work after transfer");
 
-    // --- Burned admin: no one can act ---
+    // --- Zero admin rejected (foot-gun guard) ---
     let zero = Pubkey::default();
-    env.try_update_admin(&new_admin, &zero).unwrap();
+    let r = env.try_update_admin(&new_admin, &zero);
+    assert!(
+        r.is_err(),
+        "A9: UpdateAdmin to zero should be rejected (foot-gun guard)"
+    );
 
+    // New admin still works after rejected zero update
     let r = env.try_set_maintenance_fee(&new_admin, 300);
-    assert!(r.is_err(), "A9: Burned admin - old admin locked out");
-
-    let r = env.try_update_admin(&new_admin, &new_admin.pubkey());
-    assert!(r.is_err(), "A10: Burned admin - cannot recover");
+    assert!(r.is_ok(), "A10: New admin should still work after rejected zero update");
 }
 
 /// PROPERTY TEST: Account lifecycle invariants across create/use/close/GC cycles.
@@ -31287,4 +31291,385 @@ fn test_withdraw_insurance_decrements_engine_vault() {
     assert!(result.is_ok(), "CloseSlab should succeed after WithdrawInsurance: {:?}", result);
 
     println!("WITHDRAW INSURANCE DECREMENTS ENGINE VAULT: PASSED");
+}
+
+// ============================================================================
+// Per-Market Admin Limits Tests
+// ============================================================================
+
+/// Encode InitMarket with custom per-market admin limits.
+fn encode_init_market_with_limits(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    feed_id: &[u8; 32],
+    max_maintenance_fee: u128,
+    max_risk_threshold: u128,
+    min_oracle_price_cap_e2bps: u64,
+) -> Vec<u8> {
+    let mut data = vec![0u8];
+    data.extend_from_slice(admin.as_ref());
+    data.extend_from_slice(mint.as_ref());
+    data.extend_from_slice(feed_id);
+    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_staleness_secs
+    data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
+    data.push(0u8); // invert
+    data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
+    data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
+    // Per-market admin limits
+    data.extend_from_slice(&max_maintenance_fee.to_le_bytes());
+    data.extend_from_slice(&max_risk_threshold.to_le_bytes());
+    data.extend_from_slice(&min_oracle_price_cap_e2bps.to_le_bytes());
+    // RiskParams
+    data.extend_from_slice(&0u64.to_le_bytes()); // warmup_period_slots
+    data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
+    data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
+    data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
+    data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
+    data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+    data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
+    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
+    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
+    data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
+    data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
+    data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+    data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
+    data
+}
+
+/// Verify per-market admin limits are enforced for Set* operations.
+#[test]
+fn test_init_market_admin_limits_enforced() {
+    program_path();
+
+    let mut env = TestEnv::new();
+
+    // Init market with specific limits
+    let admin = &env.payer;
+    let dummy_ata = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            dummy_ata,
+            Account {
+                lamports: 1_000_000,
+                data: vec![0u8; TokenAccount::LEN],
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(sysvar::rent::ID, false),
+            AccountMeta::new_readonly(dummy_ata, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+        ],
+        data: encode_init_market_with_limits(
+            &admin.pubkey(),
+            &env.mint,
+            &TEST_FEED_ID,
+            1000,   // max_maintenance_fee_per_slot
+            50_000, // max_risk_threshold
+            5000,   // min_oracle_price_cap_e2bps
+        ),
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&admin.pubkey()),
+        &[admin],
+        env.svm.latest_blockhash(),
+    );
+    env.svm.send_transaction(tx).expect("init_market failed");
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    // SetMaintenanceFee: within limit should succeed
+    let result = env.try_set_maintenance_fee(&admin, 1000);
+    assert!(result.is_ok(), "Fee at limit should succeed: {:?}", result);
+
+    // SetMaintenanceFee: above limit should fail
+    let result = env.try_set_maintenance_fee(&admin, 1001);
+    assert!(result.is_err(), "Fee above limit should fail");
+
+    // SetMaintenanceFee: zero is fine (no minimum)
+    let result = env.try_set_maintenance_fee(&admin, 0);
+    assert!(result.is_ok(), "Zero fee should succeed: {:?}", result);
+
+    // SetRiskThreshold: within limit should succeed
+    let result = env.try_set_risk_threshold(&admin, 50_000);
+    assert!(
+        result.is_ok(),
+        "Threshold at limit should succeed: {:?}",
+        result
+    );
+
+    // SetRiskThreshold: above limit should fail
+    let result = env.try_set_risk_threshold(&admin, 50_001);
+    assert!(result.is_err(), "Threshold above limit should fail");
+
+    // SetRiskThreshold: zero is fine (no minimum)
+    let result = env.try_set_risk_threshold(&admin, 0);
+    assert!(
+        result.is_ok(),
+        "Zero threshold should succeed: {:?}",
+        result
+    );
+
+    // SetOraclePriceCap: above floor should succeed
+    let result = env.try_set_oracle_price_cap(&admin, 5000);
+    assert!(
+        result.is_ok(),
+        "Cap at floor should succeed: {:?}",
+        result
+    );
+
+    // SetOraclePriceCap: below floor (non-zero) should fail
+    let result = env.try_set_oracle_price_cap(&admin, 4999);
+    assert!(result.is_err(), "Cap below floor should fail");
+
+    // SetOraclePriceCap: zero (disabled) is always allowed
+    let result = env.try_set_oracle_price_cap(&admin, 0);
+    assert!(
+        result.is_ok(),
+        "Zero cap (disabled) should succeed: {:?}",
+        result
+    );
+
+    println!("INIT MARKET ADMIN LIMITS ENFORCED: PASSED");
+}
+
+/// Verify that InitMarket rejects zero admin limits.
+#[test]
+fn test_init_market_zero_limits_rejected() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    let admin = &env.payer;
+    let dummy_ata = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            dummy_ata,
+            Account {
+                lamports: 1_000_000,
+                data: vec![0u8; TokenAccount::LEN],
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    // Zero max_maintenance_fee_per_slot should fail
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(sysvar::rent::ID, false),
+            AccountMeta::new_readonly(dummy_ata, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+        ],
+        data: encode_init_market_with_limits(
+            &admin.pubkey(),
+            &env.mint,
+            &TEST_FEED_ID,
+            0,         // INVALID: zero max_maintenance_fee
+            u128::MAX,
+            0,
+        ),
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&admin.pubkey()),
+        &[admin],
+        env.svm.latest_blockhash(),
+    );
+    assert!(
+        env.svm.send_transaction(tx).is_err(),
+        "Zero max_maintenance_fee should be rejected"
+    );
+
+    // Zero max_risk_threshold should fail
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(sysvar::rent::ID, false),
+            AccountMeta::new_readonly(dummy_ata, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+        ],
+        data: encode_init_market_with_limits(
+            &admin.pubkey(),
+            &env.mint,
+            &TEST_FEED_ID,
+            u128::MAX,
+            0, // INVALID: zero max_risk_threshold
+            0,
+        ),
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&admin.pubkey()),
+        &[admin],
+        env.svm.latest_blockhash(),
+    );
+    assert!(
+        env.svm.send_transaction(tx).is_err(),
+        "Zero max_risk_threshold should be rejected"
+    );
+
+    println!("INIT MARKET ZERO LIMITS REJECTED: PASSED");
+}
+
+/// Verify that UpdateAdmin to zero address is rejected.
+#[test]
+fn test_update_admin_zero_rejected() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let zero_pubkey = Pubkey::new_from_array([0u8; 32]);
+
+    let result = env.try_update_admin(&admin, &zero_pubkey);
+    assert!(
+        result.is_err(),
+        "UpdateAdmin to zero address should be rejected"
+    );
+
+    // Valid admin transfer should still work
+    let new_admin = Keypair::new();
+    env.svm
+        .airdrop(&new_admin.pubkey(), 1_000_000_000)
+        .unwrap();
+    let result = env.try_update_admin(&admin, &new_admin.pubkey());
+    assert!(
+        result.is_ok(),
+        "Valid admin transfer should succeed: {:?}",
+        result
+    );
+
+    println!("UPDATE ADMIN ZERO REJECTED: PASSED");
+}
+
+/// Verify that UpdateConfig's thresh_max cannot exceed max_risk_threshold.
+#[test]
+fn test_update_config_thresh_max_bounded_by_limit() {
+    program_path();
+
+    let mut env = TestEnv::new();
+
+    // Init market with specific max_risk_threshold = 50_000
+    let admin = &env.payer;
+    let dummy_ata = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            dummy_ata,
+            Account {
+                lamports: 1_000_000,
+                data: vec![0u8; TokenAccount::LEN],
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(sysvar::rent::ID, false),
+            AccountMeta::new_readonly(dummy_ata, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+        ],
+        data: encode_init_market_with_limits(
+            &admin.pubkey(),
+            &env.mint,
+            &TEST_FEED_ID,
+            u128::MAX, // max_maintenance_fee (uncapped)
+            50_000,    // max_risk_threshold
+            0,         // min_oracle_price_cap_e2bps (no floor)
+        ),
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&admin.pubkey()),
+        &[admin],
+        env.svm.latest_blockhash(),
+    );
+    env.svm.send_transaction(tx).expect("init_market failed");
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    // UpdateConfig with thresh_max at limit: should succeed
+    let result = env.try_update_config_with_params(
+        &admin,
+        3600,
+        1_000_000_000_000u128,
+        1000,
+        0,
+        50_000, // thresh_max == max_risk_threshold
+    );
+    assert!(
+        result.is_ok(),
+        "UpdateConfig with thresh_max at limit should succeed: {:?}",
+        result
+    );
+
+    // UpdateConfig with thresh_max above limit: should fail
+    let result = env.try_update_config_with_params(
+        &admin,
+        3600,
+        1_000_000_000_000u128,
+        1000,
+        0,
+        50_001, // thresh_max > max_risk_threshold
+    );
+    assert!(
+        result.is_err(),
+        "UpdateConfig with thresh_max above limit should be rejected"
+    );
+
+    // UpdateConfig with thresh_max below limit: should succeed
+    let result = env.try_update_config_with_params(
+        &admin,
+        3600,
+        1_000_000_000_000u128,
+        1000,
+        0,
+        10_000, // thresh_max < max_risk_threshold
+    );
+    assert!(
+        result.is_ok(),
+        "UpdateConfig with thresh_max below limit should succeed: {:?}",
+        result
+    );
+
+    println!("UPDATE CONFIG THRESH_MAX BOUNDED BY LIMIT: PASSED");
 }

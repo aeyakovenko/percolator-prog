@@ -1125,6 +1125,12 @@ pub mod ix {
             unit_scale: u32,
             /// Initial mark price in e6 format. Required (non-zero) if Hyperp mode.
             initial_mark_price_e6: u64,
+            /// Per-market admin limit: max maintenance fee per slot
+            max_maintenance_fee_per_slot: u128,
+            /// Per-market admin limit: max risk reduction threshold
+            max_risk_threshold: u128,
+            /// Per-market admin limit: min oracle price cap (e2bps floor for non-zero values)
+            min_oracle_price_cap_e2bps: u64,
             risk_params: RiskParams,
         },
         InitUser {
@@ -1252,6 +1258,9 @@ pub mod ix {
                     let invert = read_u8(&mut rest)?;
                     let unit_scale = read_u32(&mut rest)?;
                     let initial_mark_price_e6 = read_u64(&mut rest)?;
+                    let max_maintenance_fee_per_slot = read_u128(&mut rest)?;
+                    let max_risk_threshold = read_u128(&mut rest)?;
+                    let min_oracle_price_cap_e2bps = read_u64(&mut rest)?;
                     let risk_params = read_risk_params(&mut rest)?;
                     Ok(Instruction::InitMarket {
                         admin,
@@ -1262,6 +1271,9 @@ pub mod ix {
                         invert,
                         unit_scale,
                         initial_mark_price_e6,
+                        max_maintenance_fee_per_slot,
+                        max_risk_threshold,
+                        min_oracle_price_cap_e2bps,
                         risk_params,
                     })
                 }
@@ -1680,6 +1692,19 @@ pub mod state {
         /// Last effective oracle price (after clamping), in e6 format.
         /// 0 = no history (first price accepted as-is).
         pub last_effective_price_e6: u64,
+
+        // ========================================
+        // Per-Market Admin Limits (set at InitMarket, immutable)
+        // ========================================
+        /// Maximum maintenance fee per slot admin can set. Must be > 0 at init.
+        pub max_maintenance_fee_per_slot: u128,
+        /// Maximum risk reduction threshold admin can set. Must be > 0 at init.
+        pub max_risk_threshold: u128,
+        /// Minimum oracle price cap (e2bps) admin can set (floor for non-zero values).
+        /// 0 = no floor (admin can set any value).
+        pub min_oracle_price_cap_e2bps: u64,
+        /// Reserved padding for alignment.
+        pub _limits_reserved: u64,
     }
 
     pub fn slab_data_mut<'a, 'b>(
@@ -2646,6 +2671,9 @@ pub mod processor {
                 invert,
                 unit_scale,
                 initial_mark_price_e6,
+                max_maintenance_fee_per_slot,
+                max_risk_threshold,
+                min_oracle_price_cap_e2bps,
                 risk_params,
             } => {
                 // Reduced from 11 to 9: removed pyth_index and pyth_collateral accounts
@@ -2707,6 +2735,14 @@ pub mod processor {
                 } else {
                     initial_mark_price_e6
                 };
+
+                // Validate per-market admin limits (must be set at init time)
+                if max_maintenance_fee_per_slot == 0 {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+                if max_risk_threshold == 0 {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
 
                 #[cfg(debug_assertions)]
                 {
@@ -2783,6 +2819,11 @@ pub mod processor {
                         0
                     },
                     last_effective_price_e6: if is_hyperp { initial_mark_price_e6 } else { 0 },
+                    // Per-market admin limits (immutable after init)
+                    max_maintenance_fee_per_slot,
+                    max_risk_threshold,
+                    min_oracle_price_cap_e2bps,
+                    _limits_reserved: 0,
                 };
                 state::write_config(&mut data, &config);
 
@@ -3952,6 +3993,12 @@ pub mod processor {
                 let header = state::read_header(&data);
                 require_admin(header.admin, a_admin.key)?;
 
+                // Enforce per-market admin limit
+                let config = state::read_config(&data);
+                if new_threshold > config.max_risk_threshold {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
+
                 let engine = zc::engine_mut(&mut data)?;
                 engine.set_risk_reduction_threshold(new_threshold);
             }
@@ -3963,6 +4010,11 @@ pub mod processor {
 
                 accounts::expect_signer(a_admin)?;
                 accounts::expect_writable(a_slab)?;
+
+                // Reject zero-address admin (irreversible lockout)
+                if new_admin == Pubkey::default() {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
 
                 let mut data = state::slab_data_mut(a_slab)?;
                 slab_guard(program_id, a_slab, &data)?;
@@ -4074,6 +4126,11 @@ pub mod processor {
 
                 // Read existing config and update
                 let mut config = state::read_config(&data);
+
+                // Enforce per-market admin limit on thresh_max
+                if thresh_max > config.max_risk_threshold {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
                 config.funding_horizon_slots = funding_horizon_slots;
                 config.funding_k_bps = funding_k_bps;
                 config.funding_inv_scale_notional_e6 = funding_inv_scale_notional_e6;
@@ -4107,6 +4164,12 @@ pub mod processor {
 
                 let header = state::read_header(&data);
                 require_admin(header.admin, a_admin.key)?;
+
+                // Enforce per-market admin limit
+                let config = state::read_config(&data);
+                if new_fee > config.max_maintenance_fee_per_slot {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
 
                 let engine = zc::engine_mut(&mut data)?;
                 engine.params.maintenance_fee_per_slot = percolator::U128::new(new_fee);
@@ -4215,7 +4278,15 @@ pub mod processor {
                 let header = state::read_header(&data);
                 require_admin(header.admin, a_admin.key)?;
 
-                let mut config = state::read_config(&data);
+                // Enforce per-market admin limit: non-zero cap must be >= floor
+                let config = state::read_config(&data);
+                if max_change_e2bps != 0
+                    && max_change_e2bps < config.min_oracle_price_cap_e2bps
+                {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
+
+                let mut config = config;
                 config.oracle_price_cap_e2bps = max_change_e2bps;
                 state::write_config(&mut data, &config);
             }

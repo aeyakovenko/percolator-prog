@@ -239,7 +239,11 @@ fn encode_init_market(fixture: &MarketFixture, crank_staleness: u64) -> Vec<u8> 
     data.push(0u8); // invert (0 = no inversion)
     encode_u32(0, &mut data); // unit_scale (0 = no scaling)
     encode_u64(0, &mut data); // initial_mark_price_e6 (0 for non-Hyperp markets)
-
+    // Per-market admin limits (uncapped defaults for tests)
+    encode_u128(u128::MAX, &mut data); // max_maintenance_fee_per_slot
+    encode_u128(u128::MAX, &mut data); // max_risk_threshold
+    encode_u64(0, &mut data); // min_oracle_price_cap_e2bps
+    // RiskParams
     encode_u64(0, &mut data);
     encode_u64(0, &mut data);
     encode_u64(0, &mut data);
@@ -271,7 +275,11 @@ fn encode_init_market_invert(
     data.push(invert);
     encode_u32(unit_scale, &mut data);
     encode_u64(0, &mut data); // initial_mark_price_e6 (0 for non-Hyperp markets)
-
+    // Per-market admin limits (uncapped defaults for tests)
+    encode_u128(u128::MAX, &mut data); // max_maintenance_fee_per_slot
+    encode_u128(u128::MAX, &mut data); // max_risk_threshold
+    encode_u64(0, &mut data); // min_oracle_price_cap_e2bps
+    // RiskParams
     encode_u64(0, &mut data);
     encode_u64(0, &mut data);
     encode_u64(0, &mut data);
@@ -2204,16 +2212,18 @@ fn test_burn_admin_to_zero() {
         process_instruction(&f.program_id, &accounts, &init_data).unwrap();
     }
 
-    // Admin burns to zero (Pubkey::default())
+    // Attempt to burn admin to zero (Pubkey::default()) - now rejected
     let zero_admin = Pubkey::default();
     {
         let accounts = vec![f.admin.to_info(), f.slab.to_info()];
-        process_instruction(&f.program_id, &accounts, &encode_update_admin(&zero_admin)).unwrap();
+        let res =
+            process_instruction(&f.program_id, &accounts, &encode_update_admin(&zero_admin));
+        assert_eq!(res, Err(PercolatorError::InvalidConfigParam.into()));
     }
 
-    // Verify admin is now all zeros
+    // Verify admin is still the original (not zeroed)
     let header = state::read_header(&f.slab.data);
-    assert_eq!(header.admin, [0u8; 32]);
+    assert_eq!(header.admin, f.admin.key.to_bytes());
 }
 
 #[test]
@@ -2238,43 +2248,29 @@ fn test_after_burn_admin_ops_disabled() {
         process_instruction(&f.program_id, &accounts, &init_data).unwrap();
     }
 
-    // Admin burns to zero
+    // Attempt to burn admin to zero - now rejected (foot-gun guard)
     let zero_admin = Pubkey::default();
     {
         let accounts = vec![f.admin.to_info(), f.slab.to_info()];
-        process_instruction(&f.program_id, &accounts, &encode_update_admin(&zero_admin)).unwrap();
+        let res =
+            process_instruction(&f.program_id, &accounts, &encode_update_admin(&zero_admin));
+        assert_eq!(res, Err(PercolatorError::InvalidConfigParam.into()));
     }
 
-    // Attempt UpdateAdmin signed by anyone (including zero pubkey signer) → must fail
+    // Admin still works after rejected zero update
+    {
+        let accounts = vec![f.admin.to_info(), f.slab.to_info()];
+        let res = process_instruction(&f.program_id, &accounts, &encode_set_risk_threshold(12345));
+        assert!(res.is_ok(), "Admin should still work after rejected zero update");
+    }
+
+    // Non-admin still cannot act
     let anyone = Pubkey::new_unique();
     let mut anyone_account =
         TestAccount::new(anyone, solana_program::system_program::id(), 0, vec![]).signer();
     {
         let accounts = vec![anyone_account.to_info(), f.slab.to_info()];
-        let res = process_instruction(
-            &f.program_id,
-            &accounts,
-            &encode_update_admin(&Pubkey::new_unique()),
-        );
-        assert_eq!(res, Err(PercolatorError::EngineUnauthorized.into()));
-    }
-
-    // Attempt SetRiskThreshold signed by anyone → must fail
-    {
-        let accounts = vec![anyone_account.to_info(), f.slab.to_info()];
         let res = process_instruction(&f.program_id, &accounts, &encode_set_risk_threshold(12345));
-        assert_eq!(res, Err(PercolatorError::EngineUnauthorized.into()));
-    }
-
-    // Even original admin cannot do admin ops anymore
-    let original_admin_key = f.admin.key; // capture before mutable borrow
-    {
-        let accounts = vec![f.admin.to_info(), f.slab.to_info()];
-        let res = process_instruction(
-            &f.program_id,
-            &accounts,
-            &encode_update_admin(&original_admin_key),
-        );
         assert_eq!(res, Err(PercolatorError::EngineUnauthorized.into()));
     }
 }
