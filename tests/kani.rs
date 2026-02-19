@@ -523,6 +523,27 @@ fn kani_matcher_shape_valid_accepted() {
     );
 }
 
+/// Universal: matcher_shape_ok is fully characterized
+#[kani::proof]
+fn kani_matcher_shape_universal() {
+    let shape = MatcherAccountsShape {
+        prog_executable: kani::any(),
+        ctx_executable: kani::any(),
+        ctx_owner_is_prog: kani::any(),
+        ctx_len_ok: kani::any(),
+    };
+
+    let expected = shape.prog_executable
+        && !shape.ctx_executable
+        && shape.ctx_owner_is_prog
+        && shape.ctx_len_ok;
+    assert_eq!(
+        matcher_shape_ok(shape),
+        expected,
+        "matcher_shape_ok must equal (prog_exec && !ctx_exec && ctx_owned && ctx_len)"
+    );
+}
+
 // =============================================================================
 // F. PDA KEY MATCHING (2 proofs)
 // =============================================================================
@@ -1379,6 +1400,23 @@ fn kani_lp_pda_rejects_funded() {
     assert!(!lp_pda_shape_ok(shape), "funded LP PDA must be rejected");
 }
 
+/// Universal: lp_pda_shape_ok is fully characterized as 3-way AND
+#[kani::proof]
+fn kani_lp_pda_shape_universal() {
+    let shape = LpPdaShape {
+        is_system_owned: kani::any(),
+        data_len_zero: kani::any(),
+        lamports_zero: kani::any(),
+    };
+
+    let expected = shape.is_system_owned && shape.data_len_zero && shape.lamports_zero;
+    assert_eq!(
+        lp_pda_shape_ok(shape),
+        expected,
+        "lp_pda_shape_ok must equal (system_owned && data_zero && lamports_zero)"
+    );
+}
+
 // =============================================================================
 // S. ORACLE FEED_ID AND SLAB SHAPE (4 proofs)
 // =============================================================================
@@ -2131,6 +2169,32 @@ fn kani_crank_no_panic_self_crank_accepts_owner_match() {
     );
 }
 
+/// Universal characterization: decide_keeper_crank_with_panic ==
+///   if allow_panic != 0 && !admin_ok(admin, signer) => Reject
+///   else => decide_crank(permissionless, idx_exists, stored_owner, signer)
+#[kani::proof]
+fn kani_decide_keeper_crank_with_panic_universal() {
+    let allow_panic: u8 = kani::any();
+    let admin: [u8; 32] = kani::any();
+    let signer: [u8; 32] = kani::any();
+    let permissionless: bool = kani::any();
+    let idx_exists: bool = kani::any();
+    let stored_owner: [u8; 32] = kani::any();
+
+    let decision = decide_keeper_crank_with_panic(
+        allow_panic, admin, signer, permissionless, idx_exists, stored_owner,
+    );
+
+    let expected = if allow_panic != 0 && !admin_ok(admin, signer) {
+        SimpleDecision::Reject
+    } else {
+        decide_crank(permissionless, idx_exists, stored_owner, signer)
+    };
+
+    assert_eq!(decision, expected,
+        "decide_keeper_crank_with_panic must match specification");
+}
+
 // =============================================================================
 // AA. ORACLE INVERSION MATH PROOFS (5 proofs)
 // =============================================================================
@@ -2604,7 +2668,13 @@ fn kani_universal_shape_fail_rejects() {
 #[kani::proof]
 fn kani_universal_pda_fail_rejects() {
     let old_nonce: u64 = kani::any();
-    let shape = valid_shape();
+    let shape = MatcherAccountsShape {
+        prog_executable: kani::any(),
+        ctx_executable: kani::any(),
+        ctx_owner_is_prog: kani::any(),
+        ctx_len_ok: kani::any(),
+    };
+    kani::assume(matcher_shape_ok(shape));
     let identity_ok: bool = kani::any();
     let pda_ok = false; // Force failure
     let abi_ok: bool = kani::any();
@@ -2638,9 +2708,15 @@ fn kani_universal_pda_fail_rejects() {
 #[kani::proof]
 fn kani_universal_user_auth_fail_rejects() {
     let old_nonce: u64 = kani::any();
-    let shape = valid_shape();
+    let shape = MatcherAccountsShape {
+        prog_executable: kani::any(),
+        ctx_executable: kani::any(),
+        ctx_owner_is_prog: kani::any(),
+        ctx_len_ok: kani::any(),
+    };
+    kani::assume(matcher_shape_ok(shape));
     let identity_ok: bool = kani::any();
-    let pda_ok = true;
+    let pda_ok: bool = kani::any();
     let abi_ok: bool = kani::any();
     let user_auth_ok = false; // Force failure
     let lp_auth_ok: bool = kani::any();
@@ -2672,11 +2748,17 @@ fn kani_universal_user_auth_fail_rejects() {
 #[kani::proof]
 fn kani_universal_lp_auth_fail_rejects() {
     let old_nonce: u64 = kani::any();
-    let shape = valid_shape();
+    let shape = MatcherAccountsShape {
+        prog_executable: kani::any(),
+        ctx_executable: kani::any(),
+        ctx_owner_is_prog: kani::any(),
+        ctx_len_ok: kani::any(),
+    };
+    kani::assume(matcher_shape_ok(shape));
     let identity_ok: bool = kani::any();
-    let pda_ok = true;
+    let pda_ok: bool = kani::any();
     let abi_ok: bool = kani::any();
-    let user_auth_ok = true;
+    let user_auth_ok: bool = kani::any();
     let lp_auth_ok = false; // Force failure
     let gate_active: bool = kani::any();
     let risk_increase: bool = kani::any();
@@ -2706,12 +2788,18 @@ fn kani_universal_lp_auth_fail_rejects() {
 #[kani::proof]
 fn kani_universal_identity_fail_rejects() {
     let old_nonce: u64 = kani::any();
-    let shape = valid_shape();
+    let shape = MatcherAccountsShape {
+        prog_executable: kani::any(),
+        ctx_executable: kani::any(),
+        ctx_owner_is_prog: kani::any(),
+        ctx_len_ok: kani::any(),
+    };
+    kani::assume(matcher_shape_ok(shape));
     let identity_ok = false; // Force failure
-    let pda_ok = true;
+    let pda_ok: bool = kani::any();
     let abi_ok: bool = kani::any();
-    let user_auth_ok = true;
-    let lp_auth_ok = true;
+    let user_auth_ok: bool = kani::any();
+    let lp_auth_ok: bool = kani::any();
     let gate_active: bool = kani::any();
     let risk_increase: bool = kani::any();
     let exec_size: i128 = kani::any();
@@ -2740,12 +2828,18 @@ fn kani_universal_identity_fail_rejects() {
 #[kani::proof]
 fn kani_universal_abi_fail_rejects() {
     let old_nonce: u64 = kani::any();
-    let shape = valid_shape();
-    let identity_ok = true;
-    let pda_ok = true;
+    let shape = MatcherAccountsShape {
+        prog_executable: kani::any(),
+        ctx_executable: kani::any(),
+        ctx_owner_is_prog: kani::any(),
+        ctx_len_ok: kani::any(),
+    };
+    kani::assume(matcher_shape_ok(shape));
+    let identity_ok: bool = kani::any();
+    let pda_ok: bool = kani::any();
     let abi_ok = false; // Force failure
-    let user_auth_ok = true;
-    let lp_auth_ok = true;
+    let user_auth_ok: bool = kani::any();
+    let lp_auth_ok: bool = kani::any();
     let gate_active: bool = kani::any();
     let risk_increase: bool = kani::any();
     let exec_size: i128 = kani::any();
@@ -3451,27 +3545,33 @@ fn kani_scale_price_e6_identity_for_scale_leq_1() {
     );
 }
 
-/// Prove that production base_to_units and scale_price_e6 use the SAME divisor.
-/// This is the key property that ensures margin checks are consistent.
+/// Prove that production base_to_units and scale_price_e6 use the SAME divisor
+/// AND that this preserves conservative margin behavior.
 ///
 /// The fix works because:
 /// - capital_units = base_tokens / unit_scale  (via base_to_units)
 /// - oracle_scaled = oracle_price / unit_scale (via scale_price_e6)
 ///
 /// Both divide by the same unit_scale, so margin ratios are preserved.
+/// Uses u8 inputs for SAT tractability (deep multiplication chains).
 #[kani::proof]
 fn kani_scale_price_and_base_to_units_use_same_divisor() {
-    let base_tokens: u64 = kani::any();
-    let oracle_price: u64 = kani::any();
-    let unit_scale: u32 = kani::any();
+    // u8 inputs keep the 3-deep multiplication chain SAT-tractable
+    let scale_raw: u8 = kani::any();
+    let base_mult: u8 = kani::any();
+    let price_mult: u8 = kani::any();
+    let pos_raw: u8 = kani::any();
 
-    // Constrain to valid inputs
-    kani::assume(unit_scale > 1);
-    kani::assume(unit_scale <= KANI_MAX_SCALE);
-    kani::assume(base_tokens >= unit_scale as u64);
-    kani::assume(base_tokens <= KANI_MAX_QUOTIENT as u64 * unit_scale as u64); // Tight bound for SAT
-    kani::assume(oracle_price >= unit_scale as u64);
-    kani::assume(oracle_price <= KANI_MAX_QUOTIENT as u64 * unit_scale as u64); // Tight bound for SAT
+    kani::assume(scale_raw >= 2);
+    kani::assume(scale_raw <= 16);
+    kani::assume(base_mult >= 1);
+    kani::assume(price_mult >= 1);
+    kani::assume(pos_raw >= 1);
+
+    let unit_scale = scale_raw as u32;
+    let base_tokens = (base_mult as u64) * (unit_scale as u64);
+    let oracle_price = (price_mult as u64) * (unit_scale as u64);
+    let position_size = pos_raw as u128;
 
     // Call PRODUCTION functions
     let (capital_units, _dust) = base_to_units(base_tokens, unit_scale);
@@ -3489,12 +3589,13 @@ fn kani_scale_price_and_base_to_units_use_same_divisor() {
         "scale_price_e6 must compute price / unit_scale"
     );
 
-    // Key invariant: same divisor means margin ratio is preserved.
-    // margin_ratio = capital / position_value
-    // With scaling: (base/scale) / (price/scale * pos / 1e6) = base / (price * pos / 1e6)
-    // Same ratio regardless of scale!
-    // NOTE: The formal margin ratio assertion (position_size × margin_bps) is proven
-    // separately in kani_scale_price_e6_concrete_example with bounded symbolic inputs.
+    // Margin ratio preservation: scaled position value never exceeds unscaled
+    let pv_unscaled = position_size * oracle_price as u128 / 1_000_000;
+    let pv_scaled = position_size * oracle_scaled as u128 / 1_000_000;
+    assert!(
+        pv_scaled * unit_scale as u128 <= pv_unscaled,
+        "scaled position value must be conservative (floor rounding)"
+    );
 }
 
 /// Prove scaled-price math preserves conservative margin behavior under unit scaling.
