@@ -9091,6 +9091,15 @@ pub mod processor {
                     return Ok(()); // same slot — no-op
                 }
 
+                // PERC-367: Minimum update interval — limits manipulation frequency.
+                // An attacker calling UpdateHyperpMark every slot with a manipulated
+                // pool can gradually shift the EMA. A 5-slot (~2s) cooldown reduces
+                // the rate of possible EMA poisoning attempts.
+                const MIN_HYPERP_UPDATE_INTERVAL_SLOTS: u64 = 5;
+                if dt_slots < MIN_HYPERP_UPDATE_INTERVAL_SLOTS {
+                    return Ok(()); // too soon — skip silently
+                }
+
                 // SECURITY: verify the DEX pool account is owned by an approved DEX program
                 let is_dex = *a_dex_pool.owner == crate::oracle::PUMPSWAP_PROGRAM_ID
                     || *a_dex_pool.owner == crate::oracle::RAYDIUM_CLMM_PROGRAM_ID
