@@ -4256,6 +4256,25 @@ pub mod oracle {
         config.index_feed_id == [0u8; 32]
     }
 
+    /// Check that the Hyperp oracle price is not stale.
+    /// Returns `OracleStale` if the engine hasn't been cranked within
+    /// `max_crank_staleness_slots` slots.
+    #[inline]
+    pub fn check_hyperp_staleness(
+        engine_current_slot: u64,
+        max_crank_staleness_slots: u64,
+        clock_slot: u64,
+    ) -> Result<(), ProgramError> {
+        if max_crank_staleness_slots > 0 && max_crank_staleness_slots != u64::MAX {
+            let age = clock_slot.saturating_sub(engine_current_slot);
+            if age > max_crank_staleness_slots {
+                solana_program::msg!("Hyperp oracle stale");
+                return Err(super::error::PercolatorError::OracleStale.into());
+            }
+        }
+        Ok(())
+    }
+
     /// Move `index` toward `mark`, but clamp movement by cap_e2bps * dt_slots.
     /// cap_e2bps units: 1_000_000 = 100.00%
     /// Returns the new index value.
@@ -5681,6 +5700,48 @@ pub mod processor {
     }
 
     #[cfg(test)]
+    mod hyperp_staleness_tests {
+        use crate::oracle::check_hyperp_staleness;
+
+        #[test]
+        fn staleness_ok_within_threshold() {
+            // Engine cranked at slot 100, current slot 150, max stale = 100
+            assert!(check_hyperp_staleness(100, 100, 150).is_ok());
+        }
+
+        #[test]
+        fn staleness_ok_at_boundary() {
+            // Exactly at the boundary: age == max_stale
+            assert!(check_hyperp_staleness(100, 50, 150).is_ok());
+        }
+
+        #[test]
+        fn staleness_rejected_past_threshold() {
+            // Engine cranked at slot 100, current slot 201, max stale = 100
+            let result = check_hyperp_staleness(100, 100, 201);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn staleness_disabled_when_zero() {
+            // max_crank_staleness_slots = 0 disables the check
+            assert!(check_hyperp_staleness(0, 0, 999_999).is_ok());
+        }
+
+        #[test]
+        fn staleness_disabled_when_max_u64() {
+            // max_crank_staleness_slots = u64::MAX disables the check
+            assert!(check_hyperp_staleness(0, u64::MAX, 999_999).is_ok());
+        }
+
+        #[test]
+        fn staleness_fresh_crank_always_ok() {
+            // Engine just cranked (same slot)
+            assert!(check_hyperp_staleness(500, 100, 500).is_ok());
+        }
+    }
+
+    #[cfg(test)]
     mod orphan_tests {
         use super::*;
         use crate::state::MarketConfig;
@@ -6507,6 +6568,8 @@ pub mod processor {
                     if idx == 0 {
                         return Err(PercolatorError::OracleInvalid.into());
                     }
+                    // PERC-365: Reject trades if Hyperp oracle is stale
+                    { let eng = zc::engine_ref(&data)?; oracle::check_hyperp_staleness(eng.current_slot, eng.max_crank_staleness_slots, clock.slot)?; }
                     idx
                 } else {
                     oracle::read_price_clamped(
@@ -7147,7 +7210,7 @@ pub mod processor {
                 // Phase 3 & 4: Read engine state, generate nonce, validate matcher identity
                 // Note: Use immutable borrow for reading to avoid ExternalAccountDataModified
                 // Nonce write is deferred until after execute_trade
-                let (lp_account_id, mut config, req_id, lp_matcher_prog, lp_matcher_ctx) = {
+                let (lp_account_id, mut config, req_id, lp_matcher_prog, lp_matcher_ctx, eng_current_slot, eng_max_stale) = {
                     let data = a_slab.try_borrow_data()?;
                     slab_guard(program_id, a_slab, &data)?;
                     require_initialized(&data)?;
@@ -7187,6 +7250,8 @@ pub mod processor {
                         req_id,
                         lp_acc.matcher_program,
                         lp_acc.matcher_context,
+                        engine.current_slot,
+                        engine.max_crank_staleness_slots,
                     )
                 };
 
@@ -7210,6 +7275,8 @@ pub mod processor {
                     if idx == 0 {
                         return Err(PercolatorError::OracleInvalid.into());
                     }
+                    // PERC-365: Reject trades if Hyperp oracle is stale
+                    oracle::check_hyperp_staleness(eng_current_slot, eng_max_stale, clock.slot)?;
                     idx
                 } else {
                     oracle::read_price_clamped(
@@ -7395,6 +7462,8 @@ pub mod processor {
                     if idx == 0 {
                         return Err(PercolatorError::OracleInvalid.into());
                     }
+                    // PERC-365: Reject liquidations if Hyperp oracle is stale
+                    { let eng = zc::engine_ref(&data)?; oracle::check_hyperp_staleness(eng.current_slot, eng.max_crank_staleness_slots, clock.slot)?; }
                     idx
                 } else {
                     oracle::read_price_clamped(
@@ -7501,6 +7570,8 @@ pub mod processor {
                     if idx == 0 {
                         return Err(PercolatorError::OracleInvalid.into());
                     }
+                    // PERC-365: Reject if Hyperp oracle is stale
+                    { let eng = zc::engine_ref(&data)?; oracle::check_hyperp_staleness(eng.current_slot, eng.max_crank_staleness_slots, clock.slot)?; }
                     idx
                 } else {
                     oracle::read_price_clamped(
@@ -8087,6 +8158,8 @@ pub mod processor {
                     if idx == 0 {
                         return Err(PercolatorError::OracleInvalid.into());
                     }
+                    // PERC-365: Reject ADL if Hyperp oracle is stale
+                    { let eng = zc::engine_ref(&data)?; oracle::check_hyperp_staleness(eng.current_slot, eng.max_crank_staleness_slots, clock.slot)?; }
                     idx
                 } else {
                     oracle::read_price_clamped(
@@ -10723,6 +10796,8 @@ pub mod processor {
                     if idx == 0 {
                         return Err(PercolatorError::OracleInvalid.into());
                     }
+                    // PERC-365: Reject if Hyperp oracle is stale
+                    { let eng = zc::engine_ref(&data)?; oracle::check_hyperp_staleness(eng.current_slot, eng.max_crank_staleness_slots, clock.slot)?; }
                     idx
                 } else {
                     oracle::read_price_clamped(
