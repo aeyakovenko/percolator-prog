@@ -9504,10 +9504,10 @@ pub mod processor {
                 // PERC-313: Update epoch high-water mark after deposit
                 // Track the peak TVL within each epoch so withdrawals can be
                 // bounded to a floor percentage of that peak.
-                if vault_state.hwm_floor_bps > 0 {
-                    if vault_state.total_capital > vault_state.epoch_high_water_tvl {
-                        vault_state.epoch_high_water_tvl = vault_state.total_capital;
-                    }
+                if vault_state.hwm_floor_bps > 0
+                    && vault_state.total_capital > vault_state.epoch_high_water_tvl
+                {
+                    vault_state.epoch_high_water_tvl = vault_state.total_capital;
                 }
 
                 // Update engine vault balance (tokens are already in the vault token account)
