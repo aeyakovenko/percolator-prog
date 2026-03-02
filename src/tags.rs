@@ -88,6 +88,8 @@ pub const TAG_QUEUE_WITHDRAWAL: u8 = 47;
 pub const TAG_CLAIM_QUEUED_WITHDRAWAL: u8 = 48;
 /// PERC-309: Cancel queued withdrawal, refund remaining.
 pub const TAG_CANCEL_QUEUED_WITHDRAWAL: u8 = 49;
+/// PERC-305: Auto-deleverage — surgically close profitable positions when PnL cap hit.
+pub const TAG_EXECUTE_ADL: u8 = 50;
 
 #[cfg(test)]
 mod tests {
@@ -147,6 +149,7 @@ mod tests {
             TAG_QUEUE_WITHDRAWAL,
             TAG_CLAIM_QUEUED_WITHDRAWAL,
             TAG_CANCEL_QUEUED_WITHDRAWAL,
+            TAG_EXECUTE_ADL,
         ];
 
         for i in 0..tags.len() {
@@ -210,6 +213,7 @@ mod tests {
             TAG_QUEUE_WITHDRAWAL,
             TAG_CLAIM_QUEUED_WITHDRAWAL,
             TAG_CANCEL_QUEUED_WITHDRAWAL,
+            TAG_EXECUTE_ADL,
         ];
 
         for (i, &tag) in tags.iter().enumerate() {

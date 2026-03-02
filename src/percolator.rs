@@ -2099,6 +2099,11 @@ pub mod ix {
         ClaimQueuedWithdrawal,
         /// PERC-309: Cancel queued withdrawal.
         CancelQueuedWithdrawal,
+        /// PERC-305: Auto-deleverage — surgically close/reduce the most profitable
+        /// position when pnl_pos_tot exceeds max_pnl_cap. Permissionless.
+        ExecuteAdl {
+            target_idx: u16,
+        },
     }
 
     impl Instruction {
@@ -2502,6 +2507,10 @@ pub mod ix {
                 }
                 TAG_CLAIM_QUEUED_WITHDRAWAL => Ok(Instruction::ClaimQueuedWithdrawal),
                 TAG_CANCEL_QUEUED_WITHDRAWAL => Ok(Instruction::CancelQueuedWithdrawal),
+                TAG_EXECUTE_ADL => {
+                    let target_idx = read_u16(&mut rest)?;
+                    Ok(Instruction::ExecuteAdl { target_idx })
+                }
                 _ => Err(ProgramError::InvalidInstructionData),
             }
         }
@@ -10671,6 +10680,87 @@ pub mod processor {
 
                 msg!("PERC-309: Cancelled, {} LP unclaimed", remaining);
             }
+
+            Instruction::ExecuteAdl { target_idx } => {
+                // PERC-305: Auto-deleverage — permissionless instruction to surgically
+                // close/reduce the most profitable position when pnl_pos_tot > max_pnl_cap.
+                //
+                // Accounts:
+                //   0. [signer]   Caller (permissionless — incentive is unblocking
+                //                 the market for normal trading)
+                //   1. [writable] Slab account
+                //   2. []         Clock sysvar
+                //   3. []         Oracle account (Pyth/Chainlink/authority — same as liquidation)
+                accounts::expect_len(accounts, 4)?;
+                let a_slab = &accounts[1];
+                let a_oracle = &accounts[3];
+                accounts::expect_writable(a_slab)?;
+
+                let mut data = state::slab_data_mut(a_slab)?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+
+                let mut config = state::read_config(&data);
+
+                // ADL requires max_pnl_cap to be set
+                if config.max_pnl_cap == 0 {
+                    msg!("ADL: max_pnl_cap not configured");
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+
+                let clock = Clock::from_account_info(&accounts[2])?;
+
+                // Read oracle price (same logic as liquidation)
+                let is_hyperp = oracle::is_hyperp_mode(&config);
+                let price = if is_hyperp {
+                    let idx = config.last_effective_price_e6;
+                    if idx == 0 {
+                        return Err(PercolatorError::OracleInvalid.into());
+                    }
+                    idx
+                } else {
+                    oracle::read_price_clamped(
+                        &mut config,
+                        a_oracle,
+                        clock.unix_timestamp,
+                        &accounts[4..],
+                    )?
+                };
+                state::write_config(&mut data, &config);
+
+                let engine = zc::engine_mut(&mut data)?;
+                check_idx(engine, target_idx)?;
+
+                let pnl_pos_tot = engine.pnl_pos_tot.get();
+                let cap = config.max_pnl_cap as u128;
+
+                // Precondition: PnL cap must be exceeded
+                if pnl_pos_tot <= cap {
+                    msg!(
+                        "ADL: pnl_pos_tot {} <= cap {}, not needed",
+                        pnl_pos_tot,
+                        cap
+                    );
+                    return Err(PercolatorError::EngineRiskReductionOnlyMode.into());
+                }
+
+                let excess = pnl_pos_tot.saturating_sub(cap);
+
+                // Delegate to core engine's execute_adl — handles settlement,
+                // PnL checks, full/partial close, and OI updates.
+                let closed_abs = engine
+                    .execute_adl(target_idx, clock.slot, price, excess)
+                    .map_err(map_risk_error)?;
+
+                msg!(
+                    "ADL: idx={} closed={} excess={} pnl_pos_tot_after={}",
+                    target_idx,
+                    closed_abs,
+                    excess,
+                    engine.pnl_pos_tot.get()
+                );
+            }
+
             // Defense-in-depth: if a future tag routes here by mistake,
             // return an error instead of panicking (unreachable! aborts the tx).
             _ => return Err(ProgramError::InvalidInstructionData),
