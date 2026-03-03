@@ -48,9 +48,9 @@ pub mod constants {
     // PERC-312: Compile-time assertion for CONFIG_LEN (catches silent misalignment)
     // Native (u128 align=16): 512; SBF (u128 align=8): 496
     #[cfg(target_arch = "bpf")]
-    const _: [(); 504] = [(); CONFIG_LEN];
+    const _: [(); 496] = [(); CONFIG_LEN];
     #[cfg(not(target_arch = "bpf"))]
-    const _: [(); 528] = [(); CONFIG_LEN];
+    const _: [(); 512] = [(); CONFIG_LEN];
     pub const ENGINE_ALIGN: usize = align_of::<RiskEngine>();
 
     pub const fn align_up(x: usize, a: usize) -> usize {
@@ -2916,12 +2916,8 @@ pub mod state {
         pub insurance_isolation_bps: u16,
 
         /// Padding / reserved bytes (PERC-306 layout preservation).
-        ///
-        /// PERC-118: bytes [0..2] are interpreted as `mark_oracle_weight_bps: u16 LE`
-        /// (oracle weight for the Hyperp EMA blend, 0..=10_000 bps).
-        /// 0 (default) = 100% impact_mid — backward-compatible with existing markets.
-        /// Read/write via `state::get_mark_oracle_weight_bps` /
-        /// `state::set_mark_oracle_weight_bps` to avoid struct layout changes.
+        /// PERC-118: [0..2] = mark_oracle_weight_bps (u16 LE, 0..=10_000).
+        /// Access via state::get/set_mark_oracle_weight_bps().
         pub _insurance_isolation_padding: [u8; 14],
 
         // ========================================
@@ -2976,17 +2972,6 @@ pub mod state {
         pub _lp_col_pad: [u8; 7],
         /// Loan-to-value ratio in basis points for LP tokens (e.g., 8000 = 80%).
         pub lp_collateral_ltv_bps: u64,
-
-        // ========================================
-        // Mark Price Blend (PERC-118)
-        // ========================================
-        /// Oracle weight in basis points for blended mark price.
-        /// 10_000 = 100% oracle (legacy, no TWAP blend).
-        /// 7_000 = 70% oracle + 30% trade TWAP.
-        /// 0 = 100% trade TWAP (not recommended).
-        /// Default: 10_000 (backwards compatible — pure oracle mark).
-        pub mark_oracle_weight_bps: u16,
-        pub _mark_weight_pad: [u8; 14],
     }
 
     pub fn slab_data_mut<'a, 'b>(
@@ -3132,18 +3117,28 @@ pub mod state {
         data[start..start + bytes.len()].copy_from_slice(bytes);
     }
 
-    /// PERC-118: Read the mark oracle weight from config.
-    /// 0 = backward-compatible (pure oracle, treated as 10_000 at crank time).
-    /// 10_000 = 100% oracle. Values in between blend oracle + trade TWAP.
+    /// PERC-118: Read the mark oracle weight from `_insurance_isolation_padding[0..2]`.
+    ///
+    /// Stored as little-endian u16 in padding bytes to avoid CONFIG_LEN changes.
+    /// 0 = backward-compatible: blend uses pure impact_mid (no oracle component).
+    /// 10_000 = 100% oracle (mark = oracle, premium always 0).
+    /// Values in between blend oracle + impact_mid proportionally.
     #[inline]
     pub fn get_mark_oracle_weight_bps(config: &MarketConfig) -> u16 {
-        config.mark_oracle_weight_bps
+        u16::from_le_bytes([
+            config._insurance_isolation_padding[0],
+            config._insurance_isolation_padding[1],
+        ])
     }
 
-    /// PERC-118: Set the mark oracle weight. Clamps to [0, 10_000].
+    /// PERC-118: Set the mark oracle weight into `_insurance_isolation_padding[0..2]`.
+    /// Clamps to [0, 10_000].
     #[inline]
     pub fn set_mark_oracle_weight_bps(config: &mut MarketConfig, weight_bps: u16) {
-        config.mark_oracle_weight_bps = weight_bps.min(10_000);
+        let clamped = weight_bps.min(10_000);
+        let bytes = clamped.to_le_bytes();
+        config._insurance_isolation_padding[0] = bytes[0];
+        config._insurance_isolation_padding[1] = bytes[1];
     }
 }
 
@@ -4419,8 +4414,16 @@ pub mod oracle {
     ///
     /// # Returns
     /// Blended price in e6 units, saturating at u64::MAX.
-    pub fn compute_blend_mark_price(oracle_e6: u64, impact_mid_e6: u64, oracle_weight_bps: u16) -> u64 {
-        percolator::RiskEngine::compute_blended_mark_price(oracle_e6, impact_mid_e6, oracle_weight_bps as u64)
+    pub fn compute_blend_mark_price(
+        oracle_e6: u64,
+        impact_mid_e6: u64,
+        oracle_weight_bps: u16,
+    ) -> u64 {
+        percolator::RiskEngine::compute_blended_mark_price(
+            oracle_e6,
+            impact_mid_e6,
+            oracle_weight_bps as u64,
+        )
     }
 
     /// Compute premium-based funding rate (Hyperp funding model).
@@ -6945,14 +6948,13 @@ pub mod processor {
                 };
 
                 // PERC-118: Blended mark price (oracle + trade TWAP).
-                // When mark_oracle_weight_bps == 0 (default/legacy), use
-                // pure oracle (10000 weight). Otherwise blend with trade TWAP.
+                // weight=0 (default) → pure oracle mark (backward compatible:
+                // compute_blend_mark_price returns impact_mid when w=0, but
+                // engine TWAP is 0 for new markets, so set_mark_price_blended
+                // falls back to oracle anyway). For configured markets, the
+                // blend weight controls oracle vs TWAP proportions.
                 {
-                    let w = if config.mark_oracle_weight_bps == 0 {
-                        10_000u64 // backwards compatible: treat 0 as "not configured" = 100% oracle
-                    } else {
-                        config.mark_oracle_weight_bps as u64
-                    };
+                    let w = state::get_mark_oracle_weight_bps(&config) as u64;
                     engine.set_mark_price_blended(config.authority_price_e6, w);
                 }
 
@@ -8416,7 +8418,7 @@ pub mod processor {
                         if w > 10_000 {
                             return Err(PercolatorError::InvalidConfigParam.into());
                         }
-                        config.mark_oracle_weight_bps = w;
+                        state::set_mark_oracle_weight_bps(&mut config, w);
                     }
                     state::write_config(&mut data, &config);
                     let (mult, skew) = unpack_oi_cap(config.oi_cap_multiplier_bps);

@@ -5147,8 +5147,6 @@ fn test_set_pyth_oracle_then_update_mark_price() {
     );
 }
 
-
-
 // =============================================================================
 // PERC-118: compute_blend_mark_price — Unit Tests
 // =============================================================================
@@ -5178,7 +5176,10 @@ fn test_blend_mark_price_weight_5000_midpoint() {
     let impact_mid: u64 = 2_200_000_000;
     let result = percolator_prog::oracle::compute_blend_mark_price(oracle, impact_mid, 5_000);
     let expected: u64 = 2_100_000_000; // midpoint
-    assert_eq!(result, expected, "weight=5_000 should return exact midpoint");
+    assert_eq!(
+        result, expected,
+        "weight=5_000 should return exact midpoint"
+    );
 }
 
 /// Test 75% oracle + 25% impact_mid blend.
@@ -5200,7 +5201,10 @@ fn test_blend_mark_price_oracle_zero_returns_impact_mid() {
     let impact_mid: u64 = 1_500_000_000;
     for weight in [0u16, 5_000, 10_000] {
         let result = percolator_prog::oracle::compute_blend_mark_price(oracle, impact_mid, weight);
-        assert_eq!(result, impact_mid, "oracle=0 with weight={weight} should return impact_mid");
+        assert_eq!(
+            result, impact_mid,
+            "oracle=0 with weight={weight} should return impact_mid"
+        );
     }
 }
 
@@ -5217,7 +5221,9 @@ fn test_blend_mark_price_monotone_oracle_weight() {
     let oracle: u64 = 1_000_000; // $1
     let impact_mid: u64 = 2_000_000; // $2
     let mut prev = percolator_prog::oracle::compute_blend_mark_price(oracle, impact_mid, 0);
-    for w in [1_000u16, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 8_000, 9_000, 10_000] {
+    for w in [
+        1_000u16, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 8_000, 9_000, 10_000,
+    ] {
         let cur = percolator_prog::oracle::compute_blend_mark_price(oracle, impact_mid, w);
         assert!(cur <= prev, "increasing weight should move blend toward oracle (lower when oracle < impact_mid): w={w} cur={cur} prev={prev}");
         prev = cur;
@@ -5234,7 +5240,6 @@ fn test_blend_mark_price_no_overflow() {
     assert!(result > 0, "should not overflow to 0");
 }
 
-
 /// Test UpdateHyperpMark with weight=0: pure impact_mid (backward compatible).
 #[test]
 fn test_update_hyperp_mark_blend_weight_zero_backward_compat() {
@@ -5246,9 +5251,15 @@ fn test_update_hyperp_mark_blend_weight_zero_backward_compat() {
     {
         let mut dummy_ata = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
         let accounts = [
-            f.admin.to_info(), f.slab.to_info(), f.mint.to_info(), f.vault.to_info(),
-            f.token_prog.to_info(), f.clock.to_info(), f.rent.to_info(),
-            dummy_ata.to_info(), f.system.to_info(),
+            f.admin.to_info(),
+            f.slab.to_info(),
+            f.mint.to_info(),
+            f.vault.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+            f.rent.to_info(),
+            dummy_ata.to_info(),
+            f.system.to_info(),
         ];
         process_instruction(&f.program_id, &accounts, &init_data).unwrap();
     }
@@ -5256,7 +5267,8 @@ fn test_update_hyperp_mark_blend_weight_zero_backward_compat() {
     // Default weight should be 0 (bytes are zero from slab init)
     let cfg0 = state::read_config(&f.slab.data);
     assert_eq!(
-        percolator_prog::state::get_mark_oracle_weight_bps(&cfg0), 0,
+        percolator_prog::state::get_mark_oracle_weight_bps(&cfg0),
+        0,
         "default mark_oracle_weight_bps should be 0"
     );
 
@@ -5264,19 +5276,40 @@ fn test_update_hyperp_mark_blend_weight_zero_backward_compat() {
     let pumpswap_id = oracle::PUMPSWAP_PROGRAM_ID;
     let bvk = Pubkey::new_unique();
     let qvk = Pubkey::new_unique();
-    let mut pool = TestAccount::new(Pubkey::new_unique(), pumpswap_id, 0, make_pumpswap_pool(&bvk, &qvk));
+    let mut pool = TestAccount::new(
+        Pubkey::new_unique(),
+        pumpswap_id,
+        0,
+        make_pumpswap_pool(&bvk, &qvk),
+    );
     let mut bv = TestAccount::new(bvk, spl_token::ID, 0, make_spl_vault(2_000_000));
     let mut qv = TestAccount::new(qvk, spl_token::ID, 0, make_spl_vault(200_000_000));
     let mut clk = TestAccount::new(
-        solana_program::sysvar::clock::id(), solana_program::sysvar::id(), 0, make_clock(200, 200),
+        solana_program::sysvar::clock::id(),
+        solana_program::sysvar::id(),
+        0,
+        make_clock(200, 200),
     );
 
-    let accounts = [f.slab.to_info(), pool.to_info(), clk.to_info(), bv.to_info(), qv.to_info()];
+    let accounts = [
+        f.slab.to_info(),
+        pool.to_info(),
+        clk.to_info(),
+        bv.to_info(),
+        qv.to_info(),
+    ];
     let res = process_instruction(&f.program_id, &accounts, &encode_update_hyperp_mark());
-    assert!(res.is_ok(), "UpdateHyperpMark (weight=0) should succeed: {:?}", res);
+    assert!(
+        res.is_ok(),
+        "UpdateHyperpMark (weight=0) should succeed: {:?}",
+        res
+    );
 
     let after = state::read_config(&f.slab.data);
-    assert_ne!(after.authority_price_e6, 0, "mark should be non-zero after update");
+    assert_ne!(
+        after.authority_price_e6, 0,
+        "mark should be non-zero after update"
+    );
 }
 
 /// Test UpdateHyperpMark with weight=5_000: blend mode activates, last_effective_price_e6 updated.
@@ -5290,9 +5323,15 @@ fn test_update_hyperp_mark_blend_weight_5000() {
     {
         let mut dummy_ata = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
         let accounts = [
-            f.admin.to_info(), f.slab.to_info(), f.mint.to_info(), f.vault.to_info(),
-            f.token_prog.to_info(), f.clock.to_info(), f.rent.to_info(),
-            dummy_ata.to_info(), f.system.to_info(),
+            f.admin.to_info(),
+            f.slab.to_info(),
+            f.mint.to_info(),
+            f.vault.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+            f.rent.to_info(),
+            dummy_ata.to_info(),
+            f.system.to_info(),
         ];
         process_instruction(&f.program_id, &accounts, &init_data).unwrap();
     }
@@ -5309,21 +5348,45 @@ fn test_update_hyperp_mark_blend_weight_5000() {
     let pumpswap_id = oracle::PUMPSWAP_PROGRAM_ID;
     let bvk = Pubkey::new_unique();
     let qvk = Pubkey::new_unique();
-    let mut pool = TestAccount::new(Pubkey::new_unique(), pumpswap_id, 0, make_pumpswap_pool(&bvk, &qvk));
+    let mut pool = TestAccount::new(
+        Pubkey::new_unique(),
+        pumpswap_id,
+        0,
+        make_pumpswap_pool(&bvk, &qvk),
+    );
     let mut bv = TestAccount::new(bvk, spl_token::ID, 0, make_spl_vault(1_000_000));
     let mut qv = TestAccount::new(qvk, spl_token::ID, 0, make_spl_vault(150_000_000));
     let mut clk = TestAccount::new(
-        solana_program::sysvar::clock::id(), solana_program::sysvar::id(), 0, make_clock(200, 200),
+        solana_program::sysvar::clock::id(),
+        solana_program::sysvar::id(),
+        0,
+        make_clock(200, 200),
     );
 
-    let accounts = [f.slab.to_info(), pool.to_info(), clk.to_info(), bv.to_info(), qv.to_info()];
+    let accounts = [
+        f.slab.to_info(),
+        pool.to_info(),
+        clk.to_info(),
+        bv.to_info(),
+        qv.to_info(),
+    ];
     let res = process_instruction(&f.program_id, &accounts, &encode_update_hyperp_mark());
-    assert!(res.is_ok(), "UpdateHyperpMark (weight=5_000) should succeed: {:?}", res);
+    assert!(
+        res.is_ok(),
+        "UpdateHyperpMark (weight=5_000) should succeed: {:?}",
+        res
+    );
 
     let after = state::read_config(&f.slab.data);
-    assert_ne!(after.authority_price_e6, 0, "mark should be non-zero after blend update");
+    assert_ne!(
+        after.authority_price_e6, 0,
+        "mark should be non-zero after blend update"
+    );
     // PERC-118: last_effective_price_e6 is now updated by UpdateHyperpMark
-    assert_ne!(after.last_effective_price_e6, 0, "index should be updated by PERC-118");
+    assert_ne!(
+        after.last_effective_price_e6, 0,
+        "index should be updated by PERC-118"
+    );
 }
 
 /// Test mark_oracle_weight_bps accessor round-trip.
@@ -5335,7 +5398,8 @@ fn test_mark_oracle_weight_bps_accessor_roundtrip() {
     state::write_config(&mut f.slab.data, &cfg);
     let cfg2 = state::read_config(&f.slab.data);
     assert_eq!(
-        percolator_prog::state::get_mark_oracle_weight_bps(&cfg2), 7_500,
+        percolator_prog::state::get_mark_oracle_weight_bps(&cfg2),
+        7_500,
         "mark_oracle_weight_bps should survive config round-trip"
     );
 }
@@ -5347,7 +5411,8 @@ fn test_mark_oracle_weight_bps_clamps() {
     let mut cfg = state::read_config(&f.slab.data);
     percolator_prog::state::set_mark_oracle_weight_bps(&mut cfg, 20_000); // over max
     assert_eq!(
-        percolator_prog::state::get_mark_oracle_weight_bps(&cfg), 10_000,
+        percolator_prog::state::get_mark_oracle_weight_bps(&cfg),
+        10_000,
         "weight > 10_000 should clamp to 10_000"
     );
 }
