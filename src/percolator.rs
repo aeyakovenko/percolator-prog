@@ -77,8 +77,9 @@ pub mod constants {
     // Keep in sync with program/src/tags.rs when that file exists (PERC-112).
     // Add new tags here AND to tags.rs.
     pub const TAG_SET_PYTH_ORACLE: u8 = 32;
-    pub const TAG_MARK_PRICE_CRANK: u8 = 33; // PERC-118 — reserved for next PR
-                                             // ── Mark price EMA parameters (PERC-118/119) ───────────────────────────
+    /// Alias for `tags::TAG_UPDATE_MARK_PRICE` (PERC-117 — Pyth oracle CPI integration).
+    pub const TAG_MARK_PRICE_CRANK: u8 = 33;
+    // ── Mark price EMA parameters (PERC-118/119) ───────────────────────────
     /// 8-hour EMA window in slots (~400ms/slot → 72_000 slots ≈ 8 hours)
     pub const MARK_PRICE_EMA_WINDOW_SLOTS: u64 = 72_000;
     /// Per-slot EMA alpha in e-6 units: 2/(72_000+1) ≈ 27
@@ -1991,6 +1992,23 @@ pub mod ix {
             max_staleness_secs: u64,
             conf_filter_bps: u16,
         },
+
+        /// PERC-117: Update mark price from Pyth oracle (Tag 33).
+        ///
+        /// **Permissionless** — anyone can call. This is the mark price crank
+        /// for Pyth-pinned markets. Reads the current Pyth PriceUpdateV2 price,
+        /// applies 8-hour EMA smoothing with circuit breaker, and writes the
+        /// new mark to `authority_price_e6`.
+        ///
+        /// Requires: market is in Pyth-pinned mode
+        ///   (`oracle_authority == [0;32]` AND `index_feed_id != [0;32]`).
+        ///
+        /// Accounts:
+        /// - 0. `[writable]` Slab
+        /// - 1. `[]`         Pyth PriceUpdateV2 account
+        /// - 2. `[]`         Clock sysvar
+        UpdateMarkPrice,
+
         /// Update the Hyperp mark price from a DEX oracle (Tag 34).
         ///
         /// **Permissionless** — anyone can call. This is the core Hyperp EMA oracle
@@ -2429,6 +2447,7 @@ pub mod ix {
                         conf_filter_bps,
                     })
                 }
+                TAG_UPDATE_MARK_PRICE => Ok(Instruction::UpdateMarkPrice),
                 TAG_UPDATE_HYPERP_MARK => Ok(Instruction::UpdateHyperpMark),
                 TAG_TRADE_CPI_V2 => {
                     // PERC-154: TradeCpiV2 — same as TradeCpi but includes PDA bump byte
@@ -9137,6 +9156,119 @@ pub mod processor {
                     "SetPythOracle: Pyth-pinned, staleness={}s, conf_bps={}",
                     max_staleness_secs,
                     conf_filter_bps
+                );
+            }
+
+            Instruction::UpdateMarkPrice => {
+                // UpdateMarkPrice (Tag 33) — permissionless Pyth mark price crank.
+                //
+                // PERC-117: Reads the current Pyth PriceUpdateV2 price, applies
+                // 8-hour EMA smoothing with circuit breaker, and writes the new
+                // mark to authority_price_e6. This provides a manipulation-resistant
+                // mark price for funding rates, liquidations, and PnL calculations.
+                //
+                // Only valid for Pyth-pinned markets (oracle_authority==[0;32] AND
+                // index_feed_id != [0;32]). Hyperp and admin-oracle markets are rejected.
+                //
+                // Accounts:
+                //   0. [writable] Slab
+                //   1. []         Pyth PriceUpdateV2 account
+                //   2. []         Clock sysvar
+                if accounts.len() < 3 {
+                    return Err(ProgramError::NotEnoughAccountKeys);
+                }
+                let a_slab = &accounts[0];
+                let a_pyth = &accounts[1];
+                let a_clock = &accounts[2];
+
+                accounts::expect_writable(a_slab)?;
+
+                let clock = Clock::from_account_info(a_clock)?;
+                let mut data = state::slab_data_mut(a_slab)?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+                require_not_paused(&data)?;
+
+                let mut config = state::read_config(&data);
+
+                // Only Pyth-pinned markets can use this instruction.
+                // Pyth-pinned: oracle_authority == [0;32] AND index_feed_id != [0;32].
+                if !crate::verify::is_pyth_pinned_mode(config.oracle_authority, config.index_feed_id) {
+                    msg!("UpdateMarkPrice: not a Pyth-pinned market");
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                // Resolved markets don't need mark updates
+                if state::is_resolved(&data) {
+                    return Ok(());
+                }
+
+                // Read last update slot from engine
+                let last_slot = {
+                    let engine = zc::engine_ref(&data)?;
+                    engine.current_slot
+                };
+                let dt_slots = clock.slot.saturating_sub(last_slot);
+                if dt_slots == 0 {
+                    return Ok(()); // same slot — no-op
+                }
+
+                // Minimum update interval — limits manipulation frequency.
+                // An attacker calling UpdateMarkPrice every slot with a delayed
+                // Pyth price can attempt to lag the EMA. A 5-slot (~2s) cooldown
+                // reduces the rate of possible EMA manipulation attempts.
+                const MIN_PYTH_MARK_UPDATE_INTERVAL_SLOTS: u64 = 5;
+                if dt_slots < MIN_PYTH_MARK_UPDATE_INTERVAL_SLOTS {
+                    return Ok(()); // too soon — skip silently
+                }
+
+                // SECURITY: enforce that the oracle account is owned by the
+                // Pyth receiver program. Prevents substituting an attacker-controlled
+                // account for a real PriceUpdateV2 feed.
+                if !oracle::is_approved_oracle_program(a_pyth) {
+                    msg!("UpdateMarkPrice: oracle account not owned by approved oracle program");
+                    return Err(PercolatorError::OracleInvalid.into());
+                }
+
+                // Read current Pyth price (staleness + confidence + feed-ID validated).
+                let raw_price = oracle::read_pyth_price_e6(
+                    a_pyth,
+                    &config.index_feed_id,
+                    clock.unix_timestamp,
+                    config.max_staleness_secs,
+                    config.conf_filter_bps,
+                )?;
+
+                // Apply inversion and unit scaling as configured.
+                let pyth_price = {
+                    let inverted = crate::verify::invert_price_e6(raw_price, config.invert)
+                        .ok_or(PercolatorError::OracleInvalid)?;
+                    crate::verify::scale_price_e6(inverted, config.unit_scale)
+                        .ok_or::<ProgramError>(PercolatorError::OracleInvalid.into())?
+                };
+
+                // Circuit breaker + EMA: clamp raw Pyth price movement before
+                // feeding into the EMA. This prevents a single stale/wrong Pyth
+                // price from instantly shifting the mark far from fair value.
+                let prev_mark = config.authority_price_e6;
+                let cap = config.oracle_price_cap_e2bps;
+                let new_mark = oracle::compute_ema_mark_price(
+                    prev_mark,
+                    pyth_price,
+                    dt_slots,
+                    crate::constants::MARK_PRICE_EMA_ALPHA_E6,
+                    cap,
+                );
+
+                config.authority_price_e6 = new_mark;
+                state::write_config(&mut data, &config);
+
+                msg!(
+                    "UpdateMarkPrice: pyth_price={} prev_mark={} new_mark={} dt={}",
+                    pyth_price,
+                    prev_mark,
+                    new_mark,
+                    dt_slots,
                 );
             }
 
