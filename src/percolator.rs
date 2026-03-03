@@ -3132,27 +3132,18 @@ pub mod state {
         data[start..start + bytes.len()].copy_from_slice(bytes);
     }
 
-    /// PERC-118: Read the mark oracle weight from the `_insurance_isolation_padding` bytes.
-    ///
-    /// The weight is stored at padding bytes [0..2] as a little-endian u16.
-    /// 0 = 100% impact_mid (backward-compatible default for existing markets).
-    /// 10_000 = 100% oracle.
+    /// PERC-118: Read the mark oracle weight from config.
+    /// 0 = backward-compatible (pure oracle, treated as 10_000 at crank time).
+    /// 10_000 = 100% oracle. Values in between blend oracle + trade TWAP.
     #[inline]
     pub fn get_mark_oracle_weight_bps(config: &MarketConfig) -> u16 {
-        u16::from_le_bytes([
-            config._insurance_isolation_padding[0],
-            config._insurance_isolation_padding[1],
-        ])
+        config.mark_oracle_weight_bps
     }
 
-    /// PERC-118: Write the mark oracle weight into the `_insurance_isolation_padding` bytes.
-    /// Clamps the value to [0, 10_000] before storing.
+    /// PERC-118: Set the mark oracle weight. Clamps to [0, 10_000].
     #[inline]
     pub fn set_mark_oracle_weight_bps(config: &mut MarketConfig, weight_bps: u16) {
-        let clamped = weight_bps.min(10_000);
-        let bytes = clamped.to_le_bytes();
-        config._insurance_isolation_padding[0] = bytes[0];
-        config._insurance_isolation_padding[1] = bytes[1];
+        config.mark_oracle_weight_bps = weight_bps.min(10_000);
     }
 }
 
