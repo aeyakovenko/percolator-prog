@@ -31,5 +31,5 @@ jobs:
         with:
           # --harness nightly_ matches all slow harnesses (substring filter).
           # Currently: nightly_fee_monotone_in_bps (~2.5h)
-          args: --tests --output-format terse --jobs 2 --harness nightly_
+          args: --tests --output-format terse --jobs 2 --harness nightly_.*
         timeout-minutes: 295
