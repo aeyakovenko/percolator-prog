@@ -6948,7 +6948,7 @@ pub mod processor {
                 };
 
                 // PERC-118: Blended mark price (oracle + trade TWAP).
-                // weight=0 (default) → pure oracle mark (backward compatible:
+                // weight=0 (default) → pure impact_mid (backward compatible:
                 // compute_blend_mark_price returns impact_mid when w=0, but
                 // engine TWAP is 0 for new markets, so set_mark_price_blended
                 // falls back to oracle anyway). For configured markets, the
