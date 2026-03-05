@@ -3920,7 +3920,7 @@ fn kani_renounce_admin_requires_resolved() {
 /// prev_mark ± (cap * dt) regardless of the raw oracle value.
 #[kani::proof]
 #[kani::unwind(1)]
-fn kani_circuit_breaker_before_ema() {
+fn nightly_circuit_breaker_before_ema() {
     let prev_mark: u64 = kani::any();
     let oracle: u64 = kani::any();
     let dt: u64 = kani::any();

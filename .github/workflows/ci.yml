@@ -76,6 +76,7 @@ jobs:
     #   nightly_skew_adjusted_cap_never_exceeds_base_cap (~slow OI cap)
     #   nightly_median_single_price                     (~2h45m — symbolic sort, 5-element array)
     #   nightly_median_within_bounds                    (~slow — SAT-hard symbolic median, was nightly_proof_median_within_bounds)
+    #   nightly_circuit_breaker_before_ema              (~3h+ — circuit breaker EMA proof timeout)
     # All remaining kani_*, proof_*, and inductive_* harnesses run here — each expected <30 min.
     timeout-minutes: 180
     steps:
