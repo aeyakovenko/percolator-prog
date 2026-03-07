@@ -90,6 +90,9 @@ pub const TAG_CLAIM_QUEUED_WITHDRAWAL: u8 = 48;
 pub const TAG_CANCEL_QUEUED_WITHDRAWAL: u8 = 49;
 /// PERC-305: Auto-deleverage — surgically close profitable positions when PnL cap hit.
 pub const TAG_EXECUTE_ADL: u8 = 50;
+/// Close a stale slab (wrong size from old program layout) and recover rent SOL.
+/// Skips slab_guard; verifies header magic + admin authority. Admin only.
+pub const TAG_CLOSE_STALE_SLAB: u8 = 51;
 
 #[cfg(test)]
 mod tests {
@@ -150,6 +153,7 @@ mod tests {
             TAG_CLAIM_QUEUED_WITHDRAWAL,
             TAG_CANCEL_QUEUED_WITHDRAWAL,
             TAG_EXECUTE_ADL,
+            TAG_CLOSE_STALE_SLAB,
         ];
 
         for i in 0..tags.len() {
@@ -214,6 +218,7 @@ mod tests {
             TAG_CLAIM_QUEUED_WITHDRAWAL,
             TAG_CANCEL_QUEUED_WITHDRAWAL,
             TAG_EXECUTE_ADL,
+            TAG_CLOSE_STALE_SLAB,
         ];
 
         for (i, &tag) in tags.iter().enumerate() {

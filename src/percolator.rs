@@ -2135,6 +2135,21 @@ pub mod ix {
         ExecuteAdl {
             target_idx: u16,
         },
+        /// Close a stale slab (wrong size from an old program layout) and recover rent SOL.
+        ///
+        /// Unlike CloseSlab (tag 13), this path skips `slab_guard` so that slabs with
+        /// invalid data lengths (left over from old devnet deploys) can be reclaimed.
+        ///
+        /// Safety guards:
+        ///   1. slab.owner == program_id
+        ///   2. slab data length must NOT match any currently-accepted tier (SLAB_LEN,
+        ///      SLAB_LEN-16, SLAB_LEN-24). Use CloseSlab for properly-sized slabs.
+        ///   3. First 8 bytes must equal the MAGIC constant ("PERCOLAT"). Slabs with
+        ///      zero/garbage magic cannot be closed through this path.
+        ///   4. Signer must match the admin field at header offset 16..48.
+        ///
+        /// Accounts: [dest(signer,writable), slab(writable)]
+        CloseStaleSlabs,
     }
 
     impl Instruction {
@@ -2565,6 +2580,7 @@ pub mod ix {
                     let target_idx = read_u16(&mut rest)?;
                     Ok(Instruction::ExecuteAdl { target_idx })
                 }
+                TAG_CLOSE_STALE_SLAB => Ok(Instruction::CloseStaleSlabs),
                 _ => Err(ProgramError::InvalidInstructionData),
             }
         }
@@ -11331,6 +11347,91 @@ pub mod processor {
                     closed_abs,
                     excess,
                     engine.pnl_pos_tot.get()
+                );
+            }
+
+            Instruction::CloseStaleSlabs => {
+                // Close a stale slab whose data length does not match any accepted tier.
+                //
+                // This is the recovery path for slabs created by old program layouts
+                // (e.g. pre-PERC-120 devnet deploys with now-invalid sizes).  Unlike
+                // CloseSlab (tag 13) we skip `slab_guard`; instead we gate on:
+                //   1. Program ownership of the slab account.
+                //   2. The slab size must NOT match any valid tier (SLAB_LEN ± 0/16/24).
+                //   3. Header magic == MAGIC ("PERCOLAT") at bytes [0..8].
+                //   4. Signer == admin field at header bytes [16..48].
+                //
+                // Accounts: [dest(signer,writable), slab(writable)]
+                accounts::expect_len(accounts, 2)?;
+                let a_dest = &accounts[0];
+                let a_slab = &accounts[1];
+
+                accounts::expect_signer(a_dest)?;
+                accounts::expect_writable(a_slab)?;
+
+                // 1. Must be owned by this program.
+                if a_slab.owner != program_id {
+                    return Err(ProgramError::IllegalOwner);
+                }
+
+                // 2. Reject slabs with valid sizes — use CloseSlab for those.
+                const PRE_118_SLAB_LEN: usize = SLAB_LEN - 16;
+                const OLDEST_SLAB_LEN: usize = SLAB_LEN - 24;
+                let slab_data = a_slab.try_borrow_data()?;
+                let slab_len = slab_data.len();
+                if slab_len == SLAB_LEN
+                    || slab_len == PRE_118_SLAB_LEN
+                    || slab_len == OLDEST_SLAB_LEN
+                {
+                    return Err(PercolatorError::InvalidSlabLen.into());
+                }
+
+                // Header layout (stable across V0 and V1):
+                //   [0..8]   magic: u64 (little-endian)
+                //   [8..12]  version: u32
+                //   [12..13] bump: u8
+                //   [13..16] _padding: [u8;3]
+                //   [16..48] admin: [u8;32]
+                const ADMIN_OFF: usize = 16;
+                const ADMIN_END: usize = ADMIN_OFF + 32;
+
+                if slab_len < ADMIN_END {
+                    // Slab too small to contain any valid header — refuse.
+                    return Err(PercolatorError::NotInitialized.into());
+                }
+
+                // 3. Magic check.
+                let magic = u64::from_le_bytes(
+                    slab_data[0..8]
+                        .try_into()
+                        .map_err(|_| PercolatorError::InvalidMagic)?,
+                );
+                if magic != MAGIC {
+                    return Err(PercolatorError::InvalidMagic.into());
+                }
+
+                // 4. Admin check using the same helper as CloseSlab.
+                let admin_bytes: [u8; 32] = slab_data[ADMIN_OFF..ADMIN_END]
+                    .try_into()
+                    .map_err(|_| PercolatorError::InvalidMagic)?;
+                drop(slab_data); // release borrow before lamport transfer
+
+                require_admin(admin_bytes, a_dest.key)?;
+
+                // Drain all lamports to dest (same as CloseSlab, no zeroing needed
+                // because the slab layout is already invalid and the runtime will
+                // garbage-collect the account once lamports hit zero).
+                let slab_lamports = a_slab.lamports();
+                **a_slab.lamports.borrow_mut() = 0;
+                **a_dest.lamports.borrow_mut() = a_dest
+                    .lamports()
+                    .checked_add(slab_lamports)
+                    .ok_or(PercolatorError::EngineOverflow)?;
+
+                msg!(
+                    "CloseStaleSlabs: closed stale slab (size={}) reclaimed {} lamports",
+                    slab_len,
+                    slab_lamports,
                 );
             }
 
