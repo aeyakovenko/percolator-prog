@@ -11509,6 +11509,11 @@ pub mod processor {
                 accounts::expect_signer(a_slab)?;
                 accounts::expect_writable(a_slab)?;
 
+                // Guard: dest and slab must be different accounts (#936)
+                if a_dest.key == a_slab.key {
+                    return Err(ProgramError::InvalidArgument);
+                }
+
                 // 1. Slab must be owned by this program.
                 if a_slab.owner != program_id {
                     return Err(ProgramError::IllegalOwner);
