@@ -98,6 +98,18 @@ pub const TAG_CLOSE_STALE_SLAB: u8 = 51;
 /// Cannot close an initialised slab (magic == MAGIC) — use CloseSlab (tag 13) for those.
 pub const TAG_RECLAIM_SLAB_RENT: u8 = 52;
 
+/// Permissionless on-chain audit crank: walk all accounts and verify conservation invariants.
+/// Checks capital, PnL, OI, LP aggregates and solvency. Pauses market on violation.
+pub const TAG_AUDIT_CRANK: u8 = 53;
+
+/// Admin: configure cross-market margin offset for a pair of slabs.
+/// Creates/updates an OffsetPairConfig PDA at ["cmor_pair", slab_a, slab_b].
+pub const TAG_SET_OFFSET_PAIR: u8 = 54;
+
+/// Permissionless: attest user positions across two slabs for portfolio margin credit.
+/// Creates/updates a CrossMarginAttestation PDA at ["cmor", user, slab_a, slab_b].
+pub const TAG_ATTEST_CROSS_MARGIN: u8 = 55;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +171,9 @@ mod tests {
             TAG_EXECUTE_ADL,
             TAG_CLOSE_STALE_SLAB,
             TAG_RECLAIM_SLAB_RENT,
+            TAG_AUDIT_CRANK,
+            TAG_SET_OFFSET_PAIR,
+            TAG_ATTEST_CROSS_MARGIN,
         ];
 
         for i in 0..tags.len() {
@@ -225,6 +240,9 @@ mod tests {
             TAG_EXECUTE_ADL,
             TAG_CLOSE_STALE_SLAB,
             TAG_RECLAIM_SLAB_RENT,
+            TAG_AUDIT_CRANK,
+            TAG_SET_OFFSET_PAIR,
+            TAG_ATTEST_CROSS_MARGIN,
         ];
 
         for (i, &tag) in tags.iter().enumerate() {

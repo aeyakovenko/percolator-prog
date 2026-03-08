@@ -2065,6 +2065,7 @@ fn test_funding_sign_flips_with_lp_position() {
         DEFAULT_FUNDING_INV_SCALE_NOTIONAL_E6,
         DEFAULT_FUNDING_MAX_PREMIUM_BPS,
         DEFAULT_FUNDING_MAX_BPS_PER_SLOT,
+        0,
     );
 
     // LP net short => negative funding rate (shorts pay)
@@ -2077,6 +2078,7 @@ fn test_funding_sign_flips_with_lp_position() {
         DEFAULT_FUNDING_INV_SCALE_NOTIONAL_E6,
         DEFAULT_FUNDING_MAX_PREMIUM_BPS,
         DEFAULT_FUNDING_MAX_BPS_PER_SLOT,
+        0,
     );
 
     // LP flat => zero funding rate
@@ -2089,6 +2091,7 @@ fn test_funding_sign_flips_with_lp_position() {
         DEFAULT_FUNDING_INV_SCALE_NOTIONAL_E6,
         DEFAULT_FUNDING_MAX_PREMIUM_BPS,
         DEFAULT_FUNDING_MAX_BPS_PER_SLOT,
+        0,
     );
 
     // Verify rates are actually non-zero for large positions

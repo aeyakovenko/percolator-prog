@@ -264,6 +264,7 @@ pub fn compute_inventory_funding_bps_per_slot(
     funding_inv_scale_notional_e6: u128,
     funding_max_premium_bps: i64,
     funding_max_bps_per_slot: i64,
+    funding_k2_bps: u16,
 ) -> i64 {
     if net_lp_pos == 0 || price_e6 == 0 || funding_horizon_slots == 0 {
         return 0;
@@ -272,9 +273,25 @@ pub fn compute_inventory_funding_bps_per_slot(
     let abs_pos: u128 = net_lp_pos.unsigned_abs();
     let notional_e6: u128 = abs_pos.saturating_mul(price_e6 as u128) / 1_000_000u128;
 
-    // premium_bps = (notional / scale) * k_bps, capped
-    let mut premium_bps_u: u128 =
-        notional_e6.saturating_mul(funding_k_bps as u128) / funding_inv_scale_notional_e6.max(1);
+    let scale = funding_inv_scale_notional_e6.max(1);
+
+    // Linear component: premium_bps = (notional / scale) * k_bps
+    let linear_bps_u: u128 = notional_e6.saturating_mul(funding_k_bps as u128) / scale;
+
+    // Quadratic component: k2 * (notional / scale)^2
+    // skew_ratio = notional / scale (dimensionless, in e6-ish range)
+    let quadratic_bps_u: u128 = if funding_k2_bps > 0 {
+        let skew_ratio = notional_e6 / scale;
+        // k2 * skew_ratio^2, with overflow protection
+        skew_ratio
+            .saturating_mul(skew_ratio)
+            .saturating_mul(funding_k2_bps as u128)
+            / 10_000 // normalize k2 from bps
+    } else {
+        0
+    };
+
+    let mut premium_bps_u: u128 = linear_bps_u.saturating_add(quadratic_bps_u);
 
     if premium_bps_u > (funding_max_premium_bps.unsigned_abs() as u128) {
         premium_bps_u = funding_max_premium_bps.unsigned_abs() as u128;
@@ -301,6 +318,85 @@ pub fn compute_inventory_funding_bps_per_slot(
         per_slot = -funding_max_bps_per_slot;
     }
     per_slot
+}
+
+/// Integer square root via 3-iteration Newton-Raphson. Used by VRAM.
+/// Returns floor(sqrt(x)).
+#[inline]
+pub fn isqrt_u32(x: u32) -> u32 {
+    if x <= 1 {
+        return x;
+    }
+    // Initial guess: half the bit-width
+    let mut guess = 1u32 << ((32 - x.leading_zeros()) / 2);
+    // 3 Newton-Raphson iterations (sufficient for u32 range)
+    guess = (guess + x / guess) / 2;
+    guess = (guess + x / guess) / 2;
+    guess = (guess + x / guess) / 2;
+    // Floor correction: ensure guess^2 <= x
+    if guess.saturating_mul(guess) > x {
+        guess -= 1;
+    }
+    guess
+}
+
+/// Compute VRAM (Volatility-Regime Adaptive Margin) scaling factor in bps.
+///
+/// Returns effective margin multiplier in basis points (10_000 = 1.0x, no change).
+/// The margin is scaled up when realized volatility exceeds the target.
+///
+/// Formula: max(10_000, scale_bps * sqrt(ewmv_e12) / target_vol_e6)
+///
+/// - `ewmv_e12`: exponentially weighted moving variance (e12 scaled)
+/// - `scale_bps`: sensitivity parameter (e.g., 10_000 = 1.0x base scaling)
+/// - `target_vol_e6`: baseline volatility for 1.0x margin (e6 scaled)
+#[inline]
+pub fn compute_vram_margin_bps(ewmv_e12: u32, scale_bps: u16, target_vol_e6: u16) -> u64 {
+    if scale_bps == 0 || target_vol_e6 == 0 {
+        return 10_000; // disabled → 1.0x
+    }
+    // sqrt(ewmv_e12) gives realized vol in e6 units
+    let realized_vol_e6 = isqrt_u32(ewmv_e12);
+    // effective = scale_bps * realized_vol / target_vol
+    let effective =
+        (scale_bps as u64).saturating_mul(realized_vol_e6 as u64) / (target_vol_e6 as u64);
+    // Floor at 10_000 (never reduce margin below base)
+    effective.max(10_000)
+}
+
+/// Apply VRAM scaling to engine margin params. Returns (orig_initial, orig_maintenance).
+/// Caller must restore originals after the engine operation.
+#[inline]
+pub fn apply_vram_scaling(
+    engine: &mut percolator::RiskEngine,
+    config: &state::MarketConfig,
+) -> (u64, u64) {
+    let scale_bps = state::get_vol_margin_scale_bps(config);
+    let orig_init = engine.params.initial_margin_bps;
+    let orig_maint = engine.params.maintenance_margin_bps;
+    if scale_bps == 0 {
+        return (orig_init, orig_maint);
+    }
+    let ewmv = state::get_ewmv_e12(config);
+    let target = state::get_vol_margin_target_e6(config);
+    let mult = compute_vram_margin_bps(ewmv, scale_bps, target);
+    // Scale margins, capping at 10_000 bps (100%)
+    engine.params.initial_margin_bps =
+        ((orig_init as u128).saturating_mul(mult as u128) / 10_000).min(10_000) as u64;
+    engine.params.maintenance_margin_bps =
+        ((orig_maint as u128).saturating_mul(mult as u128) / 10_000).min(10_000) as u64;
+    // Maintain invariant: initial >= maintenance
+    if engine.params.initial_margin_bps < engine.params.maintenance_margin_bps {
+        engine.params.initial_margin_bps = engine.params.maintenance_margin_bps;
+    }
+    (orig_init, orig_maint)
+}
+
+/// Restore engine margin params after VRAM-scaled operation.
+#[inline]
+pub fn restore_margins(engine: &mut percolator::RiskEngine, orig: (u64, u64)) {
+    engine.params.initial_margin_bps = orig.0;
+    engine.params.maintenance_margin_bps = orig.1;
 }
 
 // =============================================================================
@@ -1764,6 +1860,12 @@ pub mod error {
         WithdrawQueueNotFound,
         /// PERC-309: Nothing claimable this epoch.
         WithdrawQueueNothingClaimable,
+        /// Audit crank detected a conservation invariant violation.
+        AuditViolation,
+        /// Cross-margin offset pair not configured for these slabs.
+        CrossMarginPairNotFound,
+        /// Cross-margin attestation stale (too many slots since attested).
+        CrossMarginAttestationStale,
     }
 
     impl From<PercolatorError> for ProgramError {
@@ -1870,6 +1972,8 @@ pub mod ix {
             funding_settlement_interval_slots: u64,
             funding_premium_dampening_e6: u64,
             funding_premium_max_bps_per_slot: i64,
+            /// Quadratic funding convexity coefficient k2 (bps). 0 = disabled.
+            funding_k2_bps: u16,
         },
         /// Set maintenance fee per slot (admin only)
         SetMaintenanceFee {
@@ -1928,6 +2032,12 @@ pub mod ix {
             /// 10_000 = 100% oracle. 7_000 = 70% oracle + 30% TWAP.
             /// None = don't change (backwards compatible).
             mark_oracle_weight_bps: Option<u16>,
+            /// VRAM: Sensitivity scaling. 0 = disabled. 10_000 = 1.0x base scaling.
+            vol_margin_scale_bps: Option<u16>,
+            /// VRAM: EWMA alpha (e6). Controls smoothing of variance estimate.
+            vol_alpha_e6: Option<u16>,
+            /// VRAM: Target volatility (e6). Baseline vol for 1.0x margin.
+            vol_margin_target_e6: Option<u16>,
         },
         /// Renounce admin: set admin to all zeros (irreversible). Admin only.
         /// Renounce admin permanently. Requires market RESOLVED and confirmation code.
@@ -2166,6 +2276,31 @@ pub mod ix {
         ///
         /// Accounts: [dest(signer,writable), slab(signer,writable)]
         ReclaimSlabRent,
+
+        /// On-chain audit crank: walk all accounts and verify conservation invariants.
+        /// Permissionless. Checks capital, PnL, OI, LP aggregates and solvency.
+        /// Sets FLAG_PAUSED on violation.
+        ///
+        /// Accounts: [slab(writable)]
+        AuditCrank,
+
+        /// Admin: configure cross-market margin offset for a pair of slabs.
+        /// Creates/updates an OffsetPairConfig PDA at ["cmor_pair", slab_a, slab_b].
+        ///
+        /// Accounts: [admin(signer,payer), slab_a, slab_b, pair_pda(writable), system_program]
+        SetOffsetPair {
+            offset_bps: u16,
+        },
+
+        /// Permissionless: attest user positions across two slabs for portfolio margin credit.
+        /// Creates/updates a CrossMarginAttestation PDA at ["cmor", user, slab_a, slab_b].
+        ///
+        /// Accounts: [payer(signer), slab_a, slab_b, attestation_pda(writable),
+        ///            pair_pda, system_program]
+        AttestCrossMargin {
+            user_idx_a: u16,
+            user_idx_b: u16,
+        },
     }
 
     impl Instruction {
@@ -2290,6 +2425,8 @@ pub mod ix {
                     let funding_settlement_interval_slots = read_u64(&mut rest).unwrap_or(0);
                     let funding_premium_dampening_e6 = read_u64(&mut rest).unwrap_or(1_000_000);
                     let funding_premium_max_bps_per_slot = read_i64(&mut rest).unwrap_or(5);
+                    // Quadratic funding convexity k2 (optional, backward compatible)
+                    let funding_k2_bps = read_u16(&mut rest).unwrap_or(0);
                     Ok(Instruction::UpdateConfig {
                         funding_horizon_slots,
                         funding_k_bps,
@@ -2308,6 +2445,7 @@ pub mod ix {
                         funding_settlement_interval_slots,
                         funding_premium_dampening_e6,
                         funding_premium_max_bps_per_slot,
+                        funding_k2_bps,
                     })
                 }
                 TAG_SET_MAINTENANCE_FEE => {
@@ -2386,7 +2524,8 @@ pub mod ix {
                     // Any other length (e.g. 2 — an isolated u16 that looks like
                     // mark_oracle_weight_bps) would be mis-decoded as
                     // adaptive_funding_enabled, silently corrupting state.
-                    const VALID_TAIL_LENS: &[usize] = &[0, 1, 3, 11, 13];
+                    // Extended: +2 vol_margin_scale_bps, +2 vol_alpha_e6, +2 vol_margin_target_e6
+                    const VALID_TAIL_LENS: &[usize] = &[0, 1, 3, 11, 13, 15, 17, 19];
                     if !VALID_TAIL_LENS.contains(&rest.len()) {
                         return Err(ProgramError::InvalidInstructionData);
                     }
@@ -2412,6 +2551,22 @@ pub mod ix {
                     } else {
                         None
                     };
+                    // VRAM: Optional volatility-regime adaptive margin params
+                    let vol_margin_scale_bps = if rest.len() >= 2 {
+                        Some(read_u16(&mut rest)?)
+                    } else {
+                        None
+                    };
+                    let vol_alpha_e6 = if rest.len() >= 2 {
+                        Some(read_u16(&mut rest)?)
+                    } else {
+                        None
+                    };
+                    let vol_margin_target_e6 = if rest.len() >= 2 {
+                        Some(read_u16(&mut rest)?)
+                    } else {
+                        None
+                    };
                     Ok(Instruction::UpdateRiskParams {
                         initial_margin_bps,
                         maintenance_margin_bps,
@@ -2424,6 +2579,9 @@ pub mod ix {
                         adaptive_scale_bps,
                         adaptive_max_funding_bps,
                         mark_oracle_weight_bps,
+                        vol_margin_scale_bps,
+                        vol_alpha_e6,
+                        vol_margin_target_e6,
                     })
                 }
                 TAG_RENOUNCE_ADMIN => {
@@ -2598,6 +2756,19 @@ pub mod ix {
                 }
                 TAG_CLOSE_STALE_SLAB => Ok(Instruction::CloseStaleSlabs),
                 TAG_RECLAIM_SLAB_RENT => Ok(Instruction::ReclaimSlabRent),
+                TAG_AUDIT_CRANK => Ok(Instruction::AuditCrank),
+                TAG_SET_OFFSET_PAIR => {
+                    let offset_bps = read_u16(&mut rest)?;
+                    Ok(Instruction::SetOffsetPair { offset_bps })
+                }
+                TAG_ATTEST_CROSS_MARGIN => {
+                    let user_idx_a = read_u16(&mut rest)?;
+                    let user_idx_b = read_u16(&mut rest)?;
+                    Ok(Instruction::AttestCrossMargin {
+                        user_idx_a,
+                        user_idx_b,
+                    })
+                }
                 _ => Err(ProgramError::InvalidInstructionData),
             }
         }
@@ -3324,6 +3495,161 @@ pub mod state {
         let bytes = clamped.to_le_bytes();
         config._insurance_isolation_padding[0] = bytes[0];
         config._insurance_isolation_padding[1] = bytes[1];
+    }
+
+    // ========================================
+    // Feature 1: Quadratic Funding Convexity
+    // ========================================
+
+    /// Read quadratic funding coefficient k2 from `_insurance_isolation_padding[2..4]`.
+    /// 0 = disabled (linear-only funding). Typical range: 1–500 bps.
+    #[inline]
+    pub fn get_funding_k2_bps(config: &MarketConfig) -> u16 {
+        u16::from_le_bytes([
+            config._insurance_isolation_padding[2],
+            config._insurance_isolation_padding[3],
+        ])
+    }
+
+    /// Set quadratic funding coefficient k2 into `_insurance_isolation_padding[2..4]`.
+    #[inline]
+    pub fn set_funding_k2_bps(config: &mut MarketConfig, k2_bps: u16) {
+        let bytes = k2_bps.to_le_bytes();
+        config._insurance_isolation_padding[2] = bytes[0];
+        config._insurance_isolation_padding[3] = bytes[1];
+    }
+
+    // ========================================
+    // Feature 2: VRAM (Volatility-Regime Adaptive Margin)
+    // ========================================
+
+    /// Read EWMV (exponentially weighted moving variance) from `_insurance_isolation_padding[4..8]`.
+    /// Scaled by 1e12. 0 = no variance history.
+    #[inline]
+    pub fn get_ewmv_e12(config: &MarketConfig) -> u32 {
+        u32::from_le_bytes([
+            config._insurance_isolation_padding[4],
+            config._insurance_isolation_padding[5],
+            config._insurance_isolation_padding[6],
+            config._insurance_isolation_padding[7],
+        ])
+    }
+
+    /// Write EWMV into `_insurance_isolation_padding[4..8]`.
+    #[inline]
+    pub fn set_ewmv_e12(config: &mut MarketConfig, ewmv: u32) {
+        let bytes = ewmv.to_le_bytes();
+        config._insurance_isolation_padding[4] = bytes[0];
+        config._insurance_isolation_padding[5] = bytes[1];
+        config._insurance_isolation_padding[6] = bytes[2];
+        config._insurance_isolation_padding[7] = bytes[3];
+    }
+
+    /// Read last volatility oracle price from `_insurance_isolation_padding[8..12]`.
+    /// Stored as u32 in e6 format. 0 = no previous price.
+    #[inline]
+    pub fn get_last_vol_price_e6(config: &MarketConfig) -> u32 {
+        u32::from_le_bytes([
+            config._insurance_isolation_padding[8],
+            config._insurance_isolation_padding[9],
+            config._insurance_isolation_padding[10],
+            config._insurance_isolation_padding[11],
+        ])
+    }
+
+    /// Write last volatility oracle price into `_insurance_isolation_padding[8..12]`.
+    #[inline]
+    pub fn set_last_vol_price_e6(config: &mut MarketConfig, price: u32) {
+        let bytes = price.to_le_bytes();
+        config._insurance_isolation_padding[8] = bytes[0];
+        config._insurance_isolation_padding[9] = bytes[1];
+        config._insurance_isolation_padding[10] = bytes[2];
+        config._insurance_isolation_padding[11] = bytes[3];
+    }
+
+    /// Read VRAM sensitivity scale from `_insurance_isolation_padding[12..14]`.
+    /// 0 = VRAM disabled. Typical: 10_000 (1.0x scaling).
+    #[inline]
+    pub fn get_vol_margin_scale_bps(config: &MarketConfig) -> u16 {
+        u16::from_le_bytes([
+            config._insurance_isolation_padding[12],
+            config._insurance_isolation_padding[13],
+        ])
+    }
+
+    /// Write VRAM sensitivity scale into `_insurance_isolation_padding[12..14]`.
+    #[inline]
+    pub fn set_vol_margin_scale_bps(config: &mut MarketConfig, scale: u16) {
+        let bytes = scale.to_le_bytes();
+        config._insurance_isolation_padding[12] = bytes[0];
+        config._insurance_isolation_padding[13] = bytes[1];
+    }
+
+    /// Read EWMA alpha from `_lp_col_pad[0..2]`.
+    /// e6 units: 100 = alpha of 0.0001, 10_000 = alpha of 0.01.
+    #[inline]
+    pub fn get_vol_alpha_e6(config: &MarketConfig) -> u16 {
+        u16::from_le_bytes([config._lp_col_pad[0], config._lp_col_pad[1]])
+    }
+
+    /// Write EWMA alpha into `_lp_col_pad[0..2]`.
+    #[inline]
+    pub fn set_vol_alpha_e6(config: &mut MarketConfig, alpha: u16) {
+        let bytes = alpha.to_le_bytes();
+        config._lp_col_pad[0] = bytes[0];
+        config._lp_col_pad[1] = bytes[1];
+    }
+
+    /// Read VRAM target volatility from `_lp_col_pad[2..4]`.
+    /// e6 units: represents the baseline volatility for 1.0x margin.
+    #[inline]
+    pub fn get_vol_margin_target_e6(config: &MarketConfig) -> u16 {
+        u16::from_le_bytes([config._lp_col_pad[2], config._lp_col_pad[3]])
+    }
+
+    /// Write VRAM target volatility into `_lp_col_pad[2..4]`.
+    #[inline]
+    pub fn set_vol_margin_target_e6(config: &mut MarketConfig, target: u16) {
+        let bytes = target.to_le_bytes();
+        config._lp_col_pad[2] = bytes[0];
+        config._lp_col_pad[3] = bytes[1];
+    }
+
+    // ========================================
+    // Feature 3: Audit Crank
+    // ========================================
+
+    /// Read audit status from `_orphan_pad[0..2]`.
+    /// 0 = never run, 1 = last audit passed, 0xFFFF = violation detected.
+    #[inline]
+    pub fn read_audit_status(config: &MarketConfig) -> u16 {
+        u16::from_le_bytes([config._orphan_pad[0], config._orphan_pad[1]])
+    }
+
+    /// Write audit status into `_orphan_pad[0..2]`.
+    #[inline]
+    pub fn write_audit_status(config: &mut MarketConfig, status: u16) {
+        let bytes = status.to_le_bytes();
+        config._orphan_pad[0] = bytes[0];
+        config._orphan_pad[1] = bytes[1];
+    }
+
+    /// Read the slot at which AuditCrank last paused the market from
+    /// `_rebalancing_pad[0..6]` (48-bit little-endian u64 — sufficient for
+    /// centuries of Solana slots).
+    /// 0 = never paused via AuditCrank.
+    #[inline]
+    pub fn read_last_audit_pause_slot(config: &MarketConfig) -> u64 {
+        let mut buf = [0u8; 8];
+        buf[..6].copy_from_slice(&config._rebalancing_pad[..6]);
+        u64::from_le_bytes(buf)
+    }
+
+    /// Write the last AuditCrank pause slot into `_rebalancing_pad[0..6]`.
+    #[inline]
+    pub fn write_last_audit_pause_slot(config: &mut MarketConfig, slot: u64) {
+        let bytes = slot.to_le_bytes();
+        config._rebalancing_pad[..6].copy_from_slice(&bytes[..6]);
     }
 }
 
@@ -5143,6 +5469,117 @@ pub mod lp_vault {
         }
     }
 
+    // ========================================
+    // Feature 4: Insurance Fund Tranche Waterfall
+    // ========================================
+    // Tranche fields stored in `_reserved2[0..40]`:
+    //   [0]      tranche_enabled: u8 (0 = disabled, 1 = enabled)
+    //   [1]      _tranche_pad0: u8
+    //   [2..4]   junior_fee_mult_bps: u16 (junior tranche fee multiplier, e.g., 15_000 = 1.5x)
+    //   [4..8]   _tranche_pad1: [u8; 4]
+    //   [8..24]  senior_capital: u128 (total capital in senior tranche)
+    //   [24..40] junior_capital: u128 (total capital in junior tranche)
+
+    impl LpVaultState {
+        /// Check if tranches are enabled.
+        #[inline]
+        pub fn tranche_enabled(&self) -> bool {
+            self._reserved2[0] != 0
+        }
+
+        /// Enable/disable tranches.
+        #[inline]
+        pub fn set_tranche_enabled(&mut self, enabled: bool) {
+            self._reserved2[0] = if enabled { 1 } else { 0 };
+        }
+
+        /// Read junior tranche fee multiplier in bps (e.g., 15_000 = 1.5x senior yield).
+        #[inline]
+        pub fn junior_fee_mult_bps(&self) -> u16 {
+            u16::from_le_bytes([self._reserved2[2], self._reserved2[3]])
+        }
+
+        /// Set junior tranche fee multiplier.
+        #[inline]
+        pub fn set_junior_fee_mult_bps(&mut self, mult: u16) {
+            let bytes = mult.to_le_bytes();
+            self._reserved2[2] = bytes[0];
+            self._reserved2[3] = bytes[1];
+        }
+
+        /// Read senior tranche capital.
+        #[inline]
+        pub fn senior_capital(&self) -> u128 {
+            u128::from_le_bytes(self._reserved2[8..24].try_into().unwrap())
+        }
+
+        /// Set senior tranche capital.
+        #[inline]
+        pub fn set_senior_capital(&mut self, capital: u128) {
+            self._reserved2[8..24].copy_from_slice(&capital.to_le_bytes());
+        }
+
+        /// Read junior tranche capital.
+        #[inline]
+        pub fn junior_capital(&self) -> u128 {
+            u128::from_le_bytes(self._reserved2[24..40].try_into().unwrap())
+        }
+
+        /// Set junior tranche capital.
+        #[inline]
+        pub fn set_junior_capital(&mut self, capital: u128) {
+            self._reserved2[24..40].copy_from_slice(&capital.to_le_bytes());
+        }
+
+        /// Distribute fees between tranches using the junior multiplier.
+        ///
+        /// Junior tranche earns `junior_fee_mult_bps / 10_000` times as much per unit
+        /// of capital as senior. Returns (senior_share, junior_share).
+        pub fn split_fees_by_tranche(&self, total_fees: u128) -> (u128, u128) {
+            let senior = self.senior_capital();
+            let junior = self.junior_capital();
+            if senior == 0 && junior == 0 {
+                return (total_fees, 0);
+            }
+            if junior == 0 {
+                return (total_fees, 0);
+            }
+            if senior == 0 {
+                return (0, total_fees);
+            }
+            // Weighted split: junior weight = junior_capital * junior_mult_bps
+            // senior weight = senior_capital * 10_000
+            let mult = self.junior_fee_mult_bps().max(10_000) as u128;
+            let senior_weight = senior.saturating_mul(10_000);
+            let junior_weight = junior.saturating_mul(mult);
+            let total_weight = senior_weight.saturating_add(junior_weight);
+            if total_weight == 0 {
+                return (total_fees, 0);
+            }
+            let junior_share = total_fees.saturating_mul(junior_weight) / total_weight;
+            let senior_share = total_fees.saturating_sub(junior_share);
+            (senior_share, junior_share)
+        }
+
+        /// Apply loss waterfall: junior tranche absorbs losses first.
+        /// Returns actual loss absorbed.
+        pub fn apply_loss_waterfall(&mut self, loss: u128) -> u128 {
+            let junior = self.junior_capital();
+            if loss <= junior {
+                // Junior absorbs all
+                self.set_junior_capital(junior - loss);
+                return loss;
+            }
+            // Junior wiped out, remainder hits senior
+            self.set_junior_capital(0);
+            let remainder = loss - junior;
+            let senior = self.senior_capital();
+            let senior_loss = remainder.min(senior);
+            self.set_senior_capital(senior - senior_loss);
+            junior + senior_loss
+        }
+    }
+
     /// Read LP vault state from raw account data.
     pub fn read_lp_vault_state(data: &[u8]) -> Option<LpVaultState> {
         if data.len() < LP_VAULT_STATE_LEN {
@@ -5604,6 +6041,139 @@ pub mod dispute {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Feature 5: Cross-Market Portfolio Margining (CMOR)
+// ═══════════════════════════════════════════════════════════════
+pub mod cross_margin {
+    use bytemuck::{Pod, Zeroable};
+
+    /// Magic for OffsetPairConfig PDA: "CMORPAIR"
+    pub const OFFSET_PAIR_MAGIC: u64 = 0x434D_4F52_5041_4952;
+    /// Magic for CrossMarginAttestation PDA: "CMORATTE"
+    pub const ATTESTATION_MAGIC: u64 = 0x434D_4F52_4154_5445;
+
+    pub const OFFSET_PAIR_LEN: usize = core::mem::size_of::<OffsetPairConfig>();
+    pub const ATTESTATION_LEN: usize = core::mem::size_of::<CrossMarginAttestation>();
+
+    /// Admin-configured pair of slabs eligible for portfolio margin offset.
+    /// PDA seeds: ["cmor_pair", slab_a, slab_b] (slab_a < slab_b lexicographically).
+    #[repr(C)]
+    #[derive(Clone, Copy, Pod, Zeroable)]
+    pub struct OffsetPairConfig {
+        pub magic: u64,
+        /// Margin offset in basis points. E.g., 3000 = 30% margin reduction for hedged positions.
+        pub offset_bps: u16,
+        /// 1 = enabled, 0 = disabled.
+        pub enabled: u8,
+        pub _pad: [u8; 5],
+        pub _reserved: [u8; 16],
+    }
+
+    /// Per-user attestation of positions across two slabs.
+    /// PDA seeds: ["cmor", user_pubkey, min(slab_a, slab_b), max(slab_a, slab_b)].
+    /// Written by permissionless keeper after reading both slabs.
+    #[repr(C)]
+    #[derive(Clone, Copy, Pod, Zeroable)]
+    pub struct CrossMarginAttestation {
+        pub magic: u64,
+        /// Explicit padding for i128 alignment (native: 16-byte aligned)
+        pub _align_pad: [u8; 8],
+        /// User position in slab A (signed: +long, -short).
+        pub user_pos_a: i128,
+        /// User position in slab B (signed).
+        pub user_pos_b: i128,
+        /// Slot when this attestation was written.
+        pub attested_slot: u64,
+        /// Margin offset bps (copied from OffsetPairConfig at attestation time).
+        pub offset_bps: u16,
+        pub _pad: [u8; 6],
+    }
+
+    impl OffsetPairConfig {
+        #[inline]
+        pub fn is_initialized(&self) -> bool {
+            self.magic == OFFSET_PAIR_MAGIC
+        }
+    }
+
+    impl CrossMarginAttestation {
+        #[inline]
+        pub fn is_initialized(&self) -> bool {
+            self.magic == ATTESTATION_MAGIC
+        }
+
+        /// Check if attestation is fresh enough (within `max_age_slots` of `current_slot`).
+        #[inline]
+        pub fn is_fresh(&self, current_slot: u64, max_age_slots: u64) -> bool {
+            current_slot.saturating_sub(self.attested_slot) <= max_age_slots
+        }
+
+        /// Compute portfolio margin credit in bps for the user.
+        /// Returns margin reduction (0 if positions are same-direction or attestation disabled).
+        /// Hedged positions (opposite directions) get `offset_bps` reduction.
+        pub fn compute_margin_credit_bps(&self) -> u16 {
+            if self.offset_bps == 0 {
+                return 0;
+            }
+            // Positions must be in opposite directions to qualify
+            let a = self.user_pos_a;
+            let b = self.user_pos_b;
+            if a == 0 || b == 0 {
+                return 0;
+            }
+            // Opposite sign = hedged
+            let hedged = (a > 0 && b < 0) || (a < 0 && b > 0);
+            if !hedged {
+                return 0;
+            }
+            // Scale offset by the smaller leg's proportion
+            let abs_a = a.unsigned_abs();
+            let abs_b = b.unsigned_abs();
+            let smaller = abs_a.min(abs_b);
+            let larger = abs_a.max(abs_b);
+            // hedged_ratio = smaller / larger (0..1), scale offset proportionally
+            let credit = (self.offset_bps as u128).saturating_mul(smaller) / larger;
+            credit.min(self.offset_bps as u128) as u16
+        }
+    }
+
+    /// Canonicalize slab pair ordering (lower pubkey first).
+    #[inline]
+    pub fn order_slab_pair(a: &[u8; 32], b: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+        if a < b {
+            (*a, *b)
+        } else {
+            (*b, *a)
+        }
+    }
+
+    pub fn read_offset_pair(data: &[u8]) -> Option<OffsetPairConfig> {
+        if data.len() < OFFSET_PAIR_LEN {
+            return None;
+        }
+        Some(*bytemuck::from_bytes::<OffsetPairConfig>(
+            &data[..OFFSET_PAIR_LEN],
+        ))
+    }
+
+    pub fn write_offset_pair(data: &mut [u8], cfg: &OffsetPairConfig) {
+        data[..OFFSET_PAIR_LEN].copy_from_slice(bytemuck::bytes_of(cfg));
+    }
+
+    pub fn read_attestation(data: &[u8]) -> Option<CrossMarginAttestation> {
+        if data.len() < ATTESTATION_LEN {
+            return None;
+        }
+        Some(*bytemuck::from_bytes::<CrossMarginAttestation>(
+            &data[..ATTESTATION_LEN],
+        ))
+    }
+
+    pub fn write_attestation(data: &mut [u8], att: &CrossMarginAttestation) {
+        data[..ATTESTATION_LEN].copy_from_slice(bytemuck::bytes_of(att));
+    }
+}
+
 // 9. mod processor
 pub mod processor {
     use crate::{
@@ -5615,8 +6185,10 @@ pub mod processor {
             DEFAULT_HYPERP_PRICE_CAP_E2BPS, DEFAULT_THRESH_ALPHA_BPS, DEFAULT_THRESH_FLOOR,
             DEFAULT_THRESH_MAX, DEFAULT_THRESH_MIN, DEFAULT_THRESH_MIN_STEP,
             DEFAULT_THRESH_RISK_BPS, DEFAULT_THRESH_STEP_BPS, DEFAULT_THRESH_UPDATE_INTERVAL_SLOTS,
-            ENGINE_LEN, ENGINE_OFF, MAGIC, MATCHER_CALL_LEN, MATCHER_CALL_TAG, SLAB_LEN, VERSION,
+            ENGINE_LEN, ENGINE_OFF, HEADER_LEN, MAGIC, MATCHER_CALL_LEN, MATCHER_CALL_TAG,
+            SLAB_LEN, VERSION,
         },
+        cross_margin,
         error::{map_risk_error, PercolatorError},
         ix::{self, Instruction},
         oracle,
@@ -6890,9 +7462,13 @@ pub mod processor {
                 // Convert requested base tokens to units
                 let (units_requested, _) = crate::units::base_to_units(amount, config.unit_scale);
 
-                engine
+                // VRAM: scale margins before withdrawal (margin check is inside engine.withdraw)
+                let vram_orig = crate::apply_vram_scaling(engine, &config);
+                let withdraw_result = engine
                     .withdraw(user_idx, units_requested as u128, clock.slot, price)
-                    .map_err(map_risk_error)?;
+                    .map_err(map_risk_error);
+                crate::restore_margins(engine, vram_orig);
+                withdraw_result?;
 
                 // Convert units back to base tokens for payout (checked to prevent silent overflow)
                 let base_to_pay =
@@ -7088,6 +7664,40 @@ pub mod processor {
                 } else {
                     None
                 };
+
+                // VRAM: Update EWMV (exponentially weighted moving variance) from oracle returns
+                {
+                    let vol_scale = state::get_vol_margin_scale_bps(&config);
+                    if vol_scale > 0 && price > 0 {
+                        let prev_price = state::get_last_vol_price_e6(&config);
+                        if prev_price > 0 {
+                            // r_t = (price - prev_price) * 1e6 / prev_price
+                            let p = price as i64;
+                            let pp = prev_price as i64;
+                            let return_e6 =
+                                ((p - pp) as i128).saturating_mul(1_000_000) / (pp as i128).max(1);
+                            // r_t^2 in e12 units
+                            let r_sq_e12 = (return_e6.saturating_mul(return_e6)) as u64;
+                            let r_sq_e12_u32 = r_sq_e12.min(u32::MAX as u64) as u32;
+                            let alpha_e6 = state::get_vol_alpha_e6(&config) as u32;
+                            let old_ewmv = state::get_ewmv_e12(&config);
+                            // ewmv = alpha * r_t^2 + (1 - alpha) * ewmv_prev
+                            let new_ewmv =
+                                ((alpha_e6 as u64).saturating_mul(r_sq_e12_u32 as u64) / 1_000_000
+                                    + (1_000_000u64.saturating_sub(alpha_e6 as u64))
+                                        .saturating_mul(old_ewmv as u64)
+                                        / 1_000_000)
+                                    .min(u32::MAX as u64) as u32;
+                            state::set_ewmv_e12(&mut config, new_ewmv);
+                        }
+                        // Store current price for next return calculation
+                        state::set_last_vol_price_e6(
+                            &mut config,
+                            (price as u64).min(u32::MAX as u64) as u32,
+                        );
+                    }
+                }
+
                 state::write_config(&mut data, &config);
 
                 let slab_len = data.len();
@@ -7136,6 +7746,7 @@ pub mod processor {
                         config.funding_inv_scale_notional_e6,
                         config.funding_max_premium_bps,
                         config.funding_max_bps_per_slot,
+                        state::get_funding_k2_bps(&config),
                     )
                 };
 
@@ -7830,9 +8441,13 @@ pub mod processor {
                 // Snapshot pre-liquidation state for event logging
                 let pre_cap = engine.accounts[target_idx as usize].capital.get() as u64;
                 let pre_pos = engine.accounts[target_idx as usize].position_size.get();
-                let _res = engine
+                // VRAM: scale margins before liquidation check
+                let vram_orig = crate::apply_vram_scaling(engine, &config);
+                let liq_result = engine
                     .liquidate_at_oracle(target_idx, clock.slot, price)
-                    .map_err(map_risk_error)?;
+                    .map_err(map_risk_error);
+                crate::restore_margins(engine, vram_orig);
+                let _res = liq_result?;
                 let post_cap = engine.accounts[target_idx as usize].capital.get() as u64;
                 let post_pos = engine.accounts[target_idx as usize].position_size.get();
                 // Enhanced liquidation event: tag=4, result, pre_cap, post_cap, price
@@ -8145,6 +8760,7 @@ pub mod processor {
                 funding_settlement_interval_slots,
                 funding_premium_dampening_e6,
                 funding_premium_max_bps_per_slot,
+                funding_k2_bps,
             } => {
                 accounts::expect_len(accounts, 2)?;
                 let a_admin = &accounts[0];
@@ -8201,6 +8817,8 @@ pub mod processor {
                 config.funding_settlement_interval_slots = funding_settlement_interval_slots;
                 config.funding_premium_dampening_e6 = funding_premium_dampening_e6;
                 config.funding_premium_max_bps_per_slot = funding_premium_max_bps_per_slot;
+                // Quadratic funding convexity
+                state::set_funding_k2_bps(&mut config, funding_k2_bps);
                 state::write_config(&mut data, &config);
             }
 
@@ -8525,6 +9143,9 @@ pub mod processor {
                 adaptive_scale_bps,
                 adaptive_max_funding_bps,
                 mark_oracle_weight_bps,
+                vol_margin_scale_bps,
+                vol_alpha_e6,
+                vol_margin_target_e6,
             } => {
                 // Update margin + fee parameters. Admin only.
                 // Accounts: [admin(signer), slab(writable)]
@@ -8579,6 +9200,9 @@ pub mod processor {
                     || adaptive_scale_bps.is_some()
                     || adaptive_max_funding_bps.is_some()
                     || mark_oracle_weight_bps.is_some()
+                    || vol_margin_scale_bps.is_some()
+                    || vol_alpha_e6.is_some()
+                    || vol_margin_target_e6.is_some()
                 {
                     let mut config = state::read_config(&data);
                     if let Some(oi_cap) = oi_cap_multiplier_bps {
@@ -8616,6 +9240,16 @@ pub mod processor {
                             return Err(PercolatorError::InvalidConfigParam.into());
                         }
                         state::set_mark_oracle_weight_bps(&mut config, w);
+                    }
+                    // VRAM: Volatility-Regime Adaptive Margin params
+                    if let Some(scale) = vol_margin_scale_bps {
+                        state::set_vol_margin_scale_bps(&mut config, scale);
+                    }
+                    if let Some(alpha) = vol_alpha_e6 {
+                        state::set_vol_alpha_e6(&mut config, alpha);
+                    }
+                    if let Some(target) = vol_margin_target_e6 {
+                        state::set_vol_margin_target_e6(&mut config, target);
                     }
                     state::write_config(&mut data, &config);
                     let (mult, skew) = unpack_oi_cap(config.oi_cap_multiplier_bps);
@@ -11554,6 +12188,337 @@ pub mod processor {
                     "ReclaimSlabRent: reclaimed {} lamports from uninitialised slab (size={})",
                     slab_lamports,
                     slab_len,
+                );
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            // Feature 3: On-Chain Audit Crank (tag 53)
+            // ═══════════════════════════════════════════════════════════════
+            Instruction::AuditCrank => {
+                // Permissionless: anyone can call. Walks all accounts and verifies
+                // conservation invariants. Sets FLAG_PAUSED on violation.
+                // Accounts: [slab(writable)]
+                if accounts.is_empty() {
+                    return Err(ProgramError::NotEnoughAccountKeys);
+                }
+                let a_slab = &accounts[0];
+                accounts::expect_writable(a_slab)?;
+
+                let mut data = state::slab_data_mut(a_slab)?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+
+                let engine = zc::engine_ref(&data)?;
+
+                // Walk all accounts and compute running aggregates
+                let mut sum_capital: i128 = 0;
+                let mut sum_pnl_pos: u128 = 0;
+                let mut sum_oi: u128 = 0;
+                for idx in 0..MAX_ACCOUNTS {
+                    if !engine.is_used(idx) {
+                        continue;
+                    }
+                    let acc = &engine.accounts[idx];
+                    sum_capital = sum_capital.saturating_add(acc.capital.get() as i128);
+                    let pnl = acc.pnl.get();
+                    if pnl > 0 {
+                        sum_pnl_pos = sum_pnl_pos.saturating_add(pnl as u128);
+                    }
+                    let pos = acc.position_size.get();
+                    sum_oi = sum_oi.saturating_add(pos.unsigned_abs());
+                }
+
+                // Check invariants
+                let mut violation = false;
+
+                // Invariant 1: sum(capital) == engine.c_tot
+                let c_tot = engine.c_tot.get();
+                if sum_capital != c_tot as i128 {
+                    msg!("AUDIT_VIOLATION: capital_mismatch");
+                    sol_log_64(sum_capital as u64, c_tot as u64, 0, 0, 0xAD01);
+                    violation = true;
+                }
+
+                // Invariant 2: sum(max(0, pnl)) == engine.pnl_pos_tot
+                let pnl_pos_tot = engine.pnl_pos_tot.get();
+                if sum_pnl_pos != pnl_pos_tot {
+                    msg!("AUDIT_VIOLATION: pnl_pos_mismatch");
+                    sol_log_64(sum_pnl_pos as u64, pnl_pos_tot as u64, 0, 0, 0xAD02);
+                    violation = true;
+                }
+
+                // Invariant 3: sum(|position|) == engine.total_open_interest
+                let total_oi = engine.total_open_interest.get();
+                if sum_oi != total_oi {
+                    msg!("AUDIT_VIOLATION: oi_mismatch");
+                    sol_log_64(sum_oi as u64, total_oi as u64, 0, 0, 0xAD03);
+                    violation = true;
+                }
+
+                // Invariant 4: net LP position consistency
+                // Uses engine's maintained net_lp_pos (O(1), already aggregated)
+                let net_lp_pos = engine.net_lp_pos.get();
+                let lp_sum_abs = engine.lp_sum_abs.get();
+                // net_lp_pos magnitude must not exceed lp_sum_abs
+                if net_lp_pos.unsigned_abs() > lp_sum_abs {
+                    msg!("AUDIT_VIOLATION: lp_pos_inconsistent");
+                    violation = true;
+                }
+
+                // Invariant 5: vault >= c_tot + insurance_fund.balance (solvency)
+                let vault = engine.vault.get();
+                let insurance_balance = engine.insurance_fund.balance.get();
+                let required = (c_tot as u128).saturating_add(insurance_balance);
+                if (vault as u128) < required {
+                    msg!("AUDIT_VIOLATION: solvency");
+                    sol_log_64(vault as u64, required as u64, 0, 0, 0xAD05);
+                    violation = true;
+                }
+
+                // Write audit result and optionally pause.
+                // #959: Cooldown guard — AuditCrank may not re-pause a market
+                // within AUDIT_CRANK_COOLDOWN_SLOTS of the previous pause to
+                // prevent a permissionless DoS via false/transient invariant
+                // triggers. 150 slots ≈ 60 s on mainnet (400 ms/slot).
+                const AUDIT_CRANK_COOLDOWN_SLOTS: u64 = 150;
+                let current_slot = Clock::get()?.slot;
+                let mut config = state::read_config(&data);
+                if violation {
+                    let last_pause = state::read_last_audit_pause_slot(&config);
+                    if current_slot.saturating_sub(last_pause) < AUDIT_CRANK_COOLDOWN_SLOTS {
+                        // Cooldown active — log violation but do not pause.
+                        // Prevents rapid repeated DoS via marginal invariant drift.
+                        msg!(
+                            "AUDIT_CRANK: violation detected but cooldown active \
+                             (last_pause={} current={} cooldown={})",
+                            last_pause,
+                            current_slot,
+                            AUDIT_CRANK_COOLDOWN_SLOTS,
+                        );
+                        return Err(PercolatorError::AuditViolation.into());
+                    }
+                    state::write_audit_status(&mut config, 0xFFFF);
+                    state::write_last_audit_pause_slot(&mut config, current_slot);
+                    state::set_paused(&mut data, true);
+                    state::write_config(&mut data, &config);
+                    msg!("AUDIT_CRANK: VIOLATION DETECTED — market paused");
+                    return Err(PercolatorError::AuditViolation.into());
+                } else {
+                    state::write_audit_status(&mut config, 1);
+                    state::write_config(&mut data, &config);
+                    msg!("AUDIT_CRANK: all invariants passed");
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            // Feature 5: Cross-Market Portfolio Margining — SetOffsetPair (tag 54)
+            // ═══════════════════════════════════════════════════════════════
+            Instruction::SetOffsetPair { offset_bps } => {
+                // Admin configures margin offset for a pair of slabs.
+                // Accounts: [admin(signer,payer), slab_a, slab_b, pair_pda(writable), system_program]
+                accounts::expect_len(accounts, 5)?;
+                let a_admin = &accounts[0];
+                let a_slab_a = &accounts[1];
+                let a_slab_b = &accounts[2]; // #958: was incorrectly prefixed with _ (unused)
+                let a_pair_pda = &accounts[3];
+                let _a_system = &accounts[4];
+
+                accounts::expect_signer(a_admin)?;
+                accounts::expect_writable(a_pair_pda)?;
+
+                // Verify admin on slab_a (#958: slab_a admin check)
+                {
+                    let data_a = a_slab_a.try_borrow_data()?;
+                    if data_a.len() < HEADER_LEN {
+                        return Err(ProgramError::InvalidAccountData);
+                    }
+                    let header = state::read_header(&data_a);
+                    if header.magic != MAGIC {
+                        return Err(PercolatorError::InvalidMagic.into());
+                    }
+                    require_admin(header.admin, a_admin.key)?;
+                }
+
+                // #958: Verify admin on slab_b — prevents cross-admin pair manipulation
+                // where slab_a admin could register a pair with an unrelated slab_b.
+                {
+                    let data_b = a_slab_b.try_borrow_data()?;
+                    if data_b.len() < HEADER_LEN {
+                        return Err(ProgramError::InvalidAccountData);
+                    }
+                    let header_b = state::read_header(&data_b);
+                    if header_b.magic != MAGIC {
+                        return Err(PercolatorError::InvalidMagic.into());
+                    }
+                    require_admin(header_b.admin, a_admin.key)?;
+                }
+
+                // #957: Verify PDA derivation of a_pair_pda — prevents account
+                // substitution attacks where an attacker passes an arbitrary
+                // writable account instead of the canonical PDA.
+                // Seeds: ["cmor_pair", min(slab_a, slab_b), max(slab_a, slab_b)]
+                // Keys are ordered lexicographically so the PDA is symmetric.
+                {
+                    let (slab_min, slab_max) =
+                        if a_slab_a.key.as_ref() <= a_slab_b.key.as_ref() {
+                            (a_slab_a.key, a_slab_b.key)
+                        } else {
+                            (a_slab_b.key, a_slab_a.key)
+                        };
+                    let (expected_pda, _bump) = Pubkey::find_program_address(
+                        &[b"cmor_pair", slab_min.as_ref(), slab_max.as_ref()],
+                        program_id,
+                    );
+                    if a_pair_pda.key != &expected_pda {
+                        return Err(ProgramError::InvalidSeeds);
+                    }
+                }
+
+                // Validate offset_bps (0..=10_000)
+                if offset_bps > 10_000 {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
+
+                // Write pair config
+                let mut pair_data = a_pair_pda.try_borrow_mut_data()?;
+                if pair_data.len() < cross_margin::OFFSET_PAIR_LEN {
+                    return Err(ProgramError::AccountDataTooSmall);
+                }
+                let cfg = cross_margin::OffsetPairConfig {
+                    magic: cross_margin::OFFSET_PAIR_MAGIC,
+                    offset_bps,
+                    enabled: 1,
+                    _pad: [0; 5],
+                    _reserved: [0; 16],
+                };
+                cross_margin::write_offset_pair(&mut pair_data, &cfg);
+                msg!("SetOffsetPair: offset_bps={}", offset_bps);
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            // Feature 5: Cross-Market Portfolio Margining — AttestCrossMargin (tag 55)
+            // ═══════════════════════════════════════════════════════════════
+            Instruction::AttestCrossMargin {
+                user_idx_a,
+                user_idx_b,
+            } => {
+                // Permissionless keeper attests user positions across two slabs.
+                // Accounts: [payer(signer), slab_a, slab_b, attestation_pda(writable),
+                //            pair_pda, system_program]
+                accounts::expect_len(accounts, 6)?;
+                let _a_payer = &accounts[0];
+                let a_slab_a = &accounts[1];
+                let a_slab_b = &accounts[2];
+                let a_attestation = &accounts[3];
+                let a_pair_pda = &accounts[4];
+                let _a_system = &accounts[5];
+
+                accounts::expect_signer(_a_payer)?;
+                accounts::expect_writable(a_attestation)?;
+
+                // Read pair config to get offset_bps
+                let pair_data = a_pair_pda.try_borrow_data()?;
+                let pair_cfg = cross_margin::read_offset_pair(&pair_data)
+                    .ok_or(ProgramError::InvalidAccountData)?;
+                if !pair_cfg.is_initialized() || pair_cfg.enabled == 0 {
+                    return Err(PercolatorError::CrossMarginPairNotFound.into());
+                }
+                let offset_bps = pair_cfg.offset_bps;
+                drop(pair_data);
+
+                // Read user position from slab A
+                let data_a = a_slab_a.try_borrow_data()?;
+                if data_a.len() < ENGINE_OFF + ENGINE_LEN {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+                let engine_a = zc::engine_ref(&data_a)?;
+                check_idx(engine_a, user_idx_a)?;
+                let pos_a = engine_a.accounts[user_idx_a as usize].position_size.get();
+                let owner_a = engine_a.accounts[user_idx_a as usize].owner;
+                let slot = engine_a.current_slot;
+                drop(data_a);
+
+                // Read user position from slab B
+                let data_b = a_slab_b.try_borrow_data()?;
+                if data_b.len() < ENGINE_OFF + ENGINE_LEN {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+                let engine_b = zc::engine_ref(&data_b)?;
+                check_idx(engine_b, user_idx_b)?;
+                let pos_b = engine_b.accounts[user_idx_b as usize].position_size.get();
+                let owner_b = engine_b.accounts[user_idx_b as usize].owner;
+                drop(data_b);
+
+                // Verify both positions belong to the same user
+                if owner_a != owner_b {
+                    return Err(PercolatorError::EngineUnauthorized.into());
+                }
+
+                // #957: Verify PDA derivation of a_pair_pda — prevents an attacker
+                // from passing an arbitrary account in place of the canonical pair PDA.
+                // Seeds: ["cmor_pair", min(slab_a, slab_b), max(slab_a, slab_b)]
+                {
+                    let (slab_min, slab_max) =
+                        if a_slab_a.key.as_ref() <= a_slab_b.key.as_ref() {
+                            (a_slab_a.key, a_slab_b.key)
+                        } else {
+                            (a_slab_b.key, a_slab_a.key)
+                        };
+                    let (expected_pair_pda, _bump) = Pubkey::find_program_address(
+                        &[b"cmor_pair", slab_min.as_ref(), slab_max.as_ref()],
+                        program_id,
+                    );
+                    if a_pair_pda.key != &expected_pair_pda {
+                        return Err(ProgramError::InvalidSeeds);
+                    }
+                }
+
+                // #957: Verify PDA derivation of a_attestation — prevents account
+                // substitution where the caller writes to an arbitrary writable account
+                // rather than the canonical per-user attestation PDA.
+                // Seeds: ["cmor", owner, slab_a, slab_b]  (keys in canonical order)
+                {
+                    let (slab_min, slab_max) =
+                        if a_slab_a.key.as_ref() <= a_slab_b.key.as_ref() {
+                            (a_slab_a.key, a_slab_b.key)
+                        } else {
+                            (a_slab_b.key, a_slab_a.key)
+                        };
+                    let owner_key = Pubkey::from(owner_a);
+                    let (expected_att_pda, _bump) = Pubkey::find_program_address(
+                        &[
+                            b"cmor",
+                            owner_key.as_ref(),
+                            slab_min.as_ref(),
+                            slab_max.as_ref(),
+                        ],
+                        program_id,
+                    );
+                    if a_attestation.key != &expected_att_pda {
+                        return Err(ProgramError::InvalidSeeds);
+                    }
+                }
+
+                // Write attestation
+                let mut att_data = a_attestation.try_borrow_mut_data()?;
+                if att_data.len() < cross_margin::ATTESTATION_LEN {
+                    return Err(ProgramError::AccountDataTooSmall);
+                }
+                let att = cross_margin::CrossMarginAttestation {
+                    magic: cross_margin::ATTESTATION_MAGIC,
+                    _align_pad: [0; 8],
+                    user_pos_a: pos_a,
+                    user_pos_b: pos_b,
+                    attested_slot: slot,
+                    offset_bps,
+                    _pad: [0; 6],
+                };
+                cross_margin::write_attestation(&mut att_data, &att);
+                msg!(
+                    "AttestCrossMargin: pos_a={} pos_b={} offset={}",
+                    pos_a as i64,
+                    pos_b as i64,
+                    offset_bps
                 );
             }
 
