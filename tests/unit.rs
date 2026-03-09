@@ -5540,3 +5540,61 @@ fn test_cmor_disabled_offset_returns_zero() {
     };
     assert_eq!(att.compute_margin_credit_bps(), 0);
 }
+
+// =============================================================================
+// Insurance Tranche Tests (#978)
+// =============================================================================
+
+#[test]
+fn test_tranche_waterfall_updates_total_capital_junior_absorbs() {
+    use percolator_prog::lp_vault::LpVaultState;
+
+    let mut state = LpVaultState::new_zeroed();
+    state.total_capital = 1_000_000;
+    state.set_junior_capital(400_000);
+    state.set_senior_capital(600_000);
+
+    let realized = state.apply_loss_waterfall(100_000);
+    assert_eq!(realized, 100_000);
+    assert_eq!(state.junior_capital(), 300_000);
+    assert_eq!(state.senior_capital(), 600_000);
+    assert_eq!(
+        state.total_capital, 900_000,
+        "total_capital must decrease by realized loss"
+    );
+}
+
+#[test]
+fn test_tranche_waterfall_updates_total_capital_cascades_to_senior() {
+    use percolator_prog::lp_vault::LpVaultState;
+
+    let mut state = LpVaultState::new_zeroed();
+    state.total_capital = 1_000_000;
+    state.set_junior_capital(200_000);
+    state.set_senior_capital(800_000);
+
+    let realized = state.apply_loss_waterfall(500_000);
+    assert_eq!(realized, 500_000);
+    assert_eq!(state.junior_capital(), 0);
+    assert_eq!(state.senior_capital(), 500_000);
+    assert_eq!(
+        state.total_capital, 500_000,
+        "total_capital must decrease by realized loss"
+    );
+}
+
+#[test]
+fn test_tranche_waterfall_total_loss() {
+    use percolator_prog::lp_vault::LpVaultState;
+
+    let mut state = LpVaultState::new_zeroed();
+    state.total_capital = 1_000_000;
+    state.set_junior_capital(400_000);
+    state.set_senior_capital(600_000);
+
+    let realized = state.apply_loss_waterfall(2_000_000);
+    assert_eq!(realized, 1_000_000); // capped at total tranche capital
+    assert_eq!(state.junior_capital(), 0);
+    assert_eq!(state.senior_capital(), 0);
+    assert_eq!(state.total_capital, 0);
+}
