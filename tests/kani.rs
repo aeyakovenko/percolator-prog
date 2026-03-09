@@ -4445,8 +4445,9 @@ fn nightly_cb_ema_alpha_zero_no_update() {
 }
 
 /// Sub-proof (a3): EMA alpha=1_000_000 means full jump to oracle.
+/// SAT-hard (2 symbolic u64 + ema_step_unclamped mul/div) — moved to nightly_ budget.
 #[kani::proof]
-fn kani_cb_ema_alpha_full_jumps_to_oracle() {
+fn nightly_cb_ema_alpha_full_jumps_to_oracle() {
     let prev: u64 = kani::any();
     let oracle: u64 = kani::any();
     kani::assume(prev > 0 && prev <= 1_000_000_000);
