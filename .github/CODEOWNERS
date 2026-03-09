@@ -1,0 +1,16 @@
+# CODEOWNERS — percolator-prog (Solana program)
+# Every path in this repo is security-sensitive. All PRs require
+# explicit security sign-off from @dcccrypto before merge.
+# Ref: issue #954 (process remediation)
+
+# Default — all files
+*                     @dcccrypto
+
+# Program source (Rust) — security-critical
+/src/                 @dcccrypto
+/tests/               @dcccrypto
+/Cargo.toml           @dcccrypto
+/Cargo.lock           @dcccrypto
+
+# CI/CD configuration — privileged runners
+/.github/             @dcccrypto
