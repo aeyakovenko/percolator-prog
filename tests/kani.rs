@@ -3770,7 +3770,7 @@ fn nightly_ema_mark_identity_at_equilibrium() {
 
 /// EMA cap bound is monotone in dt_slots: more time allows more movement.
 #[kani::proof]
-fn kani_mark_cap_bound_monotone_in_dt() {
+fn nightly_mark_cap_bound_monotone_in_dt() {
     let mark_prev: u64 = kani::any();
     let cap_e2bps: u64 = kani::any();
     let dt_a: u64 = kani::any();
@@ -5919,7 +5919,7 @@ fn proof_lp_collateral_liquidation_triggers_on_tvl_drop() {
 /// (lp_token_value reads vault_tvl/total_supply, never instruction data)
 #[cfg(kani)]
 #[kani::proof]
-fn proof_lp_token_price_from_vault_not_user_input() {
+fn nightly_lp_token_price_from_vault_not_user_input() {
     use percolator_prog::lp_collateral::lp_token_value;
 
     let lp_amount: u64 = kani::any();
@@ -5970,7 +5970,7 @@ fn proof_isolated_balance_never_negative() {
 /// Prove: global fund draw bounded by isolation BPS.
 #[cfg(kani)]
 #[kani::proof]
-fn proof_global_draw_bounded_by_isolation_bps() {
+fn nightly_global_draw_bounded_by_isolation_bps() {
     let global_fund: u128 = kani::any();
     let isolation_bps: u16 = kani::any();
 
@@ -6018,7 +6018,7 @@ fn proof_rebalancing_mode_never_permanent() {
 /// Prove: HWM floor math is correct (no rounding up).
 #[cfg(kani)]
 #[kani::proof]
-fn proof_hwm_floor_correct_math() {
+fn nightly_hwm_floor_correct_math() {
     let epoch_hwm: u128 = kani::any();
     let hwm_floor_bps: u64 = kani::any();
 
