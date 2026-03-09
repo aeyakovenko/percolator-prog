@@ -466,14 +466,15 @@ pub fn last_account_is_cmor(accounts: &[AccountInfo], program_id: &Pubkey) -> bo
 }
 
 /// Try to read and apply CMOR credit from the last account in the accounts
-/// array. Validates that the account is owned by this program and contains a
-/// valid, initialized CMOR attestation. Returns credit_bps applied (0 if no
-/// valid attestation found).
+/// array. Validates that the account is owned by this program, contains a
+/// valid initialized CMOR attestation, and the attestation belongs to the
+/// given user. Returns credit_bps applied (0 if no valid attestation found).
 #[inline]
 pub fn try_apply_cmor_from_accounts(
     engine: &mut percolator::RiskEngine,
     accounts: &[AccountInfo],
     program_id: &Pubkey,
+    user_key: &Pubkey,
     current_slot: u64,
 ) -> u16 {
     if accounts.is_empty() {
@@ -487,6 +488,17 @@ pub fn try_apply_cmor_from_accounts(
         Ok(d) => d,
         Err(_) => return 0,
     };
+    if cmor_data.len() < cross_margin::ATTESTATION_LEN {
+        return 0;
+    }
+    // Verify attestation belongs to the current user
+    let att = match cross_margin::read_attestation(&cmor_data) {
+        Some(a) if a.is_initialized() => a,
+        _ => return 0,
+    };
+    if att.owner != user_key.to_bytes() {
+        return 0;
+    }
     apply_cmor_credit(engine, &cmor_data, current_slot)
 }
 
@@ -6178,6 +6190,9 @@ pub mod cross_margin {
         /// Margin offset bps (copied from OffsetPairConfig at attestation time).
         pub offset_bps: u16,
         pub _pad: [u8; 6],
+        /// Owner pubkey — the user whose positions are attested.
+        /// Used to verify the attestation belongs to the current trader.
+        pub owner: [u8; 32],
     }
 
     impl OffsetPairConfig {
@@ -7569,7 +7584,7 @@ pub mod processor {
                 // restore_margins(vram_orig) will undo both VRAM and CMOR adjustments
                 if has_cmor {
                     crate::try_apply_cmor_from_accounts(
-                        engine, accounts, program_id, clock.slot,
+                        engine, accounts, program_id, a_user.key, clock.slot,
                     );
                 }
 
@@ -8143,7 +8158,7 @@ pub mod processor {
                 );
                 if has_cmor {
                     crate::try_apply_cmor_from_accounts(
-                        engine, accounts, program_id, clock.slot,
+                        engine, accounts, program_id, a_user.key, clock.slot,
                     );
                 }
 
@@ -8498,7 +8513,7 @@ pub mod processor {
                     );
                     if has_cmor_cpi {
                         crate::try_apply_cmor_from_accounts(
-                            engine, accounts, program_id, clock.slot,
+                            engine, accounts, program_id, a_user.key, clock.slot,
                         );
                     }
 
@@ -8612,8 +8627,13 @@ pub mod processor {
                 // their lower portfolio risk)
                 let has_cmor_liq = crate::last_account_is_cmor(accounts, program_id);
                 if has_cmor_liq {
+                    let target_owner = Pubkey::from(engine.accounts[target_idx as usize].owner);
                     crate::try_apply_cmor_from_accounts(
-                        engine, accounts, program_id, clock.slot,
+                        engine,
+                        accounts,
+                        program_id,
+                        &target_owner,
+                        clock.slot,
                     );
                 }
 
@@ -12683,6 +12703,7 @@ pub mod processor {
                     attested_slot: slot,
                     offset_bps,
                     _pad: [0; 6],
+                    owner: owner_a,
                 };
                 cross_margin::write_attestation(&mut att_data, &att);
                 msg!(
