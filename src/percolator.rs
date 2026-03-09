@@ -12610,9 +12610,20 @@ pub mod processor {
                 user_idx_b,
             } => {
                 // Permissionless keeper attests user positions across two slabs.
-                // Accounts: [payer(signer), slab_a, slab_b, attestation_pda(writable),
-                //            pair_pda, system_program]
+                //
+                // Account layout (6 accounts, fixed order):
+                //   [0] payer       — fee-payer AND transaction signer (always accounts[0]).
+                //                     This is the only signer required; any permissionless
+                //                     keeper may submit the instruction. The fee-payer never
+                //                     gains special authority over the attested positions.
+                //   [1] slab_a      — first slab account (read-only)
+                //   [2] slab_b      — second slab account (read-only)
+                //   [3] attestation_pda — per-user CMOR attestation PDA (writable)
+                //   [4] pair_pda    — offset-pair config PDA (read-only)
+                //   [5] system_program — needed for PDA creation when attestation doesn't
+                //                        exist yet (create_account_signed path in PR #82)
                 accounts::expect_len(accounts, 6)?;
+                // accounts[0]: fee-payer / signer — see layout comment above.
                 let _a_payer = &accounts[0];
                 let a_slab_a = &accounts[1];
                 let a_slab_b = &accounts[2];
