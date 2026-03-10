@@ -2416,6 +2416,11 @@ pub mod ix {
             user_idx_a: u16,
             user_idx_b: u16,
         },
+        /// PERC-623: Anyone can top up a market's keeper fund by transferring
+        /// lamports. The amount is read from instruction data (u64).
+        TopUpKeeperFund {
+            amount: u64,
+        },
     }
 
     impl Instruction {
@@ -2891,6 +2896,10 @@ pub mod ix {
                         user_idx_a,
                         user_idx_b,
                     })
+                }
+                TAG_TOPUP_KEEPER_FUND => {
+                    let amount = read_u64(&mut rest)?;
+                    Ok(Instruction::TopUpKeeperFund { amount })
                 }
                 _ => Err(ProgramError::InvalidInstructionData),
             }
@@ -7603,7 +7612,89 @@ pub mod processor {
             vault_key: a_vault.key,
             a_clock: &accounts[5],
         };
-        init_market_write_slab(&mut data, &fields, *risk_params, &write_ctx)
+        init_market_write_slab(&mut data, &fields, *risk_params, &write_ctx)?;
+
+        // PERC-623: Optional keeper fund PDA initialization.
+        // accounts[9] = keeper_fund PDA (writable), accounts[10] = system_program
+        // The admin funds the keeper with SOL lamports (separate from the SPL token
+        // vault deposit). The keeper fund pays crank rewards in SOL.
+        // Backward compatible: callers passing only 9 accounts skip this.
+        if accounts.len() >= 11 {
+            let a_keeper_fund = &accounts[9];
+            let a_system_program = &accounts[10];
+            accounts::expect_writable(a_keeper_fund)?;
+
+            // Verify system program
+            if *a_system_program.key != solana_program::system_program::id() {
+                return Err(ProgramError::IncorrectProgramId);
+            }
+
+            // Verify PDA derivation
+            let (expected_pda, pda_bump) = Pubkey::find_program_address(
+                &[crate::keeper_fund::KEEPER_FUND_SEED, a_slab.key.as_ref()],
+                program_id,
+            );
+            if *a_keeper_fund.key != expected_pda {
+                return Err(ProgramError::InvalidSeeds);
+            }
+
+            // Create the keeper fund PDA account (program-owned, SOL-funded)
+            let rent = solana_program::rent::Rent::get()?;
+            let rent_lamports = rent.minimum_balance(crate::keeper_fund::KEEPER_FUND_STATE_LEN);
+            // The admin's excess lamports above rent become the keeper fund balance.
+            // Minimum keeper fund: DEFAULT_REWARD_PER_CRANK * 100 (enough for 100 cranks).
+            let min_fund = crate::keeper_fund::DEFAULT_REWARD_PER_CRANK
+                .saturating_mul(100)
+                .saturating_add(rent_lamports);
+
+            let bump_bytes = [pda_bump];
+            let signer_seeds: &[&[u8]] = &[
+                crate::keeper_fund::KEEPER_FUND_SEED,
+                a_slab.key.as_ref(),
+                &bump_bytes,
+            ];
+            solana_program::program::invoke_signed(
+                &solana_program::system_instruction::create_account(
+                    a_admin.key,
+                    &expected_pda,
+                    min_fund,
+                    crate::keeper_fund::KEEPER_FUND_STATE_LEN as u64,
+                    program_id,
+                ),
+                &[
+                    a_admin.clone(),
+                    a_keeper_fund.clone(),
+                    a_system_program.clone(),
+                ],
+                &[signer_seeds],
+            )?;
+
+            let fund_balance = min_fund.saturating_sub(rent_lamports);
+
+            // Initialize keeper fund state
+            let default_reward = crate::keeper_fund::DEFAULT_REWARD_PER_CRANK;
+            let state = crate::keeper_fund::KeeperFundState {
+                magic: crate::keeper_fund::KEEPER_FUND_MAGIC,
+                bump: pda_bump,
+                _pad: [0u8; 7],
+                balance: fund_balance,
+                reward_per_crank: default_reward,
+                total_rewarded: 0,
+                total_topped_up: 0,
+            };
+            let mut fund_data = a_keeper_fund
+                .try_borrow_mut_data()
+                .map_err(|_| ProgramError::AccountBorrowFailed)?;
+            crate::keeper_fund::write_state(&mut fund_data, &state);
+
+            msg!(
+                "PERC-623: KeeperFund initialized — balance={} reward_per_crank={}",
+                fund_balance,
+                default_reward
+            );
+        }
+
+        Ok(())
     }
 
     pub fn process_instruction<'a, 'b>(
@@ -13193,6 +13284,69 @@ pub mod processor {
                     pos_b as i64,
                     offset_bps
                 );
+            }
+
+            // PERC-623: TopUpKeeperFund — anyone can add lamports to a market's
+            // keeper fund PDA. Permissionless (no admin check).
+            Instruction::TopUpKeeperFund { amount } => {
+                // accounts: [0] funder (signer), [1] slab (writable), [2] keeper_fund PDA (writable)
+                accounts::expect_len(accounts, 3)?;
+                let a_funder = &accounts[0];
+                let a_slab = &accounts[1];
+                let a_keeper_fund = &accounts[2];
+                accounts::expect_signer(a_funder)?;
+                accounts::expect_writable(a_slab)?;
+                accounts::expect_writable(a_keeper_fund)?;
+
+                // Verify slab is a valid program-owned slab
+                {
+                    let slab_data = state::slab_data_mut(a_slab)?;
+                    slab_guard(program_id, a_slab, &slab_data)?;
+                    require_initialized(&slab_data)?;
+                }
+
+                // Verify keeper_fund PDA derivation
+                let (expected_pda, _bump) = Pubkey::find_program_address(
+                    &[crate::keeper_fund::KEEPER_FUND_SEED, a_slab.key.as_ref()],
+                    program_id,
+                );
+                if *a_keeper_fund.key != expected_pda {
+                    return Err(ProgramError::InvalidSeeds);
+                }
+
+                if amount == 0 {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+
+                // Transfer lamports from funder to keeper fund PDA
+                **a_funder.try_borrow_mut_lamports()? -= amount;
+                **a_keeper_fund.try_borrow_mut_lamports()? += amount;
+
+                // Update keeper fund state
+                let mut fund_data = a_keeper_fund
+                    .try_borrow_mut_data()
+                    .map_err(|_| ProgramError::AccountBorrowFailed)?;
+
+                if let Some(fund_state) = crate::keeper_fund::read_state(&fund_data) {
+                    let mut new_state = *fund_state;
+                    new_state.balance = new_state.balance.saturating_add(amount);
+                    new_state.total_topped_up = new_state.total_topped_up.saturating_add(amount);
+                    crate::keeper_fund::write_state(&mut fund_data, &new_state);
+
+                    // If market was auto-paused due to depletion, unpause it
+                    if !crate::keeper_fund::is_depleted(new_state.balance) {
+                        drop(fund_data);
+                        let mut slab_data = state::slab_data_mut(a_slab)?;
+                        if state::read_flags(&slab_data) & state::FLAG_PAUSED != 0 {
+                            state::set_paused(&mut slab_data, false);
+                            msg!("KEEPER_FUND_TOPPED_UP: market unpaused");
+                        }
+                    }
+                } else {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                msg!("TopUpKeeperFund: amount={}", amount);
             }
 
             // Defense-in-depth: if a future tag routes here by mistake,
