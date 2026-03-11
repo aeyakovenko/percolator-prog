@@ -89,17 +89,18 @@ jobs:
     #   nightly_cb_ema_update_weighted_average           (~>45m — symbolic u128 mul oracle*alpha + prev*(1e6-alpha) exhausts SAT budget; confirmed timeout in CI)
     #   nightly_lp_collateral_value_never_exceeds_raw_share (~45m+ — u128 mul/div SAT-hard LP collateral; was nightly_proof_lp_collateral_value_never_exceeds_raw_share, dropped proof_ substring to avoid CI filter match)
     #   nightly_fee_mult_monotonically_increases_with_utilization (~slow — was nightly_proof_fee_mult_monotonically_increases_with_utilization, dropped proof_ substring)
-    # All remaining kani_*, proof_*, and inductive_* harnesses run here — each expected <30 min.
-    timeout-minutes: 50
+    # All remaining kani_*, proof_*, and inductive_* harnesses run here.
+    # As of Mar 2026, the full fast harness suite takes ~55-60min with --jobs 4
+    # after PERC-628 elastic-vault and PERC-642 delta-slot additions.
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Run Kani proofs (PR — all fast harnesses, exclude nightly_*)
         uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
           args: --tests --output-format terse --jobs 4 --harness kani_ --harness proof_ --harness inductive_
-        # Fast harnesses complete in ~35min. Reduced from 175min to catch
-        # the post-completion hang sooner. If proofs pass but the action
-        # hangs, the 45min step timeout kills it — check logs for
-        # "VERIFICATION:- SUCCESSFUL" on all harnesses before treating
-        # timeout as failure.
-        timeout-minutes: 45
+        # Suite was consistently hitting the old 45min step limit after vault/delta
+        # harnesses were added. Increased to 70min so proofs can complete cleanly.
+        # If proofs pass but action hangs, the step timeout kills it — check logs
+        # for "VERIFICATION:- SUCCESSFUL" on all harnesses before treating as failure.
+        timeout-minutes: 70
