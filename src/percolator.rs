@@ -7437,26 +7437,26 @@ pub mod shared_vault {
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable)]
     pub struct SharedVaultState {
-        pub magic: u64,                      // 0..8
-        pub epoch_number: u64,               // 8..16
-        pub total_capital: u128,             // 16..32
-        pub total_allocated: u128,           // 32..48
-        pub pending_withdrawals: u128,       // 48..64
-        pub epoch_start_slot: u64,           // 64..72
-        pub epoch_duration_slots: u64,       // 72..80
-        pub max_market_exposure_bps: u16,    // 80..82
-        pub bump: u8,                        // 82
+        pub magic: u64,                   // 0..8
+        pub epoch_number: u64,            // 8..16
+        pub total_capital: u128,          // 16..32
+        pub total_allocated: u128,        // 32..48
+        pub pending_withdrawals: u128,    // 48..64
+        pub epoch_start_slot: u64,        // 64..72
+        pub epoch_duration_slots: u64,    // 72..80
+        pub max_market_exposure_bps: u16, // 80..82
+        pub bump: u8,                     // 82
         /// Alignment padding to next 16-byte boundary for u128 fields below.
-        pub _pad: [u8; 13],                  // 83..96
+        pub _pad: [u8; 13], // 83..96
         /// Snapshot of `total_capital` taken at the start of each epoch
         /// (set by `AdvanceEpoch`). Used as the fixed available-capital
         /// denominator in `ClaimEpochWithdrawal` so that claim-ordering
         /// never affects individual payouts. Fixes security issue #1016.
-        pub epoch_snapshot_capital: u128,    // 96..112
+        pub epoch_snapshot_capital: u128, // 96..112
         /// Snapshot of `pending_withdrawals` taken at the start of each epoch
         /// (set by `AdvanceEpoch`). Preserved after the per-epoch reset so
         /// claims can still compute proportional payouts. Fixes #1016.
-        pub epoch_snapshot_pending: u128,    // 112..128
+        pub epoch_snapshot_pending: u128, // 112..128
     }
 
     const _: () = assert!(SHARED_VAULT_STATE_LEN == 128);
@@ -7967,7 +7967,10 @@ mod shared_vault_kani {
         // available_capital seen by B is identical to that seen by A.
         let payout_b = compute_proportional_withdrawal(lp_b, snapshot_pending, snapshot_capital);
 
-        assert_eq!(payout_a, payout_b, "same LP → same payout regardless of order");
+        assert_eq!(
+            payout_a, payout_b,
+            "same LP → same payout regardless of order"
+        );
     }
 
     /// #1016 fix: total payout of all users in an epoch never exceeds
