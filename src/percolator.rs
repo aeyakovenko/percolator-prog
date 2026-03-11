@@ -6602,9 +6602,12 @@ pub mod keeper_fund {
     /// Default split: 30% of creation deposit goes to keeper fund.
     pub const KEEPER_FUND_SPLIT_BPS: u64 = 3_000;
 
-    /// Default reward per successful KeeperCrank (in base token lamports).
-    /// ~0.001 SOL equivalent. Configurable per market at init.
-    pub const DEFAULT_REWARD_PER_CRANK: u64 = 1_000_000; // 0.001 SOL in lamports
+    /// Default reward per successful KeeperCrank, denominated in SOL lamports
+    /// (1 lamport = 1e-9 SOL). The keeper fund holds and pays in native SOL
+    /// lamports — NOT in any SPL token base units. 1_000_000 = 0.001 SOL.
+    /// Configurable per market at init via `InitMarket.reward_per_crank`.
+    /// Fixes #1013: unit is unambiguously SOL lamports, not SPL decimals.
+    pub const DEFAULT_REWARD_PER_CRANK: u64 = 1_000_000; // 0.001 SOL (lamports)
 
     /// Fee percentage diverted to keeper fund top-up (in bps).
     pub const KEEPER_FEE_TOPUP_BPS: u64 = 500; // 5% of fees
