@@ -7098,6 +7098,282 @@ mod creator_lock_kani {
     }
 }
 
+// 8d. mod creator_history — PERC-629: Dynamic Creation Deposit (Anti-Spam)
+pub mod creator_history {
+    use bytemuck::{Pod, Zeroable};
+
+    /// Magic bytes: "CRTRHIST"
+    pub const CREATOR_HISTORY_MAGIC: u64 = 0x4352_5452_4849_5354;
+    pub const CREATOR_HISTORY_LEN: usize = core::mem::size_of::<CreatorHistory>();
+    pub const CREATOR_HISTORY_SEED: &[u8] = b"creator_history";
+
+    /// Base deposit in e6 units ($2,500).
+    pub const BASE_DEPOSIT_E6: u64 = 2_500_000_000;
+    /// Max failure exponent (2^10 = 1024x cap).
+    pub const MAX_FAILURE_EXPONENT: u32 = 10;
+    /// Discount per successful market (10% = 1000 bps).
+    pub const SUCCESS_DISCOUNT_BPS: u64 = 1_000;
+    /// Maximum discount (50% = 5000 bps).
+    pub const MAX_DISCOUNT_BPS: u64 = 5_000;
+    /// OI threshold: market must reach 10% of deposit in OI.
+    pub const OI_THRESHOLD_BPS: u64 = 1_000;
+    /// Slash: 50% of deposit to insurance on failure.
+    pub const SLASH_BPS: u64 = 5_000;
+    /// Evaluation period: ~30 days in slots.
+    pub const EVALUATION_PERIOD_SLOTS: u64 = 6_480_000;
+
+    /// On-chain per-creator market history.
+    /// Seeds: `["creator_history", creator_pubkey]`
+    #[repr(C)]
+    #[derive(Clone, Copy, Pod, Zeroable)]
+    pub struct CreatorHistory {
+        pub magic: u64,
+        pub bump: u8,
+        pub _pad: [u8; 3],
+        pub total_markets: u16,
+        pub successful_markets: u16,
+        pub failed_markets: u16,
+        pub _reserved: [u8; 14],
+    }
+
+    const _: () = assert!(CREATOR_HISTORY_LEN == 32);
+
+    /// Compute the deposit multiplier from failure count.
+    /// Returns multiplier in bps (10_000 = 1x, 20_000 = 2x, etc.)
+    #[inline]
+    pub fn failure_multiplier_bps(failed: u16) -> u64 {
+        let exp = (failed as u32).min(MAX_FAILURE_EXPONENT);
+        10_000u64.saturating_mul(1u64 << exp)
+    }
+
+    /// Compute discount from successful market count.
+    /// Returns discount in bps, capped at MAX_DISCOUNT_BPS.
+    #[inline]
+    pub fn success_discount_bps(successful: u16) -> u64 {
+        let raw = (successful as u64).saturating_mul(SUCCESS_DISCOUNT_BPS);
+        raw.min(MAX_DISCOUNT_BPS)
+    }
+
+    /// Compute required deposit given creator history.
+    /// result = base * multiplier * (1 - discount) / 10_000^2
+    /// Floor: base * 50% (never below half base even with max discount).
+    #[inline]
+    pub fn compute_required_deposit(base_e6: u64, failed: u16, successful: u16) -> u64 {
+        let mult_bps = failure_multiplier_bps(failed);
+        let disc_bps = success_discount_bps(successful);
+        // effective = base * mult / 10_000 * (10_000 - disc) / 10_000
+        let numerator = (base_e6 as u128)
+            .saturating_mul(mult_bps as u128)
+            .saturating_mul((10_000u64.saturating_sub(disc_bps)) as u128);
+        let result = (numerator / (10_000u128 * 10_000u128)) as u64;
+        // Floor: 50% of base
+        let floor = base_e6 / 2;
+        result.max(floor)
+    }
+
+    /// Compute slash amount (50% of deposit).
+    #[inline]
+    pub fn compute_slash(deposit: u64) -> (u64, u64) {
+        let slash = deposit.saturating_mul(SLASH_BPS) / 10_000;
+        let remainder = deposit.saturating_sub(slash);
+        (slash, remainder)
+    }
+
+    /// Check if market reached OI threshold.
+    #[inline]
+    pub fn oi_threshold_met(deposit_e6: u64, current_oi_e6: u64) -> bool {
+        let threshold = deposit_e6.saturating_mul(OI_THRESHOLD_BPS) / 10_000;
+        current_oi_e6 >= threshold
+    }
+
+    pub fn read_state(data: &[u8]) -> Option<&CreatorHistory> {
+        if data.len() < CREATOR_HISTORY_LEN {
+            return None;
+        }
+        let state: &CreatorHistory = bytemuck::from_bytes(&data[..CREATOR_HISTORY_LEN]);
+        if state.magic != CREATOR_HISTORY_MAGIC {
+            return None;
+        }
+        Some(state)
+    }
+
+    pub fn write_state(data: &mut [u8], state: &CreatorHistory) {
+        data[..CREATOR_HISTORY_LEN].copy_from_slice(bytemuck::bytes_of(state));
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_failure_multiplier_zero() {
+            assert_eq!(failure_multiplier_bps(0), 10_000); // 1x
+        }
+
+        #[test]
+        fn test_failure_multiplier_one() {
+            assert_eq!(failure_multiplier_bps(1), 20_000); // 2x
+        }
+
+        #[test]
+        fn test_failure_multiplier_three() {
+            assert_eq!(failure_multiplier_bps(3), 80_000); // 8x
+        }
+
+        #[test]
+        fn test_failure_multiplier_capped() {
+            assert_eq!(failure_multiplier_bps(15), 10_240_000); // capped at 2^10 = 1024x
+            assert_eq!(failure_multiplier_bps(10), 10_240_000);
+        }
+
+        #[test]
+        fn test_success_discount() {
+            assert_eq!(success_discount_bps(0), 0);
+            assert_eq!(success_discount_bps(1), 1_000); // 10%
+            assert_eq!(success_discount_bps(3), 3_000); // 30%
+            assert_eq!(success_discount_bps(5), 5_000); // 50% (max)
+            assert_eq!(success_discount_bps(10), 5_000); // capped
+        }
+
+        #[test]
+        fn test_deposit_base_case() {
+            // No history: 1x * (1 - 0) = base
+            let dep = compute_required_deposit(BASE_DEPOSIT_E6, 0, 0);
+            assert_eq!(dep, BASE_DEPOSIT_E6);
+        }
+
+        #[test]
+        fn test_deposit_one_failure() {
+            // 2x * (1 - 0) = 2 * base
+            let dep = compute_required_deposit(BASE_DEPOSIT_E6, 1, 0);
+            assert_eq!(dep, BASE_DEPOSIT_E6 * 2);
+        }
+
+        #[test]
+        fn test_deposit_with_discount() {
+            // 1x * (1 - 10%) = 0.9 * base
+            let dep = compute_required_deposit(BASE_DEPOSIT_E6, 0, 1);
+            assert_eq!(dep, BASE_DEPOSIT_E6 * 9 / 10);
+        }
+
+        #[test]
+        fn test_deposit_floor() {
+            // Max discount (50%) + 0 failures = 50% of base = floor
+            let dep = compute_required_deposit(BASE_DEPOSIT_E6, 0, 10);
+            assert_eq!(dep, BASE_DEPOSIT_E6 / 2);
+        }
+
+        #[test]
+        fn test_slash_calculation() {
+            let (slash, remainder) = compute_slash(1_000_000);
+            assert_eq!(slash, 500_000);
+            assert_eq!(remainder, 500_000);
+        }
+
+        #[test]
+        fn test_slash_conservation() {
+            let (slash, remainder) = compute_slash(1_000_001);
+            assert_eq!(slash + remainder, 1_000_001);
+        }
+
+        #[test]
+        fn test_oi_threshold_met() {
+            assert!(oi_threshold_met(1_000_000, 100_000)); // exactly 10%
+            assert!(oi_threshold_met(1_000_000, 200_000)); // 20%
+            assert!(!oi_threshold_met(1_000_000, 50_000)); // 5%
+        }
+
+        #[test]
+        fn test_state_roundtrip() {
+            let state = CreatorHistory {
+                magic: CREATOR_HISTORY_MAGIC,
+                bump: 250,
+                _pad: [0; 3],
+                total_markets: 5,
+                successful_markets: 3,
+                failed_markets: 2,
+                _reserved: [0; 14],
+            };
+            let mut buf = [0u8; CREATOR_HISTORY_LEN];
+            write_state(&mut buf, &state);
+            let read = read_state(&buf).unwrap();
+            assert_eq!(read.total_markets, 5);
+            assert_eq!(read.successful_markets, 3);
+            assert_eq!(read.failed_markets, 2);
+        }
+
+        #[test]
+        fn test_read_bad_magic() {
+            let mut buf = [0u8; CREATOR_HISTORY_LEN];
+            buf[0..8].copy_from_slice(&0xDEADu64.to_le_bytes());
+            assert!(read_state(&buf).is_none());
+        }
+
+        #[test]
+        fn test_state_size() {
+            assert_eq!(CREATOR_HISTORY_LEN, 32);
+        }
+    }
+}
+
+#[cfg(kani)]
+mod creator_history_kani {
+    use crate::creator_history::*;
+
+    /// Multiplier monotonically increases with failures.
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn proof_multiplier_monotone() {
+        let a: u16 = kani::any();
+        let b: u16 = kani::any();
+        kani::assume(a <= b);
+        assert!(failure_multiplier_bps(a) <= failure_multiplier_bps(b));
+    }
+
+    /// Discount bounded by MAX_DISCOUNT_BPS.
+    #[kani::proof]
+    #[kani::unwind(1)]
+    fn proof_discount_bounded() {
+        let s: u16 = kani::any();
+        assert!(success_discount_bps(s) <= MAX_DISCOUNT_BPS);
+    }
+
+    /// Required deposit >= floor (50% of base).
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn nightly_proof_deposit_floor() {
+        let failed: u16 = kani::any();
+        let successful: u16 = kani::any();
+        let base: u64 = kani::any();
+        kani::assume(base <= 1_000_000_000_000); // reasonable range
+        let dep = compute_required_deposit(base, failed, successful);
+        assert!(dep >= base / 2);
+    }
+
+    /// Slash conservation: slash + remainder == deposit.
+    #[kani::proof]
+    #[kani::unwind(1)]
+    fn nightly_proof_slash_conservation() {
+        let deposit: u64 = kani::any();
+        let (slash, remainder) = compute_slash(deposit);
+        assert!(slash + remainder == deposit);
+    }
+
+    /// OI threshold is monotone: more OI → more likely to pass.
+    #[kani::proof]
+    #[kani::unwind(1)]
+    fn nightly_proof_oi_threshold_monotone() {
+        let deposit: u64 = kani::any();
+        let oi_a: u64 = kani::any();
+        let oi_b: u64 = kani::any();
+        kani::assume(oi_a <= oi_b);
+        if oi_threshold_met(deposit, oi_a) {
+            assert!(oi_threshold_met(deposit, oi_b));
+        }
+    }
+}
+
+
 // 9. mod processor
 pub mod processor {
     use crate::{

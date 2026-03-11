@@ -115,6 +115,8 @@ pub const TAG_ATTEST_CROSS_MARGIN: u8 = 55;
 /// PERC-623: Top up keeper fund (permissionless).
 /// Tag 56 reserved for PERC-622 AdvanceOraclePhase.
 pub const TAG_TOPUP_KEEPER_FUND: u8 = 57;
+/// PERC-629: Slash creation deposit.
+pub const TAG_SLASH_CREATION_DEPOSIT: u8 = 58;
 
 #[cfg(test)]
 mod tests {
