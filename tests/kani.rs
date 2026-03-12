@@ -236,6 +236,7 @@ fn kani_matcher_rejects_wrong_req_id() {
     kani::assume(ret.req_id != req_id);
 
     let result = validate_matcher_return(&ret, lp_account_id, oracle_price, req_size, req_id);
+    kani::cover!(result.is_err(), "COVER: rejection path is reachable");
     assert!(result.is_err(), "wrong req_id must be rejected");
 }
 
@@ -381,6 +382,10 @@ fn kani_matcher_rejects_sign_mismatch() {
     kani::assume(ret.exec_size.unsigned_abs() <= req_size.unsigned_abs());
 
     let result = validate_matcher_return(&ret, lp_account_id, oracle_price, req_size, req_id);
+    kani::cover!(
+        result.is_err(),
+        "COVER: sign mismatch rejection path is reachable"
+    );
     assert!(result.is_err(), "sign mismatch must be rejected");
 }
 
@@ -1751,6 +1756,7 @@ fn kani_tradecpi_from_ret_accept_uses_exec_size() {
             );
         }
     }
+    kani::cover!(true, "COVER: trade CPI accept path completed");
 }
 
 // =============================================================================
@@ -2203,6 +2209,10 @@ fn kani_base_to_units_monotonic() {
 
     let (units1, _) = base_to_units(base1, scale);
     let (units2, _) = base_to_units(base2, scale);
+    kani::cover!(
+        units1 < units2,
+        "COVER: strict monotonicity achieved (not just equal)"
+    );
 
     assert!(units1 <= units2, "base_to_units must be monotonic");
 }
@@ -2228,6 +2238,10 @@ fn kani_units_to_base_monotonic_bounded() {
     let base1 = units_to_base(units1, scale);
     let base2 = units_to_base(units2, scale);
 
+    kani::cover!(
+        base1 > 0 && base2 > base1,
+        "COVER: both bases positive and strictly ordered"
+    );
     assert!(
         base1 < base2,
         "units_to_base is strictly monotonic when not saturating"
@@ -2271,6 +2285,8 @@ fn kani_withdraw_misaligned_rejects() {
     let amount = q * (scale as u64) + r;
 
     let aligned = withdraw_amount_aligned(amount, scale);
+    kani::cover!(!aligned, "COVER: misalignment rejection path reachable");
+    kani::cover!(amount > 0, "COVER: non-zero misaligned amount tested");
 
     assert!(!aligned, "misaligned amount must be rejected");
 }
@@ -3328,6 +3344,14 @@ fn kani_scale_price_and_base_to_units_use_same_divisor() {
         "scale_price_e6 must compute price / unit_scale"
     );
 
+    kani::cover!(
+        capital_units > 0,
+        "COVER: base_to_units yields non-zero units"
+    );
+    kani::cover!(
+        oracle_scaled > 0,
+        "COVER: scale_price_e6 yields non-zero scaled price"
+    );
     // Key invariant: same divisor means margin ratio is preserved
     // margin_ratio = capital / position_value
     // With scaling: (base/scale) / (price/scale * pos / 1e6) = base / (price * pos / 1e6)
@@ -3663,6 +3687,11 @@ fn nightly_mark_price_bounded_by_cap() {
     let lo = mark_prev.saturating_sub(bound);
     let hi = mark_prev.saturating_add(bound);
 
+    kani::cover!(mark_new != mark_prev, "COVER: mark price actually changed");
+    kani::cover!(
+        mark_new == lo || mark_new == hi,
+        "COVER: cap bound is tight (boundary hit)"
+    );
     assert!(
         mark_new >= lo && mark_new <= hi,
         "mark_new must be within circuit breaker bound of mark_prev"
@@ -3870,6 +3899,8 @@ fn kani_hyperp_pipeline_bounded_when_bootstrapped() {
     kani::assume(cap_e2bps <= 100_000); // up to 10% per slot
 
     let new_mark = compute_ema_mark_price(prev_mark, dex_price, dt_slots, alpha_e6, cap_e2bps);
+    kani::cover!(new_mark > 0, "COVER: EMA produces positive mark price");
+    kani::cover!(new_mark != prev_mark, "COVER: EMA actually moves the mark");
 
     // New mark must be > 0 (can't go to zero from positive prev_mark with EMA)
     assert!(new_mark > 0, "EMA mark must be positive when prev_mark > 0");
@@ -3956,6 +3987,8 @@ fn nightly_circuit_breaker_before_ema() {
 
     // EMA blending can only move the result TOWARD the clamped oracle,
     // never beyond it. So the result must be within [lower, upper].
+    kani::cover!(result >= lower, "COVER: lower bound path reachable");
+    kani::cover!(result != prev_mark, "COVER: EMA moves the price");
     assert!(result >= lower, "result below circuit breaker lower bound");
     assert!(result <= upper, "result above circuit breaker upper bound");
 }
@@ -4384,6 +4417,11 @@ fn kani_concurrency_two_trades_zero_sum() {
 
     let (final_user, final_lp, ok2) = apply_trade_positions(mid_user, mid_lp, size2);
 
+    kani::cover!(ok1 && ok2, "COVER: both trades succeed");
+    kani::cover!(
+        size1 != 0 && size2 != 0,
+        "COVER: both trades are non-trivial"
+    );
     assert!(ok2, "second trade must preserve invariant");
     assert_eq!(final_user + final_lp, 0, "two trades: still zero-sum");
 }
@@ -4716,6 +4754,8 @@ fn nightly_dust_two_deposits_conservation() {
 
     // Conservation: final_units * scale + remaining == total_base
     let reconstructed = final_units * (scale as u128) + (remaining as u128);
+    kani::cover!(remaining > 0, "COVER: non-zero dust remains after sweep");
+    kani::cover!(swept_units > 0, "COVER: dust actually sweeps into units");
     assert_eq!(
         reconstructed, total_base,
         "two deposits: value must be exactly conserved"
@@ -5180,6 +5220,10 @@ fn nightly_ramp_monotonically_increases() {
     let result_a = compute_ramp_multiplier(oi_cap, created, slot_a, ramp_slots);
     let result_b = compute_ramp_multiplier(oi_cap, created, slot_b, ramp_slots);
 
+    kani::cover!(
+        result_b > result_a,
+        "COVER: ramp strictly increases between slots"
+    );
     // Later slot => equal or higher multiplier (monotonic)
     assert!(result_b >= result_a);
 }
@@ -5255,6 +5299,8 @@ fn proof_margin_always_requires_positive_collateral() {
     let required_margin = notional * (initial_margin_bps as u128) / 10_000;
 
     // Required margin is always > 0 for any viable position (not dust-sized)
+    kani::cover!(required_margin > 0, "COVER: positive margin path reachable");
+    kani::cover!(required_margin > 1, "COVER: non-trivial margin required");
     assert!(
         required_margin > 0,
         "Margin must be positive for any open position"
@@ -5382,6 +5428,7 @@ fn proof_staleness_rejects_old_price() {
 
     // Must not be considered fresh
     let is_fresh = pyth_price_is_fresh(publish_time, now, max_staleness);
+    kani::cover!(!is_fresh, "COVER: staleness rejection path reachable");
     assert!(!is_fresh, "stale price must not be accepted as fresh");
 }
 
@@ -5458,7 +5505,12 @@ fn nightly_skew_adjusted_cap_never_exceeds_base_cap() {
     let packed = pack_oi_cap(multiplier, skew_factor_bps);
     let (unpacked_mult, unpacked_skew) = unpack_oi_cap(packed);
     // Multiplier fits in 32 bits for roundtrip
+    kani::cover!(
+        long_oi != short_oi,
+        "COVER: asymmetric OI triggers skew adjustment"
+    );
     if multiplier <= 0xFFFF_FFFF && skew_factor_bps <= 0xFFFF {
+        kani::cover!(true, "COVER: pack/unpack roundtrip path reachable");
         assert_eq!(unpacked_mult, multiplier, "multiplier roundtrip");
         assert_eq!(unpacked_skew, skew_factor_bps, "skew_factor roundtrip");
     }
@@ -6312,6 +6364,11 @@ fn kani_quadratic_funding_disabled_when_k2_zero() {
         funding_max_per_slot,
         0,
     );
+    kani::cover!(
+        with_k2_0 != 0,
+        "COVER: k2=0 still produces non-zero funding"
+    );
+    kani::cover!(with_k2_0 == 0, "COVER: k2=0 can produce zero funding");
     // k2=0 must produce same result regardless of other params
     // (just verify it's within policy clamp bounds)
     assert!(with_k2_0.abs() <= funding_max_per_slot.abs().max(10_000));
@@ -6361,6 +6418,11 @@ fn kani_quadratic_funding_monotonically_increases() {
         k2_bps,
     );
     // Absolute funding with k2 must be >= without k2 (quadratic only adds)
+    kani::cover!(
+        with_k2.abs() > without_k2.abs(),
+        "COVER: k2 actually increases funding magnitude"
+    );
+    kani::cover!(without_k2 != 0, "COVER: base funding is non-zero");
     assert!(
         with_k2.abs() >= without_k2.abs(),
         "quadratic must not reduce funding magnitude"
@@ -6402,6 +6464,11 @@ fn kani_quadratic_funding_respects_clamp() {
     assert!(
         result >= -10_000 && result <= 10_000,
         "funding must respect hard clamp"
+    );
+    kani::cover!(result != 0, "COVER: funding rate is non-zero");
+    kani::cover!(
+        result == funding_max_per_slot || result == -funding_max_per_slot,
+        "COVER: clamp is actually hit"
     );
     // Policy clamp
     assert!(
@@ -6569,6 +6636,11 @@ fn kani_vram_monotonic_in_volatility() {
 
     let margin_lo = percolator_prog::compute_vram_margin_bps(ewmv_lo, scale, target);
     let margin_hi = percolator_prog::compute_vram_margin_bps(ewmv_hi, scale, target);
+    kani::cover!(
+        margin_hi > margin_lo,
+        "COVER: higher volatility strictly increases margin"
+    );
+    kani::cover!(margin_lo > 0, "COVER: non-zero margin at lower volatility");
     assert!(
         margin_hi >= margin_lo,
         "higher volatility must yield same or higher margin"
