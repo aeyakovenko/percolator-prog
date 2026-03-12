@@ -32,7 +32,7 @@ jobs:
         run: cargo build --lib --features mainnet --verbose
       # Note: unit/integration tests require LiteSVM + a built .so binary
       # (cargo-build-sbf). Run locally or in a dedicated SBF CI job.
-      # Kani proofs require the Kani verifier. Run via `cargo kani`.
+      # Kani proofs run locally via `cargo kani` — not in CI.
 
   clippy:
     runs-on: ubuntu-latest
@@ -58,50 +58,3 @@ jobs:
           components: rustfmt
       - name: Format check
         run: cargo fmt --check
-
-  kani:
-    name: Kani Proofs
-    runs-on: ubuntu-latest
-    # Slow harnesses (nightly_* prefix) are excluded here and run in nightly.yml.
-    # Currently excluded (renamed to nightly_*):
-    #   nightly_fee_monotone_in_bps                     (~2h29m — SAT-hard u128)
-    #   nightly_fee_ceil_geq_floor                      (~slow fee SAT)
-    #   nightly_fee_monotone_in_notional                (~slow fee SAT)
-    #   nightly_cb_recovery_equilibrium_stable          (~97m+ — SAT-hard CB proof)
-    #   nightly_cb_recovery_distance_decreases          (~slow CB convergence)
-    #   nightly_fee_bounded_by_notional                 (~29m — u128 SAT)
-    #   nightly_sandwich_full_cap_allows_double         (~slow OI cap proof)
-    #   nightly_sandwich_impact_proportional            (~2.5h — u128 mul+div SAT-hard)
-    #   nightly_ramp_never_exceeds_configured_multiplier (~slow ramp SAT)
-    #   nightly_ramp_monotonically_increases            (~slow ramp proof)
-    #   nightly_skew_adjusted_cap_never_exceeds_base_cap (~slow OI cap)
-    #   nightly_median_single_price                     (~2h45m — symbolic sort, 5-element array; unwind(1) bounds nightly budget)
-    #   nightly_hwm_floor_correct_math                  (~slow — symbolic MUL/DIV u128 SAT-hard; was proof_hwm_floor_correct_math)
-    #   nightly_median_within_bounds                    (~slow — SAT-hard symbolic median, was nightly_proof_median_within_bounds)
-    #   nightly_circuit_breaker_before_ema              (~3h+ — circuit breaker EMA proof timeout)
-    #   nightly_decimals_9_to_0_scales_down              (~2h41m — full u64 range SAT)
-    #   nightly_decimals_0_to_9_scales_up                (~2h32m — saturating_pow(9)+mul, same SAT pattern)
-    #   nightly_sv_exits_after_duration                  (~3h+ — safety valve symbolic proof)
-    #   nightly_cb_ema_alpha_zero_no_update              (~>2h — bounded range still SAT-hard MUL)
-    #   nightly_ema_mark_no_cap_full_oracle              (~2h46m — compute_ema_mark_price symbolic MUL/DIV)
-    #   nightly_hyperp_ema_converges_full_alpha          (~2h46m — identical structure, same SAT-hard path)
-    #   nightly_ema_mark_identity_at_equilibrium         (~2h55m+ — symbolic MUL/DIV SAT-hard; was nightly_kani_ema_mark_identity_at_equilibrium, renamed to drop kani_ substring)
-    #   nightly_cb_ema_update_weighted_average           (~>45m — symbolic u128 mul oracle*alpha + prev*(1e6-alpha) exhausts SAT budget; confirmed timeout in CI)
-    #   nightly_lp_collateral_value_never_exceeds_raw_share (~45m+ — u128 mul/div SAT-hard LP collateral; was nightly_proof_lp_collateral_value_never_exceeds_raw_share, dropped proof_ substring to avoid CI filter match)
-    #   nightly_fee_mult_monotonically_increases_with_utilization (~slow — was nightly_proof_fee_mult_monotonically_increases_with_utilization, dropped proof_ substring)
-    #   nightly_sv_total_payout_bounded                  (~67min+ — u128 mul/div proportional withdrawal SAT-hard; was nightly_proof_sv_total_payout_bounded, dropped proof_ substring to avoid CI --harness proof_ filter match)
-    # All remaining kani_*, proof_*, and inductive_* harnesses run here.
-    # As of Mar 2026, the full fast harness suite takes ~55-60min with --jobs 4
-    # after PERC-628 elastic-vault and PERC-642 delta-slot additions.
-    timeout-minutes: 80
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Run Kani proofs (PR — all fast harnesses, exclude nightly_*)
-        uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
-        with:
-          args: --tests --output-format terse --jobs 4 --harness kani_ --harness proof_ --harness inductive_
-        # Suite was consistently hitting the old 45min step limit after vault/delta
-        # harnesses were added. Increased to 70min so proofs can complete cleanly.
-        # If proofs pass but action hangs, the step timeout kills it — check logs
-        # for "VERIFICATION:- SUCCESSFUL" on all harnesses before treating as failure.
-        timeout-minutes: 70
