@@ -382,7 +382,10 @@ fn kani_matcher_rejects_sign_mismatch() {
     kani::assume(ret.exec_size.unsigned_abs() <= req_size.unsigned_abs());
 
     let result = validate_matcher_return(&ret, lp_account_id, oracle_price, req_size, req_id);
-    kani::cover!(result.is_err(), "COVER: sign mismatch rejection path is reachable");
+    kani::cover!(
+        result.is_err(),
+        "COVER: sign mismatch rejection path is reachable"
+    );
     assert!(result.is_err(), "sign mismatch must be rejected");
 }
 
@@ -2206,7 +2209,10 @@ fn kani_base_to_units_monotonic() {
 
     let (units1, _) = base_to_units(base1, scale);
     let (units2, _) = base_to_units(base2, scale);
-    kani::cover!(units1 < units2, "COVER: strict monotonicity achieved (not just equal)");
+    kani::cover!(
+        units1 < units2,
+        "COVER: strict monotonicity achieved (not just equal)"
+    );
 
     assert!(units1 <= units2, "base_to_units must be monotonic");
 }
@@ -2232,7 +2238,10 @@ fn kani_units_to_base_monotonic_bounded() {
     let base1 = units_to_base(units1, scale);
     let base2 = units_to_base(units2, scale);
 
-    kani::cover!(base1 > 0 && base2 > base1, "COVER: both bases positive and strictly ordered");
+    kani::cover!(
+        base1 > 0 && base2 > base1,
+        "COVER: both bases positive and strictly ordered"
+    );
     assert!(
         base1 < base2,
         "units_to_base is strictly monotonic when not saturating"
@@ -3335,8 +3344,14 @@ fn kani_scale_price_and_base_to_units_use_same_divisor() {
         "scale_price_e6 must compute price / unit_scale"
     );
 
-    kani::cover!(capital_units > 0, "COVER: base_to_units yields non-zero units");
-    kani::cover!(oracle_scaled > 0, "COVER: scale_price_e6 yields non-zero scaled price");
+    kani::cover!(
+        capital_units > 0,
+        "COVER: base_to_units yields non-zero units"
+    );
+    kani::cover!(
+        oracle_scaled > 0,
+        "COVER: scale_price_e6 yields non-zero scaled price"
+    );
     // Key invariant: same divisor means margin ratio is preserved
     // margin_ratio = capital / position_value
     // With scaling: (base/scale) / (price/scale * pos / 1e6) = base / (price * pos / 1e6)
@@ -3673,7 +3688,10 @@ fn nightly_mark_price_bounded_by_cap() {
     let hi = mark_prev.saturating_add(bound);
 
     kani::cover!(mark_new != mark_prev, "COVER: mark price actually changed");
-    kani::cover!(mark_new == lo || mark_new == hi, "COVER: cap bound is tight (boundary hit)");
+    kani::cover!(
+        mark_new == lo || mark_new == hi,
+        "COVER: cap bound is tight (boundary hit)"
+    );
     assert!(
         mark_new >= lo && mark_new <= hi,
         "mark_new must be within circuit breaker bound of mark_prev"
@@ -4400,7 +4418,10 @@ fn kani_concurrency_two_trades_zero_sum() {
     let (final_user, final_lp, ok2) = apply_trade_positions(mid_user, mid_lp, size2);
 
     kani::cover!(ok1 && ok2, "COVER: both trades succeed");
-    kani::cover!(size1 != 0 && size2 != 0, "COVER: both trades are non-trivial");
+    kani::cover!(
+        size1 != 0 && size2 != 0,
+        "COVER: both trades are non-trivial"
+    );
     assert!(ok2, "second trade must preserve invariant");
     assert_eq!(final_user + final_lp, 0, "two trades: still zero-sum");
 }
@@ -5199,7 +5220,10 @@ fn nightly_ramp_monotonically_increases() {
     let result_a = compute_ramp_multiplier(oi_cap, created, slot_a, ramp_slots);
     let result_b = compute_ramp_multiplier(oi_cap, created, slot_b, ramp_slots);
 
-    kani::cover!(result_b > result_a, "COVER: ramp strictly increases between slots");
+    kani::cover!(
+        result_b > result_a,
+        "COVER: ramp strictly increases between slots"
+    );
     // Later slot => equal or higher multiplier (monotonic)
     assert!(result_b >= result_a);
 }
@@ -5481,7 +5505,10 @@ fn nightly_skew_adjusted_cap_never_exceeds_base_cap() {
     let packed = pack_oi_cap(multiplier, skew_factor_bps);
     let (unpacked_mult, unpacked_skew) = unpack_oi_cap(packed);
     // Multiplier fits in 32 bits for roundtrip
-    kani::cover!(long_oi != short_oi, "COVER: asymmetric OI triggers skew adjustment");
+    kani::cover!(
+        long_oi != short_oi,
+        "COVER: asymmetric OI triggers skew adjustment"
+    );
     if multiplier <= 0xFFFF_FFFF && skew_factor_bps <= 0xFFFF {
         kani::cover!(true, "COVER: pack/unpack roundtrip path reachable");
         assert_eq!(unpacked_mult, multiplier, "multiplier roundtrip");
@@ -6337,7 +6364,10 @@ fn kani_quadratic_funding_disabled_when_k2_zero() {
         funding_max_per_slot,
         0,
     );
-    kani::cover!(with_k2_0 != 0, "COVER: k2=0 still produces non-zero funding");
+    kani::cover!(
+        with_k2_0 != 0,
+        "COVER: k2=0 still produces non-zero funding"
+    );
     kani::cover!(with_k2_0 == 0, "COVER: k2=0 can produce zero funding");
     // k2=0 must produce same result regardless of other params
     // (just verify it's within policy clamp bounds)
@@ -6388,7 +6418,10 @@ fn kani_quadratic_funding_monotonically_increases() {
         k2_bps,
     );
     // Absolute funding with k2 must be >= without k2 (quadratic only adds)
-    kani::cover!(with_k2.abs() > without_k2.abs(), "COVER: k2 actually increases funding magnitude");
+    kani::cover!(
+        with_k2.abs() > without_k2.abs(),
+        "COVER: k2 actually increases funding magnitude"
+    );
     kani::cover!(without_k2 != 0, "COVER: base funding is non-zero");
     assert!(
         with_k2.abs() >= without_k2.abs(),
@@ -6433,7 +6466,10 @@ fn kani_quadratic_funding_respects_clamp() {
         "funding must respect hard clamp"
     );
     kani::cover!(result != 0, "COVER: funding rate is non-zero");
-    kani::cover!(result == funding_max_per_slot || result == -funding_max_per_slot, "COVER: clamp is actually hit");
+    kani::cover!(
+        result == funding_max_per_slot || result == -funding_max_per_slot,
+        "COVER: clamp is actually hit"
+    );
     // Policy clamp
     assert!(
         result >= -funding_max_per_slot && result <= funding_max_per_slot,
@@ -6600,7 +6636,10 @@ fn kani_vram_monotonic_in_volatility() {
 
     let margin_lo = percolator_prog::compute_vram_margin_bps(ewmv_lo, scale, target);
     let margin_hi = percolator_prog::compute_vram_margin_bps(ewmv_hi, scale, target);
-    kani::cover!(margin_hi > margin_lo, "COVER: higher volatility strictly increases margin");
+    kani::cover!(
+        margin_hi > margin_lo,
+        "COVER: higher volatility strictly increases margin"
+    );
     kani::cover!(margin_lo > 0, "COVER: non-zero margin at lower volatility");
     assert!(
         margin_hi >= margin_lo,
