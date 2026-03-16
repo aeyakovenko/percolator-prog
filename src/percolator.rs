@@ -4680,13 +4680,33 @@ pub mod processor {
                     engine.set_pnl(user_idx as usize, percolator::wide_math::I256::ZERO);
                 }
 
-                // Forgive fee debt so close_account doesn't fail
+                // Forgive fee debt
                 engine.accounts[user_idx as usize].fee_credits = percolator::I128::ZERO;
 
-                // close_account: touch_account_full, free_slot, vault decrement
-                let amt_units = engine
-                    .close_account(user_idx, clock.slot, price)
-                    .map_err(map_risk_error)?;
+                // For resolved markets, directly settle capital and free the account.
+                // Cannot use engine.close_account() because its touch_account_full
+                // may overflow with frozen ADL state on resolved markets.
+                let amt_units = engine.accounts[user_idx as usize].capital.get();
+                if amt_units > 0 {
+                    engine.set_capital(user_idx as usize, 0);
+                    let new_vault = engine.vault.get().saturating_sub(amt_units);
+                    engine.vault = percolator::U128::new(new_vault);
+                }
+
+                // Clear position basis (should already be zero from force-close)
+                engine.set_pnl(user_idx as usize, percolator::wide_math::I256::ZERO);
+                engine.accounts[user_idx as usize].position_basis_q = percolator::wide_math::I256::ZERO;
+
+                // Decrement c_tot
+                let new_c_tot = engine.c_tot.get().saturating_sub(amt_units);
+                engine.c_tot = percolator::U128::new(new_c_tot);
+
+                // Mark slot as unused (equivalent to free_slot)
+                let idx_usize = user_idx as usize;
+                let word = idx_usize / 64;
+                let bit = idx_usize % 64;
+                engine.used[word] &= !(1u64 << bit);
+                engine.num_used_accounts = engine.num_used_accounts.saturating_sub(1);
                 let amt_units_u64: u64 = amt_units
                     .try_into()
                     .map_err(|_| PercolatorError::EngineOverflow)?;

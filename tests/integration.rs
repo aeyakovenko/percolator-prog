@@ -1087,8 +1087,8 @@ impl TestEnv {
         // offset of RiskEngine.used = 408 (bitmap array)
         // used is [u64; 64] = 512 bytes
         // num_used_accounts follows used at offset 408 + 512 = 920 within RiskEngine
-        // Total offset = 440 + 1192 = 1360
-        const NUM_USED_OFFSET: usize = 440 + 1192; // 1360
+        // Total offset = 440 + 1192 = 1632
+        const NUM_USED_OFFSET: usize = 440 + 1192;
         if slab_account.data.len() < NUM_USED_OFFSET + 2 {
             return 0;
         }
@@ -1912,7 +1912,7 @@ fn test_hyperp_rejects_zero_initial_mark_price() {
     // Snapshot state before the failing init attempt.
     // Header+config region should remain unchanged on rejected tx.
     const HEADER_CONFIG_LEN: usize = 440;
-    const NUM_USED_OFF: usize = 1360;
+    const NUM_USED_OFF: usize = 1632;
     let slab_before = svm.get_account(&slab).unwrap().data;
     let vault_before = {
         let vault_data = svm.get_account(&vault).unwrap().data;
@@ -2086,7 +2086,7 @@ fn test_hyperp_init_market_with_valid_price() {
     const AUTH_PRICE_OFF: usize = CONFIG_OFF + 288;
     const ORACLE_CAP_OFF: usize = CONFIG_OFF + 304;
     const INDEX_OFF: usize = CONFIG_OFF + 312;
-    const NUM_USED_OFF: usize = 1360;
+    const NUM_USED_OFF: usize = 1632;
 
     let slab_data = svm.get_account(&slab).unwrap().data;
     let magic = u64::from_le_bytes(slab_data[HEADER_MAGIC_OFF..HEADER_MAGIC_OFF + 8].try_into().unwrap());
@@ -2250,7 +2250,7 @@ fn test_hyperp_init_market_with_inverted_price() {
     const AUTH_PRICE_OFF: usize = CONFIG_OFF + 288;
     const ORACLE_CAP_OFF: usize = CONFIG_OFF + 304;
     const INDEX_OFF: usize = CONFIG_OFF + 312;
-    const NUM_USED_OFF: usize = 1360;
+    const NUM_USED_OFF: usize = 1632;
 
     let slab_data = svm.get_account(&slab).unwrap().data;
     let magic = u64::from_le_bytes(slab_data[HEADER_MAGIC_OFF..HEADER_MAGIC_OFF + 8].try_into().unwrap());
@@ -5047,8 +5047,8 @@ impl TradeCpiTestEnv {
 
     fn read_num_used_accounts(&self) -> u16 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        // ENGINE_OFF (440) + num_used offset (920) = 1360
-        u16::from_le_bytes(slab_data[1360..1362].try_into().unwrap())
+        // ENGINE_OFF (440) + num_used offset (1192) = 1632
+        u16::from_le_bytes(slab_data[1632..1634].try_into().unwrap())
     }
 
     /// Read pnl_pos_tot aggregate from slab
