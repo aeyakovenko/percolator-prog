@@ -9399,20 +9399,24 @@ fn test_attack_trade_without_margin() {
     );
 }
 
-/// ATTACK: Open a risk-increasing trade when insurance is depleted and
-/// risk reduction threshold is non-zero.
-/// Expected: Risk-increasing trade gated when insurance gone.
+/// ATTACK: OI-increasing trade when long side is in DrainOnly mode (spec §9.6).
+/// Expected: Trade rejected with SideBlocked → EngineRiskReductionOnlyMode (0x16).
+///
+/// The new spec (§9.6) uses side-mode gating: trades that increase net side OI
+/// on DrainOnly/ResetPending sides are rejected (RiskError::SideBlocked →
+/// EngineRiskReductionOnlyMode). The old insurance_floor is no longer a trade gate;
+/// it governs insurance withdrawal reserves only.
+///
+/// To trigger DrainOnly in a live integration scenario requires many ADL cycles
+/// (A_side decaying below MIN_A_SIDE = 2^64), which is impractical to set up.
+/// Instead, this test directly sets side_mode_long = DrainOnly (1) via raw byte
+/// manipulation of the slab, then verifies the gating and error code mapping.
 #[test]
 fn test_attack_trade_risk_increase_when_gated() {
     program_path();
 
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-
-    // Set risk reduction threshold very high so gate activates
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_risk_threshold(&admin, 1_000_000_000_000_000_000)
-        .expect("risk threshold setup must succeed");
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -9422,6 +9426,27 @@ fn test_attack_trade_risk_increase_when_gated() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
+    // Directly set side_mode_long = DrainOnly (1) in the slab raw bytes.
+    // SBF uses 8-byte u128 alignment (unlike x86-64 which uses 16-byte).
+    // ENGINE_OFF = 440.  Within RiskEngine (SBF layout):
+    //   oi_eff_long_q:  U256 (32 bytes) at engine offset 472, ends at 504
+    //   oi_eff_short_q: U256 (32 bytes) at engine offset 504, ends at 536
+    //   side_mode_long: u8 at engine offset 536
+    //   side_mode_short: u8 at engine offset 537
+    // => slab absolute offset = 440 + 536 = 976
+    const SIDE_MODE_LONG_OFF: usize = 440 + 536;
+    {
+        let original_slab = env
+            .svm
+            .get_account(&env.slab)
+            .expect("slab must exist");
+        let mut modified_slab = original_slab.clone();
+        modified_slab.data[SIDE_MODE_LONG_OFF] = 1; // SideMode::DrainOnly = 1
+        env.svm
+            .set_account(env.slab, modified_slab)
+            .expect("set_account must succeed");
+    }
+
     let user_pos_before = env.read_account_position(user_idx);
     let lp_pos_before = env.read_account_position(lp_idx);
     let user_cap_before = env.read_account_capital(user_idx);
@@ -9429,42 +9454,52 @@ fn test_attack_trade_risk_increase_when_gated() {
     let spl_vault_before = env.vault_balance();
     let engine_vault_before = env.read_engine_vault();
 
-    // Threshold set to u128::MAX means insurance must exceed an impossible amount
-    // to allow risk-increasing trades. With no insurance funded, this should gate.
+    // A long trade (user +5M, LP -5M) increases OI on the long side, which is
+    // blocked when side_mode_long == DrainOnly.
     let result = env.try_trade(&user, &lp, lp_idx, user_idx, 5_000_000);
     assert!(
         result.is_err(),
-        "ATTACK: Risk-increasing trade should be gated when threshold exceeds insurance"
+        "ATTACK: OI-increasing trade must be blocked when long side is in DrainOnly mode"
     );
+
+    // Verify the error maps to EngineRiskReductionOnlyMode (SideBlocked → 0x16 = 22).
+    let err_msg = result.unwrap_err();
+    assert!(
+        err_msg.contains("0x16"),
+        "Expected EngineRiskReductionOnlyMode (0x16) from SideBlocked, got: {}",
+        err_msg
+    );
+
+    // The transaction failed so Solana reverts all account mutations atomically.
     assert_eq!(
         env.read_account_position(user_idx),
         user_pos_before,
-        "Rejected gated trade must preserve user position"
+        "Blocked trade must preserve user position"
     );
     assert_eq!(
         env.read_account_position(lp_idx),
         lp_pos_before,
-        "Rejected gated trade must preserve LP position"
+        "Blocked trade must preserve LP position"
     );
     assert_eq!(
         env.read_account_capital(user_idx),
         user_cap_before,
-        "Rejected gated trade must preserve user capital"
+        "Blocked trade must preserve user capital"
     );
     assert_eq!(
         env.read_account_capital(lp_idx),
         lp_cap_before,
-        "Rejected gated trade must preserve LP capital"
+        "Blocked trade must preserve LP capital"
     );
     assert_eq!(
         env.vault_balance(),
         spl_vault_before,
-        "Rejected gated trade must preserve SPL vault"
+        "Blocked trade must preserve SPL vault"
     );
     assert_eq!(
         env.read_engine_vault(),
         engine_vault_before,
-        "Rejected gated trade must preserve engine vault"
+        "Blocked trade must preserve engine vault"
     );
 }
 
