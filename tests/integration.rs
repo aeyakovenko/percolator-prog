@@ -39,6 +39,10 @@ const PYTH_RECEIVER_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
 
 const TEST_FEED_ID: [u8; 32] = [0xABu8; 32];
 
+fn cu_ix() -> Instruction {
+    solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)
+}
+
 fn program_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("target/deploy/percolator_prog.so");
@@ -332,7 +336,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -374,7 +378,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -435,7 +439,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -465,7 +469,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -492,7 +496,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -667,7 +671,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -705,7 +709,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -986,7 +990,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -1034,7 +1038,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -1066,7 +1070,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -1261,7 +1265,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[&admin],
             self.svm.latest_blockhash(),
@@ -1294,7 +1298,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -1324,7 +1328,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&user.pubkey()),
             &[user, lp],
             self.svm.latest_blockhash(),
@@ -1364,7 +1368,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -1904,7 +1908,7 @@ fn test_hyperp_rejects_zero_initial_mark_price() {
     let used_before = u16::from_le_bytes(slab_before[NUM_USED_OFF..NUM_USED_OFF + 2].try_into().unwrap());
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&payer.pubkey()),
         &[&payer],
         svm.latest_blockhash(),
@@ -2047,7 +2051,7 @@ fn test_hyperp_init_market_with_valid_price() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&payer.pubkey()),
         &[&payer],
         svm.latest_blockhash(),
@@ -2211,7 +2215,7 @@ fn test_hyperp_init_market_with_inverted_price() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&payer.pubkey()),
         &[&payer],
         svm.latest_blockhash(),
@@ -2408,7 +2412,7 @@ fn test_matcher_init_vamm_passive_mode() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&payer.pubkey()),
         &[&payer],
         svm.latest_blockhash(),
@@ -2477,7 +2481,7 @@ fn test_matcher_call_after_init() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[init_ix],
+        &[cu_ix(), init_ix],
         Some(&payer.pubkey()),
         &[&payer],
         svm.latest_blockhash(),
@@ -2498,7 +2502,7 @@ fn test_matcher_call_after_init() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[call_ix],
+        &[cu_ix(), call_ix],
         Some(&payer.pubkey()),
         &[&payer, &lp],
         svm.latest_blockhash(),
@@ -2573,7 +2577,7 @@ fn test_matcher_rejects_double_init() {
     };
 
     let tx1 = Transaction::new_signed_with_payer(
-        &[ix1],
+        &[cu_ix(), ix1],
         Some(&payer.pubkey()),
         &[&payer],
         svm.latest_blockhash(),
@@ -2592,7 +2596,7 @@ fn test_matcher_rejects_double_init() {
     };
 
     let tx2 = Transaction::new_signed_with_payer(
-        &[ix2],
+        &[cu_ix(), ix2],
         Some(&payer.pubkey()),
         &[&payer],
         svm.latest_blockhash(),
@@ -2658,7 +2662,7 @@ fn test_matcher_vamm_mode_with_impact() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[init_ix],
+        &[cu_ix(), init_ix],
         Some(&payer.pubkey()),
         &[&payer],
         svm.latest_blockhash(),
@@ -2680,7 +2684,7 @@ fn test_matcher_vamm_mode_with_impact() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[call_ix],
+        &[cu_ix(), call_ix],
         Some(&payer.pubkey()),
         &[&payer, &lp],
         svm.latest_blockhash(),
@@ -2740,7 +2744,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -2774,7 +2778,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&attacker.pubkey()),
             &[attacker],
             self.svm.latest_blockhash(),
@@ -2806,7 +2810,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&user.pubkey()),
             &[user],
             self.svm.latest_blockhash(),
@@ -2837,7 +2841,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&payer.pubkey()),
             &[payer],
             self.svm.latest_blockhash(),
@@ -2867,7 +2871,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&caller.pubkey()),
             &[&caller],
             self.svm.latest_blockhash(),
@@ -3402,7 +3406,7 @@ impl TestEnv {
             data: encode_update_admin(new_admin),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&signer.pubkey()),
             &[signer],
             self.svm.latest_blockhash(),
@@ -3428,7 +3432,7 @@ impl TestEnv {
             data: encode_set_risk_threshold(new_threshold),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&signer.pubkey()),
             &[signer],
             self.svm.latest_blockhash(),
@@ -3454,7 +3458,7 @@ impl TestEnv {
             data: encode_set_oracle_authority(new_authority),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&signer.pubkey()),
             &[signer],
             self.svm.latest_blockhash(),
@@ -3481,7 +3485,7 @@ impl TestEnv {
             data: encode_push_oracle_price(price_e6, timestamp),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&signer.pubkey()),
             &[signer],
             self.svm.latest_blockhash(),
@@ -3507,7 +3511,7 @@ impl TestEnv {
             data: encode_set_oracle_price_cap(max_change_e2bps),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&signer.pubkey()),
             &[signer],
             self.svm.latest_blockhash(),
@@ -3529,7 +3533,7 @@ impl TestEnv {
             data: encode_set_maintenance_fee(new_fee),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&signer.pubkey()),
             &[signer],
             self.svm.latest_blockhash(),
@@ -3551,7 +3555,7 @@ impl TestEnv {
             data: encode_resolve_market(),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -3580,7 +3584,7 @@ impl TestEnv {
             data: encode_withdraw_insurance(),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -3614,7 +3618,7 @@ impl TestEnv {
             ),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -3648,7 +3652,7 @@ impl TestEnv {
             data: encode_withdraw_insurance_limited(amount),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&authority.pubkey()),
             &[authority],
             self.svm.latest_blockhash(),
@@ -3698,7 +3702,7 @@ impl TestEnv {
             data: encode_liquidate(target_idx),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&caller.pubkey()),
             &[&caller],
             self.svm.latest_blockhash(),
@@ -3734,7 +3738,7 @@ impl TestEnv {
             ),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&signer.pubkey()),
             &[signer],
             self.svm.latest_blockhash(),
@@ -4082,7 +4086,7 @@ fn test_critical_close_slab_authorization() {
         data: encode_close_slab(),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[attacker_ix],
+        &[cu_ix(), attacker_ix],
         Some(&attacker.pubkey()),
         &[&attacker],
         env.svm.latest_blockhash(),
@@ -4150,7 +4154,7 @@ fn test_critical_init_market_rejects_double_init() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[admin],
         env.svm.latest_blockhash(),
@@ -4436,7 +4440,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -4508,7 +4512,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[init_ix],
+            &[cu_ix(), init_ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -4533,7 +4537,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -4570,7 +4574,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -4602,7 +4606,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -4629,7 +4633,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -4674,7 +4678,7 @@ impl TradeCpiTestEnv {
 
         // Only user signs - LP owner does NOT sign
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&user.pubkey()),
             &[user],
             self.svm.latest_blockhash(),
@@ -4713,7 +4717,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&user.pubkey()),
             &[user],
             self.svm.latest_blockhash(),
@@ -4757,7 +4761,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -4815,7 +4819,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -4843,7 +4847,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&authority.pubkey()),
             &[authority],
             self.svm.latest_blockhash(),
@@ -4865,7 +4869,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -4895,7 +4899,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&payer.pubkey()),
             &[payer],
             self.svm.latest_blockhash(),
@@ -4925,7 +4929,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -4991,7 +4995,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -5092,7 +5096,7 @@ impl TradeCpiTestEnv {
             data: encode_close_account(user_idx),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -5129,7 +5133,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -5151,7 +5155,7 @@ impl TradeCpiTestEnv {
             data: encode_close_slab(),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[&admin],
             self.svm.latest_blockhash(),
@@ -5206,7 +5210,7 @@ impl TradeCpiTestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -5249,7 +5253,7 @@ impl TradeCpiTestEnv {
             data: encode_set_oracle_price_cap(max_change_e2bps),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&signer.pubkey()),
             &[signer],
             self.svm.latest_blockhash(),
@@ -5516,7 +5520,7 @@ fn test_tradecpi_rejects_wrong_matcher_context() {
         data: encode_init_vamm(MatcherMode::Passive, 5, 10, 200, 0, 0, 1_000_000_000_000, 0),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[init_ix],
+        &[cu_ix(), init_ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -6646,7 +6650,7 @@ fn test_hyperp_index_smoothing_multiple_cranks_same_slot() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&payer.pubkey()),
         &[&payer],
         svm.latest_blockhash(),
@@ -6673,7 +6677,7 @@ fn test_hyperp_index_smoothing_multiple_cranks_same_slot() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[crank_ix.clone()],
+        &[cu_ix(), crank_ix.clone()],
         Some(&payer.pubkey()),
         &[&payer],
         svm.latest_blockhash(),
@@ -6687,7 +6691,7 @@ fn test_hyperp_index_smoothing_multiple_cranks_same_slot() {
     svm.expire_blockhash();
     let new_blockhash = svm.latest_blockhash();
     let tx = Transaction::new_signed_with_payer(
-        &[crank_ix.clone()],
+        &[cu_ix(), crank_ix.clone()],
         Some(&payer.pubkey()),
         &[&payer],
         new_blockhash,
@@ -7076,7 +7080,7 @@ fn test_resolved_market_blocks_new_activity() {
         data: encode_init_user(0),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&new_user.pubkey()),
         &[&new_user],
         env.svm.latest_blockhash(),
@@ -7147,7 +7151,7 @@ fn test_resolved_market_allows_user_withdrawal() {
         data: encode_withdraw(user_idx, 100_000_000), // Withdraw 0.1 SOL
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -8370,7 +8374,7 @@ fn test_premarket_force_close_cu_benchmark() {
     };
 
     let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&caller.pubkey()),
         &[&caller],
         env.svm.latest_blockhash(),
@@ -8641,7 +8645,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -8673,7 +8677,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -10875,7 +10879,7 @@ fn test_attack_double_init_market() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[admin],
         env.svm.latest_blockhash(),
@@ -11133,7 +11137,7 @@ impl TestEnv {
             data: encode_crank_with_panic(allow_panic),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&signer.pubkey()),
             &[signer],
             self.svm.latest_blockhash(),
@@ -11157,7 +11161,7 @@ impl TestEnv {
             data: encode_crank_self(caller_idx),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -11230,7 +11234,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -12092,7 +12096,7 @@ fn test_attack_update_config_extreme_values() {
         ),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[&admin],
         env.svm.latest_blockhash(),
@@ -12210,7 +12214,7 @@ fn test_attack_deposit_u64_max() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -12422,7 +12426,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&payer.pubkey()),
             &[payer],
             self.svm.latest_blockhash(),
@@ -12465,7 +12469,7 @@ impl TestEnv {
             ),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&signer.pubkey()),
             &[signer],
             self.svm.latest_blockhash(),
@@ -12707,7 +12711,7 @@ fn test_attack_topup_insurance_insufficient_balance() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&payer.pubkey()),
         &[&payer],
         env.svm.latest_blockhash(),
@@ -13392,7 +13396,7 @@ fn test_attack_truncated_instruction_data() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -13440,7 +13444,7 @@ fn test_attack_unknown_instruction_tag() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -13488,7 +13492,7 @@ fn test_attack_empty_instruction_data() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -13659,7 +13663,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -13695,7 +13699,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&user.pubkey()),
             &[user, victim],
             self.svm.latest_blockhash(),
@@ -13724,7 +13728,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -15018,7 +15022,7 @@ fn test_attack_hyperp_deposit_after_resolution() {
         data: encode_deposit(user_idx, 500_000_000),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -16473,7 +16477,7 @@ fn test_attack_deposit_to_others_account() {
         data: encode_deposit(victim_idx, 1_000_000_000),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&attacker.pubkey()),
         &[&attacker],
         env.svm.latest_blockhash(),
@@ -16721,7 +16725,7 @@ fn test_attack_update_admin_to_zero_locks_out() {
         },
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[&admin],
         env.svm.latest_blockhash(),
@@ -20080,7 +20084,7 @@ fn test_attack_new_account_fee_goes_to_insurance() {
         data: encode_init_lp(&matcher, &ctx, fee),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&lp.pubkey()),
         &[&lp],
         env.svm.latest_blockhash(),
@@ -20117,7 +20121,7 @@ fn test_attack_new_account_fee_goes_to_insurance() {
         data: encode_init_user(fee),
     };
     let tx2 = Transaction::new_signed_with_payer(
-        &[ix2],
+        &[cu_ix(), ix2],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -20486,7 +20490,7 @@ fn test_attack_funding_extreme_k_bps_capped() {
         ),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[&admin],
         env.svm.latest_blockhash(),
@@ -20568,7 +20572,7 @@ fn test_attack_funding_extreme_max_premium_capped() {
         ),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[&admin],
         env.svm.latest_blockhash(),
@@ -20650,7 +20654,7 @@ fn test_attack_funding_extreme_max_bps_per_slot() {
         ),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[&admin],
         env.svm.latest_blockhash(),
@@ -20745,7 +20749,7 @@ fn test_attack_deposit_wrong_mint_token_account() {
         data: encode_deposit(user_idx, 1_000_000_000),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -20832,7 +20836,7 @@ fn test_attack_withdraw_to_different_users_ata() {
         data: encode_withdraw(user_idx, withdraw_amount),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -23656,7 +23660,7 @@ fn test_attack_instruction_tag_just_above_max() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -23732,7 +23736,7 @@ fn test_attack_deposit_wrong_slab_owner() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -23805,7 +23809,7 @@ fn test_attack_deposit_without_signer() {
     // Payer signs, but user doesn't
     let payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&payer.pubkey()),
         &[&payer],
         env.svm.latest_blockhash(),
@@ -24065,7 +24069,7 @@ fn test_attack_init_market_admin_mismatch() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[&admin],
         svm.latest_blockhash(),
@@ -24179,7 +24183,7 @@ fn test_attack_init_market_mint_mismatch() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[&admin],
         svm.latest_blockhash(),
@@ -24244,7 +24248,7 @@ fn test_attack_withdraw_wrong_vault_pda() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -24328,7 +24332,7 @@ fn test_attack_close_account_wrong_vault_pda() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -24407,7 +24411,7 @@ fn test_attack_topup_insurance_wrong_vault() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[&admin],
         env.svm.latest_blockhash(),
@@ -24488,7 +24492,7 @@ fn test_attack_liquidate_caller_not_signer() {
 
     // Use admin as payer (different from caller)
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[&admin],
         env.svm.latest_blockhash(),
@@ -24588,7 +24592,7 @@ fn test_attack_deposit_wrong_oracle_account() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -24662,7 +24666,7 @@ fn test_attack_init_user_fee_conservation() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -24748,7 +24752,7 @@ fn test_attack_crank_wrong_oracle() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&caller.pubkey()),
         &[&caller],
         env.svm.latest_blockhash(),
@@ -24832,7 +24836,7 @@ fn test_attack_withdraw_wrong_token_program() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -24886,7 +24890,7 @@ fn test_attack_withdraw_alias_user_ata_is_vault() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -24946,7 +24950,7 @@ fn test_attack_close_account_alias_user_ata_is_vault() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&user.pubkey()),
         &[&user],
         env.svm.latest_blockhash(),
@@ -25282,7 +25286,7 @@ fn test_attack_multi_instruction_deposit_trade_atomic() {
 
     // Send both instructions atomically (both user and LP must sign)
     let tx = Transaction::new_signed_with_payer(
-        &[deposit_ix, trade_ix],
+        &[cu_ix(), deposit_ix, trade_ix],
         Some(&user.pubkey()),
         &[&user, &lp],
         env.svm.latest_blockhash(),
@@ -26199,7 +26203,7 @@ fn test_attack_init_lp_matcher_is_self_program() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&lp_owner.pubkey()),
         &[&lp_owner],
         env.svm.latest_blockhash(),
@@ -28158,7 +28162,7 @@ fn test_attack_instruction_data_extra_trailing_bytes() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[&admin],
         env.svm.latest_blockhash(),
@@ -31424,7 +31428,7 @@ fn test_init_market_admin_limits_enforced() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[admin],
         env.svm.latest_blockhash(),
@@ -31533,7 +31537,7 @@ fn test_init_market_zero_limits_rejected() {
         ),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[admin],
         env.svm.latest_blockhash(),
@@ -31567,7 +31571,7 @@ fn test_init_market_zero_limits_rejected() {
         ),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[admin],
         env.svm.latest_blockhash(),
@@ -31655,7 +31659,7 @@ fn test_update_config_thresh_max_bounded_by_limit() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[admin],
         env.svm.latest_blockhash(),
@@ -31759,7 +31763,7 @@ fn test_crank_threshold_ewma_bounded_by_limit() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[admin],
         env.svm.latest_blockhash(),
@@ -31792,7 +31796,7 @@ fn test_crank_threshold_ewma_bounded_by_limit() {
         ),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[&admin],
         env.svm.latest_blockhash(),
@@ -31928,7 +31932,7 @@ fn test_init_market_risk_params_exceed_limits_rejected() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[admin],
         env.svm.latest_blockhash(),
@@ -32000,7 +32004,7 @@ fn test_init_market_risk_params_exceed_limits_rejected() {
     };
 
     let tx2 = Transaction::new_signed_with_payer(
-        &[ix2],
+        &[cu_ix(), ix2],
         Some(&admin2.pubkey()),
         &[admin2],
         env2.svm.latest_blockhash(),
@@ -32081,7 +32085,7 @@ fn test_init_market_risk_params_at_boundary_accepted() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[admin],
         env.svm.latest_blockhash(),
@@ -32142,7 +32146,7 @@ fn test_admin_limits_lifecycle() {
     };
 
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix(), ix],
         Some(&admin.pubkey()),
         &[admin],
         env.svm.latest_blockhash(),
