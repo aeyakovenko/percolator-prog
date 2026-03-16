@@ -16,7 +16,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-22.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -35,7 +35,7 @@ jobs:
       # Kani proofs run locally via `cargo kani` — not in CI.
 
   clippy:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-22.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -48,7 +48,7 @@ jobs:
         run: cargo clippy --lib -- -W clippy::all
 
   fmt:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-22.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
