@@ -3876,9 +3876,27 @@ pub mod processor {
                     msg!("CU_CHECKPOINT: close_account_start");
                     sol_log_compute_units();
                 }
-                let amt_units = engine
-                    .close_account(user_idx, clock.slot, price)
-                    .map_err(map_risk_error)?;
+                let amt_units = if resolved {
+                    // For resolved markets, directly close without touch_account_full
+                    // which may overflow with frozen ADL state.
+                    let cap = engine.accounts[user_idx as usize].capital.get();
+                    engine.set_capital(user_idx as usize, 0);
+                    engine.set_pnl(user_idx as usize, percolator::wide_math::I256::ZERO);
+                    engine.accounts[user_idx as usize].fee_credits = percolator::I128::ZERO;
+                    engine.accounts[user_idx as usize].position_basis_q = percolator::wide_math::I256::ZERO;
+                    let new_vault = engine.vault.get().saturating_sub(cap);
+                    engine.vault = percolator::U128::new(new_vault);
+                    let idx_usize = user_idx as usize;
+                    let word = idx_usize / 64;
+                    let bit = idx_usize % 64;
+                    engine.used[word] &= !(1u64 << bit);
+                    engine.num_used_accounts = engine.num_used_accounts.saturating_sub(1);
+                    cap
+                } else {
+                    engine
+                        .close_account(user_idx, clock.slot, price)
+                        .map_err(map_risk_error)?
+                };
                 #[cfg(feature = "cu-audit")]
                 {
                     msg!("CU_CHECKPOINT: close_account_end");
