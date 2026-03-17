@@ -1365,8 +1365,8 @@ fn benchmark_worst_case_scenarios() {
 
         let lp = Keypair::new();
         env.init_lp(&lp);
-        // LP needs massive collateral to absorb all user positions
-        env.deposit(&lp, 0, 100_000_000_000_000_000); // 100M tokens
+        // LP needs large collateral to absorb all user positions
+        env.deposit(&lp, 0, 10_000_000_000_000); // 10B tokens
 
         println!("  Creating {} users with varied collateral...", num_users);
 
