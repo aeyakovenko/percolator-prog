@@ -97,15 +97,15 @@ pub mod constants {
 /// Scans LP accounts to compute sum of effective positions.
 #[inline]
 fn compute_net_lp_pos(engine: &percolator::RiskEngine) -> i128 {
-    use percolator::wide_math::I256;
-    let mut net = I256::ZERO;
+
+    let mut net: i128 = 0;
     for i in 0..percolator::MAX_ACCOUNTS {
         if engine.is_used(i) && engine.accounts[i].is_lp() {
             let eff = engine.effective_pos_q(i);
             net = net.saturating_add(eff);
         }
     }
-    net.try_into_i128().unwrap_or(0)
+    net
 }
 
 // Packed insurance-withdraw metadata in config.authority_timestamp (i64/u64):
@@ -2468,7 +2468,7 @@ pub mod processor {
     use percolator::{
         RiskEngine, RiskError, MAX_ACCOUNTS,
     };
-    use percolator::wide_math::I256;
+
 
     /// Result of a successful trade execution from the matching engine
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2550,20 +2550,9 @@ pub mod processor {
             oracle_price,
             size,
         )?;
-        // Convert exec.size to Q64 (POS_SCALE) for the engine.
-        // The instruction size is in price_e6-denominated units, so
-        // size_q = exec.size * POS_SCALE / 1_000_000 to match notional semantics.
-        let abs_size = exec.size.unsigned_abs();
-        let abs_q = percolator::wide_math::mul_div_floor_u256(
-            percolator::wide_math::U256::from_u128(abs_size),
-            percolator::wide_math::U256::from_u128(percolator::POS_SCALE),
-            percolator::wide_math::U256::from_u128(1_000_000),
-        );
-        let size_q = if exec.size >= 0 {
-            I256::from_raw_u256_pub(abs_q)
-        } else {
-            percolator::try_negate_u256_to_i256(abs_q).ok_or(RiskError::Overflow)?
-        };
+        // POS_SCALE = 1_000_000 in spec v11.5, same as instruction units.
+        // No conversion needed.
+        let size_q: i128 = exec.size;
         engine.execute_trade(
             user_idx,
             lp_idx,
@@ -3233,9 +3222,9 @@ pub mod processor {
                             // Touch account to settle all pending PnL at settlement price
                             let _ = engine.touch_account_full(idx as usize, settlement_price, clock.slot);
                             let eff = engine.effective_pos_q(idx as usize);
-                            if !eff.is_zero() {
+                            if eff != 0 {
                                 // Zero the position
-                                engine.attach_effective_position(idx as usize, percolator::wide_math::I256::ZERO);
+                                engine.attach_effective_position(idx as usize, 0i128);
                                 // Update warmup for any positive PnL
                                 engine.update_warmup_slope(idx as usize);
                             }
@@ -3788,7 +3777,7 @@ pub mod processor {
                     sol_log_64(acc.capital.get() as u64, 0, 0, 0, 1); // cap
                     let eff = engine.effective_pos_q(target_idx as usize);
                     let notional = engine.notional(target_idx as usize, price);
-                    sol_log_64(notional as u64, eff.is_zero() as u64, 0, 0, 2); // notional, has_pos
+                    sol_log_64(notional as u64, (eff == 0) as u64, 0, 0, 2); // notional, has_pos
                 }
 
                 #[cfg(feature = "cu-audit")]
@@ -3881,9 +3870,9 @@ pub mod processor {
                     // which may overflow with frozen ADL state.
                     let cap = engine.accounts[user_idx as usize].capital.get();
                     engine.set_capital(user_idx as usize, 0);
-                    engine.set_pnl(user_idx as usize, percolator::wide_math::I256::ZERO);
+                    engine.set_pnl(user_idx as usize, 0i128);
                     engine.accounts[user_idx as usize].fee_credits = percolator::I128::ZERO;
-                    engine.accounts[user_idx as usize].position_basis_q = percolator::wide_math::I256::ZERO;
+                    engine.accounts[user_idx as usize].position_basis_q = 0i128;
                     let new_vault = engine.vault.get().saturating_sub(cap);
                     engine.vault = percolator::U128::new(new_vault);
                     let idx_usize = user_idx as usize;
@@ -4369,7 +4358,7 @@ pub mod processor {
                 for i in 0..percolator::MAX_ACCOUNTS {
                     if engine.is_used(i) {
                         let eff = engine.effective_pos_q(i);
-                        if !eff.is_zero() {
+                        if eff != 0 {
                             has_open_positions = true;
                             break;
                         }
@@ -4569,7 +4558,7 @@ pub mod processor {
 
                     // Require all positions to be closed.
                     for i in 0..percolator::MAX_ACCOUNTS {
-                        if engine.is_used(i) && !engine.effective_pos_q(i).is_zero() {
+                        if engine.is_used(i) && !(engine.effective_pos_q(i) == 0) {
                             return Err(ProgramError::InvalidAccountData);
                         }
                     }
@@ -4676,7 +4665,7 @@ pub mod processor {
                 check_idx(engine, user_idx)?;
 
                 // Position must be zero (force-closed by prior crank)
-                if !engine.effective_pos_q(user_idx as usize).is_zero() {
+                if !(engine.effective_pos_q(user_idx as usize) == 0) {
                     return Err(PercolatorError::EngineUndercollateralized.into());
                 }
 
@@ -4687,15 +4676,14 @@ pub mod processor {
                 // Force-settle PnL so close_account's pnl==0 check passes
                 let pnl = engine.accounts[user_idx as usize].pnl;
                 let capital = engine.accounts[user_idx as usize].capital.get();
-                if pnl.is_positive() {
-                    let haircutted = engine.effective_pos_pnl(&pnl);
-                    let haircutted_u128 = haircutted.try_into_u128().unwrap_or(u128::MAX);
-                    engine.set_capital(user_idx as usize, capital.saturating_add(haircutted_u128));
-                    engine.set_pnl(user_idx as usize, percolator::wide_math::I256::ZERO);
-                } else if pnl.is_negative() {
-                    let loss = pnl.abs_u256().try_into_u128().unwrap_or(u128::MAX);
+                if pnl > 0 {
+                    let haircutted = engine.effective_pos_pnl(pnl);
+                    engine.set_capital(user_idx as usize, capital.saturating_add(haircutted));
+                    engine.set_pnl(user_idx as usize, 0i128);
+                } else if pnl < 0 {
+                    let loss = pnl.unsigned_abs();
                     engine.set_capital(user_idx as usize, capital.saturating_sub(loss));
-                    engine.set_pnl(user_idx as usize, percolator::wide_math::I256::ZERO);
+                    engine.set_pnl(user_idx as usize, 0i128);
                 }
 
                 // Forgive fee debt
@@ -4711,8 +4699,8 @@ pub mod processor {
                 engine.vault = percolator::U128::new(new_vault);
 
                 // Clear position basis and PnL (should already be zero from force-close)
-                engine.set_pnl(user_idx as usize, percolator::wide_math::I256::ZERO);
-                engine.accounts[user_idx as usize].position_basis_q = percolator::wide_math::I256::ZERO;
+                engine.set_pnl(user_idx as usize, 0i128);
+                engine.accounts[user_idx as usize].position_basis_q = 0i128;
 
                 // Mark slot as unused (equivalent to free_slot)
                 let idx_usize = user_idx as usize;
