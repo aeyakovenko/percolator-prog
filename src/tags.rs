@@ -97,12 +97,12 @@ pub const TAG_CLOSE_STALE_SLAB: u8 = 51;
 /// The slab account must sign (proves the caller holds the slab keypair).
 /// Cannot close an initialised slab (magic == MAGIC) — use CloseSlab (tag 13) for those.
 pub const TAG_RECLAIM_SLAB_RENT: u8 = 52;
-/// PERC-608: Transfer position ownership (called by percolator-nft TransferHook).
+/// PERC-608: Transfer position ownership via CPI (called by percolator-nft TransferHook).
 /// Changes account[user_idx].owner to new_owner. Caller must be the NFT program's
 /// mint authority PDA (verified via signer). Admin cannot call this directly.
 /// Data: tag(1) + user_idx(2) + new_owner(32)
-/// Accounts: [nft_mint_authority(signer), slab(writable)]
-pub const TAG_TRANSFER_POSITION_OWNERSHIP: u8 = 64;
+/// Accounts: [nft_mint_authority(signer), slab(writable), nft_program]
+pub const TAG_TRANSFER_OWNERSHIP_CPI: u8 = 69;
 
 /// PERC-622: Advance oracle phase (permissionless crank).
 /// Transitions market through Phase 1→2→3 based on time + volume milestones.
@@ -226,6 +226,7 @@ mod tests {
             TAG_BURN_POSITION_NFT,
             TAG_SET_PENDING_SETTLEMENT,
             TAG_CLEAR_PENDING_SETTLEMENT,
+            TAG_TRANSFER_OWNERSHIP_CPI,
         ];
 
         for i in 0..tags.len() {

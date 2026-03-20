@@ -2391,9 +2391,10 @@ pub mod ix {
         ///
         /// Accounts: [dest(signer,writable), slab(signer,writable)]
         ReclaimSlabRent,
-        /// PERC-608: Transfer position ownership. Called by percolator-nft TransferHook.
-        /// Changes account[user_idx].owner to new_owner.
-        TransferPositionOwnership {
+        /// PERC-608: Transfer position ownership via CPI from percolator-nft TransferHook.
+        /// Changes account[user_idx].owner to new_owner. Reads new_owner from instruction data.
+        /// Caller must be the NFT program's mint authority PDA.
+        TransferOwnershipCpi {
             user_idx: u16,
             new_owner: [u8; 32],
         },
@@ -2980,14 +2981,14 @@ pub mod ix {
                 }
                 TAG_CLOSE_STALE_SLAB => Ok(Instruction::CloseStaleSlabs),
                 TAG_RECLAIM_SLAB_RENT => Ok(Instruction::ReclaimSlabRent),
-                TAG_TRANSFER_POSITION_OWNERSHIP => {
+                TAG_TRANSFER_OWNERSHIP_CPI => {
                     let user_idx = read_u16(&mut rest)?;
                     let mut new_owner = [0u8; 32];
                     if rest.len() < 32 {
                         return Err(ProgramError::InvalidInstructionData);
                     }
                     new_owner.copy_from_slice(&rest[..32]);
-                    Ok(Instruction::TransferPositionOwnership {
+                    Ok(Instruction::TransferOwnershipCpi {
                         user_idx,
                         new_owner,
                     })
@@ -14614,10 +14615,10 @@ pub mod processor {
             }
 
             // ═══════════════════════════════════════════════════════════════
-            // PERC-608: Transfer Position Ownership (tag 64)
+            // PERC-608: Transfer Position Ownership via CPI (tag 64)
             // Called by percolator-nft TransferHook via CPI.
             // ═══════════════════════════════════════════════════════════════
-            Instruction::TransferPositionOwnership {
+            Instruction::TransferOwnershipCpi {
                 user_idx,
                 new_owner,
             } => {
