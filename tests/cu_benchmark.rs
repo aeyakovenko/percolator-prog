@@ -29,10 +29,10 @@ use std::path::PathBuf;
 
 // SLAB_LEN for SBF - differs between test and production
 #[cfg(feature = "test")]
-const SLAB_LEN: usize = 17336; // MAX_ACCOUNTS=64 - haircut-ratio engine + oracle circuit breaker (no padding)
+const SLAB_LEN: usize = 19592; // MAX_ACCOUNTS=64 - native 128-bit fields
 
 #[cfg(not(feature = "test"))]
-const SLAB_LEN: usize = 1058152; // MAX_ACCOUNTS=4096 - haircut-ratio engine + oracle circuit breaker (no padding)
+const SLAB_LEN: usize = 1156656; // MAX_ACCOUNTS=4096 - native 128-bit fields + matured/min_deposit
 
 #[cfg(feature = "test")]
 const MAX_ACCOUNTS: usize = 64;
@@ -88,6 +88,10 @@ fn make_mint_data() -> Vec<u8> {
 /// Create PriceUpdateV2 mock data (Pyth Pull format)
 /// Layout: discriminator(8) + write_authority(32) + verification_level(2) + feed_id(32) +
 ///         price(8) + conf(8) + expo(4) + publish_time(8) + ...
+fn cu_ix() -> Instruction {
+    ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)
+}
+
 fn make_pyth_data(
     feed_id: &[u8; 32],
     price: i64,
@@ -173,9 +177,13 @@ fn encode_deposit(user_idx: u16, amount: u64) -> Vec<u8> {
 }
 
 fn encode_crank_permissionless(panic: u8) -> Vec<u8> {
+    // Two-phase crank: pass first 128 account indices as candidates
     let mut data = vec![5u8];
     data.extend_from_slice(&u16::MAX.to_le_bytes());
     data.push(panic);
+    for i in 0..128u16 {
+        data.extend_from_slice(&i.to_le_bytes());
+    }
     data
 }
 
@@ -346,7 +354,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&admin.pubkey()),
             &[admin],
             self.svm.latest_blockhash(),
@@ -404,7 +412,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -432,7 +440,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -458,7 +466,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&owner.pubkey()),
             &[owner],
             self.svm.latest_blockhash(),
@@ -480,7 +488,7 @@ impl TestEnv {
         };
 
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&user.pubkey()),
             &[user, lp],
             self.svm.latest_blockhash(),
@@ -602,7 +610,7 @@ impl TestEnv {
             data,
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&funder.pubkey()),
             &[funder],
             self.svm.latest_blockhash(),
@@ -634,7 +642,7 @@ fn create_users(env: &mut TestEnv, count: usize, deposit_amount: u64) -> Vec<Key
             data: encode_init_user(0),
         };
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[cu_ix(), ix],
             Some(&user.pubkey()),
             &[&user],
             env.svm.latest_blockhash(),
@@ -730,7 +738,7 @@ fn benchmark_worst_case_scenarios() {
                 data: encode_init_user(0),
             };
             let tx = Transaction::new_signed_with_payer(
-                &[ix],
+                &[cu_ix(), ix],
                 Some(&user.pubkey()),
                 &[&user],
                 env.svm.latest_blockhash(),
@@ -797,7 +805,7 @@ fn benchmark_worst_case_scenarios() {
                     data: encode_init_user(0),
                 };
                 let tx = Transaction::new_signed_with_payer(
-                    &[ix],
+                    &[cu_ix(), ix],
                     Some(&user.pubkey()),
                     &[&user],
                     env.svm.latest_blockhash(),
@@ -1020,7 +1028,7 @@ fn benchmark_worst_case_scenarios() {
                     data: encode_init_user(0),
                 };
                 let tx = Transaction::new_signed_with_payer(
-                    &[ix],
+                    &[cu_ix(), ix],
                     Some(&user.pubkey()),
                     &[&user],
                     env.svm.latest_blockhash(),
@@ -1089,7 +1097,7 @@ fn benchmark_worst_case_scenarios() {
 
     // Scenario 8: 🔥🔥 Full 4096 sweep - worst single crank across 16 calls
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("Scenario 8: 🔥🔥 Full sweep worst-case (16 cranks, 256 each)");
+    println!("Scenario 8: 🔥🔥 Full sweep worst-case (32 cranks, 128 each)");
     println!("  Testing worst single crank CU across 16-crank full sweep");
     println!("  8a: Healthy accounts with positions (no liquidations)");
     {
@@ -1134,7 +1142,7 @@ fn benchmark_worst_case_scenarios() {
                     data: encode_init_user(0),
                 };
                 let tx = Transaction::new_signed_with_payer(
-                    &[ix],
+                    &[cu_ix(), ix],
                     Some(&user.pubkey()),
                     &[&user],
                     env.svm.latest_blockhash(),
@@ -1239,7 +1247,7 @@ fn benchmark_worst_case_scenarios() {
                     data: encode_init_user(0),
                 };
                 let tx = Transaction::new_signed_with_payer(
-                    &[ix],
+                    &[cu_ix(), ix],
                     Some(&user.pubkey()),
                     &[&user],
                     env.svm.latest_blockhash(),
@@ -1361,8 +1369,8 @@ fn benchmark_worst_case_scenarios() {
 
         let lp = Keypair::new();
         env.init_lp(&lp);
-        // LP needs massive collateral to absorb all user positions
-        env.deposit(&lp, 0, 100_000_000_000_000_000); // 100M tokens
+        // LP needs large collateral to absorb all user positions
+        env.deposit(&lp, 0, 10_000_000_000_000); // 10B tokens
 
         println!("  Creating {} users with varied collateral...", num_users);
 
@@ -1392,7 +1400,7 @@ fn benchmark_worst_case_scenarios() {
                 data: encode_init_user(0),
             };
             let tx = Transaction::new_signed_with_payer(
-                &[ix],
+                &[cu_ix(), ix],
                 Some(&user.pubkey()),
                 &[&user],
                 env.svm.latest_blockhash(),
@@ -1544,7 +1552,7 @@ fn benchmark_worst_case_scenarios() {
 
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("=== SUMMARY ===");
-    println!("• Crank sweeps 256 accounts max per call (16 cranks for full 4096)");
+    println!("• Crank sweeps 128 accounts max per call (32 cranks for full 4096)");
     println!(
         "• With MAX_ACCOUNTS={}, baseline scan alone is ~194K CU",
         MAX_ACCOUNTS

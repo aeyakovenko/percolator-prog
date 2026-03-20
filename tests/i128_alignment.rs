@@ -23,8 +23,8 @@ use solana_sdk::{
 use spl_token::state::{Account as TokenAccount, AccountState};
 use std::path::PathBuf;
 
-// SLAB_LEN for production BPF (MAX_ACCOUNTS=4096) - haircut-ratio engine (no padding)
-const SLAB_LEN: usize = 1058152;
+// SLAB_LEN for production BPF (MAX_ACCOUNTS=4096) - native 128-bit fields
+const SLAB_LEN: usize = 1156656;
 const MAX_ACCOUNTS: usize = 4096;
 
 // Pyth Receiver program ID
@@ -244,13 +244,14 @@ fn test_account_struct_alignment() {
         account_id: 12345,
         capital: U128::new(0x1234_5678_9ABC_DEF0_FEDC_BA98_7654_3210),
         kind: AccountKind::User,
-        pnl: I128::new(-0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10),
-        reserved_pnl: 0xDEAD_BEEF_CAFE_BABE, // u64, not U128
+        pnl: -0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10i128,
+        reserved_pnl: 0xDEAD_BEEF_CAFE_BABEu128,
         warmup_started_at_slot: 999999,
-        warmup_slope_per_step: U128::new(42),
-        position_size: I128::new(-1_000_000_000_000i128),
-        entry_price: 100_000_000,
-        funding_index: I128::new(12345678901234i128),
+        warmup_slope_per_step: 42u128,
+        position_basis_q: -1_000_000_000_000i128,
+        adl_a_basis: 1_000_000u128,
+        adl_k_snap: 0i128,
+        adl_epoch_snap: 0u64,
         matcher_program: [0xAA; 32],
         matcher_context: [0xBB; 32],
         owner: [0xCC; 32],
@@ -265,20 +266,18 @@ fn test_account_struct_alignment() {
         0x1234_5678_9ABC_DEF0_FEDC_BA98_7654_3210
     );
     assert_eq!(
-        account.pnl.get(),
-        -0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10
+        account.pnl,
+        -0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10i128
     );
-    assert_eq!(account.reserved_pnl, 0xDEAD_BEEF_CAFE_BABE); // u64 comparison
-    assert_eq!(account.position_size.get(), -1_000_000_000_000i128);
-    assert_eq!(account.funding_index.get(), 12345678901234i128);
+    assert_eq!(account.reserved_pnl, 0xDEAD_BEEF_CAFE_BABEu128);
+    assert_eq!(account.position_basis_q, -1_000_000_000_000i128);
     assert_eq!(account.fee_credits.get(), -999);
 
     println!("Account fields verified:");
     println!("  capital: 0x{:032X}", account.capital.get());
-    println!("  pnl: {}", account.pnl.get());
-    println!("  reserved_pnl: 0x{:016X}", account.reserved_pnl); // u64 format
-    println!("  position_size: {}", account.position_size.get());
-    println!("  funding_index: {}", account.funding_index.get());
+    println!("  pnl: {}", account.pnl);
+    println!("  reserved_pnl: 0x{:032X}", account.reserved_pnl);
+    println!("  position_basis_q: {}", account.position_basis_q);
     println!("  fee_credits: {}", account.fee_credits.get());
 
     println!("\nAccount alignment test passed!");
@@ -297,10 +296,14 @@ fn test_risk_engine_alignment() {
         std::mem::size_of::<RiskEngine>()
     );
 
-    // RiskEngine should also have 8-byte alignment due to I128/U128 fields
+    // RiskEngine uses native i128/u128 fields so alignment is 16 on the host.
+    // On BPF (sbpf) the alignment of i128 is also 8, but native compilation may
+    // produce 16. We simply assert it is a power of two and <= 16.
+    let align = std::mem::align_of::<RiskEngine>();
     assert!(
-        std::mem::align_of::<RiskEngine>() <= 8,
-        "RiskEngine alignment should be <= 8 for BPF compatibility"
+        align == 8 || align == 16,
+        "RiskEngine alignment should be 8 or 16, got {}",
+        align
     );
 
     println!("\nRiskEngine alignment test passed!");
@@ -383,7 +386,7 @@ fn encode_init_market(admin: &Pubkey, mint: &Pubkey, feed_id: &[u8; 32]) -> Vec<
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
-    data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
+    data.extend_from_slice(&0u128.to_le_bytes()); // insurance_floor (was risk_reduction_threshold)
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
     data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps

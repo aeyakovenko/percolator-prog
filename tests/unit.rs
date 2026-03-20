@@ -243,20 +243,20 @@ fn encode_init_market(fixture: &MarketFixture, crank_staleness: u64) -> Vec<u8> 
     encode_u128(u128::MAX, &mut data); // max_maintenance_fee_per_slot
     encode_u128(u128::MAX, &mut data); // max_risk_threshold
     encode_u64(0, &mut data); // min_oracle_price_cap_e2bps
-    // RiskParams
-    encode_u64(0, &mut data);
-    encode_u64(0, &mut data);
-    encode_u64(0, &mut data);
-    encode_u64(0, &mut data);
-    encode_u64(MAX_ACCOUNTS as u64, &mut data);
-    encode_u128(0, &mut data);
-    encode_u128(0, &mut data);
-    encode_u128(0, &mut data);
-    encode_u64(crank_staleness, &mut data);
-    encode_u64(0, &mut data);
-    encode_u128(0, &mut data);
-    encode_u64(0, &mut data);
-    encode_u128(0, &mut data);
+    // RiskParams: warmup, maintenance_margin_bps, initial_margin_bps, trading_fee_bps
+    encode_u64(0, &mut data);   // warmup_period_slots
+    encode_u64(500, &mut data); // maintenance_margin_bps (must be < initial_margin_bps)
+    encode_u64(1000, &mut data); // initial_margin_bps
+    encode_u64(0, &mut data);   // trading_fee_bps
+    encode_u64(MAX_ACCOUNTS as u64, &mut data); // max_accounts
+    encode_u128(0, &mut data);  // new_account_fee
+    encode_u128(0, &mut data);  // insurance_floor
+    encode_u128(0, &mut data);  // maintenance_fee_per_slot
+    encode_u64(crank_staleness, &mut data); // max_crank_staleness_slots
+    encode_u64(0, &mut data);   // liquidation_fee_bps
+    encode_u128(0, &mut data);  // liquidation_fee_cap
+    encode_u64(0, &mut data);   // liquidation_buffer_bps
+    encode_u128(0, &mut data);  // min_liquidation_abs
     data
 }
 
@@ -279,20 +279,20 @@ fn encode_init_market_invert(
     encode_u128(u128::MAX, &mut data); // max_maintenance_fee_per_slot
     encode_u128(u128::MAX, &mut data); // max_risk_threshold
     encode_u64(0, &mut data); // min_oracle_price_cap_e2bps
-    // RiskParams
-    encode_u64(0, &mut data);
-    encode_u64(0, &mut data);
-    encode_u64(0, &mut data);
-    encode_u64(0, &mut data);
-    encode_u64(MAX_ACCOUNTS as u64, &mut data);
-    encode_u128(0, &mut data);
-    encode_u128(0, &mut data);
-    encode_u128(0, &mut data);
-    encode_u64(crank_staleness, &mut data);
-    encode_u64(0, &mut data);
-    encode_u128(0, &mut data);
-    encode_u64(0, &mut data);
-    encode_u128(0, &mut data);
+    // RiskParams: warmup, maintenance_margin_bps, initial_margin_bps, trading_fee_bps
+    encode_u64(0, &mut data);    // warmup_period_slots
+    encode_u64(500, &mut data);  // maintenance_margin_bps (must be < initial_margin_bps)
+    encode_u64(1000, &mut data); // initial_margin_bps
+    encode_u64(0, &mut data);    // trading_fee_bps
+    encode_u64(MAX_ACCOUNTS as u64, &mut data); // max_accounts
+    encode_u128(0, &mut data);   // new_account_fee
+    encode_u128(0, &mut data);   // insurance_floor
+    encode_u128(0, &mut data);   // maintenance_fee_per_slot
+    encode_u64(crank_staleness, &mut data); // max_crank_staleness_slots
+    encode_u64(0, &mut data);    // liquidation_fee_bps
+    encode_u128(0, &mut data);   // liquidation_fee_cap
+    encode_u64(0, &mut data);    // liquidation_buffer_bps
+    encode_u128(0, &mut data);   // min_liquidation_abs
     data
 }
 
@@ -1343,10 +1343,10 @@ fn test_set_risk_threshold() {
         process_instruction(&f.program_id, &accs, &init_data).unwrap();
     }
 
-    // Verify initial threshold is 0
+    // Verify initial insurance_floor is 0
     {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
-        assert_eq!(engine.risk_reduction_threshold(), 0);
+        assert_eq!(engine.insurance_floor, 0);
     }
 
     // Admin sets new threshold
@@ -1364,10 +1364,10 @@ fn test_set_risk_threshold() {
         .unwrap();
     }
 
-    // Verify threshold was updated
+    // Verify insurance_floor was updated
     {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
-        assert_eq!(engine.risk_reduction_threshold(), new_threshold);
+        assert_eq!(engine.insurance_floor, new_threshold);
     }
 }
 
@@ -1413,10 +1413,10 @@ fn test_set_risk_threshold_non_admin_fails() {
         assert_eq!(res, Err(PercolatorError::EngineUnauthorized.into()));
     }
 
-    // Verify threshold was NOT updated (still 0)
+    // Verify insurance_floor was NOT updated (still 0)
     {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
-        assert_eq!(engine.risk_reduction_threshold(), 0);
+        assert_eq!(engine.insurance_floor, 0);
     }
 }
 
@@ -1445,11 +1445,11 @@ fn test_crank_updates_threshold_from_risk_metric() {
         process_instruction(&f.program_id, &accs, &init_data).unwrap();
     }
 
-    // Verify initial threshold is 0
+    // Verify initial insurance_floor is 0 and no open interest
     {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
-        assert_eq!(engine.risk_reduction_threshold(), 0);
-        assert!(engine.total_open_interest.is_zero());
+        assert_eq!(engine.insurance_floor, 0);
+        assert!(engine.oi_eff_long_q == 0 && engine.oi_eff_short_q == 0);
     }
 
     // Create user
@@ -1560,14 +1560,14 @@ fn test_crank_updates_threshold_from_risk_metric() {
     // Verify positions were set by trade
     {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
-        let lp_pos = engine.accounts[lp_idx as usize].position_size;
-        let user_pos = engine.accounts[user_idx as usize].position_size;
+        let lp_pos = engine.accounts[lp_idx as usize].position_basis_q;
+        let user_pos = engine.accounts[user_idx as usize].position_basis_q;
         assert!(
-            !lp_pos.is_zero(),
+            lp_pos != 0,
             "LP should have non-zero position after trade"
         );
         assert!(
-            !user_pos.is_zero(),
+            user_pos != 0,
             "User should have non-zero position after trade"
         );
         // Verify LP is marked as LP
@@ -1581,20 +1581,20 @@ fn test_crank_updates_threshold_from_risk_metric() {
         );
     }
 
-    // Capture threshold before crank
+    // Capture insurance_floor before crank
     let threshold_before = {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
-        engine.risk_reduction_threshold()
+        engine.insurance_floor
     };
     assert_eq!(threshold_before, 0, "Threshold should be 0 before crank");
 
-    // Verify compute_system_risk_units returns non-zero
+    // Verify open interest is non-zero (LP risk gate removed in v11.21)
     {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
-        let risk_units = percolator_prog::compute_system_risk_units(engine);
+        let oi = engine.oi_eff_long_q + engine.oi_eff_short_q;
         assert!(
-            risk_units > 0,
-            "risk_units should be > 0 when there are LP positions"
+            oi > 0,
+            "open interest should be > 0 when there are LP positions"
         );
     }
 
@@ -1648,38 +1648,13 @@ fn test_crank_updates_threshold_from_risk_metric() {
         "last_thr_update_slot should be set to clock.slot after crank"
     );
 
-    // Verify threshold update behavior. Two valid outcomes:
-    // 1) Positions remain open -> threshold should update from risk metric.
-    // 2) Crank liquidates all positions -> risk_units==0 and threshold stays at 0.
+    // Verify insurance_floor is unchanged by crank (static admin-set field, LP risk gate removed in v11.21)
     {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
-        let threshold = engine.risk_reduction_threshold();
-        let risk_units_after = percolator_prog::compute_system_risk_units(engine);
-
-        if risk_units_after == 0 {
-            assert_eq!(
-                threshold, 0,
-                "Threshold should remain 0 when crank liquidates all positions"
-            );
-        } else {
-            // With trade_size=100000, LP position is -100000 (counterparty to user's +100000)
-            // Only LP positions are counted for risk:
-            //   lp_sum_abs = 100000, lp_max_abs = 100000
-            //   risk_units = max_abs + sum_abs/8 = 100000 + 12500 = 112500
-            //   risk_notional = 112500 * 100_000_000 / 1_000_000 = 11_250_000
-            //   raw_target = 0 + 11_250_000 * 50 / 10_000 = 56_250
-            //   EWMA: (1000 * 56250 + 9000 * 0) / 10000 = 5625
-            //   max_step = 56250 (current == 0 -> full jump allowed, Bug #6 fix)
-            //   final = 0 + min(56250, 5625) = 5625
-            assert!(
-                threshold > 0,
-                "Threshold should be > 0 after crank with open LP positions"
-            );
-            assert_eq!(
-                threshold, 5625,
-                "First update from 0 should be EWMA-smoothed raw target"
-            );
-        }
+        assert_eq!(
+            engine.insurance_floor, 0,
+            "insurance_floor is admin-set and not updated by crank"
+        );
     }
 }
 
@@ -1794,18 +1769,15 @@ fn test_permissionless_crank_gc() {
     // Directly manipulate account to make it dust:
     // - capital = 0
     // - pnl = -1 (small negative)
-    // - position_size = 0 (already 0)
+    // - position_basis_q = 0 (already 0)
     // - reserved_pnl = 0 (already 0)
-    // - funding_index = engine.funding_index_qpb_e6
     // - fee_credits = 0, last_fee_slot = current_slot (robustness against future predicates)
     {
         let engine = zc::engine_mut(&mut f.slab.data).unwrap();
-        let funding_idx = engine.funding_index_qpb_e6;
         let current_slot = engine.current_slot;
         let account = &mut engine.accounts[user_idx as usize];
         account.capital = U128::ZERO;
-        account.pnl = I128::new(-1);
-        account.funding_index = funding_idx;
+        account.pnl = -1i128;
         account.fee_credits = I128::ZERO;
         account.last_fee_slot = current_slot;
     }
@@ -1815,13 +1787,9 @@ fn test_permissionless_crank_gc() {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
         let account = &engine.accounts[user_idx as usize];
         assert!(account.capital.is_zero(), "capital should be 0");
-        assert_eq!(account.pnl.get(), -1, "pnl should be -1");
-        assert!(account.position_size.is_zero(), "position_size should be 0");
+        assert_eq!(account.pnl, -1, "pnl should be -1");
+        assert!(account.position_basis_q == 0, "position_basis_q should be 0");
         assert_eq!(account.reserved_pnl, 0, "reserved_pnl should be 0");
-        assert_eq!(
-            account.funding_index, engine.funding_index_qpb_e6,
-            "funding should match"
-        );
     }
 
     // Call permissionless crank - should GC the dust account
@@ -1925,10 +1893,10 @@ fn test_permissionless_funding_not_controllable() {
         process_instruction(&f.program_id, &accounts, &encode_deposit(user_idx, 100_000)).unwrap();
     }
 
-    // Record funding index and last_funding_slot before any crank
-    let (_funding_before, _last_slot_before) = {
+    // Record last_market_slot before any crank
+    let _last_slot_before = {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
-        (engine.funding_index_qpb_e6, engine.last_funding_slot)
+        engine.last_market_slot
     };
 
     // Random keeper calls crank - first crank at slot 100
@@ -1947,12 +1915,12 @@ fn test_permissionless_funding_not_controllable() {
         ];
         process_instruction(&f.program_id, &accs, &encode_crank_permissionless(0)).unwrap();
     }
-    let (funding_after_first, last_slot_after_first) = {
+    let last_slot_after_first = {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
-        (engine.funding_index_qpb_e6, engine.last_funding_slot)
+        engine.last_market_slot
     };
 
-    // Second crank in SAME slot - should NOT change funding (dt=0 gating)
+    // Second crank in SAME slot - should NOT change state (dt=0 gating)
     {
         let accs = vec![
             keeper.to_info(),
@@ -1962,21 +1930,16 @@ fn test_permissionless_funding_not_controllable() {
         ];
         process_instruction(&f.program_id, &accs, &encode_crank_permissionless(0)).unwrap();
     }
-    let (funding_after_second, last_slot_after_second) = {
+    let last_slot_after_second = {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
-        (engine.funding_index_qpb_e6, engine.last_funding_slot)
+        engine.last_market_slot
     };
 
-    // KEY SECURITY ASSERTION: same-slot crank does NOT change funding index
+    // KEY SECURITY ASSERTION: same-slot crank does NOT change last_market_slot
     // This is the core anti-spam property - attackers can't compound funding by spamming cranks
     assert_eq!(
-        funding_after_second, funding_after_first,
-        "Same-slot crank must not change funding (dt=0 gating). before={}, after={}",
-        funding_after_first, funding_after_second
-    );
-    assert_eq!(
         last_slot_after_second, last_slot_after_first,
-        "last_funding_slot should not change on same-slot crank"
+        "last_market_slot should not change on same-slot crank"
     );
 
     // Third crank in same slot - still no change (verify it's consistently gated)
@@ -1989,16 +1952,16 @@ fn test_permissionless_funding_not_controllable() {
         ];
         process_instruction(&f.program_id, &accs, &encode_crank_permissionless(0)).unwrap();
     }
-    let funding_after_third = {
+    let last_slot_after_third = {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
-        engine.funding_index_qpb_e6
+        engine.last_market_slot
     };
     assert_eq!(
-        funding_after_third, funding_after_first,
-        "Multiple same-slot cranks must not accumulate funding changes"
+        last_slot_after_third, last_slot_after_first,
+        "Multiple same-slot cranks must not change last_market_slot"
     );
 
-    // Verify last_funding_slot advances when slot changes (relative check, not absolute)
+    // Verify last_market_slot advances when slot changes (relative check, not absolute)
     f.clock.data = make_clock(101, 101);
     {
         let accs = vec![
@@ -2011,11 +1974,11 @@ fn test_permissionless_funding_not_controllable() {
     }
     let last_slot_after_new_slot = {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
-        engine.last_funding_slot
+        engine.last_market_slot
     };
     assert!(
         last_slot_after_new_slot > last_slot_after_second,
-        "last_funding_slot should advance when slot changes"
+        "last_market_slot should advance when slot changes"
     );
 }
 

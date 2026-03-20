@@ -6,7 +6,6 @@
 extern crate alloc;
 
 use solana_program::declare_id;
-use solana_program::pubkey::Pubkey;
 
 declare_id!("Perco1ator111111111111111111111111111111111");
 
@@ -94,83 +93,19 @@ pub mod constants {
 
 // 1b. Risk metric helpers (pure functions for anti-DoS threshold calculation)
 
-/// LP risk state: (sum_abs, max_abs) over all LP positions.
-/// LP aggregate risk state for O(1) risk delta checks.
-/// Uses engine's maintained aggregates instead of scanning.
-pub struct LpRiskState {
-    pub sum_abs: u128,
-    pub max_abs: u128,
-}
-
-impl LpRiskState {
-    /// Get LP aggregate risk state from engine's maintained fields. O(1).
-    #[inline]
-    pub fn compute(engine: &percolator::RiskEngine) -> Self {
-        Self {
-            sum_abs: engine.lp_sum_abs.get(),
-            max_abs: engine.lp_max_abs.get(),
-        }
-    }
-
-    /// Current risk metric: max_concentration + sum_abs/8
-    #[inline]
-    pub fn risk(&self) -> u128 {
-        self.max_abs.saturating_add(self.sum_abs / 8)
-    }
-
-    /// O(1) check: would applying delta to LP at lp_idx increase system risk?
-    /// delta is the LP's position change (negative of user's trade size).
-    /// Conservative: when LP was max and shrinks, we keep max_abs (overestimates risk, safe).
-    #[inline]
-    pub fn would_increase_risk(&self, old_lp_pos: i128, delta: i128) -> bool {
-        let old_lp_abs = old_lp_pos.unsigned_abs();
-        let new_lp_pos = old_lp_pos.saturating_add(delta);
-        let new_lp_abs = new_lp_pos.unsigned_abs();
-
-        // Guard: old_lp_abs must be part of sum_abs (caller must use same engine snapshot)
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            self.sum_abs >= old_lp_abs,
-            "old_lp_abs not in sum_abs - wrong engine snapshot?"
-        );
-
-        // Update sum_abs in O(1)
-        let new_sum_abs = self
-            .sum_abs
-            .saturating_sub(old_lp_abs)
-            .saturating_add(new_lp_abs);
-
-        // Update max_abs in O(1) (conservative when LP was max and shrinks)
-        let new_max_abs = if new_lp_abs >= self.max_abs {
-            // LP becomes new max (or ties)
-            new_lp_abs
-        } else if old_lp_abs == self.max_abs && new_lp_abs < old_lp_abs {
-            // LP was max and shrunk - we don't know second-largest without scan.
-            // Conservative: keep old max (overestimates risk, which is safe for gating).
-            self.max_abs
-        } else {
-            // LP wasn't max, stays not max
-            self.max_abs
-        };
-
-        let old_risk = self.risk();
-        let new_risk = new_max_abs.saturating_add(new_sum_abs / 8);
-        new_risk > old_risk
-    }
-}
-
-/// Compute system risk units for threshold calculation. O(1).
-/// Uses engine's maintained LP aggregates instead of scanning.
-#[inline]
-pub fn compute_system_risk_units(engine: &percolator::RiskEngine) -> u128 {
-    LpRiskState::compute(engine).risk()
-}
-
-/// Compute net LP position for inventory-based funding. O(1).
-/// Uses engine's maintained net_lp_pos instead of scanning.
+/// Compute net LP position for inventory-based funding.
+/// Scans LP accounts to compute sum of effective positions.
 #[inline]
 fn compute_net_lp_pos(engine: &percolator::RiskEngine) -> i128 {
-    engine.net_lp_pos.get()
+
+    let mut net: i128 = 0;
+    for i in 0..percolator::MAX_ACCOUNTS {
+        if engine.is_used(i) && engine.accounts[i].is_lp() {
+            let eff = engine.effective_pos_q(i);
+            net = net.saturating_add(eff);
+        }
+    }
+    net
 }
 
 // Packed insurance-withdraw metadata in config.authority_timestamp (i64/u64):
@@ -1098,6 +1033,8 @@ pub mod error {
             RiskError::NotAnLPAccount => PercolatorError::EngineNotAnLPAccount,
             RiskError::PositionSizeMismatch => PercolatorError::EnginePositionSizeMismatch,
             RiskError::AccountKindMismatch => PercolatorError::EngineAccountKindMismatch,
+            RiskError::SideBlocked => PercolatorError::EngineRiskReductionOnlyMode,
+            RiskError::CorruptState => PercolatorError::EngineOverflow,
         };
         ProgramError::Custom(err as u32)
     }
@@ -1127,11 +1064,12 @@ pub mod ix {
             initial_mark_price_e6: u64,
             /// Per-market admin limit: max maintenance fee per slot
             max_maintenance_fee_per_slot: u128,
-            /// Per-market admin limit: max risk reduction threshold
-            max_risk_threshold: u128,
+            /// Per-market admin limit: max insurance floor
+            max_insurance_floor: u128,
             /// Per-market admin limit: min oracle price cap (e2bps floor for non-zero values)
             min_oracle_price_cap_e2bps: u64,
             risk_params: RiskParams,
+            insurance_floor: u128,
         },
         InitUser {
             fee_payment: u64,
@@ -1152,6 +1090,7 @@ pub mod ix {
         KeeperCrank {
             caller_idx: u16,
             allow_panic: u8,
+            candidates: alloc::vec::Vec<u16>,
         },
         TradeNoCpi {
             lp_idx: u16,
@@ -1264,9 +1203,9 @@ pub mod ix {
                     let unit_scale = read_u32(&mut rest)?;
                     let initial_mark_price_e6 = read_u64(&mut rest)?;
                     let max_maintenance_fee_per_slot = read_u128(&mut rest)?;
-                    let max_risk_threshold = read_u128(&mut rest)?;
+                    let max_insurance_floor = read_u128(&mut rest)?;
                     let min_oracle_price_cap_e2bps = read_u64(&mut rest)?;
-                    let risk_params = read_risk_params(&mut rest)?;
+                    let (risk_params, insurance_floor) = read_risk_params(&mut rest)?;
                     Ok(Instruction::InitMarket {
                         admin,
                         collateral_mint,
@@ -1277,9 +1216,10 @@ pub mod ix {
                         unit_scale,
                         initial_mark_price_e6,
                         max_maintenance_fee_per_slot,
-                        max_risk_threshold,
+                        max_insurance_floor,
                         min_oracle_price_cap_e2bps,
                         risk_params,
+                        insurance_floor,
                     })
                 }
                 1 => {
@@ -1311,12 +1251,18 @@ pub mod ix {
                     Ok(Instruction::WithdrawCollateral { user_idx, amount })
                 }
                 5 => {
-                    // KeeperCrank
+                    // KeeperCrank — two-phase: candidates computed off-chain
                     let caller_idx = read_u16(&mut rest)?;
                     let allow_panic = read_u8(&mut rest)?;
+                    // Parse candidate list: remaining bytes are u16 account indices
+                    let mut candidates = alloc::vec::Vec::new();
+                    while rest.len() >= 2 {
+                        candidates.push(read_u16(&mut rest)?);
+                    }
                     Ok(Instruction::KeeperCrank {
                         caller_idx,
                         allow_panic,
+                        candidates,
                     })
                 }
                 6 => {
@@ -1536,22 +1482,39 @@ pub mod ix {
         Ok(bytes.try_into().unwrap())
     }
 
-    fn read_risk_params(input: &mut &[u8]) -> Result<RiskParams, ProgramError> {
-        Ok(RiskParams {
-            warmup_period_slots: read_u64(input)?,
-            maintenance_margin_bps: read_u64(input)?,
-            initial_margin_bps: read_u64(input)?,
-            trading_fee_bps: read_u64(input)?,
-            max_accounts: read_u64(input)?,
-            new_account_fee: U128::new(read_u128(input)?),
-            risk_reduction_threshold: U128::new(read_u128(input)?),
-            maintenance_fee_per_slot: U128::new(read_u128(input)?),
-            max_crank_staleness_slots: read_u64(input)?,
-            liquidation_fee_bps: read_u64(input)?,
-            liquidation_fee_cap: U128::new(read_u128(input)?),
-            liquidation_buffer_bps: read_u64(input)?,
-            min_liquidation_abs: U128::new(read_u128(input)?),
-        })
+    fn read_risk_params(input: &mut &[u8]) -> Result<(RiskParams, u128), ProgramError> {
+        let warmup_period_slots = read_u64(input)?;
+        let maintenance_margin_bps = read_u64(input)?;
+        let initial_margin_bps = read_u64(input)?;
+        let trading_fee_bps = read_u64(input)?;
+        let max_accounts = read_u64(input)?;
+        let new_account_fee = U128::new(read_u128(input)?);
+        // Wire format: insurance_floor occupies the old risk_reduction_threshold slot
+        let insurance_floor = read_u128(input)?;
+        let maintenance_fee_per_slot = U128::new(read_u128(input)?);
+        let max_crank_staleness_slots = read_u64(input)?;
+        let liquidation_fee_bps = read_u64(input)?;
+        let liquidation_fee_cap = U128::new(read_u128(input)?);
+        let liquidation_buffer_bps = read_u64(input)?;
+        let min_liquidation_abs = U128::new(read_u128(input)?);
+        let params = RiskParams {
+            warmup_period_slots,
+            maintenance_margin_bps,
+            initial_margin_bps,
+            trading_fee_bps,
+            max_accounts,
+            new_account_fee,
+            maintenance_fee_per_slot,
+            max_crank_staleness_slots,
+            liquidation_fee_bps,
+            liquidation_fee_cap,
+            liquidation_buffer_bps,
+            min_liquidation_abs,
+            min_initial_deposit: U128::ZERO,
+            min_nonzero_mm_req: 0u128,
+            min_nonzero_im_req: 0u128,
+        };
+        Ok((params, insurance_floor))
     }
 }
 
@@ -1708,7 +1671,7 @@ pub mod state {
         /// Maximum maintenance fee per slot admin can set. Must be > 0 at init.
         pub max_maintenance_fee_per_slot: u128,
         /// Maximum risk reduction threshold admin can set. Must be > 0 at init.
-        pub max_risk_threshold: u128,
+        pub max_insurance_floor: u128,
         /// Minimum oracle price cap (e2bps) admin can set (floor for non-zero values).
         /// 0 = no floor (admin can set any value).
         pub min_oracle_price_cap_e2bps: u64,
@@ -2502,7 +2465,7 @@ pub mod processor {
             DEFAULT_THRESH_ALPHA_BPS, DEFAULT_THRESH_FLOOR, DEFAULT_THRESH_MAX, DEFAULT_THRESH_MIN,
             DEFAULT_THRESH_MIN_STEP, DEFAULT_THRESH_RISK_BPS, DEFAULT_THRESH_STEP_BPS,
             DEFAULT_THRESH_UPDATE_INTERVAL_SLOTS, MAGIC, MATCHER_CALL_LEN, MATCHER_CALL_TAG,
-            MATCHER_CONTEXT_LEN, MATCHER_CONTEXT_PREFIX_LEN, SLAB_LEN, VERSION,
+            SLAB_LEN, VERSION,
         },
         error::{map_risk_error, PercolatorError},
         ix::Instruction,
@@ -2513,19 +2476,49 @@ pub mod processor {
         zc,
     };
     use percolator::{
-        MatchingEngine, NoOpMatcher, RiskEngine, RiskError, TradeExecution, MAX_ACCOUNTS,
+        RiskEngine, RiskError, MAX_ACCOUNTS,
     };
-    use solana_program::instruction::{AccountMeta, Instruction as SolInstruction};
-    use solana_program::{
-        account_info::AccountInfo,
-        entrypoint::ProgramResult,
-        log::{sol_log_64, sol_log_compute_units},
-        msg,
-        program_error::ProgramError,
-        program_pack::Pack,
-        pubkey::Pubkey,
-        sysvar::{clock::Clock, Sysvar},
-    };
+
+
+    /// Result of a successful trade execution from the matching engine
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct TradeExecution {
+        /// Actual execution price (may differ from oracle/requested price)
+        pub price: u64,
+        /// Actual executed size (may be partial fill)
+        pub size: i128,
+    }
+
+    /// Trait for pluggable matching engines
+    pub trait MatchingEngine {
+        fn execute_match(
+            &self,
+            lp_program: &[u8; 32],
+            lp_context: &[u8; 32],
+            lp_account_id: u64,
+            oracle_price: u64,
+            size: i128,
+        ) -> Result<TradeExecution, RiskError>;
+    }
+
+    /// No-op matching engine (for testing/TradeNoCpi)
+    pub struct NoOpMatcher;
+
+    impl MatchingEngine for NoOpMatcher {
+        fn execute_match(
+            &self,
+            _lp_program: &[u8; 32],
+            _lp_context: &[u8; 32],
+            _lp_account_id: u64,
+            oracle_price: u64,
+            size: i128,
+        ) -> Result<TradeExecution, RiskError> {
+            Ok(TradeExecution {
+                price: oracle_price,
+                size,
+            })
+        }
+    }
 
     struct CpiMatcher {
         exec_price: u64,
@@ -2547,6 +2540,50 @@ pub mod processor {
             })
         }
     }
+
+    /// Execute a trade via a matching engine.
+    /// `size` is the user's requested position change (positive = user goes long).
+    fn execute_trade_with_matcher<M: MatchingEngine>(
+        engine: &mut RiskEngine,
+        matcher: &M,
+        lp_idx: u16,
+        user_idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+        size: i128,
+    ) -> Result<(), RiskError> {
+        let lp = &engine.accounts[lp_idx as usize];
+        let exec = matcher.execute_match(
+            &lp.matcher_program,
+            &lp.matcher_context,
+            lp.account_id,
+            oracle_price,
+            size,
+        )?;
+        // POS_SCALE = 1_000_000 in spec v11.5, same as instruction units.
+        // No conversion needed.
+        let size_q: i128 = exec.size;
+        engine.execute_trade(
+            user_idx,
+            lp_idx,
+            oracle_price,
+            now_slot,
+            size_q,
+            exec.price,
+        )
+    }
+
+    use solana_program::instruction::{AccountMeta, Instruction as SolInstruction};
+    use solana_program::{
+        account_info::AccountInfo,
+        entrypoint::ProgramResult,
+        log::{sol_log_64, sol_log_compute_units},
+        msg,
+        program_error::ProgramError,
+        program_pack::Pack,
+        pubkey::Pubkey,
+        sysvar::{clock::Clock, Sysvar},
+    };
 
     fn slab_guard(
         program_id: &Pubkey,
@@ -2698,9 +2735,10 @@ pub mod processor {
                 unit_scale,
                 initial_mark_price_e6,
                 max_maintenance_fee_per_slot,
-                max_risk_threshold,
+                max_insurance_floor,
                 min_oracle_price_cap_e2bps,
                 risk_params,
+                insurance_floor,
             } => {
                 // Reduced from 11 to 9: removed pyth_index and pyth_collateral accounts
                 // (feed_id is now passed in instruction data, not as account)
@@ -2766,11 +2804,11 @@ pub mod processor {
                 if max_maintenance_fee_per_slot == 0 {
                     return Err(ProgramError::InvalidInstructionData);
                 }
-                if max_risk_threshold == 0 {
+                if max_insurance_floor == 0 {
                     return Err(ProgramError::InvalidInstructionData);
                 }
-                // Validate initial risk_params against per-market limits
-                if risk_params.risk_reduction_threshold.get() > max_risk_threshold {
+                // Validate initial insurance_floor against per-market limit
+                if insurance_floor > max_insurance_floor {
                     return Err(ProgramError::InvalidInstructionData);
                 }
                 if risk_params.maintenance_fee_per_slot.get() > max_maintenance_fee_per_slot {
@@ -2805,13 +2843,13 @@ pub mod processor {
                 // The data is already zeroed above, so init_in_place only sets non-zero fields.
                 let engine = zc::engine_mut(&mut data)?;
                 engine.init_in_place(risk_params);
+                engine.set_insurance_floor(insurance_floor);
 
                 // Initialize slot fields to current slot to prevent overflow on first crank
-                // (accrue_funding checks dt < 31_536_000, which fails if last_funding_slot=0)
                 let a_clock = &accounts[5];
                 let clock = Clock::from_account_info(a_clock)?;
                 engine.current_slot = clock.slot;
-                engine.last_funding_slot = clock.slot;
+                engine.last_market_slot = clock.slot;
                 engine.last_crank_slot = clock.slot;
 
                 let config = MarketConfig {
@@ -2836,7 +2874,7 @@ pub mod processor {
                     thresh_step_bps: DEFAULT_THRESH_STEP_BPS,
                     thresh_alpha_bps: DEFAULT_THRESH_ALPHA_BPS,
                     thresh_min: DEFAULT_THRESH_MIN,
-                    thresh_max: DEFAULT_THRESH_MAX.min(max_risk_threshold),
+                    thresh_max: DEFAULT_THRESH_MAX.min(max_insurance_floor),
                     thresh_min_step: DEFAULT_THRESH_MIN_STEP,
                     // Oracle authority (disabled by default - use Pyth/Chainlink)
                     // In Hyperp mode: authority_price_e6 = mark, last_effective_price_e6 = index
@@ -2854,7 +2892,7 @@ pub mod processor {
                     last_effective_price_e6: if is_hyperp { initial_mark_price_e6 } else { 0 },
                     // Per-market admin limits (immutable after init)
                     max_maintenance_fee_per_slot,
-                    max_risk_threshold,
+                    max_insurance_floor,
                     min_oracle_price_cap_e2bps,
                     _limits_reserved: 0,
                 };
@@ -3039,7 +3077,7 @@ pub mod processor {
                 }
 
                 engine
-                    .deposit(user_idx, units as u128, clock.slot)
+                    .deposit(user_idx, units as u128, 0, clock.slot)
                     .map_err(map_risk_error)?;
             }
             Instruction::WithdrawCollateral { user_idx, amount } => {
@@ -3118,7 +3156,7 @@ pub mod processor {
                 let (units_requested, _) = crate::units::base_to_units(amount, config.unit_scale);
 
                 engine
-                    .withdraw(user_idx, units_requested as u128, clock.slot, price)
+                    .withdraw(user_idx, units_requested as u128, price, clock.slot)
                     .map_err(map_risk_error)?;
 
                 // Convert units back to base tokens for payout (checked to prevent silent overflow)
@@ -3145,6 +3183,7 @@ pub mod processor {
             Instruction::KeeperCrank {
                 caller_idx,
                 allow_panic,
+                candidates,
             } => {
                 use crate::constants::CRANK_NO_CALLER;
 
@@ -3178,54 +3217,25 @@ pub mod processor {
                     let clock = Clock::from_account_info(a_clock)?;
                     let engine = zc::engine_mut(&mut data)?;
 
-                    // Force-close positions in a paginated manner using crank_cursor
-                    // Process up to 64 accounts per crank call (bounded compute)
-                    const BATCH_SIZE: u16 = 64;
+                    // Force-close positions in a paginated manner using crank_cursor.
+                    // 1. accrue_market_to updates mark to settlement price
+                    // 2. touch_account_full settles mark-to-market PnL for each account
+                    // 3. attach_effective_position zeros the position
+                    const BATCH_SIZE: u16 = 8;
                     let start = engine.crank_cursor;
                     let end = core::cmp::min(start + BATCH_SIZE, percolator::MAX_ACCOUNTS as u16);
 
+                    // Update market mark to settlement price
+                    let _ = engine.accrue_market_to(clock.slot, settlement_price);
+
                     for idx in start..end {
                         if engine.is_used(idx as usize) {
-                            let acc = &engine.accounts[idx as usize];
-                            let pos = acc.position_size.get();
-                            if pos != 0 {
-                                // Settle position at settlement price
-                                // PnL = position * (settlement_price - entry_price) / 1e6
-                                let entry = acc.entry_price as i128;
-                                let settle = settlement_price as i128;
-                                let pnl_delta = pos.saturating_mul(settle.saturating_sub(entry))
-                                    / 1_000_000i128;
-
-                                // Add to PnL using set_pnl() to maintain pnl_pos_tot aggregate
-                                // SECURITY: Must use set_pnl() for correct haircut calculations
-                                let old_pnl = acc.pnl.get();
-                                let new_pnl = old_pnl.saturating_add(pnl_delta);
-                                engine.set_pnl(idx as usize, new_pnl);
-
-                                // Initialize warmup slope for positive PnL so users can
-                                // close accounts via CloseAccount after warmup elapses.
-                                // Without this, warmup_slope_per_step stays 0 and
-                                // settle_warmup_to_capital converts nothing (Bug #11).
-                                if new_pnl > 0 {
-                                    let avail = (new_pnl as u128).saturating_sub(
-                                        engine.accounts[idx as usize].reserved_pnl as u128,
-                                    );
-                                    let period = engine.params.warmup_period_slots as u128;
-                                    let slope = if period > 0 {
-                                        core::cmp::max(1u128, avail / period)
-                                    } else {
-                                        avail // instant warmup
-                                    };
-                                    engine.accounts[idx as usize].warmup_slope_per_step =
-                                        percolator::U128::new(slope);
-                                    engine.accounts[idx as usize].warmup_started_at_slot =
-                                        clock.slot;
-                                }
-
-                                // Clear position
-                                engine.accounts[idx as usize].position_size =
-                                    percolator::I128::ZERO;
-                                engine.accounts[idx as usize].entry_price = 0;
+                            // Touch account to settle all pending PnL at settlement price
+                            let _ = engine.touch_account_full(idx as usize, settlement_price, clock.slot);
+                            let eff = engine.effective_pos_q(idx as usize);
+                            if eff != 0 {
+                                // Zero the position
+                                engine.attach_effective_position(idx as usize, 0i128);
                             }
                         }
                     }
@@ -3359,13 +3369,16 @@ pub mod processor {
                     msg!("CU_CHECKPOINT: keeper_crank_start");
                     sol_log_compute_units();
                 }
+                // Set funding rate before crank (anti-retroactivity: stored rate used next interval)
+                engine.set_funding_rate_for_next_interval(effective_funding_rate);
+
+                // Two-phase crank: candidates computed off-chain, passed in instruction data
                 let _outcome = engine
                     .keeper_crank(
-                        effective_caller_idx,
                         clock.slot,
                         price,
-                        effective_funding_rate,
-                        allow_panic != 0,
+                        &candidates,
+                        percolator::LIQ_BUDGET_PER_CRANK,
                     )
                     .map_err(map_risk_error)?;
                 #[cfg(feature = "cu-audit")]
@@ -3393,20 +3406,14 @@ pub mod processor {
 
                 // Copy stats before threshold update (avoid borrow conflict)
                 let liqs = engine.lifetime_liquidations;
-                let force = engine.lifetime_force_realize_closes;
                 let ins_low = engine.insurance_fund.balance.get() as u64;
 
-                // --- Threshold auto-update (rate-limited + EWMA smoothed + step-clamped)
+                // --- Insurance floor auto-update (rate-limited + EWMA smoothed + step-clamped)
                 if clock.slot >= last_thr_slot.saturating_add(config.thresh_update_interval_slots) {
-                    let risk_units = crate::compute_system_risk_units(engine);
-                    // Convert risk_units (contracts) to notional using price
-                    let risk_notional = risk_units.saturating_mul(price as u128) / 1_000_000;
-                    // raw target: floor + risk_notional * thresh_risk_bps / 10000
-                    let raw_target = config.thresh_floor.saturating_add(
-                        risk_notional.saturating_mul(config.thresh_risk_bps as u128) / 10_000,
-                    );
+                    // raw target: floor (static config value)
+                    let raw_target = config.thresh_floor;
                     let clamped_target = raw_target.clamp(config.thresh_min, config.thresh_max);
-                    let current = engine.risk_reduction_threshold();
+                    let current = engine.insurance_floor;
                     // EWMA: new = alpha * target + (1 - alpha) * current
                     let alpha = config.thresh_alpha_bps as u128;
                     let smoothed = (alpha * clamped_target + (10_000 - alpha) * current) / 10_000;
@@ -3424,10 +3431,9 @@ pub mod processor {
                     } else {
                         current.saturating_sub(max_step.min(current - smoothed))
                     };
-                    engine.set_risk_reduction_threshold(
+                    engine.set_insurance_floor(
                         final_thresh.clamp(config.thresh_min, config.thresh_max),
                     );
-                    drop(engine);
                     state::write_last_thr_update_slot(&mut data, clock.slot);
                 }
 
@@ -3436,9 +3442,9 @@ pub mod processor {
                     state::write_dust_base(&mut data, dust);
                 }
 
-                // Debug: log lifetime counters (sol_log_64: tag, liqs, force, max_accounts, insurance)
+                // Debug: log lifetime counters (sol_log_64: tag, liqs, max_accounts, insurance, 0)
                 msg!("CRANK_STATS");
-                sol_log_64(0xC8A4C, liqs, force, MAX_ACCOUNTS as u64, ins_low);
+                sol_log_64(0xC8A4C, liqs, MAX_ACCOUNTS as u64, ins_low, 0);
             }
             Instruction::TradeNoCpi {
                 lp_idx,
@@ -3495,38 +3501,16 @@ pub mod processor {
                     return Err(PercolatorError::EngineUnauthorized.into());
                 }
 
-                // Gate: if insurance_fund <= threshold, only allow risk-reducing trades
-                // LP delta is -size (LP takes opposite side of user's trade)
-                // O(1) check after single O(n) scan
-                // Gate activation via verify helper (Kani-provable)
-                let bal = engine.insurance_fund.balance.get();
-                let thr = engine.risk_reduction_threshold();
-                if crate::verify::gate_active(thr, bal) {
-                    #[cfg(feature = "cu-audit")]
-                    {
-                        msg!("CU_CHECKPOINT: trade_nocpi_compute_start");
-                        sol_log_compute_units();
-                    }
-                    let risk_state = crate::LpRiskState::compute(engine);
-                    #[cfg(feature = "cu-audit")]
-                    {
-                        msg!("CU_CHECKPOINT: trade_nocpi_compute_end");
-                        sol_log_compute_units();
-                    }
-                    let old_lp_pos = engine.accounts[lp_idx as usize].position_size.get();
-                    if risk_state.would_increase_risk(old_lp_pos, -size) {
-                        return Err(PercolatorError::EngineRiskReductionOnlyMode.into());
-                    }
-                }
+                // Side-mode gating is handled inside engine.execute_trade()
 
                 #[cfg(feature = "cu-audit")]
                 {
                     msg!("CU_CHECKPOINT: trade_nocpi_execute_start");
                     sol_log_compute_units();
                 }
-                engine
-                    .execute_trade(&NoOpMatcher, lp_idx, user_idx, clock.slot, price, size)
-                    .map_err(map_risk_error)?;
+                execute_trade_with_matcher(
+                    engine, &NoOpMatcher, lp_idx, user_idx, clock.slot, price, size,
+                ).map_err(map_risk_error)?;
                 #[cfg(feature = "cu-audit")]
                 {
                     msg!("CU_CHECKPOINT: trade_nocpi_execute_end");
@@ -3714,38 +3698,13 @@ pub mod processor {
                 }
                 drop(ctx_data);
 
-                let matcher = CpiMatcher {
-                    exec_price: ret.exec_price_e6,
-                    exec_size: ret.exec_size,
-                };
+                let exec_price = ret.exec_price_e6;
                 {
                     let mut data = state::slab_data_mut(a_slab)?;
                     state::write_config(&mut data, &config);
                     let engine = zc::engine_mut(&mut data)?;
 
-                    // Gate: if insurance_fund <= threshold, only allow risk-reducing trades
-                    // Use actual exec_size from matcher (LP delta is -exec_size)
-                    // O(1) check after single O(n) scan
-                    // Gate activation via verify helper (Kani-provable)
-                    let bal = engine.insurance_fund.balance.get();
-                    let thr = engine.risk_reduction_threshold();
-                    if crate::verify::gate_active(thr, bal) {
-                        #[cfg(feature = "cu-audit")]
-                        {
-                            msg!("CU_CHECKPOINT: trade_cpi_compute_start");
-                            sol_log_compute_units();
-                        }
-                        let risk_state = crate::LpRiskState::compute(engine);
-                        #[cfg(feature = "cu-audit")]
-                        {
-                            msg!("CU_CHECKPOINT: trade_cpi_compute_end");
-                            sol_log_compute_units();
-                        }
-                        let old_lp_pos = engine.accounts[lp_idx as usize].position_size.get();
-                        if risk_state.would_increase_risk(old_lp_pos, -ret.exec_size) {
-                            return Err(PercolatorError::EngineRiskReductionOnlyMode.into());
-                        }
-                    }
+                    // Side-mode gating is handled inside engine.execute_trade()
 
                     // Trade size selection via verify helper (Kani-provable: uses exec_size, not requested_size)
                     let trade_size = crate::verify::cpi_trade_size(ret.exec_size, size);
@@ -3754,9 +3713,13 @@ pub mod processor {
                         msg!("CU_CHECKPOINT: trade_cpi_execute_start");
                         sol_log_compute_units();
                     }
-                    engine
-                        .execute_trade(&matcher, lp_idx, user_idx, clock.slot, price, trade_size)
-                        .map_err(map_risk_error)?;
+                    let matcher = CpiMatcher {
+                        exec_price,
+                        exec_size: trade_size,
+                    };
+                    execute_trade_with_matcher(
+                        engine, &matcher, lp_idx, user_idx, clock.slot, price, size,
+                    ).map_err(map_risk_error)?;
                     #[cfg(feature = "cu-audit")]
                     {
                         msg!("CU_CHECKPOINT: trade_cpi_execute_end");
@@ -3824,23 +3787,10 @@ pub mod processor {
                 sol_log_64(target_idx as u64, price, 0, 0, 0); // idx, price
                 {
                     let acc = &engine.accounts[target_idx as usize];
-                    sol_log_64(acc.capital.get() as u64, acc.pnl.get() as u64, 0, 0, 1); // cap, pnl
-                    sol_log_64(acc.position_size.get() as u64, acc.entry_price, 0, 0, 2); // pos, entry
-                                                                                          // Calculate mark PnL
-                    let pos = acc.position_size.get();
-                    let entry = acc.entry_price as i128;
-                    let mark = pos.saturating_mul(price as i128 - entry) / 1_000_000;
-                    let equity = (acc.capital.get() as i128)
-                        .saturating_add(acc.pnl.get())
-                        .saturating_add(mark);
-                    let notional = (if pos < 0 { -pos } else { pos } as u128)
-                        .saturating_mul(price as u128)
-                        / 1_000_000;
-                    let maint_req = notional
-                        .saturating_mul(engine.params.maintenance_margin_bps as u128)
-                        / 10_000;
-                    sol_log_64(mark as u64, equity as u64, maint_req as u64, 0, 3);
-                    // mark, equity, maint
+                    sol_log_64(acc.capital.get() as u64, 0, 0, 0, 1); // cap
+                    let eff = engine.effective_pos_q(target_idx as usize);
+                    let notional = engine.notional(target_idx as usize, price);
+                    sol_log_64(notional as u64, (eff == 0) as u64, 0, 0, 2); // notional, has_pos
                 }
 
                 #[cfg(feature = "cu-audit")]
@@ -3928,9 +3878,22 @@ pub mod processor {
                     msg!("CU_CHECKPOINT: close_account_start");
                     sol_log_compute_units();
                 }
-                let amt_units = engine
-                    .close_account(user_idx, clock.slot, price)
-                    .map_err(map_risk_error)?;
+                let amt_units = if resolved {
+                    // For resolved markets, directly free — close_account overflow risk.
+                    let cap = engine.accounts[user_idx as usize].capital.get();
+                    engine.set_capital(user_idx as usize, 0);
+                    engine.set_pnl(user_idx as usize, 0i128);
+                    engine.accounts[user_idx as usize].fee_credits = percolator::I128::ZERO;
+                    engine.accounts[user_idx as usize].position_basis_q = 0i128;
+                    let new_vault = engine.vault.get().saturating_sub(cap);
+                    engine.vault = percolator::U128::new(new_vault);
+                    engine.free_slot(user_idx);
+                    cap
+                } else {
+                    engine
+                        .close_account(user_idx, clock.slot, price)
+                        .map_err(map_risk_error)?
+                };
                 #[cfg(feature = "cu-audit")]
                 {
                     msg!("CU_CHECKPOINT: close_account_end");
@@ -4029,12 +3992,12 @@ pub mod processor {
 
                 // Enforce per-market admin limit
                 let config = state::read_config(&data);
-                if new_threshold > config.max_risk_threshold {
+                if new_threshold > config.max_insurance_floor {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
 
                 let engine = zc::engine_mut(&mut data)?;
-                engine.set_risk_reduction_threshold(new_threshold);
+                engine.set_insurance_floor(new_threshold);
             }
 
             Instruction::UpdateAdmin { new_admin } => {
@@ -4161,7 +4124,7 @@ pub mod processor {
                 let mut config = state::read_config(&data);
 
                 // Enforce per-market admin limit on thresh_max
-                if thresh_max > config.max_risk_threshold {
+                if thresh_max > config.max_insurance_floor {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
                 config.funding_horizon_slots = funding_horizon_slots;
@@ -4398,12 +4361,12 @@ pub mod processor {
                 let engine = zc::engine_mut(&mut data)?;
 
                 // Require all positions to be closed (force-closed by crank)
-                // Check that no account has position_size != 0
+                // Check that no account has effective position != 0
                 let mut has_open_positions = false;
                 for i in 0..percolator::MAX_ACCOUNTS {
                     if engine.is_used(i) {
-                        let pos = engine.accounts[i].position_size.get();
-                        if pos != 0 {
+                        let eff = engine.effective_pos_q(i);
+                        if eff != 0 {
                             has_open_positions = true;
                             break;
                         }
@@ -4603,7 +4566,7 @@ pub mod processor {
 
                     // Require all positions to be closed.
                     for i in 0..percolator::MAX_ACCOUNTS {
-                        if engine.is_used(i) && engine.accounts[i].position_size.get() != 0 {
+                        if engine.is_used(i) && !(engine.effective_pos_q(i) == 0) {
                             return Err(ProgramError::InvalidAccountData);
                         }
                     }
@@ -4710,7 +4673,7 @@ pub mod processor {
                 check_idx(engine, user_idx)?;
 
                 // Position must be zero (force-closed by prior crank)
-                if !engine.accounts[user_idx as usize].position_size.is_zero() {
+                if !(engine.effective_pos_q(user_idx as usize) == 0) {
                     return Err(PercolatorError::EngineUndercollateralized.into());
                 }
 
@@ -4719,25 +4682,31 @@ pub mod processor {
                 verify_token_account(a_owner_ata, &owner_pubkey, &mint)?;
 
                 // Force-settle PnL so close_account's pnl==0 check passes
-                let pnl = engine.accounts[user_idx as usize].pnl.get();
+                let pnl = engine.accounts[user_idx as usize].pnl;
                 let capital = engine.accounts[user_idx as usize].capital.get();
                 if pnl > 0 {
-                    let haircutted = engine.effective_pos_pnl(pnl);
+                    let haircutted = engine.effective_matured_pnl(user_idx as usize);
                     engine.set_capital(user_idx as usize, capital.saturating_add(haircutted));
-                    engine.set_pnl(user_idx as usize, 0);
+                    engine.set_pnl(user_idx as usize, 0i128);
                 } else if pnl < 0 {
-                    let loss = (-pnl) as u128;
+                    let loss = pnl.unsigned_abs();
                     engine.set_capital(user_idx as usize, capital.saturating_sub(loss));
-                    engine.set_pnl(user_idx as usize, 0);
+                    engine.set_pnl(user_idx as usize, 0i128);
                 }
 
-                // Forgive fee debt so close_account doesn't fail
+                // Forgive fee debt
                 engine.accounts[user_idx as usize].fee_credits = percolator::I128::ZERO;
 
-                // close_account: touch_account_full, free_slot, vault decrement
-                let amt_units = engine
-                    .close_account(user_idx, clock.slot, price)
-                    .map_err(map_risk_error)?;
+                // For resolved markets, directly settle and free the account.
+                // close_account() can overflow in touch_account_full with frozen ADL.
+                let amt_units = engine.accounts[user_idx as usize].capital.get();
+                engine.set_capital(user_idx as usize, 0);
+                engine.set_pnl(user_idx as usize, 0i128);
+                engine.accounts[user_idx as usize].fee_credits = percolator::I128::ZERO;
+                engine.accounts[user_idx as usize].position_basis_q = 0i128;
+                let new_vault = engine.vault.get().saturating_sub(amt_units);
+                engine.vault = percolator::U128::new(new_vault);
+                engine.free_slot(user_idx);
                 let amt_units_u64: u64 = amt_units
                     .try_into()
                     .map_err(|_| PercolatorError::EngineOverflow)?;
@@ -4807,6 +4776,9 @@ pub mod entrypoint {
 // 11. mod risk (glue)
 pub mod risk {
     pub use percolator::{
-        MatchingEngine, NoOpMatcher, RiskEngine, RiskError, RiskParams, TradeExecution,
+        RiskEngine, RiskError, RiskParams,
+    };
+    pub use crate::processor::{
+        MatchingEngine, NoOpMatcher, TradeExecution,
     };
 }
