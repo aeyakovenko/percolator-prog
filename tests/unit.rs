@@ -3339,13 +3339,13 @@ fn make_pumpswap_pool(
 /// Includes bin_step_seed at 74, active_id at 77, and reserve_y at 185.
 /// active_id=0 → price_e6 = 1_000_000 (price == 1.0 for any bin_step).
 fn make_meteora_lbpair(bin_step: u16, active_id: i32, vault_y_key: &Pubkey) -> Vec<u8> {
-    let mut data = vec![0u8; 220]; // must be ≥ METEORA_DLMM_MIN_LEN (217)
-                                   // bin_step_seed at offset 74
-    data[74..76].copy_from_slice(&bin_step.to_le_bytes());
-    // active_id at offset 77
-    data[77..81].copy_from_slice(&active_id.to_le_bytes());
-    // reserve_y at offset 185
-    data[185..217].copy_from_slice(vault_y_key.as_ref());
+    let mut data = vec![0u8; 220]; // must be ≥ METEORA_DLMM_MIN_LEN (216)
+    // bin_step_seed at offset 73 (verified against on-chain LbPair layout)
+    data[73..75].copy_from_slice(&bin_step.to_le_bytes());
+    // active_id at offset 76
+    data[76..80].copy_from_slice(&active_id.to_le_bytes());
+    // reserve_y at offset 184
+    data[184..216].copy_from_slice(vault_y_key.as_ref());
     data
 }
 
