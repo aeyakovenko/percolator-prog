@@ -4824,10 +4824,10 @@ pub mod oracle {
     // the SPL Token Account `amount` field at byte offset 64 within the vault account.
     // We verify the vault owner is spl_token::ID or spl_token_2022::ID.
 
-    const METEORA_DLMM_PRICE_MIN_LEN: usize = 80;  // need through active_id end (76+4)
-    const METEORA_DLMM_MIN_LEN: usize = 216;       // need through reserve_y end (184+32)
+    const METEORA_DLMM_PRICE_MIN_LEN: usize = 80; // need through active_id end (76+4)
+    const METEORA_DLMM_MIN_LEN: usize = 216; // need through reserve_y end (184+32)
     const METEORA_DLMM_OFF_BIN_STEP_SEED: usize = 73; // u16 LE = bin_step
-    const METEORA_DLMM_OFF_ACTIVE_ID: usize = 76;  // i32 LE
+    const METEORA_DLMM_OFF_ACTIVE_ID: usize = 76; // i32 LE
     const METEORA_DLMM_OFF_RESERVE_Y: usize = 184; // Pubkey of vault_y token account
 
     /// Read spot price from a Meteora DLMM pool account.
