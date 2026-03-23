@@ -31,6 +31,10 @@ const IX_BURN: u8 = 8;
 // ─── CPI instruction builders ────────────────────────────────────────────────
 
 /// `InitializeMint` (tag 0).  Accounts: [WRITE] mint, [RO] Rent sysvar.
+///
+/// Wire layout (matches spl-token 6.0 exactly):
+///   - freeze=None:  tag(1) + decimals(1) + mint_authority(32) + option_byte(1)         = 35 bytes
+///   - freeze=Some:  tag(1) + decimals(1) + mint_authority(32) + option_byte(1) + key(32) = 67 bytes
 pub fn initialize_mint(
     _program_id: &Pubkey,
     mint: &Pubkey,
@@ -38,18 +42,27 @@ pub fn initialize_mint(
     freeze_authority: Option<&Pubkey>,
     decimals: u8,
 ) -> Result<Instruction, ProgramError> {
-    // Layout: tag(1) + decimals(1) + mint_authority(32) + freeze_option(1) [+ freeze_authority(32)]
-    let mut data = [0u8; 67];
-    data[0] = IX_INITIALIZE_MINT;
-    data[1] = decimals;
-    data[2..34].copy_from_slice(mint_authority.as_ref());
-    match freeze_authority {
-        Some(auth) => {
-            data[34] = 1;
-            data[35..67].copy_from_slice(auth.as_ref());
+    let data = match freeze_authority {
+        None => {
+            // 35 bytes: tag + decimals + mint_authority + freeze_option(0)
+            let mut d = [0u8; 35];
+            d[0] = IX_INITIALIZE_MINT;
+            d[1] = decimals;
+            d[2..34].copy_from_slice(mint_authority.as_ref());
+            // d[34] = 0 (freeze absent) — already zero
+            d.to_vec()
         }
-        None => {} // data[34] = 0 already
-    }
+        Some(auth) => {
+            // 67 bytes: tag + decimals + mint_authority + freeze_option(1) + freeze_authority
+            let mut d = [0u8; 67];
+            d[0] = IX_INITIALIZE_MINT;
+            d[1] = decimals;
+            d[2..34].copy_from_slice(mint_authority.as_ref());
+            d[34] = 1;
+            d[35..67].copy_from_slice(auth.as_ref());
+            d.to_vec()
+        }
+    };
     let mut accounts = Vec::with_capacity(2);
     accounts.push(AccountMeta::new(*mint, false));
     accounts.push(AccountMeta::new_readonly(
@@ -59,7 +72,7 @@ pub fn initialize_mint(
     Ok(Instruction {
         program_id: id(),
         accounts,
-        data: data.to_vec(),
+        data,
     })
 }
 

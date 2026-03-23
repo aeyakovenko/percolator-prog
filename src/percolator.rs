@@ -27,7 +27,8 @@ compile_error!("devnet feature MUST NOT be enabled on mainnet builds!");
 extern crate alloc;
 
 // Local SPL Token helpers — replaces spl-token 6.0 crate dependency.
-mod spl_token;
+// pub so that tests/pinocchio_cpi_parity.rs can import percolator_prog::spl_token::*
+pub mod spl_token;
 
 use solana_program::account_info::AccountInfo;
 use solana_program::declare_id;
