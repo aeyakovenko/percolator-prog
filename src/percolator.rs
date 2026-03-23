@@ -26,6 +26,9 @@ compile_error!("devnet feature MUST NOT be enabled on mainnet builds!");
 
 extern crate alloc;
 
+// Local SPL Token helpers — replaces spl-token 6.0 crate dependency.
+mod spl_token;
+
 use solana_program::account_info::AccountInfo;
 use solana_program::declare_id;
 use solana_program::pubkey::Pubkey;
@@ -5088,8 +5091,8 @@ pub mod oracle {
             }
 
             // SECURITY: verify vault_y is owned by spl_token or spl_token_2022
-            let is_valid_token_program =
-                *vault_y_ai.owner == spl_token::ID || *vault_y_ai.owner == spl_token_2022::ID;
+            let is_valid_token_program = *vault_y_ai.owner == crate::spl_token::id()
+                || *vault_y_ai.owner == spl_token_2022::ID;
             if !is_valid_token_program {
                 return Err(PercolatorError::OracleInvalid.into());
             }
@@ -5682,10 +5685,7 @@ pub mod collateral {
     #[cfg(not(feature = "test"))]
     use solana_program::program::{invoke, invoke_signed};
 
-    #[cfg(feature = "test")]
-    use solana_program::program_pack::Pack;
-    #[cfg(feature = "test")]
-    use spl_token::state::Account as TokenAccount;
+    // test-mode state helpers use raw byte manipulation (pinocchio-token zero-copy layout)
 
     pub fn deposit<'a>(
         _token_program: &AccountInfo<'a>,
@@ -5699,7 +5699,7 @@ pub mod collateral {
         }
         #[cfg(not(feature = "test"))]
         {
-            let ix = spl_token::instruction::transfer(
+            let ix = crate::spl_token::transfer(
                 _token_program.key,
                 source.key,
                 dest.key,
@@ -5720,20 +5720,21 @@ pub mod collateral {
         #[cfg(feature = "test")]
         {
             let mut src_data = source.try_borrow_mut_data()?;
-            let mut src_state = TokenAccount::unpack(&src_data)?;
-            src_state.amount = src_state
-                .amount
-                .checked_sub(amount)
-                .ok_or(ProgramError::InsufficientFunds)?;
-            TokenAccount::pack(src_state, &mut src_data)?;
+            let cur = crate::spl_token::state::get_token_account_amount(&src_data)?;
+            crate::spl_token::state::set_token_account_amount(
+                &mut src_data,
+                cur.checked_sub(amount)
+                    .ok_or(ProgramError::InsufficientFunds)?,
+            )?;
+            drop(src_data);
 
             let mut dst_data = dest.try_borrow_mut_data()?;
-            let mut dst_state = TokenAccount::unpack(&dst_data)?;
-            dst_state.amount = dst_state
-                .amount
-                .checked_add(amount)
-                .ok_or(ProgramError::InvalidAccountData)?;
-            TokenAccount::pack(dst_state, &mut dst_data)?;
+            let cur = crate::spl_token::state::get_token_account_amount(&dst_data)?;
+            crate::spl_token::state::set_token_account_amount(
+                &mut dst_data,
+                cur.checked_add(amount)
+                    .ok_or(ProgramError::InvalidAccountData)?,
+            )?;
             Ok(())
         }
     }
@@ -5751,7 +5752,7 @@ pub mod collateral {
         }
         #[cfg(not(feature = "test"))]
         {
-            let ix = spl_token::instruction::transfer(
+            let ix = crate::spl_token::transfer(
                 _token_program.key,
                 source.key,
                 dest.key,
@@ -5773,20 +5774,21 @@ pub mod collateral {
         #[cfg(feature = "test")]
         {
             let mut src_data = source.try_borrow_mut_data()?;
-            let mut src_state = TokenAccount::unpack(&src_data)?;
-            src_state.amount = src_state
-                .amount
-                .checked_sub(amount)
-                .ok_or(ProgramError::InsufficientFunds)?;
-            TokenAccount::pack(src_state, &mut src_data)?;
+            let cur = crate::spl_token::state::get_token_account_amount(&src_data)?;
+            crate::spl_token::state::set_token_account_amount(
+                &mut src_data,
+                cur.checked_sub(amount)
+                    .ok_or(ProgramError::InsufficientFunds)?,
+            )?;
+            drop(src_data);
 
             let mut dst_data = dest.try_borrow_mut_data()?;
-            let mut dst_state = TokenAccount::unpack(&dst_data)?;
-            dst_state.amount = dst_state
-                .amount
-                .checked_add(amount)
-                .ok_or(ProgramError::InvalidAccountData)?;
-            TokenAccount::pack(dst_state, &mut dst_data)?;
+            let cur = crate::spl_token::state::get_token_account_amount(&dst_data)?;
+            crate::spl_token::state::set_token_account_amount(
+                &mut dst_data,
+                cur.checked_add(amount)
+                    .ok_or(ProgramError::InvalidAccountData)?,
+            )?;
             Ok(())
         }
     }
@@ -5802,7 +5804,6 @@ pub mod insurance_lp {
 
     #[cfg(not(feature = "test"))]
     use solana_program::program::{invoke, invoke_signed};
-    use solana_program::program_pack::Pack;
     #[cfg(not(feature = "test"))]
     use solana_program::sysvar::Sysvar;
 
@@ -5821,7 +5822,7 @@ pub mod insurance_lp {
     ) -> Result<(), ProgramError> {
         #[cfg(not(feature = "test"))]
         {
-            let space = spl_token::state::Mint::LEN;
+            let space = crate::spl_token::state::MINT_LEN;
             let rent = solana_program::rent::Rent::get()?;
             let lamports = rent.minimum_balance(space);
 
@@ -5831,7 +5832,7 @@ pub mod insurance_lp {
                 mint_account.key,
                 lamports,
                 space as u64,
-                &spl_token::ID,
+                &crate::spl_token::id(),
             );
             invoke_signed(
                 &create_ix,
@@ -5840,8 +5841,8 @@ pub mod insurance_lp {
             )?;
 
             // Initialize mint: authority = vault_authority PDA, freeze = None
-            let init_ix = spl_token::instruction::initialize_mint(
-                &spl_token::ID,
+            let init_ix = crate::spl_token::initialize_mint(
+                &crate::spl_token::id(),
                 mint_account.key,
                 vault_authority.key,
                 None,
@@ -5858,18 +5859,22 @@ pub mod insurance_lp {
         }
         #[cfg(feature = "test")]
         {
-            // In test mode, initialize the mint data directly
-            use solana_program::program_pack::Pack;
-            use spl_token::state::Mint;
+            // In test mode, initialize the mint data directly via raw byte layout
             let mut data = mint_account.try_borrow_mut_data()?;
-            let mut mint_state = Mint::default();
-            mint_state.is_initialized = true;
-            mint_state.decimals = decimals;
-            mint_state.mint_authority =
-                solana_program::program_option::COption::Some(*vault_authority.key);
-            mint_state.freeze_authority = solana_program::program_option::COption::None;
-            mint_state.supply = 0;
-            Mint::pack(mint_state, &mut data)?;
+            crate::spl_token::state::pack_mint(
+                &mut data,
+                true,
+                decimals,
+                0,
+                Some(
+                    vault_authority
+                        .key
+                        .as_ref()
+                        .try_into()
+                        .map_err(|_| ProgramError::InvalidAccountData)?,
+                ),
+                None,
+            )?;
         }
         Ok(())
     }
@@ -5889,7 +5894,7 @@ pub mod insurance_lp {
         }
         #[cfg(not(feature = "test"))]
         {
-            let ix = spl_token::instruction::mint_to(
+            let ix = crate::spl_token::mint_to(
                 token_program.key,
                 mint.key,
                 destination.key,
@@ -5910,26 +5915,25 @@ pub mod insurance_lp {
         }
         #[cfg(feature = "test")]
         {
-            use solana_program::program_pack::Pack;
-            use spl_token::state::{Account as TokenAccount, Mint};
-
-            // Update mint supply
+            // Update mint supply (raw byte write at offset 36..44)
             let mut mint_data = mint.try_borrow_mut_data()?;
-            let mut mint_state = Mint::unpack(&mint_data)?;
-            mint_state.supply = mint_state
-                .supply
-                .checked_add(amount)
-                .ok_or(ProgramError::InvalidAccountData)?;
-            Mint::pack(mint_state, &mut mint_data)?;
+            let supply = crate::spl_token::state::get_mint_supply(&mint_data)?;
+            crate::spl_token::state::set_mint_supply(
+                &mut mint_data,
+                supply
+                    .checked_add(amount)
+                    .ok_or(ProgramError::InvalidAccountData)?,
+            )?;
+            drop(mint_data);
 
-            // Update destination balance
+            // Update destination balance (raw byte write at offset 64..72)
             let mut dst_data = destination.try_borrow_mut_data()?;
-            let mut dst_state = TokenAccount::unpack(&dst_data)?;
-            dst_state.amount = dst_state
-                .amount
-                .checked_add(amount)
-                .ok_or(ProgramError::InvalidAccountData)?;
-            TokenAccount::pack(dst_state, &mut dst_data)?;
+            let cur = crate::spl_token::state::get_token_account_amount(&dst_data)?;
+            crate::spl_token::state::set_token_account_amount(
+                &mut dst_data,
+                cur.checked_add(amount)
+                    .ok_or(ProgramError::InvalidAccountData)?,
+            )?;
             Ok(())
         }
     }
@@ -5948,7 +5952,7 @@ pub mod insurance_lp {
         }
         #[cfg(not(feature = "test"))]
         {
-            let ix = spl_token::instruction::burn(
+            let ix = crate::spl_token::burn(
                 token_program.key,
                 source.key,
                 mint.key,
@@ -5968,35 +5972,33 @@ pub mod insurance_lp {
         }
         #[cfg(feature = "test")]
         {
-            use solana_program::program_pack::Pack;
-            use spl_token::state::{Account as TokenAccount, Mint};
-
             // Update mint supply
             let mut mint_data = mint.try_borrow_mut_data()?;
-            let mut mint_state = Mint::unpack(&mint_data)?;
-            mint_state.supply = mint_state
-                .supply
-                .checked_sub(amount)
-                .ok_or(ProgramError::InsufficientFunds)?;
-            Mint::pack(mint_state, &mut mint_data)?;
+            let supply = crate::spl_token::state::get_mint_supply(&mint_data)?;
+            crate::spl_token::state::set_mint_supply(
+                &mut mint_data,
+                supply
+                    .checked_sub(amount)
+                    .ok_or(ProgramError::InsufficientFunds)?,
+            )?;
+            drop(mint_data);
 
             // Update source balance
             let mut src_data = source.try_borrow_mut_data()?;
-            let mut src_state = TokenAccount::unpack(&src_data)?;
-            src_state.amount = src_state
-                .amount
-                .checked_sub(amount)
-                .ok_or(ProgramError::InsufficientFunds)?;
-            TokenAccount::pack(src_state, &mut src_data)?;
+            let cur = crate::spl_token::state::get_token_account_amount(&src_data)?;
+            crate::spl_token::state::set_token_account_amount(
+                &mut src_data,
+                cur.checked_sub(amount)
+                    .ok_or(ProgramError::InsufficientFunds)?,
+            )?;
             Ok(())
         }
     }
 
     /// Read the current supply from an SPL mint account.
     pub fn read_mint_supply(mint_account: &AccountInfo) -> Result<u64, ProgramError> {
-        use solana_program::program_pack::Pack;
         let data = mint_account.try_borrow_data()?;
-        let mint = spl_token::state::Mint::unpack(&data)?;
+        let mint = crate::spl_token::state::MintView::unpack(&data)?;
         if !mint.is_initialized {
             return Err(ProgramError::UninitializedAccount);
         }
@@ -6005,9 +6007,8 @@ pub mod insurance_lp {
 
     /// Read the decimals from an SPL mint account.
     pub fn read_mint_decimals(mint_account: &AccountInfo) -> Result<u8, ProgramError> {
-        use solana_program::program_pack::Pack;
         let data = mint_account.try_borrow_data()?;
-        let mint = spl_token::state::Mint::unpack(&data)?;
+        let mint = crate::spl_token::state::MintView::unpack(&data)?;
         Ok(mint.decimals)
     }
 }
@@ -8289,7 +8290,6 @@ pub mod processor {
         log::sol_log_64,
         msg,
         program_error::ProgramError,
-        program_pack::Pack,
         pubkey::Pubkey,
         sysvar::{clock::Clock, Sysvar},
     };
@@ -8875,15 +8875,15 @@ pub mod processor {
         if a_vault.key != expected_pubkey {
             return Err(PercolatorError::InvalidVaultAta.into());
         }
-        if a_vault.owner != &spl_token::ID {
+        if a_vault.owner != &crate::spl_token::id() {
             return Err(PercolatorError::InvalidVaultAta.into());
         }
-        if a_vault.data_len() != spl_token::state::Account::LEN {
+        if a_vault.data_len() != crate::spl_token::state::ACCOUNT_LEN {
             return Err(PercolatorError::InvalidVaultAta.into());
         }
 
         let data = a_vault.try_borrow_data()?;
-        let tok = spl_token::state::Account::unpack(&data)?;
+        let tok = crate::spl_token::state::TokenAccountView::unpack(&data)?;
         if tok.mint != *expected_mint {
             return Err(PercolatorError::InvalidMint.into());
         }
@@ -8892,7 +8892,7 @@ pub mod processor {
         }
         // SECURITY (H3): Verify vault token account is initialized
         // Uninitialized vault could brick deposits/withdrawals
-        if tok.state != spl_token::state::AccountState::Initialized {
+        if tok.state != pinocchio_token::state::AccountState::Initialized {
             return Err(PercolatorError::InvalidVaultAta.into());
         }
         Ok(())
@@ -8908,22 +8908,22 @@ pub mod processor {
     ) -> Result<(), ProgramError> {
         #[cfg(not(feature = "test"))]
         {
-            if a_token_account.owner != &spl_token::ID {
+            if a_token_account.owner != &crate::spl_token::id() {
                 return Err(PercolatorError::InvalidTokenAccount.into());
             }
-            if a_token_account.data_len() != spl_token::state::Account::LEN {
+            if a_token_account.data_len() != crate::spl_token::state::ACCOUNT_LEN {
                 return Err(PercolatorError::InvalidTokenAccount.into());
             }
 
             let data = a_token_account.try_borrow_data()?;
-            let tok = spl_token::state::Account::unpack(&data)?;
+            let tok = crate::spl_token::state::TokenAccountView::unpack(&data)?;
             if tok.mint != *expected_mint {
                 return Err(PercolatorError::InvalidMint.into());
             }
             if tok.owner != *expected_owner {
                 return Err(PercolatorError::InvalidTokenAccount.into());
             }
-            if tok.state != spl_token::state::AccountState::Initialized {
+            if tok.state != pinocchio_token::state::AccountState::Initialized {
                 return Err(PercolatorError::InvalidTokenAccount.into());
             }
         }
@@ -8936,7 +8936,7 @@ pub mod processor {
     fn verify_token_program(a_token: &AccountInfo) -> Result<(), ProgramError> {
         #[cfg(not(feature = "test"))]
         {
-            if *a_token.key != spl_token::ID {
+            if *a_token.key != crate::spl_token::id() {
                 return Err(PercolatorError::InvalidTokenProgram.into());
             }
             if !a_token.executable {
@@ -8954,16 +8954,15 @@ pub mod processor {
     fn validate_spl_mint(a_mint: &AccountInfo) -> ProgramResult {
         #[cfg(not(feature = "test"))]
         {
-            use solana_program::program_pack::Pack;
-            use spl_token::state::Mint;
-            if *a_mint.owner != spl_token::ID {
+            if *a_mint.owner != crate::spl_token::id() {
                 return Err(ProgramError::IllegalOwner);
             }
-            if a_mint.data_len() != Mint::LEN {
+            if a_mint.data_len() != crate::spl_token::state::MINT_LEN {
                 return Err(ProgramError::InvalidAccountData);
             }
             let mint_data = a_mint.try_borrow_data()?;
-            let _ = Mint::unpack(&mint_data)?;
+            // Validate mint is initialized via pinocchio-token zero-copy parse
+            let _ = crate::spl_token::state::MintView::unpack(&mint_data)?;
         }
         #[cfg(feature = "test")]
         let _ = a_mint;
@@ -8977,10 +8976,9 @@ pub mod processor {
     fn validate_vault_seed_lamports(a_vault: &AccountInfo) -> ProgramResult {
         #[cfg(not(feature = "test"))]
         {
-            use solana_program::program_pack::Pack;
             let vault_data = a_vault.try_borrow_data()?;
-            let vault_tok = spl_token::state::Account::unpack(&vault_data)?;
-            if vault_tok.amount < crate::constants::MIN_INIT_MARKET_SEED_LAMPORTS {
+            let amount = crate::spl_token::state::get_token_account_amount(&vault_data)?;
+            if amount < crate::constants::MIN_INIT_MARKET_SEED_LAMPORTS {
                 return Err(PercolatorError::InsufficientSeed.into());
             }
         }
@@ -9470,9 +9468,7 @@ pub mod processor {
                 let vault_data = a_vault
                     .try_borrow_data()
                     .map_err(|_| ProgramError::AccountBorrowFailed)?;
-                spl_token::state::Account::unpack(&vault_data)
-                    .map(|a| a.amount)
-                    .unwrap_or(0)
+                crate::spl_token::state::get_token_account_amount(&vault_data).unwrap_or(0)
             };
             let state = crate::creator_lock::CreatorStakeLock {
                 magic: crate::creator_lock::CREATOR_LOCK_MAGIC,
