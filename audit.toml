@@ -1,0 +1,34 @@
+# Security audit exceptions — documented suppression of dev-only advisories
+# Generated: 2026-03-23
+# Reviewed by: coder (Forge)
+#
+# All three advisories below exist ONLY in dev-dependencies (solana-sdk, solana-client, litesvm).
+# The on-chain BPF binary (`cargo tree -e normal`) has ZERO exposure to these crates.
+# These will be resolved when we upgrade to Solana SDK 3.x+ (tracked in GH#1591).
+
+[advisories]
+ignore = [
+    # RUSTSEC-2022-0093: ed25519-dalek <2.0 double public key signing oracle
+    # Source: solana-keypair 2.2.1 → ed25519-dalek-bip32 0.2.0 → ed25519-dalek 1.0.1
+    # Impact: DEV-ONLY (litesvm, solana-sdk, solana-client). Not in on-chain binary.
+    # Fix: Requires Solana SDK 3.x+ (ed25519-dalek-bip32 0.3.0 uses ed25519-dalek 2.x)
+    "RUSTSEC-2022-0093",
+
+    # RUSTSEC-2024-0344: curve25519-dalek <4.1.3 timing variability
+    # Source: ed25519-dalek 1.0.1 → curve25519-dalek 3.2.0 (same dev-only chain)
+    # Impact: DEV-ONLY. Production deps use curve25519-dalek 4.1.3 (patched).
+    "RUSTSEC-2024-0344",
+
+    # RUSTSEC-2021-0139: ansi_term unmaintained
+    # Source: deep transitive dev-dep
+    # Impact: DEV-ONLY. No security issue, just unmaintained.
+    # RUSTSEC-2026-0049: rustls-webpki <0.103.10 
+    # Source: dev-dep chain via solana-client → rustls → rustls-webpki
+    # Impact: DEV-ONLY. Not in on-chain binary.
+    "RUSTSEC-2026-0049",
+
+    # RUSTSEC-2021-0139: ansi_term unmaintained
+    # Source: deep transitive dev-dep
+    # Impact: DEV-ONLY. No security issue, just unmaintained.
+    "RUSTSEC-2021-0139",
+]
