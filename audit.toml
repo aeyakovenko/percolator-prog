@@ -2,7 +2,7 @@
 # Generated: 2026-03-23
 # Reviewed by: coder (Forge)
 #
-# All three advisories below exist ONLY in dev-dependencies (solana-sdk, solana-client, litesvm).
+# All four advisories below exist ONLY in dev-dependencies (solana-sdk, solana-client, litesvm).
 # The on-chain BPF binary (`cargo tree -e normal`) has ZERO exposure to these crates.
 # These will be resolved when we upgrade to Solana SDK 3.x+ (tracked in GH#1591).
 
@@ -19,10 +19,7 @@ ignore = [
     # Impact: DEV-ONLY. Production deps use curve25519-dalek 4.1.3 (patched).
     "RUSTSEC-2024-0344",
 
-    # RUSTSEC-2021-0139: ansi_term unmaintained
-    # Source: deep transitive dev-dep
-    # Impact: DEV-ONLY. No security issue, just unmaintained.
-    # RUSTSEC-2026-0049: rustls-webpki <0.103.10 
+    # RUSTSEC-2026-0049: rustls-webpki <0.103.10
     # Source: dev-dep chain via solana-client → rustls → rustls-webpki
     # Impact: DEV-ONLY. Not in on-chain binary.
     "RUSTSEC-2026-0049",
