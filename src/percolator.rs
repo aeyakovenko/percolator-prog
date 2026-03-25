@@ -1068,6 +1068,12 @@ pub mod ix {
             max_insurance_floor: u128,
             /// Per-market admin limit: min oracle price cap (e2bps floor for non-zero values)
             min_oracle_price_cap_e2bps: u64,
+            /// Insurance withdrawal: max bps per withdrawal (0 = no live withdrawals)
+            insurance_withdraw_max_bps: u16,
+            /// Insurance withdrawal: cooldown slots between withdrawals
+            insurance_withdraw_cooldown_slots: u64,
+            /// Max insurance_floor change per day (0 = locked after init)
+            max_insurance_floor_change_per_day: u128,
             risk_params: RiskParams,
             insurance_floor: u128,
         },
@@ -1205,7 +1211,24 @@ pub mod ix {
                     let max_maintenance_fee_per_slot = read_u128(&mut rest)?;
                     let max_insurance_floor = read_u128(&mut rest)?;
                     let min_oracle_price_cap_e2bps = read_u64(&mut rest)?;
+                    // Insurance withdrawal limits (immutable after init)
                     let (risk_params, insurance_floor) = read_risk_params(&mut rest)?;
+                    // Optional insurance withdrawal limits (after RiskParams for backward compat)
+                    let insurance_withdraw_max_bps = if rest.len() >= 2 {
+                        read_u16(&mut rest)?
+                    } else {
+                        0u16 // default: no live withdrawals
+                    };
+                    let insurance_withdraw_cooldown_slots = if rest.len() >= 8 {
+                        read_u64(&mut rest)?
+                    } else {
+                        0u64
+                    };
+                    let max_insurance_floor_change_per_day = if rest.len() >= 16 {
+                        read_u128(&mut rest)?
+                    } else {
+                        0u128 // default: locked after init
+                    };
                     Ok(Instruction::InitMarket {
                         admin,
                         collateral_mint,
@@ -1218,6 +1241,9 @@ pub mod ix {
                         max_maintenance_fee_per_slot,
                         max_insurance_floor,
                         min_oracle_price_cap_e2bps,
+                        insurance_withdraw_max_bps,
+                        insurance_withdraw_cooldown_slots,
+                        max_insurance_floor_change_per_day,
                         risk_params,
                         insurance_floor,
                     })
@@ -1677,8 +1703,28 @@ pub mod state {
         /// Minimum oracle price cap (e2bps) admin can set (floor for non-zero values).
         /// 0 = no floor (admin can set any value).
         pub min_oracle_price_cap_e2bps: u64,
-        /// Reserved padding for alignment.
-        pub _limits_reserved: u64,
+
+        // ========================================
+        // Insurance Withdrawal Limits (set at InitMarket, immutable)
+        // ========================================
+        /// Max bps of insurance fund withdrawable per withdrawal (1-10000).
+        /// 0 = disabled (no live-market withdrawals allowed).
+        pub insurance_withdraw_max_bps: u16,
+        /// Padding for alignment.
+        pub _iw_padding: [u8; 6],
+        /// Minimum slots between insurance withdrawals.
+        pub insurance_withdraw_cooldown_slots: u64,
+        /// Padding for u128 alignment.
+        pub _iw_padding2: u64,
+        /// Max change to insurance_floor per day (in quote-token atomic units).
+        /// 0 = insurance_floor cannot be changed after init.
+        pub max_insurance_floor_change_per_day: u128,
+        /// Last slot when insurance_floor was changed (for rate-limiting).
+        pub last_insurance_floor_change_slot: u64,
+        /// Padding for u128 alignment.
+        pub _ifc_padding: u64,
+        /// Insurance floor value at last change (for computing delta).
+        pub last_insurance_floor_value: u128,
     }
 
     pub fn slab_data_mut<'a, 'b>(
@@ -2739,6 +2785,9 @@ pub mod processor {
                 max_maintenance_fee_per_slot,
                 max_insurance_floor,
                 min_oracle_price_cap_e2bps,
+                insurance_withdraw_max_bps,
+                insurance_withdraw_cooldown_slots,
+                max_insurance_floor_change_per_day,
                 risk_params,
                 insurance_floor,
             } => {
@@ -2896,7 +2945,15 @@ pub mod processor {
                     max_maintenance_fee_per_slot,
                     max_insurance_floor,
                     min_oracle_price_cap_e2bps,
-                    _limits_reserved: 0,
+                    // Insurance withdrawal limits (immutable after init)
+                    insurance_withdraw_max_bps,
+                    _iw_padding: [0u8; 6],
+                    insurance_withdraw_cooldown_slots,
+                    _iw_padding2: 0,
+                    max_insurance_floor_change_per_day,
+                    last_insurance_floor_change_slot: clock.slot,
+                    _ifc_padding: 0,
+                    last_insurance_floor_value: insurance_floor,
                 };
                 state::write_config(&mut data, &config);
 
@@ -3963,9 +4020,10 @@ pub mod processor {
                     .map_err(map_risk_error)?;
             }
             Instruction::SetRiskThreshold { new_threshold } => {
-                accounts::expect_len(accounts, 2)?;
+                accounts::expect_len(accounts, 3)?;
                 let a_admin = &accounts[0];
                 let a_slab = &accounts[1];
+                let a_clock = &accounts[2];
 
                 accounts::expect_signer(a_admin)?;
                 accounts::expect_writable(a_slab)?;
@@ -3980,10 +4038,43 @@ pub mod processor {
                 let header = state::read_header(&data);
                 require_admin(header.admin, a_admin.key)?;
 
+                let mut config = state::read_config(&data);
+                let clock = Clock::from_account_info(a_clock)?;
+
                 // Enforce per-market admin limit
-                let config = state::read_config(&data);
                 if new_threshold > config.max_insurance_floor {
                     return Err(PercolatorError::InvalidConfigParam.into());
+                }
+
+                // Rate-limit: max change per day (immutable cap)
+                if config.max_insurance_floor_change_per_day > 0 {
+                    let current_floor = config.last_insurance_floor_value;
+                    let delta = if new_threshold > current_floor {
+                        new_threshold - current_floor
+                    } else {
+                        current_floor - new_threshold
+                    };
+
+                    // Compute allowed delta based on elapsed time
+                    const SLOTS_PER_DAY: u64 = 216_000; // ~2.5 slots/sec * 86400
+                    let elapsed = clock.slot.saturating_sub(config.last_insurance_floor_change_slot);
+                    let max_delta = if elapsed >= SLOTS_PER_DAY {
+                        config.max_insurance_floor_change_per_day
+                    } else {
+                        // Pro-rate: max_change * elapsed / SLOTS_PER_DAY
+                        (config.max_insurance_floor_change_per_day as u128)
+                            .saturating_mul(elapsed as u128)
+                            / (SLOTS_PER_DAY as u128)
+                    };
+
+                    if delta > max_delta {
+                        return Err(PercolatorError::InvalidConfigParam.into());
+                    }
+
+                    // Update tracking
+                    config.last_insurance_floor_change_slot = clock.slot;
+                    config.last_insurance_floor_value = new_threshold;
+                    state::write_config(&mut data, &config);
                 }
 
                 let engine = zc::engine_mut(&mut data)?;
@@ -4476,15 +4567,14 @@ pub mod processor {
                 let mut data = state::slab_data_mut(a_slab)?;
                 slab_guard(program_id, a_slab, &data)?;
                 require_initialized(&data)?;
-                if !state::is_resolved(&data) {
-                    return Err(ProgramError::InvalidAccountData);
-                }
+                // Live-market withdrawals allowed (excess above insurance_floor).
+                // Resolved-market withdrawals also allowed (same path).
 
                 let header = state::read_header(&data);
                 let mut config = state::read_config(&data);
                 let clock = Clock::from_account_info(a_clock)?;
 
-                // Decode configured policy, or apply defaults when not explicitly configured.
+                // Use immutable config caps if set, else fall back to configured policy
                 let (stored_bps, stored_last_slot) = unpack_ins_withdraw_meta(config.authority_timestamp);
                 let configured = (1..=10_000).contains(&stored_bps);
                 let policy_authority = if configured {
@@ -4525,8 +4615,14 @@ pub mod processor {
                 if config.unit_scale != 0 && amount % (config.unit_scale as u64) != 0 {
                     return Err(ProgramError::InvalidInstructionData);
                 }
+                // Use the stricter of policy cooldown and immutable config cooldown
+                let effective_cooldown = if config.insurance_withdraw_cooldown_slots > 0 {
+                    core::cmp::max(policy_cooldown, config.insurance_withdraw_cooldown_slots)
+                } else {
+                    policy_cooldown
+                };
                 if last_withdraw_slot != crate::INS_WITHDRAW_LAST_SLOT_NONE
-                    && clock.slot < last_withdraw_slot.saturating_add(policy_cooldown)
+                    && clock.slot < last_withdraw_slot.saturating_add(effective_cooldown)
                 {
                     return Err(ProgramError::InvalidAccountData);
                 }
@@ -4551,13 +4647,14 @@ pub mod processor {
                     crate::units::base_to_units(policy_min_base, config.unit_scale);
                 let policy_min_units = policy_min_units_u64 as u128;
 
+                let resolved = state::is_resolved(&data);
                 {
                     let engine = zc::engine_mut(&mut data)?;
-
-                    // Require all positions to be closed.
-                    for i in 0..percolator::MAX_ACCOUNTS {
-                        if engine.is_used(i) && !(engine.effective_pos_q(i) == 0) {
-                            return Err(ProgramError::InvalidAccountData);
+                    if resolved {
+                        for i in 0..percolator::MAX_ACCOUNTS {
+                            if engine.is_used(i) && !(engine.effective_pos_q(i) == 0) {
+                                return Err(ProgramError::InvalidAccountData);
+                            }
                         }
                     }
 
@@ -4569,12 +4666,30 @@ pub mod processor {
                         return Err(PercolatorError::EngineInsufficientBalance.into());
                     }
 
+                    // On live markets, cannot withdraw below insurance_floor
+                    if !resolved {
+                        let floor = engine.params.insurance_floor.get();
+                        let post_balance = insurance_units.saturating_sub(units_requested);
+                        if post_balance < floor {
+                            return Err(PercolatorError::EngineInsufficientBalance.into());
+                        }
+                    }
+
+                    // Apply immutable bps cap from config
+                    let effective_max_bps = if config.insurance_withdraw_max_bps > 0 {
+                        core::cmp::min(policy_max_bps, config.insurance_withdraw_max_bps)
+                    } else {
+                        policy_max_bps
+                    };
+
                     let pct_limited_units =
-                        insurance_units.saturating_mul(policy_max_bps as u128) / 10_000u128;
+                        insurance_units.saturating_mul(effective_max_bps as u128) / 10_000u128;
                     let max_allowed_units = core::cmp::max(pct_limited_units, policy_min_units);
                     if units_requested > max_allowed_units {
                         return Err(ProgramError::InvalidInstructionData);
                     }
+
+                    // effective_cooldown already computed and enforced above
 
                     let req = percolator::U128::new(units_requested);
                     engine.insurance_fund.balance = engine.insurance_fund.balance - req;
