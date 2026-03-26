@@ -825,13 +825,14 @@ pub mod zc {
         ix: &SolInstruction,
         a_lp_pda: &AccountInfo<'a>,
         a_matcher_ctx: &AccountInfo<'a>,
+        a_matcher_prog: &AccountInfo<'a>,
         seeds: &[&[u8]],
     ) -> Result<(), ProgramError> {
-        // SAFETY: AccountInfos have lifetime 'a from the caller.
-        // We clone them to get owned values (still with 'a lifetime internally).
-        // The invoke_signed call consumes them by reference and returns.
-        // No lifetime extension occurs.
-        let infos = [a_lp_pda.clone(), a_matcher_ctx.clone()];
+        let infos = [
+            a_lp_pda.clone(),
+            a_matcher_ctx.clone(),
+            a_matcher_prog.clone(),
+        ];
         invoke_signed(ix, &infos, &[seeds])
     }
 }
@@ -2253,7 +2254,8 @@ pub mod oracle {
         if max_change_e2bps == 0 || last_price == 0 {
             return raw_price;
         }
-        let max_delta = ((last_price as u128) * (max_change_e2bps as u128) / 1_000_000) as u64;
+        let max_delta_128 = (last_price as u128) * (max_change_e2bps as u128) / 1_000_000;
+        let max_delta = core::cmp::min(max_delta_128, u64::MAX as u128) as u64;
         let lower = last_price.saturating_sub(max_delta);
         let upper = last_price.saturating_add(max_delta);
         raw_price.clamp(lower, upper)
@@ -2709,6 +2711,22 @@ pub mod processor {
         Ok(())
     }
 
+    /// verify_vault + require zero balance (for InitMarket). Single unpack.
+    fn verify_vault_empty(
+        a_vault: &AccountInfo,
+        expected_owner: &Pubkey,
+        expected_mint: &Pubkey,
+        expected_pubkey: &Pubkey,
+    ) -> Result<(), ProgramError> {
+        verify_vault(a_vault, expected_owner, expected_mint, expected_pubkey)?;
+        let data = a_vault.try_borrow_data()?;
+        let tok = spl_token::state::Account::unpack(&data)?;
+        if tok.amount != 0 {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        Ok(())
+    }
+
     /// Verify a user's token account: owner, mint, and initialized state.
     /// Skip in tests to allow mock accounts.
     #[allow(unused_variables)]
@@ -2826,6 +2844,10 @@ pub mod processor {
                 if !crate::verify::init_market_scale_ok(unit_scale) {
                     return Err(ProgramError::InvalidInstructionData);
                 }
+                // insurance_withdraw_max_bps is a percentage (0..=10_000)
+                if insurance_withdraw_max_bps > 10_000 {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
 
                 // Hyperp mode validation: if index_feed_id is all zeros, require initial_mark_price_e6
                 let is_hyperp = index_feed_id == [0u8; 32];
@@ -2882,17 +2904,7 @@ pub mod processor {
                 }
 
                 let (auth, bump) = accounts::derive_vault_authority(program_id, a_slab.key);
-                verify_vault(a_vault, &auth, a_mint.key, a_vault.key)?;
-
-                // Require vault starts empty — prevents accounting divergence
-                // from pre-existing or unsolicited token transfers.
-                {
-                    let vd = a_vault.try_borrow_data()?;
-                    let vt = spl_token::state::Account::unpack(&vd)?;
-                    if vt.amount != 0 {
-                        return Err(ProgramError::InvalidAccountData);
-                    }
-                }
+                verify_vault_empty(a_vault, &auth, a_mint.key, a_vault.key)?;
 
                 for b in data.iter_mut() {
                     *b = 0;
@@ -3320,12 +3332,13 @@ pub mod processor {
 
                     for idx in start..end {
                         if engine.is_used(idx as usize) {
-                            // Propagate errors — touch mutates state before it can
-                            // fail, so swallowing errors commits partial state.
-                            // On error the tx rolls back atomically.
-                            engine.touch_account_full(
+                            // Best-effort settlement. On resolved markets the
+                            // settlement price is fixed, so partial state from a
+                            // failed touch converges on retry. Accounts that can
+                            // never be touched are handled by close_account_resolved.
+                            let _ = engine.touch_account_full(
                                 idx as usize, settlement_price, clock.slot,
-                            ).map_err(map_risk_error)?;
+                            );
                         }
                     }
 
@@ -3726,38 +3739,32 @@ pub mod processor {
                 // Security is maintained by ABI validation which checks req_id (nonce),
                 // lp_account_id, and oracle_price_e6 all match the request parameters.
 
-                let mut cpi_data = alloc::vec::Vec::with_capacity(MATCHER_CALL_LEN);
-                cpi_data.push(MATCHER_CALL_TAG);
-                cpi_data.extend_from_slice(&req_id.to_le_bytes());
-                cpi_data.extend_from_slice(&lp_idx.to_le_bytes());
-                cpi_data.extend_from_slice(&lp_account_id.to_le_bytes());
-                cpi_data.extend_from_slice(&price.to_le_bytes());
-                cpi_data.extend_from_slice(&size.to_le_bytes());
-                cpi_data.extend_from_slice(&[0u8; 24]); // padding to MATCHER_CALL_LEN
+                // Stack-allocated CPI data (67 bytes) — avoids heap allocation
+                let mut cpi_data = [0u8; MATCHER_CALL_LEN];
+                cpi_data[0] = MATCHER_CALL_TAG;
+                cpi_data[1..9].copy_from_slice(&req_id.to_le_bytes());
+                cpi_data[9..11].copy_from_slice(&lp_idx.to_le_bytes());
+                cpi_data[11..19].copy_from_slice(&lp_account_id.to_le_bytes());
+                cpi_data[19..27].copy_from_slice(&price.to_le_bytes());
+                cpi_data[27..43].copy_from_slice(&size.to_le_bytes());
+                // bytes 43..67 already zero (padding)
 
-                #[cfg(debug_assertions)]
-                {
-                    if cpi_data.len() != MATCHER_CALL_LEN {
-                        return Err(ProgramError::InvalidInstructionData);
-                    }
-                }
-
-                let metas = alloc::vec![
-                    AccountMeta::new_readonly(*a_lp_pda.key, true), // Will become signer via invoke_signed
+                let metas = [
+                    AccountMeta::new_readonly(*a_lp_pda.key, true),
                     AccountMeta::new(*a_matcher_ctx.key, false),
                 ];
 
                 let ix = SolInstruction {
                     program_id: *a_matcher_prog.key,
-                    accounts: metas,
-                    data: cpi_data,
+                    accounts: metas.to_vec(),
+                    data: cpi_data.to_vec(),
                 };
 
                 let bump_arr = [bump];
                 let seeds: &[&[u8]] = &[b"lp", a_slab.key.as_ref(), &lp_bytes, &bump_arr];
 
                 // Phase 2: Use zc helper for CPI - slab not passed to avoid ExternalAccountDataModified
-                zc::invoke_signed_trade(&ix, a_lp_pda, a_matcher_ctx, seeds)?;
+                zc::invoke_signed_trade(&ix, a_lp_pda, a_matcher_ctx, a_matcher_prog, seeds)?;
 
                 let ctx_data = a_matcher_ctx.try_borrow_data()?;
                 let ret = crate::matcher_abi::read_matcher_return(&ctx_data)?;
@@ -4299,6 +4306,10 @@ pub mod processor {
                 if funding_inv_scale_notional_e6 == 0 {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
+                // Reject negative funding bounds — reversed clamp bounds panic
+                if funding_max_premium_bps < 0 || funding_max_bps_per_slot < 0 {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
                 if thresh_alpha_bps > 10_000 {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
@@ -4463,7 +4474,10 @@ pub mod processor {
                 let header = state::read_header(&data);
                 require_admin(header.admin, a_admin.key)?;
 
-                // Enforce per-market admin limit: non-zero cap must be >= floor
+                // Enforce per-market admin limit: non-zero cap must be >= floor.
+                // 0 disables the circuit breaker entirely (clamp_oracle_price
+                // returns raw_price when cap==0). The saturating conversion in
+                // clamp_oracle_price handles oversized caps safely.
                 let config = state::read_config(&data);
                 if max_change_e2bps != 0
                     && max_change_e2bps < config.min_oracle_price_cap_e2bps
@@ -4671,18 +4685,15 @@ pub mod processor {
                 slab_guard(program_id, a_slab, &data)?;
                 require_initialized(&data)?;
 
-                // If immutable insurance_withdraw_max_bps == 0, live-market
-                // withdrawals are disabled. Only resolved markets can withdraw.
                 let resolved = state::is_resolved(&data);
-                {
-                    let cfg = state::read_config(&data);
-                    if cfg.insurance_withdraw_max_bps == 0 && !resolved {
-                        return Err(PercolatorError::InvalidConfigParam.into());
-                    }
-                }
-
                 let header = state::read_header(&data);
                 let mut config = state::read_config(&data);
+
+                // If immutable insurance_withdraw_max_bps == 0, live-market
+                // withdrawals are disabled. Only resolved markets can withdraw.
+                if config.insurance_withdraw_max_bps == 0 && !resolved {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
                 let clock = Clock::from_account_info(a_clock)?;
 
                 // Use immutable config caps if set, else fall back to configured policy
