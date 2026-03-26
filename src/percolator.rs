@@ -176,7 +176,10 @@ pub mod verify {
         len >= MATCHER_CONTEXT_LEN
     }
 
-    /// Gating is active when threshold > 0 AND balance <= threshold.
+    /// HISTORICAL: gate_active models the old LP-risk gate which was removed
+    /// in spec v10.5 (replaced by engine-internal side-mode gating).
+    /// The processor does NOT enforce this gate at runtime.
+    /// Retained for Kani proof coverage of the verify module's decision logic.
     #[inline]
     pub fn gate_active(threshold: u128, balance: u128) -> bool {
         threshold > 0 && balance <= threshold
@@ -736,14 +739,10 @@ pub mod zc {
     // Use const to export the actual offset for debugging
     pub const ACCOUNTS_OFFSET: usize = offset_of!(RiskEngine, accounts);
 
-    /// Old slab length (before Account struct reordering migration)
-    /// Old slabs support up to 4095 accounts, new slabs support 4096.
-    const OLD_ENGINE_LEN: usize = ENGINE_LEN - 8;
-
     #[inline]
     pub fn engine_ref<'a>(data: &'a [u8]) -> Result<&'a RiskEngine, ProgramError> {
-        // Accept old slabs (ENGINE_LEN - 8) for backward compatibility
-        if data.len() < ENGINE_OFF + OLD_ENGINE_LEN {
+        // Require full ENGINE_LEN to avoid UB from reference extending past buffer
+        if data.len() < ENGINE_OFF + ENGINE_LEN {
             return Err(ProgramError::InvalidAccountData);
         }
         let ptr = unsafe { data.as_ptr().add(ENGINE_OFF) };
@@ -755,8 +754,7 @@ pub mod zc {
 
     #[inline]
     pub fn engine_mut<'a>(data: &'a mut [u8]) -> Result<&'a mut RiskEngine, ProgramError> {
-        // Accept old slabs (ENGINE_LEN - 8) for backward compatibility
-        if data.len() < ENGINE_OFF + OLD_ENGINE_LEN {
+        if data.len() < ENGINE_OFF + ENGINE_LEN {
             return Err(ProgramError::InvalidAccountData);
         }
         let ptr = unsafe { data.as_mut_ptr().add(ENGINE_OFF) };
@@ -1457,6 +1455,23 @@ pub mod ix {
         let liquidation_fee_cap = U128::new(read_u128(input)?);
         let liquidation_buffer_bps = read_u64(input)?;
         let min_liquidation_abs = U128::new(read_u128(input)?);
+        // These three params are decoded from instruction data (not hardcoded).
+        // Backward compat: if data is short, use safe defaults.
+        let min_initial_deposit = if input.len() >= 16 {
+            U128::new(read_u128(input)?)
+        } else {
+            U128::new(100)
+        };
+        let min_nonzero_mm_req = if input.len() >= 16 {
+            read_u128(input)?
+        } else {
+            1u128
+        };
+        let min_nonzero_im_req = if input.len() >= 16 {
+            read_u128(input)?
+        } else {
+            2u128
+        };
         let params = RiskParams {
             warmup_period_slots,
             maintenance_margin_bps,
@@ -1470,9 +1485,9 @@ pub mod ix {
             liquidation_fee_cap,
             liquidation_buffer_bps,
             min_liquidation_abs,
-            min_initial_deposit: U128::new(100),
-            min_nonzero_mm_req: 1u128,
-            min_nonzero_im_req: 2u128,
+            min_initial_deposit,
+            min_nonzero_mm_req,
+            min_nonzero_im_req,
             insurance_floor: U128::new(insurance_floor),
         };
         Ok((params, insurance_floor))
@@ -3992,10 +4007,11 @@ pub mod processor {
                     // Compute allowed delta based on elapsed time
                     const SLOTS_PER_DAY: u64 = 216_000; // ~2.5 slots/sec * 86400
                     let elapsed = clock.slot.saturating_sub(config.last_insurance_floor_change_slot);
-                    let max_delta = if elapsed >= SLOTS_PER_DAY || elapsed == 0 {
-                        // Full daily budget if: enough time passed, OR same-slot
-                        // (first change after init, or idempotent re-set)
+                    let max_delta = if elapsed >= SLOTS_PER_DAY {
                         config.max_insurance_floor_change_per_day
+                    } else if elapsed == 0 {
+                        // Same slot: only allow idempotent re-set (delta == 0)
+                        0u128
                     } else {
                         // Pro-rate: max_change * elapsed / SLOTS_PER_DAY
                         (config.max_insurance_floor_change_per_day as u128)
@@ -4264,12 +4280,15 @@ pub mod processor {
                     config.oracle_price_cap_e2bps,
                 );
                 config.authority_price_e6 = clamped;
-                // In Hyperp mode this field stores previous funding-rate state (bps/slot),
-                // not unix time. Keep it untouched so PushOraclePrice cannot clobber it.
                 if !is_hyperp {
+                    // Non-Hyperp: update timestamp and circuit breaker baseline
                     config.authority_timestamp = timestamp;
+                    config.last_effective_price_e6 = clamped;
                 }
-                config.last_effective_price_e6 = clamped;
+                // In Hyperp mode: only authority_price_e6 (mark) is updated.
+                // last_effective_price_e6 (index) is NOT set to clamped — the
+                // engine's clamp_toward_with_dt handles index smoothing.
+                // authority_timestamp stores funding rate state, not unix time.
                 state::write_config(&mut data, &config);
             }
 
@@ -4538,6 +4557,9 @@ pub mod processor {
                 };
                 let policy_max_bps = if configured {
                     stored_bps
+                } else if !resolved && config.insurance_withdraw_max_bps > 0 {
+                    // Live market: use immutable config directly (not defaults)
+                    config.insurance_withdraw_max_bps
                 } else {
                     DEFAULT_INSURANCE_WITHDRAW_MAX_BPS
                 };
@@ -4564,8 +4586,11 @@ pub mod processor {
                 if config.unit_scale != 0 && amount % (config.unit_scale as u64) != 0 {
                     return Err(ProgramError::InvalidInstructionData);
                 }
-                // Use the stricter of policy cooldown and immutable config cooldown
-                let effective_cooldown = if config.insurance_withdraw_cooldown_slots > 0 {
+                // On live markets, use config cooldown directly (not max with defaults).
+                // On resolved markets, use stricter of policy and config.
+                let effective_cooldown = if !resolved && config.insurance_withdraw_cooldown_slots > 0 {
+                    config.insurance_withdraw_cooldown_slots
+                } else if config.insurance_withdraw_cooldown_slots > 0 {
                     core::cmp::max(policy_cooldown, config.insurance_withdraw_cooldown_slots)
                 } else {
                     policy_cooldown
@@ -4624,8 +4649,9 @@ pub mod processor {
                         }
                     }
 
-                    // Apply immutable bps cap from config
-                    let effective_max_bps = if config.insurance_withdraw_max_bps > 0 {
+                    // On live markets, policy_max_bps already IS the config value.
+                    // On resolved markets, cap to the stricter of policy and config.
+                    let effective_max_bps = if resolved && config.insurance_withdraw_max_bps > 0 {
                         core::cmp::min(policy_max_bps, config.insurance_withdraw_max_bps)
                     } else {
                         policy_max_bps

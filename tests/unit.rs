@@ -257,6 +257,9 @@ fn encode_init_market(fixture: &MarketFixture, crank_staleness: u64) -> Vec<u8> 
     encode_u128(0, &mut data);  // liquidation_fee_cap
     encode_u64(0, &mut data);   // liquidation_buffer_bps
     encode_u128(0, &mut data);  // min_liquidation_abs
+    data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
+    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
     encode_u16(0, &mut data); // insurance_withdraw_max_bps
     encode_u64(0, &mut data); // insurance_withdraw_cooldown_slots
     encode_u128(u128::MAX, &mut data); // max_insurance_floor_change_per_day
@@ -296,6 +299,9 @@ fn encode_init_market_invert(
     encode_u128(0, &mut data);   // liquidation_fee_cap
     encode_u64(0, &mut data);    // liquidation_buffer_bps
     encode_u128(0, &mut data);   // min_liquidation_abs
+    data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
+    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
     encode_u16(0, &mut data); // insurance_withdraw_max_bps
     encode_u64(0, &mut data); // insurance_withdraw_cooldown_slots
     encode_u128(u128::MAX, &mut data); // max_insurance_floor_change_per_day
@@ -1358,6 +1364,9 @@ fn test_set_risk_threshold() {
         let engine = zc::engine_ref(&f.slab.data).unwrap();
         assert_eq!(engine.params.insurance_floor.get(), 0);
     }
+
+    // Advance clock past init slot so rate-limit allows change
+    f.clock.data = make_clock(101, 101);
 
     // Admin sets new threshold
     let new_threshold: u128 = 123_456_789;

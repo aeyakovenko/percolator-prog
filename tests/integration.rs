@@ -148,6 +148,9 @@ fn encode_init_market_full_v2(
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
+    data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
+    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
     // Optional insurance withdrawal limits (after RiskParams for backward compat)
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps (0 = no live withdrawals)
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
@@ -930,6 +933,9 @@ fn encode_init_market_full(
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
+    data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
+    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
     // Optional insurance withdrawal limits
     data.extend_from_slice(&0u16.to_le_bytes());
     data.extend_from_slice(&0u64.to_le_bytes());
@@ -972,6 +978,9 @@ fn encode_init_market_with_warmup(
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
+    data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
+    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
     // Optional insurance withdrawal limits
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
@@ -3887,6 +3896,9 @@ fn test_critical_set_risk_threshold_authorization() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let attacker = Keypair::new();
     env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+
+    // Advance past the init slot so elapsed > 0 for SetRiskThreshold
+    env.set_slot(1);
 
     // Attacker tries to set threshold - should fail
     let result = env.try_set_risk_threshold(&attacker, 1_000_000_000);
@@ -11312,6 +11324,9 @@ impl TestEnv {
         data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
         data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
         data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
+    data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
+    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
 
         let ix = Instruction {
             program_id: self.program_id,
@@ -12255,6 +12270,9 @@ fn test_attack_risk_threshold_rapid_toggle() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
+    // Advance past the init slot so elapsed > 0 for SetRiskThreshold
+    env.set_slot(1);
+
     // Set floor to a large value
     let result = env.try_set_risk_threshold(&admin, 1_000_000_000_000);
     assert!(result.is_ok(), "Admin should set floor: {:?}", result);
@@ -12262,6 +12280,9 @@ fn test_attack_risk_threshold_rapid_toggle() {
     // Trades still succeed (insurance_floor does not gate trades in v10.5)
     let result = env.try_trade(&user, &lp, lp_idx, user_idx, 1_000_000);
     assert!(result.is_ok(), "Trade should succeed regardless of floor: {:?}", result);
+
+    // Advance slot before second SetRiskThreshold (elapsed must be > 0)
+    env.set_slot(2);
 
     // Set floor back to 0
     let result = env.try_set_risk_threshold(&admin, 0);
@@ -18183,6 +18204,9 @@ fn test_attack_threshold_ewma_convergence() {
 
     env.crank();
 
+    // Advance past the init slot so elapsed > 0 for SetRiskThreshold
+    env.set_slot(1);
+
     // Top up insurance so risk gate doesn't block trades
     env.try_top_up_insurance(&admin, 10_000_000_000).unwrap();
 
@@ -18332,6 +18356,9 @@ fn test_attack_risk_gate_exact_threshold_boundary() {
 
     env.crank();
 
+    // Advance past the init slot so elapsed > 0 for SetRiskThreshold
+    env.set_slot(1);
+
     // Top up insurance to a large amount
     env.try_top_up_insurance(&admin, 10_000_000_000).unwrap();
 
@@ -18347,6 +18374,7 @@ fn test_attack_risk_gate_exact_threshold_boundary() {
     );
 
     // Now set threshold much higher than insurance (gate becomes active)
+    env.set_slot(2);
     let insurance = env.read_insurance_balance();
     env.try_set_risk_threshold(&admin, insurance * 100).unwrap();
 
@@ -19428,6 +19456,9 @@ fn test_attack_old_admin_blocked_after_transfer() {
     // Transfer admin
     env.try_update_admin(&old_admin, &new_admin.pubkey())
         .unwrap();
+
+    // Advance past the init slot so elapsed > 0 for SetRiskThreshold
+    env.set_slot(1);
 
     // Old admin should fail
     let old_result = env.try_set_risk_threshold(&old_admin, 999);
@@ -27151,6 +27182,9 @@ fn test_attack_risk_threshold_exact_insurance_boundary() {
     env.try_top_up_insurance(&admin, 5_000_000_000).unwrap();
     env.crank();
 
+    // Advance past the init slot so elapsed > 0 for SetRiskThreshold
+    env.set_slot(1);
+
     // Set insurance_floor to exact insurance balance
     let insurance = env.read_insurance_balance();
     env.try_set_risk_threshold(&admin, insurance).unwrap();
@@ -31497,6 +31531,9 @@ fn encode_init_market_with_limits(
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
+    data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
+    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
     // Optional insurance withdrawal limits
     data.extend_from_slice(&0u16.to_le_bytes());
     data.extend_from_slice(&0u64.to_le_bytes());
@@ -31560,6 +31597,9 @@ fn test_init_market_admin_limits_enforced() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
 
+    // Advance past the init slot so elapsed > 0 for SetRiskThreshold
+    env.set_slot(1);
+
     // SetMaintenanceFee: within limit should succeed
     let result = env.try_set_maintenance_fee(&admin, 1000);
     assert!(result.is_ok(), "Fee at limit should succeed: {:?}", result);
@@ -31580,11 +31620,12 @@ fn test_init_market_admin_limits_enforced() {
         result
     );
 
-    // SetRiskThreshold: above limit should fail
+    // SetRiskThreshold: above limit should fail (limit check fires before elapsed check)
     let result = env.try_set_risk_threshold(&admin, 50_001);
     assert!(result.is_err(), "Threshold above limit should fail");
 
     // SetRiskThreshold: zero is fine (no minimum)
+    env.set_slot(2);
     let result = env.try_set_risk_threshold(&admin, 0);
     assert!(
         result.is_ok(),
@@ -32036,6 +32077,9 @@ fn test_init_market_risk_params_exceed_limits_rejected() {
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
+    data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
+    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
 
     let ix = Instruction {
         program_id: env.program_id,
@@ -32189,6 +32233,9 @@ fn test_init_market_risk_params_at_boundary_accepted() {
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
+    data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
+    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
 
     let ix = Instruction {
         program_id: env.program_id,
@@ -32276,6 +32323,9 @@ fn test_admin_limits_lifecycle() {
     env.svm.send_transaction(tx).expect("init_market failed");
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    // Advance past the init slot so elapsed > 0 for SetRiskThreshold
+    env.set_slot(1);
 
     // Step 1: Set* ops within limits
     env.try_set_risk_threshold(&admin, 25_000).unwrap();
