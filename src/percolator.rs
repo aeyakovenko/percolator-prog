@@ -11696,6 +11696,11 @@ pub mod processor {
                     engine.params.trading_fee_bps = fee;
                 }
 
+                // GH#1736: Validate updated RiskParams via the canonical validate() method
+                // to close any residual bypass paths (e.g. future field additions).
+                // This is a belt-and-suspenders check after the explicit guards above.
+                engine.params.validate().map_err(map_risk_error)?;
+
                 // PERC-273: Update OI cap multiplier if provided
                 // PERC-272: Update max PnL cap if provided
                 // PERC-298 + PERC-302: Update OI cap, skew factor, ramp slots if provided
