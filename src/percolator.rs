@@ -2691,6 +2691,11 @@ pub mod processor {
         if tok.state != spl_token::state::AccountState::Initialized {
             return Err(PercolatorError::InvalidVaultAta.into());
         }
+        // Reject vault with pre-set delegate or close_authority — these allow
+        // a third party to drain or close the vault outside program control.
+        if tok.delegate.is_some() || tok.close_authority.is_some() {
+            return Err(PercolatorError::InvalidVaultAta.into());
+        }
         Ok(())
     }
 
