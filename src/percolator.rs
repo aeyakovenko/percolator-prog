@@ -2167,8 +2167,14 @@ pub mod oracle {
 
         // Step 2: Apply unit scaling if configured (uses verify::scale_price_e6)
         // This ensures oracle-derived values match capital scale (stored in units)
-        crate::verify::scale_price_e6(price_after_invert, unit_scale)
-            .ok_or(PercolatorError::OracleInvalid.into())
+        let engine_price = crate::verify::scale_price_e6(price_after_invert, unit_scale)
+            .ok_or(PercolatorError::OracleInvalid)?;
+
+        // Enforce MAX_ORACLE_PRICE at ingress
+        if engine_price > percolator::MAX_ORACLE_PRICE {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        Ok(engine_price)
     }
 
     /// Check if authority-pushed price is available and fresh.
@@ -3999,15 +4005,14 @@ pub mod processor {
                     sol_log_compute_units();
                 }
                 let amt_units = if resolved {
-                    // Settle lazy A/K/mark effects at the fixed settlement price.
-                    // Convergence: accrue_market_to writes last_oracle_price LAST
-                    // (after K updates). Failed K updates leave stored price
-                    // unchanged → retry recomputes same delta_p. After success,
-                    // next call with same fixed price is a no-op. So touch is
-                    // idempotent and safe to propagate errors from.
-                    engine.touch_account_full(
+                    // Best-effort settlement at settlement price.
+                    // If touch fails (ADL overflow), close_account_resolved
+                    // handles the account using stored local state.
+                    // Matches WithdrawCollateral and AdminForceCloseAccount
+                    // patterns — prevents user from being permanently wedged.
+                    let _ = engine.touch_account_full(
                         user_idx as usize, price, clock.slot,
-                    ).map_err(map_risk_error)?;
+                    );
                     engine.close_account_resolved(user_idx)
                         .map_err(map_risk_error)?
                 } else {
@@ -4355,6 +4360,11 @@ pub mod processor {
                 let normalized_price = crate::verify::to_engine_price(
                     price_e6, config.invert, config.unit_scale,
                 ).ok_or(PercolatorError::OracleInvalid)?;
+
+                // Enforce MAX_ORACLE_PRICE at ingress (engine rejects > MAX internally)
+                if normalized_price > percolator::MAX_ORACLE_PRICE {
+                    return Err(PercolatorError::OracleInvalid.into());
+                }
 
                 // For non-Hyperp markets, require monotonic authority timestamps.
                 if !is_hyperp

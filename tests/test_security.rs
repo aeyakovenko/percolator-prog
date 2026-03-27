@@ -3733,11 +3733,11 @@ fn test_attack_hyperp_push_extreme_price() {
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
     env.try_set_oracle_price_cap(&admin, 500).unwrap(); // 5% per slot
 
-    // Push extreme price - should be clamped by circuit breaker
+    // Push extreme price — rejected at ingress (exceeds MAX_ORACLE_PRICE after normalization)
     let result = env.try_push_oracle_price(&admin, u64::MAX / 2, 2000);
     assert!(
-        result.is_ok(),
-        "Extreme push should succeed (circuit breaker clamps)"
+        result.is_err(),
+        "Extreme push must be rejected (> MAX_ORACLE_PRICE)"
     );
 
     // Read stored last_effective_price_e6 - must be clamped, not u64::MAX/2
