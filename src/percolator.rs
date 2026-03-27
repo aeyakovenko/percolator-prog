@@ -1116,6 +1116,20 @@ pub mod ix {
         ReclaimEmptyAccount {
             user_idx: u16,
         },
+        /// Standalone account settlement (§10.2). Permissionless.
+        SettleAccount {
+            user_idx: u16,
+        },
+        /// Direct fee-debt repayment (§10.3.1). Owner only.
+        DepositFeeCredits {
+            user_idx: u16,
+            amount: u64,
+        },
+        /// Voluntary PnL conversion with open position (§10.4.1). Owner only.
+        ConvertReleasedPnl {
+            user_idx: u16,
+            amount: u64,
+        },
     }
 
     impl Instruction {
@@ -1369,6 +1383,23 @@ pub mod ix {
                 25 => {
                     let user_idx = read_u16(&mut rest)?;
                     Ok(Instruction::ReclaimEmptyAccount { user_idx })
+                }
+                26 => {
+                    // SettleAccount (§10.2)
+                    let user_idx = read_u16(&mut rest)?;
+                    Ok(Instruction::SettleAccount { user_idx })
+                }
+                27 => {
+                    // DepositFeeCredits (§10.3.1)
+                    let user_idx = read_u16(&mut rest)?;
+                    let amount = read_u64(&mut rest)?;
+                    Ok(Instruction::DepositFeeCredits { user_idx, amount })
+                }
+                28 => {
+                    // ConvertReleasedPnl (§10.4.1)
+                    let user_idx = read_u16(&mut rest)?;
+                    let amount = read_u64(&mut rest)?;
+                    Ok(Instruction::ConvertReleasedPnl { user_idx, amount })
                 }
                 _ => Err(ProgramError::InvalidInstructionData),
             }
@@ -5005,6 +5036,130 @@ pub mod processor {
                 engine.reclaim_empty_account(user_idx)
                     .map_err(map_risk_error)?;
                 // Per §10.7: MUST NOT call accrue_market_to, MUST NOT mutate side state.
+            }
+
+            Instruction::SettleAccount { user_idx } => {
+                // Standalone account settlement (§10.2). Permissionless.
+                // Settles lazy A/K/mark/funding effects for a single account.
+                accounts::expect_len(accounts, 3)?;
+                let a_slab = &accounts[0];
+                let a_clock = &accounts[1];
+                let a_oracle = &accounts[2];
+                accounts::expect_writable(a_slab)?;
+
+                let mut data = state::slab_data_mut(a_slab)?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+
+                let mut config = state::read_config(&data);
+                let clock = Clock::from_account_info(a_clock)?;
+
+                let is_hyperp = oracle::is_hyperp_mode(&config);
+                let price = if is_hyperp {
+                    let eng = zc::engine_ref(&data)?;
+                    let last_slot = eng.current_slot;
+                    oracle::get_engine_oracle_price_e6(
+                        last_slot, clock.slot, clock.unix_timestamp,
+                        &mut config, a_oracle,
+                    )?
+                } else {
+                    oracle::read_price_clamped(&mut config, a_oracle, clock.unix_timestamp)?
+                };
+                state::write_config(&mut data, &config);
+
+                let engine = zc::engine_mut(&mut data)?;
+                engine.settle_account(user_idx, price, clock.slot)
+                    .map_err(map_risk_error)?;
+            }
+
+            Instruction::DepositFeeCredits { user_idx, amount } => {
+                // Direct fee-debt repayment (§10.3.1). Owner only.
+                accounts::expect_len(accounts, 6)?;
+                let a_user = &accounts[0];
+                let a_slab = &accounts[1];
+                let a_user_ata = &accounts[2];
+                let a_vault = &accounts[3];
+                let a_token = &accounts[4];
+                let a_clock = &accounts[5];
+
+                accounts::expect_signer(a_user)?;
+                accounts::expect_writable(a_slab)?;
+                verify_token_program(a_token)?;
+
+                // Transfer tokens to vault BEFORE mutable slab borrow
+                collateral::deposit(a_token, a_user_ata, a_vault, a_user, amount)?;
+
+                let mut data = state::slab_data_mut(a_slab)?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+
+                let config = state::read_config(&data);
+                let mint = Pubkey::new_from_array(config.collateral_mint);
+                let auth = accounts::derive_vault_authority_with_bump(
+                    program_id, a_slab.key, config.vault_authority_bump,
+                )?;
+                verify_vault(a_vault, &auth, &mint, &Pubkey::new_from_array(config.vault_pubkey))?;
+                verify_token_account(a_user_ata, a_user.key, &mint)?;
+
+                let clock = Clock::from_account_info(a_clock)?;
+
+                // Convert to units and handle dust
+                let (units, dust) = crate::units::base_to_units(amount, config.unit_scale);
+                let old_dust = state::read_dust_base(&data);
+                state::write_dust_base(&mut data, old_dust.saturating_add(dust));
+
+                let engine = zc::engine_mut(&mut data)?;
+                check_idx(engine, user_idx)?;
+                let owner = engine.accounts[user_idx as usize].owner;
+                if !crate::verify::owner_ok(owner, a_user.key.to_bytes()) {
+                    return Err(PercolatorError::EngineUnauthorized.into());
+                }
+
+                engine.deposit_fee_credits(user_idx, units as u128, clock.slot)
+                    .map_err(map_risk_error)?;
+            }
+
+            Instruction::ConvertReleasedPnl { user_idx, amount } => {
+                // Voluntary PnL conversion (§10.4.1). Owner only.
+                accounts::expect_len(accounts, 4)?;
+                let a_user = &accounts[0];
+                let a_slab = &accounts[1];
+                let a_clock = &accounts[2];
+                let a_oracle = &accounts[3];
+
+                accounts::expect_signer(a_user)?;
+                accounts::expect_writable(a_slab)?;
+
+                let mut data = state::slab_data_mut(a_slab)?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+
+                let mut config = state::read_config(&data);
+                let clock = Clock::from_account_info(a_clock)?;
+
+                let is_hyperp = oracle::is_hyperp_mode(&config);
+                let price = if is_hyperp {
+                    let eng = zc::engine_ref(&data)?;
+                    let last_slot = eng.current_slot;
+                    oracle::get_engine_oracle_price_e6(
+                        last_slot, clock.slot, clock.unix_timestamp,
+                        &mut config, a_oracle,
+                    )?
+                } else {
+                    oracle::read_price_clamped(&mut config, a_oracle, clock.unix_timestamp)?
+                };
+                state::write_config(&mut data, &config);
+
+                let engine = zc::engine_mut(&mut data)?;
+                check_idx(engine, user_idx)?;
+                let owner = engine.accounts[user_idx as usize].owner;
+                if !crate::verify::owner_ok(owner, a_user.key.to_bytes()) {
+                    return Err(PercolatorError::EngineUnauthorized.into());
+                }
+
+                let (units, _) = crate::units::base_to_units(amount, config.unit_scale);
+                engine.convert_released_pnl(user_idx, units as u128, price, clock.slot)
+                    .map_err(map_risk_error)?;
             }
         }
         Ok(())

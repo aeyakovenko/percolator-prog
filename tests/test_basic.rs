@@ -2058,12 +2058,11 @@ fn test_funding_rate_transfers_pnl_on_premium() {
     //     "Longs should pay shorts when mark > index (funding). long_delta={}, short_delta={}",
     //     long_delta, short_delta);
 
-    println!("Funding test: long_before={}, long_after={}, long_delta={}",
-        long_pnl_before, long_pnl_after, long_delta);
-    println!("Funding test: short_before={}, short_after={}, short_delta={}",
-        short_pnl_before, short_pnl_after, short_delta);
-    // Long's PnL = mark-to-market gain (price up) MINUS funding paid
-    // Short's PnL = mark-to-market loss (price up) PLUS funding received
-    // If funding is working, the difference should be smaller than pure MTM
+    // Spec v11.31 §4.12: zero-rate core profile. No funding transfers occur.
+    // The rate is computed and stored for observability, but accrue_market_to
+    // does not apply K-coefficient funding transfers in this revision.
+    // PnL changes are purely from mark-to-market via K coefficients.
+    println!("Funding test (zero-rate §4.12): long_delta={}, short_delta={}",
+        long_delta, short_delta);
 }
 
