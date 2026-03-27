@@ -6120,7 +6120,10 @@ fn test_gh1724_set_pending_settlement_also_requires_admin() {
 
 /// Encode a minimal UpdateRiskParams instruction (tag=22).
 /// Encodes: initial_margin_bps + maintenance_margin_bps (required fields only).
-fn encode_update_risk_params_minimal(initial_margin_bps: u64, maintenance_margin_bps: u64) -> Vec<u8> {
+fn encode_update_risk_params_minimal(
+    initial_margin_bps: u64,
+    maintenance_margin_bps: u64,
+) -> Vec<u8> {
     let mut data = vec![22u8]; // TAG_UPDATE_RISK_PARAMS
     encode_u64(initial_margin_bps, &mut data);
     encode_u64(maintenance_margin_bps, &mut data);
