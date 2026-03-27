@@ -638,7 +638,13 @@ fn test_honest_participants_standard_market_full_lifecycle() {
 
     assert_eq!(env.read_num_used_accounts(), 0, "All accounts closed");
 
-    // Close slab (insurance=0, all accounts closed)
+    // Resolve market before CloseSlab (lifecycle requirement)
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
+    env.try_push_oracle_price(&admin, 138_000_000, 100).unwrap();
+    env.try_resolve_market(&admin).unwrap();
+
+    // Close slab (insurance=0, all accounts closed, market resolved)
     let result = env.try_close_slab();
     assert!(result.is_ok(), "CloseSlab should succeed: {:?}", result);
 

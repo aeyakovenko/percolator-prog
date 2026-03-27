@@ -154,8 +154,13 @@ fn test_bug3_close_slab_with_dust_should_fail() {
     // Vault should have dust remaining (500 base tokens)
     assert!(vault_after > 0, "Vault should have dust remaining");
 
-    // CloseSlab now drains stranded vault tokens (including sub-scale dust)
-    // to admin's ATA and forgives dust_base. This is the terminal cleanup path.
+    // Resolve market before CloseSlab (lifecycle requirement)
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
+    env.try_push_oracle_price(&admin, 138_000_000, 300).unwrap();
+    env.try_resolve_market(&admin).unwrap();
+
+    // CloseSlab drains stranded vault tokens and forgives dust_base
     let result = env.try_close_slab();
     assert!(result.is_ok(), "CloseSlab should drain dust and succeed: {:?}", result);
 }

@@ -10439,6 +10439,12 @@ fn test_attack_close_slab_clean_shutdown() {
     let vault = env.vault_balance();
     assert_eq!(vault, 0, "Vault should be zero: got {}", vault);
 
+    // Resolve market before CloseSlab (lifecycle requirement)
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
+    env.try_push_oracle_price(&admin, 138_000_000, 100).unwrap();
+    env.try_resolve_market(&admin).unwrap();
+
     // Close slab should succeed
     let result = env.try_close_slab();
     assert!(result.is_ok(), "CloseSlab should succeed: {:?}", result);

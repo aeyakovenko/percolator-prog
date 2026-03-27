@@ -3873,8 +3873,16 @@ pub mod processor {
 
                 // Zero-fill: ABI-valid no-op when matcher returns exec_size == 0
                 // with FLAG_PARTIAL_OK. Skip engine call which rejects size_q == 0.
+                // Do NOT persist Hyperp index update — zero-fill doesn't advance
+                // engine.current_slot, so repeated zero-fills would ratchet the
+                // index toward mark using stale dt.
                 if ret.exec_size == 0 {
                     let mut data = state::slab_data_mut(a_slab)?;
+                    // Revert any Hyperp index change by re-reading pristine config
+                    if is_hyperp {
+                        let pristine = state::read_config(&data);
+                        config.last_effective_price_e6 = pristine.last_effective_price_e6;
+                    }
                     state::write_config(&mut data, &config);
                     state::write_req_nonce(&mut data, req_id);
                     return Ok(());
@@ -4206,6 +4214,11 @@ pub mod processor {
                     let mut data = state::slab_data_mut(a_slab)?;
                     slab_guard(program_id, a_slab, &data)?;
                     require_initialized(&data)?;
+
+                    // Require resolved — enforce lifecycle ordering
+                    if !state::is_resolved(&data) {
+                        return Err(ProgramError::InvalidAccountData);
+                    }
 
                     let header = state::read_header(&data);
                     require_admin(header.admin, a_dest.key)?;
@@ -5080,6 +5093,13 @@ pub mod processor {
                 let mut data = state::slab_data_mut(a_slab)?;
                 slab_guard(program_id, a_slab, &data)?;
                 require_initialized(&data)?;
+
+                // Block on resolved markets — unsettled PnL from resolution
+                // may not yet be reflected in capital. Reclaiming before
+                // touch_account_full would forfeit claimable value.
+                if state::is_resolved(&data) {
+                    return Err(ProgramError::InvalidAccountData);
+                }
 
                 let engine = zc::engine_mut(&mut data)?;
                 engine.reclaim_empty_account(user_idx)
