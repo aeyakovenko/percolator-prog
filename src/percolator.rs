@@ -2016,6 +2016,10 @@ pub mod error {
         /// PERC-8111: Per-wallet position cap exceeded.
         /// Trade rejected because the resulting position would exceed max_wallet_pos_e6.
         WalletPositionCapExceeded,
+        /// PERC-8110: OI imbalance hard block.
+        /// Trade rejected because it would increase |long_oi - short_oi| / total_oi
+        /// beyond the oi_imbalance_hard_block_bps threshold.
+        OiImbalanceHardBlock,
     }
 
     impl From<PercolatorError> for ProgramError {
@@ -2573,6 +2577,20 @@ pub mod ix {
         SetWalletCap {
             cap_e6: u64,
         },
+        /// PERC-8110: Set OI imbalance hard block threshold (admin only).
+        /// When `|long_oi - short_oi| / total_oi * 10_000 >= threshold_bps`, any new
+        /// trade that would *increase* imbalance is rejected with OiImbalanceHardBlock.
+        ///
+        /// - `threshold_bps = 0`: disable hard block.
+        /// - `threshold_bps = 10_000`: never allow imbalance ratio > 100% (always blocks one side).
+        ///   Typical mainnet value: 8_000 (80% skew).
+        ///
+        /// Accounts:
+        ///   0. [signer]   admin
+        ///   1. [writable] slab
+        SetOiImbalanceHardBlock {
+            threshold_bps: u16,
+        },
     }
 
     impl Instruction {
@@ -3111,6 +3129,12 @@ pub mod ix {
                 TAG_SET_WALLET_CAP => {
                     let cap_e6 = read_u64(&mut rest)?;
                     Ok(Instruction::SetWalletCap { cap_e6 })
+                }
+
+                // PERC-8110: OI imbalance hard block threshold
+                TAG_SET_OI_IMBALANCE_HARD_BLOCK => {
+                    let threshold_bps = read_u16(&mut rest)?;
+                    Ok(Instruction::SetOiImbalanceHardBlock { threshold_bps })
                 }
 
                 _ => Err(ProgramError::InvalidInstructionData),
@@ -3839,6 +3863,36 @@ pub mod state {
         let bytes = clamped.to_le_bytes();
         config._insurance_isolation_padding[0] = bytes[0];
         config._insurance_isolation_padding[1] = bytes[1];
+    }
+
+    // ========================================
+    // PERC-8110: OI Imbalance Hard Block
+    // ========================================
+
+    /// PERC-8110: Read OI imbalance hard block threshold from `_lp_col_pad[4..6]`.
+    ///
+    /// Stored as little-endian u16 in padding bytes to avoid CONFIG_LEN changes.
+    /// 0 = disabled (no hard block).
+    /// 1-10_000 = max allowed |long_oi - short_oi| / total_oi in bps before new imbalance-
+    /// increasing trades are rejected.
+    ///
+    /// Layout: [0..2] = vol_alpha_e6 (VRAM EWMA alpha), [2..4] = vol_margin_target_e6,
+    /// [4..6] = oi_imbalance_hard_block_bps (this field), [6] = free.
+    #[inline]
+    pub fn get_oi_imbalance_hard_block_bps(config: &MarketConfig) -> u16 {
+        u16::from_le_bytes([config._lp_col_pad[4], config._lp_col_pad[5]])
+    }
+
+    /// PERC-8110: Set OI imbalance hard block threshold into `_lp_col_pad[4..6]`.
+    /// Clamps to [0, 10_000].
+    ///
+    /// bytes [0..2] are reserved for vol_alpha_e6 — do not touch them here.
+    #[inline]
+    pub fn set_oi_imbalance_hard_block_bps(config: &mut MarketConfig, threshold_bps: u16) {
+        let clamped = threshold_bps.min(10_000);
+        let bytes = clamped.to_le_bytes();
+        config._lp_col_pad[4] = bytes[0];
+        config._lp_col_pad[5] = bytes[1];
     }
 
     // ========================================
@@ -8668,6 +8722,79 @@ pub mod processor {
         Ok(())
     }
 
+    /// PERC-8110: OI imbalance hard block — pre-trade check.
+    ///
+    /// Rejects trades that *increase* OI imbalance when the current imbalance ratio
+    /// already meets or exceeds `oi_imbalance_hard_block_bps` threshold.
+    ///
+    /// Imbalance ratio = |long_oi - short_oi| / total_oi * 10_000 (in bps).
+    ///
+    /// Rules:
+    /// - If `threshold_bps == 0`: disabled, always Ok.
+    /// - If `total_oi == 0` (empty market): always Ok — either side can open.
+    /// - If the trade **reduces** imbalance (or keeps it neutral): always Ok.
+    /// - If the trade **increases** imbalance AND current_ratio >= threshold_bps: Err.
+    ///
+    /// `size > 0` = user going long (increases long_oi).
+    /// `size < 0` = user going short (increases short_oi).
+    ///
+    /// Called BEFORE `execute_trade`.
+    fn check_oi_imbalance_hard_block(
+        engine: &RiskEngine,
+        config: &state::MarketConfig,
+        size: i128,
+    ) -> Result<(), ProgramError> {
+        let threshold_bps = state::get_oi_imbalance_hard_block_bps(config);
+        if threshold_bps == 0 {
+            return Ok(()); // Hard block disabled
+        }
+
+        let long_oi = engine.long_oi.get();
+        let short_oi = engine.short_oi.get();
+        let total_oi = long_oi.saturating_add(short_oi);
+
+        if total_oi == 0 {
+            return Ok(()); // Empty market — any direction is fine
+        }
+
+        // Compute current imbalance ratio in bps.
+        let skew = long_oi.abs_diff(short_oi);
+        let current_ratio_bps = skew.saturating_mul(10_000u128) / total_oi;
+
+        if current_ratio_bps < threshold_bps as u128 {
+            return Ok(()); // Ratio below threshold — no block needed
+        }
+
+        // Ratio >= threshold. Block the trade if it would *increase* imbalance.
+        // size > 0 → user goes long → would increase long_oi
+        // size < 0 → user goes short → would increase short_oi
+        // If long_oi > short_oi: the dominant side is long; adding more longs worsens it.
+        // If short_oi > long_oi: the dominant side is short; adding more shorts worsens it.
+        let would_increase_imbalance = if size > 0 {
+            // Long trade: increases long_oi — bad if long is already dominant
+            long_oi >= short_oi
+        } else if size < 0 {
+            // Short trade: increases short_oi — bad if short is already dominant
+            short_oi >= long_oi
+        } else {
+            false // Zero-size trade — no OI change (won't happen in practice)
+        };
+
+        if would_increase_imbalance {
+            msg!(
+                "PERC-8110: OI imbalance hard block: long_oi={} short_oi={} ratio_bps={} threshold_bps={} size={}",
+                long_oi,
+                short_oi,
+                current_ratio_bps,
+                threshold_bps,
+                size,
+            );
+            return Err(PercolatorError::OiImbalanceHardBlock.into());
+        }
+
+        Ok(())
+    }
+
     /// PERC-312: Safety valve — check and auto-exit rebalancing mode.
     /// If rebalancing is active and trade would increase position on the dominant side, reject.
     /// Dominant side = direction of net LP position (longs dominant if net_lp_pos < 0,
@@ -10498,6 +10625,8 @@ pub mod processor {
                     let old_user_pos = engine.accounts[user_idx as usize].position_size.get();
                     let net_lp = engine.net_lp_pos.get();
                     check_safety_valve(&config, net_lp, size, old_user_pos, clock.slot)?;
+                    // PERC-8110: OI imbalance hard block (pre-trade)
+                    check_oi_imbalance_hard_block(engine, &config, size)?;
                 }
 
                 let engine = zc::engine_mut(&mut data)?;
@@ -10895,10 +11024,12 @@ pub mod processor {
                     let trade_size = crate::verify::cpi_trade_size(ret.exec_size, size);
 
                     // PERC-312: Safety valve check
+                    // PERC-8110: OI imbalance hard block (pre-trade)
                     {
                         let old_user_pos = engine.accounts[user_idx as usize].position_size.get();
                         let net_lp = engine.net_lp_pos.get();
                         check_safety_valve(&config, net_lp, trade_size, old_user_pos, clock.slot)?;
+                        check_oi_imbalance_hard_block(engine, &config, trade_size)?;
                     }
 
                     #[cfg(feature = "cu-audit")]
@@ -16694,6 +16825,40 @@ pub mod processor {
                 );
             }
 
+            // PERC-8110: SetOiImbalanceHardBlock — admin sets OI imbalance hard block threshold.
+            Instruction::SetOiImbalanceHardBlock { threshold_bps } => {
+                // Accounts: [admin(signer), slab(writable)]
+                accounts::expect_len(accounts, 2)?;
+                let a_admin = &accounts[0];
+                let a_slab = &accounts[1];
+
+                accounts::expect_signer(a_admin)?;
+                accounts::expect_writable(a_slab)?;
+
+                let mut data = state::slab_data_mut(a_slab)?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+
+                let header = state::read_header(&data);
+                require_admin(header.admin, a_admin.key)?;
+
+                // Validate: threshold_bps must be <= 10_000
+                if threshold_bps > 10_000 {
+                    return Err(ProgramError::InvalidArgument);
+                }
+
+                let mut config = state::read_config(&data);
+                state::set_oi_imbalance_hard_block_bps(&mut config, threshold_bps);
+                state::write_config(&mut data, &config);
+
+                let stored = state::get_oi_imbalance_hard_block_bps(&config);
+                msg!(
+                    "PERC-8110: SetOiImbalanceHardBlock: threshold_bps={} stored={}",
+                    threshold_bps,
+                    stored,
+                );
+            }
+
             // Defense-in-depth: if a future tag routes here by mistake,
             // return an error instead of panicking (unreachable! aborts the tx).
             _ => return Err(ProgramError::InvalidInstructionData),
@@ -16836,6 +17001,150 @@ pub mod processor {
             assert!(
                 result.is_ok(),
                 "trade must not be blocked after duration elapsed"
+            );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // PERC-8110: OI Imbalance Hard Block — Unit Tests
+    // ═══════════════════════════════════════════════════════════════
+
+    #[cfg(test)]
+    mod oi_imbalance_hard_block_tests {
+        use super::*;
+        use alloc::vec;
+
+        /// Build a minimal slab, set long_oi/short_oi on the engine, then invoke check.
+        fn run_check(
+            long_oi: u128,
+            short_oi: u128,
+            threshold_bps: u16,
+            size: i128,
+        ) -> Result<(), ProgramError> {
+            let mut slab = vec![0u8; SLAB_LEN];
+            {
+                let engine = zc::engine_mut(&mut slab).unwrap();
+                engine.long_oi.set(long_oi);
+                engine.short_oi.set(short_oi);
+                engine
+                    .total_open_interest
+                    .set(long_oi.saturating_add(short_oi));
+            }
+            let mut config = <state::MarketConfig as bytemuck::Zeroable>::zeroed();
+            state::set_oi_imbalance_hard_block_bps(&mut config, threshold_bps);
+            let engine = zc::engine_ref(&slab).unwrap();
+            check_oi_imbalance_hard_block(engine, &config, size)
+        }
+
+        // ── Disabled ──
+
+        #[test]
+        fn test_disabled_zero_threshold() {
+            assert!(run_check(9_000, 1_000, 0, 100).is_ok());
+        }
+
+        // ── Empty market ──
+
+        #[test]
+        fn test_empty_market_always_ok() {
+            assert!(run_check(0, 0, 8_000, 100).is_ok());
+            assert!(run_check(0, 0, 8_000, -100).is_ok());
+        }
+
+        // ── Below threshold ──
+
+        #[test]
+        fn test_below_threshold_either_side_ok() {
+            // Balanced market: ratio=0 bps < threshold=8000
+            assert!(run_check(5_000, 5_000, 8_000, 100).is_ok());
+            assert!(run_check(5_000, 5_000, 8_000, -100).is_ok());
+        }
+
+        // ── At threshold, trade increases imbalance → BLOCK ──
+
+        #[test]
+        fn test_blocks_long_when_longs_dominant_at_threshold() {
+            // long=9000, short=1000 → ratio = 8000/10000 * 10000 = 8000 bps = threshold
+            let result = run_check(9_000, 1_000, 8_000, 100);
+            assert!(
+                result.is_err(),
+                "must block long trade when long OI dominant at threshold"
+            );
+        }
+
+        #[test]
+        fn test_blocks_short_when_shorts_dominant_at_threshold() {
+            let result = run_check(1_000, 9_000, 8_000, -100);
+            assert!(
+                result.is_err(),
+                "must block short trade when short OI dominant at threshold"
+            );
+        }
+
+        #[test]
+        fn test_blocks_long_above_threshold() {
+            // long=9500, short=500 → ratio=9000 bps > threshold=8000
+            assert!(run_check(9_500, 500, 8_000, 100).is_err());
+        }
+
+        // ── At/above threshold, trade reduces imbalance → ALLOW ──
+
+        #[test]
+        fn test_allows_short_when_longs_dominant() {
+            assert!(run_check(9_000, 1_000, 8_000, -100).is_ok());
+        }
+
+        #[test]
+        fn test_allows_long_when_shorts_dominant() {
+            assert!(run_check(1_000, 9_000, 8_000, 100).is_ok());
+        }
+
+        // ── Zero-size ──
+
+        #[test]
+        fn test_zero_size_always_ok() {
+            assert!(run_check(9_000, 1_000, 8_000, 0).is_ok());
+        }
+
+        // ── Config accessor roundtrip ──
+
+        #[test]
+        fn test_config_accessor_roundtrip() {
+            let mut c = <state::MarketConfig as bytemuck::Zeroable>::zeroed();
+            assert_eq!(state::get_oi_imbalance_hard_block_bps(&c), 0);
+            state::set_oi_imbalance_hard_block_bps(&mut c, 8_000);
+            assert_eq!(state::get_oi_imbalance_hard_block_bps(&c), 8_000);
+            // Clamp to 10_000
+            state::set_oi_imbalance_hard_block_bps(&mut c, 15_000);
+            assert_eq!(state::get_oi_imbalance_hard_block_bps(&c), 10_000);
+            // Zero disables
+            state::set_oi_imbalance_hard_block_bps(&mut c, 0);
+            assert_eq!(state::get_oi_imbalance_hard_block_bps(&c), 0);
+        }
+
+        /// Regression: PERC-8110 uses _lp_col_pad[4..6]; vol_alpha_e6 uses [0..2].
+        /// Setting OI threshold must NOT corrupt VRAM alpha, and vice versa.
+        #[test]
+        fn test_oi_hard_block_no_storage_collision_with_vol_alpha() {
+            let mut c = <state::MarketConfig as bytemuck::Zeroable>::zeroed();
+            // Set vol_alpha_e6 first (u16, valid range 0..=65535; use 50_000 as sentinel)
+            state::set_vol_alpha_e6(&mut c, 50_000);
+            assert_eq!(state::get_vol_alpha_e6(&c), 50_000);
+            // Now set OI threshold — must not touch vol_alpha
+            state::set_oi_imbalance_hard_block_bps(&mut c, 8_000);
+            assert_eq!(state::get_oi_imbalance_hard_block_bps(&c), 8_000);
+            assert_eq!(
+                state::get_vol_alpha_e6(&c),
+                50_000,
+                "OI threshold write corrupted vol_alpha_e6"
+            );
+            // Change vol_alpha — must not touch OI threshold
+            state::set_vol_alpha_e6(&mut c, 60_000);
+            assert_eq!(state::get_vol_alpha_e6(&c), 60_000);
+            assert_eq!(
+                state::get_oi_imbalance_hard_block_bps(&c),
+                8_000,
+                "vol_alpha write corrupted OI hard block threshold"
             );
         }
     }

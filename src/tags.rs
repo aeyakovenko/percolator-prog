@@ -107,6 +107,10 @@ pub const TAG_TRANSFER_OWNERSHIP_CPI: u8 = 69;
 /// Data: tag(1) + cap_e6(8) — 0 = disabled, non-zero = max abs(position_size) in e6.
 /// Accounts: [admin(signer), slab(writable)]
 pub const TAG_SET_WALLET_CAP: u8 = 70;
+/// PERC-8110: Set OI imbalance hard block threshold (admin only).
+/// Data: tag(1) + threshold_bps(2) — 0 = disabled, 1-10000 = max imbalance ratio in bps.
+/// Accounts: [admin(signer), slab(writable)]
+pub const TAG_SET_OI_IMBALANCE_HARD_BLOCK: u8 = 71;
 
 /// PERC-622: Advance oracle phase (permissionless crank).
 /// Transitions market through Phase 1→2→3 based on time + volume milestones.
@@ -232,6 +236,7 @@ mod tests {
             TAG_CLEAR_PENDING_SETTLEMENT,
             TAG_TRANSFER_OWNERSHIP_CPI,
             TAG_SET_WALLET_CAP,
+            TAG_SET_OI_IMBALANCE_HARD_BLOCK,
         ];
 
         for i in 0..tags.len() {
