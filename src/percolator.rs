@@ -2908,6 +2908,11 @@ pub mod processor {
                 if insurance_withdraw_max_bps > 10_000 {
                     return Err(ProgramError::InvalidInstructionData);
                 }
+                // If live withdrawals are enabled, require an explicit cooldown
+                // (0 would fall through to DEFAULT which may surprise the admin).
+                if insurance_withdraw_max_bps > 0 && insurance_withdraw_cooldown_slots == 0 {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
 
                 // Hyperp mode validation: if index_feed_id is all zeros, require initial_mark_price_e6
                 let is_hyperp = index_feed_id == [0u8; 32];
@@ -3463,9 +3468,6 @@ pub mod processor {
                 }
 
                 let mut config = state::read_config(&data);
-                let header = state::read_header(&data);
-                // Read last threshold update slot BEFORE mutable engine borrow
-                let last_thr_slot = state::read_last_thr_update_slot(&data);
 
                 // allow_panic: read and discarded for wire compatibility.
                 // No runtime behavior — global settlement is not implemented.
@@ -4371,9 +4373,13 @@ pub mod processor {
                 // Update oracle authority in config
                 let mut config = state::read_config(&data);
                 config.oracle_authority = new_authority.to_bytes();
-                // Clear stored price when authority changes
-                config.authority_price_e6 = 0;
-                config.authority_timestamp = 0;
+                // Clear stored price when authority changes — except on Hyperp
+                // where authority_price_e6 is the mark price. Zeroing it would
+                // brick the market (OracleInvalid on every subsequent call).
+                if !oracle::is_hyperp_mode(&config) {
+                    config.authority_price_e6 = 0;
+                    config.authority_timestamp = 0;
+                }
                 state::write_config(&mut data, &config);
             }
 
@@ -4728,8 +4734,8 @@ pub mod processor {
                 };
                 let policy_max_bps = if configured {
                     stored_bps
-                } else if !resolved && config.insurance_withdraw_max_bps > 0 {
-                    // Live market: use immutable config directly (not defaults)
+                } else if config.insurance_withdraw_max_bps > 0 {
+                    // Use immutable config value (live or resolved unconfigured)
                     config.insurance_withdraw_max_bps
                 } else {
                     DEFAULT_INSURANCE_WITHDRAW_MAX_BPS
