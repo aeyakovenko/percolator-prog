@@ -6115,3 +6115,76 @@ fn test_gh1724_set_pending_settlement_also_requires_admin() {
         "GH#1724: pending_settlement must remain 0 after rejected SetPendingSettlement"
     );
 }
+
+// --- GH#1736: UpdateRiskParams must call RiskParams::validate() ---
+
+/// Encode a minimal UpdateRiskParams instruction (tag=22).
+/// Encodes: initial_margin_bps + maintenance_margin_bps (required fields only).
+fn encode_update_risk_params_minimal(initial_margin_bps: u64, maintenance_margin_bps: u64) -> Vec<u8> {
+    let mut data = vec![22u8]; // TAG_UPDATE_RISK_PARAMS
+    encode_u64(initial_margin_bps, &mut data);
+    encode_u64(maintenance_margin_bps, &mut data);
+    data
+}
+
+/// Helper: initialise a market and return the fixture.
+/// Uses max crank staleness so validation passes at InitMarket.
+fn setup_initialized_market() -> MarketFixture {
+    let mut f = setup_market();
+    let data = encode_init_market(&f, u64::MAX);
+    let mut dummy_ata = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
+    let accounts = vec![
+        f.admin.to_info(),
+        f.slab.to_info(),
+        f.mint.to_info(),
+        f.vault.to_info(),
+        f.token_prog.to_info(),
+        f.clock.to_info(),
+        f.rent.to_info(),
+        dummy_ata.to_info(),
+        f.system.to_info(),
+    ];
+    process_instruction(&f.program_id, &accounts, &data).unwrap();
+    f
+}
+
+/// GH#1736: UpdateRiskParams must reject margin=0 (maintenance_margin_bps=0)
+/// This was already caught by the inline pre-checks, but the test documents the guard.
+#[test]
+fn test_update_risk_params_rejects_zero_maintenance_margin() {
+    let mut f = setup_initialized_market();
+    let data = encode_update_risk_params_minimal(1000, 0); // maintenance=0
+    let accounts = vec![f.admin.to_info(), f.slab.to_info()];
+    let result = process_instruction(&f.program_id, &accounts, &data);
+    assert!(
+        result.is_err(),
+        "GH#1736: UpdateRiskParams must reject maintenance_margin_bps=0"
+    );
+}
+
+/// GH#1736: UpdateRiskParams must reject initial < maintenance.
+#[test]
+fn test_update_risk_params_rejects_initial_less_than_maintenance() {
+    let mut f = setup_initialized_market();
+    let data = encode_update_risk_params_minimal(500, 1000); // initial < maintenance
+    let accounts = vec![f.admin.to_info(), f.slab.to_info()];
+    let result = process_instruction(&f.program_id, &accounts, &data);
+    assert!(
+        result.is_err(),
+        "GH#1736: UpdateRiskParams must reject initial_margin_bps < maintenance_margin_bps"
+    );
+}
+
+/// GH#1736: UpdateRiskParams must accept valid margin params.
+#[test]
+fn test_update_risk_params_accepts_valid_params() {
+    let mut f = setup_initialized_market();
+    let data = encode_update_risk_params_minimal(2000, 1000); // valid: initial > maintenance
+    let accounts = vec![f.admin.to_info(), f.slab.to_info()];
+    let result = process_instruction(&f.program_id, &accounts, &data);
+    assert!(
+        result.is_ok(),
+        "GH#1736: UpdateRiskParams must accept valid margin params: {:?}",
+        result
+    );
+}

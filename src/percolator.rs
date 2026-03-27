@@ -11696,6 +11696,13 @@ pub mod processor {
                     engine.params.trading_fee_bps = fee;
                 }
 
+                // GH#1736: Validate the full RiskParams after all engine.params mutations.
+                // set_margin_params() only checks margin ordering — it cannot catch
+                // cross-field invariants (e.g. fee_split sum, liq fee ordering, warmup > 0).
+                // An admin could previously set warmup_period_slots=0 via UpdateRiskParams,
+                // bypassing the oracle-manipulation guard enforced at InitMarket time.
+                engine.params.validate().map_err(map_risk_error)?;
+
                 // PERC-273: Update OI cap multiplier if provided
                 // PERC-272: Update max PnL cap if provided
                 // PERC-298 + PERC-302: Update OI cap, skew factor, ramp slots if provided
