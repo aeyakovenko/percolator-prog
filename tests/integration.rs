@@ -8693,7 +8693,7 @@ fn test_attack_close_account_wrong_owner() {
     );
 }
 
-/// ATTACK: Non-admin tries admin operations (UpdateAdmin, SetRiskThreshold,
+/// ATTACK: Non-admin tries admin operations (UpdateAdmin,
 /// UpdateConfig, SetMaintenanceFee, ResolveMarket).
 /// Expected: All admin operations fail for non-admin.
 #[test]
@@ -8712,13 +8712,6 @@ fn test_attack_admin_op_as_user() {
     // UpdateAdmin
     let result = env.try_update_admin(&attacker, &attacker.pubkey());
     assert!(result.is_err(), "ATTACK: Non-admin UpdateAdmin should fail");
-
-    // SetRiskThreshold
-    let result = env.try_set_risk_threshold(&attacker, 0);
-    assert!(
-        result.is_err(),
-        "ATTACK: Non-admin SetRiskThreshold should fail"
-    );
 
     // UpdateConfig
     let result = env.try_update_config(&attacker);
@@ -8791,7 +8784,7 @@ fn test_attack_burned_admin_cannot_act() {
     );
 
     // Admin instructions should now permanently fail
-    let result = env.try_set_risk_threshold(&admin, 999);
+    let result = env.try_update_config(&admin);
     assert!(
         result.is_err(),
         "Admin operations must fail after admin burn"
@@ -16028,7 +16021,7 @@ fn test_attack_update_admin_to_zero_locks_out() {
     );
 
     // Admin is now burned - all admin instructions must fail
-    let result = env.try_set_maintenance_fee(&admin, 100);
+    let result = env.try_update_config(&admin);
     assert!(
         result.is_err(),
         "Admin operations must fail after admin burn"
@@ -18746,68 +18739,6 @@ fn test_attack_force_realize_closes_positions_safely() {
     );
 }
 
-/// ATTACK: UpdateConfig with alpha=0 should be accepted without causing overflow.
-/// Verify config update result and conservation after crank with zero-alpha.
-#[test]
-fn test_attack_threshold_ewma_alpha_zero_freezes() {
-    program_path();
-
-    let mut env = TestEnv::new();
-    env.init_market_with_invert(0);
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-
-    let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
-    env.deposit(&lp, lp_idx, 20_000_000_000);
-
-    let user = Keypair::new();
-    let user_idx = env.init_user(&user);
-    env.deposit(&user, user_idx, 5_000_000_000);
-
-    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
-    env.crank();
-
-    // Set threshold config with alpha=0 - config must be accepted
-    env.try_update_config_with_params(
-        &admin,
-        100,               // funding_horizon_slots
-        1_000_000_000_000, // funding_inv_scale
-        0,                 // thresh_alpha_bps = 0 (no learning)
-        100_000_000,       // thresh_min
-        10_000_000_000,    // thresh_max
-    )
-    .expect("Config with alpha=0 should be accepted");
-
-    // Trade and crank - must not panic/overflow with zero alpha
-    env.trade(&user, &lp, lp_idx, user_idx, 100_000);
-
-    // Precondition: position is open
-    let pos = env.read_account_position(user_idx);
-    assert_eq!(pos, 100_000, "Precondition: position should be open");
-
-    env.set_slot(200);
-    env.crank();
-
-    // Conservation must hold with zero alpha
-    let c_tot = env.read_c_tot();
-    let sum = env.read_account_capital(lp_idx) + env.read_account_capital(user_idx);
-    assert_eq!(
-        c_tot, sum,
-        "ATTACK: c_tot desync with alpha=0! c_tot={} sum={}",
-        c_tot, sum
-    );
-
-    let spl_vault = {
-        let vault_data = env.svm.get_account(&env.vault).unwrap().data;
-        TokenAccount::unpack(&vault_data).unwrap().amount
-    };
-    assert_eq!(
-        spl_vault, 26_000_000_000,
-        "ATTACK: SPL vault changed with alpha=0!"
-    );
-}
-
 /// ATTACK: Deposit after setting large maintenance fee.
 /// Verify fee settlement during deposit doesn't extract extra value.
 /// ATTACK: Close account forgives fee debt without extracting from vault.
@@ -21238,8 +21169,6 @@ fn test_attack_double_deposit_accumulation() {
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
 
-    // Set zero maintenance fee to avoid fee complications
-    env.try_set_maintenance_fee(&admin, 0).unwrap();
     env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
 
     // First deposit (BEFORE crank to prevent GC of zero-capital account)
@@ -21350,46 +21279,6 @@ fn test_attack_multi_lp_max_position_tracking() {
         c_tot, sum,
         "ATTACK: c_tot desync with multi-LP tracking! c_tot={} sum={}",
         c_tot, sum
-    );
-}
-
-/// ATTACK: SetMaintenanceFee to zero - no fees should accrue.
-/// Verify that with fee=0, capital is unchanged after many cranks.
-#[test]
-fn test_attack_zero_maintenance_fee_no_drain() {
-    program_path();
-
-    let mut env = TestEnv::new();
-    env.init_market_with_invert(0);
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-
-    let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
-    env.deposit(&lp, lp_idx, 20_000_000_000);
-
-    let user = Keypair::new();
-    let user_idx = env.init_user(&user);
-    env.deposit(&user, user_idx, 5_000_000_000);
-
-    // Set maintenance fee to zero
-    env.try_set_maintenance_fee(&admin, 0).unwrap();
-    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
-    env.crank();
-
-    let cap_before = env.read_account_capital(user_idx);
-
-    // Many cranks
-    for i in 1..=10 {
-        env.set_slot(i * 100);
-        env.crank();
-    }
-
-    let cap_after = env.read_account_capital(user_idx);
-    assert_eq!(
-        cap_before, cap_after,
-        "Capital should not change with zero maintenance fee! before={} after={}",
-        cap_before, cap_after
     );
 }
 
@@ -21841,8 +21730,6 @@ fn test_attack_lp_multiple_deposits_then_trade() {
     let lp_idx = env.init_lp(&lp);
     env.deposit(&lp, lp_idx, 10_000_000_000);
 
-    // Set zero fee to avoid complications
-    env.try_set_maintenance_fee(&admin, 0).unwrap();
     env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
     env.crank();
 
@@ -21890,7 +21777,6 @@ fn test_attack_withdraw_redeposit_cycle_conservation() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 5_000_000_000);
 
-    env.try_set_maintenance_fee(&admin, 0).unwrap();
     env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
     env.crank();
 
@@ -25221,100 +25107,6 @@ fn test_attack_set_oracle_price_cap_after_resolution_rejected() {
     );
 }
 
-/// ATTACK: SetMaintenanceFee after resolution.
-/// Fee parameters should not be mutable once market enters resolved mode.
-#[test]
-fn test_attack_set_maintenance_fee_after_resolution_rejected() {
-    program_path();
-
-    let mut env = TestEnv::new();
-    env.init_market_hyperp(138_000_000);
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 140_000_000, 100).unwrap();
-    env.try_resolve_market(&admin).unwrap();
-
-    let insurance_before = env.read_insurance_balance();
-    let spl_vault_before = env.vault_balance();
-    let engine_vault_before = env.read_engine_vault();
-    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
-
-    let result = env.try_set_maintenance_fee(&admin, 1_000_000);
-    assert!(
-        result.is_err(),
-        "SECURITY: SetMaintenanceFee must be rejected after resolution"
-    );
-    assert_eq!(
-        env.read_insurance_balance(),
-        insurance_before,
-        "Rejected post-resolution SetMaintenanceFee must preserve insurance"
-    );
-    assert_eq!(
-        env.vault_balance(),
-        spl_vault_before,
-        "Rejected post-resolution SetMaintenanceFee must preserve SPL vault"
-    );
-    assert_eq!(
-        env.read_engine_vault(),
-        engine_vault_before,
-        "Rejected post-resolution SetMaintenanceFee must preserve engine vault"
-    );
-    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
-    assert_eq!(
-        slab_after, slab_before,
-        "Rejected post-resolution SetMaintenanceFee must preserve slab bytes"
-    );
-}
-
-/// ATTACK: SetRiskThreshold after resolution.
-/// Risk-gating parameters should be immutable in resolved mode.
-#[test]
-fn test_attack_set_risk_threshold_after_resolution_rejected() {
-    program_path();
-
-    let mut env = TestEnv::new();
-    env.init_market_hyperp(138_000_000);
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 140_000_000, 100).unwrap();
-    env.try_resolve_market(&admin).unwrap();
-
-    let insurance_before = env.read_insurance_balance();
-    let spl_vault_before = env.vault_balance();
-    let engine_vault_before = env.read_engine_vault();
-    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
-
-    let result = env.try_set_risk_threshold(&admin, 1_000_000_000);
-    assert!(
-        result.is_err(),
-        "SECURITY: SetRiskThreshold must be rejected after resolution"
-    );
-    assert_eq!(
-        env.read_insurance_balance(),
-        insurance_before,
-        "Rejected post-resolution SetRiskThreshold must preserve insurance"
-    );
-    assert_eq!(
-        env.vault_balance(),
-        spl_vault_before,
-        "Rejected post-resolution SetRiskThreshold must preserve SPL vault"
-    );
-    assert_eq!(
-        env.read_engine_vault(),
-        engine_vault_before,
-        "Rejected post-resolution SetRiskThreshold must preserve engine vault"
-    );
-    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
-    assert_eq!(
-        slab_after, slab_before,
-        "Rejected post-resolution SetRiskThreshold must preserve slab bytes"
-    );
-}
-
 /// ATTACK: Multiple trades filling LP position in alternating directions.
 /// LP position oscillates: +5M, +2M (net -3M), -1M (net +4M), etc.
 /// Verify LP position tracking remains accurate through oscillations.
@@ -27400,9 +27192,6 @@ enum FuzzAction {
     TopUpInsurance {
         amount: u64,
     },
-    SetMaintenanceFee {
-        fee: u128,
-    },
     InitUser,
     CloseAccount {
         user_idx: usize,
@@ -27564,18 +27353,13 @@ impl IntegrationFuzzer {
                     price_e6: new_price,
                 }
             }
-            85..=89 => {
-                // Top up insurance (5%)
+            85..=92 => {
+                // Top up insurance (8%)
                 let amount = rng.range(100_000, 1_000_000_000);
                 FuzzAction::TopUpInsurance { amount }
             }
-            90..=94 => {
-                // Set maintenance fee (5%)
-                let fee = rng.range(0, 100_000) as u128;
-                FuzzAction::SetMaintenanceFee { fee }
-            }
-            95..=97 => {
-                // Init new user (3%)
+            93..=97 => {
+                // Init new user (5%)
                 FuzzAction::InitUser
             }
             _ => {
@@ -27633,10 +27417,6 @@ impl IntegrationFuzzer {
             FuzzAction::TopUpInsurance { amount } => {
                 let r = self.env.try_top_up_insurance(&self.admin, amount);
                 (r, format!("topup_insurance({})", amount))
-            }
-            FuzzAction::SetMaintenanceFee { fee } => {
-                let r = self.env.try_set_maintenance_fee(&self.admin, fee);
-                (r, format!("set_fee({})", fee))
             }
             FuzzAction::InitUser => {
                 let new_user = Keypair::new();
@@ -29974,8 +29754,6 @@ fn test_update_config_thresh_max_bounded_by_limit() {
     println!("UPDATE CONFIG THRESH_MAX BOUNDED BY LIMIT: PASSED");
 }
 
-/// Verify that KeeperCrank EWMA auto-update respects max_risk_threshold.
-/// The EWMA clamps to config.thresh_max, which InitMarket now clamps to max_risk_threshold.
 /// Verify that InitMarket rejects initial risk_params that exceed per-market limits.
 #[test]
 fn test_init_market_risk_params_exceed_limits_rejected() {
