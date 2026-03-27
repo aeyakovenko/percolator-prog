@@ -249,7 +249,7 @@ fn encode_init_market(fixture: &MarketFixture, crank_staleness: u64) -> Vec<u8> 
     encode_u64(0, &mut data); // initial_mark_price_e6
 
     // RiskParams (must match read_risk_params order)
-    encode_u64(0, &mut data); // warmup_period_slots
+    encode_u64(100, &mut data); // warmup_period_slots (must be >0 — PERC-8093)
     encode_u64(500, &mut data); // maintenance_margin_bps (5%)
     encode_u64(1000, &mut data); // initial_margin_bps (10%)
     encode_u64(30, &mut data); // trading_fee_bps (0.3%)
@@ -284,7 +284,7 @@ fn encode_init_market_invert(
     encode_u64(0, &mut data); // initial_mark_price_e6
 
     // RiskParams (must match read_risk_params order)
-    encode_u64(0, &mut data); // warmup_period_slots
+    encode_u64(100, &mut data); // warmup_period_slots (must be >0 — PERC-8093)
     encode_u64(500, &mut data); // maintenance_margin_bps (5%)
     encode_u64(1000, &mut data); // initial_margin_bps (10%)
     encode_u64(30, &mut data); // trading_fee_bps (0.3%)
@@ -3373,7 +3373,7 @@ fn encode_init_hyperp_market(
     encode_u32(0, &mut data); // unit_scale
     encode_u64(initial_mark_price_e6, &mut data); // initial_mark_price_e6 — REQUIRED for Hyperp
                                                   // RiskParams
-    encode_u64(0, &mut data); // warmup_period_slots
+    encode_u64(100, &mut data); // warmup_period_slots (must be >0 — PERC-8093)
     encode_u64(500, &mut data); // maintenance_margin_bps
     encode_u64(1000, &mut data); // initial_margin_bps
     encode_u64(30, &mut data); // trading_fee_bps
