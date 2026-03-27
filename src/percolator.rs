@@ -844,6 +844,11 @@ pub mod matcher_abi {
     pub const FLAG_PARTIAL_OK: u32 = 2; // bit1: partial fill including zero allowed
     pub const FLAG_REJECTED: u32 = 4; // bit2: trade rejected by matcher
 
+    /// Matcher return structure (ABI v1).
+    /// IMPORTANT: exec_price_e6 must be in engine-space (already inverted
+    /// and scaled). The matcher receives oracle_price_e6 in engine-space
+    /// and must return exec_price_e6 in the same space. The wrapper stores
+    /// it directly as the Hyperp mark price without re-normalization.
     #[repr(C)]
     #[derive(Debug, Clone, Copy)]
     pub struct MatcherReturn {
@@ -3872,11 +3877,11 @@ pub mod processor {
                     state::write_req_nonce(&mut data, req_id);
 
                     // Hyperp: update mark with exec price (already engine-space).
-                    // Clamp against previous mark (not index) for consistency
-                    // with PushOraclePrice. Circuit breaker bounds the jump.
-                    if is_hyperp {
+                    // Validate against MAX_ORACLE_PRICE to prevent config corruption
+                    // from a malicious matcher returning extreme values.
+                    if is_hyperp && ret.exec_price_e6 <= percolator::MAX_ORACLE_PRICE {
                         let clamped_mark = oracle::clamp_oracle_price(
-                            config.authority_price_e6, // clamp against previous mark
+                            config.authority_price_e6,
                             ret.exec_price_e6,
                             config.oracle_price_cap_e2bps,
                         );
@@ -4523,6 +4528,23 @@ pub mod processor {
                 if config.authority_price_e6 == 0 {
                     return Err(ProgramError::InvalidAccountData);
                 }
+                // Non-Hyperp: settlement price must be within circuit-breaker
+                // bounds of the last external oracle baseline. Prevents admin
+                // from settling at an arbitrary price far from the market.
+                // Hyperp: admin IS the price source, no external baseline.
+                if !oracle::is_hyperp_mode(&config)
+                    && config.last_effective_price_e6 != 0
+                    && config.oracle_price_cap_e2bps != 0
+                {
+                    let clamped = oracle::clamp_oracle_price(
+                        config.last_effective_price_e6,
+                        config.authority_price_e6,
+                        config.oracle_price_cap_e2bps,
+                    );
+                    if clamped != config.authority_price_e6 {
+                        return Err(PercolatorError::OracleInvalid.into());
+                    }
+                }
 
                 // Set the resolved flag
                 state::set_resolved(&mut data);
@@ -4846,10 +4868,10 @@ pub mod processor {
                     // effective_cooldown already computed and enforced above
 
                     let req = percolator::U128::new(units_requested);
-                    engine.insurance_fund.balance = engine.insurance_fund.balance - req;
                     if req > engine.vault {
                         return Err(PercolatorError::EngineInsufficientBalance.into());
                     }
+                    engine.insurance_fund.balance = engine.insurance_fund.balance - req;
                     engine.vault = engine.vault - req;
                 }
 
