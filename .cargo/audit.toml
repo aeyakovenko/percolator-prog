@@ -1,0 +1,12 @@
+# Security audit exceptions — dev-only advisories (see ../audit.toml for full justifications)
+# All ignored advisories are in dev-only deps (solana-sdk, solana-client, litesvm)
+# None are in the on-chain BPF binary. Tracked for resolution in GH#1591 (Solana SDK 3.x)
+
+[advisories]
+ignore = [
+    "RUSTSEC-2022-0093",  # ed25519-dalek <2.0 — dev-only
+    "RUSTSEC-2024-0344",  # curve25519-dalek timing — dev-only
+    "RUSTSEC-2026-0049",  # rustls-webpki — dev-only
+    "RUSTSEC-2021-0139",  # ansi_term unmaintained — dev-only
+    "RUSTSEC-2021-0145",  # atty unsound — dev-only
+]
