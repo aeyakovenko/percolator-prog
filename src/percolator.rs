@@ -2618,6 +2618,23 @@ pub mod processor {
 
     /// Execute a trade via a matching engine.
     /// `size` is the user's requested position change (positive = user goes long).
+    /// Compute the current funding rate from config (mark-index premium).
+    /// Returns 0 if prices are invalid or funding params are unset.
+    fn compute_current_funding_rate(config: &MarketConfig) -> i64 {
+        let mark = config.authority_price_e6;
+        let index = config.last_effective_price_e6;
+        if mark == 0 || index == 0 || config.funding_horizon_slots == 0 {
+            return 0;
+        }
+        oracle::compute_premium_funding_bps_per_slot(
+            mark, index,
+            config.funding_horizon_slots,
+            config.funding_k_bps,
+            config.funding_max_premium_bps,
+            config.funding_max_bps_per_slot,
+        )
+    }
+
     fn execute_trade_with_matcher<M: MatchingEngine>(
         engine: &mut RiskEngine,
         matcher: &M,
@@ -2626,6 +2643,7 @@ pub mod processor {
         now_slot: u64,
         oracle_price: u64,
         size: i128,
+        funding_rate: i64,
     ) -> Result<(), RiskError> {
         let lp = &engine.accounts[lp_idx as usize];
         let exec = matcher.execute_match(
@@ -2645,6 +2663,7 @@ pub mod processor {
             now_slot,
             size_q,
             exec.price,
+            funding_rate,
         )
     }
 
@@ -3360,7 +3379,8 @@ pub mod processor {
                 let (units_requested, _) = crate::units::base_to_units(amount, config.unit_scale);
 
                 engine
-                    .withdraw(user_idx, units_requested as u128, price, clock.slot)
+                    .withdraw(user_idx, units_requested as u128, price, clock.slot,
+                        compute_current_funding_rate(&config))
                     .map_err(map_risk_error)?;
 
                 // Convert units back to base tokens for payout (checked to prevent silent overflow)
@@ -3488,7 +3508,9 @@ pub mod processor {
                     // §10.0 steps 4-7 / §10.8 steps 9-12: end-of-instruction lifecycle.
                     // Best-effort on resolved markets — side-reset finalization may
                     // encounter CorruptState if ADL state is frozen post-resolution.
-                    let _ = engine.run_end_of_instruction_lifecycle();
+                    let _ = engine.run_end_of_instruction_lifecycle(
+                        compute_current_funding_rate(&config),
+                    );
 
                     // engine borrow ends here (last use above).
                     // Write dust_base AFTER dropping the engine borrow to avoid
@@ -3550,37 +3572,20 @@ pub mod processor {
                     msg!("CU_CHECKPOINT: keeper_crank_start");
                     sol_log_compute_units();
                 }
+                let funding_rate = compute_current_funding_rate(&config);
                 let _outcome = engine
                     .keeper_crank(
                         clock.slot,
                         price,
                         &candidates,
                         percolator::LIQ_BUDGET_PER_CRANK,
+                        funding_rate,
                     )
                     .map_err(map_risk_error)?;
                 #[cfg(feature = "cu-audit")]
                 {
                     msg!("CU_CHECKPOINT: keeper_crank_end");
                     sol_log_compute_units();
-                }
-
-                // Set the NEW funding rate on the engine for the NEXT crank.
-                // Anti-retroactivity: this crank used the old rate; next crank
-                // will use this new rate via accrue_market_to.
-                {
-                    let mark_e6 = config.authority_price_e6;
-                    let index_e6 = config.last_effective_price_e6;
-                    if mark_e6 > 0 && index_e6 > 0 {
-                        let new_rate = oracle::compute_premium_funding_bps_per_slot(
-                            mark_e6,
-                            index_e6,
-                            config.funding_horizon_slots,
-                            config.funding_k_bps,
-                            config.funding_max_premium_bps,
-                            config.funding_max_bps_per_slot,
-                        );
-                        engine.funding_rate_bps_per_slot_last = new_rate;
-                    }
                 }
 
                 // Dust sweep: if accumulated dust >= unit_scale, sweep to insurance fund
@@ -3679,8 +3684,10 @@ pub mod processor {
                     msg!("CU_CHECKPOINT: trade_nocpi_execute_start");
                     sol_log_compute_units();
                 }
+                let funding_rate = compute_current_funding_rate(&config);
                 execute_trade_with_matcher(
                     engine, &NoOpMatcher, lp_idx, user_idx, clock.slot, price, size,
+                    funding_rate,
                 ).map_err(map_risk_error)?;
                 #[cfg(feature = "cu-audit")]
                 {
@@ -3899,8 +3906,10 @@ pub mod processor {
                         exec_price,
                         exec_size: trade_size,
                     };
+                    let funding_rate = compute_current_funding_rate(&config);
                     execute_trade_with_matcher(
                         engine, &matcher, lp_idx, user_idx, clock.slot, price, trade_size,
+                        funding_rate,
                     ).map_err(map_risk_error)?;
                     #[cfg(feature = "cu-audit")]
                     {
@@ -3978,7 +3987,9 @@ pub mod processor {
                     sol_log_compute_units();
                 }
                 let _res = engine
-                    .liquidate_at_oracle(target_idx, clock.slot, price, percolator::LiquidationPolicy::FullClose)
+                    .liquidate_at_oracle(target_idx, clock.slot, price,
+                        percolator::LiquidationPolicy::FullClose,
+                        compute_current_funding_rate(&config))
                     .map_err(map_risk_error)?;
                 sol_log_64(_res as u64, 0, 0, 0, 4); // result
                 #[cfg(feature = "cu-audit")]
@@ -4071,7 +4082,8 @@ pub mod processor {
                         .map_err(map_risk_error)?
                 } else {
                     engine
-                        .close_account(user_idx, clock.slot, price)
+                        .close_account(user_idx, clock.slot, price,
+                            compute_current_funding_rate(&config))
                         .map_err(map_risk_error)?
                 };
                 #[cfg(feature = "cu-audit")]
@@ -5068,7 +5080,8 @@ pub mod processor {
                 state::write_config(&mut data, &config);
 
                 let engine = zc::engine_mut(&mut data)?;
-                engine.settle_account(user_idx, price, clock.slot)
+                engine.settle_account(user_idx, price, clock.slot,
+                    compute_current_funding_rate(&config))
                     .map_err(map_risk_error)?;
             }
 
@@ -5158,7 +5171,8 @@ pub mod processor {
                 }
 
                 let (units, _) = crate::units::base_to_units(amount, config.unit_scale);
-                engine.convert_released_pnl(user_idx, units as u128, price, clock.slot)
+                engine.convert_released_pnl(user_idx, units as u128, price, clock.slot,
+                    compute_current_funding_rate(&config))
                     .map_err(map_risk_error)?;
             }
         }
