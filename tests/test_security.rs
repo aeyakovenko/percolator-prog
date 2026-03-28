@@ -6558,9 +6558,8 @@ fn test_attack_funding_extreme_max_bps_per_slot() {
     );
     let config_result = env.svm.send_transaction(tx);
     assert!(
-        config_result.is_ok(),
-        "Extreme funding_max_bps_per_slot config update should be accepted: {:?}",
-        config_result
+        config_result.is_err(),
+        "Extreme funding_max_bps_per_slot (> MAX_ABS_FUNDING) must be rejected"
     );
 
     env.trade(&user, &lp, lp_idx, user_idx, 100_000);

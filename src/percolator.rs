@@ -2351,14 +2351,23 @@ pub mod oracle {
         a_oracle: &AccountInfo,
     ) -> Result<u64, ProgramError> {
         // Hyperp mode: index_feed_id == 0
-        // NOTE: Hyperp mark staleness is not enforced here because
-        // authority_timestamp stores the funding rate, not a push timestamp.
-        // Staleness is bounded operationally by the crank cadence requirement
-        // (require_fresh_crank) and the rate-limited index smoothing.
         if is_hyperp_mode(config) {
             let mark = config.authority_price_e6;
             if mark == 0 {
                 return Err(super::error::PercolatorError::OracleInvalid.into());
+            }
+            // Hyperp stale-crank check: reject if engine.current_slot is too
+            // far behind now_slot. Prevents trades/withdrawals from using a
+            // stale smoothed index after a long crank gap.
+            // Use max_staleness_secs * 3 as slot proxy (1 sec ≈ 2.5 slots).
+            // Cap at u64::MAX to prevent overflow with large max_staleness_secs.
+            let max_stale_slots = if config.max_staleness_secs > u64::MAX / 3 {
+                u64::MAX // effectively disabled for very large staleness configs
+            } else {
+                config.max_staleness_secs * 3
+            };
+            if now_slot.saturating_sub(engine_last_slot) > max_stale_slots {
+                return Err(super::error::PercolatorError::OracleStale.into());
             }
 
             let prev_index = config.last_effective_price_e6;
@@ -2620,7 +2629,12 @@ pub mod processor {
     /// `size` is the user's requested position change (positive = user goes long).
     /// Compute the current funding rate from config (mark-index premium).
     /// Returns 0 if prices are invalid or funding params are unset.
+    /// Compute funding rate from mark-index premium.
+    /// Returns 0 for non-Hyperp markets (no internal mark/index pair).
     fn compute_current_funding_rate(config: &MarketConfig) -> i64 {
+        if !oracle::is_hyperp_mode(config) {
+            return 0;
+        }
         let mark = config.authority_price_e6;
         let index = config.last_effective_price_e6;
         if mark == 0 || index == 0 || config.funding_horizon_slots == 0 {
@@ -3034,9 +3048,15 @@ pub mod processor {
 
                 // Initialize engine in-place (zero-copy) to avoid stack overflow.
                 let a_clock = &accounts[5];
+                let a_oracle = &accounts[7];
                 let clock = Clock::from_account_info(a_clock)?;
-                // Engine v12 requires init_oracle_price > 0. Non-Hyperp markets
-                // use 1 as a placeholder; real oracle price arrives on first crank.
+                // Engine v12 requires init_oracle_price > 0.
+                // Hyperp: use the normalized initial mark price.
+                // Non-Hyperp: use 1 as sentinel — the real oracle price is
+                // established on the first KeeperCrank via accrue_market_to.
+                // This is safe because no trades can happen before a crank
+                // (require_fresh_crank gate in engine), and the first
+                // accrue_market_to overwrites last_oracle_price.
                 let init_price = if is_hyperp { initial_mark_price_e6 } else { 1 };
                 let engine = zc::engine_mut(&mut data)?;
                 engine.init_in_place(risk_params, clock.slot, init_price);
@@ -3921,6 +3941,7 @@ pub mod processor {
                         exec_price,
                         exec_size: trade_size,
                     };
+                    // Compute funding BEFORE trade (uses pre-fill state per anti-retroactivity)
                     let funding_rate = compute_current_funding_rate(&config);
                     execute_trade_with_matcher(
                         engine, &matcher, lp_idx, user_idx, clock.slot, price, trade_size,
@@ -3933,9 +3954,7 @@ pub mod processor {
                     }
                     state::write_req_nonce(&mut data, req_id);
 
-                    // Hyperp: update mark with exec price (already engine-space).
-                    // Clamp against INDEX (not previous mark) — bounds mark-index
-                    // gap to one cap-width per fill, consistent with PushOraclePrice.
+                    // Hyperp: update mark with exec price AFTER trade execution.
                     if is_hyperp {
                         let clamped_mark = oracle::clamp_oracle_price(
                             config.last_effective_price_e6,
@@ -3944,8 +3963,6 @@ pub mod processor {
                         );
                         config.authority_price_e6 = clamped_mark;
                     }
-                    // Single config write (covers oracle price update from pre-CPI
-                    // phase + Hyperp mark update)
                     state::write_config(&mut data, &config);
                 }
             }
@@ -4345,7 +4362,9 @@ pub mod processor {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
                 // Reject negative funding bounds — reversed clamp bounds panic
-                if funding_max_premium_bps < 0 || funding_max_bps_per_slot < 0 {
+                if funding_max_premium_bps < 0 || funding_max_bps_per_slot < 0
+                    || funding_max_bps_per_slot > percolator::MAX_ABS_FUNDING_BPS_PER_SLOT
+                {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
 
