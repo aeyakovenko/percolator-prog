@@ -2378,13 +2378,19 @@ fn test_binary_market_complete_lifecycle_conservation() {
         insurance_after_crank
     );
 
-    // Close all positions explicitly (AdminForceCloseAccount zeros pos, returns capital to ATAs)
+    // Many cranks to fully settle all accounts — each covers 8 indices
+    for s in 0..20 {
+        env.set_slot(300 + s);
+        env.crank();
+    }
+
+    // Close all positions — LP first (absorbs user positions)
+    env.try_admin_force_close_account(&admin, lp_idx, &lp.pubkey())
+        .expect("AdminForceCloseAccount LP must succeed");
     env.try_admin_force_close_account(&admin, user_a_idx, &user_a.pubkey())
         .expect("AdminForceCloseAccount user_a must succeed");
     env.try_admin_force_close_account(&admin, user_b_idx, &user_b.pubkey())
         .expect("AdminForceCloseAccount user_b must succeed");
-    env.try_admin_force_close_account(&admin, lp_idx, &lp.pubkey())
-        .expect("AdminForceCloseAccount LP must succeed");
 
     // After AdminForceCloseAccount: all accounts are freed
     assert_eq!(

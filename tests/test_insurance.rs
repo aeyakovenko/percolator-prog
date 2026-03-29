@@ -711,32 +711,30 @@ fn test_limited_insurance_withdraw_adversarial_guards() {
         "precondition: position should be open"
     );
 
-    // Resolve and configure permissive policy to isolate guards under test.
+    // Resolve market.
     env.try_resolve_market(&admin)
         .expect("resolve should succeed");
-    env.try_set_insurance_withdraw_policy(&admin, &admin.pubkey(), 1000, 10_000, 0)
-        .expect("valid policy should be accepted");
 
-    // Open positions should still block limited withdraw after resolution.
-    let open_pos_withdraw = env.try_withdraw_insurance_limited(&admin, 3000);
-    assert!(
-        open_pos_withdraw.is_err(),
-        "limited withdraw must fail while any position remains open"
+    // SetInsuranceWithdrawPolicy requires all accounts closed (prevents
+    // clobbering Hyperp pricing state that open accounts depend on).
+    let policy_while_open = env.try_set_insurance_withdraw_policy(
+        &admin, &admin.pubkey(), 1000, 10_000, 0,
     );
-    assert_eq!(
-        env.read_insurance_balance(),
-        seeded_insurance,
-        "rejected open-position limited withdraw must not change insurance"
-    );
+    assert!(policy_while_open.is_err(),
+        "SetInsuranceWithdrawPolicy must fail while accounts are open");
 
     // Close positions via resolved crank path + AdminForceCloseAccount.
-    // The resolved crank only settles PnL; AdminForceCloseAccount zeros positions.
     env.set_slot(200);
     env.crank();
     env.try_admin_force_close_account(&admin, lp_idx, &lp.pubkey())
         .expect("AdminForceCloseAccount LP must succeed");
     env.try_admin_force_close_account(&admin, user_idx, &user.pubkey())
         .expect("AdminForceCloseAccount user must succeed");
+
+    // Now configure policy (all accounts closed).
+    // Use different cooldown to avoid AlreadyProcessed (different tx hash).
+    env.try_set_insurance_withdraw_policy(&admin, &admin.pubkey(), 1000, 10_000, 1)
+        .expect("valid policy should be accepted after accounts closed");
     assert_eq!(
         env.read_account_position(user_idx),
         0,

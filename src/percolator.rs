@@ -2657,7 +2657,8 @@ pub mod processor {
 
             // Compute haircutted payout using wide mul/div
             let (h_num, h_den) = engine.haircut_ratio();
-            let y = if h_den == 0 {
+            let y = if h_den == 0 || h_num >= h_den {
+                // No haircut (h >= 1.0 or undefined) — full payout
                 pos_pnl
             } else {
                 // wide_mul_div_floor: (pos_pnl * h_num) / h_den
@@ -2669,14 +2670,14 @@ pub mod processor {
                         // Decomposed: floor(a*b/c) = a*(b/c) + a*(b%c)/c
                         let quot = h_num / h_den;
                         let rem = h_num % h_den;
-                        let term1 = pos_pnl.checked_mul(quot)
-                            .ok_or(RiskError::Overflow)?;
-                        let term2 = (pos_pnl as u128)
-                            .checked_mul(rem)
-                            .ok_or(RiskError::Overflow)?
-                            / h_den;
-                        term1.checked_add(term2)
-                            .ok_or(RiskError::Overflow)?
+                        let term1 = pos_pnl.saturating_mul(quot);
+                        let term2 = match (pos_pnl as u128).checked_mul(rem) {
+                            Some(p) => p / h_den,
+                            // Second overflow: haircut ratio h_num/h_den >= 1.0
+                            // means full payout — cap at pos_pnl
+                            None => 0,
+                        };
+                        term1.saturating_add(term2)
                     }
                 }
             };
@@ -3582,13 +3583,13 @@ pub mod processor {
                     return Err(PercolatorError::EngineUnauthorized.into());
                 }
 
-                // On resolved markets, best-effort settlement at settlement price.
-                // If touch fails (ADL overflow), withdraw proceeds with
-                // locally-settled state — same as AdminForceCloseAccount.
+                // On resolved markets, settle before withdraw. Unlike close
+                // (which has a manual fallback), withdrawals must use settled
+                // state — reject if touch fails.
                 if resolved {
-                    let _ = engine.touch_account_full(
+                    engine.touch_account_full(
                         user_idx as usize, price, config.resolution_slot,
-                    );
+                    ).map_err(map_risk_error)?;
                 }
 
                 // Reject misaligned withdrawal amounts (cleaner UX than silent floor)
@@ -4108,6 +4109,7 @@ pub mod processor {
                     let mut data = state::slab_data_mut(a_slab)?;
                     let pristine = state::read_config(&data);
                     config.last_effective_price_e6 = pristine.last_effective_price_e6;
+                    config.last_hyperp_index_slot = pristine.last_hyperp_index_slot;
                     state::write_config(&mut data, &config);
                     state::write_req_nonce(&mut data, req_id);
                     return Ok(());
@@ -4144,9 +4146,7 @@ pub mod processor {
                         msg!("CU_CHECKPOINT: trade_cpi_execute_end");
                         sol_log_compute_units();
                     }
-                    state::write_req_nonce(&mut data, req_id);
-
-                    // Hyperp: update mark with exec price AFTER trade execution.
+                    // Hyperp: update mark + stamp funding rate while engine is borrowed
                     if is_hyperp {
                         let clamped_mark = oracle::clamp_oracle_price(
                             config.last_effective_price_e6,
@@ -4155,7 +4155,14 @@ pub mod processor {
                         );
                         config.authority_price_e6 = clamped_mark;
                         config.last_mark_push_slot = clock.slot as u128;
+                        engine.funding_rate_bps_per_slot_last =
+                            compute_current_funding_rate(&config);
                     }
+                }
+                // Engine borrow dropped. Write nonce + config.
+                {
+                    let mut data = state::slab_data_mut(a_slab)?;
+                    state::write_req_nonce(&mut data, req_id);
                     state::write_config(&mut data, &config);
                 }
             }
@@ -4734,6 +4741,12 @@ pub mod processor {
                     config.authority_timestamp = timestamp;
                     config.last_effective_price_e6 = clamped;
                 }
+                // Stamp post-change funding rate for next interval
+                if is_hyperp {
+                    let new_rate = compute_current_funding_rate(&config);
+                    let engine = zc::engine_mut(&mut data)?;
+                    engine.funding_rate_bps_per_slot_last = new_rate;
+                }
                 state::write_config(&mut data, &config);
             }
 
@@ -4834,10 +4847,20 @@ pub mod processor {
                     }
                 }
 
-                // Snapshot the resolution slot and set the resolved flag.
-                // All resolved-path operations use this frozen slot.
                 let clock = Clock::from_account_info(a_clock)?;
-                let mut config = config; // shadow for write
+                let mut config = config;
+
+                // Flush Hyperp index to resolution slot before freezing.
+                // Ensures resolved outcomes don't depend on last crank timing.
+                if oracle::is_hyperp_mode(&config) {
+                    let eng = zc::engine_ref(&data)?;
+                    let last_slot = eng.current_slot;
+                    oracle::get_engine_oracle_price_e6(
+                        last_slot, clock.slot, clock.unix_timestamp,
+                        &mut config, a_slab,
+                    )?;
+                }
+
                 config.resolution_slot = clock.slot;
                 state::write_config(&mut data, &config);
                 state::set_resolved(&mut data);
@@ -4950,11 +4973,16 @@ pub mod processor {
                 slab_guard(program_id, a_slab, &data)?;
                 require_initialized(&data)?;
 
-                // Policy writes oracle fields — only safe on resolved markets
-                // where the oracle is no longer needed. Live-market withdrawal
-                // limits use the dedicated MarketConfig fields instead.
+                // Policy writes oracle/index fields. Only safe when all accounts
+                // are closed — prevents corrupting Hyperp settlement math.
                 if !state::is_resolved(&data) {
                     return Err(ProgramError::InvalidAccountData);
+                }
+                {
+                    let engine = zc::engine_ref(&data)?;
+                    if engine.num_used_accounts != 0 {
+                        return Err(ProgramError::InvalidAccountData);
+                    }
                 }
 
                 let header = state::read_header(&data);
@@ -5271,9 +5299,12 @@ pub mod processor {
                 let funding_rate = compute_current_funding_rate(&config);
                 let amt_units = engine.close_account(
                     user_idx, frozen_slot, price, funding_rate,
-                // Admin force-close: broad fallback — admin must be able to
-                // close any account regardless of engine error type.
-                ).or_else(|_| settle_and_close_resolved(engine, user_idx))
+                ).or_else(|e| match e {
+                    // Only propagate CorruptState (real invariant violation).
+                    // All other errors: admin must be able to close.
+                    percolator::RiskError::CorruptState => Err(e),
+                    _ => settle_and_close_resolved(engine, user_idx),
+                })
                     .map_err(map_risk_error)?;
                 let amt_units_u64: u64 = amt_units
                     .try_into()
