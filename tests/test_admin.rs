@@ -852,8 +852,13 @@ fn test_init_market_rejects_vault_with_delegate() {
     );
     let result = svm.send_transaction(tx);
     assert!(result.is_err(), "InitMarket must reject vault with delegate");
-    // Slab remains uninitialized — InitMarket failed before writing header/config,
-    // so no state preservation check is needed (there is no prior valid state).
+
+    // Slab header must remain all-zeros (uninitialized) after rejected InitMarket
+    let slab_after = svm.get_account(&slab).unwrap();
+    assert!(
+        slab_after.data[..72].iter().all(|&b| b == 0),
+        "slab header must not change on rejected InitMarket (delegate)"
+    );
 }
 
 /// Vault with close_authority must be rejected by InitMarket.
@@ -920,8 +925,13 @@ fn test_init_market_rejects_vault_with_close_authority() {
     );
     let result = svm.send_transaction(tx);
     assert!(result.is_err(), "InitMarket must reject vault with close_authority");
-    // Slab remains uninitialized — InitMarket failed before writing header/config,
-    // so no state preservation check is needed (there is no prior valid state).
+
+    // Slab header must remain all-zeros (uninitialized) after rejected InitMarket
+    let slab_after = svm.get_account(&slab).unwrap();
+    assert!(
+        slab_after.data[..72].iter().all(|&b| b == 0),
+        "slab header must not change on rejected InitMarket (close_authority)"
+    );
 }
 
 /// UpdateConfig must reject negative funding_max_premium_bps.
@@ -1061,6 +1071,13 @@ fn test_init_market_rejects_nonempty_vault() {
         result.is_err(),
         "InitMarket must reject vault with non-zero balance"
     );
+
+    // Slab header must remain all-zeros (uninitialized) after rejected InitMarket
+    let slab_after = env.svm.get_account(&env.slab).unwrap();
+    assert!(
+        slab_after.data[..72].iter().all(|&b| b == 0),
+        "slab header must not change on rejected InitMarket (nonempty vault)"
+    );
 }
 
 // ============================================================================
@@ -1073,6 +1090,9 @@ fn test_update_config_rejects_zero_horizon() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
+
+    // Capture config snapshot before rejected operation
+    let config_before = env.read_update_config_snapshot();
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let result = env.try_update_config_with_params(
@@ -1087,6 +1107,13 @@ fn test_update_config_rejects_zero_horizon() {
         result.is_err(),
         "UpdateConfig must reject funding_horizon_slots = 0"
     );
+
+    // Config must be unchanged after rejection
+    let config_after = env.read_update_config_snapshot();
+    assert_eq!(
+        config_after, config_before,
+        "config must not change on rejected UpdateConfig (zero horizon)"
+    );
 }
 
 /// Spec: UpdateConfig rejects funding_inv_scale_notional_e6 = 0 (would cause division by zero).
@@ -1095,6 +1122,9 @@ fn test_update_config_rejects_zero_inv_scale() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
+
+    // Capture config snapshot before rejected operation
+    let config_before = env.read_update_config_snapshot();
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let result = env.try_update_config_with_params(
@@ -1108,6 +1138,13 @@ fn test_update_config_rejects_zero_inv_scale() {
     assert!(
         result.is_err(),
         "UpdateConfig must reject funding_inv_scale_notional_e6 = 0"
+    );
+
+    // Config must be unchanged after rejection
+    let config_after = env.read_update_config_snapshot();
+    assert_eq!(
+        config_after, config_before,
+        "config must not change on rejected UpdateConfig (zero inv_scale)"
     );
 }
 

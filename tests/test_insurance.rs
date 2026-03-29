@@ -1875,6 +1875,13 @@ fn test_init_market_insurance_withdraw_max_bps_bounded() {
     );
     let result = env.svm.send_transaction(tx);
     assert!(result.is_err(), "insurance_withdraw_max_bps > 10000 must be rejected");
+
+    // Slab header must remain all-zeros (uninitialized) after rejected InitMarket
+    let slab_after = env.svm.get_account(&env.slab).unwrap();
+    assert!(
+        slab_after.data[..72].iter().all(|&b| b == 0),
+        "slab must not change on rejected InitMarket (insurance_withdraw_max_bps bounded)"
+    );
 }
 
 // ============================================================================
