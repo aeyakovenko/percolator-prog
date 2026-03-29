@@ -2181,6 +2181,7 @@ fn test_attack_update_config_extreme_values() {
         accounts: vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
         ],
         data: encode_update_config(
             1,        // funding_horizon_slots (minimum)
@@ -6378,6 +6379,7 @@ fn test_attack_funding_extreme_k_bps_capped() {
         accounts: vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
         ],
         data: encode_update_config(
             100,                        // funding_horizon_slots
@@ -6460,6 +6462,7 @@ fn test_attack_funding_extreme_max_premium_capped() {
         accounts: vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
         ],
         data: encode_update_config(
             100,                        // funding_horizon_slots
@@ -6542,6 +6545,7 @@ fn test_attack_funding_extreme_max_bps_per_slot() {
         accounts: vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
         ],
         data: encode_update_config(
             100,                        // funding_horizon_slots

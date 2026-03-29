@@ -1329,6 +1329,7 @@ fn test_vulnerability_stale_pnl_pos_tot_after_force_close() {
     // Resolve market at 2.0 (2_000_000 e6) - user's long position is profitable
     // This means user has positive PnL = position * (2.0 - 1.0) / 1e6
     env.set_slot(100);
+    env.crank(); // fresh crank required before PushOraclePrice on hyperp
     env.try_push_oracle_price(&admin, 2_000_000, 200)
         .expect("resolution oracle push must succeed");
     env.try_resolve_market(&admin).unwrap();
@@ -1819,6 +1820,7 @@ fn test_attack_trade_after_force_close() {
 
     // Resolve + settle PnL via crank + force-close positions
     env.set_slot(200);
+    env.crank(); // fresh crank required before PushOraclePrice on hyperp
     env.try_push_oracle_price(&admin, 1_000_000, 200)
         .expect("oracle price push must succeed");
     env.try_resolve_market(&admin)

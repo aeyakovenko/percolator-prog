@@ -1841,6 +1841,7 @@ fn benchmark_all_instructions() {
             accounts: vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
             ],
             data: encode_update_config(
                 3600,   // funding_horizon_slots
@@ -1899,6 +1900,7 @@ fn benchmark_all_instructions() {
             accounts: vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
             ],
             data: encode_set_oracle_price_cap(10_000),
         };

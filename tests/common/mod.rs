@@ -2023,6 +2023,7 @@ impl TestEnv {
             accounts: vec![
                 AccountMeta::new(signer.pubkey(), true),
                 AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
             ],
             data: encode_set_oracle_price_cap(max_change_e2bps),
         };
@@ -2237,6 +2238,7 @@ impl TestEnv {
             accounts: vec![
                 AccountMeta::new(signer.pubkey(), true),
                 AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
             ],
             data: encode_update_config(
                 3600,                      // funding_horizon_slots
@@ -3360,6 +3362,7 @@ impl TradeCpiTestEnv {
             accounts: vec![
                 AccountMeta::new(signer.pubkey(), true),
                 AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
             ],
             data: encode_set_oracle_price_cap(max_change_e2bps),
         };
@@ -4255,6 +4258,7 @@ impl TestEnv {
             accounts: vec![
                 AccountMeta::new(signer.pubkey(), true),
                 AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
             ],
             data: encode_update_config(
                 funding_horizon_slots,

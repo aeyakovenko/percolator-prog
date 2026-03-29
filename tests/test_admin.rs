@@ -940,6 +940,7 @@ fn test_update_config_rejects_negative_funding_max_premium() {
         accounts: vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
         ],
         data: encode_update_config(
             3600, 100, 1_000_000u128,
@@ -974,6 +975,7 @@ fn test_update_config_rejects_negative_funding_max_bps_per_slot() {
         accounts: vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
         ],
         data: encode_update_config(
             3600, 100, 1_000_000u128,

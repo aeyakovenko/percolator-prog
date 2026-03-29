@@ -2611,7 +2611,8 @@ pub mod processor {
                 engine.c_tot = U128::new(old_c_tot.saturating_sub(cap).saturating_add(new_cap));
                 engine.accounts[i].capital = U128::new(new_cap);
                 // set_pnl inline: update aggregates
-                let pay_i128 = pay as i128;
+                // Cap pay at i128::MAX to prevent overflow on cast
+                let pay_i128 = if pay > i128::MAX as u128 { i128::MAX } else { pay as i128 };
                 let new_pnl = pnl.saturating_add(pay_i128);
                 // old pnl < 0, so no pnl_pos_tot change
                 engine.accounts[i].pnl = new_pnl;
@@ -4273,19 +4274,14 @@ pub mod processor {
                     sol_log_compute_units();
                 }
                 let amt_units = if resolved {
-                    // Use resolution_slot (snapshotted in ResolveMarket).
                     let frozen_slot = config.resolution_slot;
+                    // Best-effort touch (mirrors AdminForceCloseAccount)
+                    let _ = engine.touch_account_full(
+                        user_idx as usize, price, frozen_slot,
+                    );
                     let funding_rate = compute_current_funding_rate(&config);
                     engine.close_account(user_idx, frozen_slot, price, funding_rate)
-                        .or_else(|e| match e {
-                            // Same-epoch open position: canonical close fails,
-                            // use wrapper-side position zeroing + settlement.
-                            percolator::RiskError::Unauthorized
-                            | percolator::RiskError::Undercollateralized
-                            | percolator::RiskError::InsufficientBalance
-                                => settle_and_close_resolved(engine, user_idx),
-                            other => Err(other),
-                        })
+                        .or_else(|_| settle_and_close_resolved(engine, user_idx))
                         .map_err(map_risk_error)?
                 } else {
                     engine
@@ -4513,9 +4509,10 @@ pub mod processor {
                 funding_max_premium_bps,
                 funding_max_bps_per_slot,
             } => {
-                accounts::expect_len(accounts, 2)?;
+                accounts::expect_len(accounts, 3)?;
                 let a_admin = &accounts[0];
                 let a_slab = &accounts[1];
+                let a_clock = &accounts[2];
 
                 accounts::expect_signer(a_admin)?;
                 accounts::expect_writable(a_slab)?;
@@ -4525,6 +4522,16 @@ pub mod processor {
                 require_initialized(&data)?;
                 if state::is_resolved(&data) {
                     return Err(ProgramError::InvalidAccountData);
+                }
+                // Require fresh crank before config changes to create a clean
+                // accrual boundary. Without this, new params would be applied
+                // retroactively over the unaccrued interval.
+                let clock = Clock::from_account_info(a_clock)?;
+                {
+                    let engine = zc::engine_ref(&data)?;
+                    if engine.current_slot < clock.slot {
+                        return Err(PercolatorError::OracleStale.into());
+                    }
                 }
 
                 let header = state::read_header(&data);
@@ -4621,9 +4628,19 @@ pub mod processor {
                     return Err(ProgramError::InvalidAccountData);
                 }
 
-                // Verify caller is the oracle authority
                 let mut config = state::read_config(&data);
                 let is_hyperp = oracle::is_hyperp_mode(&config);
+                // Hyperp: require fresh crank before mark push to create a
+                // clean accrual boundary. Without this, the new mark/index
+                // smoothing would be applied retroactively.
+                if is_hyperp {
+                    let push_clock = Clock::get()
+                        .map_err(|_| ProgramError::UnsupportedSysvar)?;
+                    let engine = zc::engine_ref(&data)?;
+                    if engine.current_slot < push_clock.slot {
+                        return Err(PercolatorError::OracleStale.into());
+                    }
+                }
                 if config.oracle_authority == [0u8; 32] {
                     return Err(PercolatorError::EngineUnauthorized.into());
                 }
@@ -4691,9 +4708,10 @@ pub mod processor {
             }
 
             Instruction::SetOraclePriceCap { max_change_e2bps } => {
-                accounts::expect_len(accounts, 2)?;
+                accounts::expect_len(accounts, 3)?;
                 let a_admin = &accounts[0];
                 let a_slab = &accounts[1];
+                let a_clock = &accounts[2];
 
                 accounts::expect_signer(a_admin)?;
                 accounts::expect_writable(a_slab)?;
@@ -4710,6 +4728,16 @@ pub mod processor {
 
                 let config = state::read_config(&data);
                 let is_hyperp = oracle::is_hyperp_mode(&config);
+
+                // Require fresh crank before cap changes (same boundary
+                // logic as UpdateConfig and PushOraclePrice)
+                if is_hyperp {
+                    let clock = Clock::from_account_info(a_clock)?;
+                    let engine = zc::engine_ref(&data)?;
+                    if engine.current_slot < clock.slot {
+                        return Err(PercolatorError::OracleStale.into());
+                    }
+                }
 
                 // Hyperp markets must not set cap to 0 — it would freeze index
                 // smoothing (clamp_toward_with_dt returns mark unchanged when cap==0).
