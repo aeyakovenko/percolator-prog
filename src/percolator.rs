@@ -4404,24 +4404,27 @@ pub mod processor {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
 
-                // Read existing config and update
+                // Read existing config
                 let mut config = state::read_config(&data);
 
-                // funding_k_bps: 100 = 1.00x multiplier. Cap at 100_000 (1000x)
-                // to prevent saturating_mul from always hitting i128 ceiling.
                 if funding_k_bps > 100_000 {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
+
+                // Stamp the engine's funding rate from OLD config before update.
+                // This ensures the next accrual uses the pre-change rate for
+                // the interval up to this point (anti-retroactivity boundary).
+                {
+                    let old_rate = compute_current_funding_rate(&config);
+                    let engine = zc::engine_mut(&mut data)?;
+                    engine.funding_rate_bps_per_slot_last = old_rate;
+                }
+
                 config.funding_horizon_slots = funding_horizon_slots;
                 config.funding_k_bps = funding_k_bps;
                 config.funding_inv_scale_notional_e6 = funding_inv_scale_notional_e6;
                 config.funding_max_premium_bps = funding_max_premium_bps;
                 config.funding_max_bps_per_slot = funding_max_bps_per_slot;
-                // Do NOT sync engine.funding_rate_bps_per_slot_last here.
-                // Anti-retroactivity: the engine's stored rate is stamped
-                // only by keeper_crank → recompute_r_last_from_final_state.
-                // Direct writes would apply the new rate retroactively over
-                // the gap since last_market_slot.
                 state::write_config(&mut data, &config);
             }
 
@@ -4520,6 +4523,15 @@ pub mod processor {
                 //   cap-width regardless of how many same-slot pushes occur.
                 //   The index only moves per-slot via clamp_toward_with_dt.
                 // Non-Hyperp: clamp against last_effective_price_e6 baseline.
+                // Stamp engine's funding rate from OLD config state before
+                // changing the mark. Creates a funding boundary so the next
+                // accrual uses the pre-push rate for the elapsed interval.
+                if is_hyperp {
+                    let old_rate = compute_current_funding_rate(&config);
+                    let engine = zc::engine_mut(&mut data)?;
+                    engine.funding_rate_bps_per_slot_last = old_rate;
+                }
+
                 let clamp_base = config.last_effective_price_e6;
                 let clamped = oracle::clamp_oracle_price(
                     clamp_base,
@@ -4535,8 +4547,6 @@ pub mod processor {
                     config.authority_timestamp = timestamp;
                     config.last_effective_price_e6 = clamped;
                 }
-                // Do NOT sync engine.funding_rate_bps_per_slot_last here.
-                // Anti-retroactivity: rate is stamped only by keeper_crank.
                 state::write_config(&mut data, &config);
             }
 
