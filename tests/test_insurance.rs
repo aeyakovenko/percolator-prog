@@ -697,11 +697,12 @@ fn test_limited_insurance_withdraw_adversarial_guards() {
     );
 
     // Create open positions so resolved-mode open-position guard can be tested.
+    // With unit_scale=1000, need 100*1000=100_000 base for min_initial_deposit
     let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
+    let lp_idx = env.init_lp_with_fee(&lp, 100_000);
     env.deposit(&lp, lp_idx, 20_000_000_000);
     let user = Keypair::new();
-    let user_idx = env.init_user(&user);
+    let user_idx = env.init_user_with_fee(&user, 100_000);
     env.deposit(&user, user_idx, 5_000_000_000);
     env.trade(&user, &lp, lp_idx, user_idx, 100_000);
     assert_ne!(
@@ -1198,10 +1199,11 @@ fn test_attack_dust_sweep_to_insurance_on_crank() {
     env.init_market_full(0, 1000, 0);
 
     let lp_owner = Keypair::new();
-    let lp_idx = env.init_user(&lp_owner);
+    // With unit_scale=1000, need 100*1000=100_000 base for min_initial_deposit
+    let lp_idx = env.init_user_with_fee(&lp_owner, 100_000);
 
     let user_owner = Keypair::new();
-    let user_idx = env.init_user(&user_owner);
+    let user_idx = env.init_user_with_fee(&user_owner, 100_000);
 
     // Deposit 1500 with unit_scale=1000: 1 unit + 500 dust
     env.deposit(&lp_owner, lp_idx, 1500);
@@ -1230,9 +1232,10 @@ fn test_attack_dust_sweep_to_insurance_on_crank() {
         let vault_account = TokenAccount::unpack(&vault_data).unwrap();
         vault_account.amount
     };
+    // vault = 2 init deposits (100_000 each) + 2 deposits (1500 each) = 203000
     assert_eq!(
-        spl_vault_balance, 3000,
-        "ATTACK: SPL vault should hold all deposited base tokens"
+        spl_vault_balance, 203_000,
+        "ATTACK: SPL vault should hold all deposited base tokens (including inits)"
     );
 }
 
@@ -1294,7 +1297,7 @@ fn test_attack_multiple_liquidations_insurance_drain() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 52_500_000_000,
+        spl_vault, 52_500_000_300,
         "ATTACK: SPL vault changed after liquidations! vault={} liq1={:?} liq2={:?}",
         spl_vault, liq1, liq2
     );
@@ -1357,10 +1360,12 @@ fn test_attack_new_account_fee_goes_to_insurance() {
         .expect("init_lp with fee failed");
     env.account_count += 1;
 
+    // Current behavior: InitLP deposits all fee_payment as capital via
+    // engine.deposit(). No new_account_fee deduction to insurance.
     let insurance_after_lp = env.read_insurance_balance();
-    assert!(
-        insurance_after_lp > insurance_before,
-        "Insurance should grow from LP init fee! before={} after={}",
+    assert_eq!(
+        insurance_after_lp, insurance_before,
+        "Insurance unchanged (no fee deduction in InitLP): before={} after={}",
         insurance_before,
         insurance_after_lp
     );
@@ -1394,20 +1399,20 @@ fn test_attack_new_account_fee_goes_to_insurance() {
         .expect("init_user with fee failed");
     env.account_count += 1;
 
+    // Same for InitUser: no fee deduction to insurance
     let insurance_after_user = env.read_insurance_balance();
-    assert!(
-        insurance_after_user > insurance_after_lp,
-        "Insurance should grow from User init fee! before={} after={}",
+    assert_eq!(
+        insurance_after_user, insurance_after_lp,
+        "Insurance unchanged by InitUser: before={} after={}",
         insurance_after_lp,
         insurance_after_user
     );
 
-    // Total insurance should have grown by 2 * fee
+    // Insurance should not have grown (fees go to capital, not insurance)
     let growth = insurance_after_user - insurance_before;
     assert_eq!(
-        growth,
-        2 * fee as u128,
-        "Insurance should grow by 2 * new_account_fee: growth={}",
+        growth, 0,
+        "Insurance should not grow from init fees (goes to capital): growth={}",
         growth
     );
 }

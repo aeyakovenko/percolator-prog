@@ -3133,8 +3133,9 @@ fn test_attack_nonce_replay_same_trade() {
     );
 
     // Vault conservation must hold after both trades.
+    // Vault = LP deposit + user deposit + 2 init deposits (100 each)
     let vault = env.read_vault();
-    let expected_vault = 50_000_000_000u128 + 5_000_000_000u128; // LP + user deposits
+    let expected_vault = 50_000_000_000u128 + 5_000_000_000u128 + 200; // LP + user deposits + inits
     assert_eq!(
         vault, expected_vault,
         "ATTACK: Nonce handling violated vault conservation! vault={}, expected={}",
@@ -3454,9 +3455,10 @@ fn test_attack_hyperp_mark_price_clamp_defense() {
         "c_tot should equal sum of capitals: c_tot={} total={}",
         c_tot, total_cap
     );
-    // Capital sum should not exceed total deposits (conservation)
+    // Capital sum should not exceed total deposits (50B + 10B + 2 init deposits of 100 each)
+    let total_deposits = 60_000_000_000u128 + 200;
     assert!(
-        total_cap <= 60_000_000_000,
+        total_cap <= total_deposits,
         "ATTACK: Total capital exceeds total deposits after Hyperp trade! total={}",
         total_cap
     );
@@ -4846,7 +4848,8 @@ fn test_tradecpi_zero_fill_succeeds() {
     let lp_idx = {
         let idx = env.account_count;
         env.svm.airdrop(&lp.pubkey(), 1_000_000_000).unwrap();
-        let ata = env.create_ata(&lp.pubkey(), 0);
+        // min_initial_deposit requires at least 100 tokens
+        let ata = env.create_ata(&lp.pubkey(), 100);
 
         let lp_bytes = idx.to_le_bytes();
         let (lp_pda, _) =
@@ -4893,7 +4896,7 @@ fn test_tradecpi_zero_fill_succeeds() {
         );
         env.svm.send_transaction(tx).expect("init matcher context failed");
 
-        // Init LP in percolator
+        // Init LP in percolator (deposit 100 for min_initial_deposit)
         let ix = Instruction {
             program_id: env.program_id,
             accounts: vec![
@@ -4906,7 +4909,7 @@ fn test_tradecpi_zero_fill_succeeds() {
                 AccountMeta::new_readonly(mp, false),
                 AccountMeta::new_readonly(ctx, false),
             ],
-            data: encode_init_lp(&mp, &ctx, 0),
+            data: encode_init_lp(&mp, &ctx, 100),
         };
 
         let tx = Transaction::new_signed_with_payer(

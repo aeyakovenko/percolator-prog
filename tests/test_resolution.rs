@@ -697,7 +697,8 @@ fn test_resolved_crank_sweeps_dust_to_zero() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
 
     let user = Keypair::new();
-    let user_idx = env.init_user(&user);
+    // With unit_scale=1000, need 100*1000=100_000 base for min_initial_deposit
+    let user_idx = env.init_user_with_fee(&user, 100_000);
 
     // Deposit an amount that creates dust: 10_000_500 = 10_000 units + 500 dust
     env.deposit(&user, user_idx, 10_000_500);

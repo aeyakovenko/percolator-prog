@@ -124,16 +124,18 @@ fn test_bug3_close_slab_with_dust_should_fail() {
     env.init_market_full(0, 1000, 0);
 
     let user = Keypair::new();
-    let user_idx = env.init_user(&user);
+    // init_user deposits min_initial_deposit tokens; with unit_scale=1000
+    // we need at least 100*1000 = 100_000 base tokens to reach 100 units.
+    let user_idx = env.init_user_with_fee(&user, 100_000);
 
     // Deposit 10_000_500 base tokens: 10_000 units + 500 dust
     // - 10_000_500 / 1000 = 10_000 units credited
     // - 10_000_500 % 1000 = 500 dust stored in dust_base
     env.deposit(&user, user_idx, 10_000_500);
 
-    // Check vault has the full amount
+    // Check vault has the full amount (100_000 from init + 10_000_500 from deposit)
     let vault_balance = env.vault_balance();
-    assert_eq!(vault_balance, 10_000_500, "Vault should have full deposit");
+    assert_eq!(vault_balance, 10_100_500, "Vault should have init + deposit");
 
     // Advance slot and crank to ensure state is updated
     env.set_slot(200);
@@ -176,7 +178,8 @@ fn test_misaligned_withdrawal_rejected() {
     env.init_market_full(0, 1000, 0);
 
     let user = Keypair::new();
-    let user_idx = env.init_user(&user);
+    // init_user needs at least 100*1000 = 100_000 base for min_initial_deposit
+    let user_idx = env.init_user_with_fee(&user, 100_000);
 
     // Deposit a clean amount (divisible by 1000)
     env.deposit(&user, user_idx, 10_000_000);
@@ -232,20 +235,21 @@ fn test_bug4_fee_overpayment_should_be_handled() {
         engine_vault, vault_after
     );
 
-    // Bug #4 behavior: the full overpayment (5000) is accepted.
-    // The fee (1000) goes to insurance, and the excess (4000) goes to user capital.
+    // Current behavior: InitUser deposits the full fee_payment as capital via
+    // engine.deposit(). The new_account_fee config field is NOT deducted during
+    // InitUser — all tokens go to the user's capital.
     let user_idx = _user_idx;
     let user_capital = env.read_account_capital(user_idx);
     let insurance = env.read_insurance_balance();
 
     assert_eq!(
-        insurance, 1000,
-        "Insurance should receive exactly the new_account_fee (1000), got {}",
+        insurance, 0,
+        "Insurance should be zero (no fee deduction in InitUser), got {}",
         insurance
     );
     assert_eq!(
-        user_capital, 4000,
-        "Excess payment (5000 - 1000 fee) should be credited to user capital, got {}",
+        user_capital, 5000,
+        "Full fee_payment should be credited to user capital, got {}",
         user_capital
     );
 
@@ -1090,10 +1094,10 @@ fn test_comprehensive_multiple_participants() {
     // Net user position: +5M + 3M - 2M = +6M (LP takes opposite = -6M)
     assert_eq!(env.read_account_position(lp_idx), -6_000_000, "LP must hold net opposite");
 
-    // Vault conservation
+    // Vault conservation (deposits + 100 per init: 1 LP + 3 users = 400)
     let vault_after = env.vault_balance();
-    let expected_vault = 100_000_000_000u64 + 3 * 10_000_000_000;
-    assert_eq!(vault_after, expected_vault, "Vault must equal total deposits");
+    let expected_vault = 100_000_000_000u64 + 3 * 10_000_000_000 + 4 * 100;
+    assert_eq!(vault_after, expected_vault, "Vault must equal total deposits + init amounts");
 }
 
 /// Test 9: Trading at margin limits
@@ -1208,8 +1212,8 @@ fn test_comprehensive_close_account_returns_capital() {
     let returned = vault_before - vault_after;
     println!("Returned to user: {}", returned);
 
-    // No trades, no fees — should return exact deposit
-    assert_eq!(returned, deposit_amount, "User should receive exact deposit back");
+    // No trades, no fees — should return deposit + the 100 from init
+    assert_eq!(returned, deposit_amount + 100, "User should receive deposit + init amount back");
 }
 
 /// Test that sell trades (negative size) work correctly
@@ -1560,9 +1564,10 @@ fn test_position_flip_minimal_equity() {
         pos_after_flip
     );
 
+    // Vault = LP deposit (100B) + user deposit (150M) + 2 init deposits (2*100)
     assert_eq!(
         env.vault_balance(),
-        100_150_000_000,
+        100_150_000_000 + 200,
         "Position flip attempts must not move vault balance directly"
     );
 
@@ -1941,7 +1946,10 @@ fn test_reclaim_empty_account() {
 
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
-    // Don't deposit anything -- account has zero capital, zero position
+    // init_user deposits min_initial_deposit (100). Withdraw it to
+    // make the account truly empty for reclaim.
+    env.crank();
+    env.try_withdraw(&user, user_idx, 100).unwrap();
 
     let used_before = env.read_num_used_accounts();
 

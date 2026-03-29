@@ -4107,6 +4107,7 @@ pub mod processor {
                     let frozen_slot = engine.current_slot;
                     let funding_rate = compute_current_funding_rate(&config);
                     engine.close_account(user_idx, frozen_slot, price, funding_rate)
+                        .or_else(|_| engine.force_close_resolved(user_idx))
                         .map_err(map_risk_error)?
                 } else {
                     engine
@@ -4993,21 +4994,24 @@ pub mod processor {
 
                 check_idx(engine, user_idx)?;
 
-                // close_account_resolved handles position zeroing internally,
-                // so no position-zero precondition required.
-
                 // Read account owner pubkey and verify owner ATA
                 let owner_pubkey = Pubkey::new_from_array(engine.accounts[user_idx as usize].owner);
                 verify_token_account(a_owner_ata, &owner_pubkey, &mint)?;
 
-                // Try canonical close first (handles stale-epoch accounts).
-                // If that fails (same-epoch position), fall back to
-                // close_account_resolved (best-effort, may lose some PnL).
+                // Best-effort touch to settle K-pair PnL at settlement price.
+                // May fail for same-epoch accounts — that's fine, force_close_resolved
+                // handles settlement independently.
                 let frozen_slot = engine.current_slot;
+                let _ = engine.touch_account_full(user_idx as usize, price, frozen_slot);
+
+                // Try canonical close first (handles stale-epoch accounts
+                // where touch_account_full already zeroed the position).
+                // If that fails, fall back to force_close_resolved which
+                // zeroes position, settles PnL, and closes.
                 let funding_rate = compute_current_funding_rate(&config);
                 let amt_units = engine.close_account(
                     user_idx, frozen_slot, price, funding_rate,
-                ).or_else(|_| engine.close_account_resolved(user_idx))
+                ).or_else(|_| engine.force_close_resolved(user_idx))
                     .map_err(map_risk_error)?;
                 let amt_units_u64: u64 = amt_units
                     .try_into()

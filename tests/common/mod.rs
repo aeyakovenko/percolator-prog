@@ -500,6 +500,51 @@ impl TestEnv {
         idx
     }
 
+    pub fn init_lp_with_fee(&mut self, owner: &Keypair, fee: u64) -> u16 {
+        let idx = self.account_count;
+        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        let ata = self.create_ata(&owner.pubkey(), fee);
+        let matcher = spl_token::ID;
+        let ctx = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000,
+                    data: vec![0u8; 320],
+                    owner: matcher,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(matcher, false),
+                AccountMeta::new_readonly(ctx, false),
+            ],
+            data: encode_init_lp(&matcher, &ctx, fee),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_ix(), ix],
+            Some(&owner.pubkey()),
+            &[owner],
+            self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).expect("init_lp_with_fee failed");
+        self.account_count += 1;
+        idx
+    }
+
     pub fn init_user(&mut self, owner: &Keypair) -> u16 {
         let idx = self.account_count;
         self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();

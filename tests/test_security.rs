@@ -143,7 +143,8 @@ fn test_attack_withdraw_misaligned_amount() {
     env.init_market_full(0, 1000, 0); // unit_scale = 1000
 
     let user = Keypair::new();
-    let user_idx = env.init_user(&user);
+    // With unit_scale=1000, need 100*1000=100_000 base tokens for min_initial_deposit
+    let user_idx = env.init_user_with_fee(&user, 100_000);
     env.deposit(&user, user_idx, 10_000_000);
 
     env.set_slot(200);
@@ -1119,8 +1120,8 @@ fn test_attack_oracle_price_cap_circuit_breaker() {
     env.crank(); // Should not panic or corrupt state after price cap
     let vault_after = env.vault_balance();
     assert_eq!(
-        vault_after, 10_000_000_000,
-        "Vault should be intact after circuit breaker + crank"
+        vault_after, 10_000_000_100,
+        "Vault should be intact after circuit breaker + crank (includes init deposit)"
     );
 }
 
@@ -1481,7 +1482,8 @@ fn test_attack_dust_accumulation_theft() {
     env.init_market_full(0, 1000, 0); // unit_scale = 1000
 
     let user = Keypair::new();
-    let user_idx = env.init_user(&user);
+    // With unit_scale=1000, need 100*1000=100_000 base for min_initial_deposit
+    let user_idx = env.init_user_with_fee(&user, 100_000);
 
     let vault_before = env.vault_balance();
 
@@ -1542,8 +1544,8 @@ fn test_attack_fee_evasion_micro_trades() {
     // Trade attempts must never mint user capital.
     let capital = env.read_account_capital(user_idx);
     assert!(
-        capital <= 10_000_000_000u128,
-        "ATTACK: Micro trade should not increase capital beyond deposit: cap={}",
+        capital <= 10_000_000_200u128,
+        "ATTACK: Micro trade should not increase capital beyond deposit+init: cap={}",
         capital
     );
     let pos = env.read_account_position(user_idx);
@@ -1927,7 +1929,7 @@ fn test_attack_unit_scale_zero_no_dust() {
     env.deposit(&user, user_idx, 12_345_678);
 
     let vault = env.vault_balance();
-    assert_eq!(vault, 12_345_678, "Full deposit with unit_scale=0");
+    assert_eq!(vault, 12_345_778, "Full deposit with unit_scale=0 (includes 100 from init)");
 
     // Withdrawal should work for odd amounts
     let result = env.try_withdraw(&user, user_idx, 1_234_567);
@@ -1948,14 +1950,15 @@ fn test_attack_high_unit_scale_dust_boundary() {
     env.init_market_full(0, 1_000_000, 0); // 1M base per unit
 
     let user = Keypair::new();
-    let user_idx = env.init_user(&user);
+    // With unit_scale=1M, need 100*1M=100M base for min_initial_deposit
+    let user_idx = env.init_user_with_fee(&user, 100_000_000);
 
     // Deposit less than one full unit
     env.deposit(&user, user_idx, 500_000); // 0.5 units = all dust
 
     let capital = env.read_account_capital(user_idx);
-    // With 500k base and 1M per unit, capital should be 0 units
-    assert_eq!(capital, 0, "Sub-unit deposit should give 0 capital");
+    // With init deposit of 100M (=100 units) + 500k (=0 units), capital is 100
+    assert_eq!(capital, 100, "Init deposit gives 100 units; sub-unit deposit adds 0");
 
     // Cannot withdraw anything (no capital)
     let result = env.try_withdraw(&user, user_idx, 500_000);
@@ -2152,7 +2155,7 @@ fn test_attack_rapid_deposits_accounting() {
     let vault = env.vault_balance();
     assert_eq!(
         vault,
-        10 * amount_per_deposit,
+        10 * amount_per_deposit + 100,  // +100 from init deposit
         "Vault should have exactly 10 SOL after 10 deposits"
     );
 
@@ -2222,7 +2225,7 @@ fn test_attack_update_config_extreme_values() {
     env.crank();
 
     let vault = env.vault_balance();
-    assert_eq!(vault, 110_000_000_000,
+    assert_eq!(vault, 110_000_000_200,
         "ATTACK: Engine should remain functional with consistent vault after extreme config. Got {}", vault);
 }
 
@@ -2470,8 +2473,8 @@ fn test_attack_oracle_authority_disable_clears_price() {
     env.crank();
     assert_eq!(
         env.vault_balance(),
-        10_000_000_000,
-        "Market still functional"
+        10_000_000_100,
+        "Market still functional (includes init deposit)"
     );
 }
 
@@ -2524,8 +2527,8 @@ fn test_attack_oracle_authority_change_with_positions() {
     env.crank();
     let vault = env.vault_balance();
     assert_eq!(
-        vault, 110_000_000_000,
-        "Vault intact after authority change"
+        vault, 110_000_000_200,
+        "Vault intact after authority change (includes init deposits)"
     );
 }
 
@@ -2644,7 +2647,7 @@ fn test_attack_oracle_cap_ultra_restrictive() {
     env.crank();
     assert_eq!(
         env.vault_balance(),
-        10_000_000_000,
+        10_000_000_100,
         "Market should remain functional after ultra-restrictive cap clamping"
     );
 }
@@ -2686,7 +2689,9 @@ fn test_attack_user_gc_when_empty() {
 
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
-    // Don't deposit - user has zero everything
+    // init_user deposits min_initial_deposit (100). Withdraw it to
+    // make the account truly empty for GC.
+    env.withdraw(&user, user_idx, 100);
 
     // Crank to trigger GC
     env.set_slot(200);
@@ -3188,8 +3193,8 @@ fn test_attack_deposit_to_lp_account() {
     // Vault should have the tokens
     assert_eq!(
         env.vault_balance(),
-        10_000_000_000,
-        "Vault should have LP deposit"
+        10_000_000_100,
+        "Vault should have LP deposit + init"
     );
 }
 
@@ -3399,8 +3404,8 @@ fn test_attack_init_lp_after_resolution() {
     assert_eq!(vault_after, vault_before, "Rejected InitLP must not move vault funds");
 }
 
-/// ATTACK: InitUser with zero fee_payment and verify clean initialization.
-/// Expected: Account created with zero capital (fee_payment=0 is valid).
+/// InitUser with min_initial_deposit (100 tokens) and verify clean initialization.
+/// Expected: Account created with capital=100 (min_initial_deposit enforced).
 #[test]
 fn test_attack_init_user_zero_fee() {
     program_path();
@@ -3408,19 +3413,19 @@ fn test_attack_init_user_zero_fee() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    // Default init_user uses fee=0 (which is what we want to test)
+    // init_user deposits min_initial_deposit (100 tokens)
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
 
     let capital = env.read_account_capital(user_idx);
-    assert_eq!(capital, 0, "Account with zero fee should have zero capital");
+    assert_eq!(capital, 100, "Account should have min_initial_deposit capital");
 
-    // Should still be able to deposit after
+    // Should still be able to deposit more after init
     env.deposit(&user, user_idx, 1_000_000_000);
     let capital_after = env.read_account_capital(user_idx);
     assert!(
-        capital_after > 0,
-        "Should be able to deposit after zero-fee init"
+        capital_after > 100,
+        "Should be able to deposit after init"
     );
 }
 
@@ -3443,8 +3448,8 @@ fn test_attack_multi_user_withdraw_same_slot() {
 
     let vault_before = env.vault_balance();
     assert_eq!(
-        vault_before, 20_000_000_000,
-        "Both deposits should be in vault"
+        vault_before, 20_000_000_200,
+        "Both deposits should be in vault (includes init deposits)"
     );
 
     // Both withdraw max capital
@@ -3462,10 +3467,11 @@ fn test_attack_multi_user_withdraw_same_slot() {
         result2
     );
 
+    // Each user had init deposit of 100 that wasn't withdrawn, so 200 remains
     let vault_after = env.vault_balance();
     assert_eq!(
-        vault_after, 0,
-        "Vault should be empty after both full withdrawals"
+        vault_after, 200,
+        "Vault should have only init deposits remaining after full withdrawals"
     );
 }
 
@@ -3521,18 +3527,18 @@ fn test_attack_cross_market_isolation() {
     env2.deposit(&user2, user2_idx, 5_000_000_000);
 
     // Verify independent vaults
-    assert_eq!(env1.vault_balance(), 10_000_000_000, "Market 1 vault");
-    assert_eq!(env2.vault_balance(), 5_000_000_000, "Market 2 vault");
+    assert_eq!(env1.vault_balance(), 10_000_000_100, "Market 1 vault (+ init)");
+    assert_eq!(env2.vault_balance(), 5_000_000_100, "Market 2 vault (+ init)");
 
     // Withdraw from market 1 doesn't affect market 2
     env1.try_withdraw(&user1, user1_idx, 5_000_000_000)
         .expect("cross-market withdrawal in market 1 must succeed");
     assert_eq!(
         env1.vault_balance(),
-        5_000_000_000,
-        "Market 1 after withdraw"
+        5_000_000_100,
+        "Market 1 after withdraw (init deposit remains)"
     );
-    assert_eq!(env2.vault_balance(), 5_000_000_000, "Market 2 unaffected");
+    assert_eq!(env2.vault_balance(), 5_000_000_100, "Market 2 unaffected");
 }
 
 /// ATTACK: Send instruction to wrong program_id's slab.
@@ -3581,7 +3587,7 @@ fn test_attack_wrong_slab_program_id() {
     assert!(result.is_ok(), "Withdraw should succeed after restoring slab owner: {:?}", result);
     assert_eq!(
         env.vault_balance(),
-        500_000_000,
+        500_000_100,
         "Vault should reflect a single successful withdrawal after restore"
     );
 }
@@ -3635,7 +3641,7 @@ fn test_attack_self_trade_same_index() {
     // Either rejected or no-op - vault must be intact
     assert_eq!(
         env.vault_balance(),
-        100_000_000_000,
+        100_000_000_100,
         "ATTACK: Self-trade should not affect vault"
     );
 }
@@ -3794,7 +3800,7 @@ fn test_attack_warmup_prevents_immediate_profit_withdrawal() {
     env.crank();
 
     // Vault conservation: no tokens created or destroyed through trade lifecycle
-    let total_deposited = 10_000_000_000u64 + 100_000_000_000u64;
+    let total_deposited = 10_000_000_000u64 + 100_000_000_000u64 + 200; // +200 from 2 init deposits
     let vault = env.vault_balance();
     assert_eq!(
         vault, total_deposited,
@@ -3892,7 +3898,7 @@ fn test_attack_withdraw_from_others_account() {
     // Victim's capital unchanged
     let victim_capital = env.read_account_capital(victim_idx);
     assert_eq!(
-        victim_capital, 5_000_000_000,
+        victim_capital, 5_000_000_100,
         "ATTACK: Victim's capital changed after attacker's failed withdrawal! capital={}",
         victim_capital
     );
@@ -4002,7 +4008,7 @@ fn test_attack_close_others_account() {
     // Victim's capital should be intact
     let victim_capital = env.read_account_capital(victim_idx);
     assert_eq!(
-        victim_capital, 5_000_000_000,
+        victim_capital, 5_000_000_100,
         "Victim's capital should be unchanged after failed close attempt"
     );
 }
@@ -4229,7 +4235,7 @@ fn test_attack_entry_price_across_position_flip() {
     let user_cap = env.read_account_capital(user_idx);
     let lp_cap = env.read_account_capital(lp_idx);
     assert!(
-        user_cap + lp_cap <= 20_000_000_000,
+        user_cap + lp_cap <= 20_000_000_200,
         "ATTACK: Position flip created value! User + LP capital exceeds deposits"
     );
 }
@@ -4414,6 +4420,8 @@ fn test_attack_slot_reuse_clean_state_after_gc() {
     // Create user at index 1
     let user1 = Keypair::new();
     let user1_idx = env.init_user(&user1);
+    // Withdraw init deposit to make user truly empty for GC
+    env.withdraw(&user1, user1_idx, 100);
 
     env.crank();
 
@@ -4444,8 +4452,8 @@ fn test_attack_slot_reuse_clean_state_after_gc() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 10_000_000_000,
-        "ATTACK: Vault should only have LP deposit!"
+        spl_vault, 10_000_000_100,
+        "ATTACK: Vault should only have LP deposit + init!"
     );
 }
 
@@ -4494,7 +4502,7 @@ fn test_attack_crank_freshness_boundary() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 20_000_000_000,
+        spl_vault, 20_000_000_200,
         "ATTACK: Vault balance changed due to timing attack!"
     );
 }
@@ -4570,7 +4578,7 @@ fn test_attack_circuit_breaker_first_price_extreme() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 20_000_000_000,
+        spl_vault, 20_000_000_200,
         "ATTACK: Vault balance changed with extreme first price!"
     );
 
@@ -4686,7 +4694,7 @@ fn test_attack_price_oscillation_precision_loss() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 20_000_000_000,
+        spl_vault, 20_000_000_200,
         "ATTACK: SPL vault changed after round-trip trades! vault={}",
         spl_vault
     );
@@ -4694,7 +4702,7 @@ fn test_attack_price_oscillation_precision_loss() {
     let user_cap = env.read_account_capital(user_idx);
     let lp_cap = env.read_account_capital(lp_idx);
     assert!(
-        user_cap + lp_cap <= 20_000_000_000,
+        user_cap + lp_cap <= 20_000_000_200,
         "ATTACK: Total capital exceeds deposits after oscillation! user={} lp={}",
         user_cap,
         lp_cap
@@ -4738,7 +4746,7 @@ fn test_attack_withdraw_exact_capital_no_position() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 10_000_000_000,
+        spl_vault, 10_000_000_100,
         "ATTACK: SPL vault has wrong balance after full withdrawal! vault={}",
         spl_vault
     );
@@ -4801,18 +4809,19 @@ fn test_attack_max_unit_scale_operations() {
     env.init_market_full(0, 1000, 0);
 
     let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
+    // With unit_scale=1000, need 100*1000=100_000 base for min_initial_deposit
+    let lp_idx = env.init_lp_with_fee(&lp, 100_000);
     env.deposit(&lp, lp_idx, 10_000_000); // 10M base = 10K units
 
     let user = Keypair::new();
-    let user_idx = env.init_user(&user);
+    let user_idx = env.init_user_with_fee(&user, 100_000);
     env.deposit(&user, user_idx, 5_000_000); // 5M base = 5K units
 
     env.crank();
 
-    // Capital should be in units (5M / 1000 = 5000 units)
+    // Capital should be in units: 100 from init + 5000 from deposit = 5100 units
     let user_cap = env.read_account_capital(user_idx);
-    assert_eq!(user_cap, 5000, "Capital should be 5000 units at scale=1000");
+    assert_eq!(user_cap, 5100, "Capital should be 100 (init) + 5000 (deposit) units at scale=1000");
 
     // Withdrawal must be aligned to unit_scale
     let bad_withdraw = env.try_withdraw(&user, user_idx, 500); // Not aligned (500 % 1000 != 0)
@@ -4827,8 +4836,8 @@ fn test_attack_max_unit_scale_operations() {
 
     let cap_after = env.read_account_capital(user_idx);
     assert_eq!(
-        cap_after, 4999,
-        "Capital should be 4999 units after withdrawing 1"
+        cap_after, 5099,
+        "Capital should be 5099 units after withdrawing 1 (includes 100 from init)"
     );
 }
 
@@ -4937,7 +4946,7 @@ fn test_attack_same_slot_open_close_timing() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 20_000_000_000,
+        spl_vault, 20_000_000_200,
         "ATTACK: SPL vault changed from same-slot trades!"
     );
 }
@@ -4991,7 +5000,7 @@ fn test_attack_c_tot_sync_after_deposits_and_trades() {
         let vault_data = env.svm.get_account(&env.vault).unwrap().data;
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
-    assert_eq!(spl_vault, 28_000_000_000, "ATTACK: SPL vault changed!");
+    assert_eq!(spl_vault, 28_000_000_300, "ATTACK: SPL vault changed! (includes 3 init deposits)");
 }
 
 /// ATTACK: Verify pnl_pos_tot tracks only positive PnL accounts.
@@ -5082,7 +5091,7 @@ fn test_attack_warmup_zero_period_instant_conversion() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 25_000_000_000,
+        spl_vault, 25_000_000_200,
         "ATTACK: SPL vault changed with instant warmup! vault={}",
         spl_vault
     );
@@ -5163,7 +5172,7 @@ fn test_attack_position_flip_warmup_reset() {
     };
     assert_eq!(
         spl_vault,
-        26_000_000_000, // 20B + 5B + 1B insurance
+        26_000_000_200, // 20B + 5B + 1B insurance + 200 init deposits
         "ATTACK: SPL vault changed during position flip!"
     );
 
@@ -5246,12 +5255,12 @@ fn test_attack_account_reinit_after_gc_clean_state() {
     // User2 and User3 capitals unchanged (no cross-contamination)
     assert_eq!(
         env.read_account_capital(u2_idx),
-        3_000_000_000,
+        3_000_000_100,
         "ATTACK: User2 capital changed from User1's trade!"
     );
     assert_eq!(
         env.read_account_capital(u3_idx),
-        2_000_000_000,
+        2_000_000_100,
         "ATTACK: User3 capital changed from User1's trade!"
     );
 
@@ -5301,7 +5310,7 @@ fn test_attack_withdraw_margin_boundary_consistency() {
     // Verify capital is unchanged
     let cap_after = env.read_account_capital(user_idx);
     assert_eq!(
-        cap_after, 5_000_000_000,
+        cap_after, 5_000_000_100,
         "ATTACK: Failed withdrawal changed capital!"
     );
 
@@ -5328,8 +5337,8 @@ fn test_attack_withdraw_margin_boundary_consistency() {
     };
     assert_eq!(
         spl_vault,
-        25_000_000_000 - withdrawn_amount,
-        "ATTACK: SPL vault mismatch after withdrawal!"
+        25_000_000_200 - withdrawn_amount,
+        "ATTACK: SPL vault mismatch after withdrawal (includes init deposits)!"
     );
 }
 
@@ -5372,7 +5381,7 @@ fn test_attack_permissionless_crank_no_value_extraction() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 25_000_000_000,
+        spl_vault, 25_000_000_200,
         "ATTACK: SPL vault changed from permissionless cranks!"
     );
 
@@ -5422,7 +5431,7 @@ fn test_attack_double_close_account_same_index() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert!(
-        spl_vault <= 10_000_000_000,
+        spl_vault <= 10_000_000_200,
         "ATTACK: SPL vault has too much after close! vault={}",
         spl_vault
     );
@@ -5463,7 +5472,7 @@ fn test_attack_deposit_to_closed_account_index() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert!(
-        spl_vault <= 10_000_000_000,
+        spl_vault <= 10_000_000_200,
         "ATTACK: SPL vault increased from deposit to closed account!"
     );
 }
@@ -5681,7 +5690,7 @@ fn test_attack_config_extreme_funding_max_bps() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 26_000_000_000,
+        spl_vault, 26_000_000_200,
         "ATTACK: SPL vault changed after extreme config! vault={}",
         spl_vault
     );
@@ -5821,7 +5830,7 @@ fn test_attack_multi_lp_position_tracking() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 51_000_000_000,
+        spl_vault, 51_000_000_300,
         "ATTACK: SPL vault wrong with multiple LPs!"
     );
 }
@@ -6112,7 +6121,7 @@ fn test_attack_liquidation_after_price_crash() {
     };
     // 100B + 5B + 10B insurance = 115B
     assert_eq!(
-        spl_vault, 115_000_000_000,
+        spl_vault, 115_000_000_200,
         "ATTACK: SPL vault changed during liquidation!"
     );
 }
@@ -6269,7 +6278,7 @@ fn test_attack_warmup_period_zero_instant_settlement() {
     };
     assert_eq!(
         spl_vault,
-        26_000_000_000 - withdraw_amount,
+        26_000_000_200 - withdraw_amount,
         "ATTACK: SPL vault mismatch after immediate warmup=0 profit withdrawal!"
     );
 }
@@ -6338,7 +6347,7 @@ fn test_attack_same_slot_triple_crank_convergence() {
         let vault_data = env.svm.get_account(&env.vault).unwrap().data;
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
-    assert_eq!(spl_vault, 26_000_000_000);
+    assert_eq!(spl_vault, 26_000_000_200);
 }
 
 /// ATTACK: Funding rate with extreme k_bps.
@@ -6418,7 +6427,7 @@ fn test_attack_funding_extreme_k_bps_capped() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 26_000_000_000,
+        spl_vault, 26_000_000_200,
         "ATTACK: SPL vault changed with extreme k_bps!"
     );
 }
@@ -6500,7 +6509,7 @@ fn test_attack_funding_extreme_max_premium_capped() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 26_000_000_000,
+        spl_vault, 26_000_000_200,
         "ATTACK: SPL vault changed with extreme max_premium!"
     );
 }
@@ -6579,7 +6588,7 @@ fn test_attack_funding_extreme_max_bps_per_slot() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 26_000_000_000,
+        spl_vault, 26_000_000_200,
         "ATTACK: SPL vault changed with extreme max_bps_per_slot!"
     );
 }
@@ -6853,7 +6862,7 @@ fn test_attack_multiple_oracle_updates_between_cranks() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 26_000_000_000,
+        spl_vault, 26_000_000_200,
         "ATTACK: SPL vault changed after multiple oracle updates!"
     );
 }
@@ -6966,7 +6975,7 @@ fn test_attack_rapid_position_reversals() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 65_000_000_000,
+        spl_vault, 65_000_000_200,
         "ATTACK: SPL vault wrong after rapid reversals!"
     );
 }
@@ -7075,7 +7084,7 @@ fn test_attack_multiple_withdrawals_same_slot() {
     // Should have 5B - 3B = 2B remaining
     // (capital might differ due to fee settlement, but should be around 2B)
     assert!(
-        user_cap <= 2_000_000_000,
+        user_cap <= 2_000_000_100,
         "ATTACK: Capital not properly decremented after multiple withdrawals: {}",
         user_cap
     );
@@ -7084,13 +7093,13 @@ fn test_attack_multiple_withdrawals_same_slot() {
     let result = env.try_withdraw(&user, user_idx, 3_000_000_000); // More than remaining
     assert!(result.is_err(), "ATTACK: Over-withdrawal should fail!");
 
-    // SPL vault: 10B + 5B - 3B = 12B
+    // SPL vault: 10B + 5B - 3B + 200 (2 init deposits) = 12B + 200
     let spl_vault = {
         let vault_data = env.svm.get_account(&env.vault).unwrap().data;
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 12_000_000_000,
+        spl_vault, 12_000_000_200,
         "ATTACK: SPL vault wrong after multiple withdrawals!"
     );
 }
@@ -7206,7 +7215,7 @@ fn test_attack_funding_accrue_huge_dt_capped() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 65_000_000_000,
+        spl_vault, 65_000_000_200,
         "ATTACK: SPL vault changed after huge dt funding!"
     );
 
@@ -7224,11 +7233,12 @@ fn test_attack_large_unit_scale_no_overflow() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
 
     let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
+    // With unit_scale=1M, need 100*1M=100M base for min_initial_deposit
+    let lp_idx = env.init_lp_with_fee(&lp, 100_000_000);
     env.deposit(&lp, lp_idx, 20_000_000_000);
 
     let user = Keypair::new();
-    let user_idx = env.init_user(&user);
+    let user_idx = env.init_user_with_fee(&user, 100_000_000);
     env.deposit(&user, user_idx, 5_000_000_000);
 
     env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
@@ -7256,8 +7266,8 @@ fn test_attack_large_unit_scale_no_overflow() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 26_000_000_000,
-        "ATTACK: SPL vault changed with unit_scale=1M!"
+        spl_vault, 26_200_000_000,
+        "ATTACK: SPL vault changed with unit_scale=1M (includes init deposits)!"
     );
 }
 
@@ -7311,7 +7321,7 @@ fn test_attack_inverted_market_extreme_high_oracle() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 26_000_000_000,
+        spl_vault, 26_000_000_200,
         "ATTACK: SPL vault changed despite extreme inverted price!"
     );
 }
@@ -7355,7 +7365,7 @@ fn test_attack_same_owner_multiple_accounts_isolation() {
     // user2 capital unchanged
     let user2_cap = env.read_account_capital(user2_idx);
     assert_eq!(
-        user2_cap, 3_000_000_000,
+        user2_cap, 3_000_000_100,
         "ATTACK: user2 capital changed from user1's trade: {}",
         user2_cap
     );
@@ -7596,7 +7606,7 @@ fn test_attack_incremental_funding_across_many_slots() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 26_000_000_000,
+        spl_vault, 26_000_000_200,
         "ATTACK: SPL vault changed after incremental funding!"
     );
 }
@@ -7655,7 +7665,7 @@ fn test_attack_inverted_market_pnl_direction() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 106_000_000_000,
+        spl_vault, 106_000_000_200,
         "ATTACK: SPL vault changed during inverted market settlement!"
     );
 
@@ -8087,17 +8097,17 @@ fn test_attack_double_deposit_accumulation() {
     env.crank();
 
     let cap1 = env.read_account_capital(user_idx);
-    assert_eq!(cap1, 3_000_000_000, "First deposit amount");
+    assert_eq!(cap1, 3_000_000_100, "First deposit amount (includes 100 from init)");
 
     // Second deposit (different slot to avoid collision)
     env.set_slot(2);
     env.deposit(&user, user_idx, 2_000_000_000);
     let cap2 = env.read_account_capital(user_idx);
-    assert_eq!(cap2, 5_000_000_000, "Second deposit should accumulate");
+    assert_eq!(cap2, 5_000_000_100, "Second deposit should accumulate (includes init)");
 
-    // Full withdrawal
+    // Full withdrawal (5B deposit + 100 init)
     env.set_slot(3);
-    env.try_withdraw(&user, user_idx, 5_000_000_000).unwrap();
+    env.try_withdraw(&user, user_idx, 5_000_000_100).unwrap();
     let cap_final = env.read_account_capital(user_idx);
     assert_eq!(cap_final, 0, "Full withdrawal should zero capital");
 }
@@ -8462,7 +8472,7 @@ fn test_attack_funding_across_position_size_change() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 61_000_000_000,
+        spl_vault, 61_000_000_200,
         "ATTACK: SPL vault changed during funding with position changes!"
     );
 }
@@ -8543,7 +8553,7 @@ fn test_attack_lp_multiple_deposits_then_trade() {
     env.set_slot(2);
     env.deposit(&lp, lp_idx, 5_000_000_000);
     let lp_cap = env.read_account_capital(lp_idx);
-    assert_eq!(lp_cap, 15_000_000_000, "LP capital should accumulate");
+    assert_eq!(lp_cap, 15_000_000_100, "LP capital should accumulate (includes 100 from init)");
 
     // User trades against the well-funded LP
     let user = Keypair::new();
@@ -8588,7 +8598,7 @@ fn test_attack_full_account_lifecycle_sequence() {
     env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
     env.crank();
 
-    assert_eq!(env.read_account_capital(user_idx), 5_000_000_000);
+    assert_eq!(env.read_account_capital(user_idx), 5_000_000_100);
 
     // 2. Trade
     env.set_slot(2);
@@ -8729,7 +8739,7 @@ fn test_attack_trade_at_extreme_high_price() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 61_000_000_000,
+        spl_vault, 61_000_000_200,
         "ATTACK: SPL vault changed at extreme high price!"
     );
 }
@@ -8780,7 +8790,7 @@ fn test_attack_trade_at_extreme_low_price() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 61_000_000_000,
+        spl_vault, 61_000_000_200,
         "ATTACK: SPL vault changed at extreme low price!"
     );
 }
@@ -9860,8 +9870,8 @@ fn test_attack_withdraw_wrong_token_program() {
     // Verify capital unchanged
     let cap = env.read_account_capital(user_idx);
     assert_eq!(
-        cap, 5_000_000_000,
-        "Capital should be unchanged after failed withdraw"
+        cap, 5_000_000_100,
+        "Capital should be unchanged after failed withdraw (includes init)"
     );
 }
 
@@ -9990,11 +10000,12 @@ fn test_attack_scale_price_zero_rejects_trade() {
     env.init_market_full(0, unit_scale, 0);
 
     let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
+    // With unit_scale=200M, need 100*200M=20B base for min_initial_deposit
+    let lp_idx = env.init_lp_with_fee(&lp, 20_000_000_000);
     env.deposit(&lp, lp_idx, 50_000_000_000);
 
     let user = Keypair::new();
-    let user_idx = env.init_user(&user);
+    let user_idx = env.init_user_with_fee(&user, 20_000_000_000);
     env.deposit(&user, user_idx, 5_000_000_000);
     let lp_cap_before = env.read_account_capital(lp_idx);
     let user_cap_before = env.read_account_capital(user_idx);
@@ -10325,7 +10336,8 @@ fn test_attack_withdraw_scale_minus_one_misaligned() {
     env.init_market_full(0, 1000, 0); // unit_scale = 1000
 
     let user = Keypair::new();
-    let user_idx = env.init_user(&user);
+    // With unit_scale=1000, need 100*1000=100_000 base for min_initial_deposit
+    let user_idx = env.init_user_with_fee(&user, 100_000);
     env.deposit(&user, user_idx, 5_000_000_000);
 
     // Try withdrawing 999 (scale - 1), which is not aligned to unit_scale=1000
@@ -10335,10 +10347,10 @@ fn test_attack_withdraw_scale_minus_one_misaligned() {
         "ATTACK: Withdraw of scale-1 amount should fail alignment check!"
     );
 
-    // Capital unchanged (stored in units: 5B / unit_scale=1000 = 5M)
+    // Capital unchanged (stored in units: 100 from init + 5B / 1000 = 5M from deposit = 5_000_100)
     let cap = env.read_account_capital(user_idx);
     assert_eq!(
-        cap, 5_000_000,
+        cap, 5_000_100,
         "Capital unchanged after failed misaligned withdraw"
     );
 }
@@ -10477,7 +10489,7 @@ fn test_attack_deposit_and_crank_same_slot_no_exploit() {
     // Capital should reflect both deposits (no erosion from same-slot crank)
     let cap = env.read_account_capital(user_idx);
     assert_eq!(
-        cap, 5_000_000_000,
+        cap, 5_000_000_100,
         "Capital should equal total deposits after same-slot crank: cap={}",
         cap
     );
@@ -10584,7 +10596,7 @@ fn test_attack_price_whipsaw_between_cranks() {
     // At $138, PnL ≈ 0 (same as entry)
     let cap = env.read_account_capital(user_idx);
     assert!(
-        cap <= 10_000_000_000,
+        cap <= 10_000_000_100,
         "Capital should not increase: cap={}",
         cap
     );
@@ -10988,7 +11000,7 @@ fn test_attack_push_oracle_same_as_last_price() {
     // State should be stable (no drift from repeated same-price pushes)
     let vault = env.vault_balance();
     assert_eq!(
-        vault, 20_000_000_000,
+        vault, 20_000_000_100,
         "Vault should not change from repeated same-price pushes: vault={}",
         vault
     );
@@ -11630,8 +11642,8 @@ fn test_attack_slot_reuse_multi_user_gc_reinit() {
     env.set_slot(1);
     env.trade(&user2, &lp, lp_idx, user2_idx, 2_000_000);
 
-    // Withdraw all of user1's capital → now zero capital, zero position
-    env.try_withdraw(&user1, user1_idx, 5_000_000_000).unwrap();
+    // Withdraw all of user1's capital (5B deposit + 100 init) → zero capital
+    env.try_withdraw(&user1, user1_idx, 5_000_000_100).unwrap();
 
     // Crank to GC user1 (zero everything)
     env.set_slot(200);
@@ -12461,7 +12473,7 @@ fn test_attack_withdraw_all_with_open_position() {
     // Capital should be unchanged
     let cap = env.read_account_capital(user_idx);
     assert_eq!(
-        cap, 10_000_000_000,
+        cap, 10_000_000_100,
         "Capital should be unchanged after failed withdrawal: cap={}",
         cap
     );
@@ -12584,8 +12596,8 @@ fn test_attack_withdraw_all_redeposit_same_slot() {
 
     let vault_before = env.vault_balance();
 
-    // Withdraw everything then re-deposit same amount in same slot
-    env.try_withdraw(&user, user_idx, 5_000_000_000).unwrap();
+    // Withdraw everything (5B deposit + 100 init) then re-deposit in same slot
+    env.try_withdraw(&user, user_idx, 5_000_000_100).unwrap();
     let cap_mid = env.read_account_capital(user_idx);
     assert_eq!(
         cap_mid, 0,
@@ -12593,10 +12605,10 @@ fn test_attack_withdraw_all_redeposit_same_slot() {
         cap_mid
     );
 
-    env.deposit(&user, user_idx, 5_000_000_000);
+    env.deposit(&user, user_idx, 5_000_000_100);
     let cap_after = env.read_account_capital(user_idx);
     assert_eq!(
-        cap_after, 5_000_000_000,
+        cap_after, 5_000_000_100,
         "Capital should be restored after re-deposit: {}",
         cap_after
     );
@@ -12814,8 +12826,8 @@ fn test_attack_deposit_withdraw_deposit_cycle_aggregates() {
     // Verify per-account capital
     let user_cap = env.read_account_capital(user_idx);
     assert_eq!(
-        user_cap, 3_000_000_000,
-        "User capital should be 3B after cycle: {}",
+        user_cap, 3_000_000_100,
+        "User capital should be 3B after cycle (includes init): {}",
         user_cap
     );
 }
@@ -13040,8 +13052,8 @@ fn test_attack_deposit_to_lp_wrong_owner() {
     // LP capital should be zero (never deposited)
     let lp_cap = env.read_account_capital(lp_idx);
     assert_eq!(
-        lp_cap, 0,
-        "LP capital should be 0 after failed unauthorized deposit: cap={}",
+        lp_cap, 100,
+        "LP capital should be 100 (init deposit) after failed unauthorized deposit: cap={}",
         lp_cap
     );
 }

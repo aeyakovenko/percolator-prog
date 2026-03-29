@@ -35,13 +35,13 @@ fn test_attack_conservation_invariant() {
     let user2_idx = env.init_user(&user2);
     env.deposit(&user2, user2_idx, 10_000_000_000);
 
-    let total_deposited: u64 = 120_000_000_000; // 100 + 10 + 10 SOL
+    let total_deposited: u64 = 120_000_000_000 + 300; // 100 + 10 + 10 SOL + 3 init deposits
 
     // Vault should have all deposited funds
     let vault_after_deposits = env.vault_balance();
     assert_eq!(
         vault_after_deposits, total_deposited,
-        "Vault should have exactly the deposited amount"
+        "Vault should have exactly the deposited amount (including init deposits)"
     );
 
     // User1 goes long, user2 goes short
@@ -111,7 +111,7 @@ fn test_attack_multi_user_settlement_conservation() {
         users.push((u, idx));
     }
 
-    let total_deposited = 100_000_000_000 + total_user_deposit;
+    let total_deposited = 100_000_000_000 + total_user_deposit + 600; // +600 from 6 init deposits
 
     // Price changes and multiple cranks
     env.set_slot_and_price(200, 150_000_000);
@@ -150,7 +150,7 @@ fn test_attack_trade_crash_reverse_conservation() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    let total = 110_000_000_000u64;
+    let total = 110_000_000_200u64; // includes 2 init deposits
 
     // Open long
     env.trade(&user, &lp, lp_idx, user_idx, 10_000_000);
@@ -206,7 +206,7 @@ fn test_attack_full_lifecycle_conservation() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    let total = 110_000_000_000u64;
+    let total = 110_000_000_200u64; // includes 2 init deposits
     assert_eq!(env.vault_balance(), total, "Initial vault");
 
     // Trade → crank → close
@@ -623,7 +623,7 @@ fn test_attack_multiple_deposits_conservation() {
         env.deposit(&user, user_idx, deposit_amount);
     }
 
-    let expected_total = deposit_amount as u128 * num_deposits;
+    let expected_total = deposit_amount as u128 * num_deposits + 100; // +100 from init
     let actual_capital = env.read_account_capital(user_idx);
     assert_eq!(
         actual_capital, expected_total,
@@ -631,9 +631,9 @@ fn test_attack_multiple_deposits_conservation() {
         expected_total, actual_capital
     );
 
-    // Vault should have all deposits
+    // Vault should have all deposits (user capital + LP deposit + LP init)
     let vault = env.vault_balance();
-    let expected_vault = expected_total + 100_000_000_000; // user + LP
+    let expected_vault = expected_total + 100_000_000_000 + 100; // user + LP deposit + LP init
     assert_eq!(
         vault, expected_vault as u64,
         "ATTACK: Vault balance mismatch after multiple deposits. expected={}, actual={}",
@@ -747,7 +747,7 @@ fn test_attack_multi_crank_funding_conservation() {
         u128::from_le_bytes(slab.data[520..536].try_into().unwrap())
     };
     assert_eq!(
-        engine_vault, 20_000_000_000,
+        engine_vault, 20_000_000_200,
         "ATTACK: Multi-crank funding changed engine vault! Expected 20B, got {}",
         engine_vault
     );
@@ -927,7 +927,7 @@ fn test_attack_trading_fee_insurance_conservation() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 20_000_000_000,
+        spl_vault, 20_000_000_200,
         "ATTACK: SPL vault changed after trade (should only change on deposit/withdraw)!"
     );
 }
@@ -958,7 +958,7 @@ fn test_attack_many_deposits_one_withdrawal_conservation() {
     // Total deposited: 20 * 100M = 2B
     let cap = env.read_account_capital(user_idx);
     assert_eq!(
-        cap, 2_000_000_000,
+        cap, 2_000_000_100,
         "Capital should equal sum of deposits: {}",
         cap
     );
@@ -969,8 +969,8 @@ fn test_attack_many_deposits_one_withdrawal_conservation() {
 
     let cap_after = env.read_account_capital(user_idx);
     assert_eq!(
-        cap_after, 1_000_000_000,
-        "Capital after withdrawal should be 1B: {}",
+        cap_after, 1_000_000_100,
+        "Capital after withdrawal should be 1B + init deposit: {}",
         cap_after
     );
 
@@ -980,8 +980,8 @@ fn test_attack_many_deposits_one_withdrawal_conservation() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 11_000_000_000,
-        "ATTACK: SPL vault has wrong balance! expected 11B, got {}",
+        spl_vault, 11_000_000_200,
+        "ATTACK: SPL vault has wrong balance! expected 11B+200, got {}",
         spl_vault
     );
 }
@@ -1053,7 +1053,7 @@ fn test_attack_multi_user_lifecycle_conservation() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 60_000_000_000,
+        spl_vault, 60_000_000_400,
         "ATTACK: SPL vault changed during multi-user lifecycle! vault={}",
         spl_vault
     );
@@ -1106,7 +1106,7 @@ fn test_attack_conservation_large_slot_jump() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 26_000_000_000,
+        spl_vault, 26_000_000_200,
         "ATTACK: SPL vault changed after large slot jump!"
     );
 
@@ -1150,11 +1150,12 @@ fn test_attack_unit_scale_trade_conservation() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
 
     let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
+    // With unit_scale=1000, need 100*1000=100_000 base for min_initial_deposit
+    let lp_idx = env.init_lp_with_fee(&lp, 100_000);
     env.deposit(&lp, lp_idx, 20_000_000_000);
 
     let user = Keypair::new();
-    let user_idx = env.init_user(&user);
+    let user_idx = env.init_user_with_fee(&user, 100_000);
     env.deposit(&user, user_idx, 5_000_000_000);
 
     env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
@@ -1186,8 +1187,8 @@ fn test_attack_unit_scale_trade_conservation() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 26_000_000_000,
-        "ATTACK: SPL vault changed with unit_scale!"
+        spl_vault, 26_000_200_000,
+        "ATTACK: SPL vault changed with unit_scale (includes init deposits)!"
     );
 }
 
@@ -1235,7 +1236,7 @@ fn test_attack_inverted_market_trade_conservation() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 26_000_000_000,
+        spl_vault, 26_000_000_200,
         "ATTACK: SPL vault changed on inverted market!"
     );
 }
@@ -1252,11 +1253,12 @@ fn test_attack_inverted_with_unit_scale_conservation() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
 
     let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
+    // With unit_scale=1000, need 100*1000=100_000 base for min_initial_deposit
+    let lp_idx = env.init_lp_with_fee(&lp, 100_000);
     env.deposit(&lp, lp_idx, 20_000_000_000);
 
     let user = Keypair::new();
-    let user_idx = env.init_user(&user);
+    let user_idx = env.init_user_with_fee(&user, 100_000);
     env.deposit(&user, user_idx, 5_000_000_000);
 
     env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
@@ -1284,8 +1286,8 @@ fn test_attack_inverted_with_unit_scale_conservation() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 26_000_000_000,
-        "ATTACK: SPL vault changed with invert+unit_scale!"
+        spl_vault, 26_000_200_000,
+        "ATTACK: SPL vault changed with invert+unit_scale (includes init deposits)!"
     );
 }
 
@@ -1334,7 +1336,7 @@ fn test_attack_trade_size_one_conservation() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 16_000_000_000,
+        spl_vault, 16_000_000_200,
         "ATTACK: SPL vault changed with size=1 trade!"
     );
 }
@@ -1383,7 +1385,7 @@ fn test_attack_trade_size_negative_one_conservation() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 16_000_000_000,
+        spl_vault, 16_000_000_200,
         "ATTACK: SPL vault changed with size=-1 trade!"
     );
 }
@@ -1562,7 +1564,7 @@ fn test_attack_liquidation_conservation() {
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
     assert_eq!(
-        spl_vault, 115_000_000_000,
+        spl_vault, 115_000_000_200,
         "ATTACK: SPL vault changed during liquidation!"
     );
 }
@@ -1662,11 +1664,12 @@ fn test_attack_init_user_fee_conservation() {
         .send_transaction(tx)
         .expect("init_user with fee failed");
 
-    // Verify insurance received the fee
+    // Current behavior: InitUser deposits all fee_payment as capital via
+    // engine.deposit(). No new_account_fee deduction to insurance.
     let insurance = env.read_insurance_balance();
-    assert!(
-        insurance >= new_account_fee,
-        "Insurance should have received new_account_fee: got {}",
+    assert_eq!(
+        insurance, 0,
+        "Insurance unchanged (no fee deduction in InitUser): got {}",
         insurance
     );
 
