@@ -4651,7 +4651,7 @@ pub mod processor {
                     engine.funding_rate_bps_per_slot_last = old_rate;
                     if oracle::is_hyperp_mode(&config) {
                         let _ = engine.accrue_market_to(
-                            clock.slot, config.authority_price_e6,
+                            clock.slot, config.last_effective_price_e6,
                         );
                     }
                 }
@@ -4795,7 +4795,7 @@ pub mod processor {
                     let push_clock2 = Clock::get()
                         .map_err(|_| ProgramError::UnsupportedSysvar)?;
                     let _ = engine.accrue_market_to(
-                        push_clock2.slot, config.authority_price_e6,
+                        push_clock2.slot, config.last_effective_price_e6,
                     );
                 }
 
@@ -4866,7 +4866,7 @@ pub mod processor {
                     let engine = zc::engine_mut(&mut data)?;
                     engine.funding_rate_bps_per_slot_last = old_rate;
                     let _ = engine.accrue_market_to(
-                        clock.slot, config.authority_price_e6,
+                        clock.slot, config.last_effective_price_e6,
                     );
                 }
 
@@ -4955,7 +4955,7 @@ pub mod processor {
                     let engine = zc::engine_mut(&mut data)?;
                     engine.funding_rate_bps_per_slot_last = old_rate;
                     let _ = engine.accrue_market_to(
-                        clock.slot, config.authority_price_e6,
+                        clock.slot, config.last_effective_price_e6,
                     );
                     config = state::read_config(&data);
                 }
