@@ -5264,3 +5264,318 @@ fn test_tradecpi_slippage_old_wire_format_backward_compat() {
     assert!(result.is_ok(), "Old wire format (no limit) must still work: {:?}", result);
 }
 
+// ── Inverted market slippage protection tests ──────────────────────────
+
+/// Helper: initialize an inverted (invert=1) market on a TradeCpiTestEnv.
+/// Identical to TradeCpiTestEnv::init_market() except invert=1.
+fn init_market_inverted(env: &mut TradeCpiTestEnv) {
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let dummy_ata = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            dummy_ata,
+            Account {
+                lamports: 1_000_000,
+                data: vec![0u8; TokenAccount::LEN],
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(sysvar::rent::ID, false),
+            AccountMeta::new_readonly(dummy_ata, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+        ],
+        data: encode_init_market_with_invert(&admin.pubkey(), &env.mint, &TEST_FEED_ID, 1),
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&admin.pubkey()),
+        &[&admin],
+        env.svm.latest_blockhash(),
+    );
+    env.svm
+        .send_transaction(tx)
+        .expect("init inverted market failed");
+}
+
+/// Inverted buy slippage rejection: on an inverted market (invert=1), the
+/// slippage inequality flips. A raw limit_price_e6 that is *below* the raw
+/// oracle price means the user is willing to pay at most that low price.
+/// Since the VAMM fill is near the oracle (~138e6), the trade should reject.
+///
+/// Inverted buy rejection rule (from production code):
+///   engine: exec_eng < limit_eng  →  reject
+/// Raw limit 100e6 → engine limit = 1e12/100e6 = 10_000e6 (high in engine space)
+/// exec_eng ≈ 1e12/138e6 ≈ 7246e6 (lower) → exec_eng < limit_eng → REJECT.
+#[test]
+fn test_tradecpi_inverted_market_slippage_buy_rejects_correctly() {
+    let mut env = TradeCpiTestEnv::new();
+    init_market_inverted(&mut env);
+    let matcher_prog = env.matcher_program_id;
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Buy (size > 0), raw limit = 100M (below raw oracle 138M).
+    // In engine space: limit_eng = 1e12/100e6 = 10_000e6, exec_eng ≈ 7246e6.
+    // Inverted buy rejects when exec_eng < limit_eng → 7246 < 10000 → REJECT.
+    let result = env.try_trade_cpi_with_limit(
+        &user,
+        &lp.pubkey(),
+        lp_idx,
+        user_idx,
+        1_000_000i128,
+        100_000_000u64, // raw limit below oracle → maps to high engine limit → reject
+        &matcher_prog,
+        &matcher_ctx,
+    );
+    assert!(
+        result.is_err(),
+        "Inverted buy with raw limit below oracle must be rejected (flipped inequality)"
+    );
+}
+
+/// Inverted sell slippage rejection: on an inverted market, a raw limit
+/// *above* the oracle price means the user demands to receive at least that
+/// much. Since the VAMM fill is near oracle (~138e6), the sell should reject.
+///
+/// Inverted sell rejection rule:
+///   engine: exec_eng > limit_eng  →  reject
+/// Raw limit 200e6 → engine limit = 1e12/200e6 = 5_000e6
+/// exec_eng ≈ 7246e6 → exec_eng > limit_eng → REJECT.
+#[test]
+fn test_tradecpi_inverted_market_slippage_sell_rejects_correctly() {
+    let mut env = TradeCpiTestEnv::new();
+    init_market_inverted(&mut env);
+    let matcher_prog = env.matcher_program_id;
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Sell (size < 0), raw limit = 200M (above raw oracle 138M).
+    // In engine space: limit_eng = 1e12/200e6 = 5_000e6, exec_eng ≈ 7246e6.
+    // Inverted sell rejects when exec_eng > limit_eng → 7246 > 5000 → REJECT.
+    let result = env.try_trade_cpi_with_limit(
+        &user,
+        &lp.pubkey(),
+        lp_idx,
+        user_idx,
+        -1_000_000i128,
+        200_000_000u64, // raw limit above oracle → maps to low engine limit → reject
+        &matcher_prog,
+        &matcher_ctx,
+    );
+    assert!(
+        result.is_err(),
+        "Inverted sell with raw limit above oracle must be rejected (flipped inequality)"
+    );
+}
+
+/// Inverted buy acceptance: generous raw limit well *above* oracle price.
+/// Since inversion is order-reversing, a high raw limit maps to a low engine
+/// limit, and exec_eng will be above it → not rejected.
+///
+/// Raw limit 200e6 → engine limit = 5_000e6, exec_eng ≈ 7246e6.
+/// Inverted buy rejects when exec_eng < limit_eng → 7246 < 5000 → FALSE → ACCEPT.
+#[test]
+fn test_tradecpi_inverted_market_slippage_buy_accepts_correctly() {
+    let mut env = TradeCpiTestEnv::new();
+    init_market_inverted(&mut env);
+    let matcher_prog = env.matcher_program_id;
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Buy (size > 0), raw limit = 200M (well above raw oracle 138M).
+    // In engine space: limit_eng = 5_000e6, exec_eng ≈ 7246e6.
+    // Inverted buy rejects when exec_eng < limit_eng → 7246 < 5000 → FALSE → ACCEPT.
+    let result = env.try_trade_cpi_with_limit(
+        &user,
+        &lp.pubkey(),
+        lp_idx,
+        user_idx,
+        1_000_000i128,
+        200_000_000u64, // raw limit above oracle → maps to low engine limit → accept
+        &matcher_prog,
+        &matcher_ctx,
+    );
+    assert!(
+        result.is_ok(),
+        "Inverted buy with generous raw limit should succeed: {:?}",
+        result
+    );
+}
+
+// ── Zero-fill must not walk last_effective_price_e6 (index) ────────────
+
+/// Spec invariant: a zero-fill TradeCpi must not advance last_effective_price_e6.
+/// If a matcher returns exec_size=0, the index/baseline must remain unchanged.
+/// Violation would allow repeated zero-fills to walk the circuit-breaker
+/// baseline toward the raw oracle price, bypassing rate limiting.
+#[test]
+fn test_tradecpi_zero_fill_does_not_walk_index() {
+    let mut env = TradeCpiTestEnv::new();
+    env.init_market_hyperp(1_000_000);
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let mp = env.matcher_program_id;
+
+    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
+    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+
+    // Create LP with max_fill_abs=0 to force zero-fill responses from matcher
+    let lp = Keypair::new();
+    let lp_idx = {
+        let idx = env.account_count;
+        env.svm.airdrop(&lp.pubkey(), 1_000_000_000).unwrap();
+        let ata = env.create_ata(&lp.pubkey(), 100);
+
+        let lp_bytes = idx.to_le_bytes();
+        let (lp_pda, _) =
+            Pubkey::find_program_address(&[b"lp", env.slab.as_ref(), &lp_bytes], &env.program_id);
+
+        let ctx = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 10_000_000,
+                    data: vec![0u8; MATCHER_CONTEXT_LEN],
+                    owner: mp,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+
+        // Initialize matcher with max_fill_abs=0 => always zero-fill
+        let init_ix = Instruction {
+            program_id: mp,
+            accounts: vec![
+                AccountMeta::new_readonly(lp_pda, false),
+                AccountMeta::new(ctx, false),
+            ],
+            data: encode_init_vamm(
+                MatcherMode::Passive,
+                5,    // trading_fee_bps
+                10,   // base_spread_bps
+                200,  // max_total_bps
+                0,    // impact_k_bps
+                0,    // liquidity_notional_e6
+                0,    // max_fill_abs = 0 => zero fill
+                0,    // max_inventory_abs
+            ),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_ix(), init_ix],
+            Some(&lp.pubkey()),
+            &[&lp],
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx).expect("init matcher context failed");
+
+        // Init LP in percolator
+        let ix = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(mp, false),
+                AccountMeta::new_readonly(ctx, false),
+            ],
+            data: encode_init_lp(&mp, &ctx, 100),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_ix(), ix],
+            Some(&lp.pubkey()),
+            &[&lp],
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx).expect("init_lp failed");
+        env.account_count += 1;
+        (idx, ctx)
+    };
+
+    env.deposit(&lp, lp_idx.0, 10_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+
+    env.set_slot(50);
+    env.crank();
+
+    // Read last_effective_price_e6 before the zero-fill trade
+    const LAST_EFF_PRICE_OFF: usize = 384;
+    let index_before = {
+        let data = env.svm.get_account(&env.slab).unwrap().data;
+        u64::from_le_bytes(
+            data[LAST_EFF_PRICE_OFF..LAST_EFF_PRICE_OFF + 8]
+                .try_into()
+                .unwrap(),
+        )
+    };
+    assert_ne!(index_before, 0, "Index should be set after crank");
+
+    // Push a different oracle price so the index WOULD walk if the zero-fill
+    // erroneously persisted the oracle update.
+    env.try_push_oracle_price(&admin, 2_000_000, 1000).unwrap();
+    env.set_slot(100);
+
+    // Execute zero-fill TradeCpi
+    let result = env.try_trade_cpi(
+        &user, &lp.pubkey(), lp_idx.0, user_idx, 100_000, &mp, &lp_idx.1,
+    );
+    assert!(result.is_ok(), "Zero-fill TradeCpi should succeed as no-op: {:?}", result);
+
+    // Read last_effective_price_e6 after the zero-fill
+    let index_after = {
+        let data = env.svm.get_account(&env.slab).unwrap().data;
+        u64::from_le_bytes(
+            data[LAST_EFF_PRICE_OFF..LAST_EFF_PRICE_OFF + 8]
+                .try_into()
+                .unwrap(),
+        )
+    };
+
+    assert_eq!(
+        index_before, index_after,
+        "Zero-fill must not walk last_effective_price_e6: before={} after={}",
+        index_before, index_after
+    );
+
+    // Also verify no position change (sanity check for zero-fill)
+    assert_eq!(
+        env.read_account_position(user_idx),
+        0,
+        "Zero-fill means no position change"
+    );
+}
+

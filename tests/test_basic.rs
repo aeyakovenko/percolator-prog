@@ -3115,3 +3115,243 @@ fn test_deposit_fee_credits_rejects_sub_scale_payment() {
     );
 }
 
+/// KeeperCrank with format_version=0 (legacy bare u16 indices).
+///
+/// format_version=0 is the original encoding where each candidate is a bare
+/// u16 index with an implicit FullClose liquidation policy. This test creates
+/// a market with an account, advances slots, and sends a crank with
+/// format_version=0 encoding to verify it succeeds.
+#[test]
+fn test_keeper_crank_format_v0_legacy_bare_u16() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 5_000_000_000);
+
+    // Open a position so the crank has something to touch
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
+    assert_ne!(env.read_account_position(user_idx), 0, "precondition: user has position");
+
+    // Advance slot
+    env.set_slot(200);
+
+    // Build format_version=0 crank instruction with bare u16 indices
+    let caller = Keypair::new();
+    env.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+
+    let mut data = vec![5u8]; // KeeperCrank tag
+    data.extend_from_slice(&u16::MAX.to_le_bytes()); // caller_idx = permissionless
+    data.push(0u8); // format_version = 0 (legacy bare u16)
+    // Bare u16 candidate indices
+    data.extend_from_slice(&lp_idx.to_le_bytes());
+    data.extend_from_slice(&user_idx.to_le_bytes());
+
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(caller.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(env.pyth_index, false),
+        ],
+        data,
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&caller.pubkey()),
+        &[&caller],
+        env.svm.latest_blockhash(),
+    );
+    let result = env.svm.send_transaction(tx);
+    assert!(
+        result.is_ok(),
+        "format_version=0 crank with bare u16 indices should succeed: {:?}",
+        result
+    );
+
+    // Position should still be intact (account is healthy, no liquidation)
+    let pos_after = env.read_account_position(user_idx);
+    assert_ne!(pos_after, 0, "Healthy account must retain position after format_version=0 crank");
+
+    // Vault conservation
+    let engine_vault = env.read_engine_vault();
+    let spl_vault = env.vault_balance();
+    assert_eq!(
+        engine_vault as u64, spl_vault,
+        "Conservation after format_version=0 crank: engine={} spl={}",
+        engine_vault, spl_vault
+    );
+}
+
+/// KeeperCrank with format_version=2 must be rejected.
+///
+/// The decoder only accepts format_version 0 (legacy) and 1 (extended).
+/// Any other value must return InvalidInstructionData.
+#[test]
+fn test_keeper_crank_format_v2_rejected() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+
+    env.set_slot(200);
+
+    // Build a crank instruction with format_version=2
+    let caller = Keypair::new();
+    env.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+
+    let mut data = vec![5u8]; // KeeperCrank tag
+    data.extend_from_slice(&u16::MAX.to_le_bytes()); // caller_idx = permissionless
+    data.push(2u8); // format_version = 2 (invalid)
+    // Some candidate bytes (doesn't matter, should fail at decode)
+    data.extend_from_slice(&lp_idx.to_le_bytes());
+
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(caller.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(env.pyth_index, false),
+        ],
+        data,
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&caller.pubkey()),
+        &[&caller],
+        env.svm.latest_blockhash(),
+    );
+    let result = env.svm.send_transaction(tx);
+    assert!(
+        result.is_err(),
+        "format_version=2 crank must be rejected (only 0 and 1 are valid)"
+    );
+}
+
+/// Self-crank with wrong signer must be rejected.
+///
+/// When caller_idx is set to a specific account index (not u16::MAX),
+/// the program enters self-crank mode and requires the signer to match
+/// the stored account owner. A different keypair must be rejected with
+/// EngineUnauthorized.
+#[test]
+fn test_keeper_crank_self_crank_wrong_signer_rejected() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 5_000_000_000);
+
+    env.set_slot(200);
+    env.crank();
+
+    // Create a different keypair (attacker) that does NOT own user_idx
+    let attacker = Keypair::new();
+    env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+
+    // Try self-crank with attacker as signer but user_idx as caller_idx
+    let result = env.try_crank_self(&attacker, user_idx);
+    assert!(
+        result.is_err(),
+        "Self-crank with wrong signer must be rejected (attacker != account owner)"
+    );
+
+    // Verify the legitimate owner CAN self-crank
+    env.set_slot(300);
+    let result_ok = env.try_crank_self(&user, user_idx);
+    assert!(
+        result_ok.is_ok(),
+        "Self-crank with correct owner should succeed: {:?}",
+        result_ok
+    );
+}
+
+/// Removed instruction tags 11 (SetRiskThreshold) and 15 (SetMaintenanceFee)
+/// must be rejected with InvalidInstructionData.
+///
+/// These tags were removed per spec (SS 2.2.1 and SS 8.2) but the tag bytes
+/// are still reserved in the decoder to prevent accidental reuse. Sending
+/// raw instruction data with these tags must fail.
+#[test]
+fn test_instruction_decoder_removed_tags_rejected() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let caller = Keypair::new();
+    env.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+
+    // Tag 11: SetRiskThreshold (removed)
+    // Send minimal instruction: just the tag byte + some padding
+    let data_tag11 = vec![11u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let ix11 = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(caller.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(env.pyth_index, false),
+        ],
+        data: data_tag11,
+    };
+
+    let tx11 = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix11],
+        Some(&caller.pubkey()),
+        &[&caller],
+        env.svm.latest_blockhash(),
+    );
+    let result11 = env.svm.send_transaction(tx11);
+    assert!(
+        result11.is_err(),
+        "Tag 11 (SetRiskThreshold, removed) must be rejected with InvalidInstructionData"
+    );
+
+    // Tag 15: SetMaintenanceFee (removed)
+    let data_tag15 = vec![15u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let ix15 = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(caller.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(env.pyth_index, false),
+        ],
+        data: data_tag15,
+    };
+
+    let tx15 = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix15],
+        Some(&caller.pubkey()),
+        &[&caller],
+        env.svm.latest_blockhash(),
+    );
+    let result15 = env.svm.send_transaction(tx15);
+    assert!(
+        result15.is_err(),
+        "Tag 15 (SetMaintenanceFee, removed) must be rejected with InvalidInstructionData"
+    );
+}
+

@@ -793,3 +793,228 @@ fn test_admin_force_close_admin_only() {
     );
 }
 
+// ============================================================================
+// Hyperp Full Lifecycle: Init to CloseSlab
+// ============================================================================
+
+/// End-to-end Hyperp lifecycle test covering all admin operations.
+///
+/// Steps: InitMarket(Hyperp) -> SetOracleAuthority -> PushOraclePrice (x2)
+/// -> Crank (index smoothing) -> UpdateConfig -> SetOraclePriceCap
+/// -> InitUser+Deposit -> ResolveMarket -> resolved Crank -> AdminForceCloseAccount
+/// -> WithdrawInsurance -> CloseSlab.
+///
+/// No trading (TradeNoCpi is blocked on Hyperp), focuses on admin lifecycle.
+#[test]
+fn test_hyperp_full_lifecycle_init_to_close_slab() {
+    program_path();
+    println!("=== HYPERP FULL LIFECYCLE: INIT TO CLOSE SLAB ===");
+
+    let mut env = TestEnv::new();
+
+    // 1. Init Hyperp market ($100 mark)
+    env.init_market_hyperp(100_000_000);
+    println!("1. Hyperp market initialized (mark=$100)");
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    // 2. Set oracle authority
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .expect("set_oracle_authority");
+    println!("2. Oracle authority set");
+
+    // 3. Push mark prices over multiple slots.
+    //    The circuit breaker clamps mark against index (1%/slot default cap).
+    //    Index only moves toward mark when dt > 0 (Bug #9 fix).
+    env.set_slot(10);
+    env.try_push_oracle_price(&admin, 110_000_000, 110)
+        .expect("push $110");
+
+    // Read index right after push (should still be initial since the push's
+    // internal index flush used the OLD mark = initial = 100M, so no movement)
+    const INDEX_OFF: usize = 384; // last_effective_price_e6 in slab
+    let slab_data = env.svm.get_account(&env.slab).unwrap().data;
+    let index_after_push =
+        u64::from_le_bytes(slab_data[INDEX_OFF..INDEX_OFF + 8].try_into().unwrap());
+    println!("3. Pushed mark toward $110; index after push: {}", index_after_push);
+
+    // 4. Advance to a LATER slot so dt > 0, then crank.
+    //    The crank's get_engine_oracle_price_e6 calls clamp_toward_with_dt
+    //    with dt = (slot_now - last_hyperp_index_slot). With dt > 0, the
+    //    index moves toward the (clamped) mark.
+    env.set_slot(20); // 10 slots after push
+    env.crank();
+    let slab_data = env.svm.get_account(&env.slab).unwrap().data;
+    let index_after_crank =
+        u64::from_le_bytes(slab_data[INDEX_OFF..INDEX_OFF + 8].try_into().unwrap());
+    // The mark was clamped to ~101M (1% of 100M). With dt=10 slots and cap=1%/slot,
+    // the index can move up to 10% of its value toward the mark. Since the mark is
+    // only 1% above index, the index should reach or nearly reach the mark.
+    assert!(
+        index_after_crank >= index_after_push,
+        "Index should not decrease: {} -> {}", index_after_push, index_after_crank
+    );
+    println!("4. Cranked at slot 20: index {} -> {}", index_after_push, index_after_crank);
+
+    // Push again at later slot to continue driving mark up
+    env.set_slot(30);
+    env.try_push_oracle_price(&admin, 120_000_000, 130).expect("push $120");
+    env.set_slot(40);
+    env.crank();
+    println!("   Pushed $120 at slot 30, cranked at slot 40");
+
+    // 5. UpdateConfig (change funding params)
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+        ],
+        data: encode_update_config(
+            7200, 200, 1_000_000_000_000u128, 200i64, 10i64,
+            0u128, 100, 100, 100, 1000,
+            0u128, 1_000_000_000_000_000u128, 1u128,
+        ),
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&admin.pubkey()),
+        &[&admin],
+        env.svm.latest_blockhash(),
+    );
+    env.svm.send_transaction(tx).expect("UpdateConfig");
+    println!("5. UpdateConfig succeeded (k=200, horizon=7200)");
+
+    // 6. SetOraclePriceCap
+    env.try_set_oracle_price_cap(&admin, 50_000).expect("SetOraclePriceCap");
+    println!("6. SetOraclePriceCap set to 50_000 (5%/slot)");
+
+    // 7. Create user + deposit
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+    assert!(env.read_account_capital(user_idx) > 0);
+    println!("7. User idx={} created with deposit", user_idx);
+
+    env.set_slot(50);
+    env.crank();
+
+    // 8. ResolveMarket
+    env.try_push_oracle_price(&admin, 115_000_000, 150).expect("settlement price");
+    env.try_resolve_market(&admin).expect("ResolveMarket");
+    assert!(env.is_market_resolved());
+    println!("8. Market resolved at $115");
+
+    // 9. Resolved crank
+    env.set_slot(60);
+    env.crank();
+    println!("9. Resolved crank executed");
+
+    // 10. AdminForceCloseAccount
+    env.try_admin_force_close_account(&admin, user_idx, &user.pubkey())
+        .expect("AdminForceCloseAccount");
+    assert_eq!(env.read_num_used_accounts(), 0);
+    println!("10. AdminForceCloseAccount succeeded, 0 accounts remaining");
+
+    // 11. WithdrawInsurance
+    let ins = env.read_insurance_balance();
+    if ins > 0 {
+        env.try_withdraw_insurance(&admin).expect("WithdrawInsurance");
+        assert_eq!(env.read_insurance_balance(), 0);
+        println!("11. Insurance withdrawn (was {})", ins);
+    } else {
+        println!("11. No insurance to withdraw");
+    }
+
+    // 12. CloseSlab
+    env.try_close_slab().expect("CloseSlab");
+    println!("12. CloseSlab succeeded -- market fully closed");
+
+    println!();
+    println!("HYPERP FULL LIFECYCLE INIT TO CLOSE SLAB: PASSED");
+}
+
+// ============================================================================
+// Resolved Crank Cursor Wraps to Zero
+// ============================================================================
+
+/// Verify that the resolved-market crank cursor wraps back to 0 after
+/// scanning all MAX_ACCOUNTS (4096) slots.
+///
+/// The resolved crank processes BATCH_SIZE=8 accounts per call, advancing
+/// crank_cursor. When end >= MAX_ACCOUNTS it resets to 0.
+///
+/// This test resolves a market, cranks 513 times (512 to complete one full
+/// scan + 1 more batch), and reads crank_cursor from the slab to verify
+/// it wrapped to 8.
+#[test]
+fn test_resolved_crank_cursor_wraps_to_zero() {
+    program_path();
+    println!("=== RESOLVED CRANK CURSOR WRAPS TO ZERO ===");
+
+    let mut env = TestEnv::new();
+    env.init_market_hyperp(1_000_000);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
+    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+
+    // Create a few users so the slab is non-trivial
+    let mut users = Vec::new();
+    for _ in 0..3 {
+        let u = Keypair::new();
+        let idx = env.init_user(&u);
+        env.deposit(&u, idx, 1_000_000_000);
+        users.push((u, idx));
+    }
+    println!("Created {} user accounts", users.len());
+
+    // Live crank
+    env.set_slot(10);
+    env.crank();
+
+    // Resolve
+    env.try_resolve_market(&admin).unwrap();
+    assert!(env.is_market_resolved());
+    println!("Market resolved");
+
+    // crank_cursor is at ENGINE(520) + 328 = 848 in the slab.
+    const CRANK_CURSOR_OFF: usize = 848;
+    let read_cursor = |svm: &LiteSVM, slab: &Pubkey| -> u16 {
+        let d = svm.get_account(slab).unwrap().data;
+        u16::from_le_bytes(d[CRANK_CURSOR_OFF..CRANK_CURSOR_OFF + 2].try_into().unwrap())
+    };
+
+    let cursor_before = read_cursor(&env.svm, &env.slab);
+    println!("Cursor before resolved cranks: {}", cursor_before);
+
+    // 4096 / 8 = 512 cranks to complete one full scan and wrap to 0.
+    // Run 513 to place the cursor one batch (8) past the wrap.
+    let total_cranks: u64 = 513;
+    for i in 0..total_cranks {
+        env.set_slot(20 + i * 2);
+        env.crank();
+    }
+
+    let cursor_after = read_cursor(&env.svm, &env.slab);
+    println!("Cursor after {} cranks: {}", total_cranks, cursor_after);
+
+    // After 512 cranks: cursor 0 -> 4096 -> wraps to 0.
+    // 513th crank: 0 -> 8.
+    assert_eq!(
+        cursor_after, 8,
+        "Cursor should be 8 after 513 cranks (512 wrap + 1 batch): got {}",
+        cursor_after
+    );
+    println!("Cursor wrapped correctly: 0 -> 4096 -> 0 -> 8");
+
+    // Cleanup
+    for (u, idx) in &users {
+        let _ = env.try_admin_force_close_account(&admin, *idx, &u.pubkey());
+    }
+
+    println!();
+    println!("RESOLVED CRANK CURSOR WRAPS TO ZERO: PASSED");
+}
+
