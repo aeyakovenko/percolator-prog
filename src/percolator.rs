@@ -2671,31 +2671,13 @@ pub mod processor {
                 engine.accounts[i].reserved_pnl = 0;
             }
 
-            // Compute haircutted payout using wide mul/div
+            // Compute haircutted payout using wide mul/div (U256 internally)
             let (h_num, h_den) = engine.haircut_ratio();
             let y = if h_den == 0 || h_num >= h_den {
                 // No haircut (h >= 1.0 or undefined) — full payout
                 pos_pnl
             } else {
-                // wide_mul_div_floor: (pos_pnl * h_num) / h_den
-                // Use u128 checked_mul first; if overflow, fall back to
-                // decomposed multiplication: split into hi*lo parts.
-                match (pos_pnl as u128).checked_mul(h_num) {
-                    Some(product) => product / h_den,
-                    None => {
-                        // Decomposed: floor(a*b/c) = a*(b/c) + a*(b%c)/c
-                        let quot = h_num / h_den;
-                        let rem = h_num % h_den;
-                        let term1 = pos_pnl.saturating_mul(quot);
-                        let term2 = match (pos_pnl as u128).checked_mul(rem) {
-                            Some(p) => p / h_den,
-                            // Second overflow: haircut ratio h_num/h_den >= 1.0
-                            // means full payout — cap at pos_pnl
-                            None => 0,
-                        };
-                        term1.saturating_add(term2)
-                    }
-                }
+                percolator::wide_math::wide_mul_div_floor_u128(pos_pnl, h_num, h_den)
             };
 
             // consume_released_pnl: decrease PnL and aggregates
