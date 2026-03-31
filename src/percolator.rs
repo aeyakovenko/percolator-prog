@@ -4122,16 +4122,20 @@ pub mod processor {
                 }
                 drop(ctx_data);
 
-                // User-side slippage protection
+                // User-side slippage protection.
+                // Normalize limit to engine-space (same invert+scale as exec_price).
                 if limit_price_e6 != 0 && ret.exec_size != 0 {
+                    let limit_eng = crate::verify::to_engine_price(
+                        limit_price_e6, config.invert, config.unit_scale,
+                    ).ok_or(PercolatorError::OracleInvalid)?;
                     if size > 0 {
                         // User is buying — reject if exec price too high
-                        if ret.exec_price_e6 > limit_price_e6 {
+                        if ret.exec_price_e6 > limit_eng {
                             return Err(ProgramError::InvalidAccountData);
                         }
                     } else {
                         // User is selling — reject if exec price too low
-                        if ret.exec_price_e6 < limit_price_e6 {
+                        if ret.exec_price_e6 < limit_eng {
                             return Err(ProgramError::InvalidAccountData);
                         }
                     }
@@ -4643,18 +4647,14 @@ pub mod processor {
                     }
                     state::write_config(&mut data, &config);
                 }
-                // Create engine-side boundary: accrue market to current slot
-                // with old rate, then stamp old rate. This ensures the interval
-                // [old_slot..now] uses the old funding params.
-                {
-                    let old_rate = compute_current_funding_rate(&config);
+                // Accrue to boundary using engine's already-stored rate.
+                // Do NOT overwrite funding_rate_bps_per_slot_last before accrual —
+                // that would retroactively reprice the elapsed interval.
+                if oracle::is_hyperp_mode(&config) {
                     let engine = zc::engine_mut(&mut data)?;
-                    engine.funding_rate_bps_per_slot_last = old_rate;
-                    if oracle::is_hyperp_mode(&config) {
-                        engine.accrue_market_to(
-                            clock.slot, config.last_effective_price_e6,
-                        ).map_err(map_risk_error)?;
-                    }
+                    engine.accrue_market_to(
+                        clock.slot, config.last_effective_price_e6,
+                    ).map_err(map_risk_error)?;
                 }
 
                 config.funding_horizon_slots = funding_horizon_slots;
@@ -4785,16 +4785,12 @@ pub mod processor {
                 //   cap-width regardless of how many same-slot pushes occur.
                 //   The index only moves per-slot via clamp_toward_with_dt.
                 // Non-Hyperp: clamp against last_effective_price_e6 baseline.
-                // Create engine-side boundary: accrue market to current slot
-                // before changing the mark. This advances engine.slot_last and
-                // fund_px_last so the interval [old_slot..now] uses the old rate,
-                // and the post-change interval starts clean.
+                // Accrue to boundary using engine's already-stored rate.
+                // Do NOT overwrite funding_rate_bps_per_slot_last before accrual.
                 if is_hyperp {
-                    let old_rate = compute_current_funding_rate(&config);
-                    let engine = zc::engine_mut(&mut data)?;
-                    engine.funding_rate_bps_per_slot_last = old_rate;
                     let push_clock2 = Clock::get()
                         .map_err(|_| ProgramError::UnsupportedSysvar)?;
+                    let engine = zc::engine_mut(&mut data)?;
                     engine.accrue_market_to(
                         push_clock2.slot, config.last_effective_price_e6,
                     ).map_err(map_risk_error)?;
@@ -4862,10 +4858,8 @@ pub mod processor {
                     }
                     state::write_config(&mut data, &config);
                     config = state::read_config(&data);
-                    // Accrue engine to boundary before changing cap
-                    let old_rate = compute_current_funding_rate(&config);
+                    // Accrue to boundary using engine's already-stored rate.
                     let engine = zc::engine_mut(&mut data)?;
-                    engine.funding_rate_bps_per_slot_last = old_rate;
                     engine.accrue_market_to(
                         clock.slot, config.last_effective_price_e6,
                     ).map_err(map_risk_error)?;
@@ -4951,10 +4945,8 @@ pub mod processor {
                         config.last_hyperp_index_slot = clock.slot;
                     }
                     state::write_config(&mut data, &config);
-                    // Accrue engine to resolution boundary
-                    let old_rate = compute_current_funding_rate(&config);
+                    // Accrue to resolution boundary using engine's stored rate.
                     let engine = zc::engine_mut(&mut data)?;
-                    engine.funding_rate_bps_per_slot_last = old_rate;
                     engine.accrue_market_to(
                         clock.slot, config.last_effective_price_e6,
                     ).map_err(map_risk_error)?;
