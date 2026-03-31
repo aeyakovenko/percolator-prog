@@ -1829,8 +1829,8 @@ fn test_attack_large_price_drop_liquidation_conservation() {
 
     env.try_top_up_insurance(&admin, 5_000_000_000).unwrap();
 
-    // Disable circuit breaker to allow large price moves
-    env.try_set_oracle_price_cap(&admin, u64::MAX).unwrap();
+    // Set circuit breaker to max (100%) to allow large price moves
+    env.try_set_oracle_price_cap(&admin, 1_000_000).unwrap();
 
     env.crank();
 

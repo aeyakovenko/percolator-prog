@@ -2082,8 +2082,8 @@ fn test_attack_premarket_resolve_extreme_high_price() {
         .unwrap();
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
 
-    // Remove price cap to allow extreme price (for resolution scenario)
-    env.try_set_oracle_price_cap(&admin, 1_000_000_000).unwrap(); // Very high cap
+    // Set price cap to max (100%) to allow extreme price for resolution scenario
+    env.try_set_oracle_price_cap(&admin, 1_000_000).unwrap();
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);

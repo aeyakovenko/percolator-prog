@@ -2100,15 +2100,27 @@ impl TestEnv {
         &mut self,
         signer: &Keypair,
         price_e6: u64,
-        timestamp: i64,
+        _timestamp: i64,
     ) -> Result<(), String> {
+        // Use current clock unix_timestamp + 1 to guarantee strict monotonicity
+        // and clock anchoring. The explicit timestamp parameter is ignored —
+        // kept for API compatibility.
+        let clock: Clock = self.svm.get_sysvar();
+        let ts = clock.unix_timestamp;
+        // Bump the clock by 1 second so subsequent pushes in the same test
+        // get strictly increasing timestamps.
+        self.svm.set_sysvar(&Clock {
+            slot: clock.slot,
+            unix_timestamp: ts + 1,
+            ..clock
+        });
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
                 AccountMeta::new(signer.pubkey(), true),
                 AccountMeta::new(self.slab, false),
             ],
-            data: encode_push_oracle_price(price_e6, timestamp),
+            data: encode_push_oracle_price(price_e6, ts),
         };
         let tx = Transaction::new_signed_with_payer(
             &[cu_ix(), ix],
@@ -3069,8 +3081,15 @@ impl TradeCpiTestEnv {
         &mut self,
         authority: &Keypair,
         price_e6: u64,
-        timestamp: i64,
+        _timestamp: i64,
     ) -> Result<(), String> {
+        let clock: Clock = self.svm.get_sysvar();
+        let ts = clock.unix_timestamp;
+        self.svm.set_sysvar(&Clock {
+            slot: clock.slot,
+            unix_timestamp: ts + 1,
+            ..clock
+        });
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
@@ -3078,7 +3097,7 @@ impl TradeCpiTestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
             ],
-            data: encode_push_oracle_price(price_e6, timestamp),
+            data: encode_push_oracle_price(price_e6, ts),
         };
 
         let tx = Transaction::new_signed_with_payer(

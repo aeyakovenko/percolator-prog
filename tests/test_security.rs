@@ -1131,9 +1131,9 @@ fn test_attack_oracle_price_cap_circuit_breaker() {
 fn test_attack_stale_oracle_rejected() {
     program_path();
 
-    // Test that PushOraclePrice rejects stale (backward) timestamps.
-    // The engine enforces monotonic authority_timestamp for non-Hyperp markets:
-    // if new timestamp < stored authority_timestamp → OracleStale error.
+    // Test that PushOraclePrice rejects stale (backward) timestamps
+    // and timestamps in the future. Uses raw instruction data to control
+    // the timestamp field directly (the helper auto-uses clock time).
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
@@ -1141,39 +1141,65 @@ fn test_attack_stale_oracle_rejected() {
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .expect("oracle authority setup must succeed");
 
-    // Push price at timestamp 1000 - establishes authority_timestamp = 1000
-    env.try_push_oracle_price(&admin, 138_000_000, 1000)
-        .expect("first oracle push must succeed");
+    // Set clock to a known time
+    env.svm.set_sysvar(&Clock {
+        slot: 200,
+        unix_timestamp: 1000,
+        ..Clock::default()
+    });
 
-    // Push price at timestamp 2000 - advances authority_timestamp to 2000
-    let result = env.try_push_oracle_price(&admin, 140_000_000, 2000);
-    assert!(
-        result.is_ok(),
-        "Forward timestamp push should succeed: {:?}",
-        result
-    );
+    // Push at timestamp 1000 (= clock time) — succeeds
+    let send_raw_push = |env: &mut TestEnv, price: u64, ts: i64| -> Result<(), String> {
+        let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+        let ix = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.slab, false),
+            ],
+            data: encode_push_oracle_price(price, ts),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_ix(), ix],
+            Some(&admin.pubkey()),
+            &[&admin],
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx).map(|_| ()).map_err(|e| format!("{:?}", e))
+    };
 
-    // Push price at timestamp 500 (BEFORE 2000) - must be REJECTED as stale
-    let result = env.try_push_oracle_price(&admin, 135_000_000, 500);
-    assert!(
-        result.is_err(),
-        "ATTACK: Stale oracle push (timestamp 500 < stored 2000) must be rejected!"
-    );
+    send_raw_push(&mut env, 138_000_000, 1000).expect("first push at clock time");
 
-    // Push at exactly the same timestamp (2000) - must also be rejected (not strictly greater)
-    let result = env.try_push_oracle_price(&admin, 136_000_000, 1999);
-    assert!(
-        result.is_err(),
-        "ATTACK: Oracle push with timestamp < stored must be rejected!"
-    );
+    // Advance clock
+    env.svm.set_sysvar(&Clock {
+        slot: 300,
+        unix_timestamp: 2000,
+        ..Clock::default()
+    });
 
-    // Push at a forward timestamp to confirm the market still works
-    let result = env.try_push_oracle_price(&admin, 139_000_000, 3000);
-    assert!(
-        result.is_ok(),
-        "Forward timestamp push should succeed after stale rejection: {:?}",
-        result
-    );
+    // Push at timestamp 2000 — succeeds (strictly > 1000)
+    send_raw_push(&mut env, 140_000_000, 2000).expect("forward push");
+
+    // Push at stale timestamp 500 — rejected (< stored 2000)
+    let result = send_raw_push(&mut env, 135_000_000, 500);
+    assert!(result.is_err(), "ATTACK: Stale timestamp must be rejected");
+
+    // Push at same timestamp 2000 — rejected (not strictly greater)
+    let result = send_raw_push(&mut env, 136_000_000, 2000);
+    assert!(result.is_err(), "ATTACK: Equal timestamp must be rejected");
+
+    // Push at future timestamp 9999 — rejected (> clock 2000)
+    let result = send_raw_push(&mut env, 137_000_000, 9999);
+    assert!(result.is_err(), "ATTACK: Future timestamp must be rejected");
+
+    // Advance clock and push forward — still works
+    env.svm.set_sysvar(&Clock {
+        slot: 400,
+        unix_timestamp: 3000,
+        ..Clock::default()
+    });
+    let result = send_raw_push(&mut env, 139_000_000, 3000);
+    assert!(result.is_ok(), "Forward push after clock advance should succeed: {:?}", result);
 }
 
 /// ATTACK: Push zero price via oracle authority.
@@ -8215,37 +8241,39 @@ fn test_attack_push_oracle_stale_timestamp() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
 
-    // Push with timestamp=2000
-    env.try_push_oracle_price(&admin, 1_000_000, 2000).unwrap();
+    // Use raw pushes with controlled timestamps (helper auto-timestamps)
+    let send_raw_push = |env: &mut TestEnv, price: u64, ts: i64| -> Result<(), String> {
+        let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+        let ix = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.slab, false),
+            ],
+            data: encode_push_oracle_price(price, ts),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_ix(), ix], Some(&admin.pubkey()), &[&admin], env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx).map(|_| ()).map_err(|e| format!("{:?}", e))
+    };
 
-    // Push with later timestamp=3000 should succeed
-    let result = env.try_push_oracle_price(&admin, 1_500_000, 3000);
-    assert!(
-        result.is_ok(),
-        "Push with newer timestamp should succeed: {:?}",
-        result
-    );
+    env.svm.set_sysvar(&Clock { slot: 200, unix_timestamp: 2000, ..Clock::default() });
+    send_raw_push(&mut env, 1_000_000, 2000).expect("first push");
 
-    // Read the price after the 3000-timestamp push
-    let price_after_good_push = env.read_authority_price();
+    env.svm.set_sysvar(&Clock { slot: 300, unix_timestamp: 3000, ..Clock::default() });
+    send_raw_push(&mut env, 1_500_000, 3000).expect("forward push");
 
-    // Push with earlier timestamp=1000 (stale) must be rejected
-    let stale_result = env.try_push_oracle_price(&admin, 2_000_000, 1000);
-    assert!(
-        stale_result.is_err(),
-        "SECURITY: stale authority timestamp rollback must be rejected"
-    );
+    let price_after_good = env.read_authority_price();
 
-    // State must be completely preserved after rejected stale push
+    // Stale push (timestamp 1000 < stored 3000)
+    let result = send_raw_push(&mut env, 2_000_000, 1000);
+    assert!(result.is_err(), "Stale timestamp must be rejected");
+
     let price_after_stale = env.read_authority_price();
-    assert_eq!(
-        price_after_good_push, price_after_stale,
-        "Stale push must not mutate authority_price: before={} after={}",
-        price_after_good_push, price_after_stale
-    );
+    assert_eq!(price_after_good, price_after_stale, "Stale push must not mutate price");
 }
 
 /// ATTACK: Liquidate account that is solvent (positive equity).
@@ -11546,8 +11574,8 @@ fn test_attack_oracle_price_cap_u64_max() {
     env.crank();
     env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
 
-    // Set price cap to maximum (disable circuit breaker)
-    env.try_set_oracle_price_cap(&admin, u64::MAX).unwrap();
+    // Set price cap to hard maximum (100% per slot — effectively disabling)
+    env.try_set_oracle_price_cap(&admin, 1_000_000).unwrap();
 
     // Large price jump should now be accepted in one crank
     env.set_slot_and_price(200, 200_000_000); // $138 → $200 (45% jump)

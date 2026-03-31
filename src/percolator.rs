@@ -49,6 +49,7 @@ pub mod constants {
     pub const DEFAULT_FUNDING_MAX_PREMIUM_BPS: i64 = 500; // cap premium at 5.00%
     pub const DEFAULT_FUNDING_MAX_BPS_PER_SLOT: i64 = 5; // cap per-slot funding
     pub const DEFAULT_HYPERP_PRICE_CAP_E2BPS: u64 = 10_000; // 1% per slot max price change for Hyperp
+    pub const MAX_ORACLE_PRICE_CAP_E2BPS: u64 = 1_000_000; // 100% — hard ceiling for circuit breaker
     pub const DEFAULT_INSURANCE_WITHDRAW_MIN_BASE: u64 = 1;
     pub const DEFAULT_INSURANCE_WITHDRAW_MAX_BPS: u16 = 100; // 1%
     pub const DEFAULT_INSURANCE_WITHDRAW_COOLDOWN_SLOTS: u64 = 400_000;
@@ -2553,7 +2554,7 @@ pub mod processor {
         constants::{
             CONFIG_LEN, DEFAULT_FUNDING_HORIZON_SLOTS, DEFAULT_FUNDING_INV_SCALE_NOTIONAL_E6,
             DEFAULT_FUNDING_K_BPS, DEFAULT_FUNDING_MAX_BPS_PER_SLOT,
-            DEFAULT_FUNDING_MAX_PREMIUM_BPS, DEFAULT_HYPERP_PRICE_CAP_E2BPS,
+            DEFAULT_FUNDING_MAX_PREMIUM_BPS, DEFAULT_HYPERP_PRICE_CAP_E2BPS, MAX_ORACLE_PRICE_CAP_E2BPS,
             DEFAULT_INSURANCE_WITHDRAW_COOLDOWN_SLOTS, DEFAULT_INSURANCE_WITHDRAW_MAX_BPS,
             DEFAULT_INSURANCE_WITHDRAW_MIN_BASE,
             DEFAULT_THRESH_ALPHA_BPS, DEFAULT_THRESH_FLOOR, DEFAULT_THRESH_MAX, DEFAULT_THRESH_MIN,
@@ -3166,6 +3167,10 @@ pub mod processor {
                 if insurance_floor > max_insurance_floor {
                     return Err(ProgramError::InvalidInstructionData);
                 }
+                // Oracle cap floor: hard-bounded to MAX (100%)
+                if min_oracle_price_cap_e2bps > MAX_ORACLE_PRICE_CAP_E2BPS {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
                 // §8.2: recurring maintenance fees disabled. Reject non-zero at init.
                 if risk_params.maintenance_fee_per_slot.get() != 0 {
                     return Err(ProgramError::InvalidInstructionData);
@@ -3248,7 +3253,9 @@ pub mod processor {
                     oracle_price_cap_e2bps: if is_hyperp {
                         DEFAULT_HYPERP_PRICE_CAP_E2BPS.max(min_oracle_price_cap_e2bps)
                     } else {
-                        0
+                        // Non-Hyperp: start at the immutable floor so the circuit
+                        // breaker is active from genesis. 0 floor = no breaker.
+                        min_oracle_price_cap_e2bps
                     },
                     last_effective_price_e6: if is_hyperp { initial_mark_price_e6 } else { 0 },
                     // Per-market admin limits (immutable after init)
@@ -4755,12 +4762,24 @@ pub mod processor {
                     return Err(PercolatorError::OracleInvalid.into());
                 }
 
-                // For non-Hyperp markets, require monotonic authority timestamps.
-                if !is_hyperp
-                    && config.authority_timestamp != 0
-                    && timestamp < config.authority_timestamp
-                {
-                    return Err(PercolatorError::OracleStale.into());
+                // For non-Hyperp markets, require strictly increasing timestamps
+                // anchored to the current clock. This prevents the admin from
+                // walking last_effective_price_e6 in a single burst (each push
+                // must use a later timestamp, and the timestamp must not exceed
+                // the current unix_timestamp from the clock sysvar).
+                if !is_hyperp {
+                    let push_clock = Clock::get()
+                        .map_err(|_| ProgramError::UnsupportedSysvar)?;
+                    // Strict monotonicity: reject equal timestamps
+                    if config.authority_timestamp != 0
+                        && timestamp <= config.authority_timestamp
+                    {
+                        return Err(PercolatorError::OracleStale.into());
+                    }
+                    // Clock anchoring: timestamp must not be in the future
+                    if timestamp > push_clock.unix_timestamp {
+                        return Err(PercolatorError::OracleStale.into());
+                    }
                 }
 
                 // Clamp against circuit breaker.
@@ -4869,6 +4888,10 @@ pub mod processor {
                     && max_change_e2bps == 0
                     && config.min_oracle_price_cap_e2bps != 0
                 {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
+                // Hard ceiling: cap above 100% makes the circuit breaker vacuous
+                if max_change_e2bps > MAX_ORACLE_PRICE_CAP_E2BPS {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
 
