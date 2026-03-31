@@ -4342,19 +4342,12 @@ pub mod processor {
                 let amt_units = if resolved {
                     let frozen_slot = config.resolution_slot;
                     // Best-effort touch — but abort on CorruptState
-                    match engine.touch_account_full(
+                    engine.touch_account_full(
                         user_idx as usize, price, frozen_slot,
-                    ) {
-                        Ok(()) => {}
-                        Err(percolator::RiskError::CorruptState) => {
-                            return Err(map_risk_error(percolator::RiskError::CorruptState));
-                        }
-                        Err(_) => {} // same-epoch, overflow, etc. — fallback handles
-                    }
+                    ).map_err(map_risk_error)?;
                     let funding_rate = compute_current_funding_rate(&config);
                     engine.close_account(user_idx, frozen_slot, price, funding_rate)
                         .or_else(|e| match e {
-                            // CorruptState = real engine invariant violation — don't mask
                             percolator::RiskError::CorruptState => Err(e),
                             // All other errors: same-epoch position, PnL not settled, etc.
                             _ => settle_and_close_resolved(engine, user_idx),
@@ -4650,9 +4643,9 @@ pub mod processor {
                     let engine = zc::engine_mut(&mut data)?;
                     engine.funding_rate_bps_per_slot_last = old_rate;
                     if oracle::is_hyperp_mode(&config) {
-                        let _ = engine.accrue_market_to(
+                        engine.accrue_market_to(
                             clock.slot, config.last_effective_price_e6,
-                        );
+                        ).map_err(map_risk_error)?;
                     }
                 }
 
@@ -4794,9 +4787,9 @@ pub mod processor {
                     engine.funding_rate_bps_per_slot_last = old_rate;
                     let push_clock2 = Clock::get()
                         .map_err(|_| ProgramError::UnsupportedSysvar)?;
-                    let _ = engine.accrue_market_to(
+                    engine.accrue_market_to(
                         push_clock2.slot, config.last_effective_price_e6,
-                    );
+                    ).map_err(map_risk_error)?;
                 }
 
                 let clamp_base = config.last_effective_price_e6;
@@ -4865,9 +4858,9 @@ pub mod processor {
                     let old_rate = compute_current_funding_rate(&config);
                     let engine = zc::engine_mut(&mut data)?;
                     engine.funding_rate_bps_per_slot_last = old_rate;
-                    let _ = engine.accrue_market_to(
+                    engine.accrue_market_to(
                         clock.slot, config.last_effective_price_e6,
-                    );
+                    ).map_err(map_risk_error)?;
                 }
 
                 // Hyperp markets must not set cap to 0 — it would freeze index
@@ -4954,9 +4947,9 @@ pub mod processor {
                     let old_rate = compute_current_funding_rate(&config);
                     let engine = zc::engine_mut(&mut data)?;
                     engine.funding_rate_bps_per_slot_last = old_rate;
-                    let _ = engine.accrue_market_to(
+                    engine.accrue_market_to(
                         clock.slot, config.last_effective_price_e6,
-                    );
+                    ).map_err(map_risk_error)?;
                     config = state::read_config(&data);
                 }
 
@@ -5386,17 +5379,10 @@ pub mod processor {
                 verify_token_account(a_owner_ata, &owner_pubkey, &mint)?;
 
                 // Best-effort touch to settle K-pair PnL at settlement price.
-                // May fail for same-epoch accounts — that's fine,
-                // settle_and_close_resolved handles settlement independently.
-                // But CorruptState = real engine invariant violation — abort.
+                // Touch must succeed before close — all errors are fatal.
                 let frozen_slot = config.resolution_slot;
-                match engine.touch_account_full(user_idx as usize, price, frozen_slot) {
-                    Ok(()) => {}
-                    Err(percolator::RiskError::CorruptState) => {
-                        return Err(map_risk_error(percolator::RiskError::CorruptState));
-                    }
-                    Err(_) => {} // same-epoch, overflow, etc. — fallback handles
-                }
+                engine.touch_account_full(user_idx as usize, price, frozen_slot)
+                    .map_err(map_risk_error)?;
 
                 // Try canonical close first (handles stale-epoch accounts
                 // where touch_account_full already zeroed the position).
