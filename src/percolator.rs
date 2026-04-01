@@ -2280,21 +2280,53 @@ pub mod oracle {
     }
 
     /// Read oracle price with circuit-breaker clamping.
-    /// Reads raw price via `read_price_with_authority`, clamps it against
-    /// `config.last_effective_price_e6`, and updates that field to the post-clamped value.
+    ///
+    /// The baseline (`last_effective_price_e6`) is ONLY updated from external
+    /// oracle reads (Pyth/Chainlink). Authority-pushed prices are used as the
+    /// returned effective price but do NOT contaminate the baseline. This
+    /// prevents the admin from ratcheting the baseline via push+crank interleaving.
     pub fn read_price_clamped(
         config: &mut super::state::MarketConfig,
         price_ai: &AccountInfo,
         now_unix_ts: i64,
     ) -> Result<u64, ProgramError> {
-        let raw = read_price_with_authority(config, price_ai, now_unix_ts)?;
-        let clamped = clamp_oracle_price(
-            config.last_effective_price_e6,
-            raw,
-            config.oracle_price_cap_e2bps,
+        // Always try to read external oracle to update baseline
+        let external = read_engine_price_e6(
+            price_ai,
+            &config.index_feed_id,
+            now_unix_ts,
+            config.max_staleness_secs,
+            config.conf_filter_bps,
+            config.invert,
+            config.unit_scale,
         );
-        config.last_effective_price_e6 = clamped;
-        Ok(clamped)
+
+        // Update baseline from external oracle only (never from authority)
+        if let Ok(ext_price) = external {
+            let clamped_ext = clamp_oracle_price(
+                config.last_effective_price_e6,
+                ext_price,
+                config.oracle_price_cap_e2bps,
+            );
+            config.last_effective_price_e6 = clamped_ext;
+        }
+
+        // Return the authority price if fresh, otherwise the external price
+        if let Some(auth_price) = read_authority_price(config, now_unix_ts, config.max_staleness_secs) {
+            // Authority price is clamped against the (now-updated) external baseline
+            let clamped_auth = clamp_oracle_price(
+                config.last_effective_price_e6,
+                auth_price,
+                config.oracle_price_cap_e2bps,
+            );
+            return Ok(clamped_auth);
+        }
+
+        // No authority: use external price (already clamped above)
+        match external {
+            Ok(_) => Ok(config.last_effective_price_e6),
+            Err(e) => Err(e),
+        }
     }
 
     // =========================================================================

@@ -13500,3 +13500,54 @@ fn test_attack_resolve_rejects_stale_settlement_push() {
     );
 }
 
+/// ATTACK: Authority push+crank interleaving must not ratchet the baseline.
+///
+/// The admin enables signer-oracle, pushes a price far from the external
+/// oracle, then cranks to commit the read. The baseline (last_effective_price_e6)
+/// must only advance from external oracle reads, not from authority prices.
+#[test]
+fn test_attack_authority_push_crank_does_not_ratchet_baseline() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    // Establish external oracle baseline via crank ($138)
+    env.crank();
+    let baseline_initial = env.read_last_effective_price();
+    assert_eq!(baseline_initial, 138_000_000, "Initial baseline should be $138");
+
+    // Enable authority oracle
+    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
+
+    // Push a price far from oracle ($200), then crank repeatedly
+    for i in 0..20 {
+        env.set_slot(200 + i * 10);
+        env.try_push_oracle_price(&admin, 200_000_000, 0).unwrap();
+        env.crank();
+    }
+
+    // Baseline must NOT have been ratcheted toward $200
+    let baseline_after = env.read_last_effective_price();
+    // With external oracle at $138 and cap, the baseline should stay near $138
+    // (it may move slightly from external oracle reads, but not from authority)
+    assert!(
+        baseline_after < 150_000_000,
+        "Baseline must not ratchet from authority pushes: initial={} after={}",
+        baseline_initial, baseline_after
+    );
+
+    // Disable authority — baseline should reflect external oracle, not authority
+    env.try_set_oracle_authority(&admin, &Pubkey::default()).unwrap();
+    env.set_slot(500);
+    env.crank();
+    let baseline_after_disable = env.read_last_effective_price();
+    assert!(
+        baseline_after_disable < 150_000_000,
+        "After disabling authority, baseline should be near external oracle: {}",
+        baseline_after_disable
+    );
+}
+
