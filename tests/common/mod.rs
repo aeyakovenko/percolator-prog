@@ -2191,6 +2191,7 @@ impl TestEnv {
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
             ],
             data: encode_resolve_market(),
         };
@@ -3119,6 +3120,7 @@ impl TradeCpiTestEnv {
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
             ],
             data: encode_resolve_market(),
         };

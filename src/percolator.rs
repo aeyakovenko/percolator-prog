@@ -4910,10 +4910,11 @@ pub mod processor {
 
             Instruction::ResolveMarket => {
                 // Resolve market: snapshot resolution slot, set RESOLVED flag.
-                accounts::expect_len(accounts, 3)?;
+                accounts::expect_len(accounts, 4)?;
                 let a_admin = &accounts[0];
                 let a_slab = &accounts[1];
                 let a_clock = &accounts[2];
+                let a_oracle = &accounts[3];
 
                 accounts::expect_signer(a_admin)?;
                 accounts::expect_writable(a_slab)?;
@@ -4936,20 +4937,26 @@ pub mod processor {
                     return Err(ProgramError::InvalidAccountData);
                 }
                 // Non-Hyperp: settlement price must be within circuit-breaker
-                // bounds of the last external oracle baseline. Uses the
-                // immutable min_oracle_price_cap_e2bps (not the mutable cap)
-                // so admin can't bypass by setting cap to 0 first.
+                // bounds of a FRESH external oracle read — not stored baseline
+                // which can be authority-influenced. Uses the immutable
+                // min_oracle_price_cap_e2bps for the comparison.
                 // Hyperp: admin IS the price source, no external baseline.
                 if !oracle::is_hyperp_mode(&config)
                     && config.min_oracle_price_cap_e2bps != 0
                 {
-                    // Require at least one external oracle read before resolution.
-                    // Without a baseline, the settlement guard has nothing to compare against.
-                    if config.last_effective_price_e6 == 0 {
-                        return Err(PercolatorError::OracleInvalid.into());
-                    }
+                    let clock_tmp = Clock::from_account_info(a_clock)?;
+                    // Read fresh external oracle price (bypasses authority override)
+                    let fresh_oracle = oracle::read_engine_price_e6(
+                        a_oracle,
+                        &config.index_feed_id,
+                        clock_tmp.unix_timestamp,
+                        config.max_staleness_secs,
+                        config.conf_filter_bps,
+                        config.invert,
+                        config.unit_scale,
+                    )?;
                     let clamped = oracle::clamp_oracle_price(
-                        config.last_effective_price_e6,
+                        fresh_oracle,
                         config.authority_price_e6,
                         config.min_oracle_price_cap_e2bps,
                     );
