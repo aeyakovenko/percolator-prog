@@ -3448,6 +3448,12 @@ fn test_ewma_tracks_moving_index() {
         let clamped = clamp_oracle_price(clamp_base, exec, cap);
         mark = ewma_update(mark, clamped, halflife, slot - 1, slot);
     }
+    // Mark must have moved up (proves EWMA is tracking)
+    assert!(
+        mark > 100_000_000,
+        "Mark must have moved up from initial: mark={}",
+        mark,
+    );
     // Mark should be within 5% of final index (EWMA lags by design)
     let gap_pct = ((index as i128 - mark as i128).unsigned_abs() * 100) / index as u128;
     assert!(
