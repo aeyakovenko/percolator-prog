@@ -3742,11 +3742,11 @@ pub mod processor {
                 let a_clock = &accounts[2];
                 let a_oracle = &accounts[3];
 
-                // Permissionless mode: caller_idx == u16::MAX means anyone can crank
+                // Permissionless mode: caller_idx == u16::MAX means anyone can crank.
+                // Resolved markets are always permissionless (settlement is idempotent).
                 let permissionless = caller_idx == CRANK_NO_CALLER;
 
                 if !permissionless {
-                    // Self-crank mode: require signer + owner authorization
                     accounts::expect_signer(a_caller)?;
                 }
                 accounts::expect_writable(a_slab)?;
@@ -3756,6 +3756,9 @@ pub mod processor {
                 require_initialized(&data)?;
 
                 // Check if market is resolved - frozen time mode.
+                // NOTE: resolved crank is effectively permissionless regardless of
+                // caller_idx — the resolved path returns before owner-match checks.
+                // This is intentional: settlement is idempotent and no funds move.
                 // All resolved operations use engine.current_slot (frozen at
                 // last pre-resolution crank) instead of clock.slot.
                 if state::is_resolved(&data) {
