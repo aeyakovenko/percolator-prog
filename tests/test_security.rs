@@ -626,7 +626,7 @@ fn test_attack_trade_risk_increase_when_gated() {
     //   oi_eff_short_q: U256 (32 bytes) at engine offset 504, ends at 536
     //   side_mode_long: u8 at engine offset 424 (BPF, native 128-bit)
     // => slab absolute offset = 520 + 488 = 864
-    const SIDE_MODE_LONG_OFF: usize = 552 + 488;
+    const SIDE_MODE_LONG_OFF: usize = 568 + 488;
     {
         let original_slab = env
             .svm
@@ -1483,7 +1483,7 @@ fn test_attack_double_init_market() {
         &[admin],
         env.svm.latest_blockhash(),
     );
-    const HEADER_CONFIG_LEN: usize = 552;
+    const HEADER_CONFIG_LEN: usize = 568;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let used_before = env.read_num_used_accounts();
     let vault_before = env.vault_balance();
@@ -2927,7 +2927,7 @@ fn test_attack_truncated_instruction_data() {
 
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    const HEADER_CONFIG_LEN: usize = 552;
+    const HEADER_CONFIG_LEN: usize = 568;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let used_before = env.read_num_used_accounts();
     let vault_before = env.vault_balance();
@@ -2983,7 +2983,7 @@ fn test_attack_unknown_instruction_tag() {
 
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    const HEADER_CONFIG_LEN: usize = 552;
+    const HEADER_CONFIG_LEN: usize = 568;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let used_before = env.read_num_used_accounts();
     let vault_before = env.vault_balance();
@@ -3031,7 +3031,7 @@ fn test_attack_empty_instruction_data() {
 
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    const HEADER_CONFIG_LEN: usize = 552;
+    const HEADER_CONFIG_LEN: usize = 568;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let used_before = env.read_num_used_accounts();
     let vault_before = env.vault_balance();
@@ -4310,7 +4310,7 @@ fn test_attack_funding_anti_retroactivity_zero_dt() {
     // Engine vault should still be correct
     let engine_vault = {
         let slab = env.svm.get_account(&env.slab).unwrap();
-        u128::from_le_bytes(slab.data[552..568].try_into().unwrap())
+        u128::from_le_bytes(slab.data[568..584].try_into().unwrap())
     };
     assert!(engine_vault > 0, "Engine vault should be positive");
 }
@@ -4404,7 +4404,7 @@ fn test_attack_withdrawal_with_warmup_settlement() {
     };
     let engine_vault = {
         let slab = env.svm.get_account(&env.slab).unwrap();
-        u128::from_le_bytes(slab.data[552..568].try_into().unwrap())
+        u128::from_le_bytes(slab.data[568..584].try_into().unwrap())
     };
 
     // Key assertion: SPL vault == engine vault always (conservation)
@@ -8074,7 +8074,7 @@ fn test_attack_update_admin_same_address_noop() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    const HEADER_CONFIG_LEN: usize = 552;
+    const HEADER_CONFIG_LEN: usize = 568;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let used_before = env.read_num_used_accounts();
     let spl_vault_before = env.vault_balance();
@@ -8926,7 +8926,7 @@ fn test_attack_instruction_tag_just_above_max() {
         &[&user],
         env.svm.latest_blockhash(),
     );
-    const HEADER_CONFIG_LEN: usize = 552;
+    const HEADER_CONFIG_LEN: usize = 568;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let used_before = env.read_num_used_accounts();
     let spl_vault_before = env.vault_balance();
@@ -9281,7 +9281,7 @@ fn test_attack_init_market_admin_mismatch() {
         &[&admin],
         svm.latest_blockhash(),
     );
-    const HEADER_CONFIG_LEN: usize = 552;
+    const HEADER_CONFIG_LEN: usize = 568;
     let slab_before = svm.get_account(&slab).unwrap().data;
     let vault_before = svm.get_account(&vault).unwrap().data;
     let result = svm.send_transaction(tx);
@@ -9395,7 +9395,7 @@ fn test_attack_init_market_mint_mismatch() {
         &[&admin],
         svm.latest_blockhash(),
     );
-    const HEADER_CONFIG_LEN: usize = 552;
+    const HEADER_CONFIG_LEN: usize = 568;
     let slab_before = svm.get_account(&slab).unwrap().data;
     let vault_before = svm.get_account(&vault).unwrap().data;
     let result = svm.send_transaction(tx);

@@ -198,7 +198,7 @@ fn test_critical_init_market_rejects_double_init() {
         env.svm.latest_blockhash(),
     );
     // Snapshot state after first init and before rejected second init.
-    const HEADER_CONFIG_LEN: usize = 552;
+    const HEADER_CONFIG_LEN: usize = 568;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let used_before = env.read_num_used_accounts();
     let vault_before = env.vault_balance();

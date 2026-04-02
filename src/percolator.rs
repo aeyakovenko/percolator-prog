@@ -1167,6 +1167,11 @@ pub mod ix {
             user_idx: u16,
             amount: u64,
         },
+        /// Permissionless market resolution after prolonged oracle staleness.
+        /// Anyone can call when the oracle has been stale for at least
+        /// config.permissionless_resolve_stale_slots. Settles at the last
+        /// known good oracle price from engine.last_oracle_price.
+        ResolvePermissionless,
     }
 
     impl Instruction {
@@ -1445,6 +1450,7 @@ pub mod ix {
                     let amount = read_u64(&mut rest)?;
                     Ok(Instruction::ConvertReleasedPnl { user_idx, amount })
                 }
+                29 => Ok(Instruction::ResolvePermissionless),
                 _ => Err(ProgramError::InvalidInstructionData),
             }
         }
@@ -1783,6 +1789,15 @@ pub mod state {
         pub mark_ewma_halflife_slots: u64,
         /// Padding for u128 alignment.
         pub _ewma_padding: u64,
+
+        // ========================================
+        // Permissionless Resolution
+        // ========================================
+        /// Slots of oracle staleness required before anyone can resolve.
+        /// 0 = disabled (admin-only resolution). Set at InitMarket, immutable.
+        pub permissionless_resolve_stale_slots: u64,
+        /// Padding for u128 alignment.
+        pub _perm_resolve_padding: u64,
     }
 
     pub fn slab_data_mut<'a, 'b>(
@@ -3375,6 +3390,8 @@ pub mod processor {
                     mark_ewma_last_slot: if is_hyperp { clock.slot } else { 0 },
                     mark_ewma_halflife_slots: DEFAULT_MARK_EWMA_HALFLIFE_SLOTS,
                     _ewma_padding: 0,
+                    permissionless_resolve_stale_slots: 0, // disabled by default
+                    _perm_resolve_padding: 0,
                 };
                 // Hyperp markets must have non-zero cap for index smoothing
                 if is_hyperp && config.oracle_price_cap_e2bps == 0 {
@@ -5844,6 +5861,52 @@ pub mod processor {
                 engine.convert_released_pnl(user_idx, units as u128, price, clock.slot,
                     compute_current_funding_rate(&config))
                     .map_err(map_risk_error)?;
+            }
+
+            Instruction::ResolvePermissionless => {
+                // Permissionless resolution after prolonged oracle staleness.
+                // Anyone can call — no signer required.
+                accounts::expect_len(accounts, 2)?;
+                let a_slab = &accounts[0];
+                let a_clock = &accounts[1];
+
+                accounts::expect_writable(a_slab)?;
+
+                let mut data = state::slab_data_mut(a_slab)?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+
+                if state::is_resolved(&data) {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                let config = state::read_config(&data);
+
+                // Feature must be enabled at init
+                if config.permissionless_resolve_stale_slots == 0 {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
+
+                let clock = Clock::from_account_info(a_clock)?;
+
+                let engine = zc::engine_ref(&data)?;
+                let last_price = engine.last_oracle_price;
+                if last_price == 0 {
+                    return Err(PercolatorError::OracleInvalid.into());
+                }
+
+                // Oracle must be stale for at least the configured duration
+                let staleness = clock.slot.saturating_sub(engine.last_crank_slot);
+                if staleness < config.permissionless_resolve_stale_slots {
+                    return Err(PercolatorError::OracleStale.into());
+                }
+
+                // Settle at last known good oracle price
+                let mut config = config;
+                config.authority_price_e6 = last_price;
+                config.resolution_slot = engine.last_crank_slot;
+                state::write_config(&mut data, &config);
+                state::set_resolved(&mut data);
             }
         }
         Ok(())

@@ -980,7 +980,7 @@ fn test_resolved_crank_cursor_wraps_to_zero() {
     println!("Market resolved");
 
     // crank_cursor is at ENGINE(520) + 328 = 848 in the slab.
-    const CRANK_CURSOR_OFF: usize = 880;
+    const CRANK_CURSOR_OFF: usize = 896;
     let read_cursor = |svm: &LiteSVM, slab: &Pubkey| -> u16 {
         let d = svm.get_account(slab).unwrap().data;
         u16::from_le_bytes(d[CRANK_CURSOR_OFF..CRANK_CURSOR_OFF + 2].try_into().unwrap())
@@ -1016,5 +1016,76 @@ fn test_resolved_crank_cursor_wraps_to_zero() {
 
     println!();
     println!("RESOLVED CRANK CURSOR WRAPS TO ZERO: PASSED");
+}
+
+// ── Permissionless Resolution Tests ────────────────────────────────────
+
+/// Permissionless resolution succeeds after oracle is stale long enough.
+#[test]
+fn test_resolve_permissionless_after_staleness() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    // Enable permissionless resolve by writing config field directly
+    {
+        let mut slab = env.svm.get_account(&env.slab).unwrap();
+        // permissionless_resolve_stale_slots: last 16 bytes before end of config,
+        // first u64 of the pair.
+        let config_end = 72 + std::mem::size_of::<percolator_prog::state::MarketConfig>();
+        let offset = config_end - 16; // 2 u64 fields from end
+        slab.data[offset..offset + 8].copy_from_slice(&100u64.to_le_bytes());
+        env.svm.set_account(env.slab, slab).unwrap();
+    }
+
+    // Crank to establish last_crank_slot + last_oracle_price
+    env.crank();
+    assert!(!env.is_market_resolved());
+
+    // Not stale enough — should fail
+    env.set_slot(50);
+    let result = env.try_resolve_permissionless();
+    assert!(result.is_err(), "Should fail when oracle not stale enough");
+
+    // Advance past staleness (100 slots threshold, add padding for slot offset)
+    env.set_slot(200);
+    let result = env.try_resolve_permissionless();
+    assert!(result.is_ok(), "Should succeed after staleness: {:?}", result);
+    assert!(env.is_market_resolved());
+}
+
+/// Permissionless resolution rejected when disabled (stale_slots=0).
+#[test]
+fn test_resolve_permissionless_disabled_by_default() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+    env.crank();
+    env.set_slot(1_000_000);
+    let result = env.try_resolve_permissionless();
+    assert!(result.is_err(), "Should fail when feature disabled");
+}
+
+/// Settlement price = last_oracle_price from engine.
+#[test]
+fn test_resolve_permissionless_settlement_price() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    {
+        let mut slab = env.svm.get_account(&env.slab).unwrap();
+        let config_end = 72 + std::mem::size_of::<percolator_prog::state::MarketConfig>();
+        let offset = config_end - 16;
+        slab.data[offset..offset + 8].copy_from_slice(&50u64.to_le_bytes());
+        env.svm.set_account(env.slab, slab).unwrap();
+    }
+
+    env.crank(); // oracle = $138
+    env.set_slot(200);
+    env.try_resolve_permissionless().unwrap();
+
+    let settlement = env.read_authority_price();
+    assert_eq!(settlement, 138_000_000, "Settlement should be last oracle price");
 }
 
