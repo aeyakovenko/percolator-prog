@@ -5315,6 +5315,17 @@ pub mod processor {
                         }
                     }
 
+                    // On live markets, require a recent crank so that latent
+                    // losses are reflected in insurance_fund.balance before
+                    // allowing withdrawal. Without this, unsettled losses
+                    // could make the stored balance overstated.
+                    if !resolved {
+                        let staleness = clock.slot.saturating_sub(engine.last_crank_slot);
+                        if staleness > engine.max_crank_staleness_slots {
+                            return Err(PercolatorError::OracleStale.into());
+                        }
+                    }
+
                     let insurance_units = engine.insurance_fund.balance.get();
                     if insurance_units == 0 {
                         return Ok(());

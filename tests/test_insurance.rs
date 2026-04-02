@@ -1969,3 +1969,110 @@ fn test_insurance_floor_immutable_after_init() {
     );
 }
 
+/// SOLVENCY: WithdrawInsuranceLimited on live market must require a recent
+/// crank so that latent losses are reflected before withdrawal.
+///
+/// Without this, the insurance balance could be overstated (unsettled losses
+/// haven't absorbed insurance yet), letting the authority withdraw funds that
+/// should be reserved for loss coverage.
+#[test]
+fn test_insurance_withdraw_limited_requires_recent_crank() {
+    program_path();
+
+    let mut env = TestEnv::new();
+
+    // Init market with insurance_withdraw_max_bps=100 (1%) + cooldown=1 slot
+    // to enable live-market limited withdrawals.
+    let admin = &env.payer;
+    let dummy_ata = Pubkey::new_unique();
+    env.svm.set_account(dummy_ata, Account {
+        lamports: 1_000_000,
+        data: vec![0u8; TokenAccount::LEN],
+        owner: spl_token::ID,
+        executable: false,
+        rent_epoch: 0,
+    }).unwrap();
+
+    let mut data = vec![0u8];
+    data.extend_from_slice(admin.pubkey().as_ref());
+    data.extend_from_slice(env.mint.as_ref());
+    data.extend_from_slice(&TEST_FEED_ID);
+    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_staleness_secs
+    data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
+    data.push(0u8); // invert
+    data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
+    data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
+    data.extend_from_slice(&100_000_000_000_000_000_000u128.to_le_bytes());
+    data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap
+    // RiskParams
+    data.extend_from_slice(&0u64.to_le_bytes()); // warmup
+    data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
+    data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
+    data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
+    data.extend_from_slice(&(percolator::MAX_ACCOUNTS as u64).to_le_bytes());
+    data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+    data.extend_from_slice(&0u128.to_le_bytes()); // insurance_floor = 0
+    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
+    data.extend_from_slice(&10u64.to_le_bytes()); // max_crank_staleness_slots = 10
+    data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
+    data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
+    data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+    data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
+    data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
+    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    // Enable live insurance withdrawals
+    data.extend_from_slice(&100u16.to_le_bytes()); // insurance_withdraw_max_bps = 1%
+    data.extend_from_slice(&1u64.to_le_bytes()); // insurance_withdraw_cooldown_slots = 1
+    data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_insurance_floor_change_per_day
+
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(sysvar::rent::ID, false),
+            AccountMeta::new_readonly(dummy_ata, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+        ],
+        data,
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix], Some(&admin.pubkey()), &[admin], env.svm.latest_blockhash(),
+    );
+    env.svm.send_transaction(tx).expect("init with live withdrawals");
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    // Top up insurance
+    env.try_top_up_insurance(&admin, 5_000_000_000).unwrap();
+
+    // Crank to establish current_slot
+    env.crank();
+
+    // Advance far beyond max_crank_staleness_slots (10) without cranking
+    env.set_slot(1_000);
+
+    // Attempt withdrawal without recent crank — should be rejected
+    let result = env.try_withdraw_insurance_limited(&admin, 1000);
+    assert!(
+        result.is_err(),
+        "WithdrawInsuranceLimited must require recent crank on live markets"
+    );
+
+    // After cranking, withdrawal should succeed
+    env.crank();
+    env.set_slot(1_002); // advance past cooldown
+    let result = env.try_withdraw_insurance_limited(&admin, 1000);
+    assert!(
+        result.is_ok(),
+        "WithdrawInsuranceLimited should succeed after fresh crank: {:?}",
+        result,
+    );
+}
+
