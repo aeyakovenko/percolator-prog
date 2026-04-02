@@ -3317,6 +3317,14 @@ pub mod processor {
                     return Err(ProgramError::InvalidInstructionData);
                 }
 
+                // Permissionless resolve: if enabled, must exceed max_crank_staleness
+                // to prevent accidental instant-resolution from one missed crank.
+                if permissionless_resolve_stale_slots > 0
+                    && permissionless_resolve_stale_slots <= risk_params.max_crank_staleness_slots
+                {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+
                 #[cfg(debug_assertions)]
                 {
                     if core::mem::size_of::<MarketConfig>() != CONFIG_LEN {
@@ -5921,7 +5929,9 @@ pub mod processor {
                 let clock = Clock::from_account_info(a_clock)?;
 
                 // Verify oracle is actually stale RIGHT NOW by trying to read it.
-                // If the oracle read succeeds, the oracle is live → reject.
+                // Only OracleStale proves the oracle is dead. Other errors
+                // (wrong account, bad data) don't prove staleness — they could
+                // be an attacker passing garbage to fake oracle death.
                 let is_hyperp = oracle::is_hyperp_mode(&config);
                 if !is_hyperp {
                     let oracle_result = oracle::read_engine_price_e6(
@@ -5929,8 +5939,15 @@ pub mod processor {
                         clock.unix_timestamp, config.max_staleness_secs,
                         config.conf_filter_bps, config.invert, config.unit_scale,
                     );
-                    if oracle_result.is_ok() {
-                        return Err(ProgramError::InvalidAccountData);
+                    match oracle_result {
+                        Ok(_) => return Err(ProgramError::InvalidAccountData), // live
+                        Err(e) => {
+                            let stale_err: ProgramError = PercolatorError::OracleStale.into();
+                            if e != stale_err {
+                                return Err(e); // wrong account / bad data — propagate
+                            }
+                            // OracleStale = oracle is actually dead → proceed
+                        }
                     }
                 } else {
                     // Hyperp: check mark staleness (last trade or push)
@@ -5977,10 +5994,10 @@ pub mod processor {
                     }
                     state::write_config(&mut data, &config);
                     let engine = zc::engine_mut(&mut data)?;
-                    let _ = engine.accrue_market_to(
+                    engine.accrue_market_to(
                         engine.last_crank_slot,
                         config.last_effective_price_e6,
-                    );
+                    ).map_err(map_risk_error)?;
                     config = state::read_config(&data);
                 }
 

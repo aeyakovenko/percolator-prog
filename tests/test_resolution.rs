@@ -1130,3 +1130,61 @@ fn test_resolve_permissionless_settlement_price() {
     assert_eq!(settlement, 138_000_000, "Settlement should be last oracle price");
 }
 
+/// ATTACK: Passing a garbage oracle account must NOT fake staleness.
+/// Only OracleStale should count as proof the oracle is dead.
+#[test]
+fn test_resolve_permissionless_rejects_wrong_oracle() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    {
+        let mut slab = env.svm.get_account(&env.slab).unwrap();
+        let config_end = 72 + std::mem::size_of::<percolator_prog::state::MarketConfig>();
+        let offset = config_end - 16;
+        slab.data[offset..offset + 8].copy_from_slice(&50u64.to_le_bytes());
+        slab.data[168..176].copy_from_slice(&30u64.to_le_bytes());
+        env.svm.set_account(env.slab, slab).unwrap();
+    }
+
+    env.crank(); // establish baseline
+
+    // Oracle is live (within staleness), but attacker passes a garbage account
+    // to make read_engine_price_e6 fail with non-OracleStale error.
+    let garbage_oracle = Pubkey::new_unique();
+    env.svm.set_account(garbage_oracle, Account {
+        lamports: 1_000_000,
+        data: vec![0u8; 10], // too short for any oracle
+        owner: Pubkey::new_unique(), // wrong owner
+        executable: false,
+        rent_epoch: 0,
+    }).unwrap();
+
+    // Build instruction manually with wrong oracle
+    let caller = Keypair::new();
+    env.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+    env.svm.set_sysvar(&Clock { slot: 300, unix_timestamp: 300, ..Clock::default() });
+
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(garbage_oracle, false), // WRONG oracle
+        ],
+        data: encode_resolve_permissionless(),
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&caller.pubkey()),
+        &[&caller],
+        env.svm.latest_blockhash(),
+    );
+    let result = env.svm.send_transaction(tx);
+    assert!(
+        result.is_err(),
+        "Must reject wrong oracle account — only OracleStale proves death"
+    );
+    assert!(!env.is_market_resolved(), "Market must NOT be resolved with fake oracle");
+}
+
