@@ -442,6 +442,35 @@ pub fn encode_init_market_with_maint_fee_bounded(
     data
 }
 
+/// Encode InitMarket with force_close_delay_slots for permissionless force-close tests.
+pub fn encode_init_market_with_force_close(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    feed_id: &[u8; 32],
+    force_close_delay_slots: u64,
+) -> Vec<u8> {
+    // Build base with cap + permissionless resolve
+    let mut data = encode_init_market_with_cap(
+        admin, mint, feed_id, 0, 10_000, 100,
+    );
+    // funding params (required before mark_min_fee)
+    data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon
+    data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
+    data.extend_from_slice(&500i64.to_le_bytes()); // max_premium
+    data.extend_from_slice(&5i64.to_le_bytes()); // max_per_slot
+    // mark_min_fee
+    data.extend_from_slice(&0u64.to_le_bytes()); // disabled
+    // force_close_delay_slots
+    data.extend_from_slice(&force_close_delay_slots.to_le_bytes());
+    data
+}
+
+pub fn encode_force_close_resolved(user_idx: u16) -> Vec<u8> {
+    let mut data = vec![30u8]; // Tag 30
+    data.extend_from_slice(&user_idx.to_le_bytes());
+    data
+}
+
 pub fn encode_init_lp(matcher: &Pubkey, ctx: &Pubkey, fee: u64) -> Vec<u8> {
     let mut data = vec![2u8];
     data.extend_from_slice(matcher.as_ref());
@@ -2742,6 +2771,45 @@ impl TestEnv {
             self.svm.latest_blockhash(),
         );
         self.svm.send_transaction(tx).map(|_| ()).map_err(|e| format!("{:?}", e))
+    }
+
+    /// Try ForceCloseResolved instruction (permissionless, requires resolved + delay)
+    pub fn try_force_close_resolved(
+        &mut self,
+        user_idx: u16,
+        owner: &Pubkey,
+    ) -> Result<(), String> {
+        let caller = Keypair::new();
+        self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+
+        let owner_ata = self.create_ata(owner, 0);
+        let (vault_pda, _) =
+            Pubkey::find_program_address(&[b"vault", self.slab.as_ref()], &self.program_id);
+
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new(owner_ata, false),
+                AccountMeta::new_readonly(vault_pda, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_force_close_resolved(user_idx),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_ix(), ix],
+            Some(&caller.pubkey()),
+            &[&caller],
+            self.svm.latest_blockhash(),
+        );
+        self.svm
+            .send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
     }
 
     /// Try WithdrawInsurance instruction (admin only, requires resolved + all positions closed)

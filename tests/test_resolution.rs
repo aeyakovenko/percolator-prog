@@ -1605,3 +1605,127 @@ fn test_resolve_permissionless_blocked_by_live_authority() {
     );
 }
 
+// ============================================================================
+// Change 2: Permissionless ForceCloseResolved
+// ============================================================================
+
+/// Basic force-close: resolve market, wait for delay, close abandoned account.
+#[test]
+fn test_force_close_resolved_basic() {
+    program_path();
+    let mut env = TestEnv::new();
+
+    // Init with force_close_delay = 50 slots
+    let data = encode_init_market_with_force_close(
+        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID, 50,
+    );
+    env.try_init_market_raw(data).expect("init failed");
+
+    // Set bounded staleness for permissionless resolution
+    {
+        let mut slab = env.svm.get_account(&env.slab).unwrap();
+        slab.data[168..176].copy_from_slice(&30u64.to_le_bytes());
+        env.svm.set_account(env.slab, slab).unwrap();
+    }
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 1_000_000_000);
+
+    // Crank, then resolve
+    env.set_slot(200);
+    env.crank();
+    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
+    env.try_push_oracle_price(&admin, 138_000_000, 300).unwrap();
+    env.try_resolve_market(&admin).unwrap();
+    assert!(env.is_market_resolved());
+
+    // Crank resolved to settle
+    env.set_slot(400);
+    env.crank();
+
+    let used_before = env.read_num_used_accounts();
+
+    // Force-close user account after delay (resolution_slot + 50)
+    env.set_slot(500);
+    let result = env.try_force_close_resolved(user_idx, &user.pubkey());
+    assert!(result.is_ok(), "Force close must succeed after delay: {:?}", result);
+
+    let used_after = env.read_num_used_accounts();
+    assert_eq!(
+        used_after,
+        used_before - 1,
+        "num_used should decrease by 1"
+    );
+}
+
+/// Force-close rejected before delay elapses.
+#[test]
+fn test_force_close_resolved_rejects_before_delay() {
+    program_path();
+    let mut env = TestEnv::new();
+
+    let data = encode_init_market_with_force_close(
+        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID, 500, // 500 slot delay
+    );
+    env.try_init_market_raw(data).expect("init failed");
+    {
+        let mut slab = env.svm.get_account(&env.slab).unwrap();
+        slab.data[168..176].copy_from_slice(&30u64.to_le_bytes());
+        env.svm.set_account(env.slab, slab).unwrap();
+    }
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 1_000_000_000);
+    env.set_slot(200);
+    env.crank();
+    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
+    env.try_push_oracle_price(&admin, 138_000_000, 300).unwrap();
+    env.try_resolve_market(&admin).unwrap();
+
+    // Try immediately — too early (resolution at ~300, delay=500)
+    env.set_slot(400);
+    let result = env.try_force_close_resolved(user_idx, &user.pubkey());
+    assert!(result.is_err(), "Must reject before delay elapses");
+}
+
+/// Force-close rejected on non-resolved market.
+#[test]
+fn test_force_close_resolved_rejects_non_resolved() {
+    program_path();
+    let mut env = TestEnv::new();
+
+    let data = encode_init_market_with_force_close(
+        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID, 50,
+    );
+    env.try_init_market_raw(data).expect("init failed");
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+
+    env.set_slot(200);
+    let result = env.try_force_close_resolved(user_idx, &user.pubkey());
+    assert!(result.is_err(), "Must reject on non-resolved market");
+}
+

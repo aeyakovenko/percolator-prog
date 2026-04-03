@@ -1081,6 +1081,8 @@ pub mod ix {
             funding_max_bps_per_slot: Option<i64>,
             /// Fee-weighted EWMA: min fee for full mark weight. 0 = disabled.
             mark_min_fee: u64,
+            /// Permissionless force-close delay after resolution. 0 = disabled.
+            force_close_delay_slots: u64,
         },
         InitUser {
             fee_payment: u64,
@@ -1204,6 +1206,11 @@ pub mod ix {
         /// config.permissionless_resolve_stale_slots. Settles at the last
         /// known good oracle price from engine.last_oracle_price.
         ResolvePermissionless,
+        /// Permissionless force-close for resolved markets (tag 30).
+        /// Requires RESOLVED + delay. Sends capital to stored owner ATA.
+        ForceCloseResolved {
+            user_idx: u16,
+        },
     }
 
     impl Instruction {
@@ -1267,6 +1274,12 @@ pub mod ix {
                     } else {
                         0u64 // disabled
                     };
+                    // Optional force_close_delay_slots (after mark_min_fee)
+                    let force_close_delay_slots = if rest.len() >= 8 {
+                        read_u64(&mut rest)?
+                    } else {
+                        0u64 // disabled
+                    };
                     // Reject trailing bytes to prevent silent misparsing.
                     // All optional fields are parsed — leftover data means the
                     // client sent a malformed or future-version payload.
@@ -1296,6 +1309,7 @@ pub mod ix {
                         funding_max_premium_bps,
                         funding_max_bps_per_slot,
                         mark_min_fee,
+                        force_close_delay_slots,
                     })
                 }
                 1 => {
@@ -1518,6 +1532,10 @@ pub mod ix {
                     Ok(Instruction::ConvertReleasedPnl { user_idx, amount })
                 }
                 29 => Ok(Instruction::ResolvePermissionless),
+                30 => {
+                    let user_idx = read_u16(&mut rest)?;
+                    Ok(Instruction::ForceCloseResolved { user_idx })
+                }
                 _ => Err(ProgramError::InvalidInstructionData),
             }
         }
@@ -1874,8 +1892,9 @@ pub mod state {
         /// 0 = disabled (all trades get full weight, backward compat).
         /// Set at InitMarket, immutable.
         pub mark_min_fee: u64,
-        /// Padding for u128 alignment.
-        pub _min_fee_padding: u64,
+        /// Minimum slots after resolution before permissionless force-close.
+        /// 0 = disabled. Set at InitMarket, immutable.
+        pub force_close_delay_slots: u64,
     }
 
     pub fn slab_data_mut<'a, 'b>(
@@ -2826,7 +2845,10 @@ pub mod processor {
                 // set_capital inline: update c_tot and account capital
                 let new_cap = cap - pay;
                 let old_c_tot = engine.c_tot.get();
-                engine.c_tot = U128::new(old_c_tot.saturating_sub(cap).saturating_add(new_cap));
+                engine.c_tot = U128::new(
+                    old_c_tot.checked_sub(cap).ok_or(RiskError::Overflow)?
+                        .checked_add(new_cap).ok_or(RiskError::Overflow)?
+                );
                 engine.accounts[i].capital = U128::new(new_cap);
                 // set_pnl inline: if capital fully covers the loss, zero PnL directly.
                 // This avoids i128::MIN + i128::MAX = -1 edge case.
@@ -2869,7 +2891,7 @@ pub mod processor {
                 // Update pnl_matured_pos_tot: matured increases by released amount
                 let matured_delta = core::cmp::min(old_reserved, pos_pnl);
                 engine.pnl_matured_pos_tot = engine.pnl_matured_pos_tot
-                    .saturating_add(matured_delta);
+                    .checked_add(matured_delta).ok_or(RiskError::Overflow)?;
                 engine.accounts[i].reserved_pnl = 0;
             }
 
@@ -2884,18 +2906,21 @@ pub mod processor {
 
             // consume_released_pnl: decrease PnL and aggregates
             // set_pnl to 0: remove pos_pnl from pnl_pos_tot
-            engine.pnl_pos_tot = engine.pnl_pos_tot.saturating_sub(pos_pnl);
-            // Also decrease pnl_matured_pos_tot
+            engine.pnl_pos_tot = engine.pnl_pos_tot
+                .checked_sub(pos_pnl).ok_or(RiskError::Overflow)?;
             engine.pnl_matured_pos_tot = engine.pnl_matured_pos_tot
-                .saturating_sub(pos_pnl);
+                .checked_sub(pos_pnl).ok_or(RiskError::Overflow)?;
             engine.accounts[i].pnl = 0;
             engine.accounts[i].reserved_pnl = 0;
 
             // set_capital: add haircutted payout to capital
             let old_cap = engine.accounts[i].capital.get();
-            let new_cap = old_cap.saturating_add(y);
+            let new_cap = old_cap.checked_add(y).ok_or(RiskError::Overflow)?;
             let old_c_tot = engine.c_tot.get();
-            engine.c_tot = U128::new(old_c_tot.saturating_sub(old_cap).saturating_add(new_cap));
+            engine.c_tot = U128::new(
+                old_c_tot.checked_sub(old_cap).ok_or(RiskError::Overflow)?
+                    .checked_add(new_cap).ok_or(RiskError::Overflow)?
+            );
             engine.accounts[i].capital = U128::new(new_cap);
         }
 
@@ -2909,7 +2934,10 @@ pub mod processor {
                 if pay > 0 {
                     let new_cap = cap - pay;
                     let old_c_tot = engine.c_tot.get();
-                    engine.c_tot = U128::new(old_c_tot.saturating_sub(cap).saturating_add(new_cap));
+                    engine.c_tot = U128::new(
+                        old_c_tot.checked_sub(cap).ok_or(RiskError::Overflow)?
+                            .checked_add(new_cap).ok_or(RiskError::Overflow)?
+                    );
                     engine.accounts[i].capital = U128::new(new_cap);
                     let pay_i128 = core::cmp::min(pay, i128::MAX as u128) as i128;
                     engine.accounts[i].fee_credits = I128::new(
@@ -3003,6 +3031,18 @@ pub mod processor {
             config.funding_max_premium_bps,
             config.funding_max_bps_per_slot,
         )
+    }
+
+    /// Validated funding rate stamp (spec §4.12 compliance).
+    /// Clamps rate to MAX_ABS_FUNDING_BPS_PER_SLOT before writing,
+    /// ensuring the engine field never exceeds the protocol bound.
+    fn stamp_funding_rate(engine: &mut RiskEngine, config: &MarketConfig) {
+        let rate = compute_current_funding_rate(config);
+        let clamped = rate.clamp(
+            -percolator::MAX_ABS_FUNDING_BPS_PER_SLOT,
+            percolator::MAX_ABS_FUNDING_BPS_PER_SLOT,
+        );
+        engine.funding_rate_bps_per_slot_last = clamped;
     }
 
     fn execute_trade_with_matcher<M: MatchingEngine>(
@@ -3282,6 +3322,7 @@ pub mod processor {
                 funding_max_premium_bps: custom_max_premium,
                 funding_max_bps_per_slot: custom_max_per_slot,
                 mark_min_fee,
+                force_close_delay_slots,
             } => {
                 // Reduced from 11 to 9: removed pyth_index and pyth_collateral accounts
                 // (feed_id is now passed in instruction data, not as account)
@@ -3551,7 +3592,7 @@ pub mod processor {
                     permissionless_resolve_stale_slots,
                     _perm_resolve_padding: 0,
                     mark_min_fee,
-                    _min_fee_padding: 0,
+                    force_close_delay_slots,
                 };
                 // Hyperp markets must have non-zero cap for index smoothing
                 if is_hyperp && config.oracle_price_cap_e2bps == 0 {
@@ -4245,8 +4286,7 @@ pub mod processor {
                     if config.mark_ewma_e6 != old_ewma {
                         config.mark_ewma_last_slot = clock.slot;
                     }
-                    engine.funding_rate_bps_per_slot_last =
-                        compute_current_funding_rate(&config);
+                    stamp_funding_rate(engine, &config);
                 }
 
                 // Write updated config (mark_ewma changed)
@@ -4549,8 +4589,7 @@ pub mod processor {
                             config.mark_ewma_last_slot = clock.slot;
                         }
                         // Stamp funding rate from updated mark
-                        engine.funding_rate_bps_per_slot_last =
-                            compute_current_funding_rate(&config);
+                        stamp_funding_rate(engine, &config);
                     }
 
                     // Hyperp: also update authority_price (legacy mark field)
@@ -5023,9 +5062,8 @@ pub mod processor {
                 config.funding_max_bps_per_slot = funding_max_bps_per_slot;
                 // Stamp post-change funding rate for next interval
                 if oracle::is_hyperp_mode(&config) {
-                    let new_rate = compute_current_funding_rate(&config);
                     let engine = zc::engine_mut(&mut data)?;
-                    engine.funding_rate_bps_per_slot_last = new_rate;
+                    stamp_funding_rate(engine, &config);
                 }
                 state::write_config(&mut data, &config);
             }
@@ -5203,9 +5241,8 @@ pub mod processor {
                 }
                 // Stamp post-change funding rate for next interval
                 if is_hyperp {
-                    let new_rate = compute_current_funding_rate(&config);
                     let engine = zc::engine_mut(&mut data)?;
-                    engine.funding_rate_bps_per_slot_last = new_rate;
+                    stamp_funding_rate(engine, &config);
                 }
                 state::write_config(&mut data, &config);
             }
@@ -5285,9 +5322,8 @@ pub mod processor {
                 config.oracle_price_cap_e2bps = max_change_e2bps;
                 // Stamp post-change funding rate for next interval
                 if is_hyperp {
-                    let new_rate = compute_current_funding_rate(&config);
                     let engine = zc::engine_mut(&mut data)?;
-                    engine.funding_rate_bps_per_slot_last = new_rate;
+                    stamp_funding_rate(engine, &config);
                 }
                 state::write_config(&mut data, &config);
             }
@@ -6201,6 +6237,100 @@ pub mod processor {
                 config.authority_price_e6 = last_price;
                 state::write_config(&mut data, &config);
                 state::set_resolved(&mut data);
+            }
+
+            Instruction::ForceCloseResolved { user_idx } => {
+                // Permissionless force-close for resolved markets.
+                // Mirrors AdminForceCloseAccount but requires delay and no admin.
+                accounts::expect_len(accounts, 7)?;
+                let a_slab = &accounts[0];
+                let a_vault = &accounts[1];
+                let a_owner_ata = &accounts[2];
+                let a_pda = &accounts[3];
+                let a_token = &accounts[4];
+                let a_clock = &accounts[5];
+                // accounts[6] = oracle (unused but passed for compatibility)
+
+                accounts::expect_writable(a_slab)?;
+                verify_token_program(a_token)?;
+
+                let mut data = state::slab_data_mut(a_slab)?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+
+                if !state::is_resolved(&data) {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                let config = state::read_config(&data);
+                if config.force_close_delay_slots == 0 {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
+                let clock = Clock::from_account_info(a_clock)?;
+                if clock.slot < config.resolution_slot
+                    .saturating_add(config.force_close_delay_slots)
+                {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                let mint = Pubkey::new_from_array(config.collateral_mint);
+                let auth = accounts::derive_vault_authority_with_bump(
+                    program_id, a_slab.key, config.vault_authority_bump,
+                )?;
+                verify_vault(
+                    a_vault, &auth, &mint,
+                    &Pubkey::new_from_array(config.vault_pubkey),
+                )?;
+                accounts::expect_key(a_pda, &auth)?;
+
+                let price = config.authority_price_e6;
+                if price == 0 {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                let engine = zc::engine_mut(&mut data)?;
+                check_idx(engine, user_idx)?;
+
+                let owner_pubkey = Pubkey::new_from_array(
+                    engine.accounts[user_idx as usize].owner,
+                );
+                verify_token_account(a_owner_ata, &owner_pubkey, &mint)?;
+
+                let frozen_slot = config.resolution_slot;
+                match engine.touch_account_full(user_idx as usize, price, frozen_slot) {
+                    Ok(()) => {}
+                    Err(percolator::RiskError::CorruptState) => {
+                        return Err(map_risk_error(percolator::RiskError::CorruptState));
+                    }
+                    Err(_) => {}
+                }
+
+                let funding_rate = compute_current_funding_rate(&config);
+                let amt_units = engine.close_account(
+                    user_idx, frozen_slot, price, funding_rate,
+                ).or_else(|e| match e {
+                    percolator::RiskError::CorruptState => Err(e),
+                    _ => settle_and_close_resolved(engine, user_idx),
+                }).map_err(map_risk_error)?;
+
+                let amt_units_u64: u64 = amt_units
+                    .try_into()
+                    .map_err(|_| PercolatorError::EngineOverflow)?;
+                let base_to_pay =
+                    crate::units::units_to_base_checked(amt_units_u64, config.unit_scale)
+                        .ok_or(PercolatorError::EngineOverflow)?;
+
+                let seed1: &[u8] = b"vault";
+                let seed2: &[u8] = a_slab.key.as_ref();
+                let bump_arr: [u8; 1] = [config.vault_authority_bump];
+                let seed3: &[u8] = &bump_arr;
+                let seeds: [&[u8]; 3] = [seed1, seed2, seed3];
+                let signer_seeds: [&[&[u8]]; 1] = [&seeds];
+
+                collateral::withdraw(
+                    a_token, a_vault, a_owner_ata, a_pda,
+                    base_to_pay, &signer_seeds,
+                )?;
             }
         }
         Ok(())
