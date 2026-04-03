@@ -1587,21 +1587,29 @@ fn test_resolve_permissionless_blocked_by_live_authority() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
 
-    // Authority pushes a fresh price
-    env.try_push_oracle_price(&admin, 138_000_000, 200).unwrap();
-
-    // Make external oracle stale
+    // Advance clock to ts=200, then push. The helper uses clock.unix_timestamp
+    // for the push timestamp, so authority_timestamp will be ~200.
     env.svm.set_sysvar(&Clock {
-        slot: 600,
-        unix_timestamp: 600,
+        slot: 300,
+        unix_timestamp: 200,
+        ..Clock::default()
+    });
+    env.try_push_oracle_price(&admin, 138_000_000, 0).unwrap();
+
+    // Advance clock to make external oracle stale but authority still fresh.
+    // Oracle publish_time=100 (from init), max_staleness=30.
+    // At ts=220: oracle age=120 > 30 (stale), authority age=~20 < 30 (fresh).
+    env.svm.set_sysvar(&Clock {
+        slot: 320,
+        unix_timestamp: 220,
         ..Clock::default()
     });
 
-    // Should be rejected — authority is alive and pushing prices
+    // Should be rejected — authority pushed recently (age ~20 < 30)
     let result = env.try_resolve_permissionless();
     assert!(
         result.is_err(),
-        "Must not resolve permissionlessly when authority is active"
+        "Must not resolve permissionlessly when authority push is fresh"
     );
 }
 

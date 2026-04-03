@@ -3870,9 +3870,20 @@ pub mod processor {
                             // does best-effort touch then falls through to
                             // close_account_resolved using stored local state.
                             // on stored local state without accrue/settle.
-                            let _ = engine.touch_account_full(
+                            // Best-effort touch for resolved settlement.
+                            // Propagate CorruptState (real invariant violation).
+                            // Other errors (epoch mismatch, etc.) are non-fatal:
+                            // the account will be settled by force_close_resolved
+                            // when the owner or anyone calls ForceCloseResolved.
+                            match engine.touch_account_full(
                                 idx as usize, settlement_price, frozen_slot,
-                            );
+                            ) {
+                                Ok(()) => {}
+                                Err(percolator::RiskError::CorruptState) => {
+                                    return Err(map_risk_error(percolator::RiskError::CorruptState));
+                                }
+                                Err(_) => {} // deferred to ForceCloseResolved
+                            }
                         }
                     }
 
@@ -3900,13 +3911,19 @@ pub mod processor {
                     };
 
                     // §10.0 steps 4-7 / §10.8 steps 9-12: end-of-instruction lifecycle.
-                    // Best-effort on resolved markets — side-reset finalization may
-                    // encounter CorruptState if ADL state is frozen post-resolution.
+                    // Propagate CorruptState (real invariant violation), ignore other
+                    // errors (side-reset may fail on frozen ADL state post-resolution).
                     let mut ctx = percolator::InstructionContext::new();
-                    let _ = engine.run_end_of_instruction_lifecycle(
+                    match engine.run_end_of_instruction_lifecycle(
                         &mut ctx,
                         compute_current_funding_rate(&config),
-                    );
+                    ) {
+                        Ok(()) => {}
+                        Err(percolator::RiskError::CorruptState) => {
+                            return Err(map_risk_error(percolator::RiskError::CorruptState));
+                        }
+                        Err(_) => {} // non-fatal on resolved markets
+                    }
 
                     // engine borrow ends here (last use above).
                     // Write dust_base AFTER dropping the engine borrow to avoid
@@ -4873,11 +4890,20 @@ pub mod processor {
                 // Accrue to boundary using engine's already-stored rate.
                 // Do NOT overwrite funding_rate_bps_per_slot_last before accrual —
                 // that would retroactively reprice the elapsed interval.
-                if oracle::is_hyperp_mode(&config) {
-                    let engine = zc::engine_mut(&mut data)?;
-                    engine.accrue_market_to(
-                        clock.slot, config.last_effective_price_e6,
-                    ).map_err(map_risk_error)?;
+                // Both Hyperp and non-Hyperp must accrue before changing funding params.
+                {
+                    let accrual_price = if oracle::is_hyperp_mode(&config) {
+                        config.last_effective_price_e6
+                    } else {
+                        // Non-Hyperp: use last oracle price from engine
+                        let engine = zc::engine_ref(&data)?;
+                        engine.last_oracle_price
+                    };
+                    if accrual_price > 0 {
+                        let engine = zc::engine_mut(&mut data)?;
+                        engine.accrue_market_to(clock.slot, accrual_price)
+                            .map_err(map_risk_error)?;
+                    }
                 }
 
                 config.funding_horizon_slots = funding_horizon_slots;
@@ -4885,8 +4911,8 @@ pub mod processor {
                 config.funding_inv_scale_notional_e6 = funding_inv_scale_notional_e6;
                 config.funding_max_premium_bps = funding_max_premium_bps;
                 config.funding_max_bps_per_slot = funding_max_bps_per_slot;
-                // Stamp post-change funding rate for next interval
-                if oracle::is_hyperp_mode(&config) {
+                // Stamp post-change funding rate for next interval (all market types)
+                {
                     let engine = zc::engine_mut(&mut data)?;
                     stamp_funding_rate(engine, &config);
                 }
@@ -5222,6 +5248,17 @@ pub mod processor {
 
                 let clock = Clock::from_account_info(a_clock)?;
                 let mut config = config;
+
+                // Accrue engine to settlement price BEFORE entering resolved mode.
+                // This crystallizes all account states at the settlement price so
+                // force_close_resolved (which takes no price parameter) uses
+                // consistent post-accrual state.
+                if !oracle::is_hyperp_mode(&config) {
+                    let engine = zc::engine_mut(&mut data)?;
+                    engine.accrue_market_to(
+                        clock.slot, config.authority_price_e6,
+                    ).map_err(map_risk_error)?;
+                }
 
                 // Flush Hyperp index to resolution slot WITHOUT staleness check.
                 // Admin must be able to resolve even if mark is stale.
@@ -5970,12 +6007,21 @@ pub mod processor {
                     }
                 }
 
-                // Block if an oracle authority is configured.
-                // A market with authority pricing has a human-in-the-loop who
-                // can push prices and resolve manually. Permissionless resolution
-                // is for fully admin-free markets only.
-                if config.oracle_authority != [0u8; 32] {
-                    return Err(ProgramError::InvalidAccountData);
+                // Block if an oracle authority is configured AND has pushed recently.
+                // If the authority has never pushed (timestamp=0) or their last push
+                // is stale, the authority is effectively dead and permissionless
+                // resolution should proceed. This prevents the deadlock where:
+                // authority set + external oracle dead = no resolution path.
+                if config.oracle_authority != [0u8; 32] && config.authority_timestamp > 0 {
+                    let authority_age_secs = clock.unix_timestamp
+                        .saturating_sub(config.authority_timestamp);
+                    // Authority is "fresh" if push happened within max_staleness_secs
+                    // (the same staleness window as the external oracle feed).
+                    if authority_age_secs >= 0
+                        && (authority_age_secs as u64) < config.max_staleness_secs
+                    {
+                        return Err(ProgramError::InvalidAccountData);
+                    }
                 }
 
                 // Also require minimum time since last crank (defense in depth)
@@ -6034,10 +6080,22 @@ pub mod processor {
                     if p == 0 {
                         return Err(PercolatorError::OracleInvalid.into());
                     }
-                    config.resolution_slot = engine.last_crank_slot;
                     p
                 };
 
+                // Accrue engine to settlement price before entering resolved mode.
+                // Crystallizes all account states so force_close_resolved uses
+                // consistent post-accrual state.
+                {
+                    let engine = zc::engine_mut(&mut data)?;
+                    engine.accrue_market_to(clock.slot, last_price)
+                        .map_err(map_risk_error)?;
+                }
+
+                // Use clock.slot (not engine.last_crank_slot) — other instructions
+                // advance current_slot past last_crank_slot, so using the stale
+                // crank slot would make resolved touch paths fail monotonic checks.
+                config.resolution_slot = clock.slot;
                 config.authority_price_e6 = last_price;
                 state::write_config(&mut data, &config);
                 state::set_resolved(&mut data);
