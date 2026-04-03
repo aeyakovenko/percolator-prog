@@ -4182,8 +4182,11 @@ pub mod processor {
                 // Side-mode gating is handled inside engine.execute_trade()
 
                 // Snapshot insurance fund balance for fee-weighted EWMA.
-                // The delta after execute_trade = exact fee collected into I
-                // (avoids the pre-trade capital snapshot overestimate issue).
+                // The delta after execute_trade = fees_collected - losses_absorbed.
+                // NOTE: If loss absorption occurs during the same trade (spec §5.4),
+                // delta undercounts the actual fee. This is the conservative direction:
+                // mark is stickier during volatile loss-absorption events, never
+                // more manipulable. A future engine API could expose fee_paid directly.
                 let ins_before = engine.insurance_fund.balance.get();
 
                 #[cfg(feature = "cu-audit")]
@@ -4474,7 +4477,9 @@ pub mod processor {
 
                     let trade_size = crate::verify::cpi_trade_size(ret.exec_size, size);
 
-                    // Snapshot insurance for fee-weighted EWMA (exact delta approach)
+                    // Snapshot insurance for fee-weighted EWMA (delta approach).
+                    // NOTE: delta = fees - losses_absorbed. Conservative undercount
+                    // during volatile loss-absorption events (see TradeNoCpi comment).
                     let ins_before_cpi = engine.insurance_fund.balance.get();
 
                     #[cfg(feature = "cu-audit")]
