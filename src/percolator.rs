@@ -2793,168 +2793,10 @@ pub mod processor {
         RiskEngine, RiskError, I128, U128, ADL_ONE, MAX_ACCOUNTS,
     };
 
-    /// Settle a same-epoch account for resolved-market close.
-    ///
-    /// When `close_account` fails (same-epoch position not zeroed by touch),
-    /// this function zeros the position, settles PnL, and prepares the
-    /// account so that `close_account_resolved` can succeed.
-    ///
-    /// Replicates the old `force_close_resolved` logic that was removed
-    /// from the engine. Directly manipulates engine fields to maintain
-    /// aggregate invariants (stored_pos_count, pnl_pos_tot, c_tot, etc.).
-    fn settle_and_close_resolved(engine: &mut RiskEngine, idx: u16) -> Result<u128, RiskError> {
-        let i = idx as usize;
-        if i >= MAX_ACCOUNTS || !engine.is_used(i) {
-            return Err(RiskError::AccountNotFound);
-        }
+    // settle_and_close_resolved removed — replaced by engine.force_close_resolved()
+    // which handles K-pair PnL, checked arithmetic, and all settlement internally.
+    // (function body deleted — ~150 lines of wrapper-level state surgery)
 
-        // Step 1: Zero position with stored_pos_count + stale_count maintenance
-        let basis = engine.accounts[i].position_basis_q;
-        if basis != 0 {
-            if basis > 0 {
-                engine.stored_pos_count_long = engine.stored_pos_count_long
-                    .checked_sub(1).ok_or(RiskError::Overflow)?;
-                // Epoch-mismatched accounts: decrement stale count (spec §5.3 step 5).
-                // On resolved markets, epoch mismatch is expected for accounts that
-                // were created before the last side reset. Use checked arithmetic.
-                if engine.accounts[i].adl_epoch_snap != engine.adl_epoch_long {
-                    engine.stale_account_count_long = engine.stale_account_count_long
-                        .checked_sub(1).ok_or(RiskError::Overflow)?;
-                }
-            } else {
-                engine.stored_pos_count_short = engine.stored_pos_count_short
-                    .checked_sub(1).ok_or(RiskError::Overflow)?;
-                if engine.accounts[i].adl_epoch_snap != engine.adl_epoch_short {
-                    engine.stale_account_count_short = engine.stale_account_count_short
-                        .checked_sub(1).ok_or(RiskError::Overflow)?;
-                }
-            }
-            engine.accounts[i].position_basis_q = 0;
-            engine.accounts[i].adl_a_basis = ADL_ONE;
-            engine.accounts[i].adl_k_snap = 0;
-            engine.accounts[i].adl_epoch_snap = 0;
-        }
-
-        // Step 2: Settle losses (negative PnL → capital)
-        let pnl = engine.accounts[i].pnl;
-        if pnl < 0 {
-            let need = if pnl == i128::MIN { i128::MAX as u128 + 1 } else { pnl.unsigned_abs() };
-            let cap = engine.accounts[i].capital.get();
-            let pay = core::cmp::min(need, cap);
-            if pay > 0 {
-                // set_capital inline: update c_tot and account capital
-                let new_cap = cap - pay;
-                let old_c_tot = engine.c_tot.get();
-                engine.c_tot = U128::new(
-                    old_c_tot.checked_sub(cap).ok_or(RiskError::Overflow)?
-                        .checked_add(new_cap).ok_or(RiskError::Overflow)?
-                );
-                engine.accounts[i].capital = U128::new(new_cap);
-                // set_pnl inline: if capital fully covers the loss, zero PnL directly.
-                // This avoids i128::MIN + i128::MAX = -1 edge case.
-                let new_pnl = if pay == need {
-                    0i128
-                } else {
-                    let pay_i128 = if pay > i128::MAX as u128 { i128::MAX } else { pay as i128 };
-                    pnl.saturating_add(pay_i128)
-                };
-                engine.accounts[i].pnl = new_pnl;
-            }
-        }
-
-        // Step 3: Absorb remaining negative PnL from insurance (above floor).
-        // Only zero the amount actually covered. Uncovered remainder stays
-        // as protocol loss — vault absorbs it implicitly when close_account_resolved
-        // returns less capital than the vault had.
-        if engine.accounts[i].pnl < 0 {
-            let loss = engine.accounts[i].pnl.unsigned_abs();
-            let ins_bal = engine.insurance_fund.balance.get();
-            let available = ins_bal.saturating_sub(engine.params.insurance_floor.get());
-            let ins_pay = core::cmp::min(loss, available);
-            if ins_pay > 0 {
-                engine.insurance_fund.balance = U128::new(ins_bal - ins_pay);
-            }
-            // Zero PnL for close_account_resolved precondition. Any uncovered
-            // loss (loss > capital + available_insurance) is an implicit haircut:
-            // the vault retains less, so future withdrawals/closes receive less.
-            // This matches the engine's absorb_protocol_loss semantics.
-            engine.accounts[i].pnl = 0;
-        }
-
-        // Step 4: Convert positive PnL to capital (bypass warmup for resolved)
-        if engine.accounts[i].pnl > 0 {
-            let pos_pnl = engine.accounts[i].pnl as u128;
-
-            // Release all reserves (bypass warmup)
-            let old_reserved = engine.accounts[i].reserved_pnl;
-            if old_reserved > 0 {
-                // Update pnl_matured_pos_tot: matured increases by released amount
-                let matured_delta = core::cmp::min(old_reserved, pos_pnl);
-                engine.pnl_matured_pos_tot = engine.pnl_matured_pos_tot
-                    .checked_add(matured_delta).ok_or(RiskError::Overflow)?;
-                engine.accounts[i].reserved_pnl = 0;
-            }
-
-            // Compute haircutted payout using wide mul/div (U256 internally)
-            let (h_num, h_den) = engine.haircut_ratio();
-            let y = if h_den == 0 || h_num >= h_den {
-                // No haircut (h >= 1.0 or undefined) — full payout
-                pos_pnl
-            } else {
-                percolator::wide_math::wide_mul_div_floor_u128(pos_pnl, h_num, h_den)
-            };
-
-            // consume_released_pnl: decrease PnL and aggregates
-            // set_pnl to 0: remove pos_pnl from pnl_pos_tot
-            engine.pnl_pos_tot = engine.pnl_pos_tot
-                .checked_sub(pos_pnl).ok_or(RiskError::Overflow)?;
-            engine.pnl_matured_pos_tot = engine.pnl_matured_pos_tot
-                .checked_sub(pos_pnl).ok_or(RiskError::Overflow)?;
-            engine.accounts[i].pnl = 0;
-            engine.accounts[i].reserved_pnl = 0;
-
-            // set_capital: add haircutted payout to capital
-            let old_cap = engine.accounts[i].capital.get();
-            let new_cap = old_cap.checked_add(y).ok_or(RiskError::Overflow)?;
-            let old_c_tot = engine.c_tot.get();
-            engine.c_tot = U128::new(
-                old_c_tot.checked_sub(old_cap).ok_or(RiskError::Overflow)?
-                    .checked_add(new_cap).ok_or(RiskError::Overflow)?
-            );
-            engine.accounts[i].capital = U128::new(new_cap);
-        }
-
-        // Step 5: Fee debt sweep
-        {
-            let fc = engine.accounts[i].fee_credits.get();
-            if fc < 0 {
-                let debt = fc.unsigned_abs();
-                let cap = engine.accounts[i].capital.get();
-                let pay = core::cmp::min(debt, cap);
-                if pay > 0 {
-                    let new_cap = cap - pay;
-                    let old_c_tot = engine.c_tot.get();
-                    engine.c_tot = U128::new(
-                        old_c_tot.checked_sub(cap).ok_or(RiskError::Overflow)?
-                            .checked_add(new_cap).ok_or(RiskError::Overflow)?
-                    );
-                    engine.accounts[i].capital = U128::new(new_cap);
-                    let pay_i128 = core::cmp::min(pay, i128::MAX as u128) as i128;
-                    engine.accounts[i].fee_credits = I128::new(
-                        fc.checked_add(pay_i128).unwrap_or(0)
-                    );
-                    engine.insurance_fund.balance = U128::new(
-                        engine.insurance_fund.balance.get().saturating_add(pay)
-                    );
-                }
-            }
-        }
-
-        // Now position==0 and pnl==0, delegate to close_account_resolved
-        engine.close_account_resolved(idx)
-    }
-
-    /// Result of a successful trade execution from the matching engine
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct TradeExecution {
         /// Actual execution price (may differ from oracle/requested price)
@@ -4745,26 +4587,9 @@ pub mod processor {
                     sol_log_compute_units();
                 }
                 let amt_units = if resolved {
-                    let frozen_slot = config.resolution_slot;
-                    // Best-effort touch — abort on CorruptState only.
-                    // Same-epoch accounts legitimately fail here; the
-                    // settle_and_close_resolved fallback handles them.
-                    match engine.touch_account_full(
-                        user_idx as usize, price, frozen_slot,
-                    ) {
-                        Ok(()) => {}
-                        Err(percolator::RiskError::CorruptState) => {
-                            return Err(map_risk_error(percolator::RiskError::CorruptState));
-                        }
-                        Err(_) => {}
-                    }
-                    let funding_rate = compute_current_funding_rate(&config);
-                    engine.close_account(user_idx, frozen_slot, price, funding_rate)
-                        .or_else(|e| match e {
-                            percolator::RiskError::CorruptState => Err(e),
-                            // All other errors: same-epoch position, PnL not settled, etc.
-                            _ => settle_and_close_resolved(engine, user_idx),
-                        })
+                    // Engine handles K-pair PnL, loss settlement, insurance absorption,
+                    // profit conversion with haircut, fee debt sweep, and account close.
+                    engine.force_close_resolved(user_idx)
                         .map_err(map_risk_error)?
                 } else {
                     engine
@@ -5857,31 +5682,9 @@ pub mod processor {
                 let owner_pubkey = Pubkey::new_from_array(engine.accounts[user_idx as usize].owner);
                 verify_token_account(a_owner_ata, &owner_pubkey, &mint)?;
 
-                // Best-effort touch to settle K-pair PnL at settlement price.
-                // Abort on CorruptState only — same-epoch accounts legitimately
-                // fail here; settle_and_close_resolved fallback handles them.
-                let frozen_slot = config.resolution_slot;
-                match engine.touch_account_full(user_idx as usize, price, frozen_slot) {
-                    Ok(()) => {}
-                    Err(percolator::RiskError::CorruptState) => {
-                        return Err(map_risk_error(percolator::RiskError::CorruptState));
-                    }
-                    Err(_) => {}
-                }
-
-                // Try canonical close first (handles stale-epoch accounts
-                // where touch_account_full already zeroed the position).
-                // If that fails, fall back to settle_and_close_resolved which
-                // zeroes position, settles PnL, and closes.
-                let funding_rate = compute_current_funding_rate(&config);
-                let amt_units = engine.close_account(
-                    user_idx, frozen_slot, price, funding_rate,
-                ).or_else(|e| match e {
-                    // Only propagate CorruptState (real invariant violation).
-                    // All other errors: admin must be able to close.
-                    percolator::RiskError::CorruptState => Err(e),
-                    _ => settle_and_close_resolved(engine, user_idx),
-                })
+                // Engine handles K-pair PnL, loss settlement, insurance absorption,
+                // profit conversion with haircut, fee debt sweep, and account close.
+                let amt_units = engine.force_close_resolved(user_idx)
                     .map_err(map_risk_error)?;
                 let amt_units_u64: u64 = amt_units
                     .try_into()
@@ -5946,8 +5749,9 @@ pub mod processor {
                     return Err(ProgramError::InvalidAccountData);
                 }
 
+                let clock = Clock::from_account_info(_a_clock)?;
                 let engine = zc::engine_mut(&mut data)?;
-                engine.reclaim_empty_account(user_idx)
+                engine.reclaim_empty_account(user_idx, clock.slot)
                     .map_err(map_risk_error)?;
                 // Per §10.7: MUST NOT call accrue_market_to, MUST NOT mutate side state.
             }
@@ -6296,22 +6100,8 @@ pub mod processor {
                 );
                 verify_token_account(a_owner_ata, &owner_pubkey, &mint)?;
 
-                let frozen_slot = config.resolution_slot;
-                match engine.touch_account_full(user_idx as usize, price, frozen_slot) {
-                    Ok(()) => {}
-                    Err(percolator::RiskError::CorruptState) => {
-                        return Err(map_risk_error(percolator::RiskError::CorruptState));
-                    }
-                    Err(_) => {}
-                }
-
-                let funding_rate = compute_current_funding_rate(&config);
-                let amt_units = engine.close_account(
-                    user_idx, frozen_slot, price, funding_rate,
-                ).or_else(|e| match e {
-                    percolator::RiskError::CorruptState => Err(e),
-                    _ => settle_and_close_resolved(engine, user_idx),
-                }).map_err(map_risk_error)?;
+                let amt_units = engine.force_close_resolved(user_idx)
+                    .map_err(map_risk_error)?;
 
                 let amt_units_u64: u64 = amt_units
                     .try_into()
