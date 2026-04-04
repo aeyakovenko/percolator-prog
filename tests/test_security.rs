@@ -626,7 +626,7 @@ fn test_attack_trade_risk_increase_when_gated() {
     //   oi_eff_short_q: U256 (32 bytes) at engine offset 504, ends at 536
     //   side_mode_long: u8 at engine offset 424 (BPF, native 128-bit)
     // => slab absolute offset = 520 + 488 = 864
-    const SIDE_MODE_LONG_OFF: usize = 584 + 488;
+    const SIDE_MODE_LONG_OFF: usize = 584 + 480;
     {
         let original_slab = env
             .svm

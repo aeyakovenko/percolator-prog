@@ -119,7 +119,7 @@ fn test_hyperp_rejects_zero_initial_mark_price() {
     // Snapshot state before the failing init attempt.
     // Header+config region should remain unchanged on rejected tx.
     const HEADER_CONFIG_LEN: usize = 584;
-    const NUM_USED_OFF: usize = 1704;
+    const NUM_USED_OFF: usize = 1680;
     let slab_before = svm.get_account(&slab).unwrap().data;
     let vault_before = {
         let vault_data = svm.get_account(&vault).unwrap().data;
@@ -289,7 +289,7 @@ fn test_hyperp_init_market_with_valid_price() {
     const AUTH_PRICE_OFF: usize = CONFIG_OFF + 288;
     const ORACLE_CAP_OFF: usize = CONFIG_OFF + 304;
     const INDEX_OFF: usize = CONFIG_OFF + 312;
-    const NUM_USED_OFF: usize = 1704;
+    const NUM_USED_OFF: usize = 1680;
 
     let slab_data = svm.get_account(&slab).unwrap().data;
     let magic = u64::from_le_bytes(slab_data[HEADER_MAGIC_OFF..HEADER_MAGIC_OFF + 8].try_into().unwrap());
@@ -453,7 +453,7 @@ fn test_hyperp_init_market_with_inverted_price() {
     const AUTH_PRICE_OFF: usize = CONFIG_OFF + 288;
     const ORACLE_CAP_OFF: usize = CONFIG_OFF + 304;
     const INDEX_OFF: usize = CONFIG_OFF + 312;
-    const NUM_USED_OFF: usize = 1704;
+    const NUM_USED_OFF: usize = 1680;
 
     let slab_data = svm.get_account(&slab).unwrap().data;
     let magic = u64::from_le_bytes(slab_data[HEADER_MAGIC_OFF..HEADER_MAGIC_OFF + 8].try_into().unwrap());
@@ -1144,9 +1144,9 @@ fn test_funding_boundary_anti_retroactivity_update_config() {
 
     // Read stored rate and K coefficients
     const ENGINE_OFF: usize = 584;
-    const FUNDING_RATE_OFF: usize = ENGINE_OFF + 232; // funding_rate_bps_per_slot_last (i64)
-    const K_LONG_OFF: usize = ENGINE_OFF + 376;       // adl_coeff_long (i128)
-    const K_SHORT_OFF: usize = ENGINE_OFF + 392;      // adl_coeff_short (i128)
+    const FUNDING_RATE_OFF: usize = ENGINE_OFF + 224; // funding_rate_bps_per_slot_last (i64)
+    const K_LONG_OFF: usize = ENGINE_OFF + 368;       // adl_coeff_long (i128)
+    const K_SHORT_OFF: usize = ENGINE_OFF + 384;      // adl_coeff_short (i128)
 
     let read_i64_at = |svm: &LiteSVM, slab: &Pubkey, off: usize| -> i64 {
         let d = svm.get_account(slab).unwrap().data;

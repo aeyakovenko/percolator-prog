@@ -979,8 +979,8 @@ fn test_resolved_crank_cursor_wraps_to_zero() {
     assert!(env.is_market_resolved());
     println!("Market resolved");
 
-    // crank_cursor is at ENGINE(584) + 328 = 912 in the slab.
-    const CRANK_CURSOR_OFF: usize = 912;
+    // crank_cursor is at ENGINE(584) + 320 = 904 in the slab.
+    const CRANK_CURSOR_OFF: usize = 904;
     let read_cursor = |svm: &LiteSVM, slab: &Pubkey| -> u16 {
         let d = svm.get_account(slab).unwrap().data;
         u16::from_le_bytes(d[CRANK_CURSOR_OFF..CRANK_CURSOR_OFF + 2].try_into().unwrap())
