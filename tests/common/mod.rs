@@ -125,6 +125,21 @@ pub fn make_pyth_data(
     data
 }
 
+/// Append default extended tail (82 bytes) to an InitMarket payload.
+/// All extended fields get default/disabled values.
+fn append_default_extended_tail(data: &mut Vec<u8>) {
+    data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
+    data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
+    data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_insurance_floor_change_per_day
+    data.extend_from_slice(&0u64.to_le_bytes()); // permissionless_resolve_stale_slots
+    data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots (default)
+    data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps (default)
+    data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps (default)
+    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot (default)
+    data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee (disabled)
+    data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots (disabled)
+}
+
 /// Encode InitMarket instruction with invert flag
 pub fn encode_init_market_with_invert(
     admin: &Pubkey,
@@ -181,10 +196,7 @@ pub fn encode_init_market_with_conf_bps(
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    // Optional insurance withdrawal limits
-    data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
-    data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
-    data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_insurance_floor_change_per_day
+    append_default_extended_tail(&mut data);
     data
 }
 
@@ -226,10 +238,8 @@ pub fn encode_init_market_full_v2(
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    // Optional insurance withdrawal limits (after RiskParams for backward compat)
-    data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps (0 = no live withdrawals)
-    data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
-    data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_insurance_floor_change_per_day (unrestricted)
+    // Full extended tail (required — no partial tails allowed)
+    append_default_extended_tail(&mut data);
     data
 }
 
@@ -280,12 +290,17 @@ pub fn encode_init_market_with_cap(
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    // Optional insurance withdrawal limits
+    // Full extended tail (82 bytes)
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
     data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_insurance_floor_change_per_day
-    // Permissionless resolution
     data.extend_from_slice(&permissionless_resolve_stale_slots.to_le_bytes());
+    data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots (default)
+    data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps (default)
+    data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps (default)
+    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot (default)
+    data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee (disabled)
+    data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots (disabled)
     data
 }
 
@@ -311,11 +326,16 @@ pub fn encode_init_market_with_funding(
         min_oracle_price_cap_e2bps,
         permissionless_resolve_stale_slots,
     );
-    // Optional trailing funding params
+    // Truncate default funding + mark_min_fee + force_close_delay (48 bytes)
+    // from the full tail produced by encode_init_market_with_cap, then re-append
+    // with custom funding params and default mark_min_fee + force_close_delay.
+    data.truncate(data.len() - 48);
     data.extend_from_slice(&funding_horizon_slots.to_le_bytes());
     data.extend_from_slice(&funding_k_bps.to_le_bytes());
     data.extend_from_slice(&funding_max_premium_bps.to_le_bytes());
     data.extend_from_slice(&funding_max_bps_per_slot.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee (disabled)
+    data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots (disabled)
     data
 }
 
@@ -339,8 +359,10 @@ pub fn encode_init_market_with_min_fee(
         funding_horizon_slots, funding_k_bps,
         funding_max_premium_bps, funding_max_bps_per_slot,
     );
-    // Optional trailing mark_min_fee
+    // Truncate default mark_min_fee + force_close_delay (16 bytes), replace with custom
+    data.truncate(data.len() - 16);
     data.extend_from_slice(&mark_min_fee.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots (disabled)
     data
 }
 
@@ -395,6 +417,7 @@ pub fn encode_init_market_with_trading_fee(
     data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot
     // mark_min_fee
     data.extend_from_slice(&mark_min_fee.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots (disabled)
     data
 }
 
@@ -436,9 +459,7 @@ pub fn encode_init_market_with_maint_fee_bounded(
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
-    data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
-    data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_insurance_floor_change_per_day
+    append_default_extended_tail(&mut data);
     data
 }
 
@@ -449,18 +470,12 @@ pub fn encode_init_market_with_force_close(
     feed_id: &[u8; 32],
     force_close_delay_slots: u64,
 ) -> Vec<u8> {
-    // Build base with cap + permissionless resolve
+    // Build base with cap + permissionless resolve (full 82-byte tail)
     let mut data = encode_init_market_with_cap(
         admin, mint, feed_id, 0, 10_000, 100,
     );
-    // funding params (required before mark_min_fee)
-    data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon
-    data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
-    data.extend_from_slice(&500i64.to_le_bytes()); // max_premium
-    data.extend_from_slice(&5i64.to_le_bytes()); // max_per_slot
-    // mark_min_fee
-    data.extend_from_slice(&0u64.to_le_bytes()); // disabled
-    // force_close_delay_slots
+    // Truncate default force_close_delay_slots (last 8 bytes), replace with custom
+    data.truncate(data.len() - 8);
     data.extend_from_slice(&force_close_delay_slots.to_le_bytes());
     data
 }
@@ -1509,10 +1524,7 @@ pub fn encode_init_market_full(
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    // Optional insurance withdrawal limits
-    data.extend_from_slice(&0u16.to_le_bytes());
-    data.extend_from_slice(&0u64.to_le_bytes());
-    data.extend_from_slice(&u128::MAX.to_le_bytes()); // unrestricted
+    append_default_extended_tail(&mut data);
     data
 }
 
@@ -1554,10 +1566,7 @@ pub fn encode_init_market_with_warmup(
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    // Optional insurance withdrawal limits
-    data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
-    data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
-    data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_insurance_floor_change_per_day (unrestricted)
+    append_default_extended_tail(&mut data);
     data
 }
 
@@ -4912,9 +4921,7 @@ impl TestEnv {
         data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
         data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
         data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-        data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
-        data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
-        data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_insurance_floor_change_per_day
+        append_default_extended_tail(&mut data);
 
         let ix = Instruction {
             program_id: self.program_id,
@@ -7472,10 +7479,7 @@ pub fn encode_init_market_with_limits(
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    // Optional insurance withdrawal limits
-    data.extend_from_slice(&0u16.to_le_bytes());
-    data.extend_from_slice(&0u64.to_le_bytes());
-    data.extend_from_slice(&u128::MAX.to_le_bytes()); // unrestricted
+    append_default_extended_tail(&mut data);
     data
 }
 
@@ -7520,9 +7524,7 @@ pub fn encode_init_market_with_maintenance_fee(
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    data.extend_from_slice(&0u16.to_le_bytes());
-    data.extend_from_slice(&0u64.to_le_bytes());
-    data.extend_from_slice(&u128::MAX.to_le_bytes());
+    append_default_extended_tail(&mut data);
     data
 }
 
@@ -7563,9 +7565,7 @@ pub fn encode_init_market_with_insurance_floor(
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    data.extend_from_slice(&0u16.to_le_bytes());
-    data.extend_from_slice(&0u64.to_le_bytes());
-    data.extend_from_slice(&u128::MAX.to_le_bytes());
+    append_default_extended_tail(&mut data);
     data
 }
 

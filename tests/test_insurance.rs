@@ -1847,6 +1847,13 @@ fn test_init_market_insurance_withdraw_max_bps_bounded() {
     data.extend_from_slice(&10001u16.to_le_bytes()); // insurance_withdraw_max_bps > 10000
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
     data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_floor_change_per_day
+    data.extend_from_slice(&0u64.to_le_bytes()); // permissionless_resolve_stale_slots
+    data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots
+    data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
+    data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
+    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot
+    data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee
+    data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots
 
     let (vault_pda, _) = Pubkey::find_program_address(&[b"vault", env.slab.as_ref()], &env.program_id);
     let ix = Instruction {
@@ -2026,6 +2033,13 @@ fn test_insurance_withdraw_limited_requires_recent_crank() {
     data.extend_from_slice(&100u16.to_le_bytes()); // insurance_withdraw_max_bps = 1%
     data.extend_from_slice(&1u64.to_le_bytes()); // insurance_withdraw_cooldown_slots = 1
     data.extend_from_slice(&u128::MAX.to_le_bytes()); // max_insurance_floor_change_per_day
+    data.extend_from_slice(&0u64.to_le_bytes()); // permissionless_resolve_stale_slots
+    data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots
+    data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
+    data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
+    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot
+    data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee
+    data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots
 
     let ix = Instruction {
         program_id: env.program_id,

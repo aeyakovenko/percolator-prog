@@ -1235,50 +1235,41 @@ pub mod ix {
                     let min_oracle_price_cap_e2bps = read_u64(&mut rest)?;
                     // Insurance withdrawal limits (immutable after init)
                     let (risk_params, insurance_floor) = read_risk_params(&mut rest)?;
-                    // Optional insurance withdrawal limits (after RiskParams for backward compat)
-                    let insurance_withdraw_max_bps = if rest.len() >= 2 {
-                        read_u16(&mut rest)?
+                    // Extended fields: either ALL present (82 bytes) or NONE.
+                    // No partial tails — prevents silent misparsing of truncated payloads.
+                    // Total: insurance(2+8+16) + permissionless(8) + funding(8+8+8+8) +
+                    //        mark_min_fee(8) + force_close_delay(8) = 82 bytes
+                    const EXTENDED_TAIL_LEN: usize = 2 + 8 + 16 + 8 + 32 + 8 + 8;
+                    let (
+                        insurance_withdraw_max_bps,
+                        insurance_withdraw_cooldown_slots,
+                        max_insurance_floor_change_per_day,
+                        permissionless_resolve_stale_slots,
+                        funding_horizon_slots,
+                        funding_k_bps,
+                        funding_max_premium_bps,
+                        funding_max_bps_per_slot,
+                        mark_min_fee,
+                        force_close_delay_slots,
+                    ) = if rest.is_empty() {
+                        // Minimal payload: all extended fields use defaults
+                        (0u16, 0u64, 0u128, 0u64, None, None, None, None, 0u64, 0u64)
+                    } else if rest.len() >= EXTENDED_TAIL_LEN {
+                        // Full extended payload
+                        let iwm = read_u16(&mut rest)?;
+                        let iwc = read_u64(&mut rest)?;
+                        let mifc = read_u128(&mut rest)?;
+                        let prs = read_u64(&mut rest)?;
+                        let fh = read_u64(&mut rest)?;
+                        let fk = read_u64(&mut rest)?;
+                        let fmp = read_i64(&mut rest)?;
+                        let fms = read_i64(&mut rest)?;
+                        let mmf = read_u64(&mut rest)?;
+                        let fcd = read_u64(&mut rest)?;
+                        (iwm, iwc, mifc, prs, Some(fh), Some(fk), Some(fmp), Some(fms), mmf, fcd)
                     } else {
-                        0u16 // default: no live withdrawals
-                    };
-                    let insurance_withdraw_cooldown_slots = if rest.len() >= 8 {
-                        read_u64(&mut rest)?
-                    } else {
-                        0u64
-                    };
-                    let max_insurance_floor_change_per_day = if rest.len() >= 16 {
-                        read_u128(&mut rest)?
-                    } else {
-                        0u128
-                    };
-                    let permissionless_resolve_stale_slots = if rest.len() >= 8 {
-                        read_u64(&mut rest)?
-                    } else {
-                        0u64 // disabled by default
-                    };
-                    // Optional custom funding parameters (trailing, all-or-nothing:
-                    // if horizon is present, all four must be provided)
-                    let (funding_horizon_slots, funding_k_bps, funding_max_premium_bps, funding_max_bps_per_slot) =
-                        if rest.len() >= 32 {
-                            let h = read_u64(&mut rest)?;
-                            let k = read_u64(&mut rest)?;
-                            let mp = read_i64(&mut rest)?;
-                            let ms = read_i64(&mut rest)?;
-                            (Some(h), Some(k), Some(mp), Some(ms))
-                        } else {
-                            (None, None, None, None)
-                        };
-                    // Optional mark_min_fee (after funding params)
-                    let mark_min_fee = if rest.len() >= 8 {
-                        read_u64(&mut rest)?
-                    } else {
-                        0u64 // disabled
-                    };
-                    // Optional force_close_delay_slots (after mark_min_fee)
-                    let force_close_delay_slots = if rest.len() >= 8 {
-                        read_u64(&mut rest)?
-                    } else {
-                        0u64 // disabled
+                        // Partial tail: reject to prevent misparsing
+                        return Err(ProgramError::InvalidInstructionData);
                     };
                     // Reject trailing bytes to prevent silent misparsing.
                     // All optional fields are parsed — leftover data means the
@@ -5285,9 +5276,16 @@ pub mod processor {
                                 return Err(PercolatorError::OracleInvalid.into());
                             }
                         }
-                        Err(_) => {
-                            // Oracle is stale/dead — skip guard, allow admin to resolve.
-                            // The authority price push was already validated fresh above.
+                        Err(e) => {
+                            // Only skip guard if oracle is genuinely stale/dead.
+                            // Other errors (wrong account, bad data, wrong feed) must
+                            // propagate — otherwise admin can bypass guard by passing
+                            // a broken oracle account.
+                            let stale_err: ProgramError = PercolatorError::OracleStale.into();
+                            if e != stale_err {
+                                return Err(e);
+                            }
+                            // OracleStale = oracle is dead, allow admin to resolve
                         }
                     }
                 }
@@ -6115,22 +6113,18 @@ pub mod processor {
                 }
 
                 // Settlement price = last oracle price from engine.
-                // Reject if engine still has the init sentinel (p <= 1 for non-Hyperp)
-                // AND no authority has ever pushed (authority-only markets set
-                // last_oracle_price via accrue_market_to from earlier in this handler).
-                // This prevents resolution at the meaningless init sentinel while
-                // allowing authority-only markets (which accrue before reaching here)
-                // and unit_scale markets (where price=1 is overwritten by the accrual).
+                // Reject only if completely uninitialized (p == 0).
+                // The non-Hyperp init sentinel (p=1) is harmless: if no one ever
+                // traded or cranked, there are no positions to settle. If anyone
+                // did interact, accrue_market_to updated last_oracle_price to the
+                // real price. The sentinel cannot cause incorrect settlement because:
+                // - All resolve paths require crank staleness (no recent activity)
+                // - If the market had activity, last_oracle_price reflects it
+                // - Resolution at p=1 on an empty market is a no-op
                 let last_price = {
                     let engine = zc::engine_ref(&data)?;
                     let p = engine.last_oracle_price;
                     if p == 0 {
-                        return Err(PercolatorError::OracleInvalid.into());
-                    }
-                    // Non-Hyperp init sentinel is 1. Reject if still at sentinel
-                    // AND no authority is configured (authority-only markets can
-                    // operate without external oracle establishing last_effective_price).
-                    if !is_hyperp && p <= 1 && config.oracle_authority == [0u8; 32] {
                         return Err(PercolatorError::OracleInvalid.into());
                     }
                     p

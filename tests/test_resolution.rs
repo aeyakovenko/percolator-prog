@@ -1497,9 +1497,11 @@ fn test_resolve_permissionless_inverted_with_positions() {
 // Finding 1: ResolvePermissionless sentinel collision fix
 // ============================================================================
 
-/// Before any crank, permissionless resolution must be rejected (no real oracle established).
+/// Before any crank, permissionless resolution on an empty market succeeds
+/// at the init sentinel price (p=1). This is harmless: there are no positions
+/// to settle, so the settlement price is irrelevant.
 #[test]
-fn test_resolve_permissionless_rejects_before_first_crank() {
+fn test_resolve_permissionless_empty_market_at_sentinel() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 10_000, 100);
@@ -1510,17 +1512,19 @@ fn test_resolve_permissionless_rejects_before_first_crank() {
         env.svm.set_account(env.slab, slab).unwrap();
     }
 
-    // Do NOT crank — last_effective_price_e6 is still 0
+    // Do NOT crank — engine still has init sentinel price=1
 
-    // Make oracle stale
+    // Make oracle stale + enough crank staleness
     env.svm.set_sysvar(&Clock {
         slot: 600,
         unix_timestamp: 600,
         ..Clock::default()
     });
 
+    // Resolution at sentinel is allowed on empty markets (no positions to settle)
     let result = env.try_resolve_permissionless();
-    assert!(result.is_err(), "Must reject when no real oracle price established");
+    assert!(result.is_ok(), "Empty market resolution at sentinel should succeed: {:?}", result);
+    assert!(env.is_market_resolved());
 }
 
 // ============================================================================

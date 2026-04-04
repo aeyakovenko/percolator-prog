@@ -4499,6 +4499,7 @@ fn test_governance_free_inverted_sol_lifecycle_with_fee_weighted_ewma() {
         data.extend_from_slice(&10i64.to_le_bytes()); // max_per_slot
         // mark_min_fee (in engine units — must be below seed trade fee ~16)
         data.extend_from_slice(&10u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots (disabled)
 
         let ix = Instruction {
             program_id: env.program_id,

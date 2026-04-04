@@ -263,6 +263,13 @@ fn encode_init_market(fixture: &MarketFixture, crank_staleness: u64) -> Vec<u8> 
     encode_u16(0, &mut data); // insurance_withdraw_max_bps
     encode_u64(0, &mut data); // insurance_withdraw_cooldown_slots
     encode_u128(u128::MAX, &mut data); // max_insurance_floor_change_per_day
+    encode_u64(0, &mut data); // permissionless_resolve_stale_slots
+    encode_u64(500, &mut data); // funding_horizon_slots
+    encode_u64(100, &mut data); // funding_k_bps
+    data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
+    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot
+    encode_u64(0, &mut data); // mark_min_fee
+    encode_u64(0, &mut data); // force_close_delay_slots
     data
 }
 
@@ -305,6 +312,13 @@ fn encode_init_market_invert(
     encode_u16(0, &mut data); // insurance_withdraw_max_bps
     encode_u64(0, &mut data); // insurance_withdraw_cooldown_slots
     encode_u128(u128::MAX, &mut data); // max_insurance_floor_change_per_day
+    encode_u64(0, &mut data); // permissionless_resolve_stale_slots
+    encode_u64(500, &mut data); // funding_horizon_slots
+    encode_u64(100, &mut data); // funding_k_bps
+    data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
+    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot
+    encode_u64(0, &mut data); // mark_min_fee
+    encode_u64(0, &mut data); // force_close_delay_slots
     data
 }
 

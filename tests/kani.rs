@@ -3351,8 +3351,10 @@ fn kani_ins_withdraw_meta_roundtrip() {
 // Fee-Weighted EWMA Proofs
 // ============================================================================
 
-/// Bounded price range for EWMA proofs (keeps verification tractable).
+/// Bounded price range for single-call EWMA proofs.
 const KANI_MAX_PRICE: u64 = 1_000_000;
+/// Tighter bound for two-call comparison proofs (SAT solver tractability).
+const KANI_MAX_PRICE_CMP: u64 = 1_000;
 
 /// For all valid inputs: result is in [min(old, price), max(old, price)].
 /// Fee-weighting cannot push EWMA outside the convex hull of old and price.
@@ -3396,15 +3398,14 @@ fn proof_ewma_weighted_monotone_in_fee() {
     let fee_b: u64 = kani::any();
     let min_fee: u64 = kani::any();
 
-    kani::assume(old > 0 && old <= KANI_MAX_PRICE);
-    kani::assume(price > 0 && price <= KANI_MAX_PRICE);
-    kani::assume(halflife > 0 && halflife <= 10_000);
+    kani::assume(old > 0 && old <= KANI_MAX_PRICE_CMP);
+    kani::assume(price > 0 && price <= KANI_MAX_PRICE_CMP);
+    kani::assume(halflife > 0 && halflife <= 1_000);
     kani::assume(now_slot >= last_slot);
-    kani::assume(now_slot - last_slot <= 10_000);
-    kani::assume(min_fee > 1 && min_fee <= KANI_MAX_PRICE);
+    kani::assume(now_slot - last_slot <= 1_000);
+    kani::assume(min_fee > 1 && min_fee <= KANI_MAX_PRICE_CMP);
     kani::assume(fee_a < fee_b);
     // Force at least one fee below threshold to exercise the scaling logic.
-    // Without this, both fees could exceed min_fee → both get full alpha → trivially monotone.
     kani::assume(fee_a < min_fee);
 
     let result_a = ewma_update(old, price, halflife, last_slot, now_slot, fee_a, min_fee);
@@ -3454,12 +3455,12 @@ fn proof_ewma_weight_at_threshold_equals_unweighted() {
     let min_fee: u64 = kani::any();
     let fee_paid: u64 = kani::any();
 
-    kani::assume(old > 0 && old <= KANI_MAX_PRICE);
-    kani::assume(price > 0 && price <= KANI_MAX_PRICE);
-    kani::assume(halflife > 0 && halflife <= 10_000);
+    kani::assume(old > 0 && old <= KANI_MAX_PRICE_CMP);
+    kani::assume(price > 0 && price <= KANI_MAX_PRICE_CMP);
+    kani::assume(halflife > 0 && halflife <= 1_000);
     kani::assume(now_slot >= last_slot);
-    kani::assume(now_slot - last_slot <= 10_000);
-    kani::assume(min_fee > 0 && min_fee <= KANI_MAX_PRICE);
+    kani::assume(now_slot - last_slot <= 1_000);
+    kani::assume(min_fee > 0 && min_fee <= KANI_MAX_PRICE_CMP);
     kani::assume(fee_paid >= min_fee);
 
     // At-threshold: effective_alpha = alpha (unscaled)
