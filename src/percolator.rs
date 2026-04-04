@@ -2791,17 +2791,34 @@ pub mod processor {
     // settle_and_close_resolved removed — replaced by engine.force_close_resolved()
     // which handles K-pair PnL, checked arithmetic, and all settlement internally.
 
-    /// Read oracle price for non-Hyperp markets and stamp last_good_oracle_slot.
-    /// Every successful external oracle read updates the field so
-    /// ResolvePermissionless can measure oracle-death duration accurately.
+    /// Read oracle price for non-Hyperp markets and stamp last_good_oracle_slot
+    /// ONLY when the external oracle read succeeds. Authority-fallback success
+    /// does NOT stamp the field — it measures external-oracle liveness only.
     fn read_price_and_stamp(
         config: &mut state::MarketConfig,
         a_oracle: &AccountInfo,
         clock_unix_ts: i64,
         clock_slot: u64,
     ) -> Result<u64, ProgramError> {
+        // Probe external oracle BEFORE read_price_clamped to track liveness.
+        // This is a read-only check — read_price_clamped does the actual work.
+        let external_ok = oracle::read_engine_price_e6(
+            a_oracle,
+            &config.index_feed_id,
+            clock_unix_ts,
+            config.max_staleness_secs,
+            config.conf_filter_bps,
+            config.invert,
+            config.unit_scale,
+        ).is_ok();
+
         let price = oracle::read_price_clamped(config, a_oracle, clock_unix_ts)?;
-        config.last_good_oracle_slot = clock_slot;
+
+        // Only stamp when external oracle is genuinely live.
+        // Authority-fallback success does not prove external liveness.
+        if external_ok {
+            config.last_good_oracle_slot = clock_slot;
+        }
         Ok(price)
     }
 
