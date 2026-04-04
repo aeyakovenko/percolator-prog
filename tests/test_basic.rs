@@ -4841,3 +4841,32 @@ fn test_haircut_profitable_account_actually_haircutted() {
     }
 }
 
+// ============================================================================
+// Finding 3: TradeNoCpi should reject user-user and LP-LP trades
+// ============================================================================
+
+/// TradeNoCpi allows user-user bilateral trades (both parties sign).
+/// This is by spec — TradeNoCpi is a bilateral trade path, not LP-gated.
+/// Account roles are NOT enforced for this instruction.
+#[test]
+fn test_trade_nocpi_allows_user_user_bilateral() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let user1 = Keypair::new();
+    let user1_idx = env.init_user(&user1);
+    env.deposit(&user1, user1_idx, 10_000_000_000);
+
+    let user2 = Keypair::new();
+    let user2_idx = env.init_user(&user2);
+    env.deposit(&user2, user2_idx, 10_000_000_000);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 1_000_000_000);
+
+    // User-user bilateral trade — allowed by spec
+    let result = env.try_trade(&user1, &user2, user2_idx, user1_idx, 1_000);
+    assert!(result.is_ok(), "User-user bilateral trade must be allowed: {:?}", result);
+}
+
