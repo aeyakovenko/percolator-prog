@@ -1009,6 +1009,7 @@ pub mod error {
         InvalidTokenProgram,
         InvalidConfigParam,
         HyperpTradeNoCpiDisabled,
+        EngineCorruptState,
     }
 
     impl From<PercolatorError> for ProgramError {
@@ -1030,7 +1031,7 @@ pub mod error {
             RiskError::PositionSizeMismatch => PercolatorError::EnginePositionSizeMismatch,
             RiskError::AccountKindMismatch => PercolatorError::EngineAccountKindMismatch,
             RiskError::SideBlocked => PercolatorError::EngineRiskReductionOnlyMode,
-            RiskError::CorruptState => PercolatorError::EngineOverflow,
+            RiskError::CorruptState => PercolatorError::EngineCorruptState,
         };
         ProgramError::Custom(err as u32)
     }
@@ -1627,7 +1628,7 @@ pub mod ix {
         let max_crank_staleness_slots = read_u64(input)?;
         let liquidation_fee_bps = read_u64(input)?;
         let liquidation_fee_cap = U128::new(read_u128(input)?);
-        let liquidation_buffer_bps = read_u64(input)?;
+        let _liquidation_buffer_bps = read_u64(input)?; // removed from engine, kept in wire format
         let min_liquidation_abs = U128::new(read_u128(input)?);
         // These three params must be explicitly provided — truncated payloads
         // are rejected to prevent silent creation with tiny fallback floors.
@@ -1648,7 +1649,6 @@ pub mod ix {
             max_crank_staleness_slots,
             liquidation_fee_bps,
             liquidation_fee_cap,
-            liquidation_buffer_bps,
             min_liquidation_abs,
             min_initial_deposit,
             min_nonzero_mm_req,
@@ -2788,20 +2788,23 @@ pub mod processor {
         RiskEngine, RiskError, I128, U128, ADL_ONE, MAX_ACCOUNTS,
     };
 
-    // settle_and_close_resolved removed — replaced by engine.force_close_resolved()
+    // settle_and_close_resolved removed — replaced by engine.force_close_resolved_not_atomic()
     // which handles K-pair PnL, checked arithmetic, and all settlement internally.
 
     /// Read oracle price for non-Hyperp markets and stamp last_good_oracle_slot
     /// ONLY when the external oracle read succeeds. Authority-fallback success
     /// does NOT stamp the field — it measures external-oracle liveness only.
+    ///
+    /// Probes external oracle separately to detect liveness. This doubles the
+    /// oracle parse (~2K CU) but is necessary because read_price_clamped can
+    /// succeed via authority fallback without a live external oracle, and
+    /// change-detection on last_effective_price_e6 misses same-price reads.
     fn read_price_and_stamp(
         config: &mut state::MarketConfig,
         a_oracle: &AccountInfo,
         clock_unix_ts: i64,
         clock_slot: u64,
     ) -> Result<u64, ProgramError> {
-        // Probe external oracle BEFORE read_price_clamped to track liveness.
-        // This is a read-only check — read_price_clamped does the actual work.
         let external_ok = oracle::read_engine_price_e6(
             a_oracle,
             &config.index_feed_id,
@@ -2814,8 +2817,6 @@ pub mod processor {
 
         let price = oracle::read_price_clamped(config, a_oracle, clock_unix_ts)?;
 
-        // Only stamp when external oracle is genuinely live.
-        // Authority-fallback success does not prove external liveness.
         if external_ok {
             config.last_good_oracle_slot = clock_slot;
         }
@@ -2945,7 +2946,7 @@ pub mod processor {
         } else {
             return Err(RiskError::Overflow);
         };
-        engine.execute_trade(
+        engine.execute_trade_not_atomic(
             a,
             b,
             oracle_price,
@@ -3817,7 +3818,7 @@ pub mod processor {
                 // (which has a manual fallback), withdrawals must use settled
                 // state — reject if touch fails.
                 if resolved {
-                    engine.touch_account_full(
+                    engine.touch_account_full_not_atomic(
                         user_idx as usize, price, config.resolution_slot,
                     ).map_err(map_risk_error)?;
                 }
@@ -3833,7 +3834,7 @@ pub mod processor {
                 // Use frozen time on resolved markets
                 let withdraw_slot = if resolved { config.resolution_slot } else { clock.slot };
                 engine
-                    .withdraw(user_idx, units_requested as u128, price, withdraw_slot,
+                    .withdraw_not_atomic(user_idx, units_requested as u128, price, withdraw_slot,
                         compute_current_funding_rate(&config))
                     .map_err(map_risk_error)?;
 
@@ -3936,14 +3937,12 @@ pub mod processor {
                             // close_account_resolved using stored local state.
                             // on stored local state without accrue/settle.
                             // Best-effort touch for resolved settlement.
-                            // ALL errors are non-fatal on resolved markets:
-                            // CorruptState can occur for epoch-mismatch accounts
-                            // which are normal post-resolution. These accounts
-                            // will be settled by ForceCloseResolved which has a
-                            // manual K-pair fallback for exactly this case.
-                            let _ = engine.touch_account_full(
+                            // _not_atomic callers must abort on Err (partial state).
+                            // If touch fails, abort the crank — the account will be
+                            // settled by ForceCloseResolved in a separate transaction.
+                            engine.touch_account_full_not_atomic(
                                 idx as usize, settlement_price, frozen_slot,
-                            );
+                            ).map_err(map_risk_error)?;
                         }
                     }
 
@@ -4047,7 +4046,7 @@ pub mod processor {
                 }
                 let funding_rate = compute_current_funding_rate(&config);
                 let _outcome = engine
-                    .keeper_crank(
+                    .keeper_crank_not_atomic(
                         clock.slot,
                         price,
                         &candidates,
@@ -4150,7 +4149,7 @@ pub mod processor {
                     return Err(PercolatorError::EngineUnauthorized.into());
                 }
 
-                // Side-mode gating is handled inside engine.execute_trade()
+                // Side-mode gating is handled inside engine.execute_trade_not_atomic()
 
                 // Snapshot insurance fund balance for fee-weighted EWMA.
                 // The delta after execute_trade = fees_collected - losses_absorbed.
@@ -4581,7 +4580,7 @@ pub mod processor {
                     sol_log_compute_units();
                 }
                 let _res = engine
-                    .liquidate_at_oracle(target_idx, clock.slot, price,
+                    .liquidate_at_oracle_not_atomic(target_idx, clock.slot, price,
                         percolator::LiquidationPolicy::FullClose,
                         compute_current_funding_rate(&config))
                     .map_err(map_risk_error)?;
@@ -4664,14 +4663,14 @@ pub mod processor {
                     sol_log_compute_units();
                 }
                 let amt_units = if resolved {
-                    let _ = engine.touch_account_full(
+                    engine.touch_account_full_not_atomic(
                         user_idx as usize, price, config.resolution_slot,
-                    );
-                    engine.force_close_resolved(user_idx)
+                    ).map_err(map_risk_error)?;
+                    engine.force_close_resolved_not_atomic(user_idx)
                         .map_err(map_risk_error)?
                 } else {
                     engine
-                        .close_account(user_idx, clock.slot, price,
+                        .close_account_not_atomic(user_idx, clock.slot, price,
                             compute_current_funding_rate(&config))
                         .map_err(map_risk_error)?
                 };
@@ -5745,7 +5744,7 @@ pub mod processor {
             Instruction::AdminForceCloseAccount { user_idx } => {
                 // Admin force-close an abandoned account after market resolution.
                 // Settles PnL (with haircut for positive), forgives fee debt,
-                // then delegates to engine.close_account() for the rest.
+                // then delegates to engine.close_account_not_atomic() for the rest.
                 accounts::expect_len(accounts, 8)?;
                 let a_admin = &accounts[0];
                 let a_slab = &accounts[1];
@@ -5803,10 +5802,10 @@ pub mod processor {
                 // Best-effort touch to settle K-pair PnL and maintenance fees.
                 // If touch fails (epoch mismatch, overflow), force_close_resolved
                 // handles it via its manual K-pair fallback.
-                let _ = engine.touch_account_full(
-                    user_idx as usize, price, config.resolution_slot,
-                );
-                let amt_units = engine.force_close_resolved(user_idx)
+                engine.touch_account_full_not_atomic(
+                        user_idx as usize, price, config.resolution_slot,
+                    ).map_err(map_risk_error)?;
+                let amt_units = engine.force_close_resolved_not_atomic(user_idx)
                     .map_err(map_risk_error)?;
                 let amt_units_u64: u64 = amt_units
                     .try_into()
@@ -5873,7 +5872,7 @@ pub mod processor {
 
                 let clock = Clock::from_account_info(_a_clock)?;
                 let engine = zc::engine_mut(&mut data)?;
-                engine.reclaim_empty_account(user_idx, clock.slot)
+                engine.reclaim_empty_account_not_atomic(user_idx, clock.slot)
                     .map_err(map_risk_error)?;
                 // Per §10.7: MUST NOT call accrue_market_to, MUST NOT mutate side state.
             }
@@ -5910,7 +5909,7 @@ pub mod processor {
                 state::write_config(&mut data, &config);
 
                 let engine = zc::engine_mut(&mut data)?;
-                engine.settle_account(user_idx, price, clock.slot,
+                engine.settle_account_not_atomic(user_idx, price, clock.slot,
                     compute_current_funding_rate(&config))
                     .map_err(map_risk_error)?;
             }
@@ -6032,7 +6031,7 @@ pub mod processor {
                 if dust != 0 {
                     return Err(ProgramError::InvalidArgument);
                 }
-                engine.convert_released_pnl(user_idx, units as u128, price, clock.slot,
+                engine.convert_released_pnl_not_atomic(user_idx, units as u128, price, clock.slot,
                     compute_current_funding_rate(&config))
                     .map_err(map_risk_error)?;
             }
@@ -6260,10 +6259,10 @@ pub mod processor {
                 );
                 verify_token_account(a_owner_ata, &owner_pubkey, &mint)?;
 
-                let _ = engine.touch_account_full(
-                    user_idx as usize, price, config.resolution_slot,
-                );
-                let amt_units = engine.force_close_resolved(user_idx)
+                engine.touch_account_full_not_atomic(
+                        user_idx as usize, price, config.resolution_slot,
+                    ).map_err(map_risk_error)?;
+                let amt_units = engine.force_close_resolved_not_atomic(user_idx)
                     .map_err(map_risk_error)?;
 
                 let amt_units_u64: u64 = amt_units
