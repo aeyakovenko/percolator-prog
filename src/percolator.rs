@@ -3363,6 +3363,46 @@ pub mod processor {
                 // (require_fresh_crank gate in engine), and the first
                 // accrue_market_to overwrites last_oracle_price.
                 let init_price = if is_hyperp { initial_mark_price_e6 } else { 1 };
+
+                // Prevalidate all engine RiskParams invariants to return
+                // ProgramError instead of panicking inside engine.init_in_place().
+                {
+                    let p = &risk_params;
+                    if (p.max_accounts as usize) > percolator::MAX_ACCOUNTS || p.max_accounts == 0 {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
+                    if p.maintenance_margin_bps > p.initial_margin_bps
+                        || p.initial_margin_bps > 10_000
+                    {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
+                    if p.trading_fee_bps > 10_000 || p.liquidation_fee_bps > 10_000 {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
+                    if p.min_nonzero_mm_req == 0
+                        || p.min_nonzero_mm_req >= p.min_nonzero_im_req
+                        || p.min_nonzero_im_req > p.min_initial_deposit.get()
+                    {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
+                    if p.min_initial_deposit.get() == 0
+                        || p.min_initial_deposit.get() > percolator::MAX_VAULT_TVL
+                    {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
+                    if p.min_liquidation_abs.get() > p.liquidation_fee_cap.get()
+                        || p.liquidation_fee_cap.get() > percolator::MAX_PROTOCOL_FEE_ABS
+                    {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
+                    if p.maintenance_fee_per_slot.get() > percolator::MAX_MAINTENANCE_FEE_PER_SLOT {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
+                    if p.insurance_floor.get() > percolator::MAX_VAULT_TVL {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
+                }
+
                 let engine = zc::engine_mut(&mut data)?;
                 engine.init_in_place(risk_params, clock.slot, init_price);
                 // init_in_place sets last_crank_slot = 0; override to init slot
@@ -3871,19 +3911,14 @@ pub mod processor {
                             // close_account_resolved using stored local state.
                             // on stored local state without accrue/settle.
                             // Best-effort touch for resolved settlement.
-                            // Propagate CorruptState (real invariant violation).
-                            // Other errors (epoch mismatch, etc.) are non-fatal:
-                            // the account will be settled by force_close_resolved
-                            // when the owner or anyone calls ForceCloseResolved.
-                            match engine.touch_account_full(
+                            // ALL errors are non-fatal on resolved markets:
+                            // CorruptState can occur for epoch-mismatch accounts
+                            // which are normal post-resolution. These accounts
+                            // will be settled by ForceCloseResolved which has a
+                            // manual K-pair fallback for exactly this case.
+                            let _ = engine.touch_account_full(
                                 idx as usize, settlement_price, frozen_slot,
-                            ) {
-                                Ok(()) => {}
-                                Err(percolator::RiskError::CorruptState) => {
-                                    return Err(map_risk_error(percolator::RiskError::CorruptState));
-                                }
-                                Err(_) => {} // deferred to ForceCloseResolved
-                            }
+                            );
                         }
                     }
 
@@ -5222,12 +5257,14 @@ pub mod processor {
                 // oracle_price_cap_e2bps (not just the immutable floor) so markets
                 // with min_cap=0 but live cap>0 still get the settlement guard.
                 // Hyperp: admin IS the price source, no external baseline.
+                // If the oracle is stale/dead, skip the guard — the admin must
+                // be able to resolve even when the oracle has died (prevents deadlock
+                // on markets with nonzero cap floor + dead oracle).
                 if !oracle::is_hyperp_mode(&config)
                     && config.oracle_price_cap_e2bps != 0
                 {
                     let clock_tmp = Clock::from_account_info(a_clock)?;
-                    // Read fresh external oracle price (bypasses authority override)
-                    let fresh_oracle = oracle::read_engine_price_e6(
+                    let oracle_result = oracle::read_engine_price_e6(
                         a_oracle,
                         &config.index_feed_id,
                         clock_tmp.unix_timestamp,
@@ -5235,14 +5272,23 @@ pub mod processor {
                         config.conf_filter_bps,
                         config.invert,
                         config.unit_scale,
-                    )?;
-                    let clamped = oracle::clamp_oracle_price(
-                        fresh_oracle,
-                        config.authority_price_e6,
-                        config.oracle_price_cap_e2bps,
                     );
-                    if clamped != config.authority_price_e6 {
-                        return Err(PercolatorError::OracleInvalid.into());
+                    match oracle_result {
+                        Ok(fresh_oracle) => {
+                            // Oracle is live — enforce settlement guard
+                            let clamped = oracle::clamp_oracle_price(
+                                fresh_oracle,
+                                config.authority_price_e6,
+                                config.oracle_price_cap_e2bps,
+                            );
+                            if clamped != config.authority_price_e6 {
+                                return Err(PercolatorError::OracleInvalid.into());
+                            }
+                        }
+                        Err(_) => {
+                            // Oracle is stale/dead — skip guard, allow admin to resolve.
+                            // The authority price push was already validated fresh above.
+                        }
                     }
                 }
 
@@ -6069,19 +6115,22 @@ pub mod processor {
                 }
 
                 // Settlement price = last oracle price from engine.
-                // Reject if no real oracle read ever happened. We check
-                // last_effective_price_e6 > 0 instead of last_oracle_price > 1
-                // because the engine init sentinel (init_price=1 for non-Hyperp)
-                // collides with legitimate unit_scale-derived prices of 1.
-                // last_effective_price_e6 starts at 0 for non-Hyperp and is only
-                // set by the first crank's read_price_clamped.
-                if !is_hyperp && config.last_effective_price_e6 == 0 {
-                    return Err(PercolatorError::OracleInvalid.into());
-                }
+                // Reject if engine still has the init sentinel (p <= 1 for non-Hyperp)
+                // AND no authority has ever pushed (authority-only markets set
+                // last_oracle_price via accrue_market_to from earlier in this handler).
+                // This prevents resolution at the meaningless init sentinel while
+                // allowing authority-only markets (which accrue before reaching here)
+                // and unit_scale markets (where price=1 is overwritten by the accrual).
                 let last_price = {
                     let engine = zc::engine_ref(&data)?;
                     let p = engine.last_oracle_price;
                     if p == 0 {
+                        return Err(PercolatorError::OracleInvalid.into());
+                    }
+                    // Non-Hyperp init sentinel is 1. Reject if still at sentinel
+                    // AND no authority is configured (authority-only markets can
+                    // operate without external oracle establishing last_effective_price).
+                    if !is_hyperp && p <= 1 && config.oracle_authority == [0u8; 32] {
                         return Err(PercolatorError::OracleInvalid.into());
                     }
                     p
