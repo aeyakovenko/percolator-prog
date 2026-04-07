@@ -27,7 +27,18 @@ pub mod constants {
 
     pub const ENGINE_OFF: usize = align_up(HEADER_LEN + CONFIG_LEN, ENGINE_ALIGN);
     pub const ENGINE_LEN: usize = size_of::<RiskEngine>();
-    pub const SLAB_LEN: usize = ENGINE_OFF + ENGINE_LEN;
+
+    // RiskBuffer: 4-entry persistent cache of highest-notional accounts
+    pub const RISK_BUF_CAP: usize = 4;
+    pub const RISK_BUF_EMPTY: u16 = u16::MAX;
+    pub const RISK_BUF_OFF: usize = ENGINE_OFF + ENGINE_LEN;
+    pub const RISK_BUF_LEN: usize = size_of::<crate::risk_buffer::RiskBuffer>();
+    pub const SLAB_LEN: usize = RISK_BUF_OFF + RISK_BUF_LEN;
+
+    /// Minimum stale slots before crank discount activates.
+    pub const CRANK_REWARD_MIN_DT: u64 = 100;
+    /// Progressive scan window per crank.
+    pub const RISK_SCAN_WINDOW: usize = 32;
     pub const MATCHER_ABI_VERSION: u32 = 1;
     pub const MATCHER_CONTEXT_PREFIX_LEN: usize = 64;
     pub const MATCHER_CONTEXT_LEN: usize = 320;
@@ -120,6 +131,122 @@ pub fn unpack_ins_withdraw_meta(packed: i64) -> (u16, u64) {
 // =============================================================================
 // Pure helpers for Kani verification (program-level invariants only)
 // =============================================================================
+
+// 1b. mod risk_buffer
+pub mod risk_buffer {
+    use bytemuck::{Pod, Zeroable};
+    use crate::constants::RISK_BUF_CAP;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Pod, Zeroable)]
+    pub struct RiskEntry {
+        pub idx: u16,
+        pub _pad: [u8; 14],
+        pub notional: u128,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Pod, Zeroable)]
+    pub struct RiskBuffer {
+        pub scan_cursor: u16,
+        pub count: u8,
+        pub _pad: [u8; 13],
+        pub min_notional: u128,
+        pub entries: [RiskEntry; RISK_BUF_CAP],
+    }
+
+    impl RiskBuffer {
+        pub fn recompute_min(&mut self) {
+            self.min_notional = match self.count {
+                0 => 0,
+                1 => self.entries[0].notional,
+                2 => core::cmp::min(
+                    self.entries[0].notional,
+                    self.entries[1].notional,
+                ),
+                3 => core::cmp::min(
+                    self.entries[0].notional,
+                    core::cmp::min(
+                        self.entries[1].notional,
+                        self.entries[2].notional,
+                    ),
+                ),
+                _ => core::cmp::min(
+                    core::cmp::min(
+                        self.entries[0].notional,
+                        self.entries[1].notional,
+                    ),
+                    core::cmp::min(
+                        self.entries[2].notional,
+                        self.entries[3].notional,
+                    ),
+                ),
+            };
+        }
+
+        pub fn find(&self, idx: u16) -> Option<usize> {
+            if self.count > 0 && self.entries[0].idx == idx { return Some(0); }
+            if self.count > 1 && self.entries[1].idx == idx { return Some(1); }
+            if self.count > 2 && self.entries[2].idx == idx { return Some(2); }
+            if self.count > 3 && self.entries[3].idx == idx { return Some(3); }
+            None
+        }
+
+        fn min_slot(&self) -> usize {
+            let mut m = 0;
+            if self.count > 1 && self.entries[1].notional < self.entries[m].notional { m = 1; }
+            if self.count > 2 && self.entries[2].notional < self.entries[m].notional { m = 2; }
+            if self.count > 3 && self.entries[3].notional < self.entries[m].notional { m = 3; }
+            m
+        }
+
+        /// Insert or update. Returns true if buffer changed.
+        pub fn upsert(&mut self, idx: u16, notional: u128) -> bool {
+            if let Some(slot) = self.find(idx) {
+                if self.entries[slot].notional == notional {
+                    return false;
+                }
+                self.entries[slot].notional = notional;
+                self.recompute_min();
+                return true;
+            }
+            if (self.count as usize) < RISK_BUF_CAP {
+                let s = self.count as usize;
+                self.entries[s].idx = idx;
+                self.entries[s].notional = notional;
+                self.entries[s]._pad = [0; 14];
+                self.count += 1;
+                self.recompute_min();
+                return true;
+            }
+            if notional <= self.min_notional {
+                return false;
+            }
+            let victim = self.min_slot();
+            self.entries[victim].idx = idx;
+            self.entries[victim].notional = notional;
+            self.entries[victim]._pad = [0; 14];
+            self.recompute_min();
+            true
+        }
+
+        /// Remove by idx. Swap-remove with last.
+        pub fn remove(&mut self, idx: u16) -> bool {
+            let slot = match self.find(idx) {
+                Some(s) => s,
+                None => return false,
+            };
+            let last = self.count as usize - 1;
+            if slot != last {
+                self.entries[slot] = self.entries[last];
+            }
+            self.entries[last] = RiskEntry::zeroed();
+            self.count -= 1;
+            self.recompute_min();
+            true
+        }
+    }
+}
 
 /// Pure verification helpers for program-level authorization and CPI binding.
 /// These are tested by Kani to prove wrapper-level security properties.
@@ -2016,6 +2143,22 @@ pub mod state {
         let src = bytemuck::bytes_of(c);
         let dst = &mut data[HEADER_LEN..HEADER_LEN + CONFIG_LEN];
         dst.copy_from_slice(src);
+    }
+
+    pub fn read_risk_buffer(data: &[u8]) -> crate::risk_buffer::RiskBuffer {
+        use crate::constants::RISK_BUF_OFF;
+        use crate::constants::RISK_BUF_LEN;
+        let mut buf = crate::risk_buffer::RiskBuffer::zeroed();
+        let src = &data[RISK_BUF_OFF..RISK_BUF_OFF + RISK_BUF_LEN];
+        bytemuck::bytes_of_mut(&mut buf).copy_from_slice(src);
+        buf
+    }
+
+    pub fn write_risk_buffer(data: &mut [u8], buf: &crate::risk_buffer::RiskBuffer) {
+        use crate::constants::RISK_BUF_OFF;
+        use crate::constants::RISK_BUF_LEN;
+        let src = bytemuck::bytes_of(buf);
+        data[RISK_BUF_OFF..RISK_BUF_OFF + RISK_BUF_LEN].copy_from_slice(src);
     }
 }
 
@@ -4012,6 +4155,10 @@ pub mod processor {
 
                 state::write_config(&mut data, &config);
 
+                // Read risk buffer BEFORE engine borrow (disjoint regions,
+                // but borrow checker can't see that).
+                let buf = state::read_risk_buffer(&data);
+
                 let engine = zc::engine_mut(&mut data)?;
 
                 // Crank authorization:
@@ -4029,12 +4176,32 @@ pub mod processor {
                     msg!("CU_CHECKPOINT: keeper_crank_start");
                     sol_log_compute_units();
                 }
+                // Crank discount: halve caller's pending maintenance fee interval.
+                // Applied BEFORE keeper_crank so the caller's own touch sees reduced dt.
+                if !permissionless {
+                    let acct = &mut engine.accounts[caller_idx as usize];
+                    let dt = clock.slot.saturating_sub(acct.last_fee_slot);
+                    if dt > crate::constants::CRANK_REWARD_MIN_DT {
+                        acct.last_fee_slot = acct.last_fee_slot + dt / 2;
+                    }
+                }
+                let mut combined = alloc::vec::Vec::with_capacity(
+                    buf.count as usize + candidates.len(),
+                );
+                for i in 0..buf.count as usize {
+                    combined.push((
+                        buf.entries[i].idx,
+                        Some(percolator::LiquidationPolicy::FullClose),
+                    ));
+                }
+                combined.extend_from_slice(&candidates);
+
                 let funding_rate = compute_current_funding_rate(&config);
                 let _outcome = engine
                     .keeper_crank_not_atomic(
                         clock.slot,
                         price,
-                        &candidates,
+                        &combined,
                         percolator::LIQ_BUDGET_PER_CRANK,
                         funding_rate,
                     )
@@ -4062,17 +4229,75 @@ pub mod processor {
                     None
                 };
 
-                // Copy stats before threshold update (avoid borrow conflict)
+                // Copy stats and drop engine mutable borrow
                 let liqs = engine.lifetime_liquidations;
                 let ins_low = engine.insurance_fund.balance.get() as u64;
-
-                // Spec §2.2.1: I_floor is immutable — no auto-update.
-                // Insurance floor is set at InitMarket and never changes.
-                // (EWMA auto-update removed per spec compliance.)
+                drop(engine);
 
                 // Write remaining dust if sweep occurred
                 if let Some(dust) = remaining_dust {
                     state::write_dust_base(&mut data, dust);
+                }
+
+                // ── RiskBuffer maintenance (engine borrow dropped) ──
+                {
+                    let mut buf = state::read_risk_buffer(&data);
+                    let engine = zc::engine_ref(&data)?;
+
+                    // Phase A: scrub dead entries
+                    for i in (0..4usize).rev() {
+                        if i >= buf.count as usize { continue; }
+                        let eidx = buf.entries[i].idx as usize;
+                        if !engine.is_used(eidx) || engine.effective_pos_q(eidx) == 0 {
+                            buf.remove(buf.entries[i].idx);
+                        }
+                    }
+
+                    // Phase B: refresh surviving entries
+                    for i in 0..buf.count as usize {
+                        let eidx = buf.entries[i].idx as usize;
+                        let eff = engine.effective_pos_q(eidx);
+                        let notional = percolator::wide_math::mul_div_floor_u128(
+                            eff.unsigned_abs(), price as u128, percolator::POS_SCALE,
+                        );
+                        buf.entries[i].notional = notional;
+                    }
+                    buf.recompute_min();
+
+                    // Phase C: progressive discovery scan
+                    let scan_start = buf.scan_cursor as usize;
+                    for offset in 0..crate::constants::RISK_SCAN_WINDOW {
+                        let idx = (scan_start + offset) % percolator::MAX_ACCOUNTS;
+                        if !engine.is_used(idx) { continue; }
+                        let eff = engine.effective_pos_q(idx);
+                        if eff == 0 { continue; }
+                        let notional = percolator::wide_math::mul_div_floor_u128(
+                            eff.unsigned_abs(), price as u128, percolator::POS_SCALE,
+                        );
+                        buf.upsert(idx as u16, notional);
+                    }
+                    buf.scan_cursor = ((scan_start + crate::constants::RISK_SCAN_WINDOW)
+                        % percolator::MAX_ACCOUNTS) as u16;
+
+                    // Phase D: ingest caller-supplied candidates
+                    for &(cidx, _) in candidates.iter() {
+                        let ci = cidx as usize;
+                        if ci >= percolator::MAX_ACCOUNTS || !engine.is_used(ci) {
+                            continue;
+                        }
+                        let eff = engine.effective_pos_q(ci);
+                        if eff == 0 {
+                            buf.remove(cidx);
+                        } else {
+                            let notional = percolator::wide_math::mul_div_floor_u128(
+                                eff.unsigned_abs(), price as u128, percolator::POS_SCALE,
+                            );
+                            buf.upsert(cidx, notional);
+                        }
+                    }
+
+                    drop(engine); // release immutable borrow before write
+                    state::write_risk_buffer(&mut data, &buf);
                 }
 
                 // Debug: log lifetime counters (sol_log_64: tag, liqs, max_accounts, insurance, 0)
@@ -4520,11 +4745,32 @@ pub mod processor {
                         config.last_mark_push_slot = clock.slot as u128;
                     }
                 }
-                // Engine borrow dropped. Write nonce + config.
+                // Engine borrow dropped.
+                // Collect post-trade positions for risk buffer (re-borrow as ref)
+                let (user_eff_cpi, lp_eff_cpi) = {
+                    let data = a_slab.try_borrow_data()?;
+                    let engine = zc::engine_ref(&data)?;
+                    (engine.effective_pos_q(user_idx as usize),
+                     engine.effective_pos_q(lp_idx as usize))
+                };
+                // Write nonce + config + risk buffer.
                 {
                     let mut data = state::slab_data_mut(a_slab)?;
                     state::write_req_nonce(&mut data, req_id);
                     state::write_config(&mut data, &config);
+                    // Update risk buffer
+                    let mut buf = state::read_risk_buffer(&data);
+                    for &(idx, eff) in &[(user_idx, user_eff_cpi), (lp_idx, lp_eff_cpi)] {
+                        if eff == 0 {
+                            buf.remove(idx);
+                        } else {
+                            let notional = percolator::wide_math::mul_div_floor_u128(
+                                eff.unsigned_abs(), exec_price as u128, percolator::POS_SCALE,
+                            );
+                            buf.upsert(idx, notional);
+                        }
+                    }
+                    state::write_risk_buffer(&mut data, &buf);
                 }
             }
             Instruction::LiquidateAtOracle { target_idx } => {
@@ -4585,6 +4831,25 @@ pub mod processor {
                         compute_current_funding_rate(&config))
                     .map_err(map_risk_error)?;
                 sol_log_64(_res as u64, 0, 0, 0, 4); // result
+
+                // Collect post-liquidation position for risk buffer
+                let liq_eff = engine.effective_pos_q(target_idx as usize);
+                drop(engine);
+
+                // Update risk buffer (engine borrow dropped)
+                {
+                    let mut buf = state::read_risk_buffer(&data);
+                    if liq_eff == 0 {
+                        buf.remove(target_idx);
+                    } else {
+                        let notional = percolator::wide_math::mul_div_floor_u128(
+                            liq_eff.unsigned_abs(), price as u128, percolator::POS_SCALE,
+                        );
+                        buf.upsert(target_idx, notional);
+                    }
+                    state::write_risk_buffer(&mut data, &buf);
+                }
+
                 #[cfg(feature = "cu-audit")]
                 {
                     msg!("CU_CHECKPOINT: liquidate_end");
@@ -4683,6 +4948,14 @@ pub mod processor {
                 let amt_units_u64: u64 = amt_units
                     .try_into()
                     .map_err(|_| PercolatorError::EngineOverflow)?;
+
+                // Remove from risk buffer (drop engine borrow first to release data)
+                drop(engine);
+                {
+                    let mut buf = state::read_risk_buffer(&data);
+                    buf.remove(user_idx);
+                    state::write_risk_buffer(&mut data, &buf);
+                }
 
                 // Convert units to base tokens for payout (checked to prevent silent overflow)
                 let base_to_pay =
@@ -5840,6 +6113,14 @@ pub mod processor {
                     .try_into()
                     .map_err(|_| PercolatorError::EngineOverflow)?;
 
+                // Remove from risk buffer before withdraw (drop engine first)
+                drop(engine);
+                {
+                    let mut buf = state::read_risk_buffer(&data);
+                    buf.remove(user_idx);
+                    state::write_risk_buffer(&mut data, &buf);
+                }
+
                 let base_to_pay =
                     crate::units::units_to_base_checked(amt_units_u64, config.unit_scale)
                         .ok_or(PercolatorError::EngineOverflow)?;
@@ -6289,10 +6570,18 @@ pub mod processor {
 
                 let amt_units = engine.force_close_resolved_not_atomic(user_idx, config.resolution_slot)
                     .map_err(map_risk_error)?;
-
                 let amt_units_u64: u64 = amt_units
                     .try_into()
                     .map_err(|_| PercolatorError::EngineOverflow)?;
+
+                // Remove from risk buffer before withdraw
+                drop(engine);
+                {
+                    let mut buf = state::read_risk_buffer(&data);
+                    buf.remove(user_idx);
+                    state::write_risk_buffer(&mut data, &buf);
+                }
+
                 let base_to_pay =
                     crate::units::units_to_base_checked(amt_units_u64, config.unit_scale)
                         .ok_or(PercolatorError::EngineOverflow)?;
