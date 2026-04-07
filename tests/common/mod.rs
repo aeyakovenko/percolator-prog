@@ -7637,6 +7637,18 @@ impl TestEnv {
         )
     }
 
+    /// Read the risk buffer from the slab.
+    /// Uses SLAB_LEN - RISK_BUF_LEN as the offset (buffer is at end of slab).
+    pub fn read_risk_buffer(&self) -> percolator_prog::risk_buffer::RiskBuffer {
+        use bytemuck::Zeroable;
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let buf_size = core::mem::size_of::<percolator_prog::risk_buffer::RiskBuffer>();
+        let buf_off = SLAB_LEN - buf_size;
+        let mut buf = percolator_prog::risk_buffer::RiskBuffer::zeroed();
+        bytemuck::bytes_of_mut(&mut buf).copy_from_slice(&d[buf_off..buf_off + buf_size]);
+        buf
+    }
+
     /// Try to init market with raw instruction data (for rejection testing)
     pub fn try_init_market_raw(&mut self, data: Vec<u8>) -> Result<(), String> {
         let admin = &self.payer;

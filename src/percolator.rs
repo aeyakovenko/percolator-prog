@@ -4421,8 +4421,30 @@ pub mod processor {
                     // handles it via the funding_rate parameter (§5.5 anti-retroactivity).
                 }
 
+                // Collect post-trade positions for risk buffer
+                let user_eff_nocpi = engine.effective_pos_q(user_idx as usize);
+                let lp_eff_nocpi = engine.effective_pos_q(lp_idx as usize);
+                drop(engine);
+
                 // Write updated config (mark_ewma changed)
                 state::write_config(&mut data, &config);
+
+                // Update risk buffer
+                {
+                    let mut buf = state::read_risk_buffer(&data);
+                    for &(idx, eff) in &[(user_idx, user_eff_nocpi), (lp_idx, lp_eff_nocpi)] {
+                        if eff == 0 {
+                            buf.remove(idx);
+                        } else {
+                            let notional = percolator::wide_math::mul_div_floor_u128(
+                                eff.unsigned_abs(), price as u128, percolator::POS_SCALE,
+                            );
+                            buf.upsert(idx, notional);
+                        }
+                    }
+                    state::write_risk_buffer(&mut data, &buf);
+                }
+
                 #[cfg(feature = "cu-audit")]
                 {
                     msg!("CU_CHECKPOINT: trade_nocpi_execute_end");
