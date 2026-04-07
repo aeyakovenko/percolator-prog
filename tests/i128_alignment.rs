@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, unused_variables, unused_mut, clippy::too_many_arguments, clippy::field_reassign_with_default, clippy::manual_saturating_arithmetic, clippy::useless_conversion, for_loops_over_fallibles, clippy::unnecessary_cast, clippy::absurd_extreme_comparisons, clippy::manual_abs_diff, clippy::empty_line_after_doc_comments, clippy::doc_lazy_continuation, clippy::needless_range_loop, clippy::implicit_saturating_sub, clippy::wrong_self_convention)]
 //! BPF i128 Alignment Test
 //!
 //! Tests that I128/U128 wrapper types work correctly:
@@ -23,8 +24,10 @@ use solana_sdk::{
 use spl_token::state::{Account as TokenAccount, AccountState};
 use std::path::PathBuf;
 
-// SLAB_LEN for production BPF (MAX_ACCOUNTS=4096) - native 128-bit fields
-const SLAB_LEN: usize = 1156776;
+// SLAB_LEN must match the production BPF binary at target/deploy/percolator_prog.so
+// (compiled without --features test, MAX_ACCOUNTS=4096, includes dex_pool: [u8; 32]).
+// Update when MarketConfig layout or RiskEngine struct changes.
+const SLAB_LEN: usize = 1_156_808; // MAX_ACCOUNTS=4096 with dex_pool field (SBF 32-bit layout)
 const MAX_ACCOUNTS: usize = 4096;
 
 // Pyth Receiver program ID

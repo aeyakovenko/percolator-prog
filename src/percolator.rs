@@ -2,12 +2,41 @@
 
 #![no_std]
 #![deny(unsafe_code)]
+// Upstream code uses patterns that trigger some clippy lints.
+// These are pre-existing in the upstream codebase, not introduced by our changes.
+#![allow(
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::needless_return,
+    clippy::collapsible_if,
+    clippy::if_same_then_else,
+    clippy::manual_range_contains,
+    clippy::explicit_auto_deref,
+    clippy::needless_borrow,
+    clippy::result_large_err,
+    clippy::vec_init_then_push,
+    clippy::manual_is_multiple_of,
+    clippy::needless_lifetimes,
+    clippy::ok_expect,
+    clippy::question_mark,
+    clippy::assertions_on_constants,
+    unused_imports,
+    unused_variables,
+    dead_code,
+)]
 
 extern crate alloc;
+
+// Local SPL Token helpers — replaces spl-token crate dependency.
+pub mod spl_token;
 
 use solana_program::declare_id;
 
 declare_id!("Perco1ator111111111111111111111111111111111");
+
+/// Instruction tag constants — single source of truth for CPI callers.
+#[path = "tags.rs"]
+pub mod tags;
 
 // 1. mod constants
 pub mod constants {
@@ -20,6 +49,19 @@ pub mod constants {
     pub const HEADER_LEN: usize = size_of::<SlabHeader>();
     pub const CONFIG_LEN: usize = size_of::<MarketConfig>();
     pub const ENGINE_ALIGN: usize = align_of::<RiskEngine>();
+
+    // SBF compile-time layout pinning assertions.
+    // If any of these fail, update the SDK layout constants.
+    pub const ACCOUNT_SIZE: usize = size_of::<percolator::Account>();
+    #[cfg(target_arch = "sbf")]
+    const _SBF_ENGINE_ALIGN: [(); 8] = [(); ENGINE_ALIGN];
+
+    /// Minimum seed deposit required for InitMarket (10 USDC at 6 decimals).
+    #[cfg(not(feature = "test"))]
+    pub const MIN_INIT_MARKET_SEED: u64 = 10_000_000;
+    #[cfg(feature = "test")]
+    pub const MIN_INIT_MARKET_SEED: u64 = 0;
+    pub const MIN_INIT_MARKET_SEED_LAMPORTS: u64 = MIN_INIT_MARKET_SEED;
 
     pub const fn align_up(x: usize, a: usize) -> usize {
         (x + (a - 1)) & !(a - 1)
@@ -1212,6 +1254,38 @@ pub mod ix {
         ForceCloseResolved {
             user_idx: u16,
         },
+
+        // ─── Fork-specific instructions ────────────────────────────────────
+
+        /// PERC-623: Top up keeper fund (permissionless, tag 57).
+        /// Transfers SOL lamports from funder to keeper fund PDA.
+        TopUpKeeperFund { amount: u64 },
+
+        /// PERC-8400: Rescue orphan vault (admin only, tag 72).
+        /// Reads actual vault token balance and transfers to admin ATA.
+        RescueOrphanVault,
+
+        /// PERC-8400: Close orphan slab (admin only, tag 73).
+        /// Verifies vault is empty, zeros slab data, drains lamports to admin.
+        CloseOrphanSlab,
+
+        /// PERC-SetDexPool: Pin admin-approved DEX pool for HYPERP market (tag 74).
+        SetDexPool { pool: Pubkey },
+
+        /// InitMatcherCtx: CPI to matcher program to initialize a matcher context (tag 75).
+        InitMatcherCtx {
+            lp_idx: u16,
+            kind: u8,
+            trading_fee_bps: u32,
+            base_spread_bps: u32,
+            max_total_bps: u32,
+            impact_k_bps: u32,
+            liquidity_notional_e6: u128,
+            max_fill_abs: u128,
+            max_inventory_abs: u128,
+            fee_to_insurance_bps: u16,
+            skew_spread_mult_bps: u16,
+        },
     }
 
     impl Instruction {
@@ -1529,6 +1603,46 @@ pub mod ix {
                 30 => {
                     let user_idx = read_u16(&mut rest)?;
                     Ok(Instruction::ForceCloseResolved { user_idx })
+                }
+                // Fork-specific instructions
+                57 => {
+                    // TopUpKeeperFund
+                    let amount = read_u64(&mut rest)?;
+                    Ok(Instruction::TopUpKeeperFund { amount })
+                }
+                72 => Ok(Instruction::RescueOrphanVault),
+                73 => Ok(Instruction::CloseOrphanSlab),
+                74 => {
+                    // SetDexPool
+                    let pool = read_pubkey(&mut rest)?;
+                    Ok(Instruction::SetDexPool { pool })
+                }
+                75 => {
+                    // InitMatcherCtx
+                    let lp_idx = read_u16(&mut rest)?;
+                    let kind = read_u8(&mut rest)?;
+                    let trading_fee_bps = read_u32(&mut rest)?;
+                    let base_spread_bps = read_u32(&mut rest)?;
+                    let max_total_bps = read_u32(&mut rest)?;
+                    let impact_k_bps = read_u32(&mut rest)?;
+                    let liquidity_notional_e6 = read_u128(&mut rest)?;
+                    let max_fill_abs = read_u128(&mut rest)?;
+                    let max_inventory_abs = read_u128(&mut rest)?;
+                    let fee_to_insurance_bps = read_u16(&mut rest)?;
+                    let skew_spread_mult_bps = read_u16(&mut rest)?;
+                    Ok(Instruction::InitMatcherCtx {
+                        lp_idx,
+                        kind,
+                        trading_fee_bps,
+                        base_spread_bps,
+                        max_total_bps,
+                        impact_k_bps,
+                        liquidity_notional_e6,
+                        max_fill_abs,
+                        max_inventory_abs,
+                        fee_to_insurance_bps,
+                        skew_spread_mult_bps,
+                    })
                 }
                 _ => Err(ProgramError::InvalidInstructionData),
             }
@@ -1890,12 +2004,20 @@ pub mod state {
         /// Minimum slots after resolution before permissionless force-close.
         /// 0 = disabled. Set at InitMarket, immutable.
         pub force_close_delay_slots: u64,
+
+        // ========================================
+        // DEX Pool Pinning (PERC-SetDexPool)
+        // ========================================
+        /// Admin-pinned DEX pool pubkey for HYPERP markets.
+        /// Set via SetDexPool (tag 74). All-zeros = not set.
+        /// UpdateHyperpMark rejects pool keys that don't match this.
+        pub dex_pool: [u8; 32],
     }
 
     pub fn slab_data_mut<'a, 'b>(
         ai: &'b AccountInfo<'a>,
     ) -> Result<RefMut<'b, &'a mut [u8]>, ProgramError> {
-        Ok(ai.try_borrow_mut_data()?)
+        ai.try_borrow_mut_data()
     }
 
     pub fn read_header(data: &[u8]) -> SlabHeader {
@@ -2073,6 +2195,29 @@ pub mod oracle {
         0xf1, 0x4b, 0xf6, 0x5a, 0xd5, 0x6b, 0xd2, 0xba, 0x71, 0x5e, 0x45, 0x74, 0x2c, 0x23, 0x1f,
         0x27, 0xd6, 0x36, 0x21, 0xcf, 0x5b, 0x77, 0x8f, 0x37, 0xc1, 0xa2, 0x48, 0x95, 0x1d, 0x17,
         0x56, 0x02,
+    ]);
+
+    // ─── DEX program IDs for HYPERP oracle (PERC-SetDexPool) ─────────────────
+
+    /// PumpSwap AMM program ID: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
+    pub const PUMPSWAP_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+        0x4f, 0x48, 0x5d, 0x40, 0x7a, 0x49, 0xd6, 0x99, 0x53, 0x25, 0xb9, 0xd8, 0x07, 0x41, 0xb7,
+        0x09, 0x59, 0xb6, 0xf3, 0x8b, 0xa7, 0x75, 0x98, 0x6d, 0xfb, 0x38, 0x4d, 0x56, 0x58, 0xbc,
+        0x91, 0x41,
+    ]);
+
+    /// Raydium CLMM program ID: CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK
+    pub const RAYDIUM_CLMM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+        0xa5, 0x6e, 0xf9, 0x5a, 0x9f, 0x77, 0x01, 0x36, 0x88, 0x49, 0xef, 0x5c, 0xd5, 0x91, 0xdb,
+        0x0d, 0xb1, 0x2a, 0xb2, 0x09, 0x68, 0x39, 0xb0, 0xcc, 0x86, 0x50, 0xad, 0xcd, 0xfd, 0x95,
+        0x09, 0x6a,
+    ]);
+
+    /// Meteora DLMM program ID: LBUZKhRxPF3XUpBCjp4YzTKgLLjTriggZTtEA3SsX1D
+    pub const METEORA_DLMM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+        0x09, 0x35, 0x95, 0x00, 0xda, 0xfb, 0x4c, 0x3d, 0x82, 0x03, 0x25, 0xd9, 0x64, 0xcc, 0x26,
+        0x90, 0x4f, 0x05, 0x8f, 0x05, 0xfe, 0xe3, 0x60, 0x8b, 0x72, 0x01, 0xe3, 0x66, 0x85, 0xb4,
+        0xe7, 0x02,
     ]);
 
     // PriceUpdateV2 account layout offsets (134 bytes minimum)
@@ -2761,8 +2906,76 @@ pub mod collateral {
     }
 }
 
+// 9b. mod keeper_fund — PERC-623: Self-Funding Keeper
+pub mod keeper_fund {
+    use bytemuck::{Pod, Zeroable};
+
+    /// Magic bytes for KeeperFundState PDA: "KEEPFUND"
+    pub const KEEPER_FUND_MAGIC: u64 = 0x4B454550_46554E44;
+
+    /// Size of the KeeperFundState account data.
+    pub const KEEPER_FUND_STATE_LEN: usize = core::mem::size_of::<KeeperFundState>();
+
+    /// Default split: 30% of creation deposit goes to keeper fund.
+    pub const KEEPER_FUND_SPLIT_BPS: u64 = 3_000;
+
+    /// Default reward per successful KeeperCrank, denominated in SOL lamports.
+    /// 1_000_000 = 0.001 SOL.
+    pub const DEFAULT_REWARD_PER_CRANK: u64 = 1_000_000;
+
+    /// PDA seed prefix.
+    pub const KEEPER_FUND_SEED: &[u8] = b"keeper_fund";
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Pod, Zeroable)]
+    pub struct KeeperFundState {
+        pub magic: u64,
+        pub bump: u8,
+        /// 1 if market was auto-paused due to keeper fund depletion.
+        /// TopUpKeeperFund only unpauses when this is set, preventing
+        /// accidental clearing of admin pauses.
+        pub depleted_pause: u8,
+        pub _pad: [u8; 6],
+        /// Current fund balance (SOL lamports).
+        pub balance: u64,
+        /// Reward paid to crank caller per successful KeeperCrank.
+        pub reward_per_crank: u64,
+        /// Lifetime total rewards paid out.
+        pub total_rewarded: u64,
+        /// Lifetime total topped up.
+        pub total_topped_up: u64,
+    }
+
+    // Compile-time size check
+    const _: [(); 48] = [(); KEEPER_FUND_STATE_LEN];
+
+    /// Check if fund is depleted (balance == 0).
+    pub fn is_depleted(balance: u64) -> bool {
+        balance == 0
+    }
+
+    /// Read KeeperFundState from account data.
+    pub fn read_state(data: &[u8]) -> Option<&KeeperFundState> {
+        if data.len() < KEEPER_FUND_STATE_LEN {
+            return None;
+        }
+        let state: &KeeperFundState = bytemuck::from_bytes(&data[..KEEPER_FUND_STATE_LEN]);
+        if state.magic != KEEPER_FUND_MAGIC {
+            return None;
+        }
+        Some(state)
+    }
+
+    /// Write KeeperFundState to account data.
+    pub fn write_state(data: &mut [u8], state: &KeeperFundState) {
+        data[..KEEPER_FUND_STATE_LEN].copy_from_slice(bytemuck::bytes_of(state));
+    }
+}
+
 // 9. mod processor
 pub mod processor {
+    #[allow(unused_imports)]
+    use alloc::format; // Required by msg! macro with format args in no_std builds
     use crate::{
         accounts, collateral,
         constants::{
@@ -2784,6 +2997,7 @@ pub mod processor {
         unpack_ins_withdraw_meta,
         zc,
     };
+    #[allow(unused_imports)]
     use percolator::{
         RiskEngine, RiskError, I128, U128, ADL_ONE, MAX_ACCOUNTS,
     };
@@ -3488,6 +3702,9 @@ pub mod processor {
                     last_good_oracle_slot: clock.slot,
                     mark_min_fee,
                     force_close_delay_slots,
+                    // DEX pool pinning: initialized to all-zeros (not set).
+                    // Admin must call SetDexPool (tag 74) for HYPERP markets.
+                    dex_pool: [0u8; 32],
                 };
                 // Hyperp markets must have non-zero cap for index smoothing
                 if is_hyperp && config.oracle_price_cap_e2bps == 0 {
@@ -3509,6 +3726,79 @@ pub mod processor {
                 // Write market_start_slot (§2.1): captures creation slot for rewards program.
                 // Shares _reserved[8..16] with last_thr_update_slot (initialized to same value).
                 state::write_market_start_slot(&mut data, clock.slot);
+
+                // PERC-623: Optional keeper fund PDA initialization.
+                // accounts[9] = keeper_fund PDA (writable), accounts[10] = system_program
+                // Backward compatible: callers passing only 9 accounts skip this.
+                if accounts.len() >= 11 {
+                    let a_keeper_fund = &accounts[9];
+                    let a_system_program = &accounts[10];
+                    accounts::expect_writable(a_keeper_fund)?;
+
+                    if *a_system_program.key != solana_program::system_program::id() {
+                        return Err(ProgramError::IncorrectProgramId);
+                    }
+
+                    let (expected_pda, pda_bump) = Pubkey::find_program_address(
+                        &[crate::keeper_fund::KEEPER_FUND_SEED, a_slab.key.as_ref()],
+                        program_id,
+                    );
+                    if *a_keeper_fund.key != expected_pda {
+                        return Err(ProgramError::InvalidSeeds);
+                    }
+
+                    let rent = solana_program::rent::Rent::get()?;
+                    let rent_lamports =
+                        rent.minimum_balance(crate::keeper_fund::KEEPER_FUND_STATE_LEN);
+                    let min_fund = crate::keeper_fund::DEFAULT_REWARD_PER_CRANK
+                        .saturating_mul(100)
+                        .saturating_add(rent_lamports);
+
+                    let bump_bytes = [pda_bump];
+                    let signer_seeds: &[&[u8]] = &[
+                        crate::keeper_fund::KEEPER_FUND_SEED,
+                        a_slab.key.as_ref(),
+                        &bump_bytes,
+                    ];
+                    solana_program::program::invoke_signed(
+                        &solana_program::system_instruction::create_account(
+                            a_admin.key,
+                            &expected_pda,
+                            min_fund,
+                            crate::keeper_fund::KEEPER_FUND_STATE_LEN as u64,
+                            program_id,
+                        ),
+                        &[
+                            a_admin.clone(),
+                            a_keeper_fund.clone(),
+                            a_system_program.clone(),
+                        ],
+                        &[signer_seeds],
+                    )?;
+
+                    let fund_balance = min_fund.saturating_sub(rent_lamports);
+                    let default_reward = crate::keeper_fund::DEFAULT_REWARD_PER_CRANK;
+                    let fund_state = crate::keeper_fund::KeeperFundState {
+                        magic: crate::keeper_fund::KEEPER_FUND_MAGIC,
+                        bump: pda_bump,
+                        depleted_pause: 0,
+                        _pad: [0u8; 6],
+                        balance: fund_balance,
+                        reward_per_crank: default_reward,
+                        total_rewarded: 0,
+                        total_topped_up: 0,
+                    };
+                    let mut fund_data = a_keeper_fund
+                        .try_borrow_mut_data()
+                        .map_err(|_| ProgramError::AccountBorrowFailed)?;
+                    crate::keeper_fund::write_state(&mut fund_data, &fund_state);
+
+                    msg!(
+                        "PERC-623: KeeperFund initialized — balance={} reward_per_crank={}",
+                        fund_balance,
+                        default_reward
+                    );
+                }
             }
             Instruction::InitUser { fee_payment } => {
                 accounts::expect_len(accounts, 6)?;
@@ -5819,7 +6109,7 @@ pub mod processor {
                 )?;
                 accounts::expect_key(a_pda, &auth)?;
 
-                let clock = Clock::from_account_info(&accounts[6])?;
+                let _clock = Clock::from_account_info(&accounts[6])?;
                 // Resolved markets use fixed settlement price.
                 let price = config.authority_price_e6;
                 if price == 0 {
@@ -6308,6 +6598,480 @@ pub mod processor {
                     a_token, a_vault, a_owner_ata, a_pda,
                     base_to_pay, &signer_seeds,
                 )?;
+            }
+
+            // ─── Fork-specific instruction handlers ────────────────────────
+
+            Instruction::TopUpKeeperFund { amount } => {
+                // accounts: [0] funder (signer), [1] slab (writable), [2] keeper_fund PDA (writable)
+                // optional: [3] system_program (required when funder is not program-owned)
+                accounts::expect_len(accounts, 3)?;
+                let a_funder = &accounts[0];
+                let a_slab = &accounts[1];
+                let a_keeper_fund = &accounts[2];
+                accounts::expect_signer(a_funder)?;
+                accounts::expect_writable(a_slab)?;
+                accounts::expect_writable(a_keeper_fund)?;
+
+                {
+                    let slab_data = state::slab_data_mut(a_slab)?;
+                    slab_guard(program_id, a_slab, &slab_data)?;
+                    require_initialized(&slab_data)?;
+                }
+
+                let (expected_pda, _bump) = Pubkey::find_program_address(
+                    &[crate::keeper_fund::KEEPER_FUND_SEED, a_slab.key.as_ref()],
+                    program_id,
+                );
+                if *a_keeper_fund.key != expected_pda {
+                    return Err(ProgramError::InvalidSeeds);
+                }
+
+                if amount == 0 {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+
+                if a_funder.owner != program_id {
+                    if accounts.len() < 4 {
+                        return Err(ProgramError::NotEnoughAccountKeys);
+                    }
+                    let a_system = &accounts[3];
+                    if *a_system.key != solana_program::system_program::id() {
+                        return Err(ProgramError::IncorrectProgramId);
+                    }
+                    solana_program::program::invoke(
+                        &solana_program::system_instruction::transfer(
+                            a_funder.key,
+                            a_keeper_fund.key,
+                            amount,
+                        ),
+                        &[a_funder.clone(), a_keeper_fund.clone(), a_system.clone()],
+                    )?;
+                } else {
+                    let funder_lamports = **a_funder.try_borrow_lamports()?;
+                    if funder_lamports < amount {
+                        return Err(ProgramError::InsufficientFunds);
+                    }
+                    **a_funder.try_borrow_mut_lamports()? = funder_lamports - amount;
+                    **a_keeper_fund.try_borrow_mut_lamports()? = a_keeper_fund
+                        .lamports()
+                        .checked_add(amount)
+                        .ok_or(ProgramError::InsufficientFunds)?;
+                }
+
+                let mut fund_data = a_keeper_fund
+                    .try_borrow_mut_data()
+                    .map_err(|_| ProgramError::AccountBorrowFailed)?;
+
+                if let Some(fund_state) = crate::keeper_fund::read_state(&fund_data) {
+                    let mut new_state = *fund_state;
+                    new_state.balance = new_state.balance.saturating_add(amount);
+                    new_state.total_topped_up = new_state.total_topped_up.saturating_add(amount);
+                    // Clear depleted_pause flag when fund is topped up above zero.
+                    if new_state.depleted_pause != 0
+                        && !crate::keeper_fund::is_depleted(new_state.balance)
+                    {
+                        new_state.depleted_pause = 0;
+                    }
+                    crate::keeper_fund::write_state(&mut fund_data, &new_state);
+                } else {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                msg!("TopUpKeeperFund: amount={}", amount);
+            }
+
+            // PERC-8400: RescueOrphanVault
+            // Layout-agnostic rescue: reads raw bytes from the slab header.
+            // Accounts: [admin(signer), slab(readonly), admin_ata(writable),
+            //            vault(writable), token_program, vault_pda]
+            Instruction::RescueOrphanVault => {
+                accounts::expect_len(accounts, 6)?;
+                let a_admin = &accounts[0];
+                let a_slab = &accounts[1];
+                let a_admin_ata = &accounts[2];
+                let a_vault = &accounts[3];
+                let a_token = &accounts[4];
+                let a_vault_pda = &accounts[5];
+
+                accounts::expect_signer(a_admin)?;
+                accounts::expect_writable(a_admin_ata)?;
+                accounts::expect_writable(a_vault)?;
+                verify_token_program(a_token)?;
+
+                if a_slab.owner != program_id {
+                    return Err(ProgramError::IllegalOwner);
+                }
+
+                let slab_data = a_slab.try_borrow_data()?;
+                if slab_data.len() < 48 {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                let magic = u64::from_le_bytes(
+                    slab_data[0..8]
+                        .try_into()
+                        .map_err(|_| ProgramError::InvalidAccountData)?,
+                );
+                if magic != MAGIC {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                let admin_bytes: [u8; 32] = slab_data[16..48]
+                    .try_into()
+                    .map_err(|_| ProgramError::InvalidAccountData)?;
+                let slab_admin = Pubkey::new_from_array(admin_bytes);
+                if slab_admin != *a_admin.key {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                let flags = slab_data[state::FLAGS_OFF];
+                if flags & state::FLAG_RESOLVED == 0 {
+                    solana_program::msg!("RescueOrphanVault rejected: market is not resolved");
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                let bump = slab_data[12];
+                drop(slab_data);
+
+                // H-1: Verify vault is owned by SPL Token program.
+                if a_vault.owner != &crate::spl_token::id() {
+                    return Err(ProgramError::IllegalOwner);
+                }
+
+                let (auth, expected_bump) =
+                    accounts::derive_vault_authority(program_id, a_slab.key);
+                if bump != expected_bump {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+                accounts::expect_key(a_vault_pda, &auth)?;
+
+                let vault_data = a_vault.try_borrow_data()?;
+                let vault_token = crate::spl_token::state::TokenAccountView::unpack(&vault_data)?;
+                if vault_token.owner != auth {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+                let actual_amount = vault_token.amount;
+                let vault_mint = vault_token.mint;
+                drop(vault_data);
+
+                let admin_ata_data = a_admin_ata.try_borrow_data()?;
+                let admin_token =
+                    crate::spl_token::state::TokenAccountView::unpack(&admin_ata_data)?;
+                if admin_token.owner != *a_admin.key {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+                if admin_token.mint != vault_mint {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+                drop(admin_ata_data);
+
+                if actual_amount == 0 {
+                    msg!("PERC-8400: vault is empty, nothing to rescue");
+                    return Ok(());
+                }
+
+                let seed1: &[u8] = b"vault";
+                let seed2: &[u8] = a_slab.key.as_ref();
+                let bump_arr: [u8; 1] = [bump];
+                let seed3: &[u8] = &bump_arr;
+                let seeds: [&[u8]; 3] = [seed1, seed2, seed3];
+                let signer_seeds: [&[&[u8]]; 1] = [&seeds];
+
+                collateral::withdraw(
+                    a_token,
+                    a_vault,
+                    a_admin_ata,
+                    a_vault_pda,
+                    actual_amount,
+                    &signer_seeds,
+                )?;
+
+                msg!("PERC-8400: rescued {} tokens from orphan vault", actual_amount);
+            }
+
+            // PERC-8400: CloseOrphanSlab
+            // Accounts: [admin(signer,writable), slab(writable), vault(readonly)]
+            Instruction::CloseOrphanSlab => {
+                accounts::expect_len(accounts, 3)?;
+                let a_admin = &accounts[0];
+                let a_slab = &accounts[1];
+                let a_vault = &accounts[2];
+
+                accounts::expect_signer(a_admin)?;
+                accounts::expect_writable(a_slab)?;
+
+                if a_slab.owner != program_id {
+                    return Err(ProgramError::IllegalOwner);
+                }
+
+                {
+                    let mut slab_data = a_slab.try_borrow_mut_data()?;
+                    if slab_data.len() < 48 {
+                        return Err(ProgramError::InvalidAccountData);
+                    }
+
+                    let magic = u64::from_le_bytes(
+                        slab_data[0..8]
+                            .try_into()
+                            .map_err(|_| ProgramError::InvalidAccountData)?,
+                    );
+                    if magic != MAGIC {
+                        return Err(ProgramError::InvalidAccountData);
+                    }
+
+                    let admin_bytes: [u8; 32] = slab_data[16..48]
+                        .try_into()
+                        .map_err(|_| ProgramError::InvalidAccountData)?;
+                    let slab_admin = Pubkey::new_from_array(admin_bytes);
+                    if slab_admin != *a_admin.key {
+                        return Err(ProgramError::InvalidAccountData);
+                    }
+
+                    // M-1: Verify vault is owned by SPL Token program.
+                    if a_vault.owner != &crate::spl_token::id() {
+                        return Err(ProgramError::IllegalOwner);
+                    }
+
+                    let vault_data = a_vault
+                        .try_borrow_data()
+                        .map_err(|_| ProgramError::InvalidAccountData)?;
+                    if vault_data.len() < 72 {
+                        return Err(ProgramError::InvalidAccountData);
+                    }
+                    let vault_amount = u64::from_le_bytes(
+                        vault_data[64..72]
+                            .try_into()
+                            .map_err(|_| ProgramError::InvalidAccountData)?,
+                    );
+                    if vault_amount > 0 {
+                        msg!("PERC-8400: vault still has {} tokens, rescue first", vault_amount);
+                        return Err(ProgramError::InvalidAccountData);
+                    }
+                    let vault_owner_bytes: [u8; 32] = vault_data[32..64]
+                        .try_into()
+                        .map_err(|_| ProgramError::InvalidAccountData)?;
+                    let vault_owner = Pubkey::new_from_array(vault_owner_bytes);
+                    let (expected_auth, _) =
+                        accounts::derive_vault_authority(program_id, a_slab.key);
+                    if vault_owner != expected_auth {
+                        return Err(ProgramError::InvalidAccountData);
+                    }
+                    drop(vault_data);
+
+                    for b in slab_data.iter_mut() {
+                        *b = 0;
+                    }
+                }
+
+                let slab_lamports = a_slab.lamports();
+                **a_slab.lamports.borrow_mut() = 0;
+                **a_admin.lamports.borrow_mut() = a_admin
+                    .lamports()
+                    .checked_add(slab_lamports)
+                    .ok_or(PercolatorError::EngineOverflow)?;
+
+                msg!("PERC-8400: closed orphan slab, reclaimed {} lamports", slab_lamports);
+            }
+
+            // PERC-SetDexPool (Tag 74): Pin admin-approved DEX pool for HYPERP markets.
+            // Accounts: [admin(signer), slab(writable), pool_account(readonly)]
+            Instruction::SetDexPool { pool } => {
+                accounts::expect_len(accounts, 3)?;
+                let a_admin = &accounts[0];
+                let a_slab = &accounts[1];
+                let a_pool = &accounts[2];
+
+                accounts::expect_signer(a_admin)?;
+                accounts::expect_writable(a_slab)?;
+
+                // SetDexPool fix: verify pool pubkey matches the pool account key.
+                if pool != *a_pool.key {
+                    return Err(ProgramError::InvalidArgument);
+                }
+
+                let mut data = state::slab_data_mut(a_slab)?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+
+                let header = state::read_header(&data);
+                require_admin(header.admin, a_admin.key)?;
+
+                let mut config = state::read_config(&data);
+
+                if !oracle::is_hyperp_mode(&config) {
+                    msg!("SetDexPool: not a HYPERP market (index_feed_id is non-zero)");
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                let is_approved_dex = *a_pool.owner == oracle::PUMPSWAP_PROGRAM_ID
+                    || *a_pool.owner == oracle::RAYDIUM_CLMM_PROGRAM_ID
+                    || *a_pool.owner == oracle::METEORA_DLMM_PROGRAM_ID;
+                if !is_approved_dex {
+                    msg!("SetDexPool: pool account not owned by an approved DEX program");
+                    return Err(PercolatorError::OracleInvalid.into());
+                }
+
+                {
+                    let pool_data = a_pool.try_borrow_data()?;
+
+                    let mint_matches = if *a_pool.owner == oracle::PUMPSWAP_PROGRAM_ID {
+                        const PS_OFF_BASE_MINT: usize = 35;
+                        if pool_data.len() < PS_OFF_BASE_MINT + 32 {
+                            return Err(ProgramError::InvalidAccountData);
+                        }
+                        let base_mint: [u8; 32] =
+                            pool_data[PS_OFF_BASE_MINT..PS_OFF_BASE_MINT + 32]
+                                .try_into()
+                                .unwrap();
+                        base_mint == config.collateral_mint
+                    } else if *a_pool.owner == oracle::RAYDIUM_CLMM_PROGRAM_ID {
+                        const RAYDIUM_OFF_MINT0: usize = 73;
+                        const RAYDIUM_OFF_MINT1: usize = 105;
+                        if pool_data.len() < RAYDIUM_OFF_MINT1 + 32 {
+                            return Err(ProgramError::InvalidAccountData);
+                        }
+                        let mint0: [u8; 32] = pool_data[RAYDIUM_OFF_MINT0..RAYDIUM_OFF_MINT0 + 32]
+                            .try_into()
+                            .unwrap();
+                        let mint1: [u8; 32] = pool_data[RAYDIUM_OFF_MINT1..RAYDIUM_OFF_MINT1 + 32]
+                            .try_into()
+                            .unwrap();
+                        mint0 == config.collateral_mint || mint1 == config.collateral_mint
+                    } else {
+                        // Meteora DLMM
+                        const METEORA_OFF_X: usize = 81;
+                        const METEORA_OFF_Y: usize = 113;
+                        if pool_data.len() < METEORA_OFF_Y + 32 {
+                            return Err(ProgramError::InvalidAccountData);
+                        }
+                        let x_mint: [u8; 32] = pool_data[METEORA_OFF_X..METEORA_OFF_X + 32]
+                            .try_into()
+                            .unwrap();
+                        let y_mint: [u8; 32] = pool_data[METEORA_OFF_Y..METEORA_OFF_Y + 32]
+                            .try_into()
+                            .unwrap();
+                        x_mint == config.collateral_mint || y_mint == config.collateral_mint
+                    };
+
+                    if !mint_matches {
+                        msg!("SetDexPool: pool mints do not include market collateral_mint");
+                        return Err(PercolatorError::OracleInvalid.into());
+                    }
+                }
+
+                config.dex_pool = pool.to_bytes();
+                state::write_config(&mut data, &config);
+
+                msg!("SetDexPool: pinned pool {} for HYPERP market {}", pool, a_slab.key);
+            }
+
+            // InitMatcherCtx (Tag 75): CPI to matcher program to initialize a matcher context.
+            // Accounts: [admin(signer), slab(readonly), matcher_ctx(writable),
+            //            matcher_prog(executable), lp_pda]
+            Instruction::InitMatcherCtx {
+                lp_idx,
+                kind,
+                trading_fee_bps,
+                base_spread_bps,
+                max_total_bps,
+                impact_k_bps,
+                liquidity_notional_e6,
+                max_fill_abs,
+                max_inventory_abs,
+                fee_to_insurance_bps,
+                skew_spread_mult_bps,
+            } => {
+                accounts::expect_len(accounts, 5)?;
+                let a_admin = &accounts[0];
+                let a_slab = &accounts[1];
+                let a_matcher_ctx = &accounts[2];
+                let a_matcher_prog = &accounts[3];
+                let a_lp_pda = &accounts[4];
+
+                accounts::expect_signer(a_admin)?;
+                accounts::expect_writable(a_matcher_ctx)?;
+
+                let data = a_slab.try_borrow_data()?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+
+                let header = state::read_header(&data);
+                require_admin(header.admin, a_admin.key)?;
+
+                let engine = zc::engine_ref(&data)?;
+                check_idx(engine, lp_idx)?;
+                let lp_acc = &engine.accounts[lp_idx as usize];
+
+                if lp_acc.matcher_program == [0u8; 32] {
+                    return Err(ProgramError::InvalidArgument);
+                }
+
+                if lp_acc.matcher_program != a_matcher_prog.key.to_bytes() {
+                    return Err(PercolatorError::EngineInvalidMatchingEngine.into());
+                }
+
+                if lp_acc.matcher_context != a_matcher_ctx.key.to_bytes() {
+                    return Err(PercolatorError::EngineInvalidMatchingEngine.into());
+                }
+
+                if a_matcher_ctx.owner != a_matcher_prog.key {
+                    return Err(ProgramError::IncorrectProgramId);
+                }
+
+                if !a_matcher_prog.executable {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                let lp_bytes = lp_idx.to_le_bytes();
+                let (expected_lp_pda, bump) = Pubkey::find_program_address(
+                    &[b"lp", a_slab.key.as_ref(), &lp_bytes],
+                    program_id,
+                );
+                if *a_lp_pda.key != expected_lp_pda {
+                    return Err(ProgramError::InvalidSeeds);
+                }
+
+                drop(data);
+
+                // Build matcher init CPI data (matcher tag 2 + InitParams, 70 bytes total).
+                let mut cpi_data = [0u8; 70];
+                cpi_data[0] = 2; // MATCHER_INIT_TAG
+                cpi_data[1] = kind;
+                cpi_data[2..6].copy_from_slice(&trading_fee_bps.to_le_bytes());
+                cpi_data[6..10].copy_from_slice(&base_spread_bps.to_le_bytes());
+                cpi_data[10..14].copy_from_slice(&max_total_bps.to_le_bytes());
+                cpi_data[14..18].copy_from_slice(&impact_k_bps.to_le_bytes());
+                cpi_data[18..34].copy_from_slice(&liquidity_notional_e6.to_le_bytes());
+                cpi_data[34..50].copy_from_slice(&max_fill_abs.to_le_bytes());
+                cpi_data[50..66].copy_from_slice(&max_inventory_abs.to_le_bytes());
+                cpi_data[66..68].copy_from_slice(&fee_to_insurance_bps.to_le_bytes());
+                cpi_data[68..70].copy_from_slice(&skew_spread_mult_bps.to_le_bytes());
+
+                let metas = [
+                    solana_program::instruction::AccountMeta::new_readonly(
+                        *a_lp_pda.key,
+                        true,
+                    ),
+                    solana_program::instruction::AccountMeta::new(*a_matcher_ctx.key, false),
+                ];
+
+                let ix = solana_program::instruction::Instruction {
+                    program_id: *a_matcher_prog.key,
+                    accounts: metas.to_vec(),
+                    data: cpi_data.to_vec(),
+                };
+
+                let bump_arr = [bump];
+                let seeds: &[&[u8]] = &[b"lp", a_slab.key.as_ref(), &lp_bytes, &bump_arr];
+
+                solana_program::program::invoke_signed(
+                    &ix,
+                    &[a_lp_pda.clone(), a_matcher_ctx.clone()],
+                    &[seeds],
+                )?;
+
+                msg!("InitMatcherCtx: initialized matcher context for LP idx {}", lp_idx);
             }
         }
         Ok(())

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("sbf", "bpf"))', 'cfg(kani)', 'cfg(target_os, values("solana"))', 'cfg(feature, values("custom-heap", "custom-panic"))'] }
+
 [lib]
 crate-type = ["cdylib", "lib"]
 name = "percolator_prog"
@@ -14,6 +17,8 @@ no-entrypoint = []
 test-sbf = []
 test = ["percolator/test"]  # Use MAX_ACCOUNTS=64 for tests
 cu-audit = []  # Enable compute unit checkpoints for CU auditing
+medium = ["percolator/medium"]  # MAX_ACCOUNTS=1024 (~2.7 SOL)
+mainnet = []                    # Mainnet build — enables compile-time guards
 
 [dependencies]
 solana-program = "1.18"
