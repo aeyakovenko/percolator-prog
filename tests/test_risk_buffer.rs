@@ -968,3 +968,123 @@ fn test_maintenance_fee_proportional_to_elapsed() {
         "Fee must scale ~linearly: fee_500={} fee_1000={} ratio={:.2}",
         fee_500, fee_1000, ratio);
 }
+
+// ============================================================================
+// M3. Fee=0 means zero fees forever (SetMaintenanceFee removed)
+// ============================================================================
+
+/// When maintenance_fee_per_slot=0 at init, no fees are ever charged.
+/// SetMaintenanceFee instruction was removed (§8.2), so fees are immutable.
+/// The engine still stamps last_fee_slot on the fee=0 early return to keep
+/// the slot counter advancing, but no capital is deducted.
+#[test]
+fn test_fee_zero_no_fees_ever_charged() {
+    program_path();
+    let mut env = TestEnv::new();
+
+    // Init with fee=0
+    let data = encode_init_market_with_maint_fee_bounded(
+        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
+        10_000, 0, 0, // fee=0
+    );
+    env.try_init_market_raw(data).expect("init failed");
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 1_000_000_000);
+
+    // Crank across many slots — capital must NOT decrease from fees
+    let cap_before = env.read_account_capital(user_idx);
+    for i in 1..=10u64 {
+        env.set_slot(200 + i * 1000);
+        env.crank();
+    }
+    let cap_after = env.read_account_capital(user_idx);
+
+    assert_eq!(cap_after, cap_before,
+        "Capital must not change with fee=0 across 10K slots: before={} after={}",
+        cap_before, cap_after);
+}
+
+// ============================================================================
+// S6. Deposit does NOT settle pending maintenance fees
+// ============================================================================
+
+/// DepositCollateral does not call touch_account — pending maintenance fees
+/// are not settled during deposit. They are deferred to the next crank.
+/// This is intentional: deposit is a simple capital add, withdrawal does the
+/// full settlement. Documented here as a test to prevent accidental changes.
+#[test]
+fn test_deposit_does_not_settle_pending_maintenance_fee() {
+    program_path();
+    let mut env = TestEnv::new();
+
+    let fee_per_slot: u128 = 500;
+    let data = encode_init_market_with_maint_fee_bounded(
+        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
+        10_000, fee_per_slot, 0,
+    );
+    env.try_init_market_raw(data).expect("init failed");
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 1_000_000_000);
+
+    // Baseline crank to align last_fee_slot
+    env.set_slot(200);
+    env.crank();
+
+    let cap_after_crank = env.read_account_capital(user_idx);
+
+    // Advance 1000 slots — pending fee = 500 * 1000 = 500K
+    env.set_slot(1200);
+
+    // Deposit 1_000_000_000 more — should NOT settle pending fees
+    env.deposit(&user, user_idx, 1_000_000_000);
+    let cap_after_deposit = env.read_account_capital(user_idx);
+
+    // Convert deposit to units for comparison
+    let deposit_units = 1_000_000_000u128;
+
+    // Capital should increase by approximately the deposit amount.
+    // If fees WERE settled, capital would be: cap_after_crank + deposit - 500K
+    // If fees NOT settled, capital would be: cap_after_crank + deposit
+    let increase = cap_after_deposit - cap_after_crank;
+
+    println!("Deposit test: cap_after_crank={} cap_after_deposit={} increase={} deposit={}",
+        cap_after_crank, cap_after_deposit, increase, deposit_units);
+
+    // The increase must be the full deposit amount (fees not yet settled)
+    assert!(increase >= deposit_units * 9 / 10,
+        "Deposit must add ~full amount (fees deferred): increase={} deposit={}",
+        increase, deposit_units);
+
+    // Now crank to settle the pending fees
+    env.crank();
+    let cap_after_final_crank = env.read_account_capital(user_idx);
+    let total_fee = cap_after_deposit - cap_after_final_crank;
+
+    println!("After crank: cap={} fee_charged={}", cap_after_final_crank, total_fee);
+
+    // Fees must be charged during crank (not during deposit)
+    assert!(total_fee > 0,
+        "Crank after deposit must settle pending fees: fee={}", total_fee);
+}
