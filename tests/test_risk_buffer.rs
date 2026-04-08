@@ -69,7 +69,7 @@ fn test_trade_close_removes_from_buffer() {
     // Open position
     env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
     let buf = env.read_risk_buffer();
-    let count_after_open = buf.count;
+    let _count_after_open = buf.count;
 
     // Close position (opposite direction, same size)
     env.set_slot(200);
@@ -967,6 +967,87 @@ fn test_maintenance_fee_proportional_to_elapsed() {
     assert!(ratio > 1.5 && ratio < 2.5,
         "Fee must scale ~linearly: fee_500={} fee_1000={} ratio={:.2}",
         fee_500, fee_1000, ratio);
+}
+
+// ============================================================================
+// K3. Multiple undercollateralized accounts liquidated via buffer-only cranks
+// ============================================================================
+
+/// Empty-candidate cranks progressively liquidate multiple undercollateralized
+/// accounts via the buffer. This is the end-to-end test for the claim that
+/// "cranks without hints eventually liquidate everyone in the buffer."
+#[test]
+fn test_multiple_accounts_liquidated_via_buffer_only_cranks() {
+    use solana_sdk::instruction::{Instruction, AccountMeta};
+    use solana_sdk::sysvar;
+
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 10_000_000_000);
+
+    env.set_slot(50);
+    env.crank();
+
+    // Create 3 users with thin margin and near-max leverage
+    let mut users = Vec::new();
+    for _ in 0..3 {
+        let u = Keypair::new();
+        let idx = env.init_user(&u);
+        env.deposit(&u, idx, 1_500_000_000);
+        env.trade(&u, &lp, lp_idx, idx, 100_000_000);
+        users.push((u, idx));
+    }
+
+    // All 3 must be in buffer (LP + 3 users = 4 entries = full)
+    let buf = env.read_risk_buffer();
+    for &(_, idx) in &users {
+        assert!(buf.find(idx).is_some(), "User {} must be in buffer", idx);
+    }
+
+    // Price drop → all 3 undercollateralized
+    env.set_slot_and_price(200, 120_000_000);
+
+    // Crank with EMPTY candidates — buffer entries drive all liquidations
+    let caller = Keypair::new();
+    env.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(caller.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(env.pyth_index, false),
+        ],
+        data: encode_crank_with_candidates(&[]),
+    };
+    let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&caller.pubkey()),
+        &[&caller],
+        env.svm.latest_blockhash(),
+    );
+    env.svm.send_transaction(tx).expect("buffer-only crank failed");
+
+    // ALL 3 users must be liquidated in a single crank
+    for &(_, idx) in &users {
+        let pos = env.read_account_position(idx);
+        assert_eq!(pos, 0,
+            "User {} must be liquidated by buffer-only crank", idx);
+    }
+
+    // All removed from buffer
+    let buf = env.read_risk_buffer();
+    for &(_, idx) in &users {
+        assert!(buf.find(idx).is_none(),
+            "Liquidated user {} must be removed from buffer", idx);
+    }
 }
 
 // ============================================================================
