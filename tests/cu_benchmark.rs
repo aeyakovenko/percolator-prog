@@ -811,11 +811,14 @@ fn benchmark_worst_case_scenarios() {
         MAX_ACCOUNTS, 4096,
         "Expected MAX_ACCOUNTS=4096 for production benchmark"
     );
-    assert!(
-        SLAB_LEN > 900_000,
-        "Expected SLAB_LEN > 900K for production benchmark, got {}",
-        SLAB_LEN
-    );
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(
+            SLAB_LEN > 900_000,
+            "Expected SLAB_LEN > 900K for production benchmark, got {}",
+            SLAB_LEN
+        );
+    }
 
     let path = program_path();
     if !path.exists() {
@@ -908,7 +911,6 @@ fn benchmark_worst_case_scenarios() {
     println!("Scenario 3: 📊 Finding practical CU limit");
     {
         let test_sizes = [100, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000];
-        let mut last_success = 0u64;
         let mut last_success_users = 0usize;
 
         for &num_users in &test_sizes {
@@ -960,7 +962,6 @@ fn benchmark_worst_case_scenarios() {
                         "  {:>4} users: {:>10} CU (~{} CU/user)",
                         num_users, cu, cu_per_account
                     );
-                    last_success = cu;
                     last_success_users = num_users;
                 }
                 Err(_) => {
@@ -1600,7 +1601,7 @@ fn benchmark_worst_case_scenarios() {
         let mut total_force: u64 = 0;
         let mut any_failed = false;
         let mut last_max_acc: u64 = 0;
-        let mut last_insurance: u64 = 0;
+        let mut _last_insurance: u64 = 0;
 
         // Helper to parse hex or decimal
         fn parse_hex_or_dec(s: &str) -> u64 {
@@ -1620,29 +1621,28 @@ fn benchmark_worst_case_scenarios() {
                     }
                     total_cu += cu;
 
-                    // Parse stats from logs
-                    for (i, log) in logs.iter().enumerate() {
-                        if log.contains("CRANK_STATS") {
-                            if i + 1 < logs.len() {
-                                let next_log = &logs[i + 1];
-                                if let Some(rest) = next_log.strip_prefix("Program log: ") {
-                                    let parts: Vec<&str> = rest.split(", ").collect();
-                                    if parts.len() >= 5 {
-                                        let liqs = parse_hex_or_dec(parts[1]);
-                                        let force = parse_hex_or_dec(parts[2]);
-                                        last_max_acc = parse_hex_or_dec(parts[3]);
-                                        last_insurance = parse_hex_or_dec(parts[4]);
-                                        total_liqs = liqs; // cumulative from engine
-                                        total_force = force;
+                    // Parse stats from crank sol_log_64 output.
+                    // Format: "Program log: 0xC8A4C5, 0x<liqs>, 0x<max_acc>, 0x<ins>, 0x0"
+                    // Tag 0xC8A4C5 replaced the old "CRANK_STATS" msg! call.
+                    for log in &logs {
+                        if log.contains("0xc8a4c5") || log.contains("0xC8A4C5") {
+                            if let Some(rest) = log.strip_prefix("Program log: ") {
+                                let parts: Vec<&str> = rest.split(", ").collect();
+                                if parts.len() >= 5 {
+                                    let liqs = parse_hex_or_dec(parts[1]);
+                                    let force = parse_hex_or_dec(parts[2]);
+                                    last_max_acc = parse_hex_or_dec(parts[3]);
+                                    _last_insurance = parse_hex_or_dec(parts[4]);
+                                    total_liqs = liqs; // cumulative from engine
+                                    total_force = force;
 
-                                        println!(
-                                            "    Crank {:>2}: {:>7} CU | liqs={} force={}",
-                                            crank_num + 1,
-                                            cu,
-                                            liqs,
-                                            force
-                                        );
-                                    }
+                                    println!(
+                                        "    Crank {:>2}: {:>7} CU | liqs={} force={}",
+                                        crank_num + 1,
+                                        cu,
+                                        liqs,
+                                        force
+                                    );
                                 }
                             }
                         }
