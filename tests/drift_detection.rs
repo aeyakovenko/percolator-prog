@@ -592,7 +592,8 @@ fn assert_decode_err(data: &[u8], msg: &str) {
 /// Tags 31–36 are documented upstream-reserved gaps: they must return error.
 #[test]
 fn gap_and_reserved_tags_return_invalid_instruction_data() {
-    let no_arm_tags: &[u8] = &[31, 32, 33, 34, 35, 36];
+    // 34 = UpdateHyperpMark (now ported), so only 31,32,33,35,36 are gaps
+    let no_arm_tags: &[u8] = &[31, 32, 33, 35, 36];
     for &tag in no_arm_tags {
         assert_decode_err(
             &[tag],
@@ -619,7 +620,8 @@ fn slash_creation_deposit_tag_is_unimplemented_stub() {
 #[test]
 fn unknown_high_tag_returns_invalid_instruction_data() {
     assert_decode_err(&[255u8], "tag 255");
-    assert_decode_err(&[76u8], "tag 76");
+    // 76=PauseMarket, 77=UnpauseMarket — now valid
+    assert_decode_err(&[78u8], "tag 78");
     assert_decode_err(&[100u8], "tag 100");
 }
 
