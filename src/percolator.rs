@@ -3366,25 +3366,34 @@ pub mod oracle {
 
         let decimal_diff = 6i32 + decimals_0 - decimals_1;
 
-        // Hi/lo decomposition for pseudo-256-bit squaring precision
-        let hi = sqrt_price_x64 >> 64;
-        let lo = sqrt_price_x64 & ((1u128 << 64) - 1);
-        let hh = hi * hi;
-        let hl2 = hi.checked_mul(lo).unwrap_or(u128::MAX >> 1) << 1;
-        let price_ratio = hh.saturating_add(hl2 >> 64);
-
-        let price_e6_raw = price_ratio
-            .checked_mul(1_000_000)
-            .ok_or(PercolatorError::EngineOverflow)?;
-
-        let price_e6 = if decimal_diff >= 0 {
-            let scale = 10u128.pow(decimal_diff as u32);
-            price_e6_raw
-                .checked_mul(scale)
-                .ok_or(PercolatorError::EngineOverflow)?
+        // Compute price_e6 = sqrt^2 * 10^(6 + decimal_diff) / 2^128
+        // Must scale BEFORE dividing to avoid precision loss for prices < 2^64.
+        let scale_exp = (6i32 + decimal_diff).max(0) as u32;
+        let scale = 10u128.pow(scale_exp);
+        // sqrt fits in 128 bits. sqrt * sqrt_scaled to avoid overflow:
+        // Split: price = (sqrt / 2^64)^2 * scale = sqrt^2 * scale / 2^128
+        // Use: (sqrt * scale_half) * sqrt / 2^128 where scale_half = sqrt(scale) — no, simpler:
+        // price = ((sqrt >> 32) * (sqrt >> 32) * scale) >> 64
+        // This gives 32-bit precision loss but handles the full range.
+        let sqrt_shifted = sqrt_price_x64 >> 32;
+        let price_e6 = if sqrt_shifted == 0 {
+            0u128
         } else {
-            let scale = 10u128.pow((-decimal_diff) as u32);
-            price_e6_raw / scale
+            let sq = sqrt_shifted * sqrt_shifted; // fits in 128 bits (64-bit * 64-bit)
+            // sq = sqrt^2 / 2^64. Need to divide by another 2^64 and multiply by scale.
+            // price_e6 = sq * scale / 2^64
+            sq.checked_mul(scale)
+                .map(|v| v >> 64)
+                .unwrap_or_else(|| {
+                    // Overflow: scale is too large, compute differently
+                    (sq >> 64).saturating_mul(scale)
+                })
+        };
+        let price_e6 = if decimal_diff < 0 {
+            let down_scale = 10u128.pow((-decimal_diff) as u32);
+            price_e6 / down_scale
+        } else {
+            price_e6
         };
 
         if price_e6 == 0 {
