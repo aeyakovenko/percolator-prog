@@ -6515,6 +6515,8 @@ pub mod processor {
         let mut data = state::slab_data_mut(a_slab)?;
         slab_guard(program_id, a_slab, &data)?;
         require_initialized(&data)?;
+        // SECURITY(H-1): Block during emergency pause.
+        require_not_paused(&data)?;
 
         // Block new users when market is resolved
         if state::is_resolved(&data) {
@@ -6605,6 +6607,8 @@ pub mod processor {
         let mut data = state::slab_data_mut(a_slab)?;
         slab_guard(program_id, a_slab, &data)?;
         require_initialized(&data)?;
+        // SECURITY(H-1): Block during emergency pause.
+        require_not_paused(&data)?;
 
         // Block new LPs when market is resolved
         if state::is_resolved(&data) {
@@ -6695,6 +6699,8 @@ pub mod processor {
         let mut data = state::slab_data_mut(a_slab)?;
         slab_guard(program_id, a_slab, &data)?;
         require_initialized(&data)?;
+        // SECURITY(H-1): Block during emergency pause.
+        require_not_paused(&data)?;
 
         // Block deposits when market is resolved
         if state::is_resolved(&data) {
@@ -6770,6 +6776,8 @@ pub mod processor {
         let mut data = state::slab_data_mut(a_slab)?;
         slab_guard(program_id, a_slab, &data)?;
         require_initialized(&data)?;
+        // SECURITY(H-1): Block during emergency pause (users exit via CloseAccount).
+        require_not_paused(&data)?;
         let mut config = state::read_config(&data);
         let mint = Pubkey::new_from_array(config.collateral_mint);
 
@@ -7121,6 +7129,8 @@ pub mod processor {
         let mut data = state::slab_data_mut(a_slab)?;
         slab_guard(program_id, a_slab, &data)?;
         require_initialized(&data)?;
+        // SECURITY(H-1): Block trading during emergency pause.
+        require_not_paused(&data)?;
 
         // Block trading when market is resolved
         if state::is_resolved(&data) {
@@ -7293,6 +7303,8 @@ pub mod processor {
             let data = a_slab.try_borrow_data()?;
             slab_guard(program_id, a_slab, &*data)?;
             require_initialized(&*data)?;
+            // SECURITY(H-1): Block trading during emergency pause.
+            require_not_paused(&*data)?;
 
             // Block trading when market is resolved
             if state::is_resolved(&*data) {
