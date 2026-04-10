@@ -5931,27 +5931,36 @@ pub mod processor {
                 handle_advance_oracle_phase(program_id, accounts)?;
             }
 
-            Instruction::InitSharedVault {
-                epoch_duration_slots,
-                max_market_exposure_bps,
-            } => {
-                handle_init_shared_vault(program_id, accounts, epoch_duration_slots, max_market_exposure_bps)?;
+            // SECURITY(H-2/H-3/H-4): SharedVault subsystem disabled for mainnet.
+            // Multiple critical bugs: no deposit instruction (total_capital always 0),
+            // no LP mint/share system, QueueWithdrawalSV accepts arbitrary amounts
+            // with no token validation (fund theft), AllocateMarket double-counts
+            // total_allocated, and no deallocation path exists. The feature is
+            // incomplete and cannot be safely fixed without fundamental redesign.
+            // Handler code is preserved for future development.
+            Instruction::InitSharedVault { .. } => {
+                msg!("SharedVault subsystem disabled — feature incomplete");
+                return Err(ProgramError::InvalidInstructionData);
             }
 
-            Instruction::AllocateMarket { amount } => {
-                handle_allocate_market(program_id, accounts, amount)?;
+            Instruction::AllocateMarket { .. } => {
+                msg!("SharedVault subsystem disabled — feature incomplete");
+                return Err(ProgramError::InvalidInstructionData);
             }
 
             Instruction::AdvanceEpoch => {
-                handle_advance_epoch(program_id, accounts)?;
+                msg!("SharedVault subsystem disabled — feature incomplete");
+                return Err(ProgramError::InvalidInstructionData);
             }
 
-            Instruction::QueueWithdrawalSV { lp_amount } => {
-                handle_queue_withdrawal_sv(program_id, accounts, lp_amount)?;
+            Instruction::QueueWithdrawalSV { .. } => {
+                msg!("SharedVault subsystem disabled — feature incomplete");
+                return Err(ProgramError::InvalidInstructionData);
             }
 
             Instruction::ClaimEpochWithdrawal => {
-                handle_claim_epoch_withdrawal(program_id, accounts)?;
+                msg!("SharedVault subsystem disabled — feature incomplete");
+                return Err(ProgramError::InvalidInstructionData);
             }
 
             Instruction::MintPositionNft { user_idx } => {
