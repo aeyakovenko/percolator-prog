@@ -350,6 +350,16 @@ mod tests {
             TAG_BURN_POSITION_NFT,
             TAG_SET_PENDING_SETTLEMENT,
             TAG_CLEAR_PENDING_SETTLEMENT,
+            // SECURITY(L-6): Tags 69-77 were missing from this test.
+            TAG_TRANSFER_OWNERSHIP_CPI,
+            TAG_SET_WALLET_CAP,
+            TAG_SET_OI_IMBALANCE_HARD_BLOCK,
+            TAG_RESCUE_ORPHAN_VAULT,
+            TAG_CLOSE_ORPHAN_SLAB,
+            TAG_SET_DEX_POOL,
+            TAG_INIT_MATCHER_CTX,
+            TAG_PAUSE_MARKET,
+            TAG_UNPAUSE_MARKET,
         ];
 
         // Verify monotonically increasing (allows gaps for removed instructions)
