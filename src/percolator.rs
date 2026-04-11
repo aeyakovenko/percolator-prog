@@ -12740,6 +12740,14 @@ pub mod processor {
             return Err(ProgramError::InvalidArgument);
         }
 
+        // Block burn during pending settlement — consistent with the guard
+        // in TransferPositionOwnership. Destroying the NFT state while a
+        // settlement is in-flight could orphan the settlement tracking.
+        if nft_state.pending_settlement != 0 {
+            msg!("BurnPositionNft: pending settlement must be cleared first");
+            return Err(PercolatorError::EngineUnauthorized.into());
+        }
+
         crate::position_nft::burn_nft(a_token22, a_nft_mint, a_owner_ata, a_owner)?;
 
         {
