@@ -258,9 +258,9 @@ fn test_account_struct_alignment() {
         exact_reserve_cohorts: [ReserveCohort::EMPTY; MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT],
         exact_cohort_count: 0,
         overflow_older: ReserveCohort::EMPTY,
-        overflow_older_present: false,
+        overflow_older_present: 0,
         overflow_newest: ReserveCohort::EMPTY,
-        overflow_newest_present: false,
+        overflow_newest_present: 0,
     };
 
     // Verify all fields round-trip correctly
