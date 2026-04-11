@@ -10251,6 +10251,18 @@ pub mod processor {
                 .checked_add(units as u128)
                 .ok_or(PercolatorError::EngineOverflow)?,
         );
+        // SECURITY(R4-M1): Increment engine.vault to match the token deposit.
+        // Without this, engine.vault diverges from actual vault balance, causing:
+        // - WithdrawInsurance to revert (ins > engine.vault check)
+        // - AuditCrank false-positive solvency violation (vault < c_tot + insurance)
+        // - Artificially tight OI caps
+        engine.vault = percolator::U128::new(
+            engine
+                .vault
+                .get()
+                .checked_add(units as u128)
+                .ok_or(PercolatorError::EngineOverflow)?,
+        );
 
         msg!("PERC-306: funded market insurance with {} units", units);
         Ok(())
