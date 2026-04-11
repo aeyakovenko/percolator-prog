@@ -3924,15 +3924,15 @@ pub mod processor {
                 )?;
                 verify_token_account(a_user_ata, a_user.key, &mint)?;
 
-                let resolved = state::is_resolved(&data);
+                // Block withdrawals on resolved markets.
+                // The engine's withdraw_not_atomic requires MarketMode::Live.
+                // After resolution, users exit via CloseAccount / ForceCloseResolved.
+                if state::is_resolved(&data) {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
                 let clock = Clock::from_account_info(a_clock)?;
-                let price = if resolved {
-                    let settlement = config.authority_price_e6;
-                    if settlement == 0 {
-                        return Err(ProgramError::InvalidAccountData);
-                    }
-                    settlement
-                } else {
+                let price = {
                     let is_hyperp = oracle::is_hyperp_mode(&config);
                     let px = if is_hyperp {
                         let eng = zc::engine_ref(&data)?;
@@ -3970,8 +3970,7 @@ pub mod processor {
                 // Convert requested base tokens to units
                 let (units_requested, _) = crate::units::base_to_units(amount, config.unit_scale);
 
-                // Use frozen time on resolved markets
-                let withdraw_slot = if resolved { config.resolution_slot } else { clock.slot };
+                let withdraw_slot = clock.slot;
                 let h_lock = engine.params.h_min;
                 engine
                     .withdraw_not_atomic(user_idx, units_requested as u128, price, withdraw_slot,
