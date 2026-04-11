@@ -7856,6 +7856,26 @@ pub mod processor {
         let mut header = state::read_header(&data);
         require_admin(header.admin, a_admin.key)?;
 
+        // SECURITY(R4-H1): Reject admin burn (zero pubkey) when no
+        // permissionless resolution path exists. Without this guard,
+        // burning admin on a market with permissionless_resolve_stale_slots=0
+        // permanently bricks all user funds — no one can resolve the market,
+        // force-close positions, or withdraw insurance.
+        if new_admin == Pubkey::default() {
+            let config = state::read_config(&data);
+            if config.permissionless_resolve_stale_slots == 0
+                || config.force_close_delay_slots == 0
+            {
+                msg!(
+                    "UpdateAdmin: cannot burn admin without permissionless \
+                     resolve ({}) and force-close ({}) paths enabled",
+                    config.permissionless_resolve_stale_slots,
+                    config.force_close_delay_slots,
+                );
+                return Err(ProgramError::InvalidArgument);
+            }
+        }
+
         header.admin = new_admin.to_bytes();
         state::write_header(&mut data, &header);
         Ok(())
