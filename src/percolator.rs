@@ -9771,7 +9771,11 @@ pub mod processor {
 
         let lp_tokens_to_mint: u64 = if lp_supply == 0 || capital_before == 0 {
             if lp_supply > 0 && capital_before == 0 {
-                vault_state.epoch = vault_state.epoch.saturating_add(1);
+                // Vault is depleted but LP tokens still exist (zombie tokens).
+                // A 1:1 deposit here would dilute the new depositor because
+                // existing LP holders retain their tokens and claim a share
+                // of the new capital. Reject until supply is cleared.
+                return Err(PercolatorError::LpVaultSupplyMismatch.into());
             }
             units
         } else {
