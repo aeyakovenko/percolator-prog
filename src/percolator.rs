@@ -4656,14 +4656,6 @@ pub mod processor {
                     msg!("CU_CHECKPOINT: close_account_end");
                     sol_log_compute_units();
                 }
-                // If force_close_resolved returns Ok(0), the account may still be open
-                // (deferred — position reconciled but not all accounts ready for payout).
-                // Only proceed with buffer removal and withdrawal if account was freed.
-                if amt_units == 0 && resolved && engine.is_used(user_idx as usize) {
-                    // Account still open — deferred close. No payout, no buffer removal.
-                    return Ok(());
-                }
-
                 let amt_units_u64: u64 = amt_units
                     .try_into()
                     .map_err(|_| PercolatorError::EngineOverflow)?;
@@ -4775,16 +4767,21 @@ pub mod processor {
                 // strands any funds that require admin action to recover.
                 //
                 // Requirements for burn:
-                // - Market must either be resolved with zero accounts (fully drained),
-                //   OR have BOTH permissionless resolution AND permissionless force-close
-                //   configured (so the entire lifecycle can complete without admin).
+                // - Market must either be fully empty (resolved, zero accounts,
+                //   zero insurance, zero vault), OR have ALL permissionless
+                //   recovery paths configured (resolve + force-close).
+                // Without this, burning admin can permanently strand insurance,
+                // vault tokens, or rent lamports.
                 if new_admin.to_bytes() == [0u8; 32] {
                     let config = state::read_config(&data);
                     let resolved = state::is_resolved(&data);
                     let engine = zc::engine_ref(&data)?;
-                    let fully_drained = resolved && engine.num_used_accounts == 0;
+                    let fully_empty = resolved
+                        && engine.num_used_accounts == 0
+                        && engine.insurance_fund.balance.is_zero()
+                        && engine.vault.is_zero();
 
-                    if !fully_drained {
+                    if !fully_empty {
                         let has_permissionless_resolve = config.permissionless_resolve_stale_slots > 0;
                         let has_permissionless_force_close = config.force_close_delay_slots > 0;
                         if !has_permissionless_resolve || !has_permissionless_force_close {
@@ -4963,9 +4960,11 @@ pub mod processor {
                     let accrual_price = if oracle::is_hyperp_mode(&config) {
                         config.last_effective_price_e6
                     } else {
-                        // Non-Hyperp: use last oracle price from engine
+                        // Non-Hyperp: use last oracle price ONLY if engine has seen
+                        // a real oracle (oracle_initialized != 0). Sentinel price 1
+                        // from init must never be used for accrual.
                         let engine = zc::engine_ref(&data)?;
-                        engine.last_oracle_price
+                        if engine.oracle_initialized == 0 { 0 } else { engine.last_oracle_price }
                     };
                     if accrual_price > 0 {
                         let engine = zc::engine_mut(&mut data)?;
@@ -5843,12 +5842,6 @@ pub mod processor {
 
                 let amt_units = engine.force_close_resolved_not_atomic(user_idx, config.resolution_slot)
                     .map_err(map_risk_error)?;
-
-                // Deferred close: account still open, no payout yet
-                if amt_units == 0 && engine.is_used(user_idx as usize) {
-                    return Ok(());
-                }
-
                 let amt_units_u64: u64 = amt_units
                     .try_into()
                     .map_err(|_| PercolatorError::EngineOverflow)?;
@@ -6210,12 +6203,17 @@ pub mod processor {
 
                 // Determine canonical settlement price.
                 // Hyperp: use mark EWMA (same as ResolveMarket Hyperp path).
-                // Non-Hyperp: use engine.last_oracle_price (last accrued price).
+                // Non-Hyperp: use engine.last_oracle_price — but ONLY if the engine
+                // has seen a real oracle accrual (oracle_initialized != 0). The init
+                // sentinel price of 1 must never be used for settlement.
                 let settlement_price = if is_hyperp {
                     let mark = config.mark_ewma_e6;
                     if mark > 0 { mark } else { config.authority_price_e6 }
                 } else {
                     let engine = zc::engine_ref(&data)?;
+                    if engine.oracle_initialized == 0 {
+                        return Err(PercolatorError::OracleInvalid.into());
+                    }
                     let p = engine.last_oracle_price;
                     if p == 0 {
                         return Err(PercolatorError::OracleInvalid.into());
@@ -6293,12 +6291,6 @@ pub mod processor {
 
                 let amt_units = engine.force_close_resolved_not_atomic(user_idx, config.resolution_slot)
                     .map_err(map_risk_error)?;
-
-                // Deferred close: account still open, no payout yet
-                if amt_units == 0 && engine.is_used(user_idx as usize) {
-                    return Ok(());
-                }
-
                 let amt_units_u64: u64 = amt_units
                     .try_into()
                     .map_err(|_| PercolatorError::EngineOverflow)?;
