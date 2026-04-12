@@ -1703,7 +1703,7 @@ pub mod state {
         pub bump: u8,
         pub _padding: [u8; 3],
         pub admin: [u8; 32],
-        pub _reserved: [u8; 24], // [0..8]=nonce, [8..16]=last_thr_slot, [16..24]=dust_base
+        pub _reserved: [u8; 24], // [0..8]=nonce, [8..24]=unused
     }
 
     /// Offset of _reserved field in SlabHeader, derived from offset_of! for correctness.
@@ -4882,10 +4882,6 @@ pub mod processor {
                             &signer_seeds,
                         )?;
                     }
-
-                    // Forgive any remaining dust_base — engine accounting is zero,
-                    // and any sub-scale remainder has been drained from the vault.
-                    // (dust_base tracks base-unit fractions with no engine entry)
 
                     // Zero out the slab data to prevent reuse
                     for b in data.iter_mut() {
