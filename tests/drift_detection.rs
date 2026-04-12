@@ -101,7 +101,6 @@ use percolator_prog::{
         TAG_SETTLE_ACCOUNT,
         TAG_SLASH_CREATION_DEPOSIT,
         TAG_TOP_UP_INSURANCE,
-        TAG_TOPUP_KEEPER_FUND,
         TAG_TRADE_CPI,
         TAG_TRADE_CPI_V2,
         TAG_TRADE_NO_CPI,
@@ -415,7 +414,6 @@ fn all_tags() -> &'static [u8] {
         TAG_SET_OFFSET_PAIR,               // 54
         TAG_ATTEST_CROSS_MARGIN,           // 55
         TAG_ADVANCE_ORACLE_PHASE,          // 56
-        TAG_TOPUP_KEEPER_FUND,             // 57
         TAG_SLASH_CREATION_DEPOSIT,        // 58 — reserved, no decode arm
         TAG_INIT_SHARED_VAULT,             // 59
         TAG_ALLOCATE_MARKET,               // 60
@@ -526,7 +524,6 @@ fn tags_match_numeric_values() {
     assert_eq!(TAG_SET_OFFSET_PAIR, 54u8);
     assert_eq!(TAG_ATTEST_CROSS_MARGIN, 55u8);
     assert_eq!(TAG_ADVANCE_ORACLE_PHASE, 56u8);
-    assert_eq!(TAG_TOPUP_KEEPER_FUND, 57u8);
     assert_eq!(TAG_SLASH_CREATION_DEPOSIT, 58u8);
     assert_eq!(TAG_INIT_SHARED_VAULT, 59u8);
     assert_eq!(TAG_ALLOCATE_MARKET, 60u8);
@@ -768,17 +765,6 @@ fn set_dex_pool_decode_round_trip() {
             assert_eq!(got.to_bytes(), pool)
         }
         other => panic!("Expected SetDexPool, got {:?}", other),
-    }
-}
-
-#[test]
-fn topup_keeper_fund_decode_round_trip() {
-    let amount: u64 = 777_777;
-    let mut data = vec![TAG_TOPUP_KEEPER_FUND];
-    data.extend_from_slice(&amount.to_le_bytes());
-    match Instruction::decode(&data) {
-        Ok(Instruction::TopUpKeeperFund { amount: got }) => assert_eq!(got, amount),
-        other => panic!("Expected TopUpKeeperFund, got {:?}", other),
     }
 }
 
