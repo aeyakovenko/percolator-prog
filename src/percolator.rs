@@ -1061,6 +1061,8 @@ pub mod ix {
             unit_scale: u32,
             /// Initial mark price in e6 format. Required (non-zero) if Hyperp mode.
             initial_mark_price_e6: u64,
+            /// Periodic maintenance fee per slot per account (engine units). 0 = disabled.
+            maintenance_fee_per_slot: u128,
             /// Per-market admin limit: max insurance floor
             max_insurance_floor: u128,
             /// Per-market admin limit: min oracle price cap (e2bps floor for non-zero values)
@@ -1226,7 +1228,7 @@ pub mod ix {
                     let invert = read_u8(&mut rest)?;
                     let unit_scale = read_u32(&mut rest)?;
                     let initial_mark_price_e6 = read_u64(&mut rest)?;
-                    let _ = read_u128(&mut rest)?; // max_maintenance_fee_per_slot (removed)
+                    let maintenance_fee_per_slot = read_u128(&mut rest)?; // periodic fee per slot per account
                     let max_insurance_floor = read_u128(&mut rest)?;
                     let min_oracle_price_cap_e2bps = read_u64(&mut rest)?;
                     // Insurance withdrawal limits (immutable after init)
@@ -1281,6 +1283,7 @@ pub mod ix {
                         invert,
                         unit_scale,
                         initial_mark_price_e6,
+                        maintenance_fee_per_slot,
                         max_insurance_floor,
                         min_oracle_price_cap_e2bps,
                         insurance_withdraw_max_bps,
@@ -1821,6 +1824,13 @@ pub mod state {
         // ========================================
         // Fee-Weighted EWMA
         // ========================================
+        /// Periodic maintenance fee per slot per account (engine units).
+        /// Wrapper charges via engine.charge_account_fee_not_atomic during KeeperCrank.
+        /// 0 = disabled. Set at InitMarket, immutable.
+        pub maintenance_fee_per_slot: u128,
+        /// Last slot when maintenance fees were globally charged.
+        pub last_fee_charge_slot: u64,
+        pub _fee_padding: u64,
         /// Minimum fee (in engine units, same as insurance_fund.balance) for full mark EWMA weight.
         /// Trades with fee below this get proportionally reduced alpha.
         /// 0 = disabled (all trades get full weight, backward compat).
@@ -3068,6 +3078,7 @@ pub mod processor {
                 invert,
                 unit_scale,
                 initial_mark_price_e6,
+                maintenance_fee_per_slot,
                 max_insurance_floor,
                 min_oracle_price_cap_e2bps,
                 insurance_withdraw_max_bps,
@@ -3395,6 +3406,9 @@ pub mod processor {
                     // from market creation, not slot 0 (prevents immediate resolution
                     // if the oracle happens to be down during market creation).
                     last_good_oracle_slot: clock.slot,
+                    maintenance_fee_per_slot,
+                    last_fee_charge_slot: clock.slot,
+                    _fee_padding: 0,
                     mark_min_fee,
                     force_close_delay_slots,
                 };
@@ -3854,10 +3868,38 @@ pub mod processor {
                     sol_log_compute_units();
                 }
 
+                // ── Periodic maintenance fees (wrapper-owned, §8.3) ──
+                // Charge maintenance_fee_per_slot * dt for each candidate account.
+                // Uses engine.charge_account_fee_not_atomic for safe capital→insurance transfer.
+                if config.maintenance_fee_per_slot > 0 {
+                    let dt = clock.slot.saturating_sub(config.last_fee_charge_slot);
+                    if dt > 0 {
+                        let fee_per_account = config.maintenance_fee_per_slot.saturating_mul(dt as u128);
+                        // Charge each candidate that was processed by the crank.
+                        // Use the combined list (buffer + external candidates) to match
+                        // which accounts were touched.
+                        for &(cidx, _) in combined.iter() {
+                            if (cidx as usize) < percolator::MAX_ACCOUNTS
+                                && engine.is_used(cidx as usize)
+                            {
+                                // Best-effort: ignore errors (account may have been
+                                // liquidated or closed during this crank).
+                                let _ = engine.charge_account_fee_not_atomic(
+                                    cidx, fee_per_account, clock.slot,
+                                );
+                            }
+                        }
+                        config.last_fee_charge_slot = clock.slot;
+                    }
+                }
+
                 // Copy stats and drop engine mutable borrow
                 let liqs = engine.lifetime_liquidations;
                 let ins_low = engine.insurance_fund.balance.get() as u64;
                 drop(engine);
+
+                // Write updated config (fee charge slot may have changed)
+                state::write_config(&mut data, &config);
 
                 // ── RiskBuffer maintenance (engine borrow dropped) ──
                 {
@@ -4641,29 +4683,28 @@ pub mod processor {
                 let amt_units = if resolved {
                     // force_close_resolved handles K-pair PnL, maintenance fees,
                     // loss settlement, and account close internally.
-                    // Do NOT pre-touch: touch can fail on epoch-mismatch accounts
-                    // that force_close_resolved was specifically designed to handle.
-                    engine.force_close_resolved_not_atomic(user_idx, config.resolution_slot)
+                    match engine.force_close_resolved_not_atomic(user_idx, config.resolution_slot)
                         .map_err(map_risk_error)?
-                } else {
                     {
-                        let h_lock = engine.params.h_min;
-                        engine
-                            .close_account_not_atomic(user_idx, clock.slot, price,
-                                compute_current_funding_rate_e9(&config),
-                                h_lock)
-                            .map_err(map_risk_error)?
+                        percolator::ResolvedCloseResult::Deferred => {
+                            // Phase 1 reconciliation only — account still open.
+                            // Caller must retry after all accounts reconciled.
+                            return Ok(());
+                        }
+                        percolator::ResolvedCloseResult::Closed(payout) => payout,
                     }
+                } else {
+                    let h_lock = engine.params.h_min;
+                    engine
+                        .close_account_not_atomic(user_idx, clock.slot, price,
+                            compute_current_funding_rate_e9(&config),
+                            h_lock)
+                        .map_err(map_risk_error)?
                 };
                 #[cfg(feature = "cu-audit")]
                 {
                     msg!("CU_CHECKPOINT: close_account_end");
                     sol_log_compute_units();
-                }
-                // Phase 1 reconciliation: Ok(0) with account still open means
-                // deferred — caller must retry after all accounts reconciled.
-                if amt_units == 0 && resolved && engine.is_used(user_idx as usize) {
-                    return Ok(());
                 }
 
                 let amt_units_u64: u64 = amt_units
@@ -5899,22 +5940,18 @@ pub mod processor {
 
                 let owner_pubkey = Pubkey::new_from_array(engine.accounts[user_idx as usize].owner);
 
-                let amt_units = engine.force_close_resolved_not_atomic(user_idx, config.resolution_slot)
-                    .map_err(map_risk_error)?;
-
-                // Phase 1 reconciliation may return Ok(0) with account still open.
-                // Skip buffer removal and payout — caller must retry later.
-                if amt_units == 0 && engine.is_used(user_idx as usize) {
-                    return Ok(());
-                }
+                let amt_units = match engine.force_close_resolved_not_atomic(user_idx, config.resolution_slot)
+                    .map_err(map_risk_error)?
+                {
+                    percolator::ResolvedCloseResult::Deferred => return Ok(()),
+                    percolator::ResolvedCloseResult::Closed(payout) => payout,
+                };
 
                 let amt_units_u64: u64 = amt_units
                     .try_into()
                     .map_err(|_| PercolatorError::EngineOverflow)?;
 
                 // Only verify owner ATA when there's a nonzero payout.
-                // This allows reconciliation-only calls without a valid owner ATA,
-                // preventing abandoned accounts from blocking num_used_accounts cleanup.
                 if amt_units_u64 > 0 {
                     verify_token_account(a_owner_ata, &owner_pubkey, &mint)?;
                 }
@@ -6369,13 +6406,12 @@ pub mod processor {
                     engine.accounts[user_idx as usize].owner,
                 );
 
-                let amt_units = engine.force_close_resolved_not_atomic(user_idx, config.resolution_slot)
-                    .map_err(map_risk_error)?;
-
-                // Phase 1 reconciliation may return Ok(0) with account still open.
-                if amt_units == 0 && engine.is_used(user_idx as usize) {
-                    return Ok(());
-                }
+                let amt_units = match engine.force_close_resolved_not_atomic(user_idx, config.resolution_slot)
+                    .map_err(map_risk_error)?
+                {
+                    percolator::ResolvedCloseResult::Deferred => return Ok(()),
+                    percolator::ResolvedCloseResult::Closed(payout) => payout,
+                };
 
                 // Only verify owner ATA when there's a nonzero payout.
                 if amt_units > 0 {

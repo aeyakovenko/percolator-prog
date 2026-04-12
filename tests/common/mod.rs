@@ -19,7 +19,7 @@ pub use std::path::PathBuf;
 // Note: We use production BPF (not test feature) because test feature
 // bypasses CPI for token transfers, which fails in LiteSVM.
 // Haircut-ratio engine (ADL/socialization scratch arrays removed)
-pub const SLAB_LEN: usize = 8984112; // MAX_ACCOUNTS=2048 (v12.15 Account with reserve cohort queues, fits 10MB Solana limit)
+pub const SLAB_LEN: usize = 8984144; // MAX_ACCOUNTS=2048 (v12.15 Account with reserve cohort queues, fits 10MB Solana limit)
 pub const MAX_ACCOUNTS: usize = 2048;
 
 // Pyth Receiver program ID
@@ -176,7 +176,7 @@ pub fn encode_init_market_with_conf_bps(
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&initial_mark_price_e6.to_le_bytes()); // initial_mark_price_e6
     // Per-market admin limits (uncapped defaults for tests)
-    data.extend_from_slice(&100_000_000_000_000_000_000u128.to_le_bytes()); // max_maintenance_fee_per_slot
+    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
     data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
@@ -219,7 +219,7 @@ pub fn encode_init_market_full_v2(
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&initial_mark_price_e6.to_le_bytes()); // initial_mark_price_e6
     // Per-market admin limits (uncapped defaults for tests)
-    data.extend_from_slice(&100_000_000_000_000_000_000u128.to_le_bytes()); // max_maintenance_fee_per_slot (<= MAX_PROTOCOL_FEE_ABS)
+    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled) (<= MAX_PROTOCOL_FEE_ABS)
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor (<= MAX_VAULT_TVL)
     data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
@@ -265,7 +265,7 @@ pub fn encode_init_market_with_cap(
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6 (0 for non-Hyperp)
     // Per-market admin limits
-    data.extend_from_slice(&100_000_000_000_000_000_000u128.to_le_bytes()); // max_maintenance_fee_per_slot
+    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
     data.extend_from_slice(&min_oracle_price_cap_e2bps.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
@@ -393,7 +393,7 @@ pub fn encode_init_market_with_trading_fee(
     data.push(invert);
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
-    data.extend_from_slice(&100_000_000_000_000_000_000u128.to_le_bytes()); // max_maintenance_fee_per_slot
+    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
     data.extend_from_slice(&min_oracle_price_cap_e2bps.to_le_bytes());
     // RiskParams
@@ -450,7 +450,7 @@ pub fn encode_init_market_with_maint_fee_bounded(
     data.push(0u8); // invert
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
-    data.extend_from_slice(&0u128.to_le_bytes()); // max_maintenance_fee_per_slot (legacy, ignored)
+    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
     data.extend_from_slice(&min_oracle_price_cap_e2bps.to_le_bytes());
     // RiskParams
@@ -1516,7 +1516,7 @@ pub fn encode_init_market_full(
     data.extend_from_slice(&unit_scale.to_le_bytes());
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6 (0 for non-Hyperp)
     // Per-market admin limits (uncapped defaults for tests)
-    data.extend_from_slice(&100_000_000_000_000_000_000u128.to_le_bytes()); // max_maintenance_fee_per_slot (<= MAX_PROTOCOL_FEE_ABS)
+    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled) (<= MAX_PROTOCOL_FEE_ABS)
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor (<= MAX_VAULT_TVL)
     data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
@@ -1559,7 +1559,7 @@ pub fn encode_init_market_with_warmup(
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale = 0 (no scaling)
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6 (0 for non-Hyperp)
     // Per-market admin limits (uncapped defaults for tests)
-    data.extend_from_slice(&100_000_000_000_000_000_000u128.to_le_bytes()); // max_maintenance_fee_per_slot (<= MAX_PROTOCOL_FEE_ABS)
+    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled) (<= MAX_PROTOCOL_FEE_ABS)
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor (<= MAX_VAULT_TVL)
     data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
@@ -4809,7 +4809,7 @@ impl TestEnv {
         data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
         data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
         // Per-market admin limits (uncapped defaults for tests)
-        data.extend_from_slice(&100_000_000_000_000_000_000u128.to_le_bytes()); // max_maintenance_fee_per_slot (<= MAX_PROTOCOL_FEE_ABS)
+        data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled) (<= MAX_PROTOCOL_FEE_ABS)
         data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor (<= MAX_VAULT_TVL)
         data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
         // RiskParams
@@ -4890,7 +4890,7 @@ impl TestEnv {
         data.push(0u8); // invert
         data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
         data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
-        data.extend_from_slice(&100_000_000_000_000_000_000u128.to_le_bytes()); // max_maintenance_fee_per_slot
+        data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
         data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
         data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
         data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
@@ -7494,7 +7494,7 @@ pub fn encode_init_market_with_maintenance_fee(
     data.push(invert);
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
-    data.extend_from_slice(&100_000_000_000_000_000_000u128.to_le_bytes()); // max_maintenance_fee_per_slot
+    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
     data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
@@ -7535,7 +7535,7 @@ pub fn encode_init_market_with_insurance_floor(
     data.push(invert);
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
-    data.extend_from_slice(&100_000_000_000_000_000_000u128.to_le_bytes()); // max_maintenance_fee_per_slot
+    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
     data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
