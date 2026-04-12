@@ -1822,15 +1822,13 @@ fn test_permissionless_crank_gc() {
     // - pnl = 0 (GC requires pnl == 0 per spec §2.6)
     // - position_basis_q = 0 (already 0)
     // - reserved_pnl = 0 (already 0)
-    // - fee_credits = 0, last_fee_slot = current_slot
+    // - fee_credits = 0
     // Also zero out vault and c_tot to keep conservation invariant consistent.
     {
         let engine = zc::engine_mut(&mut f.slab.data).unwrap();
-        let current_slot = engine.current_slot;
         engine.accounts[user_idx as usize].capital = U128::ZERO;
         engine.accounts[user_idx as usize].pnl = 0i128;
         engine.accounts[user_idx as usize].fee_credits = I128::ZERO;
-        engine.accounts[user_idx as usize].last_fee_slot = current_slot;
         engine.c_tot = U128::ZERO;
         engine.vault = U128::ZERO;
     }

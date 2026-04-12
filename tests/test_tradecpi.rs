@@ -5435,3 +5435,64 @@ fn test_tradecpi_zero_fill_does_not_walk_index() {
     );
 }
 
+// ============================================================================
+// H1/M9: TradeCpi buffer notional must use oracle price, not exec_price
+// ============================================================================
+
+/// Risk buffer notional after TradeCpi must equal |eff_pos| * oracle_price / POS_SCALE.
+/// Using exec_price (from the matcher) is gameable: a colluding matcher could
+/// deflate exec_price to keep the entry's notional artificially low, evading
+/// the buffer's liquidation priority ranking.
+///
+/// The vAMM test matcher fills at oracle price, so for this test oracle==exec.
+/// We verify the notional matches the oracle-based formula exactly.
+#[test]
+fn test_tradecpi_buffer_notional_uses_oracle_price() {
+    let mut env = TradeCpiTestEnv::new();
+    env.init_market();
+
+    let matcher_prog = env.matcher_program_id;
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 1_000_000_000);
+
+    let trade_size = 1_000_000i128;
+    env.try_trade_cpi(
+        &user, &lp.pubkey(), lp_idx, user_idx, trade_size,
+        &matcher_prog, &matcher_ctx,
+    ).expect("TradeCpi failed");
+
+    // Read buffer from slab
+    let buf = {
+        use bytemuck::Zeroable;
+        let d = env.svm.get_account(&env.slab).unwrap().data;
+        let buf_size = core::mem::size_of::<percolator_prog::risk_buffer::RiskBuffer>();
+        let buf_off = SLAB_LEN - buf_size;
+        let mut buf = percolator_prog::risk_buffer::RiskBuffer::zeroed();
+        bytemuck::bytes_of_mut(&mut buf).copy_from_slice(&d[buf_off..buf_off + buf_size]);
+        buf
+    };
+
+    // User must be in buffer
+    let slot = buf.find(user_idx).expect("User must be in buffer after TradeCpi");
+    let actual_notional = buf.entries[slot].notional;
+
+    // Expected: |eff_pos| * oracle_price / POS_SCALE
+    let user_eff = env.read_account_position(user_idx);
+    let oracle_price: u128 = 138_000_000; // test oracle price_e6
+    let expected_notional = percolator::wide_math::mul_div_floor_u128(
+        (user_eff as i128).unsigned_abs(), oracle_price, percolator::POS_SCALE,
+    );
+
+    assert_eq!(actual_notional, expected_notional,
+        "Buffer notional must use oracle price (H1/M9): actual={} expected={}",
+        actual_notional, expected_notional);
+}
+

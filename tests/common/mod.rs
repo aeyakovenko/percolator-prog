@@ -18,9 +18,9 @@ pub use std::path::PathBuf;
 // SLAB_LEN for production BPF (MAX_ACCOUNTS=4096)
 // Note: We use production BPF (not test feature) because test feature
 // bypasses CPI for token transfers, which fails in LiteSVM.
-// Updated for dex_pool: [u8; 32] addition to MarketConfig (+32 bytes CONFIG_LEN).
-pub const SLAB_LEN: usize = 1_156_808; // MAX_ACCOUNTS=4096 with dex_pool field (SBF 32-bit layout)
-pub const MAX_ACCOUNTS: usize = 4096;
+// Haircut-ratio engine (ADL/socialization scratch arrays removed)
+pub const SLAB_LEN: usize = 8951432; // MAX_ACCOUNTS=2048 (v12.15 Account with reserve cohort queues, fits 10MB Solana limit)
+pub const MAX_ACCOUNTS: usize = 2048;
 
 // Pyth Receiver program ID
 pub const PYTH_RECEIVER_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
@@ -180,18 +180,19 @@ pub fn encode_init_market_with_conf_bps(
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
     data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
-    data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // warmup_period_slots
+    data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
-    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_max
+    data.extend_from_slice(&0u64.to_le_bytes()); // _h_max_padding
     data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
-    data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+    data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
@@ -222,18 +223,19 @@ pub fn encode_init_market_full_v2(
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor (<= MAX_VAULT_TVL)
     data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
-    data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // warmup_period_slots
+    data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
-    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_max
+    data.extend_from_slice(&0u64.to_le_bytes()); // _h_max_padding
     data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
-    data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+    data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
@@ -267,14 +269,15 @@ pub fn encode_init_market_with_cap(
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
     data.extend_from_slice(&min_oracle_price_cap_e2bps.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
-    data.extend_from_slice(&0u64.to_le_bytes()); // warmup_period_slots
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
-    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_max
+    data.extend_from_slice(&0u64.to_le_bytes()); // _h_max_padding
     // max_crank_staleness_slots: use bounded value when permissionless resolve is enabled
     // (permissionless_resolve_stale_slots must exceed max_crank_staleness_slots)
     let max_crank = if permissionless_resolve_stale_slots > 0 {
@@ -285,7 +288,7 @@ pub fn encode_init_market_with_cap(
     data.extend_from_slice(&max_crank.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
-    data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+    data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
@@ -394,18 +397,19 @@ pub fn encode_init_market_with_trading_fee(
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
     data.extend_from_slice(&min_oracle_price_cap_e2bps.to_le_bytes());
     // RiskParams
-    data.extend_from_slice(&0u64.to_le_bytes()); // warmup_period_slots
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&trading_fee_bps.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
-    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_max
+    data.extend_from_slice(&0u64.to_le_bytes()); // _h_max_padding
     data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
-    data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+    data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
@@ -426,12 +430,15 @@ pub fn encode_init_market_with_trading_fee(
 }
 
 /// Encode InitMarket with configurable maintenance fee and max bound.
+/// Encode InitMarket with custom oracle cap (legacy name kept for test compat).
+/// max_maintenance_fee_per_slot and maintenance_fee_per_slot params are ignored
+/// (fields removed from engine). Wire slots now carry h_max + padding.
 pub fn encode_init_market_with_maint_fee_bounded(
     admin: &Pubkey,
     mint: &Pubkey,
     feed_id: &[u8; 32],
-    max_maintenance_fee_per_slot: u128,
-    maintenance_fee_per_slot: u128,
+    _max_maintenance_fee_per_slot: u128,
+    _maintenance_fee_per_slot: u128,
     min_oracle_price_cap_e2bps: u64,
 ) -> Vec<u8> {
     let mut data = vec![0u8];
@@ -443,22 +450,23 @@ pub fn encode_init_market_with_maint_fee_bounded(
     data.push(0u8); // invert
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
-    data.extend_from_slice(&max_maintenance_fee_per_slot.to_le_bytes());
+    data.extend_from_slice(&0u128.to_le_bytes()); // max_maintenance_fee_per_slot (legacy, ignored)
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
     data.extend_from_slice(&min_oracle_price_cap_e2bps.to_le_bytes());
     // RiskParams
-    data.extend_from_slice(&0u64.to_le_bytes()); // warmup_period_slots
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
-    data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
-    data.extend_from_slice(&maintenance_fee_per_slot.to_le_bytes());
+    data.extend_from_slice(&0u128.to_le_bytes()); // insurance_floor
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_max
+    data.extend_from_slice(&0u64.to_le_bytes()); // _h_max_padding
     data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
-    data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+    data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
@@ -1512,18 +1520,19 @@ pub fn encode_init_market_full(
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor (<= MAX_VAULT_TVL)
     data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
-    data.extend_from_slice(&0u64.to_le_bytes()); // warmup_period_slots
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&new_account_fee.to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
-    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_max
+    data.extend_from_slice(&0u64.to_le_bytes()); // _h_max_padding
     data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
-    data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+    data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
@@ -1554,18 +1563,19 @@ pub fn encode_init_market_with_warmup(
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor (<= MAX_VAULT_TVL)
     data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
-    data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // warmup_period_slots
+    data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps (5%)
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps (10%)
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
-    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_max
+    data.extend_from_slice(&0u64.to_le_bytes()); // _h_max_padding
     data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
-    data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+    data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
@@ -1713,7 +1723,7 @@ impl TestEnv {
         // offset of RiskEngine.used = 408 (bitmap array)
         // used is [u64; 64] = 512 bytes
         // num_used_accounts follows used at offset 408 + 512 = 920 within RiskEngine
-        pub const NUM_USED_OFFSET: usize = 616 + 1096;
+        pub const NUM_USED_OFFSET: usize = 616 + 648;
         if slab_account.data.len() < NUM_USED_OFFSET + 2 {
             return 0;
         }
@@ -1753,10 +1763,10 @@ impl TestEnv {
     }
 
     /// Read funding_rate_bps_per_slot_last from engine
-    pub fn read_funding_rate(&self) -> i64 {
+    pub fn read_funding_rate(&self) -> i128 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        const OFF: usize = 616 + 224; // ENGINE_OFF(616) + funding_rate_bps_per_slot_last offset(224)
-        i64::from_le_bytes(d[OFF..OFF + 8].try_into().unwrap())
+        const OFF: usize = 616 + 240; // ENGINE_OFF(584) + funding_rate_e9_per_slot_last offset(240)
+        i128::from_le_bytes(d[OFF..OFF + 16].try_into().unwrap())
     }
 
     /// Read funding_horizon_slots from config
@@ -1807,7 +1817,7 @@ impl TestEnv {
         let slab_account = self.svm.get_account(&self.slab).unwrap();
         // ENGINE_OFF = 440, offset of RiskEngine.used = 576 (after insurance_floor)
         // Bitmap is [u64; 64] at offset 520 + 608 = 1016
-        pub const BITMAP_OFFSET: usize = 616 + 584;
+        pub const BITMAP_OFFSET: usize = 616 + 640;
         let word_idx = (idx as usize) >> 6; // idx / 64
         let bit_idx = (idx as usize) & 63; // idx % 64
         let word_offset = BITMAP_OFFSET + word_idx * 8;
@@ -1827,8 +1837,8 @@ impl TestEnv {
         let slab_account = self.svm.get_account(&self.slab).unwrap();
         // ENGINE_OFF = 584, accounts array at offset 9320 within RiskEngine
         // Account size = 280 bytes, capital at offset 8 within Account (after account_id u64)
-        pub const ACCOUNTS_OFFSET: usize = 616 + 9312;
-        pub const ACCOUNT_SIZE: usize = 280;
+        pub const ACCOUNTS_OFFSET: usize = 616 + 800;
+        pub const ACCOUNT_SIZE: usize = 4400;
         pub const CAPITAL_OFFSET_IN_ACCOUNT: usize = 8; // After account_id (u64)
         let account_offset =
             ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + CAPITAL_OFFSET_IN_ACCOUNT;
@@ -1845,40 +1855,34 @@ impl TestEnv {
     /// Read effective position for an account, computing it from the ADL state.
     /// Returns position in POS_SCALE units (i128, low 128 bits of I256).
     /// Formula: effective_pos_q = position_basis_q * A_side / a_basis (epoch-matched)
+    /// Read effective position for an account from raw slab bytes.
+    /// v12.15: position_basis_q is i128 (not I256), at offset 64 in Account.
     pub fn read_account_position(&self, idx: u16) -> i128 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
         pub const ENGINE: usize = 616;
-        pub const ACCOUNTS_OFFSET: usize = ENGINE + 9312;
-        pub const ACCOUNT_SIZE: usize = 280;
-        // Account field offsets
-        pub const PBQ: usize = 88;    // position_basis_q: I256 (32 bytes)
-        pub const A_BASIS: usize = 104; // adl_a_basis: u128 (16 bytes)
-        pub const EPOCH_SNAP: usize = 136; // adl_epoch_snap: u64 (8 bytes)
-        // Engine field offsets
-        pub const ADL_MULT_LONG: usize = ENGINE + 336;
-        pub const ADL_MULT_SHORT: usize = ENGINE + 352;
-        pub const ADL_EPOCH_LONG: usize = ENGINE + 400;
-        pub const ADL_EPOCH_SHORT: usize = ENGINE + 408;
+        pub const ACCOUNTS_OFFSET: usize = ENGINE + 800;
+        pub const ACCOUNT_SIZE: usize = 4400;
+        pub const PBQ: usize = 64;       // position_basis_q: i128 (16 bytes)
+        pub const A_BASIS: usize = 80;   // adl_a_basis: u128 (16 bytes)
+        pub const EPOCH_SNAP: usize = 112; // adl_epoch_snap: u64 (8 bytes)
+        pub const ADL_MULT_LONG: usize = ENGINE + 368;
+        pub const ADL_MULT_SHORT: usize = ENGINE + 384;
+        pub const ADL_EPOCH_LONG: usize = ENGINE + 432;
+        pub const ADL_EPOCH_SHORT: usize = ENGINE + 440;
 
         let acc_off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE;
         if d.len() < acc_off + ACCOUNT_SIZE { return 0; }
 
-        // Read position_basis_q low 128 bits (assumes fits in i128 for test positions)
-        let basis_lo = i128::from_le_bytes(d[acc_off+PBQ..acc_off+PBQ+16].try_into().unwrap());
-        let basis_hi = i128::from_le_bytes(d[acc_off+PBQ+16..acc_off+PBQ+32].try_into().unwrap());
-        if basis_lo == 0 && basis_hi == 0 { return 0; }
+        // position_basis_q is now i128 (16 bytes)
+        let basis = i128::from_le_bytes(d[acc_off+PBQ..acc_off+PBQ+16].try_into().unwrap());
+        if basis == 0 { return 0; }
 
         let a_basis = u128::from_le_bytes(d[acc_off+A_BASIS..acc_off+A_BASIS+16].try_into().unwrap());
         let epoch_snap = u64::from_le_bytes(d[acc_off+EPOCH_SNAP..acc_off+EPOCH_SNAP+8].try_into().unwrap());
-
         if a_basis == 0 { return 0; }
 
-        // Determine side from sign of basis
-        let is_negative = basis_hi < 0 || (basis_hi == 0 && basis_lo < 0);
-        let is_positive = !is_negative && (basis_lo != 0 || basis_hi != 0);
-
         // Read A_side and epoch based on sign
-        let (a_side, epoch_side) = if is_positive {
+        let (a_side, epoch_side) = if basis > 0 {
             let a = u128::from_le_bytes(d[ADL_MULT_LONG..ADL_MULT_LONG+16].try_into().unwrap());
             let e = u64::from_le_bytes(d[ADL_EPOCH_LONG..ADL_EPOCH_LONG+8].try_into().unwrap());
             (a, e)
@@ -1890,30 +1894,15 @@ impl TestEnv {
 
         if epoch_snap != epoch_side { return 0; }
 
-        // effective = |basis| * A_side / a_basis (floor division, return signed)
-        let abs_basis = if is_negative {
-            // Two's complement negate for u128 pair
-            let neg_lo = (!basis_lo as u128).wrapping_add(1);
-            if basis_hi == -1 && basis_lo < 0 { neg_lo } // common case: small negative
-            else { (basis_lo as u128).wrapping_neg() } // approximate for test values
-        } else {
-            basis_lo as u128
-        };
-        // Compute effective position in instruction-level units (e6-denominated).
-        // effective_q = abs_basis * a_side / a_basis (Q64)
-        // effective = effective_q * 1_000_000 / POS_SCALE
-        // Reorder to avoid u128 overflow: (abs_basis / a_basis * a_side) when a_side==a_basis is just abs_basis
-        pub const POS_SCALE: u128 = 1_000_000;
-        pub const SCALE_FACTOR: u128 = POS_SCALE / 1_000_000;
+        // effective = |basis| * A_side / a_basis
+        let abs_basis = basis.unsigned_abs();
         let effective = if a_side == a_basis {
-            abs_basis / SCALE_FACTOR
+            abs_basis
         } else {
-            // Use 256-bit: (abs_basis * a_side / a_basis) / SCALE_FACTOR
-            let abs_basis_256 = (abs_basis as u128) as u128;
-            // Approximate: divide first by SCALE_FACTOR, then scale by a_side/a_basis
-            (abs_basis / SCALE_FACTOR).checked_mul(a_side / a_basis.max(1)).unwrap_or(u128::MAX)
+            // mul_div_floor: abs_basis * a_side / a_basis
+            ((abs_basis as u128) * a_side) / a_basis.max(1)
         };
-        if is_negative { -(effective as i128) } else { effective as i128 }
+        if basis < 0 { -(effective as i128) } else { effective as i128 }
     }
 
     /// Snapshot config fields relevant to UpdateConfig validation tests.
@@ -3835,33 +3824,31 @@ impl TradeCpiTestEnv {
         )
     }
 
+    /// Read effective position (v12.15: position_basis_q is i128, not I256)
     pub fn read_account_position(&self, idx: u16) -> i128 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
         pub const ENGINE: usize = 616;
-        pub const ACCOUNTS_OFFSET: usize = ENGINE + 9312;
-        pub const ACCOUNT_SIZE: usize = 280;
-        pub const PBQ: usize = 88;
-        pub const A_BASIS: usize = 104;
-        pub const EPOCH_SNAP: usize = 136;
-        pub const ADL_MULT_LONG: usize = ENGINE + 336;
-        pub const ADL_MULT_SHORT: usize = ENGINE + 352;
-        pub const ADL_EPOCH_LONG: usize = ENGINE + 400;
-        pub const ADL_EPOCH_SHORT: usize = ENGINE + 408;
-        pub const POS_SCALE: u128 = 1_000_000;
+        pub const ACCOUNTS_OFFSET: usize = ENGINE + 800;
+        pub const ACCOUNT_SIZE: usize = 4400;
+        pub const PBQ: usize = 64;
+        pub const A_BASIS: usize = 80;
+        pub const EPOCH_SNAP: usize = 112;
+        pub const ADL_MULT_LONG: usize = ENGINE + 368;
+        pub const ADL_MULT_SHORT: usize = ENGINE + 384;
+        pub const ADL_EPOCH_LONG: usize = ENGINE + 432;
+        pub const ADL_EPOCH_SHORT: usize = ENGINE + 440;
 
         let acc_off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE;
         if d.len() < acc_off + ACCOUNT_SIZE { return 0; }
 
-        let basis_lo = i128::from_le_bytes(d[acc_off+PBQ..acc_off+PBQ+16].try_into().unwrap());
-        let basis_hi = i128::from_le_bytes(d[acc_off+PBQ+16..acc_off+PBQ+32].try_into().unwrap());
-        if basis_lo == 0 && basis_hi == 0 { return 0; }
+        let basis = i128::from_le_bytes(d[acc_off+PBQ..acc_off+PBQ+16].try_into().unwrap());
+        if basis == 0 { return 0; }
 
         let a_basis = u128::from_le_bytes(d[acc_off+A_BASIS..acc_off+A_BASIS+16].try_into().unwrap());
         let epoch_snap = u64::from_le_bytes(d[acc_off+EPOCH_SNAP..acc_off+EPOCH_SNAP+8].try_into().unwrap());
         if a_basis == 0 { return 0; }
 
-        let is_negative = basis_hi < 0 || (basis_hi == 0 && basis_lo < 0);
-        let (a_side, epoch_side) = if !is_negative {
+        let (a_side, epoch_side) = if basis > 0 {
             (u128::from_le_bytes(d[ADL_MULT_LONG..ADL_MULT_LONG+16].try_into().unwrap()),
              u64::from_le_bytes(d[ADL_EPOCH_LONG..ADL_EPOCH_LONG+8].try_into().unwrap()))
         } else {
@@ -3870,15 +3857,11 @@ impl TradeCpiTestEnv {
         };
         if epoch_snap != epoch_side { return 0; }
 
-        let abs_basis = if is_negative { (basis_lo as u128).wrapping_neg() } else { basis_lo as u128 };
-        // Compute effective position in instruction-level units (e6-denominated).
-        pub const SCALE_FACTOR: u128 = POS_SCALE / 1_000_000;
-        let effective = if a_side == a_basis {
-            abs_basis / SCALE_FACTOR
-        } else {
-            (abs_basis / SCALE_FACTOR).checked_mul(a_side / a_basis.max(1)).unwrap_or(u128::MAX)
+        let abs_basis = basis.unsigned_abs();
+        let effective = if a_side == a_basis { abs_basis } else {
+            (abs_basis * a_side) / a_basis.max(1)
         };
-        if is_negative { -(effective as i128) } else { effective as i128 }
+        if basis < 0 { -(effective as i128) } else { effective as i128 }
     }
 
     pub fn try_withdraw(&mut self, owner: &Keypair, user_idx: u16, amount: u64) -> Result<(), String> {
@@ -3929,7 +3912,7 @@ impl TradeCpiTestEnv {
         //   funding_rate_bps(8) + last_crank_slot(8) + max_crank_staleness(8) +
         //   total_open_interest(16) + c_tot(16) + pnl_pos_tot(16)
         // Offset: 16+32+144+8+16+8+8+8+8+16+16 = 280
-        pub const PNL_POS_TOT_OFFSET: usize = 616 + 264;
+        pub const PNL_POS_TOT_OFFSET: usize = 616 + 320;
         u128::from_le_bytes(
             slab_data[PNL_POS_TOT_OFFSET..PNL_POS_TOT_OFFSET + 16]
                 .try_into()
@@ -3941,7 +3924,7 @@ impl TradeCpiTestEnv {
     pub fn read_c_tot(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
         // c_tot is at offset 264 within RiskEngine (16 bytes before pnl_pos_tot)
-        pub const C_TOT_OFFSET: usize = 616 + 248;
+        pub const C_TOT_OFFSET: usize = 616 + 296;
         u128::from_le_bytes(
             slab_data[C_TOT_OFFSET..C_TOT_OFFSET + 16]
                 .try_into()
@@ -3973,8 +3956,8 @@ impl TradeCpiTestEnv {
         //   warmup_started_at_slot: u64 (8), offset 56
         //   warmup_slope_per_step: U128 (16), offset 64
         //   position_size: I128 (16), offset 80 (confirmed in other tests)
-        pub const ACCOUNTS_OFFSET: usize = 616 + 9312;
-        pub const ACCOUNT_SIZE: usize = 280;
+        pub const ACCOUNTS_OFFSET: usize = 616 + 800;
+        pub const ACCOUNT_SIZE: usize = 4400;
         pub const PNL_OFFSET_IN_ACCOUNT: usize = 32; // pnl is at offset 32 within Account
         let account_off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + PNL_OFFSET_IN_ACCOUNT;
         if slab_data.len() < account_off + 16 {
@@ -4136,8 +4119,8 @@ impl TradeCpiTestEnv {
 
     pub fn read_account_capital(&self, idx: u16) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        pub const ACCOUNTS_OFFSET: usize = 616 + 9312;
-        pub const ACCOUNT_SIZE: usize = 280;
+        pub const ACCOUNTS_OFFSET: usize = 616 + 800;
+        pub const ACCOUNT_SIZE: usize = 4400;
         pub const CAPITAL_OFFSET_IN_ACCOUNT: usize = 8;
         let account_off =
             ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + CAPITAL_OFFSET_IN_ACCOUNT;
@@ -4400,7 +4383,7 @@ impl TestEnv {
     /// Read c_tot aggregate from slab
     pub fn read_c_tot(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        pub const C_TOT_OFFSET: usize = 616 + 248;
+        pub const C_TOT_OFFSET: usize = 616 + 296;
         u128::from_le_bytes(
             slab_data[C_TOT_OFFSET..C_TOT_OFFSET + 16]
                 .try_into()
@@ -4422,7 +4405,7 @@ impl TestEnv {
     /// Read pnl_pos_tot aggregate from slab
     pub fn read_pnl_pos_tot(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        pub const PNL_POS_TOT_OFFSET: usize = 616 + 264;
+        pub const PNL_POS_TOT_OFFSET: usize = 616 + 320;
         u128::from_le_bytes(
             slab_data[PNL_POS_TOT_OFFSET..PNL_POS_TOT_OFFSET + 16]
                 .try_into()
@@ -4433,8 +4416,8 @@ impl TestEnv {
     /// Read account PnL for a slot
     pub fn read_account_pnl(&self, idx: u16) -> i128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        pub const ACCOUNTS_OFFSET: usize = 616 + 9312;
-        pub const ACCOUNT_SIZE: usize = 280;
+        pub const ACCOUNTS_OFFSET: usize = 616 + 800;
+        pub const ACCOUNT_SIZE: usize = 4400;
         pub const PNL_OFFSET_IN_ACCOUNT: usize = 32;
         let account_off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + PNL_OFFSET_IN_ACCOUNT;
         if slab_data.len() < account_off + 16 {
@@ -4830,18 +4813,19 @@ impl TestEnv {
         data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor (<= MAX_VAULT_TVL)
         data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
         // RiskParams
-        data.extend_from_slice(&0u64.to_le_bytes()); // warmup_period_slots
+        data.extend_from_slice(&0u64.to_le_bytes()); // h_min
         data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
         data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
         data.extend_from_slice(&trading_fee_bps.to_le_bytes()); // trading_fee_bps
         data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
         data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
         data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
-        data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
+        data.extend_from_slice(&0u64.to_le_bytes()); // h_max
+    data.extend_from_slice(&0u64.to_le_bytes()); // _h_max_padding
         data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
         data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
         data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
-        data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+        data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
         data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
@@ -4909,18 +4893,19 @@ impl TestEnv {
         data.extend_from_slice(&100_000_000_000_000_000_000u128.to_le_bytes()); // max_maintenance_fee_per_slot
         data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
         data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
-        data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // warmup_period_slots
+        data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
         data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
         data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
         data.extend_from_slice(&trading_fee_bps.to_le_bytes()); // trading_fee_bps
         data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
         data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
         data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
-        data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
+        data.extend_from_slice(&0u64.to_le_bytes()); // h_max
+    data.extend_from_slice(&0u64.to_le_bytes()); // _h_max_padding
         data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
         data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
         data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
-        data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+        data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
         data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
         data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
         data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
@@ -5127,8 +5112,8 @@ impl TestEnv {
     /// Fee credits is at offset 240 within Account.
     pub fn read_account_fee_credits(&self, idx: u16) -> i128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 616 + 9312;
-        const ACCOUNT_SIZE: usize = 280;
+        const ACCOUNTS_OFFSET: usize = 616 + 800;
+        const ACCOUNT_SIZE: usize = 4400;
         const FEE_CREDITS_OFFSET: usize = 240;
         let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + FEE_CREDITS_OFFSET;
         if slab_data.len() < off + 16 {
@@ -5141,8 +5126,8 @@ impl TestEnv {
     /// fees_earned_total is at offset 264 within Account.
     pub fn read_account_fees_earned_total(&self, idx: u16) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 616 + 9312;
-        const ACCOUNT_SIZE: usize = 280;
+        const ACCOUNTS_OFFSET: usize = 616 + 800;
+        const ACCOUNT_SIZE: usize = 4400;
         const FEES_EARNED_OFFSET: usize = 264;
         let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + FEES_EARNED_OFFSET;
         if slab_data.len() < off + 16 {
@@ -5155,8 +5140,8 @@ impl TestEnv {
     /// warmup_started_at_slot is at offset 64 within Account.
     pub fn read_account_warmup_started_at_slot(&self, idx: u16) -> u64 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 616 + 9312;
-        const ACCOUNT_SIZE: usize = 280;
+        const ACCOUNTS_OFFSET: usize = 616 + 800;
+        const ACCOUNT_SIZE: usize = 4400;
         const WARMUP_SLOT_OFFSET: usize = 64;
         let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + WARMUP_SLOT_OFFSET;
         if slab_data.len() < off + 8 {
@@ -5169,8 +5154,8 @@ impl TestEnv {
     /// reserved_pnl is at offset 48 within Account.
     pub fn read_account_reserved_pnl(&self, idx: u16) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 616 + 9312;
-        const ACCOUNT_SIZE: usize = 280;
+        const ACCOUNTS_OFFSET: usize = 616 + 800;
+        const ACCOUNT_SIZE: usize = 4400;
         const RESERVED_PNL_OFFSET: usize = 48;
         let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + RESERVED_PNL_OFFSET;
         if slab_data.len() < off + 16 {
@@ -5183,8 +5168,8 @@ impl TestEnv {
     /// kind is at offset 24 within Account (0 = User, 1 = LP).
     pub fn read_account_kind(&self, idx: u16) -> u8 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 616 + 9312;
-        const ACCOUNT_SIZE: usize = 280;
+        const ACCOUNTS_OFFSET: usize = 616 + 800;
+        const ACCOUNT_SIZE: usize = 4400;
         const KIND_OFFSET: usize = 24;
         let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + KIND_OFFSET;
         if slab_data.len() < off + 1 {
@@ -5197,8 +5182,8 @@ impl TestEnv {
     /// matcher_program is at offset 144 within Account (BPF layout).
     pub fn read_account_matcher_program(&self, idx: u16) -> [u8; 32] {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 616 + 9312;
-        const ACCOUNT_SIZE: usize = 280;
+        const ACCOUNTS_OFFSET: usize = 616 + 800;
+        const ACCOUNT_SIZE: usize = 4400;
         const MATCHER_PROG_OFFSET: usize = 144;
         let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + MATCHER_PROG_OFFSET;
         let mut buf = [0u8; 32];
@@ -5210,8 +5195,8 @@ impl TestEnv {
     /// matcher_context is at offset 176 within Account (BPF layout).
     pub fn read_account_matcher_context(&self, idx: u16) -> [u8; 32] {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 616 + 9312;
-        const ACCOUNT_SIZE: usize = 280;
+        const ACCOUNTS_OFFSET: usize = 616 + 800;
+        const ACCOUNT_SIZE: usize = 4400;
         const MATCHER_CTX_OFFSET: usize = 176;
         let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + MATCHER_CTX_OFFSET;
         let mut buf = [0u8; 32];
@@ -7411,7 +7396,7 @@ impl IntegrationFuzzer {
 // ============================================================================
 
 /// Standard Pyth market: user deposits, trades (long), price goes up, flattens, closes account.
-/// warmup_period_slots=0 so PnL converts instantly.
+/// h_min=0 so PnL converts instantly.
 
 
 /// Standard Pyth market: user deposits, trades (long), price drops, flattens, closes.
@@ -7467,18 +7452,19 @@ pub fn encode_init_market_with_limits(
     data.extend_from_slice(&max_risk_threshold.to_le_bytes());
     data.extend_from_slice(&min_oracle_price_cap_e2bps.to_le_bytes());
     // RiskParams
-    data.extend_from_slice(&0u64.to_le_bytes()); // warmup_period_slots
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
-    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_max
+    data.extend_from_slice(&0u64.to_le_bytes()); // _h_max_padding
     data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
-    data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+    data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
@@ -7512,18 +7498,18 @@ pub fn encode_init_market_with_maintenance_fee(
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
     data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
-    data.extend_from_slice(&0u64.to_le_bytes()); // warmup_period_slots
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&0u128.to_le_bytes()); // insurance_floor
-    data.extend_from_slice(&maintenance_fee_per_slot.to_le_bytes()); // maintenance_fee_per_slot
+    data.extend_from_slice(&maintenance_fee_per_slot.to_le_bytes()); // h_max (u64) + padding (u64)
     data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
-    data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+    data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
@@ -7553,18 +7539,19 @@ pub fn encode_init_market_with_insurance_floor(
     data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
     data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
-    data.extend_from_slice(&0u64.to_le_bytes()); // warmup_period_slots
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&insurance_floor.to_le_bytes()); // insurance_floor
-    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_max
+    data.extend_from_slice(&0u64.to_le_bytes()); // _h_max_padding
     data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
-    data.extend_from_slice(&100u64.to_le_bytes()); // liquidation_buffer_bps
+    data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
@@ -7629,12 +7616,24 @@ impl TestEnv {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
         // insurance_floor is now in params.insurance_floor (no separate engine field).
         // params at engine offset 32, insurance_floor at params offset 168.
-        pub const INSURANCE_FLOOR_OFFSET: usize = 616 + 32 + 168;
+        pub const INSURANCE_FLOOR_OFFSET: usize = 616 + 32 + 144;
         u128::from_le_bytes(
             slab_data[INSURANCE_FLOOR_OFFSET..INSURANCE_FLOOR_OFFSET + 16]
                 .try_into()
                 .unwrap(),
         )
+    }
+
+    /// Read the risk buffer from the slab.
+    /// Uses SLAB_LEN - RISK_BUF_LEN as the offset (buffer is at end of slab).
+    pub fn read_risk_buffer(&self) -> percolator_prog::risk_buffer::RiskBuffer {
+        use bytemuck::Zeroable;
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let buf_size = core::mem::size_of::<percolator_prog::risk_buffer::RiskBuffer>();
+        let buf_off = SLAB_LEN - buf_size;
+        let mut buf = percolator_prog::risk_buffer::RiskBuffer::zeroed();
+        bytemuck::bytes_of_mut(&mut buf).copy_from_slice(&d[buf_off..buf_off + buf_size]);
+        buf
     }
 
     /// Try to init market with raw instruction data (for rejection testing)
