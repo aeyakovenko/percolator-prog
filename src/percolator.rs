@@ -4816,13 +4816,35 @@ pub mod processor {
                 // so the market lifecycle can complete without admin.
                 // For resolved markets: allow unconditionally (admin already resolved).
                 if new_admin.to_bytes() == [0u8; 32] {
-                    let config = state::read_config(&data);
+                    let mut config = state::read_config(&data);
+
+                    // Reject burn if insurance-withdraw policy is configured.
+                    // Otherwise the configured authority can still extract insurance
+                    // after admin is burned, defeating the "no privileged extraction" guarantee.
+                    if state::is_policy_configured(&data) {
+                        return Err(PercolatorError::InvalidConfigParam.into());
+                    }
+
                     if !state::is_resolved(&data) {
                         let has_permissionless_resolve = config.permissionless_resolve_stale_slots > 0;
                         let has_permissionless_force_close = config.force_close_delay_slots > 0;
                         if !has_permissionless_resolve || !has_permissionless_force_close {
                             return Err(PercolatorError::InvalidConfigParam.into());
                         }
+                    }
+
+                    // Clear oracle authority on burn. PushOraclePrice authorizes off
+                    // config.oracle_authority, not header.admin. Without this, a
+                    // "burned" market still has a privileged signer that can push
+                    // prices, influence liquidations/funding, and block permissionless
+                    // resolution by staying fresh.
+                    if config.oracle_authority != [0u8; 32] {
+                        config.oracle_authority = [0u8; 32];
+                        // Clear stored authority price so stale pushed price
+                        // can't be used for admin resolution (which is now impossible anyway).
+                        config.authority_price_e6 = 0;
+                        config.authority_timestamp = 0;
+                        state::write_config(&mut data, &config);
                     }
                 }
 
@@ -4935,7 +4957,7 @@ pub mod processor {
                         )?;
                         solana_program::program::invoke_signed(
                             &close_ix,
-                            &[a_vault.clone(), a_dest.clone(), a_vault_auth.clone()],
+                            &[a_vault.clone(), a_dest.clone(), a_vault_auth.clone(), a_token.clone()],
                             &signer_seeds,
                         )?;
                     }
@@ -6286,9 +6308,11 @@ pub mod processor {
                 } else {
                     let engine = zc::engine_ref(&data)?;
                     if engine.oracle_initialized == 0 {
-                        // Oracle never initialized — only safe if no positions exist.
-                        // Sentinel price 1 is harmless on an empty market (nothing to settle).
-                        if engine.num_used_accounts > 0 {
+                        // Oracle never initialized — only safe if no open positions.
+                        // Accounts may exist (deposits-only) but if OI is zero,
+                        // there is no position-dependent settlement risk and the
+                        // sentinel price is harmless.
+                        if engine.oi_eff_long_q > 0 || engine.oi_eff_short_q > 0 {
                             return Err(PercolatorError::OracleInvalid.into());
                         }
                     }
