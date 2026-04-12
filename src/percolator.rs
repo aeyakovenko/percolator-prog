@@ -3466,33 +3466,15 @@ pub mod processor {
                 let (units, _dust) = crate::units::base_to_units(fee_payment, config.unit_scale);
 
                 let engine = zc::engine_mut(&mut data)?;
-                // Canonical deposit-based materialization (spec §10.3).
-                let idx = engine.free_head;
-                engine.deposit(idx, units as u128, 0, clock.slot)
-                    .map_err(map_risk_error)?;
-                // Charge new_account_fee: deduct from capital → insurance
-                // Tokens are already in the vault from deposit() above, so we
-                // only move the internal accounting (capital → insurance) without
-                // touching engine.vault (which was already incremented by deposit).
-                // Charge new_account_fee: capital → insurance.
-                // engine.set_capital() is test_visible! (private in prod), so manual
-                // adjustment is required. Mirrors set_capital's signed-delta logic.
-                let fee = engine.params.new_account_fee.get();
-                if fee > 0 {
-                    let cap = engine.accounts[idx as usize].capital.get();
-                    if cap < fee {
-                        return Err(PercolatorError::EngineInsufficientBalance.into());
-                    }
-                    engine.accounts[idx as usize].capital = percolator::U128::new(cap - fee);
-                    engine.c_tot = percolator::U128::new(
-                        engine.c_tot.get().checked_sub(fee)
-                            .ok_or(ProgramError::ArithmeticOverflow)?,
-                    );
-                    let new_ins = engine.insurance_fund.balance.get()
-                        .checked_add(fee)
-                        .ok_or(ProgramError::ArithmeticOverflow)?;
-                    engine.insurance_fund.balance = percolator::U128::new(new_ins);
-                }
+                // Use engine's canonical materialization API (§10.3).
+                // Handles fee deduction, dust rejection, vault/insurance accounting,
+                // max_accounts bound, and materialized_account_count tracking.
+                let idx = engine.materialize_with_fee(
+                    percolator::Account::KIND_USER,
+                    units as u128,
+                    [0u8; 32], // no matcher for users
+                    [0u8; 32],
+                ).map_err(map_risk_error)?;
                 engine.set_owner(idx, a_user.key.to_bytes())
                     .map_err(map_risk_error)?;
             }
@@ -3551,33 +3533,13 @@ pub mod processor {
                 let (units, _dust) = crate::units::base_to_units(fee_payment, config.unit_scale);
 
                 let engine = zc::engine_mut(&mut data)?;
-                let idx = engine.free_head;
-                engine.deposit(idx, units as u128, 0, clock.slot)
-                    .map_err(map_risk_error)?;
-                // Charge new_account_fee: capital → insurance (no vault change)
-                // Charge new_account_fee: capital → insurance.
-                // engine.set_capital() is test_visible! (private in prod), so manual
-                // adjustment is required. Mirrors set_capital's signed-delta logic.
-                let fee = engine.params.new_account_fee.get();
-                if fee > 0 {
-                    let cap = engine.accounts[idx as usize].capital.get();
-                    if cap < fee {
-                        return Err(PercolatorError::EngineInsufficientBalance.into());
-                    }
-                    engine.accounts[idx as usize].capital = percolator::U128::new(cap - fee);
-                    engine.c_tot = percolator::U128::new(
-                        engine.c_tot.get().checked_sub(fee)
-                            .ok_or(ProgramError::ArithmeticOverflow)?,
-                    );
-                    let new_ins = engine.insurance_fund.balance.get()
-                        .checked_add(fee)
-                        .ok_or(ProgramError::ArithmeticOverflow)?;
-                    engine.insurance_fund.balance = percolator::U128::new(new_ins);
-                }
-                // Set LP fields
-                engine.accounts[idx as usize].kind = percolator::Account::KIND_LP;
-                engine.accounts[idx as usize].matcher_program = matcher_program.to_bytes();
-                engine.accounts[idx as usize].matcher_context = matcher_context.to_bytes();
+                // Use engine's canonical materialization API (§10.3).
+                let idx = engine.materialize_with_fee(
+                    percolator::Account::KIND_LP,
+                    units as u128,
+                    matcher_program.to_bytes(),
+                    matcher_context.to_bytes(),
+                ).map_err(map_risk_error)?;
                 engine.set_owner(idx, a_user.key.to_bytes())
                     .map_err(map_risk_error)?;
             }
@@ -4136,6 +4098,11 @@ pub mod processor {
                 let a_lp_pda = &accounts[7];
 
                 accounts::expect_signer(a_user)?;
+                // Reject zero-size requests at entry — zero-fill path should only
+                // be reached via matcher returning exec_size == 0 on a nonzero request.
+                if size == 0 {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
                 // Note: a_lp_owner does NOT need to be a signer for TradeCpi.
                 // LP owner delegated trade authorization to the matcher program.
                 // The matcher CPI (via LP PDA invoke_signed) validates the trade.
@@ -4172,7 +4139,7 @@ pub mod processor {
                 // Phase 3 & 4: Read engine state, generate nonce, validate matcher identity
                 // Note: Use immutable borrow for reading to avoid ExternalAccountDataModified
                 // Nonce write is deferred until after execute_trade
-                let (lp_account_id, mut config, req_id, lp_matcher_prog, lp_matcher_ctx, engine_current_slot) = {
+                let (lp_account_id, mut config, config_pre_oracle, req_id, lp_matcher_prog, lp_matcher_ctx, engine_current_slot) = {
                     let data = a_slab.try_borrow_data()?;
                     slab_guard(program_id, a_slab, &*data)?;
                     require_initialized(&*data)?;
@@ -4189,6 +4156,8 @@ pub mod processor {
                     }
 
                     let config = state::read_config(&*data);
+                    // Snapshot config BEFORE oracle/index mutations for zero-fill rollback.
+                    let config_pre_oracle = config;
 
                     // Phase 3: Monotonic nonce for req_id (prevents replay attacks)
                     // Nonce advancement via verify helper (Kani-provable)
@@ -4222,6 +4191,7 @@ pub mod processor {
                     (
                         lp_acc.account_id,
                         config,
+                        config_pre_oracle,
                         req_id,
                         lp_acc.matcher_program,
                         lp_acc.matcher_context,
@@ -4361,14 +4331,13 @@ pub mod processor {
                 // happens AFTER this early return (inside the exec_size != 0 branch below).
                 // Zero-fills never touch the EWMA, so no revert is needed.
                 if ret.exec_size == 0 {
+                    // Restore the pre-oracle-read config snapshot.
+                    // The wrapper mutated config during oracle/index processing
+                    // and wrote it to the slab before the CPI. Reading "pristine"
+                    // from slab here would get the mutated version — use the
+                    // explicit pre-oracle snapshot instead.
                     let mut data = state::slab_data_mut(a_slab)?;
-                    let pristine = state::read_config(&data);
-                    config.last_effective_price_e6 = pristine.last_effective_price_e6;
-                    config.last_hyperp_index_slot = pristine.last_hyperp_index_slot;
-                    // Revert last_good_oracle_slot too — zero-fills must not refresh
-                    // the oracle-death timer (prevents resolution-delay manipulation).
-                    config.last_good_oracle_slot = pristine.last_good_oracle_slot;
-                    state::write_config(&mut data, &config);
+                    state::write_config(&mut data, &config_pre_oracle);
                     state::write_req_nonce(&mut data, req_id);
                     return Ok(());
                 }
