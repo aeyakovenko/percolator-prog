@@ -3735,10 +3735,7 @@ pub mod processor {
                     // errors (side-reset may fail on frozen ADL state post-resolution).
                     // Pass zero funding rate — market is resolved, no funding accrual.
                     let mut ctx = percolator::InstructionContext::new();
-                    match engine.run_end_of_instruction_lifecycle(
-                        &mut ctx,
-                        0i128, // zero funding on resolved markets
-                    ) {
+                    match engine.run_end_of_instruction_lifecycle(&mut ctx) {
                         Ok(()) => {}
                         Err(percolator::RiskError::CorruptState) => {
                             return Err(map_risk_error(percolator::RiskError::CorruptState));
@@ -4041,14 +4038,8 @@ pub mod processor {
                     // handles it via the funding_rate parameter (§5.5 anti-retroactivity).
                 }
 
-                // Patch engine's stored funding rate with post-EWMA value.
-                // execute_trade_not_atomic stored the pre-EWMA rate via its internal
-                // recompute_r_last_from_final_state. But the wrapper updated mark_ewma
-                // after the engine call (EWMA is wrapper state, not engine state).
-                // Direct field write is necessary because the engine has no post-trade
-                // "re-stamp funding" API. This ensures the next interval accrues at
-                // the rate derived from the updated mark, not the stale pre-trade mark.
-                engine.funding_rate_e9_per_slot_last = compute_current_funding_rate_e9(&config);
+                // v12.17: funding rate is passed to accrue_market_to, not stored directly.
+                // The next accrual (crank/trade/settle) will use the updated mark EWMA.
 
                 // Collect post-trade positions for risk buffer
                 let user_eff_nocpi = engine.effective_pos_q(user_idx as usize);
@@ -4454,16 +4445,12 @@ pub mod processor {
                     (engine.effective_pos_q(user_idx as usize),
                      engine.effective_pos_q(lp_idx as usize))
                 };
-                // Write nonce + config + risk buffer + patch funding rate.
+                // Write nonce + config + risk buffer.
                 {
                     let mut data = state::slab_data_mut(a_slab)?;
                     state::write_req_nonce(&mut data, req_id);
                     state::write_config(&mut data, &config);
-                    // Patch engine's stored funding rate with post-EWMA value.
-                    let post_trade_funding = compute_current_funding_rate_e9(&config);
-                    let engine = zc::engine_mut(&mut data)?;
-                    engine.funding_rate_e9_per_slot_last = post_trade_funding;
-                    drop(engine);
+                    // v12.17: funding rate passed to accrue_market_to, not stored directly.
                     // Update risk buffer — use oracle price for notional ranking (H1/M9).
                     // exec_price is gameable by a colluding matcher; oracle price is not.
                     let mut buf = state::read_risk_buffer(&data);
@@ -5028,7 +5015,8 @@ pub mod processor {
                     };
                     if accrual_price > 0 {
                         let engine = zc::engine_mut(&mut data)?;
-                        engine.accrue_market_to(clock.slot, accrual_price)
+                        engine.accrue_market_to(clock.slot, accrual_price,
+                            compute_current_funding_rate_e9(&config))
                             .map_err(map_risk_error)?;
                     }
                 }
@@ -5042,10 +5030,7 @@ pub mod processor {
                 {
                     let engine = zc::engine_mut(&mut data)?;
                     let mut ctx = percolator::InstructionContext::new();
-                    match engine.run_end_of_instruction_lifecycle(
-                        &mut ctx,
-                        compute_current_funding_rate_e9(&config),
-                    ) {
+                    match engine.run_end_of_instruction_lifecycle(&mut ctx) {
                         Ok(()) => {}
                         Err(percolator::RiskError::CorruptState) => {
                             return Err(map_risk_error(percolator::RiskError::CorruptState));
@@ -5195,6 +5180,7 @@ pub mod processor {
                     let engine = zc::engine_mut(&mut data)?;
                     engine.accrue_market_to(
                         push_clock2.slot, config.last_effective_price_e6,
+                        compute_current_funding_rate_e9(&config),
                     ).map_err(map_risk_error)?;
                 }
 
@@ -5234,10 +5220,7 @@ pub mod processor {
                 if is_hyperp {
                     let engine = zc::engine_mut(&mut data)?;
                     let mut ctx = percolator::InstructionContext::new();
-                    match engine.run_end_of_instruction_lifecycle(
-                        &mut ctx,
-                        compute_current_funding_rate_e9(&config),
-                    ) {
+                    match engine.run_end_of_instruction_lifecycle(&mut ctx) {
                         Ok(()) => {}
                         Err(percolator::RiskError::CorruptState) => {
                             return Err(map_risk_error(percolator::RiskError::CorruptState));
@@ -5290,6 +5273,7 @@ pub mod processor {
                     let engine = zc::engine_mut(&mut data)?;
                     engine.accrue_market_to(
                         clock.slot, config.last_effective_price_e6,
+                        compute_current_funding_rate_e9(&config),
                     ).map_err(map_risk_error)?;
                 }
 
@@ -5325,10 +5309,7 @@ pub mod processor {
                 if is_hyperp {
                     let engine = zc::engine_mut(&mut data)?;
                     let mut ctx = percolator::InstructionContext::new();
-                    match engine.run_end_of_instruction_lifecycle(
-                        &mut ctx,
-                        compute_current_funding_rate_e9(&config),
-                    ) {
+                    match engine.run_end_of_instruction_lifecycle(&mut ctx) {
                         Ok(()) => {}
                         Err(percolator::RiskError::CorruptState) => {
                             return Err(map_risk_error(percolator::RiskError::CorruptState));
