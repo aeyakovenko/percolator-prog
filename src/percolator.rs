@@ -4346,13 +4346,14 @@ pub mod processor {
                 // happens AFTER this early return (inside the exec_size != 0 branch below).
                 // Zero-fills never touch the EWMA, so no revert is needed.
                 if ret.exec_size == 0 {
-                    // Restore the pre-oracle-read config snapshot.
-                    // The wrapper mutated config during oracle/index processing
-                    // and wrote it to the slab before the CPI. Reading "pristine"
-                    // from slab here would get the mutated version — use the
-                    // explicit pre-oracle snapshot instead.
+                    // Restore the pre-oracle-read config snapshot, but preserve
+                    // last_good_oracle_slot — the oracle WAS successfully read
+                    // and its liveness proof must not be discarded. Reverting it
+                    // would falsely accelerate the permissionless-resolution window.
                     let mut data = state::slab_data_mut(a_slab)?;
-                    state::write_config(&mut data, &config_pre_oracle);
+                    let mut restored = config_pre_oracle;
+                    restored.last_good_oracle_slot = config.last_good_oracle_slot;
+                    state::write_config(&mut data, &restored);
                     state::write_req_nonce(&mut data, req_id);
                     return Ok(());
                 }
