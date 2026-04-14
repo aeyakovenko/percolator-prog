@@ -3840,16 +3840,20 @@ pub mod processor {
                         let fee_per_account = core::cmp::min(raw_fee, percolator::MAX_PROTOCOL_FEE_ABS);
                         // Deduplicate combined list to prevent double-charging accounts
                         // that appear in both the risk buffer and caller candidates (N1/Issue 3).
-                        let mut charged = [false; 64]; // bitmap for first 64 indices
+                        // Dedup via u64 bitmap words (same layout as engine.used[])
+                        const BITMAP_WORDS: usize = (percolator::MAX_ACCOUNTS + 63) / 64;
+                        let mut charged = [0u64; BITMAP_WORDS];
                         for &(cidx, _) in combined.iter() {
                             let ci = cidx as usize;
                             if ci >= percolator::MAX_ACCOUNTS || !engine.is_used(ci) {
                                 continue;
                             }
                             // Skip if already charged (dedup)
-                            if ci < 64 {
-                                if charged[ci] { continue; }
-                                charged[ci] = true;
+                            let word = ci >> 6;
+                            let bit = ci & 63;
+                            if word < BITMAP_WORDS {
+                                if (charged[word] >> bit) & 1 == 1 { continue; }
+                                charged[word] |= 1u64 << bit;
                             }
                             // Best-effort: ignore errors (account may have been
                             // liquidated or closed during this crank).
@@ -5466,10 +5470,9 @@ pub mod processor {
                 // Call the engine's resolve_market transition.
                 // This does final accrual at settlement price, sets MarketMode::Resolved,
                 // matures all PnL, zeros OI, and drains/finalizes sides.
-                // The engine validates |resolved_price - live_oracle_price| <= deviation band.
-                // Pass the engine's last accrued price as live_oracle_price (P_last)
-                // so the band check is meaningful. Passing settlement_price for both
-                // would make the check vacuous (0 <= anything).
+                // For non-Hyperp: use the fresh oracle price read earlier (if available)
+                // as live_oracle_price for the engine's deviation band check.
+                // For Hyperp or when oracle was stale/dead: fall back to engine.last_oracle_price.
                 let engine = zc::engine_mut(&mut data)?;
                 let live_oracle = engine.last_oracle_price;
                 engine.resolve_market(
