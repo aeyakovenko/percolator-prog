@@ -1858,17 +1858,6 @@ pub mod state {
         data[RESERVED_OFF..RESERVED_OFF + 8].copy_from_slice(&nonce.to_le_bytes());
     }
 
-    /// Read the monotonic materialization counter from _reserved[8..16].
-    /// Incremented on every InitUser/InitLP to provide stable account identity
-    /// that survives slot reuse after GC reclamation.
-    pub fn read_mat_counter(data: &[u8]) -> u64 {
-        u64::from_le_bytes(data[RESERVED_OFF + 8..RESERVED_OFF + 16].try_into().unwrap())
-    }
-
-    /// Write the materialization counter.
-    pub fn write_mat_counter(data: &mut [u8], counter: u64) {
-        data[RESERVED_OFF + 8..RESERVED_OFF + 16].copy_from_slice(&counter.to_le_bytes());
-    }
 
     // ========================================
     // Market Flags (stored in _padding[0] at offset 13)
@@ -2711,6 +2700,7 @@ pub mod processor {
         a_oracle: &AccountInfo,
         clock_unix_ts: i64,
         clock_slot: u64,
+        slab_data: &mut [u8],
     ) -> Result<u64, ProgramError> {
         let external_ok = oracle::read_engine_price_e6(
             a_oracle,
@@ -2726,6 +2716,11 @@ pub mod processor {
 
         if external_ok {
             config.last_good_oracle_slot = clock_slot;
+            // Mark oracle as initialized on first successful external read.
+            // Single source of truth — eliminates sentinel price overloading.
+            if !state::is_oracle_initialized(slab_data) {
+                state::set_oracle_initialized(slab_data);
+            }
         }
         Ok(price)
     }
@@ -2837,14 +2832,24 @@ pub mod processor {
         funding_rate_e9: i128,
     ) -> Result<(), RiskError> {
         let lp = &engine.accounts[lp_idx as usize];
-        // Instance-stable LP identity (see TradeCpi handler)
-        let owner_prefix = u64::from_le_bytes(
-            lp.owner[0..8].try_into().unwrap(),
-        );
+        // Instance-stable LP identity: FNV-1a hash of (slot, owner, matcher_context).
+        // Must match TradeCpi handler's computation exactly.
+        let lp_instance_id = {
+            let mut h: u64 = 0xcbf29ce484222325;
+            let mix = |h: &mut u64, b: u8| {
+                *h ^= b as u64;
+                *h = h.wrapping_mul(0x100000001b3);
+            };
+            mix(&mut h, lp_idx as u8);
+            mix(&mut h, (lp_idx >> 8) as u8);
+            for &b in lp.owner.iter() { mix(&mut h, b); }
+            for &b in lp.matcher_context.iter() { mix(&mut h, b); }
+            h
+        };
         let exec = matcher.execute_match(
             &lp.matcher_program,
             &lp.matcher_context,
-            lp_idx as u64 ^ owner_prefix,
+            lp_instance_id,
             oracle_price,
             size,
         )?;
@@ -3681,7 +3686,7 @@ pub mod processor {
                             &mut config, a_oracle_idx,
                         )?
                     } else {
-                        read_price_and_stamp(&mut config, a_oracle_idx, clock.unix_timestamp, clock.slot)?
+                        read_price_and_stamp(&mut config, a_oracle_idx, clock.unix_timestamp, clock.slot, &mut data)?
                     };
                     state::write_config(&mut data, &config);
                     px
@@ -3818,16 +3823,11 @@ pub mod processor {
                         a_oracle,
                     )?
                 } else {
-                    read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot)?
+                    read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
                 };
 
                 state::write_config(&mut data, &config);
-                // Mark oracle as initialized on first successful read.
-                // The crank is always the first instruction that reads oracle
-                // after init (require_fresh_crank gate blocks trades before crank).
-                if !state::is_oracle_initialized(&data) {
-                    state::set_oracle_initialized(&mut data);
-                }
+                // FLAG_ORACLE_INITIALIZED now set inside read_price_and_stamp/get_engine_oracle_price_e6
 
                 // Read risk buffer BEFORE engine borrow (disjoint regions,
                 // but borrow checker can't see that).
@@ -4025,7 +4025,7 @@ pub mod processor {
 
                 // Read oracle price with circuit-breaker clamping
                 let price =
-                    read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot)?;
+                    read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?;
                 state::write_config(&mut data, &config);
 
                 let engine = zc::engine_mut(&mut data)?;
@@ -4256,14 +4256,24 @@ pub mod processor {
                     }
 
                     let lp_acc = &engine.accounts[lp_idx as usize];
-                    // Instance-stable LP identity: XOR slot index with owner prefix.
-                    // Changes on re-materialization (new owner at same slot),
-                    // preventing stale matcher state from binding to a reused slot.
-                    let owner_prefix = u64::from_le_bytes(
-                        lp_acc.owner[0..8].try_into().unwrap(),
-                    );
+                    // Instance-stable LP identity: FNV-1a hash of (slot, owner, matcher_context).
+                    // Changes on re-materialization (new owner/matcher at same slot).
+                    // Survives same-owner reopening because matcher_context differs.
+                    // Uses full 32-byte owner + 32-byte context for collision resistance.
+                    let lp_instance_id = {
+                        let mut h: u64 = 0xcbf29ce484222325; // FNV offset basis
+                        let mix = |h: &mut u64, b: u8| {
+                            *h ^= b as u64;
+                            *h = h.wrapping_mul(0x100000001b3); // FNV prime
+                        };
+                        mix(&mut h, lp_idx as u8);
+                        mix(&mut h, (lp_idx >> 8) as u8);
+                        for &b in lp_acc.owner.iter() { mix(&mut h, b); }
+                        for &b in lp_acc.matcher_context.iter() { mix(&mut h, b); }
+                        h
+                    };
                     (
-                        lp_idx as u64 ^ owner_prefix,
+                        lp_instance_id,
                         config,
                         config_pre_oracle,
                         req_id,
@@ -4294,7 +4304,10 @@ pub mod processor {
                         &mut config, a_oracle,
                     )?
                 } else {
-                    read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot)?
+                    let mut slab_data = state::slab_data_mut(a_slab)?;
+                    let price = read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut slab_data)?;
+                    drop(slab_data);
+                    price
                 };
 
                 // Note: We don't zero the matcher_ctx before CPI because we don't own it.
@@ -4586,7 +4599,7 @@ pub mod processor {
                         &mut config, a_oracle,
                     )?
                 } else {
-                    read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot)?
+                    read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
                 };
                 state::write_config(&mut data, &config);
 
@@ -4693,7 +4706,7 @@ pub mod processor {
                             &mut config, a_oracle,
                         )?
                     } else {
-                        read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot)?
+                        read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
                     };
                     state::write_config(&mut data, &config);
                     px
@@ -5103,16 +5116,19 @@ pub mod processor {
                         // Authoritative path: fresh oracle read for non-Hyperp.
                         // Also updates last_effective_price_e6 (circuit-breaker baseline)
                         // and stamps oracle liveness for permissionless resolve tracking.
-                        match read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot) {
+                        match read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data) {
                             Ok(price) => {
-                                if !state::is_oracle_initialized(&data) {
-                                    state::set_oracle_initialized(&mut data);
-                                }
+                                // Flag set inside read_price_and_stamp
                                 state::write_config(&mut data, &config);
                                 price
                             }
-                            Err(_) => {
-                                // Oracle read failed — fall back to engine state.
+                            Err(e) => {
+                                // Only fall back on stale oracle (dead feed).
+                                // Wrong account / bad data / wrong feed must propagate.
+                                let stale_err: ProgramError = PercolatorError::OracleStale.into();
+                                if e != stale_err {
+                                    return Err(e);
+                                }
                                 let engine = zc::engine_ref(&data)?;
                                 if state::is_oracle_initialized(&data) { engine.last_oracle_price } else { 0 }
                             }
@@ -5550,13 +5566,18 @@ pub mod processor {
                 // Non-Hyperp: use the fresh external oracle read from above.
                 //   Falls back to engine.last_oracle_price only if oracle is dead.
                 // Hyperp: use the (just-flushed) index as live oracle.
+                // Read flag BEFORE mutable engine borrow to avoid aliasing.
+                let oracle_initialized = state::is_oracle_initialized(&data);
                 let engine = zc::engine_mut(&mut data)?;
                 let live_oracle = if let Some(fresh) = fresh_live_oracle {
                     fresh
                 } else if oracle::is_hyperp_mode(&config) {
                     config.last_effective_price_e6
-                } else {
+                } else if oracle_initialized {
                     engine.last_oracle_price
+                } else {
+                    // Oracle never initialized — cannot resolve with sentinel price.
+                    return Err(PercolatorError::OracleInvalid.into());
                 };
                 engine.resolve_market_not_atomic(
                     settlement_price,
@@ -6112,7 +6133,7 @@ pub mod processor {
                         &mut config, a_oracle,
                     )?
                 } else {
-                    read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot)?
+                    read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
                 };
                 state::write_config(&mut data, &config);
 
@@ -6225,7 +6246,7 @@ pub mod processor {
                         &mut config, a_oracle,
                     )?
                 } else {
-                    read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot)?
+                    read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
                 };
                 state::write_config(&mut data, &config);
 
