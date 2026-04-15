@@ -2735,14 +2735,11 @@ pub mod processor {
         if external_ok {
             config.last_good_oracle_slot = clock_slot;
         }
-        // Mark oracle as initialized whenever read_price_clamped succeeds.
-        // This covers both external oracle and authority-price paths.
-        // The flag means "engine has received a real non-sentinel price" —
-        // not just "external oracle was seen". Authority-priced operations
-        // feed real prices into engine accrual/trade, so the sentinel is gone.
-        if !state::is_oracle_initialized(slab_data) {
-            state::set_oracle_initialized(slab_data);
-        }
+        // NOTE: FLAG_ORACLE_INITIALIZED is NOT set here.
+        // The flag means "engine.last_oracle_price is a real price" which is
+        // only true after the engine processes it via accrue_market_to or similar.
+        // Setting it on wrapper read alone would be unsound because zero-fill
+        // and other early-return paths skip the engine call.
         Ok(price)
     }
 
@@ -3747,6 +3744,10 @@ pub mod processor {
                     .withdraw_not_atomic(user_idx, units_requested as u128, price, withdraw_slot,
                         compute_current_funding_rate_e9(&config), h_lock)
                     .map_err(map_risk_error)?;
+                drop(engine);
+                if !state::is_oracle_initialized(&data) {
+                    state::set_oracle_initialized(&mut data);
+                }
 
                 // Convert units back to base tokens for payout (checked to prevent silent overflow)
                 let base_to_pay =
@@ -3948,6 +3949,12 @@ pub mod processor {
                 let ins_low = engine.insurance_fund.balance.get() as u64;
                 drop(engine);
 
+                // Engine has now processed a real oracle price via accrue_market_to.
+                // engine.last_oracle_price is no longer the init sentinel.
+                if !state::is_oracle_initialized(&data) {
+                    state::set_oracle_initialized(&mut data);
+                }
+
                 // Write updated config (fee charge slot may have changed)
                 state::write_config(&mut data, &config);
 
@@ -4147,6 +4154,9 @@ pub mod processor {
                 let user_eff_nocpi = engine.effective_pos_q(user_idx as usize);
                 let lp_eff_nocpi = engine.effective_pos_q(lp_idx as usize);
                 drop(engine);
+                if !state::is_oracle_initialized(&data) {
+                    state::set_oracle_initialized(&mut data);
+                }
 
                 // Write updated config (mark_ewma changed)
                 state::write_config(&mut data, &config);
@@ -4580,11 +4590,14 @@ pub mod processor {
                     (engine.effective_pos_q(user_idx as usize),
                      engine.effective_pos_q(lp_idx as usize))
                 };
-                // Write nonce + config + risk buffer.
+                // Write nonce + config + risk buffer + oracle flag.
                 {
                     let mut data = state::slab_data_mut(a_slab)?;
                     state::write_req_nonce(&mut data, req_id);
                     state::write_config(&mut data, &config);
+                    if !state::is_oracle_initialized(&data) {
+                        state::set_oracle_initialized(&mut data);
+                    }
                     // v12.17: funding rate passed to accrue_market_to, not stored directly.
                     // Update risk buffer — use oracle price for notional ranking (H1/M9).
                     // exec_price is gameable by a colluding matcher; oracle price is not.
@@ -4666,6 +4679,9 @@ pub mod processor {
                 // Collect post-liquidation position for risk buffer
                 let liq_eff = engine.effective_pos_q(target_idx as usize);
                 drop(engine);
+                if !state::is_oracle_initialized(&data) {
+                    state::set_oracle_initialized(&mut data);
+                }
 
                 // Update risk buffer (engine borrow dropped)
                 {
@@ -5150,7 +5166,6 @@ pub mod processor {
                         // and stamps oracle liveness for permissionless resolve tracking.
                         match read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data) {
                             Ok(price) => {
-                                // Flag set inside read_price_and_stamp
                                 state::write_config(&mut data, &config);
                                 price
                             }
@@ -5171,10 +5186,16 @@ pub mod processor {
                         if state::is_oracle_initialized(&data) { engine.last_oracle_price } else { 0 }
                     };
                     if accrual_price > 0 {
-                        let engine = zc::engine_mut(&mut data)?;
-                        engine.accrue_market_to(clock.slot, accrual_price,
-                            compute_current_funding_rate_e9(&config))
-                            .map_err(map_risk_error)?;
+                        {
+                            let engine = zc::engine_mut(&mut data)?;
+                            engine.accrue_market_to(clock.slot, accrual_price,
+                                compute_current_funding_rate_e9(&config))
+                                .map_err(map_risk_error)?;
+                        }
+                        // Engine processed real price — last_oracle_price is no longer sentinel
+                        if !state::is_oracle_initialized(&data) {
+                            state::set_oracle_initialized(&mut data);
+                        }
                     }
                 }
 
@@ -6175,6 +6196,10 @@ pub mod processor {
                     compute_current_funding_rate_e9(&config),
                     h_lock)
                     .map_err(map_risk_error)?;
+                drop(engine);
+                if !state::is_oracle_initialized(&data) {
+                    state::set_oracle_initialized(&mut data);
+                }
             }
 
             Instruction::DepositFeeCredits { user_idx, amount } => {
@@ -6299,6 +6324,10 @@ pub mod processor {
                     compute_current_funding_rate_e9(&config),
                     h_lock)
                     .map_err(map_risk_error)?;
+                drop(engine);
+                if !state::is_oracle_initialized(&data) {
+                    state::set_oracle_initialized(&mut data);
+                }
             }
 
             Instruction::ResolvePermissionless => {
