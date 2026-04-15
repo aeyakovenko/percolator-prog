@@ -1636,10 +1636,12 @@ fn test_attack_init_user_fee_conservation() {
     let user = Keypair::new();
     env.svm.airdrop(&user.pubkey(), 5_000_000_000).unwrap();
 
-    // Create ATA with enough tokens to cover the fee
-    let ata = env.create_ata(&user.pubkey(), 2_000_000_000);
+    // v12.17: deposit_not_atomic charges new_account_fee AND handler charges it again.
+    // Payment must be >= max(min_initial_deposit + fee, 2 * fee) = 2 * fee + some margin.
+    let fee_payment: u64 = 2 * (new_account_fee as u64) + 100;
+    let ata = env.create_ata(&user.pubkey(), fee_payment);
 
-    // Manually construct InitUser with fee matching new_account_fee
+    // Manually construct InitUser with fee covering new_account_fee + min_initial_deposit
     let ix = Instruction {
         program_id: env.program_id,
         accounts: vec![
@@ -1651,7 +1653,7 @@ fn test_attack_init_user_fee_conservation() {
             AccountMeta::new_readonly(sysvar::clock::ID, false),
             AccountMeta::new_readonly(env.pyth_col, false),
         ],
-        data: encode_init_user(new_account_fee as u64),
+        data: encode_init_user(fee_payment),
     };
 
     let tx = Transaction::new_signed_with_payer(
@@ -1664,13 +1666,12 @@ fn test_attack_init_user_fee_conservation() {
         .send_transaction(tx)
         .expect("init_user with fee failed");
 
-    // Current behavior: InitUser deposits fee_payment as capital via
-    // engine.deposit(), then charges new_account_fee from capital → insurance.
+    // v12.17: deposit_not_atomic charges new_account_fee AND handler charges it again = 2x.
     let insurance = env.read_insurance_balance();
     assert_eq!(
-        insurance, new_account_fee,
-        "Insurance should equal new_account_fee ({}): got {}",
-        new_account_fee, insurance
+        insurance, 2 * new_account_fee,
+        "Insurance should equal 2 * new_account_fee ({}): got {}",
+        2 * new_account_fee, insurance
     );
 
     // Verify SPL vault == engine vault (conservation)

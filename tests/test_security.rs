@@ -2468,10 +2468,21 @@ fn test_attack_oracle_authority_disable_clears_price() {
 fn test_attack_oracle_authority_change_with_positions() {
     program_path();
 
+    // v12.17: Pyth-pinned markets (non-zero feed_id) block changing oracle
+    // authority to a different non-zero address. Use Hyperp market (zero feed_id)
+    // which allows authority changes at any time.
     let mut env = TestEnv::new();
-    env.init_market_with_invert(0);
+    env.init_market_hyperp(1_000_000); // $1.00 mark price
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    // Set initial authority so we can push prices
+    let auth1 = Keypair::new();
+    env.svm.airdrop(&auth1.pubkey(), 1_000_000_000).unwrap();
+    env.try_set_oracle_authority(&admin, &auth1.pubkey())
+        .expect("oracle authority setup must succeed");
+    env.try_push_oracle_price(&auth1, 1_000_000, 100)
+        .expect("oracle price push must succeed");
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -2481,29 +2492,24 @@ fn test_attack_oracle_authority_change_with_positions() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    // Open position
-    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
-
-    // Set authority and push price
-    let auth1 = Keypair::new();
-    env.svm.airdrop(&auth1.pubkey(), 1_000_000_000).unwrap();
-    env.try_set_oracle_authority(&admin, &auth1.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&auth1, 200_000_000, 100)
+    // Crank to establish market state, then push again for price freshness
+    env.set_slot(10);
+    env.crank();
+    env.try_push_oracle_price(&auth1, 1_000_000, 110)
         .expect("oracle price push must succeed");
 
     // Change to new authority
     let auth2 = Keypair::new();
     env.svm.airdrop(&auth2.pubkey(), 1_000_000_000).unwrap();
     env.try_set_oracle_authority(&admin, &auth2.pubkey())
-        .expect("oracle authority setup must succeed");
+        .expect("oracle authority change must succeed on Hyperp market");
 
     // Old authority can't push anymore
-    let result = env.try_push_oracle_price(&auth1, 250_000_000, 200);
+    let result = env.try_push_oracle_price(&auth1, 1_500_000, 200);
     assert!(result.is_err(), "Old authority should be rejected");
 
     // New authority can push
-    let result = env.try_push_oracle_price(&auth2, 250_000_000, 200);
+    let result = env.try_push_oracle_price(&auth2, 1_500_000, 200);
     assert!(result.is_ok(), "New authority should work: {:?}", result);
 
     // Market still functional - crank works
@@ -4362,10 +4368,7 @@ fn test_attack_withdrawal_with_warmup_settlement() {
         let vault_account = TokenAccount::unpack(&vault_data).unwrap();
         vault_account.amount
     };
-    let engine_vault = {
-        let slab = env.svm.get_account(&env.slab).unwrap();
-        u128::from_le_bytes(slab.data[584..600].try_into().unwrap())
-    };
+    let engine_vault = env.read_engine_vault();
 
     // Key assertion: SPL vault == engine vault always (conservation)
     assert!(

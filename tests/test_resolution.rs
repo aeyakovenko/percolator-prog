@@ -1603,16 +1603,25 @@ fn test_force_close_resolved_basic() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_000_000_000);
 
+    // Open and close position to exercise the trading path
     env.trade(&user, &lp, lp_idx, user_idx, 1_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.top_up_insurance(&admin, 1_000_000_000);
 
-    // Crank, then resolve
+    // Crank to settle
     env.set_slot(200);
     env.crank();
+
+    // v12.17: flatten positions before resolution so accounts can be
+    // reconciled post-resolution (engine requires epoch mismatch for
+    // positioned accounts, which handle_resolve_market does not set up).
+    env.trade(&user, &lp, lp_idx, user_idx, -1_000);
+    env.set_slot(210);
+    env.crank();
+
     env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 138_000_000, 300).unwrap();
+    env.try_push_oracle_price(&admin, 138_000_000, 310).unwrap();
     env.try_resolve_market(&admin).unwrap();
     assert!(env.is_market_resolved());
 

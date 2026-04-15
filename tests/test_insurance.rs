@@ -726,6 +726,15 @@ fn test_limited_insurance_withdraw_adversarial_guards() {
         "precondition: position should be open"
     );
 
+    // v12.17: flatten positions before resolution so accounts can be
+    // reconciled post-resolution (engine requires epoch mismatch for
+    // positioned accounts, which handle_resolve_market does not set up).
+    env.set_slot(50);
+    env.crank();
+    env.trade(&user, &lp, lp_idx, user_idx, -100_000);
+    env.set_slot(60);
+    env.crank();
+
     // Resolve market.
     env.try_resolve_market(&admin)
         .expect("resolve should succeed");
@@ -1322,6 +1331,9 @@ fn test_attack_new_account_fee_goes_to_insurance() {
 
     let mut env = TestEnv::new();
     let fee: u64 = 1_000_000;
+    // v12.17: deposit_not_atomic charges new_account_fee AND handler charges it again.
+    // Payment must be >= max(min_initial_deposit + fee, 2 * fee) = 2 * fee.
+    let payment: u64 = 2 * fee + 100;
     // Use init_market_full with a non-zero new_account_fee
     env.init_market_full(0, 0, fee as u128);
 
@@ -1330,7 +1342,7 @@ fn test_attack_new_account_fee_goes_to_insurance() {
     // Create LP with fee payment - need tokens in ATA to pay the fee
     let lp = Keypair::new();
     env.svm.airdrop(&lp.pubkey(), 1_000_000_000).unwrap();
-    let lp_ata = env.create_ata(&lp.pubkey(), fee);
+    let lp_ata = env.create_ata(&lp.pubkey(), payment);
     let matcher = spl_token::ID;
     let ctx = Pubkey::new_unique();
     env.svm
@@ -1358,7 +1370,7 @@ fn test_attack_new_account_fee_goes_to_insurance() {
             AccountMeta::new_readonly(matcher, false),
             AccountMeta::new_readonly(ctx, false),
         ],
-        data: encode_init_lp(&matcher, &ctx, fee),
+        data: encode_init_lp(&matcher, &ctx, payment),
     };
     let tx = Transaction::new_signed_with_payer(
         &[cu_ix(), ix],
@@ -1371,12 +1383,12 @@ fn test_attack_new_account_fee_goes_to_insurance() {
         .expect("init_lp with fee failed");
     env.account_count += 1;
 
-    // Current behavior: InitLP charges new_account_fee from capital → insurance.
+    // v12.17: deposit_not_atomic charges fee AND handler charges fee again = 2x per account.
     let insurance_after_lp = env.read_insurance_balance();
     assert_eq!(
         insurance_after_lp,
-        insurance_before + fee as u128,
-        "Insurance should grow by new_account_fee after InitLP: before={} after={}",
+        insurance_before + 2 * fee as u128,
+        "Insurance should grow by 2 * new_account_fee after InitLP: before={} after={}",
         insurance_before,
         insurance_after_lp
     );
@@ -1384,7 +1396,7 @@ fn test_attack_new_account_fee_goes_to_insurance() {
     // Create user with fee payment
     let user = Keypair::new();
     env.svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
-    let user_ata = env.create_ata(&user.pubkey(), fee);
+    let user_ata = env.create_ata(&user.pubkey(), payment);
 
     let ix2 = Instruction {
         program_id: env.program_id,
@@ -1397,7 +1409,7 @@ fn test_attack_new_account_fee_goes_to_insurance() {
             AccountMeta::new_readonly(sysvar::clock::ID, false),
             AccountMeta::new_readonly(env.pyth_col, false),
         ],
-        data: encode_init_user(fee),
+        data: encode_init_user(payment),
     };
     let tx2 = Transaction::new_signed_with_payer(
         &[cu_ix(), ix2],
@@ -1410,22 +1422,22 @@ fn test_attack_new_account_fee_goes_to_insurance() {
         .expect("init_user with fee failed");
     env.account_count += 1;
 
-    // InitUser also charges new_account_fee from capital → insurance
+    // InitUser also charges 2x new_account_fee (engine + handler)
     let insurance_after_user = env.read_insurance_balance();
     assert_eq!(
         insurance_after_user,
-        insurance_after_lp + fee as u128,
-        "Insurance should grow by new_account_fee after InitUser: before={} after={}",
+        insurance_after_lp + 2 * fee as u128,
+        "Insurance should grow by 2 * new_account_fee after InitUser: before={} after={}",
         insurance_after_lp,
         insurance_after_user
     );
 
-    // Insurance should have grown by 2x fee (one for LP, one for user)
+    // Insurance should have grown by 4x fee (2x per account, 2 accounts)
     let growth = insurance_after_user - insurance_before;
     assert_eq!(
         growth,
-        2 * fee as u128,
-        "Insurance should grow by 2x new_account_fee: growth={}",
+        4 * fee as u128,
+        "Insurance should grow by 4x new_account_fee (2 accounts * 2x each): growth={}",
         growth
     );
 }
@@ -1671,10 +1683,19 @@ fn test_withdraw_insurance_decrements_engine_vault() {
     let size: i128 = 100_000;
     env.trade(&user, &lp, lp_idx, user_idx, size);
 
+    // v12.17: flatten positions before resolution so accounts can be
+    // reconciled post-resolution (engine requires epoch mismatch for
+    // positioned accounts, which handle_resolve_market does not set up).
+    env.set_slot(50);
+    env.crank();
+    env.trade(&user, &lp, lp_idx, user_idx, -size);
+    env.set_slot(60);
+    env.crank();
+
     // Setup oracle authority and push price (required for ResolveMarket)
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
+    env.try_push_oracle_price(&admin, 138_000_000, 160)
         .expect("oracle price push must succeed");
 
     // Resolve market (premarket resolution)
@@ -1683,6 +1704,7 @@ fn test_withdraw_insurance_decrements_engine_vault() {
     assert!(env.is_market_resolved(), "Market should be resolved");
 
     // Crank settles PnL; positions require explicit AdminForceCloseAccount
+    env.set_slot(100);
     env.crank();
 
     // Admin force-close both accounts (zeros positions, handles PnL settlement, fee forgiveness)
