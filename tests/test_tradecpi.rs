@@ -5634,6 +5634,16 @@ fn test_tradecpi_buffer_notional_uses_oracle_price() {
         &matcher_prog, &matcher_ctx,
     ).expect("TradeCpi failed");
 
+    // Compute expected notional from engine state after trade
+    let (user_eff, oracle_price, expected_notional) = {
+        let d = env.svm.get_account(&env.slab).unwrap().data;
+        let engine = percolator_prog::zc::engine_ref(&d).unwrap();
+        let eff = engine.effective_pos_q(user_idx as usize);
+        let price = engine.last_oracle_price;
+        let notional = (eff.unsigned_abs() as u128) * (price as u128) / percolator::POS_SCALE;
+        (eff, price, notional)
+    };
+
     // Read buffer from slab (risk buffer sits before the gen table)
     let buf = {
         use bytemuck::Zeroable;

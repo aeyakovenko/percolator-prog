@@ -20,7 +20,7 @@ pub use std::path::PathBuf;
 // Note: We use production BPF (not test feature) because test feature
 // bypasses CPI for token transfers, which fails in LiteSVM.
 // Haircut-ratio engine (ADL/socialization scratch arrays removed)
-pub const SLAB_LEN: usize = 1484616; // MAX_ACCOUNTS=4096 + 32KB gen table (v12.17 upstream)
+pub const SLAB_LEN: usize = 1484648; // MAX_ACCOUNTS=4096 + 32KB gen table (v12.17 upstream, SBF 32-bit layout)
 pub const MAX_ACCOUNTS: usize = 4096;
 
 // Pyth Receiver program ID

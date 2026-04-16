@@ -1245,16 +1245,20 @@ fn engine_accounts_array_fills_end_of_struct() {
 }
 
 #[test]
-fn engine_slab_len_equals_engine_off_plus_engine_size_plus_risk_buf() {
-    let expected = ENGINE_OFF + size_of::<RiskEngine>() + percolator_prog::constants::RISK_BUF_LEN;
+fn engine_slab_len_equals_engine_off_plus_engine_size_plus_risk_buf_plus_gen_table() {
+    let expected = ENGINE_OFF
+        + size_of::<RiskEngine>()
+        + percolator_prog::constants::RISK_BUF_LEN
+        + percolator_prog::constants::GEN_TABLE_LEN;
     assert_eq!(
         percolator_prog::constants::SLAB_LEN,
         expected,
-        "SLAB_LEN ({}) != ENGINE_OFF ({}) + sizeof(RiskEngine) ({}) + RISK_BUF_LEN ({})",
+        "SLAB_LEN ({}) != ENGINE_OFF ({}) + sizeof(RiskEngine) ({}) + RISK_BUF_LEN ({}) + GEN_TABLE_LEN ({})",
         percolator_prog::constants::SLAB_LEN,
         ENGINE_OFF,
         size_of::<RiskEngine>(),
         percolator_prog::constants::RISK_BUF_LEN,
+        percolator_prog::constants::GEN_TABLE_LEN,
     );
 }
 
