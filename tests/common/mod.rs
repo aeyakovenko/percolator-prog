@@ -2845,6 +2845,7 @@ impl TestEnv {
         authority: &Keypair,
         amount: u64,
     ) -> Result<(), String> {
+        // Live markets require oracle (8th account). Pass pyth_index for accrual.
         let authority_ata = self.create_ata(&authority.pubkey(), 0);
         let (vault_pda, _) =
             Pubkey::find_program_address(&[b"vault", self.slab.as_ref()], &self.program_id);
@@ -2858,6 +2859,7 @@ impl TestEnv {
                 AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(vault_pda, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
             ],
             data: encode_withdraw_insurance_limited(amount),
         };
