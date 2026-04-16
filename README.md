@@ -1,8 +1,6 @@
 # Percolator (Solana Program)
 
-> **DISCLAIMER: FOR EDUCATIONAL PURPOSES ONLY**
->
-> This code has **NOT been audited**. Do NOT use in production or with real funds. This is experimental software provided for learning and testing purposes only. Use at your own risk.
+> **Mainnet beta.** Live on Solana mainnet at `ESa89R5Es3rJ5mnwGybVRG1GrNt9etP11Z5V2QWD4edv`. Internal security audit complete (25 findings, 12 fixed, 5 deferred). Squads multisig migration pending before removing beta designation.
 
 Percolator is a minimal Solana program that wraps the `percolator` crate's `RiskEngine` inside a single on-chain **slab** account and exposes a small, composable instruction set for deploying and operating perpetual markets.
 
@@ -464,19 +462,38 @@ Recovery is "by design impossible" (this is a one-way governance lock).
 
 ---
 
-## Build & test
+## Instruction Tags
+
+The program exposes 30+ instruction tags. Notable ones:
+
+- Tag 0: `InitMarket` — create slab, bind vault and oracle
+- Tag 1: `InitUser`, Tag 2: `InitLP`
+- Tag 3: `DepositCollateral`, Tag 4: `WithdrawCollateral`
+- Tag 5: `KeeperCrank` (permissionless, two-phase shortlist design)
+- Tag 6: `TradeNoCpi`, Tag 7: `TradeCpi` (CPI matcher binding)
+- Tag 8: `LiquidateAtOracle`
+- Tag 9: `UpdateAdmin`, Tag 10: `UpdateConfig`
+- Tag 11: `CloseAccount`, Tag 12: `AdminForceCloseAccount`
+- Tag 13: `SetOracleAuthority`, Tag 14: `PushOraclePrice`, Tag 15: `SetOraclePriceCap`
+- Tag 16: `ResolveMarket`
+- Tag 22: `WithdrawInsuranceLimited`, Tag 23: `SetInsuranceWithdrawPolicy`
+- Tag 71: `SetOiImbalanceHardBlock`
+
+The gen table in `TradeNoCpi` maps LP index to LP entry via a generation counter. `FLAG_ORACLE_INITIALIZED` in the slab header signals that the oracle authority has been set and at least one price has been pushed.
+
+## Build and Test
 
 ```bash
 # Build BPF binary (required before running CU benchmark)
 cargo build-sbf
 
-# All tests (integration, unit, alignment)
-cargo test
+# All tests (integration, unit, alignment) — 707 tests, 0 failures
+cargo test --features test
 
-# CU benchmark (requires BPF binary)
+# CU benchmark (requires BPF binary, worst case 461K CU / 1.4M limit)
 cargo test --release --test cu_benchmark -- --nocapture
 
-# Kani harnesses (requires kani toolchain)
+# Kani harnesses — 113 proofs (requires kani toolchain)
 cargo kani --tests
 ```
 
