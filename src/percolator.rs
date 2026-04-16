@@ -80,7 +80,12 @@ pub mod constants {
     // RISK_BUF_EMPTY removed — buffer uses zeroed entries, not sentinels
     pub const RISK_BUF_OFF: usize = ENGINE_OFF + ENGINE_LEN;
     pub const RISK_BUF_LEN: usize = size_of::<crate::risk_buffer::RiskBuffer>();
-    pub const SLAB_LEN: usize = RISK_BUF_OFF + RISK_BUF_LEN;
+    /// Per-account materialization generation table.
+    /// Stores the global mat_counter value assigned at InitUser/InitLP.
+    /// Used as lp_account_id for per-instance identity across slot reuse.
+    pub const GEN_TABLE_OFF: usize = RISK_BUF_OFF + RISK_BUF_LEN;
+    pub const GEN_TABLE_LEN: usize = percolator::MAX_ACCOUNTS * 8; // u64 per slot
+    pub const SLAB_LEN: usize = GEN_TABLE_OFF + GEN_TABLE_LEN;
 
     // CRANK_REWARD_MIN_DT removed — crank discount logic removed in v12.15
     /// Progressive scan window per crank.
@@ -2657,6 +2662,19 @@ pub mod state {
         let src = bytemuck::bytes_of(buf);
         data[RISK_BUF_OFF..RISK_BUF_OFF + RISK_BUF_LEN].copy_from_slice(src);
     }
+
+    /// Read per-account materialization generation (u64).
+    /// Returns 0 for never-materialized slots (zero-initialized slab).
+    pub fn read_account_generation(data: &[u8], idx: u16) -> u64 {
+        let off = crate::constants::GEN_TABLE_OFF + (idx as usize) * 8;
+        u64::from_le_bytes(data[off..off + 8].try_into().unwrap())
+    }
+
+    /// Write per-account materialization generation.
+    pub fn write_account_generation(data: &mut [u8], idx: u16, gen: u64) {
+        let off = crate::constants::GEN_TABLE_OFF + (idx as usize) * 8;
+        data[off..off + 8].copy_from_slice(&gen.to_le_bytes());
+    }
 }
 
 // 7. mod units - base token/units conversion at instruction boundaries
@@ -5230,16 +5248,11 @@ pub mod processor {
         if external_ok {
             config.last_good_oracle_slot = clock_slot;
         }
-        // Mark oracle as initialized whenever read_price_clamped succeeds.
-        // This covers both external oracle and authority-price paths.
-        // The flag means "engine has received a real non-sentinel price" —
-        // not just "external oracle was seen". Authority-priced operations
-        // feed real prices into engine accrual/trade, so the sentinel is gone.
-        if let Some(sd) = slab_data {
-            if !state::is_oracle_initialized(sd) {
-                state::set_oracle_initialized(sd);
-            }
-        }
+        // NOTE: FLAG_ORACLE_INITIALIZED is NOT set here.
+        // The flag means "engine.last_oracle_price is a real price" which is
+        // only true after the engine processes it via accrue_market_to or similar.
+        // Setting it on wrapper read alone would be unsound because zero-fill
+        // and other early-return paths skip the engine call.
         Ok(price)
     }
 
@@ -5348,26 +5361,13 @@ pub mod processor {
         oracle_price: u64,
         size: i128,
         funding_rate_e9: i128,
+        lp_account_id: u64,
     ) -> Result<(), RiskError> {
         let lp = &engine.accounts[lp_idx as usize];
-        // Instance-stable LP identity: FNV-1a hash of (slot, owner, matcher_context).
-        // Must match TradeCpi handler's computation exactly.
-        let lp_instance_id = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            let mix = |h: &mut u64, b: u8| {
-                *h ^= b as u64;
-                *h = h.wrapping_mul(0x100000001b3);
-            };
-            mix(&mut h, lp_idx as u8);
-            mix(&mut h, (lp_idx >> 8) as u8);
-            for &b in lp.owner.iter() { mix(&mut h, b); }
-            for &b in lp.matcher_context.iter() { mix(&mut h, b); }
-            h
-        };
         let exec = matcher.execute_match(
             &lp.matcher_program,
             &lp.matcher_context,
-            lp_instance_id,
+            lp_account_id,
             oracle_price,
             size,
         )?;
@@ -5667,7 +5667,6 @@ pub mod processor {
             }
             Instruction::InitUser { fee_payment } => {
                 handle_init_user(program_id, accounts, fee_payment)?;
-
             }
             Instruction::InitLP {
                 matcher_program,
@@ -5681,14 +5680,12 @@ pub mod processor {
             }
             Instruction::WithdrawCollateral { user_idx, amount } => {
                 handle_withdraw_collateral(program_id, accounts, user_idx, amount)?;
-
             }
             Instruction::KeeperCrank {
                 caller_idx,
                 candidates,
             } => {
                 handle_keeper_crank(program_id, accounts, caller_idx, candidates)?;
-
             }
             Instruction::TradeNoCpi {
                 lp_idx,
@@ -5696,7 +5693,6 @@ pub mod processor {
                 size,
             } => {
                 handle_trade_no_cpi(program_id, accounts, lp_idx, user_idx, size)?;
-
             }
             Instruction::TradeCpi {
                 lp_idx,
@@ -6468,6 +6464,10 @@ pub mod processor {
         }
         engine.set_owner(idx, a_user.key.to_bytes())
             .map_err(map_risk_error)?;
+        drop(engine);
+        // LP identity: write generation counter so TradeCpi can verify lp_account_id
+        let gen = state::next_mat_counter(&mut data);
+        state::write_account_generation(&mut data, idx, gen);
         Ok(())
     }
 
@@ -6561,6 +6561,10 @@ pub mod processor {
         engine.accounts[idx as usize].matcher_context = matcher_context.to_bytes();
         engine.set_owner(idx, a_user.key.to_bytes())
             .map_err(map_risk_error)?;
+        drop(engine);
+        // LP identity: write generation counter so TradeCpi can verify lp_account_id
+        let gen = state::next_mat_counter(&mut data);
+        state::write_account_generation(&mut data, idx, gen);
         Ok(())
     }
 
@@ -7001,6 +7005,9 @@ pub mod processor {
             read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, Some(&mut *data))?;
         state::write_config(&mut data, &config);
 
+        // LP identity: read generation before engine borrow
+        let lp_gen = state::read_account_generation(&data, lp_idx);
+
         let engine = zc::engine_mut(&mut data)?;
 
         check_idx(engine, lp_idx)?;
@@ -7045,7 +7052,7 @@ pub mod processor {
         let funding_rate = compute_current_funding_rate_e9(&config);
         execute_trade_with_matcher(
             engine, &NoOpMatcher, lp_idx, user_idx, clock.slot, price, size,
-            funding_rate,
+            funding_rate, lp_gen,
         ).map_err(map_risk_error)?;
 
         // Update mark EWMA from trade (NoOpMatcher fills at oracle price).
@@ -7390,7 +7397,7 @@ pub mod processor {
             let funding_rate = compute_current_funding_rate_e9(&config);
             execute_trade_with_matcher(
                 engine, &matcher, lp_idx, user_idx, clock.slot, price, trade_size,
-                funding_rate,
+                funding_rate, lp_account_id,
             ).map_err(map_risk_error)?;
             #[cfg(feature = "cu-audit")]
             {

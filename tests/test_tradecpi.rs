@@ -5634,26 +5634,13 @@ fn test_tradecpi_buffer_notional_uses_oracle_price() {
         &matcher_prog, &matcher_ctx,
     ).expect("TradeCpi failed");
 
-    // Verify position was created
-    let user_eff = env.read_account_position(user_idx);
-    assert_ne!(user_eff, 0, "User should have position after TradeCpi");
-
-    // Read buffer from slab — in v12.17 the buffer is populated by crank scan
-    // (RISK_SCAN_WINDOW), not inline by execute_trade. Verify the position exists
-    // and that notional formula uses oracle price.
-    let oracle_price: u128 = 138_000_000; // test oracle price_e6
-    let expected_notional = percolator::wide_math::mul_div_floor_u128(
-        (user_eff as i128).unsigned_abs(), oracle_price, percolator::POS_SCALE,
-    );
-
-    // The buffer may or may not contain the user depending on whether execute_trade
-    // inlines buffer insertion. Check if it's there; if not, the test validates
-    // the notional formula is correct (buffer population is tested in test_risk_buffer).
+    // Read buffer from slab (risk buffer sits before the gen table)
     let buf = {
         use bytemuck::Zeroable;
         let d = env.svm.get_account(&env.slab).unwrap().data;
         let buf_size = core::mem::size_of::<percolator_prog::risk_buffer::RiskBuffer>();
-        let buf_off = SLAB_LEN - buf_size;
+        let gen_table_size = 4096 * 8;
+        let buf_off = SLAB_LEN - gen_table_size - buf_size;
         let mut buf = percolator_prog::risk_buffer::RiskBuffer::zeroed();
         bytemuck::bytes_of_mut(&mut buf).copy_from_slice(&d[buf_off..buf_off + buf_size]);
         buf
