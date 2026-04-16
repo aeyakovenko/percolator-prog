@@ -4764,4 +4764,39 @@ fn test_trade_nocpi_allows_user_user_bilateral() {
     assert!(result.is_ok(), "User-user bilateral trade must be allowed: {:?}", result);
 }
 
+// ============================================================================
+// F-7 regression: FLAG_ORACLE_INITIALIZED must be set after first crank
+// ============================================================================
+
+/// Regression test for F-7: the fork must set FLAG_ORACLE_INITIALIZED
+/// after the first instruction that feeds a real oracle price to the engine.
+/// Before the fix, the flag was defined but never called (0 call sites).
+#[test]
+fn test_f7_oracle_initialized_flag_set_after_crank() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    // Before any crank, flag should NOT be set
+    {
+        let slab = env.svm.get_account(&env.slab).unwrap();
+        let flag_byte = slab.data[13]; // FLAGS_OFF = 13
+        let oracle_init_bit = flag_byte & (1 << 3); // FLAG_ORACLE_INITIALIZED = bit 3
+        assert_eq!(oracle_init_bit, 0,
+            "FLAG_ORACLE_INITIALIZED must be 0 before first crank");
+    }
+
+    // First crank feeds real oracle price to engine via accrue_market_to
+    env.set_slot(100);
+    env.crank();
+
+    // After crank, flag MUST be set
+    {
+        let slab = env.svm.get_account(&env.slab).unwrap();
+        let flag_byte = slab.data[13];
+        let oracle_init_bit = flag_byte & (1 << 3);
+        assert_ne!(oracle_init_bit, 0,
+            "F-7 REGRESSION: FLAG_ORACLE_INITIALIZED must be set after first crank");
+    }
+}
 

@@ -1770,3 +1770,76 @@ fn test_resolve_market_before_first_crank_with_fresh_oracle() {
         "ResolveMarket should succeed with fresh oracle: {:?}", result);
 }
 
+// ============================================================================
+// SP-1 regression: ForceCloseResolved delay uses engine.current_slot
+// ============================================================================
+
+/// Regression test for SP-1: ForceCloseResolved delay check must use the
+/// actual resolution slot from the engine, not a stub returning 0.
+///
+/// Scenario: market resolves at slot 1000, delay = 200.
+/// At slot 1100: clock.slot (1100) > 0 + 200 = 200 → old stub allows it (BUG)
+///               clock.slot (1100) < 1000 + 200 = 1200 → correct impl rejects (CORRECT)
+///
+/// This test WOULD HAVE PASSED with the old stub (allowing premature force-close).
+/// With the fix, it correctly rejects.
+#[test]
+fn test_sp1_force_close_delay_uses_engine_resolved_slot() {
+    program_path();
+    let mut env = TestEnv::new();
+
+    // Init with force_close_delay = 200 slots
+    let data = encode_init_market_with_force_close(
+        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID, 200,
+    );
+    env.try_init_market_raw(data).expect("init failed");
+    {
+        let mut slab = env.svm.get_account(&env.slab).unwrap();
+        slab.data[168..176].copy_from_slice(&30u64.to_le_bytes());
+        env.svm.set_account(env.slab, slab).unwrap();
+    }
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 1_000_000_000);
+
+    // Crank and flatten before resolution
+    env.set_slot(900);
+    env.crank();
+    env.trade(&user, &lp, lp_idx, user_idx, -1_000);
+    env.set_slot(950);
+    env.crank();
+
+    // Resolve at slot ~1000
+    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
+    env.try_push_oracle_price(&admin, 138_000_000, 1000).unwrap();
+    env.try_resolve_market(&admin).unwrap();
+    assert!(env.is_market_resolved());
+
+    // Crank resolved
+    env.set_slot(1050);
+    env.crank();
+
+    // At slot 1100: past delay from stub perspective (1100 > 0+200=200)
+    // but WITHIN delay from correct perspective (1100 < 1000+200=1200)
+    env.set_slot(1100);
+    let result = env.try_force_close_resolved(user_idx, &user.pubkey());
+    assert!(result.is_err(),
+        "SP-1 REGRESSION: force-close must be rejected — resolved_slot (~1000) + delay (200) = ~1200 > clock (1100)");
+
+    // At slot 1300: past delay from both perspectives — must succeed
+    env.set_slot(1300);
+    let result = env.try_force_close_resolved(user_idx, &user.pubkey());
+    assert!(result.is_ok(),
+        "Force-close must succeed after full delay: {:?}", result);
+}
+
