@@ -5597,77 +5597,10 @@ fn test_tradecpi_zero_fill_does_not_walk_index() {
     );
 }
 
-// ============================================================================
-// H1/M9: TradeCpi buffer notional must use oracle price, not exec_price
-// ============================================================================
-
-/// Risk buffer notional after TradeCpi must equal |eff_pos| * oracle_price / POS_SCALE.
-/// Using exec_price (from the matcher) is gameable: a colluding matcher could
-/// deflate exec_price to keep the entry's notional artificially low, evading
-/// the buffer's liquidation priority ranking.
-///
-/// The vAMM test matcher fills at oracle price, so for this test oracle==exec.
-/// We verify the notional matches the oracle-based formula exactly.
-#[test]
-fn test_tradecpi_buffer_notional_uses_oracle_price() {
-    let mut env = TradeCpiTestEnv::new();
-    env.init_market();
-
-    let matcher_prog = env.matcher_program_id;
-    let lp = Keypair::new();
-    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
-    env.deposit(&lp, lp_idx, 100_000_000_000);
-
-    let user = Keypair::new();
-    let user_idx = env.init_user(&user);
-    env.deposit(&user, user_idx, 10_000_000_000);
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.top_up_insurance(&admin, 1_000_000_000);
-
-    // v12.17: the buffer is populated by crank scan, not inline by TradeCpi.
-    // We need to set up oracle authority so PushOraclePrice works for hyperp,
-    // but init_market() is non-hyperp, so we just crank after trade.
-    let trade_size = 1_000_000i128;
-    env.try_trade_cpi(
-        &user, &lp.pubkey(), lp_idx, user_idx, trade_size,
-        &matcher_prog, &matcher_ctx,
-    ).expect("TradeCpi failed");
-
-    // Compute expected notional from engine state after trade
-    let (user_eff, oracle_price, expected_notional) = {
-        let d = env.svm.get_account(&env.slab).unwrap().data;
-        let engine = percolator_prog::zc::engine_ref(&d).unwrap();
-        let eff = engine.effective_pos_q(user_idx as usize);
-        let price = engine.last_oracle_price;
-        let notional = (eff.unsigned_abs() as u128) * (price as u128) / percolator::POS_SCALE;
-        (eff, price, notional)
-    };
-
-    // Read buffer from slab (risk buffer sits before the gen table)
-    let buf = {
-        use bytemuck::Zeroable;
-        let d = env.svm.get_account(&env.slab).unwrap().data;
-        let buf_size = core::mem::size_of::<percolator_prog::risk_buffer::RiskBuffer>();
-        let gen_table_size = 4096 * 8;
-        let buf_off = SLAB_LEN - gen_table_size - buf_size;
-        let mut buf = percolator_prog::risk_buffer::RiskBuffer::zeroed();
-        bytemuck::bytes_of_mut(&mut buf).copy_from_slice(&d[buf_off..buf_off + buf_size]);
-        buf
-    };
-
-    if let Some(slot) = buf.find(user_idx) {
-        let actual_notional = buf.entries[slot].notional;
-        assert_eq!(actual_notional, expected_notional,
-            "Buffer notional must use oracle price (H1/M9): actual={} expected={}",
-            actual_notional, expected_notional);
-    } else {
-        // Buffer populated by crank scan — validate formula is non-zero
-        assert!(expected_notional > 0,
-            "Expected notional should be positive: eff_pos={} oracle={}",
-            user_eff, oracle_price);
-    }
-}
+// test_tradecpi_buffer_notional_uses_oracle_price removed — the risk buffer
+// is not wired into any handler (read_risk_buffer/write_risk_buffer have zero
+// call sites). The buffer data structure exists in the slab but no instruction
+// reads or writes it. Re-add this test when the buffer is integrated.
 
 /// Nonce overflow must reject the trade, never wrap to 0.
 /// At u64::MAX, wrapping would reopen the entire request-ID space.

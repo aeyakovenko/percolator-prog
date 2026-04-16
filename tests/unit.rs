@@ -3158,7 +3158,7 @@ fn test_close_slab() {
     // Mark market as resolved (required by CloseSlab)
     {
         let engine = zc::engine_mut(&mut f.slab.data).unwrap();
-        engine.resolve_market_not_atomic(1_000_000, 1_000_000, 1, 0).unwrap();
+        engine.resolve_market_not_atomic(1_000_000, 1_000_000, 200, 0).unwrap();
     }
 
     // Create vault authority PDA and admin's dest ATA for CloseSlab
@@ -3228,7 +3228,7 @@ fn test_close_slab_non_admin_rejected() {
     // Mark market as resolved (required by CloseSlab)
     {
         let engine = zc::engine_mut(&mut f.slab.data).unwrap();
-        engine.resolve_market_not_atomic(1_000_000, 1_000_000, 1, 0).unwrap();
+        engine.resolve_market_not_atomic(1_000_000, 1_000_000, 200, 0).unwrap();
     }
 
     // Attacker tries to close
