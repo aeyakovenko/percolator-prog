@@ -2571,11 +2571,8 @@ pub mod state {
     #[inline]
     pub fn set_dispute_window_slots(_config: &mut MarketConfig, _v: u64) {}
 
-    /// Resolved slot (slot when market was resolved).
-    #[inline]
-    pub fn get_resolved_slot(_config: &MarketConfig) -> u64 { 0 }
-    #[inline]
-    pub fn set_resolved_slot(_config: &mut MarketConfig, _v: u64) {}
+    // resolved_slot is read from the engine via zc::engine_ref(&data)?.current_slot
+    // (frozen at resolution time). The config-based stubs were removed — see commit c1f2903.
 
     /// Dispute bond amount — 0 means no bond required.
     #[inline]
@@ -7004,6 +7001,14 @@ pub mod processor {
         let price =
             read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, Some(&mut *data))?;
         state::write_config(&mut data, &config);
+
+        // Bounds-check before gen table read (check_idx requires engine borrow,
+        // but gen table read must happen before the mutable engine borrow).
+        if (lp_idx as usize) >= percolator::MAX_ACCOUNTS
+            || (user_idx as usize) >= percolator::MAX_ACCOUNTS
+        {
+            return Err(ProgramError::InvalidArgument);
+        }
 
         // LP identity: read generation before engine borrow
         let lp_gen = state::read_account_generation(&data, lp_idx);
