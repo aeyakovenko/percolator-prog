@@ -325,6 +325,52 @@ fn encode_init_market_invert(
     data
 }
 
+/// Like encode_init_market but with permissionless resolve and force-close paths enabled,
+/// which is required for admin burn-to-zero (UpdateAdmin to Pubkey::default()).
+/// Security guard (R4-H1): burning admin when there's no permissionless exit path permanently
+/// bricks user funds; permissionless_resolve_stale_slots and force_close_delay_slots must both
+/// be non-zero to allow admin burn.
+fn encode_init_market_burn_safe(fixture: &MarketFixture, crank_staleness: u64) -> Vec<u8> {
+    let mut data = vec![0u8];
+    encode_pubkey(&fixture.admin.key, &mut data);
+    encode_pubkey(&fixture.mint.key, &mut data);
+    encode_bytes32(&fixture.index_feed_id, &mut data);
+    encode_u64(100, &mut data); // max_staleness_secs
+    encode_u16(500, &mut data); // conf_filter_bps
+    data.push(0u8); // invert
+    encode_u32(0, &mut data); // unit_scale
+    encode_u64(0, &mut data); // initial_mark_price_e6
+    encode_u128(0u128, &mut data); // maintenance_fee_per_slot
+    encode_u128(10_000_000_000_000_000u128, &mut data); // max_insurance_floor
+    encode_u64(0, &mut data); // min_oracle_price_cap_e2bps
+    encode_u64(0, &mut data);   // warmup_period_slots
+    encode_u64(500, &mut data); // maintenance_margin_bps
+    encode_u64(1000, &mut data); // initial_margin_bps
+    encode_u64(0, &mut data);   // trading_fee_bps
+    encode_u64(MAX_ACCOUNTS as u64, &mut data); // max_accounts
+    encode_u128(0, &mut data);  // new_account_fee
+    encode_u128(0, &mut data);  // insurance_floor
+    encode_u64(0, &mut data);   // h_max
+    encode_u64(crank_staleness, &mut data); // max_crank_staleness_slots
+    encode_u64(0, &mut data);   // liquidation_fee_bps
+    encode_u128(0, &mut data);  // liquidation_fee_cap
+    encode_u64(100, &mut data); // resolve_price_deviation_bps
+    encode_u128(0, &mut data);  // min_liquidation_abs
+    data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
+    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    encode_u16(0, &mut data); // insurance_withdraw_max_bps
+    encode_u64(0, &mut data); // insurance_withdraw_cooldown_slots
+    encode_u64(crank_staleness + 1, &mut data); // permissionless_resolve_stale_slots (must be > max_crank_staleness_slots to allow admin burn)
+    encode_u64(500, &mut data); // funding_horizon_slots
+    encode_u64(100, &mut data); // funding_k_bps
+    data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
+    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot
+    encode_u64(0, &mut data); // mark_min_fee
+    encode_u64(1, &mut data); // force_close_delay_slots (non-zero to allow admin burn)
+    data
+}
+
 fn encode_init_user(fee: u64) -> Vec<u8> {
     let mut data = vec![1u8];
     encode_u64(fee, &mut data);
@@ -353,19 +399,21 @@ fn encode_withdraw(user_idx: u16, amount: u64) -> Vec<u8> {
     data
 }
 
-fn encode_crank(caller: u16, panic: u8) -> Vec<u8> {
+fn encode_crank(caller: u16, _panic: u8) -> Vec<u8> {
     let mut data = vec![5u8];
     encode_u16(caller, &mut data);
-    data.push(panic);
-    // Two-phase crank: include first 128 account indices as candidates
+    // format_version = 1 (v12.17 two-phase crank: u16 idx + u8 policy_tag per candidate)
+    data.push(1u8);
+    // Include first 128 account indices as touch-only candidates (policy_tag = 0xFF)
     for i in 0..128u16 {
         encode_u16(i, &mut data);
+        data.push(0xFF); // 0xFF = touch-only (no liquidation)
     }
     data
 }
 
-fn encode_crank_permissionless(panic: u8) -> Vec<u8> {
-    encode_crank(u16::MAX, panic)
+fn encode_crank_permissionless(_panic: u8) -> Vec<u8> {
+    encode_crank(u16::MAX, 0)
 }
 
 fn encode_trade(lp: u16, user: u16, size: i128) -> Vec<u8> {
@@ -381,6 +429,7 @@ fn encode_trade_cpi(lp: u16, user: u16, size: i128) -> Vec<u8> {
     encode_u16(lp, &mut data);
     encode_u16(user, &mut data);
     encode_i128(size, &mut data);
+    encode_u64(0, &mut data); // limit_price_e6 = 0 (no price limit)
     data
 }
 
@@ -2178,7 +2227,9 @@ fn test_non_admin_cannot_rotate() {
 #[cfg(feature = "test")]
 fn test_burn_admin_to_zero() {
     let mut f = setup_market();
-    let init_data = encode_init_market(&f, 100);
+    // Use burn-safe init: permissionless_resolve_stale_slots=1 and force_close_delay_slots=1
+    // required by R4-H1 guard in UpdateAdmin to allow burning admin to Pubkey::default().
+    let init_data = encode_init_market_burn_safe(&f, 100);
 
     // Init market with admin A
     {
@@ -2215,7 +2266,9 @@ fn test_burn_admin_to_zero() {
 #[cfg(feature = "test")]
 fn test_after_burn_admin_ops_disabled() {
     let mut f = setup_market();
-    let init_data = encode_init_market(&f, 100);
+    // Use burn-safe init: permissionless_resolve_stale_slots=1 and force_close_delay_slots=1
+    // required by R4-H1 guard in UpdateAdmin to allow burning admin to Pubkey::default().
+    let init_data = encode_init_market_burn_safe(&f, 100);
 
     // Init market with admin A
     {
@@ -2965,8 +3018,8 @@ fn test_dust_sweep_preserves_real_to_accounted_equality() {
     // Set dust_base = 14 (>= unit_scale=10, so sweep will happen)
     state::write_dust_base(&mut f.slab.data, 14);
 
-    // Record pre-crank state
-    let dust_before_crank = 0u64;
+    // Record pre-crank state: read the actual dust_base we just wrote (14)
+    let dust_before_crank = state::read_dust_base(&f.slab.data);
     let engine_vault_before = zc::engine_ref(&f.slab.data).unwrap().vault;
     let insurance_before = zc::engine_ref(&f.slab.data).unwrap().insurance_fund.balance;
 
@@ -2988,8 +3041,8 @@ fn test_dust_sweep_preserves_real_to_accounted_equality() {
         process_instruction(&f.program_id, &accounts, &encode_crank(user_idx, 0)).unwrap();
     }
 
-    // Read post-crank state
-    let dust_after_crank = 0u64;
+    // Read post-crank state: read the actual dust_base after sweep
+    let dust_after_crank = state::read_dust_base(&f.slab.data);
     let engine_vault_after = zc::engine_ref(&f.slab.data).unwrap().vault;
     let insurance_after = zc::engine_ref(&f.slab.data).unwrap().insurance_fund.balance;
 
@@ -3155,11 +3208,14 @@ fn test_close_slab() {
     let header = state::read_header(&f.slab.data);
     assert_eq!(header.magic, MAGIC);
 
-    // Mark market as resolved (required by CloseSlab)
+    // Mark market as resolved (required by CloseSlab):
+    // 1. Resolve the engine state via resolve_market_not_atomic
+    // 2. Set FLAG_RESOLVED in the slab header (normally set by handle_resolve_market)
     {
         let engine = zc::engine_mut(&mut f.slab.data).unwrap();
         engine.resolve_market_not_atomic(1_000_000, 1_000_000, 200, 0).unwrap();
     }
+    state::set_resolved(&mut f.slab.data);
 
     // Create vault authority PDA and admin's dest ATA for CloseSlab
     let mut vault_auth = TestAccount::new(f.vault_pda, solana_program::system_program::id(), 0, vec![]);
@@ -3225,11 +3281,14 @@ fn test_close_slab_non_admin_rejected() {
         process_instruction(&f.program_id, &accounts, &init_data).unwrap();
     }
 
-    // Mark market as resolved (required by CloseSlab)
+    // Mark market as resolved (required by CloseSlab):
+    // 1. Resolve the engine state via resolve_market_not_atomic
+    // 2. Set FLAG_RESOLVED in the slab header (normally set by handle_resolve_market)
     {
         let engine = zc::engine_mut(&mut f.slab.data).unwrap();
         engine.resolve_market_not_atomic(1_000_000, 1_000_000, 200, 0).unwrap();
     }
+    state::set_resolved(&mut f.slab.data);
 
     // Attacker tries to close
     let mut attacker = TestAccount::new(
