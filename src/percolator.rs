@@ -6309,9 +6309,10 @@ pub mod processor {
             return Err(ProgramError::InvalidInstructionData);
         }
 
-        // max_staleness_secs: reject 0 (would brick oracle reads —
-        // any non-zero age > 0 fails the staleness check).
-        if max_staleness_secs == 0 {
+        // max_staleness_secs: reject 0 and unreasonable values.
+        // 0 would brick oracle reads. >7 days is clearly misconfigured —
+        // u64::MAX would effectively disable staleness checks entirely.
+        if max_staleness_secs == 0 || max_staleness_secs > 7 * 86400 {
             return Err(ProgramError::InvalidInstructionData);
         }
 
@@ -7598,22 +7599,30 @@ pub mod processor {
 
         // Zero-fill: ABI-valid no-op when matcher returns exec_size == 0
         // with FLAG_PARTIAL_OK. Skip engine call which rejects size_q == 0.
-        // Zero-fill: no trade occurred, so do not persist oracle side effects.
-        // Revert last_effective_price_e6 for ALL markets — prevents repeated
-        // zero-fills from walking the circuit-breaker baseline toward the raw
-        // oracle price (Hyperp: index ratchet, non-Hyperp: baseline walk).
-        // SAFETY: mark_ewma_e6 is NOT reverted here because the EWMA update
-        // happens AFTER this early return (inside the exec_size != 0 branch below).
-        // Zero-fills never touch the EWMA, so no revert is needed.
+        //
+        // Restore pre-oracle config, but PRESERVE oracle/index state that
+        // legitimately advanced during this instruction:
+        //   - last_good_oracle_slot: liveness proof from a successful read.
+        //     Reverting would falsely accelerate the permissionless-resolution
+        //     window when the oracle is in fact alive.
+        //   - last_effective_price_e6 and last_hyperp_index_slot: the Hyperp
+        //     index legitimately moved toward mark per the per-slot rate limit.
+        //     Reverting these caused a dt-accumulation attack: repeated
+        //     zero-fills would revert the index clock, then a subsequent real
+        //     trade could snap the index with a huge accumulated dt.
+        //
+        // mark_ewma_e6 is NOT touched here because the EWMA update happens
+        // AFTER this early return (inside the exec_size != 0 branch below);
+        // zero-fills never enter that branch, so no revert is needed.
         if ret.exec_size == 0 {
             let mut data = state::slab_data_mut(a_slab)?;
             let pristine = state::read_config(&data);
-            config.last_effective_price_e6 = pristine.last_effective_price_e6;
-            config.last_hyperp_index_slot = pristine.last_hyperp_index_slot;
-            // Revert last_good_oracle_slot too — zero-fills must not refresh
-            // the oracle-death timer (prevents resolution-delay manipulation).
-            config.last_good_oracle_slot = pristine.last_good_oracle_slot;
-            state::write_config(&mut data, &config);
+            // Start from pristine, then re-apply only the legitimately-advanced fields.
+            let mut restored = pristine;
+            restored.last_good_oracle_slot = config.last_good_oracle_slot;
+            restored.last_effective_price_e6 = config.last_effective_price_e6;
+            restored.last_hyperp_index_slot = config.last_hyperp_index_slot;
+            state::write_config(&mut data, &restored);
             state::write_req_nonce(&mut data, req_id);
             return Ok(());
         }

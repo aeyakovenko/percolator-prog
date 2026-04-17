@@ -930,7 +930,7 @@ fn risk_params_three_trailing_fields_are_mandatory() {
     data.extend_from_slice(&[0u8; 32]); // admin
     data.extend_from_slice(&[0u8; 32]); // collateral_mint
     data.extend_from_slice(&[0u8; 32]); // feed_id
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_staleness_secs
+    data.extend_from_slice(&86400u64.to_le_bytes()); // max_staleness_secs (1 day, ≤7d cap)
     data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
     data.push(0u8); // invert
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
@@ -978,7 +978,7 @@ fn risk_params_full_round_trip_via_init_market() {
     data.extend_from_slice(&[0xAAu8; 32]); // admin
     data.extend_from_slice(&[0xBBu8; 32]); // collateral_mint
     data.extend_from_slice(&[0xABu8; 32]); // feed_id
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_staleness_secs
+    data.extend_from_slice(&86400u64.to_le_bytes()); // max_staleness_secs (1 day, ≤7d cap)
     data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
     data.push(0u8); // invert
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale

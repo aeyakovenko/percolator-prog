@@ -1862,7 +1862,7 @@ fn test_init_market_insurance_withdraw_max_bps_bounded() {
     data.extend_from_slice(admin.pubkey().as_ref());
     data.extend_from_slice(env.mint.as_ref());
     data.extend_from_slice(&[0xABu8; 32]); // feed_id
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_staleness_secs
+    data.extend_from_slice(&86400u64.to_le_bytes()); // max_staleness_secs (1 day, ≤7d cap)
     data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
     data.push(0u8); // invert
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
@@ -2047,7 +2047,7 @@ fn test_insurance_withdraw_limited_requires_recent_crank() {
     data.extend_from_slice(admin.pubkey().as_ref());
     data.extend_from_slice(env.mint.as_ref());
     data.extend_from_slice(&TEST_FEED_ID);
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_staleness_secs
+    data.extend_from_slice(&86400u64.to_le_bytes()); // max_staleness_secs (1 day, ≤7d cap)
     data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
     data.push(0u8); // invert
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale

@@ -5583,10 +5583,21 @@ fn test_tradecpi_zero_fill_does_not_walk_index() {
         )
     };
 
-    assert_eq!(
-        index_before, index_after,
-        "Zero-fill must not walk last_effective_price_e6: before={} after={}",
+    // Post upstream 77dce78: zero-fill PRESERVES the legitimately-advanced
+    // index (per-slot rate-limited toward mark) instead of reverting it.
+    // Reverting allowed a dt-accumulation attack where repeated zero-fills
+    // reset the index clock then a real trade snapped a huge dt at once.
+    // The new invariant: index may advance toward the raw oracle price but
+    // is still bounded by the per-slot rate cap (it never reaches the raw).
+    assert!(
+        index_after >= index_before,
+        "Zero-fill must not regress index: before={} after={}",
         index_before, index_after
+    );
+    assert!(
+        index_after < 2_000_000,
+        "Zero-fill index advancement is rate-limited (must not reach raw oracle 2_000_000): after={}",
+        index_after
     );
 
     // Also verify no position change (sanity check for zero-fill)

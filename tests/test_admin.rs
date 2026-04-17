@@ -549,7 +549,7 @@ fn test_init_market_risk_params_exceed_limits_rejected() {
     data.extend_from_slice(admin.pubkey().as_ref());
     data.extend_from_slice(env.mint.as_ref());
     data.extend_from_slice(&TEST_FEED_ID);
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_staleness_secs
+    data.extend_from_slice(&86400u64.to_le_bytes()); // max_staleness_secs (1 day, ≤7d cap)
     data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
     data.push(0u8); // invert
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
@@ -705,7 +705,7 @@ fn test_init_market_risk_params_at_boundary_accepted() {
     data.extend_from_slice(admin.pubkey().as_ref());
     data.extend_from_slice(env.mint.as_ref());
     data.extend_from_slice(&TEST_FEED_ID);
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_staleness_secs
+    data.extend_from_slice(&86400u64.to_le_bytes()); // max_staleness_secs (1 day, ≤7d cap)
     data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
     data.push(0u8); // invert
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
