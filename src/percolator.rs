@@ -7076,6 +7076,11 @@ pub mod processor {
 
         let clock = Clock::from_account_info(a_clock)?;
 
+        // Capture pre-oracle-read funding rate for anti-retroactivity (§5.5).
+        // The rate for interval [last_market_slot, now_slot] must reflect
+        // mark vs index DURING that interval, not the post-read state.
+        let funding_rate_e9_pre = compute_current_funding_rate_e9(&config);
+
         // Hyperp mode: use get_engine_oracle_price_e6 for rate-limited index smoothing
         // Otherwise: use read_price_clamped as before
         let is_hyperp = oracle::is_hyperp_mode(&config);
@@ -7116,7 +7121,8 @@ pub mod processor {
             msg!("CU_CHECKPOINT: keeper_crank_start");
             sol_log_compute_units();
         }
-        let funding_rate = compute_current_funding_rate_e9(&config);
+        // Use pre-oracle-read funding rate (anti-retroactivity §5.5)
+        let funding_rate = funding_rate_e9_pre;
         let h_lock = engine.params.h_min;
         let _outcome = engine
             .keeper_crank_not_atomic(
@@ -7213,6 +7219,9 @@ pub mod processor {
             return Err(PercolatorError::HyperpTradeNoCpiDisabled.into());
         }
 
+        // Capture pre-oracle-read funding rate for anti-retroactivity (§5.5)
+        let funding_rate_e9_pre = compute_current_funding_rate_e9(&config);
+
         // Read oracle price with circuit-breaker clamping
         let price =
             read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, Some(&mut *data))?;
@@ -7267,7 +7276,8 @@ pub mod processor {
             msg!("CU_CHECKPOINT: trade_nocpi_execute_start");
             sol_log_compute_units();
         }
-        let funding_rate = compute_current_funding_rate_e9(&config);
+        // Use pre-oracle-read funding rate (anti-retroactivity §5.5)
+        let funding_rate = funding_rate_e9_pre;
         execute_trade_with_matcher(
             engine, &NoOpMatcher, lp_idx, user_idx, clock.slot, price, size,
             funding_rate, 0, // NoOpMatcher ignores lp_account_id
@@ -7461,6 +7471,9 @@ pub mod processor {
         }
 
         let clock = Clock::from_account_info(a_clock)?;
+        // Capture pre-oracle-read funding rate for anti-retroactivity (§5.5)
+        let funding_rate_e9_pre = compute_current_funding_rate_e9(&config);
+
         // Oracle price: Hyperp mode applies rate-limited index update
         // via clamp_toward_with_dt (prevents stale-index manipulation).
         // Non-Hyperp: standard circuit-breaker clamping.
@@ -7608,8 +7621,8 @@ pub mod processor {
                 exec_price,
                 exec_size: trade_size,
             };
-            // Compute funding BEFORE trade (uses pre-fill state per anti-retroactivity)
-            let funding_rate = compute_current_funding_rate_e9(&config);
+            // Use pre-oracle-read funding rate (anti-retroactivity §5.5)
+            let funding_rate = funding_rate_e9_pre;
             execute_trade_with_matcher(
                 engine, &matcher, lp_idx, user_idx, clock.slot, price, trade_size,
                 funding_rate, lp_account_id,
