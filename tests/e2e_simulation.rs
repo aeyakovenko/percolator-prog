@@ -316,12 +316,6 @@ fn phase1_market_creation(env: &mut TestEnv) -> (Keypair, u16, Pubkey) {
         }
     }
 
-    // Step 8 — SetOracleAuthority: admin grants push rights to itself.
-    println!("[8] SetOracleAuthority...");
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("SetOracleAuthority must succeed");
-    println!("    SetOracleAuthority OK: authority set to admin");
-
     (lp_owner, lp_idx, admin.pubkey())
 }
 
@@ -343,12 +337,11 @@ fn phase2_trading(env: &mut TestEnv, lp_owner: &Keypair, lp_idx: u16) -> (Keypai
     assert!(capital > 0, "User capital must be positive after deposit");
     println!("    InitUser OK: idx={}, capital={}", user_idx, capital);
 
-    // Step 10 — PushOraclePrice at initial price.
-    println!("[10] PushOraclePrice (initial price = 138_000_000 e6)...");
+    // Step 10 — set oracle price.
+    println!("[10] set_oracle_price_e6 (initial price = 138_000_000 e6)...");
     let price1: u64 = 138_000_000;
-    env.try_push_oracle_price(&admin, price1, 200)
-        .expect("PushOraclePrice must succeed");
-    println!("    PushOraclePrice OK: price={}", price1);
+    env.set_oracle_price_e6(price1);
+    println!("    set_oracle_price_e6 OK: price={}", price1);
 
     // Step 11 — KeeperCrank.
     println!("[11] KeeperCrank (slot=200)...");
@@ -371,12 +364,11 @@ fn phase2_trading(env: &mut TestEnv, lp_owner: &Keypair, lp_idx: u16) -> (Keypai
     assert!(pos_after.abs() > 0, "Position must be non-zero");
     println!("    Position verified: {}", pos_after);
 
-    // Step 14 — PushOraclePrice at different price.
-    println!("[14] PushOraclePrice (new price = 150_000_000 e6)...");
+    // Step 14 — set oracle price.
+    println!("[14] set_oracle_price_e6 (new price = 150_000_000 e6)...");
     let price2: u64 = 150_000_000; // price moved up — user long is profitable
-    env.try_push_oracle_price(&admin, price2, 300)
-        .expect("PushOraclePrice must succeed");
-    println!("    PushOraclePrice OK: price={}", price2);
+    env.set_oracle_price_e6(price2);
+    println!("    set_oracle_price_e6 OK: price={}", price2);
 
     // Step 15 — KeeperCrank again.
     println!("[15] KeeperCrank (slot=300)...");
@@ -510,8 +502,7 @@ fn phase4_cleanup(env: &mut TestEnv, user: &Keypair, user_idx: u16, lp_owner: &K
 
     // Step 20 — ResolveMarket.
     println!("[20] ResolveMarket...");
-    env.try_push_oracle_price(&admin, 150_000_000, 400)
-        .expect("PushOraclePrice before resolve must succeed");
+    env.set_oracle_price_e6(150_000_000);
     env.try_resolve_market(&admin)
         .expect("ResolveMarket must succeed");
     assert!(env.is_market_resolved(), "Market must be RESOLVED after ResolveMarket");

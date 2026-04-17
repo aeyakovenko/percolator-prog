@@ -1881,40 +1881,8 @@ fn benchmark_all_instructions() {
     }
 
     // SetMaintenanceFee (Tag 15) — removed per spec §8.2. Decoder rejects.
-
-    // --- SetOracleAuthority (Tag 16) ---
-    {
-        let ix = Instruction {
-            program_id: env.program_id,
-            accounts: vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(env.slab, false),
-            ],
-            data: encode_set_oracle_authority(&admin.pubkey()),
-        };
-        let cu = measure(&mut env.svm, ix, &[&admin]).unwrap();
-        println!("SetOracleAuthority:    {:>8} CU", cu);
-    }
-
-    // --- PushOraclePrice (Tag 17) ---
-    {
-        // Advance clock so push timestamp passes anchoring check
-        env.svm.set_sysvar(&solana_sdk::clock::Clock {
-            slot: 700,
-            unix_timestamp: 700,
-            ..Default::default()
-        });
-        let ix = Instruction {
-            program_id: env.program_id,
-            accounts: vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(env.slab, false),
-            ],
-            data: encode_push_oracle_price(100_000_000, 100),
-        };
-        let cu = measure(&mut env.svm, ix, &[&admin]).unwrap();
-        println!("PushOraclePrice:       {:>8} CU", cu);
-    }
+    // SetOracleAuthority (Tag 16) — removed in Phase G. Decoder rejects.
+    // PushOraclePrice    (Tag 17) — removed in Phase G. Decoder rejects.
 
     // --- SetOraclePriceCap (Tag 18) ---
     {

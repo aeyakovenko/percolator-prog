@@ -553,8 +553,6 @@ fn test_premarket_resolution_full_lifecycle() {
     let matcher_prog = env.matcher_program_id;
 
     // Set oracle authority to admin
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
 
     // Create LP with matcher
     let lp = Keypair::new();
@@ -567,8 +565,7 @@ fn test_premarket_resolution_full_lifecycle() {
     env.deposit(&user, user_idx, 1_000_000_000); // 1 SOL
 
     // Push initial price and crank
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("initial oracle push must succeed"); // Price = 1.0
+    env.set_oracle_price_e6(1_000_000); // Price = 1.0
     env.set_slot(100);
     env.crank();
 
@@ -606,9 +603,8 @@ fn test_premarket_resolution_full_lifecycle() {
 
     // Step 1: Admin pushes final resolution price (binary: 1e-6 or 1)
     // Price = 1 (1e-6) means "NO" outcome (essentially zero, but nonzero for force-close)
-    env.try_push_oracle_price(&admin, 1, 2000)
-        .expect("resolution oracle push must succeed"); // Final price = 1e-6 (NO)
-    println!("Admin pushed final price: 1e-6 (NO outcome)");
+    env.set_oracle_price_e6(1); // Final price = 1e-6 (NO)
+    println!("Admin set final price: 1e-6 (NO outcome)");
 
     // Step 2: Admin resolves market
     let result = env.try_resolve_market(&admin);
@@ -676,10 +672,7 @@ fn test_withdraw_insurance_requires_positions_closed() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("initial oracle push must succeed");
+    env.set_oracle_price_e6(1_000_000);
 
     // Create LP and user with positions
     let lp = Keypair::new();
@@ -714,8 +707,7 @@ fn test_withdraw_insurance_requires_positions_closed() {
     env.crank();
 
     // Resolve market
-    env.try_push_oracle_price(&admin, 500_000, 2000)
-        .expect("resolution oracle push must succeed"); // Price = 0.5
+    env.set_oracle_price_e6(500_000); // Price = 0.5
     env.try_resolve_market(&admin).unwrap();
     println!("Market resolved but accounts not yet closed");
 
@@ -767,10 +759,7 @@ fn test_premarket_paginated_force_close() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("initial oracle push must succeed");
+    env.set_oracle_price_e6(1_000_000);
 
     // Create multiple users with positions
     // We'll create 100 users to simulate paginated close (not 4096 for test speed)
@@ -835,8 +824,7 @@ fn test_premarket_paginated_force_close() {
     env.crank();
 
     // Resolve market
-    env.try_push_oracle_price(&admin, 500_000, 2000)
-        .expect("resolution oracle push must succeed"); // Final price = 0.5
+    env.set_oracle_price_e6(500_000); // Final price = 0.5
     env.try_resolve_market(&admin).unwrap();
     println!("Market resolved");
 
@@ -905,10 +893,7 @@ fn test_premarket_binary_outcome_price_zero() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 500_000, 1000)
-        .expect("initial oracle push must succeed");
+    env.set_oracle_price_e6(500_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -944,8 +929,7 @@ fn test_premarket_binary_outcome_price_zero() {
     env.crank();
 
     // Outcome: NO wins (price = 1e-6, essentially zero but nonzero for force-close)
-    env.try_push_oracle_price(&admin, 1, 2000)
-        .expect("resolution oracle push must succeed");
+    env.set_oracle_price_e6(1);
     env.try_resolve_market(&admin).unwrap();
     println!("Market resolved at price = 1e-6 (NO wins)");
 
@@ -976,10 +960,7 @@ fn test_premarket_binary_outcome_price_one() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 500_000, 1000)
-        .expect("initial oracle push must succeed");
+    env.set_oracle_price_e6(500_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -1015,8 +996,7 @@ fn test_premarket_binary_outcome_price_one() {
     env.crank();
 
     // Outcome: YES wins (price = 1.0 = 1_000_000 in e6)
-    env.try_push_oracle_price(&admin, 1_000_000, 2000)
-        .expect("resolution oracle push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
     println!("Market resolved at price = 1.0 (YES wins)");
 
@@ -1058,10 +1038,7 @@ fn test_premarket_force_close_cu_benchmark() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("initial oracle push must succeed");
+    env.set_oracle_price_e6(1_000_000);
 
     // Create LP with large deposit to handle all trades
     let lp = Keypair::new();
@@ -1120,8 +1097,7 @@ fn test_premarket_force_close_cu_benchmark() {
     env.crank();
 
     // Resolve market
-    env.try_push_oracle_price(&admin, 500_000, 2000)
-        .expect("resolution oracle push must succeed");
+    env.set_oracle_price_e6(500_000);
     env.try_resolve_market(&admin).unwrap();
     println!("Market resolved");
 
@@ -1263,10 +1239,7 @@ fn test_vulnerability_stale_pnl_pos_tot_after_force_close() {
     let matcher_prog = env.matcher_program_id;
 
     // Set oracle authority and initial price for hyperp market
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("initial oracle push must succeed");
+    env.set_oracle_price_e6(1_000_000);
 
     // Create LP with initial deposit
     let lp = Keypair::new();
@@ -1312,8 +1285,7 @@ fn test_vulnerability_stale_pnl_pos_tot_after_force_close() {
     env.crank();
 
     // Resolve market at 2.0 (2_000_000 e6)
-    env.try_push_oracle_price(&admin, 2_000_000, 200)
-        .expect("resolution oracle push must succeed");
+    env.set_oracle_price_e6(2_000_000);
     env.try_resolve_market(&admin).unwrap();
     println!("Market resolved at price 2.0");
 
@@ -1705,10 +1677,7 @@ fn test_attack_trade_after_force_close() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
 
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 1_000_000, 100)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -1740,8 +1709,7 @@ fn test_attack_trade_after_force_close() {
     env.crank();
 
     // Resolve + settle PnL via crank + force-close
-    env.try_push_oracle_price(&admin, 1_000_000, 200)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin)
         .expect("market resolution setup must succeed");
     env.set_slot(300);
@@ -1784,9 +1752,7 @@ fn test_attack_hyperp_mark_manipulation_via_trade() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     // Set price cap so circuit breaker is active
     env.try_set_oracle_price_cap(&admin, 500).unwrap(); // 5% per slot
@@ -1853,9 +1819,7 @@ fn test_attack_hyperp_index_lag_exploitation() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
     env.try_set_oracle_price_cap(&admin, 10_000).unwrap(); // 100% per slot cap
 
     let lp = Keypair::new();
@@ -1872,7 +1836,7 @@ fn test_attack_hyperp_index_lag_exploitation() {
     let vault_total = env.read_vault();
 
     // Push mark price up significantly (circuit breaker will clamp)
-    env.try_push_oracle_price(&admin, 2_000_000, 2000).unwrap();
+    env.set_oracle_price_e6(2_000_000);
 
     // Trade at slot 101 (index lags behind new mark)
     env.set_slot(101);
@@ -1925,9 +1889,7 @@ fn test_attack_premarket_withdraw_before_force_close() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -1953,7 +1915,7 @@ fn test_attack_premarket_withdraw_before_force_close() {
     assert!(result.is_ok(), "Trade should succeed");
 
     // Resolve market
-    env.try_push_oracle_price(&admin, 1_000_000, 2000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
 
     // Try to withdraw all capital before force-close completes
@@ -1976,9 +1938,7 @@ fn test_attack_premarket_extra_cranks_idempotent() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -2012,7 +1972,7 @@ fn test_attack_premarket_extra_cranks_idempotent() {
     env.crank();
 
     // Resolve and force-close
-    env.try_push_oracle_price(&admin, 1_500_000, 2000).unwrap();
+    env.set_oracle_price_e6(1_500_000);
     env.try_resolve_market(&admin).unwrap();
 
     env.set_slot(200);
@@ -2075,9 +2035,7 @@ fn test_attack_premarket_resolve_extreme_high_price() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     // Set price cap to max (100%) to allow extreme price for resolution scenario
     env.try_set_oracle_price_cap(&admin, 1_000_000).unwrap();
@@ -2109,8 +2067,7 @@ fn test_attack_premarket_resolve_extreme_high_price() {
     // Circuit breaker will clamp, but push multiple times to ramp up
     for i in 0..20 {
         let price = 1_000_000u64.saturating_mul(2u64.pow(i));
-        env.try_push_oracle_price(&admin, price.min(u64::MAX / 2), 3000 + i as i64)
-            .expect("oracle price push must succeed");
+        env.set_oracle_price_e6(price.min(u64::MAX / 2));
         env.set_slot(200 + i as u64 * 100);
         env.crank();
     }
@@ -2157,9 +2114,7 @@ fn test_attack_withdraw_insurance_non_admin() {
     env.init_market_hyperp(1_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     // Create user, deposit and resolve
     let user = Keypair::new();
@@ -2216,9 +2171,7 @@ fn test_attack_double_withdraw_insurance() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     // Create LP and user with trade to generate fees (insurance fund gets fees)
     let lp = Keypair::new();
@@ -2253,7 +2206,7 @@ fn test_attack_double_withdraw_insurance() {
     env.crank();
 
     // Resolve and force-close
-    env.try_push_oracle_price(&admin, 1_000_000, 2000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
     env.set_slot(200);
     env.crank();
@@ -2302,9 +2255,7 @@ fn test_attack_tradecpi_after_resolution() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -2367,9 +2318,7 @@ fn test_attack_hyperp_deposit_after_resolution() {
     env.init_market_hyperp(1_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
@@ -2438,9 +2387,7 @@ fn test_attack_sandwich_deposit_withdraw() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -2500,50 +2447,6 @@ fn test_attack_sandwich_deposit_withdraw() {
 
 /// ATTACK: Push oracle price to zero in Hyperp mode.
 /// Zero price should be rejected since it would break all calculations.
-#[test]
-fn test_attack_hyperp_push_zero_mark_price() {
-    let mut env = TradeCpiTestEnv::new();
-
-    env.init_market_hyperp(1_000_000);
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
-    const AUTH_PRICE_OFF: usize = 360;
-    const AUTH_TS_OFF: usize = 368;
-    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
-    let auth_price_before =
-        u64::from_le_bytes(slab_before[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8].try_into().unwrap());
-    let auth_ts_before =
-        i64::from_le_bytes(slab_before[AUTH_TS_OFF..AUTH_TS_OFF + 8].try_into().unwrap());
-    let vault_before = env.read_vault();
-    let used_before = env.read_num_used_accounts();
-
-    // Try pushing zero price
-    let result = env.try_push_oracle_price(&admin, 0, 2000);
-    assert!(
-        result.is_err(),
-        "ATTACK: Zero price accepted in Hyperp mode!"
-    );
-    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
-    let auth_price_after =
-        u64::from_le_bytes(slab_after[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8].try_into().unwrap());
-    let auth_ts_after =
-        i64::from_le_bytes(slab_after[AUTH_TS_OFF..AUTH_TS_OFF + 8].try_into().unwrap());
-    let vault_after = env.read_vault();
-    let used_after = env.read_num_used_accounts();
-    assert_eq!(
-        auth_price_after, auth_price_before,
-        "Rejected zero mark push must not change authority price"
-    );
-    assert_eq!(
-        auth_ts_after, auth_ts_before,
-        "Rejected zero mark push must not change authority timestamp"
-    );
-    assert_eq!(vault_after, vault_before, "Rejected zero mark push must not change vault");
-    assert_eq!(used_after, used_before, "Rejected zero mark push must not change num_used_accounts");
-}
 
 /// ATTACK: LP tries to close account while it still has a position from force-close PnL.
 /// After force-close, LP may have PnL that prevents account closure.
@@ -2555,9 +2458,7 @@ fn test_attack_lp_close_account_with_pnl_after_force_close() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -2592,7 +2493,7 @@ fn test_attack_lp_close_account_with_pnl_after_force_close() {
     env.crank();
 
     // Resolve at different price (creates PnL)
-    env.try_push_oracle_price(&admin, 1_500_000, 2000).unwrap();
+    env.set_oracle_price_e6(1_500_000);
     env.try_resolve_market(&admin).unwrap();
 
     env.set_slot(200);
@@ -2628,9 +2529,7 @@ fn test_attack_hyperp_funding_rate_no_value_creation() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -2658,7 +2557,7 @@ fn test_attack_hyperp_funding_rate_no_value_creation() {
     assert!(result.is_ok(), "Trade should succeed");
 
     // Push mark price higher to create premium (mark > index → positive funding)
-    env.try_push_oracle_price(&admin, 1_100_000, 2000).unwrap();
+    env.set_oracle_price_e6(1_100_000);
 
     // Crank many times to accumulate funding payments
     for i in 0..10 {
@@ -2692,74 +2591,6 @@ fn test_attack_hyperp_funding_rate_no_value_creation() {
 
 /// ATTACK: Change oracle authority during active Hyperp positions.
 /// Old authority must be rejected, new authority must be accepted.
-#[test]
-fn test_attack_hyperp_oracle_authority_swap_with_positions() {
-    let mut env = TradeCpiTestEnv::new();
-
-    env.init_market_hyperp(1_000_000);
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    let matcher_prog = env.matcher_program_id;
-    let old_authority = Keypair::new();
-    env.svm
-        .airdrop(&old_authority.pubkey(), 1_000_000_000)
-        .unwrap();
-    env.try_set_oracle_authority(&admin, &old_authority.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&old_authority, 1_000_000, 1000)
-        .unwrap();
-
-    let lp = Keypair::new();
-    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
-    env.deposit(&lp, lp_idx, 10_000_000_000);
-
-    let user = Keypair::new();
-    let user_idx = env.init_user(&user);
-    env.deposit(&user, user_idx, 1_000_000_000);
-
-    env.set_slot(100);
-    env.crank();
-
-    // Open position under old authority
-    let result = env.try_trade_cpi(
-        &user,
-        &lp.pubkey(),
-        lp_idx,
-        user_idx,
-        100_000_000,
-        &matcher_prog,
-        &matcher_ctx,
-    );
-    assert!(result.is_ok(), "Trade should succeed");
-
-    // Change oracle authority
-    let new_authority = Keypair::new();
-    env.svm
-        .airdrop(&new_authority.pubkey(), 1_000_000_000)
-        .unwrap();
-    env.try_set_oracle_authority(&admin, &new_authority.pubkey())
-        .unwrap();
-
-    // Old authority should no longer be able to push prices
-    let result = env.try_push_oracle_price(&old_authority, 2_000_000, 2000);
-    assert!(
-        result.is_err(),
-        "ATTACK: Old oracle authority still accepted after change!"
-    );
-
-    // New authority should work
-    let result = env.try_push_oracle_price(&new_authority, 1_000_000, 2000);
-    assert!(
-        result.is_ok(),
-        "New authority should be able to push prices: {:?}",
-        result
-    );
-
-    // Verify core security property: 3 assertions tested above
-    // 1. Trade succeeded under old authority
-    // 2. Old authority rejected after change
-    // 3. New authority accepted
-}
 
 /// ATTACK: Close slab without withdrawing insurance first.
 /// CloseSlab requires insurance_fund.balance == 0.
@@ -2771,9 +2602,7 @@ fn test_attack_close_slab_before_insurance_withdrawal() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     // Create LP and user, trade to generate fees
     let lp = Keypair::new();
@@ -2799,7 +2628,7 @@ fn test_attack_close_slab_before_insurance_withdrawal() {
     .expect("pre-close-slab TradeCpi setup must succeed");
 
     // Resolve and force-close
-    env.try_push_oracle_price(&admin, 1_000_000, 2000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
     env.set_slot(200);
     env.crank();
@@ -2886,9 +2715,7 @@ fn test_attack_extreme_position_size() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -2958,9 +2785,7 @@ fn test_attack_extreme_negative_position_size() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -3030,9 +2855,7 @@ fn test_attack_nonce_replay_same_trade() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -3113,9 +2936,7 @@ fn test_attack_rounding_extraction_rapid_trades() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -3204,9 +3025,7 @@ fn test_attack_premarket_paginated_force_close() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     // Create LP + users
     let lp = Keypair::new();
@@ -3242,7 +3061,7 @@ fn test_attack_premarket_paginated_force_close() {
     env.crank();
 
     // Resolve at same price to minimize PnL complexity
-    env.try_push_oracle_price(&admin, 1_000_000, 2000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
 
     // Settle PnL via multiple cranks (paginated)
@@ -3281,9 +3100,7 @@ fn test_attack_force_close_pnl_accuracy() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -3318,7 +3135,7 @@ fn test_attack_force_close_pnl_accuracy() {
     env.crank();
 
     // Resolve at 2x price
-    env.try_push_oracle_price(&admin, 2_000_000, 2000).unwrap();
+    env.set_oracle_price_e6(2_000_000);
     env.try_resolve_market(&admin).unwrap();
 
     // Settle PnL via cranks
@@ -3358,9 +3175,7 @@ fn test_attack_hyperp_mark_price_clamp_defense() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -3424,9 +3239,7 @@ fn test_attack_withdraw_insurance_before_force_close() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -3479,10 +3292,7 @@ fn test_binary_market_close_account_warmup_delay() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("initial oracle push must succeed");
+    env.set_oracle_price_e6(1_000_000);
 
     // Setup: LP + user with a long position
     let lp = Keypair::new();
@@ -3523,8 +3333,7 @@ fn test_binary_market_close_account_warmup_delay() {
     env.crank();
 
     // Resolve at higher price (user profits)
-    env.try_push_oracle_price(&admin, 1_500_000, 2000)
-        .expect("resolution oracle push must succeed");
+    env.set_oracle_price_e6(1_500_000);
     env.try_resolve_market(&admin).unwrap();
 
     // Settle PnL via crank
@@ -3569,10 +3378,7 @@ fn test_binary_market_negative_pnl_close_immediate() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("initial oracle push must succeed");
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -3601,8 +3407,7 @@ fn test_binary_market_negative_pnl_close_immediate() {
     println!("Capital before resolution: {}", capital_before);
 
     // Resolve at LOWER price (user loses)
-    env.try_push_oracle_price(&admin, 500_000, 2000)
-        .expect("resolution oracle push must succeed");
+    env.set_oracle_price_e6(500_000);
     env.try_resolve_market(&admin).unwrap();
 
     env.set_slot(200);
@@ -3637,10 +3442,7 @@ fn test_binary_market_force_close_pnl_correctness() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("initial oracle push must succeed");
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -3687,8 +3489,7 @@ fn test_binary_market_force_close_pnl_correctness() {
 
     // Resolve at $2.00
     let settlement_price: u64 = 2_000_000;
-    env.try_push_oracle_price(&admin, settlement_price, 3000)
-        .expect("resolution oracle push must succeed");
+    env.set_oracle_price_e6(settlement_price);
     env.try_resolve_market(&admin).unwrap();
 
     env.set_slot(200);
@@ -3732,10 +3533,7 @@ fn test_binary_market_force_close_zero_position_noop() {
     env.init_market_hyperp(1_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("initial oracle push must succeed");
+    env.set_oracle_price_e6(1_000_000);
 
     // Create user with deposit but NO position
     let user = Keypair::new();
@@ -3780,8 +3578,6 @@ fn test_admin_force_close_account_happy_path() {
 
     env.init_market_hyperp(1_000_000);
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
 
     // Create LP and user with positions
     let mp = env.matcher_program_id;
@@ -3793,8 +3589,7 @@ fn test_admin_force_close_account_happy_path() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_000_000_000);
 
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("initial oracle push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.set_slot(100);
     env.crank();
 
@@ -3820,8 +3615,7 @@ fn test_admin_force_close_account_happy_path() {
     env.crank();
 
     // Resolve market
-    env.try_push_oracle_price(&admin, 1_000_000, 2000)
-        .expect("resolution oracle push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
 
     // Crank settles PnL
@@ -3857,10 +3651,7 @@ fn test_admin_force_close_account_requires_resolved() {
 
     env.init_market_hyperp(1_000_000);
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("initial oracle push must succeed");
+    env.set_oracle_price_e6(1_000_000);
 
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
@@ -3917,10 +3708,7 @@ fn test_admin_force_close_account_requires_admin() {
 
     env.init_market_hyperp(1_000_000);
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
 
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
@@ -3983,8 +3771,6 @@ fn test_admin_force_close_account_requires_zero_position() {
 
     env.init_market_hyperp(1_000_000);
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
 
     let mp = env.matcher_program_id;
     let lp = Keypair::new();
@@ -3995,8 +3781,7 @@ fn test_admin_force_close_account_requires_zero_position() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_000_000_000);
 
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.set_slot(100);
     env.crank();
 
@@ -4022,8 +3807,7 @@ fn test_admin_force_close_account_requires_zero_position() {
     env.crank();
 
     // Resolve
-    env.try_push_oracle_price(&admin, 1_000_000, 2000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
 
     let used_before = env.read_num_used_accounts();
@@ -4059,8 +3843,6 @@ fn test_admin_force_close_account_with_positive_pnl() {
 
     env.init_market_hyperp(1_000_000);
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
 
     let mp = env.matcher_program_id;
     let lp = Keypair::new();
@@ -4071,8 +3853,7 @@ fn test_admin_force_close_account_with_positive_pnl() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_000_000_000);
 
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.set_slot(100);
     env.crank();
 
@@ -4098,8 +3879,7 @@ fn test_admin_force_close_account_with_positive_pnl() {
     env.crank();
 
     // Price goes up → user profits (realized from the flatten trade)
-    env.try_push_oracle_price(&admin, 2_000_000, 2000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(2_000_000);
     env.try_resolve_market(&admin).unwrap();
 
     env.set_slot(200);
@@ -4131,8 +3911,6 @@ fn test_admin_force_close_account_with_negative_pnl() {
 
     env.init_market_hyperp(1_000_000);
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
 
     let mp = env.matcher_program_id;
     let lp = Keypair::new();
@@ -4143,8 +3921,7 @@ fn test_admin_force_close_account_with_negative_pnl() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_000_000_000);
 
-    env.try_push_oracle_price(&admin, 2_000_000, 1000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(2_000_000);
     env.set_slot(100);
     env.crank();
 
@@ -4170,8 +3947,7 @@ fn test_admin_force_close_account_with_negative_pnl() {
     env.crank();
 
     // Price drops → user loses (already realized from the flatten trade)
-    env.try_push_oracle_price(&admin, 1_000_000, 2000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
 
     env.set_slot(200);
@@ -4212,8 +3988,6 @@ fn test_admin_force_close_account_enables_close_slab() {
     env.init_market_hyperp(1_000_000);
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
 
     // Create LP and user
     let lp = Keypair::new();
@@ -4224,8 +3998,7 @@ fn test_admin_force_close_account_enables_close_slab() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_000_000_000);
 
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.set_slot(100);
     env.crank();
 
@@ -4251,8 +4024,7 @@ fn test_admin_force_close_account_enables_close_slab() {
     env.crank();
 
     // Resolve and force-close positions
-    env.try_push_oracle_price(&admin, 1_000_000, 2000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
     env.set_slot(200);
     env.crank();
@@ -4304,8 +4076,6 @@ fn test_honest_user_close_after_force_close_positive_pnl() {
     env.init_market_hyperp_with_warmup(1_000_000, 100); // mark = 1.0, warmup > 0
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &mp);
@@ -4315,8 +4085,7 @@ fn test_honest_user_close_after_force_close_positive_pnl() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_000_000_000);
 
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.set_slot(100);
     env.crank();
 
@@ -4342,8 +4111,7 @@ fn test_honest_user_close_after_force_close_positive_pnl() {
     env.crank();
 
     // Price doubles → user profits (realized from the flatten trade)
-    env.try_push_oracle_price(&admin, 2_000_000, 2000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(2_000_000);
     env.try_resolve_market(&admin).unwrap();
 
     env.set_slot(200);
@@ -4380,8 +4148,6 @@ fn test_honest_user_close_after_force_close_negative_pnl() {
     env.init_market_hyperp(1_000_000);
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &mp);
@@ -4391,8 +4157,7 @@ fn test_honest_user_close_after_force_close_negative_pnl() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_000_000_000);
 
-    env.try_push_oracle_price(&admin, 2_000_000, 1000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(2_000_000);
     env.set_slot(100);
     env.crank();
 
@@ -4409,8 +4174,7 @@ fn test_honest_user_close_after_force_close_negative_pnl() {
     .unwrap();
 
     // Price drops to 1.0 → user loses
-    env.try_push_oracle_price(&admin, 1_000_000, 2000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
 
     env.set_slot(200);
@@ -4444,8 +4208,6 @@ fn test_honest_participants_full_lifecycle() {
     env.init_market_hyperp(1_000_000);
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &mp);
@@ -4455,8 +4217,7 @@ fn test_honest_participants_full_lifecycle() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_000_000_000);
 
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.set_slot(100);
     env.crank();
 
@@ -4485,8 +4246,7 @@ fn test_honest_participants_full_lifecycle() {
     env.crank();
 
     // Resolve at same price — PnL should be ~0 for both
-    env.try_push_oracle_price(&admin, 1_000_000, 2000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
 
     env.set_slot(200);
@@ -4543,8 +4303,6 @@ fn test_honest_user_hyperp_trade_flatten_close() {
     env.init_market_hyperp(1_000_000); // mark = 1.0
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
 
     // Top up insurance to prevent force-realize mode
     let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
@@ -4558,8 +4316,7 @@ fn test_honest_user_hyperp_trade_flatten_close() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000); // 10 SOL
 
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.set_slot(100);
     env.crank();
 
@@ -4582,8 +4339,7 @@ fn test_honest_user_hyperp_trade_flatten_close() {
     );
 
     // Crank at same price
-    env.try_push_oracle_price(&admin, 1_000_000, 2000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.set_slot(200);
     env.crank();
 
@@ -4605,8 +4361,7 @@ fn test_honest_user_hyperp_trade_flatten_close() {
     );
 
     // Crank to settle
-    env.try_push_oracle_price(&admin, 1_000_000, 3000)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(1_000_000);
     env.set_slot(300);
     env.crank();
 
@@ -4649,8 +4404,6 @@ fn test_full_market_shutdown_lifecycle() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
 
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup");
 
     // Create LP and user
     let lp = Keypair::new();
@@ -4666,7 +4419,7 @@ fn test_full_market_shutdown_lifecycle() {
     env.top_up_insurance(&ins_payer, 500_000_000);
 
     // Push price and crank
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
     env.set_slot(100);
     env.crank();
 
@@ -4694,7 +4447,7 @@ fn test_full_market_shutdown_lifecycle() {
     env.crank();
 
     // Step 2: Resolve market
-    env.try_push_oracle_price(&admin, 1_200_000, 2000).unwrap();
+    env.set_oracle_price_e6(1_200_000);
     env.try_resolve_market(&admin).unwrap();
 
     // Step 3: Crank to settle PnL at settlement price
@@ -4734,7 +4487,6 @@ fn test_insurance_withdraw_resolved_requires_positions_closed() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
 
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &mp);
@@ -4747,14 +4499,14 @@ fn test_insurance_withdraw_resolved_requires_positions_closed() {
     let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.top_up_insurance(&ins_payer, 500_000_000);
 
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
     env.set_slot(100);
     env.crank();
 
     env.try_trade_cpi(&user, &lp.pubkey(), lp_idx, user_idx, 10_000, &mp, &matcher_ctx).unwrap();
     assert_ne!(env.read_account_position(user_idx), 0);
 
-    env.try_push_oracle_price(&admin, 1_000_000, 2000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
 
     let r = env.try_withdraw_insurance(&admin);
@@ -4771,8 +4523,7 @@ fn test_resolved_close_settles_before_closing() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
 
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     // Create LP and user with positions
     let lp = Keypair::new();
@@ -4791,7 +4542,7 @@ fn test_resolved_close_settles_before_closing() {
     assert_ne!(env.read_account_position(user_idx), 0);
 
     // Move price significantly before resolution
-    env.try_push_oracle_price(&admin, 2_000_000, 2000).unwrap();
+    env.set_oracle_price_e6(2_000_000);
     env.set_slot(200);
     env.crank();
 
@@ -4824,8 +4575,7 @@ fn test_tradecpi_zero_fill_succeeds() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
 
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     // Create LP with max_fill_abs=0 to force zero-fill responses
     let lp = Keypair::new();
@@ -4944,8 +4694,7 @@ fn test_resolved_close_with_inline_touch() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
 
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &mp);
@@ -4963,7 +4712,7 @@ fn test_resolved_close_with_inline_touch() {
     assert_ne!(pos, 0, "user should have an open position");
 
     // Move price to $2, crank to settle mark-to-market
-    env.try_push_oracle_price(&admin, 2_000_000, 2000).unwrap();
+    env.set_oracle_price_e6(2_000_000);
     env.set_slot(200);
     env.crank();
 
@@ -4996,8 +4745,7 @@ fn test_resolved_close_payout_with_and_without_crank() {
         let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
         let mp = env.matcher_program_id;
 
-        env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-        env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+            env.set_oracle_price_e6(1_000_000);
 
         let lp = Keypair::new();
         let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &mp);
@@ -5011,7 +4759,7 @@ fn test_resolved_close_payout_with_and_without_crank() {
         env.crank();
         env.try_trade_cpi(&user, &lp.pubkey(), lp_idx, user_idx, 100_000, &mp, &matcher_ctx).unwrap();
 
-        env.try_push_oracle_price(&admin, 2_000_000, 2000).unwrap();
+        env.set_oracle_price_e6(2_000_000);
         env.set_slot(200);
         env.crank();
 
@@ -5040,8 +4788,7 @@ fn test_resolved_close_payout_with_and_without_crank() {
         let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
         let mp = env.matcher_program_id;
 
-        env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-        env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+            env.set_oracle_price_e6(1_000_000);
 
         let lp = Keypair::new();
         let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &mp);
@@ -5055,7 +4802,7 @@ fn test_resolved_close_payout_with_and_without_crank() {
         env.crank();
         env.try_trade_cpi(&user, &lp.pubkey(), lp_idx, user_idx, 100_000, &mp, &matcher_ctx).unwrap();
 
-        env.try_push_oracle_price(&admin, 2_000_000, 2000).unwrap();
+        env.set_oracle_price_e6(2_000_000);
         env.set_slot(200);
         env.crank();
 
@@ -5451,8 +5198,7 @@ fn test_tradecpi_zero_fill_does_not_walk_index() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
 
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     // Create LP with max_fill_abs=0 to force zero-fill responses from matcher
     let lp = Keypair::new();
@@ -5564,7 +5310,7 @@ fn test_tradecpi_zero_fill_does_not_walk_index() {
 
     // Push a different oracle price so the index WOULD walk if the zero-fill
     // erroneously persisted the oracle update.
-    env.try_push_oracle_price(&admin, 2_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(2_000_000);
     env.set_slot(100);
 
     // Execute zero-fill TradeCpi
@@ -5622,8 +5368,7 @@ fn test_trade_cpi_rejects_nonce_overflow_instead_of_wrapping() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 100).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &mp);
@@ -5718,8 +5463,7 @@ fn test_slot_reuse_does_not_reuse_lp_matcher_identity() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 100).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp1 = Keypair::new();
     let (lp1_idx, _ctx1) = env.init_lp_with_matcher(&lp1, &mp);

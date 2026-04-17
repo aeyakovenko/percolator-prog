@@ -238,9 +238,7 @@ fn test_attack_premarket_force_close_pnl_conservation() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     // Create LP and 3 users with positions
     let lp = Keypair::new();
@@ -300,7 +298,7 @@ fn test_attack_premarket_force_close_pnl_conservation() {
     env.crank();
 
     // Resolve at different price to create PnL
-    env.try_push_oracle_price(&admin, 1_500_000, 2000).unwrap(); // 50% up
+    env.set_oracle_price_e6(1_500_000); // 50% up
     env.try_resolve_market(&admin).unwrap();
 
     // Force-close via crank (settles PnL only; positions require AdminForceCloseAccount)
@@ -365,9 +363,7 @@ fn test_attack_multi_lp_conservation() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     // Create 2 LPs
     let lp1 = Keypair::new();
@@ -412,7 +408,7 @@ fn test_attack_multi_lp_conservation() {
     assert!(result.is_ok(), "Trade vs LP2 should succeed: {:?}", result);
 
     // Price moves
-    env.try_push_oracle_price(&admin, 1_200_000, 2000).unwrap();
+    env.set_oracle_price_e6(1_200_000);
     env.set_slot(200);
     env.crank();
 
@@ -460,9 +456,7 @@ fn test_attack_conservation_through_price_movement() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let lp = Keypair::new();
     let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
@@ -498,7 +492,7 @@ fn test_attack_conservation_through_price_movement() {
     );
 
     // Price moves up
-    env.try_push_oracle_price(&admin, 1_500_000, 2000).unwrap();
+    env.set_oracle_price_e6(1_500_000);
     env.set_slot(200);
     env.crank();
 
@@ -511,7 +505,7 @@ fn test_attack_conservation_through_price_movement() {
     );
 
     // Price moves down
-    env.try_push_oracle_price(&admin, 500_000, 3000).unwrap();
+    env.set_oracle_price_e6(500_000);
     env.set_slot(300);
     env.crank();
 
@@ -552,9 +546,7 @@ fn test_attack_premarket_partial_force_close_conservation() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     // Create LP and many users
     let lp = Keypair::new();
@@ -589,7 +581,7 @@ fn test_attack_premarket_partial_force_close_conservation() {
     let vault_before = env.read_vault();
 
     // Resolve market
-    env.try_push_oracle_price(&admin, 1_200_000, 2000).unwrap();
+    env.set_oracle_price_e6(1_200_000);
     env.try_resolve_market(&admin).unwrap();
 
     // Single crank: may only force-close a batch (64 accounts max)
@@ -2329,10 +2321,7 @@ fn test_binary_market_complete_lifecycle_conservation() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("initial oracle push must succeed");
+    env.set_oracle_price_e6(1_000_000);
 
     // Setup: LP + 2 users with opposing positions
     let lp = Keypair::new();
@@ -2375,8 +2364,7 @@ fn test_binary_market_complete_lifecycle_conservation() {
     let vault_before = env.vault_balance();
 
     // Resolve at $1.50 (user_a profits, user_b loses)
-    env.try_push_oracle_price(&admin, 1_500_000, 2000)
-        .expect("resolution oracle push must succeed");
+    env.set_oracle_price_e6(1_500_000);
     env.try_resolve_market(&admin).unwrap();
 
     // Settle PnL via crank (positions require explicit AdminForceCloseAccount)

@@ -125,10 +125,7 @@ fn test_limited_insurance_withdraw_defaults_enforced() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(138_000_000);
 
     // Seed insurance before resolution.
     env.top_up_insurance(&admin, 10_000_000_000);
@@ -209,10 +206,7 @@ fn test_limited_insurance_withdraw_custom_policy_enforced() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(138_000_000);
 
     env.top_up_insurance(&admin, 10_000_000_000);
     env.set_slot(100);
@@ -329,10 +323,7 @@ fn test_limited_insurance_withdraw_cooldown_enforced_from_slot_zero() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(138_000_000);
 
     env.top_up_insurance(&admin, 10_000_000_000);
     env.set_slot(100);
@@ -392,10 +383,7 @@ fn test_limited_insurance_withdraw_min_floor_when_percent_cap_small() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(138_000_000);
 
     env.top_up_insurance(&admin, 10_000);
     env.set_slot(100);
@@ -456,10 +444,7 @@ fn test_limited_insurance_withdraw_default_min_floor_respects_unit_scale() {
     env.init_market_full(0, 1000, 0); // unit_scale = 1000
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(138_000_000);
 
     // 50_000 base => 50 units in insurance.
     env.top_up_insurance(&admin, 50_000);
@@ -544,10 +529,7 @@ fn test_limited_insurance_withdraw_failed_attempts_do_not_arm_cooldown() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(138_000_000);
 
     env.top_up_insurance(&admin, 10_000_000_000);
     env.set_slot(100);
@@ -643,10 +625,7 @@ fn test_limited_insurance_policy_validation_and_resolution_gates() {
     );
 
     // Prepare resolvable state.
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(138_000_000);
     env.top_up_insurance(&admin, 1_000_000_000);
     env.set_slot(100);
     env.crank();
@@ -689,10 +668,7 @@ fn test_limited_insurance_withdraw_adversarial_guards() {
     env.init_market_full(0, 1000, 0); // unit_scale = 1000 for alignment checks
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(138_000_000);
 
     // Seed insurance while unresolved.
     let seeded_base = 10_000_000_000u64;
@@ -819,10 +795,7 @@ fn test_admin_withdraw_insurance_bypasses_limited_policy() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
-        .expect("oracle price push");
+    env.set_oracle_price_e6(138_000_000);
 
     // Seed insurance before resolution
     env.top_up_insurance(&admin, 10_000_000_000);
@@ -942,12 +915,7 @@ fn test_attack_withdraw_insurance_with_open_positions() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-
-    // Set oracle authority and push price
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(138_000_000);
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -1065,10 +1033,7 @@ fn test_attack_topup_insurance_after_resolution() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(138_000_000);
     env.set_slot(100);
     env.crank();
     env.try_resolve_market(&admin)
@@ -1692,11 +1657,7 @@ fn test_withdraw_insurance_decrements_engine_vault() {
     env.set_slot(60);
     env.crank();
 
-    // Setup oracle authority and push price (required for ResolveMarket)
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 160)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(138_000_000);
 
     // Resolve market (premarket resolution)
     let result = env.try_resolve_market(&admin);
@@ -1759,8 +1720,7 @@ fn test_insurance_withdraw_cooldown_enforcement() {
 
     // Resolve market to enable SetInsuranceWithdrawPolicy
     env.set_slot(1);
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 138_000_000, 200).unwrap();
+    env.set_oracle_price_e6(138_000_000);
     env.set_slot(200);
     env.crank();
     env.try_resolve_market(&admin).unwrap();
@@ -1796,8 +1756,7 @@ fn test_insurance_withdraw_bps_cap() {
 
     // Resolve
     env.set_slot(1);
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 138_000_000, 200).unwrap();
+    env.set_oracle_price_e6(138_000_000);
     env.set_slot(200);
     env.crank();
     env.try_resolve_market(&admin).unwrap();
@@ -1940,8 +1899,7 @@ fn test_top_up_insurance_blocked_on_resolved() {
     env.init_market_hyperp(1_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
     assert!(env.is_market_resolved());
 

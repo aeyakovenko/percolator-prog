@@ -2520,19 +2520,6 @@ pub fn encode_set_risk_threshold(new_threshold: u128) -> Vec<u8> {
     data
 }
 
-pub fn encode_set_oracle_authority(new_authority: &Pubkey) -> Vec<u8> {
-    let mut data = vec![16u8]; // Tag 16: SetOracleAuthority
-    data.extend_from_slice(new_authority.as_ref());
-    data
-}
-
-pub fn encode_push_oracle_price(price_e6: u64, timestamp: i64) -> Vec<u8> {
-    let mut data = vec![17u8]; // Tag 17: PushOraclePrice
-    data.extend_from_slice(&price_e6.to_le_bytes());
-    data.extend_from_slice(&timestamp.to_le_bytes());
-    data
-}
-
 pub fn encode_set_oracle_price_cap(max_change_e2bps: u64) -> Vec<u8> {
     let mut data = vec![18u8]; // Tag 18: SetOraclePriceCap
     data.extend_from_slice(&max_change_e2bps.to_le_bytes());
@@ -2669,69 +2656,38 @@ impl TestEnv {
             .map_err(|e| format!("{:?}", e))
     }
 
-    /// Try SetOracleAuthority instruction
-    pub fn try_set_oracle_authority(
-        &mut self,
-        signer: &Keypair,
-        new_authority: &Pubkey,
-    ) -> Result<(), String> {
-        let ix = Instruction {
-            program_id: self.program_id,
-            accounts: vec![
-                AccountMeta::new(signer.pubkey(), true),
-                AccountMeta::new(self.slab, false),
-            ],
-            data: encode_set_oracle_authority(new_authority),
-        };
-        let tx = Transaction::new_signed_with_payer(
-            &[cu_ix(), ix],
-            Some(&signer.pubkey()),
-            &[signer],
-            self.svm.latest_blockhash(),
-        );
-        self.svm
-            .send_transaction(tx)
-            .map(|_| ())
-            .map_err(|e| format!("{:?}", e))
-    }
-
-    /// Try PushOraclePrice instruction
-    pub fn try_push_oracle_price(
-        &mut self,
-        signer: &Keypair,
-        price_e6: u64,
-        _timestamp: i64,
-    ) -> Result<(), String> {
-        // Use current clock unix_timestamp + 1 to guarantee strict monotonicity
-        // and clock anchoring. The explicit timestamp parameter is ignored —
-        // kept for API compatibility.
+    /// Phase G migration helper: replace `try_push_oracle_price`. Writes the Pyth
+    /// mock account directly (no on-chain transaction). Bumps clock unix_timestamp
+    /// by 1 to preserve the strict-monotonicity behavior the old push helper had.
+    pub fn set_oracle_price_e6(&mut self, price_e6: u64) {
         let clock: Clock = self.svm.get_sysvar();
-        let ts = clock.unix_timestamp;
-        // Bump the clock by 1 second so subsequent pushes in the same test
-        // get strictly increasing timestamps.
+        let ts = clock.unix_timestamp + 1;
         self.svm.set_sysvar(&Clock {
             slot: clock.slot,
-            unix_timestamp: ts + 1,
+            unix_timestamp: ts,
             ..clock
         });
-        let ix = Instruction {
-            program_id: self.program_id,
-            accounts: vec![
-                AccountMeta::new(signer.pubkey(), true),
-                AccountMeta::new(self.slab, false),
-            ],
-            data: encode_push_oracle_price(price_e6, ts),
-        };
-        let tx = Transaction::new_signed_with_payer(
-            &[cu_ix(), ix],
-            Some(&signer.pubkey()),
-            &[signer],
-            self.svm.latest_blockhash(),
-        );
-        self.svm
-            .send_transaction(tx)
-            .map(|_| ())
-            .map_err(|e| format!("{:?}", e))
+        let pyth_data = make_pyth_data(&TEST_FEED_ID, price_e6 as i64, -6, 1, ts);
+        self.svm.set_account(
+            self.pyth_index,
+            Account {
+                lamports: 1_000_000,
+                data: pyth_data.clone(),
+                owner: PYTH_RECEIVER_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        ).unwrap();
+        self.svm.set_account(
+            self.pyth_col,
+            Account {
+                lamports: 1_000_000,
+                data: pyth_data,
+                owner: PYTH_RECEIVER_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        ).unwrap();
     }
 
     /// Try SetOraclePriceCap instruction
@@ -3727,65 +3683,38 @@ impl TradeCpiTestEnv {
         self.svm.send_transaction(tx).expect("crank failed");
     }
 
-    pub fn try_set_oracle_authority(
-        &mut self,
-        admin: &Keypair,
-        new_authority: &Pubkey,
-    ) -> Result<(), String> {
-        let ix = Instruction {
-            program_id: self.program_id,
-            accounts: vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(self.slab, false),
-            ],
-            data: encode_set_oracle_authority(new_authority),
-        };
-
-        let tx = Transaction::new_signed_with_payer(
-            &[cu_ix(), ix],
-            Some(&admin.pubkey()),
-            &[admin],
-            self.svm.latest_blockhash(),
-        );
-        self.svm
-            .send_transaction(tx)
-            .map(|_| ())
-            .map_err(|e| format!("{:?}", e))
-    }
-
-    pub fn try_push_oracle_price(
-        &mut self,
-        authority: &Keypair,
-        price_e6: u64,
-        _timestamp: i64,
-    ) -> Result<(), String> {
+    /// Phase G migration helper: replace `try_push_oracle_price`. Writes the Pyth
+    /// mock account directly (no on-chain transaction). Bumps clock unix_timestamp
+    /// by 1 to preserve the strict-monotonicity behavior the old push helper had.
+    pub fn set_oracle_price_e6(&mut self, price_e6: u64) {
         let clock: Clock = self.svm.get_sysvar();
-        let ts = clock.unix_timestamp;
+        let ts = clock.unix_timestamp + 1;
         self.svm.set_sysvar(&Clock {
             slot: clock.slot,
-            unix_timestamp: ts + 1,
+            unix_timestamp: ts,
             ..clock
         });
-        let ix = Instruction {
-            program_id: self.program_id,
-            accounts: vec![
-                AccountMeta::new(authority.pubkey(), true),
-                AccountMeta::new(self.slab, false),
-                AccountMeta::new_readonly(sysvar::clock::ID, false),
-            ],
-            data: encode_push_oracle_price(price_e6, ts),
-        };
-
-        let tx = Transaction::new_signed_with_payer(
-            &[cu_ix(), ix],
-            Some(&authority.pubkey()),
-            &[authority],
-            self.svm.latest_blockhash(),
-        );
-        self.svm
-            .send_transaction(tx)
-            .map(|_| ())
-            .map_err(|e| format!("{:?}", e))
+        let pyth_data = make_pyth_data(&TEST_FEED_ID, price_e6 as i64, -6, 1, ts);
+        self.svm.set_account(
+            self.pyth_index,
+            Account {
+                lamports: 1_000_000,
+                data: pyth_data.clone(),
+                owner: PYTH_RECEIVER_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        ).unwrap();
+        self.svm.set_account(
+            self.pyth_col,
+            Account {
+                lamports: 1_000_000,
+                data: pyth_data,
+                owner: PYTH_RECEIVER_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        ).unwrap();
     }
 
     /// v12.17: flatten positions via an opposing TradeCpi before resolution.

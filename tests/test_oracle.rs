@@ -552,59 +552,6 @@ fn test_comprehensive_oracle_price_impact_on_pnl() {
     assert_ne!(env.read_account_position(user_idx), 0, "Position must persist through price changes");
 }
 
-/// CRITICAL: Admin oracle mechanism for Hyperp mode
-#[test]
-fn test_critical_admin_oracle_authority() {
-    program_path();
-
-    let mut env = TestEnv::new();
-    env.init_market_with_invert(0);
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    let oracle_authority = Keypair::new();
-    let attacker = Keypair::new();
-    env.svm
-        .airdrop(&oracle_authority.pubkey(), 1_000_000_000)
-        .unwrap();
-    env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
-
-    // Attacker tries to set oracle authority - should fail
-    let result = env.try_set_oracle_authority(&attacker, &attacker.pubkey());
-    assert!(
-        result.is_err(),
-        "SECURITY: Non-admin should not set oracle authority"
-    );
-    println!("SetOracleAuthority by non-admin: REJECTED (correct)");
-
-    // Admin sets oracle authority - should succeed
-    let result = env.try_set_oracle_authority(&admin, &oracle_authority.pubkey());
-    assert!(
-        result.is_ok(),
-        "Admin should set oracle authority: {:?}",
-        result
-    );
-    println!("SetOracleAuthority by admin: ACCEPTED (correct)");
-
-    // Attacker tries to push price - should fail
-    let result = env.try_push_oracle_price(&attacker, 150_000_000, 200);
-    assert!(
-        result.is_err(),
-        "SECURITY: Non-authority should not push oracle price"
-    );
-    println!("PushOraclePrice by non-authority: REJECTED (correct)");
-
-    // Oracle authority pushes price - should succeed
-    let result = env.try_push_oracle_price(&oracle_authority, 150_000_000, 200);
-    assert!(
-        result.is_ok(),
-        "Oracle authority should push price: {:?}",
-        result
-    );
-    println!("PushOraclePrice by authority: ACCEPTED (correct)");
-
-    println!("CRITICAL TEST PASSED: Admin oracle mechanism verified");
-}
-
 /// CRITICAL: SetOraclePriceCap admin-only
 #[test]
 fn test_critical_set_oracle_price_cap_authorization() {
@@ -852,10 +799,7 @@ fn test_hyperp_index_smoothing_rate_limited() {
     // Init Hyperp market (feed_id = [0;32], no external oracle)
     env.init_market_hyperp(initial_price);
 
-    // Set oracle authority so we can push prices
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("set oracle authority");
 
     // Read default oracle_price_cap_e2bps (1% per slot = 10_000 e2bps)
     let slab_data = env.svm.get_account(&env.slab).unwrap().data;
@@ -870,7 +814,7 @@ fn test_hyperp_index_smoothing_rate_limited() {
     // EWMA: $100 * 0.5 + $101 * 0.5 = $100.5M
     // The mark moves enough that the index will follow.
     env.set_slot(1);
-    env.try_push_oracle_price(&admin, 200_000_000, 200).expect("push");
+    env.set_oracle_price_e6(200_000_000);
 
     let slab_data = env.svm.get_account(&env.slab).unwrap().data;
     const INDEX_OFF: usize = 72 + 200; // HEADER_LEN(72) + offset_of!(MarketConfig, last_effective_price_e6)(200)
@@ -1051,8 +995,7 @@ fn test_funding_boundary_anti_retroactivity_update_config() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let matcher_prog = env.matcher_program_id;
 
-    // Oracle authority + high cap so mark can diverge from index
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
+    // High cap so mark can diverge from index
     env.try_set_oracle_price_cap(&admin, 100_000).unwrap(); // 10%/slot
 
     // Helper: send UpdateConfig with a specific funding_k_bps.
@@ -1085,8 +1028,8 @@ fn test_funding_boundary_anti_retroactivity_update_config() {
     admin_send_config(&mut env, 1000);
     println!("1. Funding config: k=1000, horizon=100");
 
-    // Push price and crank to initialize
-    env.try_push_oracle_price(&admin, 1_000_000, 100).unwrap();
+    // Set price and crank to initialize
+    env.set_oracle_price_e6(1_000_000);
     env.set_slot(5);
     env.crank();
 
@@ -1115,7 +1058,7 @@ fn test_funding_boundary_anti_retroactivity_update_config() {
     // The trade updated mark to exec_price (which may differ from index).
     // Push mark above current index to widen the premium, then let it persist.
     env.set_slot(11);
-    env.try_push_oracle_price(&admin, 2_000_000, 111).unwrap();
+    env.set_oracle_price_e6(2_000_000);
     // Do NOT crank -- we want mark != index so the stored rate is non-zero.
     // The push already recomputes and stores the funding rate.
 
@@ -1165,7 +1108,7 @@ fn test_funding_boundary_anti_retroactivity_update_config() {
 
     // Post-UpdateConfig crank should use new rate (k=2000)
     env.set_slot(11 + idle_dt + 10);
-    env.try_push_oracle_price(&admin, 2_000_000, 190).unwrap();
+    env.set_oracle_price_e6(2_000_000);
     env.crank();
     let config_post = {
         let d = env.svm.get_account(&env.slab).unwrap().data;

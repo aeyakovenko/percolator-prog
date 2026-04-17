@@ -78,7 +78,6 @@ use percolator_prog::{
         TAG_LP_VAULT_DEPOSIT,
         TAG_LP_VAULT_WITHDRAW,
         TAG_MINT_POSITION_NFT,
-        TAG_PUSH_ORACLE_PRICE,
         TAG_QUERY_LP_FEES,
         TAG_QUEUE_WITHDRAWAL,
         TAG_QUEUE_WITHDRAWAL_SV,
@@ -99,7 +98,6 @@ use percolator_prog::{
         TAG_ACCEPT_ADMIN,
         TAG_SET_OFFSET_PAIR,
         TAG_SET_OI_IMBALANCE_HARD_BLOCK,
-        TAG_SET_ORACLE_AUTHORITY,
         TAG_SET_ORACLE_PRICE_CAP,
         TAG_SET_PENDING_SETTLEMENT,
         TAG_SET_PYTH_ORACLE,
@@ -375,8 +373,8 @@ fn all_tags() -> &'static [u8] {
         TAG_CLOSE_SLAB,                    // 13
         TAG_UPDATE_CONFIG,                 // 14
         TAG_SET_MAINTENANCE_FEE,           // 15
-        TAG_SET_ORACLE_AUTHORITY,          // 16
-        TAG_PUSH_ORACLE_PRICE,             // 17
+        // 16 = TAG_SET_ORACLE_AUTHORITY — permanently removed Phase G (4ab59f0)
+        // 17 = TAG_PUSH_ORACLE_PRICE    — permanently removed Phase G (4ab59f0)
         TAG_SET_ORACLE_PRICE_CAP,          // 18
         TAG_RESOLVE_MARKET,                // 19
         TAG_WITHDRAW_INSURANCE,            // 20
@@ -492,8 +490,8 @@ fn tags_match_numeric_values() {
     assert_eq!(TAG_CLOSE_SLAB, 13u8);
     assert_eq!(TAG_UPDATE_CONFIG, 14u8);
     assert_eq!(TAG_SET_MAINTENANCE_FEE, 15u8);
-    assert_eq!(TAG_SET_ORACLE_AUTHORITY, 16u8);
-    assert_eq!(TAG_PUSH_ORACLE_PRICE, 17u8);
+    // 16 = TAG_SET_ORACLE_AUTHORITY — permanently removed Phase G (4ab59f0)
+    // 17 = TAG_PUSH_ORACLE_PRICE    — permanently removed Phase G (4ab59f0)
     assert_eq!(TAG_SET_ORACLE_PRICE_CAP, 18u8);
     assert_eq!(TAG_RESOLVE_MARKET, 19u8);
     assert_eq!(TAG_WITHDRAW_INSURANCE, 20u8);

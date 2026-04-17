@@ -27,10 +27,7 @@ fn test_resolved_market_blocks_new_activity() {
     env.init_market_hyperp(1_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("set_oracle_authority should succeed");
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("push_oracle_price should succeed");
+    env.set_oracle_price_e6(1_000_000);
 
     // Resolve market
     let result = env.try_resolve_market(&admin);
@@ -83,10 +80,7 @@ fn test_resolved_market_allows_user_withdrawal() {
     env.init_market_hyperp(1_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("set_oracle_authority should succeed");
-    env.try_push_oracle_price(&admin, 1_000_000, 1000)
-        .expect("push_oracle_price should succeed");
+    env.set_oracle_price_e6(1_000_000);
 
     // Create user with deposit
     let user = Keypair::new();
@@ -132,11 +126,7 @@ fn test_attack_trade_after_market_resolved() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
 
-    // Set oracle authority and push price so resolve can work
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(138_000_000);
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -202,50 +192,6 @@ fn test_attack_trade_after_market_resolved() {
     );
 }
 
-/// ATTACK: Resolve market without oracle authority price being set.
-/// Expected: Resolution requires authority price to be set first.
-#[test]
-fn test_attack_resolve_market_without_oracle_price() {
-    program_path();
-
-    let mut env = TestEnv::new();
-    env.init_market_with_invert(0);
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-
-    // Set oracle authority but DON'T push a price
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-
-    let resolved_before = env.is_market_resolved();
-    let used_before = env.read_num_used_accounts();
-    let vault_before = env.vault_balance();
-
-    // Try to resolve without pushing price
-    let result = env.try_resolve_market(&admin);
-    assert!(
-        result.is_err(),
-        "ATTACK: Resolve without oracle price should fail"
-    );
-    let resolved_after = env.is_market_resolved();
-    let used_after = env.read_num_used_accounts();
-    let vault_after = env.vault_balance();
-
-    assert!(!resolved_before, "Precondition: market should be unresolved");
-    assert_eq!(
-        resolved_after, resolved_before,
-        "Rejected resolve-without-price must not toggle resolved flag"
-    );
-    assert_eq!(
-        used_after, used_before,
-        "Rejected resolve-without-price must not change num_used_accounts"
-    );
-    assert_eq!(
-        vault_after, vault_before,
-        "Rejected resolve-without-price must not move vault funds"
-    );
-}
-
 /// ATTACK: Resolve an already-resolved market.
 /// Expected: Double resolution rejected.
 #[test]
@@ -256,10 +202,7 @@ fn test_attack_double_resolution() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(138_000_000);
 
     env.set_slot(100);
     env.crank();
@@ -284,10 +227,7 @@ fn test_attack_withdraw_between_resolution_and_force_close() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("oracle authority setup must succeed");
-    env.try_push_oracle_price(&admin, 138_000_000, 100)
-        .expect("oracle price push must succeed");
+    env.set_oracle_price_e6(138_000_000);
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -326,9 +266,7 @@ fn test_attack_resolve_market_non_admin() {
     env.init_market_hyperp(1_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     // Non-admin tries to resolve
     let attacker = Keypair::new();
@@ -625,8 +563,7 @@ fn test_honest_participants_standard_market_full_lifecycle() {
 
     // Resolve market before CloseSlab (lifecycle requirement)
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 138_000_000, 100).unwrap();
+    env.set_oracle_price_e6(138_000_000);
     env.try_resolve_market(&admin).unwrap();
 
     // Close slab (insurance=0, all accounts closed, market resolved)
@@ -644,8 +581,7 @@ fn test_liquidate_blocked_on_resolved_market() {
     env.init_market_hyperp(1_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
@@ -704,8 +640,7 @@ fn test_resolved_crank_dust_base_stays_zero_with_aligned_deposits() {
     env.crank();
     env.close_account(&user, user_idx);
 
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 138_000_000, 200).unwrap();
+    env.set_oracle_price_e6(138_000_000);
     env.try_resolve_market(&admin).unwrap();
 
     env.set_slot(300);
@@ -753,8 +688,7 @@ fn test_admin_force_close_admin_only() {
     env.init_market_hyperp(1_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
@@ -803,17 +737,14 @@ fn test_hyperp_full_lifecycle_init_to_close_slab() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
 
-    // 2. Set oracle authority
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .expect("set_oracle_authority");
-    println!("2. Oracle authority set");
+    println!("2. Oracle authority removed (Phase G)");
 
     // 3. Push mark prices over multiple slots.
     //    The circuit breaker clamps mark against index (1%/slot default cap).
     //    Index only moves toward mark when dt > 0 (Bug #9 fix).
     env.set_slot(10);
-    env.try_push_oracle_price(&admin, 110_000_000, 110)
-        .expect("push $110");
+    env.set_oracle_price_e6(110_000_000);
+    println!("3. set_oracle_price_e6 $110");
 
     // Read index right after push (should still be initial since the push's
     // internal index flush used the OLD mark = initial = 100M, so no movement)
@@ -843,10 +774,10 @@ fn test_hyperp_full_lifecycle_init_to_close_slab() {
 
     // Push again at later slot to continue driving mark up
     env.set_slot(30);
-    env.try_push_oracle_price(&admin, 120_000_000, 130).expect("push $120");
+    env.set_oracle_price_e6(120_000_000);
     env.set_slot(40);
     env.crank();
-    println!("   Pushed $120 at slot 30, cranked at slot 40");
+    println!("   set_oracle_price_e6 $120 at slot 30, cranked at slot 40");
 
     // 5. UpdateConfig (change funding params)
     let ix = Instruction {
@@ -886,7 +817,7 @@ fn test_hyperp_full_lifecycle_init_to_close_slab() {
     env.crank();
 
     // 8. ResolveMarket
-    env.try_push_oracle_price(&admin, 115_000_000, 150).expect("settlement price");
+    env.set_oracle_price_e6(115_000_000);
     env.try_resolve_market(&admin).expect("ResolveMarket");
     assert!(env.is_market_resolved());
     println!("8. Market resolved at $115");
@@ -936,8 +867,7 @@ fn test_resolved_crank_is_idempotent() {
     env.init_market_hyperp(1_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
 
     // Create a few users so the slab is non-trivial
     let mut users = Vec::new();
@@ -1048,8 +978,7 @@ fn test_resolve_permissionless_already_admin_resolved() {
 
     // Admin resolves first
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 138_000_000, 100).unwrap();
+    env.set_oracle_price_e6(138_000_000);
     env.set_slot(100);
     env.crank();
     env.try_resolve_market(&admin).unwrap();
@@ -1483,96 +1412,6 @@ fn test_resolve_permissionless_empty_market_at_sentinel() {
 }
 
 // ============================================================================
-// Finding 3: ResolveMarket settlement guard — live cap
-// ============================================================================
-
-/// A market with min_oracle_price_cap_e2bps=0 but live oracle_price_cap > 0
-/// should still enforce the settlement guard using the live cap.
-/// Scenario: authority pushes at $138 (matching oracle), then the external oracle
-/// jumps to $150 before resolution. The settlement guard should catch this.
-#[test]
-fn test_resolve_market_uses_live_cap_when_floor_is_zero() {
-    program_path();
-    let mut env = TestEnv::new();
-    // Init with min_oracle_price_cap = 0 (no immutable floor)
-    env.init_market_with_invert(0);
-
-    // Set a live oracle_price_cap via admin
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_price_cap(&admin, 10_000).unwrap(); // 1% cap
-
-    // Crank to establish baseline
-    env.crank();
-
-    // Set up authority and push at current oracle price ($138)
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.set_slot(200);
-    env.try_push_oracle_price(&admin, 138_000_000, 300).unwrap();
-
-    // Now external oracle jumps to $150 (9% move from $138)
-    // This simulates the oracle updating while the authority price is stale
-    env.set_slot_and_price(300, 150_000_000);
-
-    // ResolveMarket: authority_price=$138M, fresh oracle=$150M, cap=1%
-    // 138M is NOT within 1% of 150M → should be rejected.
-    // But with min_oracle_price_cap_e2bps=0, the old code skips the guard entirely.
-    let result = env.try_resolve_market(&admin);
-    assert!(
-        result.is_err(),
-        "Settlement guard must use live cap when floor=0 but cap>0"
-    );
-}
-
-// ============================================================================
-// Finding 8: ResolvePermissionless — authority pricing freshness
-// ============================================================================
-
-/// A market with a live oracle authority should NOT be permissionlessly resolvable
-/// just because the external feed is stale — the authority can still push prices.
-#[test]
-fn test_resolve_permissionless_blocked_by_live_authority() {
-    program_path();
-    let mut env = TestEnv::new();
-    env.init_market_with_cap(0, 10_000, 100);
-
-    {
-        let mut slab = env.svm.get_account(&env.slab).unwrap();
-        slab.data[168..176].copy_from_slice(&30u64.to_le_bytes());
-        env.svm.set_account(env.slab, slab).unwrap();
-    }
-
-    // Crank + set authority
-    env.crank();
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-
-    // Advance clock to ts=200, then push. The helper uses clock.unix_timestamp
-    // for the push timestamp, so authority_timestamp will be ~200.
-    env.svm.set_sysvar(&Clock {
-        slot: 300,
-        unix_timestamp: 200,
-        ..Clock::default()
-    });
-    env.try_push_oracle_price(&admin, 138_000_000, 0).unwrap();
-
-    // Advance clock to make external oracle stale but authority still fresh.
-    // Oracle publish_time=100 (from init), max_staleness=30.
-    // At ts=220: oracle age=120 > 30 (stale), authority age=~20 < 30 (fresh).
-    env.svm.set_sysvar(&Clock {
-        slot: 320,
-        unix_timestamp: 220,
-        ..Clock::default()
-    });
-
-    // Should be rejected — authority pushed recently (age ~20 < 30)
-    let result = env.try_resolve_permissionless();
-    assert!(
-        result.is_err(),
-        "Must not resolve permissionlessly when authority push is fresh"
-    );
-}
-
-// ============================================================================
 // Change 2: Permissionless ForceCloseResolved
 // ============================================================================
 
@@ -1620,8 +1459,7 @@ fn test_force_close_resolved_basic() {
     env.set_slot(210);
     env.crank();
 
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 138_000_000, 310).unwrap();
+    env.set_oracle_price_e6(138_000_000);
     env.try_resolve_market(&admin).unwrap();
     assert!(env.is_market_resolved());
 
@@ -1672,8 +1510,7 @@ fn test_force_close_resolved_rejects_before_delay() {
     env.top_up_insurance(&admin, 1_000_000_000);
     env.set_slot(200);
     env.crank();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 138_000_000, 300).unwrap();
+    env.set_oracle_price_e6(138_000_000);
     env.try_resolve_market(&admin).unwrap();
 
     // Try immediately — too early (resolution at ~300, delay=500)
@@ -1720,15 +1557,11 @@ fn test_resolve_market_passes_fresh_live_oracle_to_engine() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-
-    // Crank at oracle price 138_000_000 (sets engine.last_oracle_price)
-    env.try_push_oracle_price(&admin, 138_000_000, 100).unwrap();
+    env.set_oracle_price_e6(138_000_000);
     env.set_slot(100);
     env.crank();
 
-    // Push settlement price within band of oracle
-    env.try_push_oracle_price(&admin, 138_000_000, 200).unwrap();
+    env.set_oracle_price_e6(138_000_000);
 
     // Resolve should succeed — fresh oracle from Pyth account matches settlement
     env.set_slot(200);
@@ -1753,11 +1586,7 @@ fn test_resolve_market_before_first_crank_with_fresh_oracle() {
     env.init_market_with_invert(0);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-
-    // Push settlement price but do NOT crank.
-    // engine.last_oracle_price is still the init sentinel (1).
-    env.try_push_oracle_price(&admin, 138_000_000, 100).unwrap();
+    env.set_oracle_price_e6(138_000_000);
 
     // The Pyth oracle account has price 138_000_000, which is fresh.
     // ResolveMarket should read this fresh oracle and pass it to the engine
@@ -1820,8 +1649,7 @@ fn test_sp1_force_close_delay_uses_engine_resolved_slot() {
     env.crank();
 
     // Resolve at slot ~1000
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 138_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(138_000_000);
     env.try_resolve_market(&admin).unwrap();
     assert!(env.is_market_resolved());
 

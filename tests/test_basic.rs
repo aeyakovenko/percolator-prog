@@ -2011,8 +2011,7 @@ fn test_funding_rate_transfers_pnl_on_premium() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
     // Widen cap so mark can diverge from index significantly
     env.try_set_oracle_price_cap(&admin, 500_000).unwrap(); // 50% per slot
 
@@ -2041,7 +2040,7 @@ fn test_funding_rate_transfers_pnl_on_premium() {
     // Index will chase mark but never catch up fully due to rate limiting.
     // Each crank applies funding from the previous rate (anti-retroactivity).
     for slot in (100..5000).step_by(100) {
-        env.try_push_oracle_price(&admin, 1_500_000, slot as i64).unwrap();
+        env.set_oracle_price_e6(1_500_000);
         env.set_slot(slot as u64);
         env.crank();
     }
@@ -2193,8 +2192,7 @@ fn test_settle_account_blocked_on_resolved() {
 
     // Resolve the market.
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 138_000_000, 300).unwrap();
+    env.set_oracle_price_e6(138_000_000);
     env.set_slot(300);
     env.try_resolve_market(&admin).unwrap();
     assert!(env.is_market_resolved(), "Market must be resolved");
@@ -2492,8 +2490,7 @@ fn test_convert_released_pnl_blocked_on_resolved() {
 
     // Resolve the market.
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 138_000_000, 300).unwrap();
+    env.set_oracle_price_e6(138_000_000);
     env.set_slot(300);
     env.try_resolve_market(&admin).unwrap();
     assert!(env.is_market_resolved(), "Market must be resolved");
@@ -2544,8 +2541,7 @@ fn test_init_user_blocked_on_resolved() {
     env.init_market_hyperp(1_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
     assert!(env.is_market_resolved());
 
@@ -2645,8 +2641,7 @@ fn test_init_lp_blocked_on_resolved() {
     env.init_market_hyperp(1_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+    env.set_oracle_price_e6(1_000_000);
     env.try_resolve_market(&admin).unwrap();
     assert!(env.is_market_resolved());
 
@@ -2750,8 +2745,7 @@ fn test_reclaim_blocked_on_resolved() {
 
     // Resolve the market
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
-    env.try_push_oracle_price(&admin, 138_000_000, 200).unwrap();
+    env.set_oracle_price_e6(138_000_000);
     env.try_resolve_market(&admin).unwrap();
     assert!(env.is_market_resolved());
 
