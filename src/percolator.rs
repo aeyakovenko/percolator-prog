@@ -3332,7 +3332,15 @@ pub mod processor {
                     }
                 }
                 if let Some(ms) = custom_max_per_slot {
-                    if ms < 0 || funding_bps_to_e9(ms) > percolator::MAX_ABS_FUNDING_E9_PER_SLOT {
+                    // The wrapper's RiskParams envelope stores a per-market cap of
+                    // 1_000_000 e9/slot (see read_risk_params). Validating against the
+                    // engine's global MAX_ABS_FUNDING_E9_PER_SLOT (1e9) would accept
+                    // rates the engine later rejects at accrue time — i.e., live
+                    // markets that can be bricked by a large premium. Gate against
+                    // the stored per-market cap instead.
+                    if ms < 0
+                        || funding_bps_to_e9(ms) as u64 > risk_params.max_abs_funding_e9_per_slot
+                    {
                         return Err(PercolatorError::InvalidConfigParam.into());
                     }
                 }
@@ -4012,23 +4020,35 @@ pub mod processor {
                     if dt > 0 {
                         let raw_fee = config.maintenance_fee_per_slot.saturating_mul(dt as u128);
                         let fee_per_account = core::cmp::min(raw_fee, percolator::MAX_PROTOCOL_FEE_ABS);
-                        for idx in 0..percolator::MAX_ACCOUNTS {
-                            if !engine.is_used(idx) {
-                                continue;
-                            }
-                            match engine.charge_account_fee_not_atomic(
-                                idx as u16,
-                                fee_per_account,
-                                clock.slot,
-                            ) {
-                                Ok(()) => {}
-                                Err(percolator::RiskError::CorruptState) => {
-                                    return Err(map_risk_error(percolator::RiskError::CorruptState));
+                        // Work-proportional scan: iterate the engine's used[] bitmap
+                        // words and visit only set bits. CU stays proportional to the
+                        // number of live accounts rather than MAX_ACCOUNTS, which
+                        // matters for sparse markets (and is required for the crank
+                        // to fit inside the per-tx compute budget at larger caps).
+                        const BITMAP_WORDS: usize = (percolator::MAX_ACCOUNTS + 63) / 64;
+                        for word_idx in 0..BITMAP_WORDS {
+                            let mut bits = engine.used[word_idx];
+                            while bits != 0 {
+                                let bit = bits.trailing_zeros() as usize;
+                                let idx = word_idx * 64 + bit;
+                                bits &= bits - 1; // clear lowest set bit
+                                if idx >= percolator::MAX_ACCOUNTS {
+                                    continue;
                                 }
-                                Err(percolator::RiskError::Unauthorized) => {
-                                    return Err(map_risk_error(percolator::RiskError::Unauthorized));
+                                match engine.charge_account_fee_not_atomic(
+                                    idx as u16,
+                                    fee_per_account,
+                                    clock.slot,
+                                ) {
+                                    Ok(()) => {}
+                                    Err(percolator::RiskError::CorruptState) => {
+                                        return Err(map_risk_error(percolator::RiskError::CorruptState));
+                                    }
+                                    Err(percolator::RiskError::Unauthorized) => {
+                                        return Err(map_risk_error(percolator::RiskError::Unauthorized));
+                                    }
+                                    Err(_) => {} // per-account issue — skip, continue
                                 }
-                                Err(_) => {} // per-account issue — skip, continue
                             }
                         }
                         config.last_fee_charge_slot = clock.slot;
@@ -5239,10 +5259,16 @@ pub mod processor {
                 if funding_horizon_slots == 0 {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
-                // Reject negative funding bounds — reversed clamp bounds panic
-                if funding_max_premium_bps < 0 || funding_max_bps_per_slot < 0
-                    || funding_bps_to_e9(funding_max_bps_per_slot) > percolator::MAX_ABS_FUNDING_E9_PER_SLOT
-                {
+                // Reject negative funding bounds — reversed clamp bounds panic.
+                // Also gate against the engine's stored per-market envelope
+                // (params.max_abs_funding_e9_per_slot), NOT the crate-global
+                // MAX_ABS_FUNDING_E9_PER_SLOT, so UpdateConfig cannot accept a cap
+                // that the engine would later reject at accrue time.
+                if funding_max_premium_bps < 0 || funding_max_bps_per_slot < 0 {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
+                let engine_envelope = zc::engine_ref(&data)?.params.max_abs_funding_e9_per_slot;
+                if funding_bps_to_e9(funding_max_bps_per_slot) as u64 > engine_envelope {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
 
@@ -5272,43 +5298,46 @@ pub mod processor {
                     }
                     state::write_config(&mut data, &config);
                 }
-                // Accrue to boundary using engine's already-stored rate.
-                // Do NOT overwrite funding_rate_bps_per_slot_last before accrual —
-                // that would retroactively reprice the elapsed interval.
-                // Both Hyperp and non-Hyperp must accrue before changing funding params.
+                // Accrue to boundary. The ordinary/degenerate split mirrors
+                // Resolve{Market,Permissionless}:
+                //   ORDINARY  — fresh non-Hyperp oracle reading (or Hyperp flushed index):
+                //       accrual_price = fresh reading (or index), rate = captured.
+                //   DEGENERATE — non-Hyperp oracle dead (or no oracle passed):
+                //       accrual_price = P_last = engine.last_oracle_price, rate = 0.
+                // The degenerate arm must pass 0 — using the captured rate over an
+                // interval with no live oracle signal would realize an arbitrary
+                // funding transfer (spec §9.8 degenerate semantics).
                 {
-                    let accrual_price = if oracle::is_hyperp_mode(&config) {
-                        config.last_effective_price_e6
-                    } else if let Some(a_oracle) = a_oracle_opt {
-                        // Authoritative path: fresh oracle read for non-Hyperp.
-                        // Also updates last_effective_price_e6 (circuit-breaker baseline)
-                        // and stamps oracle liveness for permissionless resolve tracking.
-                        match read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data) {
-                            Ok(price) => {
-                                state::write_config(&mut data, &config);
-                                price
-                            }
-                            Err(e) => {
-                                // Only fall back on stale oracle (dead feed).
-                                // Wrong account / bad data / wrong feed must propagate.
-                                let stale_err: ProgramError = PercolatorError::OracleStale.into();
-                                if e != stale_err {
-                                    return Err(e);
+                    let (accrual_price, rate_for_accrual): (u64, i128) =
+                        if oracle::is_hyperp_mode(&config) {
+                            (config.last_effective_price_e6, funding_rate_e9)
+                        } else if let Some(a_oracle) = a_oracle_opt {
+                            match read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data) {
+                                Ok(price) => {
+                                    state::write_config(&mut data, &config);
+                                    (price, funding_rate_e9)
                                 }
-                                let engine = zc::engine_ref(&data)?;
-                                if state::is_oracle_initialized(&data) { engine.last_oracle_price } else { 0 }
+                                Err(e) => {
+                                    // Wrong account / bad data / wrong feed still propagate.
+                                    let stale_err: ProgramError = PercolatorError::OracleStale.into();
+                                    if e != stale_err {
+                                        return Err(e);
+                                    }
+                                    // Oracle is confirmed dead → degenerate arm.
+                                    let engine = zc::engine_ref(&data)?;
+                                    (engine.last_oracle_price, 0i128)
+                                }
                             }
-                        }
-                    } else {
-                        // No oracle account provided — best-effort from engine state.
-                        let engine = zc::engine_ref(&data)?;
-                        if state::is_oracle_initialized(&data) { engine.last_oracle_price } else { 0 }
-                    };
+                        } else {
+                            // No oracle account supplied: degenerate arm.
+                            let engine = zc::engine_ref(&data)?;
+                            (engine.last_oracle_price, 0i128)
+                        };
                     if accrual_price > 0 {
                         {
                             let engine = zc::engine_mut(&mut data)?;
                             engine.accrue_market_to(clock.slot, accrual_price,
-                                funding_rate_e9)
+                                rate_for_accrual)
                                 .map_err(map_risk_error)?;
                         }
                         // Engine processed real price — last_oracle_price is no longer sentinel
@@ -5659,18 +5688,15 @@ pub mod processor {
                                 fresh_oracle,
                                 config.oracle_price_cap_e2bps,
                             );
-                            // Settlement guard: when cap > 0, settlement price
-                            // must be within circuit-breaker bounds of fresh oracle.
-                            if config.oracle_price_cap_e2bps != 0 {
-                                let clamped = oracle::clamp_oracle_price(
-                                    fresh_oracle,
-                                    config.authority_price_e6,
-                                    config.oracle_price_cap_e2bps,
-                                );
-                                if clamped != config.authority_price_e6 {
-                                    return Err(PercolatorError::OracleInvalid.into());
-                                }
-                            }
+                            // B3 fix: the spec's settlement deviation band is
+                            // `resolve_price_deviation_bps` (plain bps, max
+                            // MAX_RESOLVE_PRICE_DEVIATION_BPS=10_000), not the
+                            // oracle-update circuit breaker `oracle_price_cap_e2bps`
+                            // (e2bps, max 1_000_000). Applying the latter here would
+                            // enforce the wrong band by two orders of magnitude and
+                            // also duplicate the engine's own §9.8 step 7 check.
+                            // Drop the wrapper pre-check and let resolve_market_not_atomic
+                            // apply the canonical band with the canonical parameter.
                         }
                         Err(e) => {
                             // Only skip guard if oracle is genuinely stale/dead.

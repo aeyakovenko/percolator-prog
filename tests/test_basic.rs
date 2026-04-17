@@ -3854,11 +3854,13 @@ fn test_init_market_custom_funding_max_per_slot() {
 fn test_init_market_custom_all_funding_params() {
     program_path();
     let mut env = TestEnv::new();
-    env.init_market_with_funding(0, 10_000, 0, 2000, 300, 800, 20);
+    // funding_max_bps_per_slot must fit the engine's per-market envelope
+    // (max_abs_funding_e9_per_slot = 1_000_000, i.e. 10 bps/slot). Use 10.
+    env.init_market_with_funding(0, 10_000, 0, 2000, 300, 800, 10);
     assert_eq!(env.read_funding_horizon(), 2000);
     assert_eq!(env.read_funding_k_bps(), 300);
     assert_eq!(env.read_funding_max_premium_bps(), 800);
-    assert_eq!(env.read_funding_max_bps_per_slot(), 20);
+    assert_eq!(env.read_funding_max_bps_per_slot(), 10);
 }
 
 /// Without trailing funding params, defaults should be used (backward compat).

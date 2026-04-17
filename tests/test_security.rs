@@ -2221,7 +2221,7 @@ fn test_attack_update_config_extreme_values() {
             1,        // funding_horizon_slots (minimum)
             10000,    // funding_k_bps (100%)
             10000i64, // funding_max_premium_bps (max allowed)
-            10000i64, // funding_max_bps_per_slot (max allowed - engine caps at ±10k)
+            10i64,    // funding_max_bps_per_slot (fits per-market envelope = 10 bps/slot)
             0u128,
             10000,
             1,
