@@ -9037,46 +9037,53 @@ pub mod processor {
                 }
             }
 
-            // On live markets, realize latent losses before reading insurance.
-            // Authoritative path: if oracle account is provided, do same-instruction
-            // accrue_market_to to update insurance balance with fresh price impact.
-            // Fallback: require a recent crank (stale-accounting proxy).
+            // On live markets, REQUIRE oracle for same-instruction loss realization.
+            // accrue_market_to with fresh price updates insurance_fund.balance to
+            // reflect current market state before any withdrawal. The 7-account
+            // stale-crank fallback is removed for live markets — it cannot detect
+            // adverse price movement that has not yet been cranked into the engine.
             if !resolved {
-                if let Some(a_oracle) = a_oracle_opt {
-                    let is_hyperp = oracle::is_hyperp_mode(&config);
-                    let accrual_price = if is_hyperp {
-                        let last_slot = engine.current_slot;
-                        drop(engine);
-                        let px = oracle::get_engine_oracle_price_e6(
-                            last_slot, clock.slot, clock.unix_timestamp,
-                            &mut config, a_oracle,
-                        )?;
-                        state::write_config(&mut data, &config);
-                        px
-                    } else {
-                        drop(engine);
-                        let px = read_price_and_stamp(
-                            &mut config, a_oracle, clock.unix_timestamp, clock.slot, Some(&mut *data),
-                        )?;
-                        state::write_config(&mut data, &config);
-                        px
-                    };
-                    {
-                        let engine = zc::engine_mut(&mut data)?;
-                        engine.accrue_market_to(
-                            clock.slot, accrual_price,
-                            compute_current_funding_rate_e9(&config),
-                        ).map_err(map_risk_error)?;
-                    }
-                    if !state::is_oracle_initialized(&data) {
-                        state::set_oracle_initialized(&mut data);
-                    }
-                } else {
-                    let staleness = clock.slot.saturating_sub(engine.last_crank_slot);
-                    if staleness > engine.params.max_crank_staleness_slots {
-                        return Err(PercolatorError::OracleStale.into());
-                    }
+                let a_oracle = a_oracle_opt
+                    .ok_or(PercolatorError::OracleInvalid)?;
+                let is_hyperp = oracle::is_hyperp_mode(&config);
+                let accrual_price = if is_hyperp {
+                    let last_slot = engine.current_slot;
                     drop(engine);
+                    let px = oracle::get_engine_oracle_price_e6(
+                        last_slot, clock.slot, clock.unix_timestamp,
+                        &mut config, a_oracle,
+                    )?;
+                    state::write_config(&mut data, &config);
+                    px
+                } else {
+                    drop(engine);
+                    let px = read_price_and_stamp(
+                        &mut config, a_oracle, clock.unix_timestamp, clock.slot, Some(&mut *data),
+                    )?;
+                    state::write_config(&mut data, &config);
+                    px
+                };
+                {
+                    let engine = zc::engine_mut(&mut data)?;
+                    engine.accrue_market_to(
+                        clock.slot, accrual_price,
+                        compute_current_funding_rate_e9(&config),
+                    ).map_err(map_risk_error)?;
+                }
+                // Run lifecycle after accrual (matches UpdateConfig/PushOraclePrice/SetOraclePriceCap).
+                {
+                    let engine = zc::engine_mut(&mut data)?;
+                    let mut ctx = percolator::InstructionContext::new();
+                    match engine.run_end_of_instruction_lifecycle(&mut ctx) {
+                        Ok(()) => {}
+                        Err(percolator::RiskError::CorruptState) => {
+                            return Err(map_risk_error(percolator::RiskError::CorruptState));
+                        }
+                        Err(_) => {} // non-fatal post-resolution states
+                    }
+                }
+                if !state::is_oracle_initialized(&data) {
+                    state::set_oracle_initialized(&mut data);
                 }
             } else {
                 drop(engine);

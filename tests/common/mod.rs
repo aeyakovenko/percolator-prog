@@ -2932,6 +2932,7 @@ impl TestEnv {
     }
 
     /// Limited insurance withdraw by configured authority.
+    /// Live markets require oracle (8th account). Pass pyth_index for accrual.
     pub fn try_withdraw_insurance_limited(
         &mut self,
         authority: &Keypair,
@@ -2950,6 +2951,7 @@ impl TestEnv {
                 AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(vault_pda, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
             ],
             data: encode_withdraw_insurance_limited(amount),
         };
