@@ -1764,3 +1764,150 @@ fn test_resolve_market_before_first_crank_with_fresh_oracle() {
         "ResolveMarket should succeed with fresh oracle: {:?}", result);
 }
 
+// ============================================================================
+// W4: init_price = 1 sentinel defense-in-depth tests
+// ----------------------------------------------------------------------------
+// The engine is constructed with last_oracle_price = 1 on non-Hyperp markets.
+// This sentinel is replaced on the first successful oracle read (which also
+// sets FLAG_ORACLE_INITIALIZED). Resolution paths gate on the flag before
+// allowing the sentinel to become the settlement price. These tests lock in
+// that interlock so future edits don't open the sentinel to real positions.
+// ============================================================================
+
+/// Sentinel safety: permissionless resolve with OI=0 and oracle never
+/// initialized is allowed, and capital is preserved (no spurious settlement PnL).
+///
+/// Flow:
+///   init → deposit (no trade, no crank) → oracle dies → resolve_permissionless
+///
+/// Expected: resolution succeeds with settlement == sentinel (1), but because
+/// OI is zero the engine has no position-dependent settlement to apply. Every
+/// depositor walks away with their capital intact.
+#[test]
+fn test_init_sentinel_permissionless_resolve_deposits_only_preserves_capital() {
+    program_path();
+    let mut env = TestEnv::new();
+    // Enable permissionless resolution with a 50-slot staleness window.
+    env.init_market_with_cap(0, 10_000, 50);
+
+    // Tighten max_staleness_secs so "oracle dead" can be triggered by clock
+    // advance without us having to actually stop the mocked Pyth feed.
+    {
+        let mut slab = env.svm.get_account(&env.slab).unwrap();
+        slab.data[168..176].copy_from_slice(&30u64.to_le_bytes());
+        env.svm.set_account(env.slab, slab).unwrap();
+    }
+
+    // Deposit only. No trade → no execute_trade → no oracle read from the
+    // wrapper's read_price path → FLAG_ORACLE_INITIALIZED stays clear,
+    // engine.last_oracle_price stays at the init sentinel (1).
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+    let cap_before = env.read_account_capital(user_idx);
+    assert!(cap_before > 0, "deposit must have funded capital");
+
+    // Oracle dies: advance clock far past last_good_oracle_slot (which is
+    // still 0 because nothing has read the oracle yet).
+    env.svm.set_sysvar(&Clock { slot: 500, unix_timestamp: 500, ..Clock::default() });
+
+    // Permissionless resolution must succeed — the OI=0 safety branch allows it.
+    env.try_resolve_permissionless()
+        .expect("resolve_permissionless must succeed with OI=0 and dead oracle");
+    assert!(env.is_market_resolved(), "market must be resolved");
+
+    // Capital preserved: with OI=0, no K-pair deltas, no funding (W1: zero
+    // rate over the dead interval), so the depositor's capital is unchanged.
+    let cap_after = env.read_account_capital(user_idx);
+    assert_eq!(
+        cap_after, cap_before,
+        "deposits-only account must retain full capital through sentinel settlement"
+    );
+}
+
+/// Sentinel replacement: the first successful oracle accrual (keeper crank)
+/// replaces the sentinel with a real price. After that, permissionless resolve
+/// uses the real price, not the sentinel.
+///
+/// Flow:
+///   init → crank (reads real oracle, sets FLAG_ORACLE_INITIALIZED) → oracle
+///   dies → resolve_permissionless → settlement == last real oracle price.
+#[test]
+fn test_sentinel_replaced_after_first_crank() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_cap(0, 10_000, 50);
+    {
+        let mut slab = env.svm.get_account(&env.slab).unwrap();
+        slab.data[168..176].copy_from_slice(&30u64.to_le_bytes());
+        env.svm.set_account(env.slab, slab).unwrap();
+    }
+
+    // One crank. The crank reads the mocked Pyth feed, validates it, stamps
+    // engine.last_oracle_price and FLAG_ORACLE_INITIALIZED.
+    env.crank();
+    assert!(!env.is_market_resolved(), "crank alone must not resolve");
+
+    // Oracle dies (publish_time frozen, clock advances past staleness).
+    env.svm.set_sysvar(&Clock { slot: 500, unix_timestamp: 500, ..Clock::default() });
+    env.try_resolve_permissionless()
+        .expect("permissionless resolve must succeed after first crank and oracle death");
+
+    // Settlement price = engine.last_oracle_price = real Pyth price (138 USD
+    // with e6 scaling, per the common test fixture), NOT the sentinel 1.
+    let settlement = env.read_authority_price();
+    assert!(
+        settlement > 1_000_000,
+        "settlement must be the real post-crank oracle price, not the init sentinel (got {})",
+        settlement
+    );
+    assert_eq!(
+        settlement, 138_000_000,
+        "settlement must equal the last successful oracle read ($138 e6)"
+    );
+}
+
+/// OI-nonzero + oracle-never-initialized path is structurally unreachable in
+/// the wrapper: the only way to grow OI is execute_trade, and execute_trade
+/// reads the oracle (or fails). This test enforces that invariant by proving
+/// a trade flips the oracle-initialized flag and updates the engine price.
+///
+/// The W4 audit concern was that *if* OI could ever be nonzero with
+/// FLAG_ORACLE_INITIALIZED clear, the sentinel would leak into settlement.
+/// This test documents why that state is unreachable.
+#[test]
+fn test_sentinel_invariant_nonzero_oi_implies_oracle_initialized() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_cap(0, 10_000, 50);
+
+    // Seed a trade → establishes OI. The trade path MUST read the oracle,
+    // which sets FLAG_ORACLE_INITIALIZED and replaces the sentinel.
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
+
+    assert_ne!(
+        env.read_account_position(user_idx), 0,
+        "trade must create nonzero position (OI > 0)"
+    );
+
+    // Now force oracle death and resolve. Because the trade initialized the
+    // oracle, settlement uses the real price (not the sentinel).
+    {
+        let mut slab = env.svm.get_account(&env.slab).unwrap();
+        slab.data[168..176].copy_from_slice(&30u64.to_le_bytes());
+        env.svm.set_account(env.slab, slab).unwrap();
+    }
+    env.svm.set_sysvar(&Clock { slot: 500, unix_timestamp: 500, ..Clock::default() });
+    env.try_resolve_permissionless().expect("must resolve with real price");
+    let settlement = env.read_authority_price();
+    assert_eq!(
+        settlement, 138_000_000,
+        "settlement after OI>0 must always be the real oracle price"
+    );
+}

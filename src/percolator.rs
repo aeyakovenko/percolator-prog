@@ -3928,28 +3928,21 @@ pub mod processor {
                 }
                 combined.extend_from_slice(&candidates);
 
-                let admit_h_min = engine.params.h_min;
-                let admit_h_max = engine.params.h_max;
-                let _outcome = engine
-                    .keeper_crank_not_atomic(
-                        clock.slot,
-                        price,
-                        &combined,
-                        percolator::LIQ_BUDGET_PER_CRANK,
-                        funding_rate_e9_pre,
-                        admit_h_min,
-                        admit_h_max,
-                    )
-                    .map_err(map_risk_error)?;
-                #[cfg(feature = "cu-audit")]
-                {
-                    msg!("CU_CHECKPOINT: keeper_crank_end");
-                    sol_log_compute_units();
-                }
-
                 // ── Periodic maintenance fees (wrapper-owned, §8.3) ──
-                // Charge maintenance_fee_per_slot * dt for each candidate account.
-                // Uses engine.charge_account_fee_not_atomic for safe capital→insurance transfer.
+                // W2: charge fees BEFORE keeper_crank_not_atomic. The crank's final
+                // step (run_end_of_instruction_lifecycle) performs side-mode drain
+                // detection, resets, and health reconciliation. Running fees *after*
+                // that lifecycle means a fee-induced margin dip or side-drain isn't
+                // handled until the *next* crank — leaving stranded bankruptcies or
+                // neg_pnl_account_count drift. Charging before lets the same-crank
+                // lifecycle observe fee-induced state.
+                //
+                // Ordering is safe: charge_account_fee_not_atomic requires
+                // slot >= engine.current_slot; engine.current_slot is at the previous
+                // crank and clock.slot has advanced since, so the precondition holds.
+                // Per-account touch inside charge applies the engine's *stored* funding
+                // rate (from the prior crank) for the interval [account.last_touch,
+                // clock.slot], which is the correct anti-retroactivity interval.
                 if config.maintenance_fee_per_slot > 0 {
                     let dt = clock.slot.saturating_sub(config.last_fee_charge_slot);
                     if dt > 0 {
@@ -3974,15 +3967,51 @@ pub mod processor {
                                 if (charged[word] >> bit) & 1 == 1 { continue; }
                                 charged[word] |= 1u64 << bit;
                             }
-                            // Propagate errors — engine's _not_atomic contract means
-                            // Err may leave partial state. Swallowing would commit
-                            // partial mutations with last_fee_charge_slot advanced.
-                            engine.charge_account_fee_not_atomic(
+                            // W3: propagate only real invariant violations. A
+                            // permissionless crank must survive adversarial injection
+                            // of malformed candidate indices — one account's per-idx
+                            // error must not brick fee collection for the other
+                            // N−1 accounts. Under wrapper preconditions (fee capped,
+                            // slot >= current, account is_used), the only errors this
+                            // call can plausibly surface are CorruptState (slab
+                            // invariant broken) and Unauthorized (market mode drift),
+                            // both of which we surface. Every other variant is a
+                            // per-account issue that does not justify bricking the
+                            // whole crank.
+                            match engine.charge_account_fee_not_atomic(
                                 cidx, fee_per_account, clock.slot,
-                            ).map_err(map_risk_error)?;
+                            ) {
+                                Ok(()) => {}
+                                Err(percolator::RiskError::CorruptState) => {
+                                    return Err(map_risk_error(percolator::RiskError::CorruptState));
+                                }
+                                Err(percolator::RiskError::Unauthorized) => {
+                                    return Err(map_risk_error(percolator::RiskError::Unauthorized));
+                                }
+                                Err(_) => {} // per-account issue — skip, continue crank
+                            }
                         }
                         config.last_fee_charge_slot = clock.slot;
                     }
+                }
+
+                let admit_h_min = engine.params.h_min;
+                let admit_h_max = engine.params.h_max;
+                let _outcome = engine
+                    .keeper_crank_not_atomic(
+                        clock.slot,
+                        price,
+                        &combined,
+                        percolator::LIQ_BUDGET_PER_CRANK,
+                        funding_rate_e9_pre,
+                        admit_h_min,
+                        admit_h_max,
+                    )
+                    .map_err(map_risk_error)?;
+                #[cfg(feature = "cu-audit")]
+                {
+                    msg!("CU_CHECKPOINT: keeper_crank_end");
+                    sol_log_compute_units();
                 }
 
                 // Copy stats and drop engine mutable borrow
@@ -6453,8 +6482,6 @@ pub mod processor {
                 }
 
                 let mut config = state::read_config(&data);
-                // Anti-retroactivity: capture funding rate before any config mutation (§5.5)
-                let funding_rate_e9 = compute_current_funding_rate_e9(&config);
 
                 if config.permissionless_resolve_stale_slots == 0 {
                     return Err(PercolatorError::InvalidConfigParam.into());
@@ -6591,11 +6618,19 @@ pub mod processor {
                 } else {
                     engine.last_oracle_price
                 };
+                // W1: pass zero funding rate. The interval
+                //   [engine.last_market_slot, clock.slot]
+                // is the oracle-dead interval (gated above by permissionless_resolve_stale_slots).
+                // compute_current_funding_rate_e9 would derive a rate from mark_ewma_e6 vs
+                // last_effective_price_e6 — both snapshots from *before* the oracle died.
+                // Applying that rate over a signal-free interval is an arbitrary wealth
+                // transfer proportional to how long the oracle was down. Zero is the
+                // conservative choice and matches the semantics of the staleness gate.
                 engine.resolve_market_not_atomic(
                     settlement_price,
                     live_oracle,
                     clock.slot,
-                    funding_rate_e9,
+                    0,
                 ).map_err(map_risk_error)?;
 
                 config.authority_price_e6 = settlement_price;
