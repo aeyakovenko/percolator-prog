@@ -1384,11 +1384,11 @@ fn magic_constant_encodes_percolat_ascii() {
 // ============================================================================
 
 #[test]
-fn matcher_abi_version_is_one() {
+fn matcher_abi_version_is_two() {
     assert_eq!(
         MATCHER_ABI_VERSION,
-        1u32,
-        "MATCHER_ABI_VERSION must be 1 — update SDK bindings if this changes"
+        2u32,
+        "MATCHER_ABI_VERSION must be 2 — update SDK bindings if this changes"
     );
 }
 

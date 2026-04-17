@@ -90,7 +90,7 @@ pub mod constants {
     // CRANK_REWARD_MIN_DT removed — crank discount logic removed in v12.15
     /// Progressive scan window per crank.
     pub const RISK_SCAN_WINDOW: usize = 32;
-    pub const MATCHER_ABI_VERSION: u32 = 1;
+    pub const MATCHER_ABI_VERSION: u32 = 2;
     // MATCHER_CONTEXT_PREFIX_LEN removed — validation uses MATCHER_CONTEXT_LEN directly
     pub const MATCHER_CONTEXT_LEN: usize = 320;
     pub const MATCHER_CALL_TAG: u8 = 0;
@@ -2440,10 +2440,12 @@ pub mod state {
 
     /// Increment the materialization counter and return the NEW value.
     /// Each account gets a globally unique ID at creation time.
-    pub fn next_mat_counter(data: &mut [u8]) -> u64 {
-        let c = read_mat_counter(data).wrapping_add(1);
+    /// Returns None if the counter would overflow (0 is reserved as "never materialized").
+    pub fn next_mat_counter(data: &mut [u8]) -> Option<u64> {
+        let old = read_mat_counter(data);
+        let c = old.checked_add(1)?;
         write_mat_counter(data, c);
-        c
+        Some(c)
     }
 
     // ========================================
@@ -6655,7 +6657,8 @@ pub mod processor {
             .map_err(map_risk_error)?;
         drop(engine);
         // LP identity: write generation counter so TradeCpi can verify lp_account_id
-        let gen = state::next_mat_counter(&mut data);
+        let gen = state::next_mat_counter(&mut data)
+            .ok_or(PercolatorError::EngineOverflow)?;
         state::write_account_generation(&mut data, idx, gen);
         Ok(())
     }
@@ -6752,7 +6755,8 @@ pub mod processor {
             .map_err(map_risk_error)?;
         drop(engine);
         // LP identity: write generation counter so TradeCpi can verify lp_account_id
-        let gen = state::next_mat_counter(&mut data);
+        let gen = state::next_mat_counter(&mut data)
+            .ok_or(PercolatorError::EngineOverflow)?;
         state::write_account_generation(&mut data, idx, gen);
         Ok(())
     }
@@ -7222,9 +7226,6 @@ pub mod processor {
             return Err(ProgramError::InvalidArgument);
         }
 
-        // LP identity: read generation before engine borrow
-        let lp_gen = state::read_account_generation(&data, lp_idx);
-
         let engine = zc::engine_mut(&mut data)?;
 
         check_idx(engine, lp_idx)?;
@@ -7269,7 +7270,7 @@ pub mod processor {
         let funding_rate = compute_current_funding_rate_e9(&config);
         execute_trade_with_matcher(
             engine, &NoOpMatcher, lp_idx, user_idx, clock.slot, price, size,
-            funding_rate, lp_gen,
+            funding_rate, 0, // NoOpMatcher ignores lp_account_id
         ).map_err(map_risk_error)?;
 
         // Update mark EWMA from trade (NoOpMatcher fills at oracle price).
@@ -7431,41 +7432,14 @@ pub mod processor {
             }
 
             let lp_acc = &engine.accounts[lp_idx as usize];
-            // Instance-stable LP identity for matcher CPI binding: FNV-1a hash
-            // of (lp_idx, owner, matcher_context). account_id field removed in
-            // v12.17; use deterministic hash instead.
-            //
-            // F-6 DECISION (audit 2026-04-16): This FNV identity is intentionally
-            // SEPARATE from the gen_table identity (state::read_account_generation)
-            // used by TradeNoCpi at L7184. The two serve different purposes:
-            //
-            //   - gen_table (mat_counter): strictly monotonic, increments on
-            //     every InitUser/InitLP. Used for internal lifecycle tracking
-            //     (e.g., detecting slot reuse across account closures).
-            //
-            //   - FNV identity (here): deterministic function of current LP
-            //     bytes. Used by the matcher to identify "which LP context
-            //     should receive this trade." Stable across CPI round-trips,
-            //     does not need to distinguish instance generations because
-            //     matcher_context is already rotated on each InitLP.
-            //
-            // Unifying them would require either (a) embedding gen_table in the
-            // matcher ABI (breaks existing matcher binaries) or (b) collapsing
-            // gen_table semantics into FNV (loses slot-reuse detection). Neither
-            // is preferable to the current dual scheme. Documented here so the
-            // divergence isn't flagged again as a bug.
-            let lp_instance_id = {
-                let mut h: u64 = 0xcbf29ce484222325; // FNV offset basis
-                let mix = |h: &mut u64, b: u8| {
-                    *h ^= b as u64;
-                    *h = h.wrapping_mul(0x100000001b3); // FNV prime
-                };
-                mix(&mut h, lp_idx as u8);
-                mix(&mut h, (lp_idx >> 8) as u8);
-                for &b in lp_acc.owner.iter() { mix(&mut h, b); }
-                for &b in lp_acc.matcher_context.iter() { mix(&mut h, b); }
-                h
-            };
+            // Per-instance LP identity from generation table (mat_counter).
+            // Assigned at InitLP, immutable for the lifetime of this LP instance.
+            // Different for every materialization even at the same slot.
+            let lp_instance_id = state::read_account_generation(&*data, lp_idx);
+            // Reject generation 0 — slot was never materialized via InitLP
+            if lp_instance_id == 0 {
+                return Err(PercolatorError::EngineAccountNotFound.into());
+            }
             (
                 lp_instance_id,
                 config,

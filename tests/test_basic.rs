@@ -642,7 +642,7 @@ fn test_matcher_call_after_init() {
     println!("  exec_size: {}", exec_size);
     println!("  req_id: {}", req_id);
 
-    assert_eq!(abi_version, 1, "ABI version mismatch");
+    assert_eq!(abi_version, 2, "ABI version mismatch");
     assert_eq!(flags & 1, 1, "FLAG_VALID should be set");
     assert_eq!(req_id, 1, "req_id mismatch");
     assert_eq!(exec_size, req_size, "exec_size mismatch");
@@ -822,7 +822,7 @@ fn test_matcher_vamm_mode_with_impact() {
     println!("  exec_price: {}", exec_price);
     println!("  exec_size: {}", exec_size);
 
-    assert_eq!(abi_version, 1, "ABI version mismatch");
+    assert_eq!(abi_version, 2, "ABI version mismatch");
     assert_eq!(flags & 1, 1, "FLAG_VALID should be set");
 
     // Impact = impact_k_bps * notional / liquidity = 50 * 1M / 10M = 5 bps
