@@ -1838,6 +1838,9 @@ fn benchmark_all_instructions() {
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
+                // Oracle is REQUIRED on non-Hyperp UpdateConfig — admin cannot
+                // select the degenerate zero-funding arm by omission.
+                AccountMeta::new_readonly(env.pyth_index, false),
             ],
             data: encode_update_config(
                 3600,   // funding_horizon_slots

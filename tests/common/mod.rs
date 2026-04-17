@@ -2935,6 +2935,10 @@ impl TestEnv {
                 AccountMeta::new(signer.pubkey(), true),
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
+                // Non-Hyperp UpdateConfig REQUIRES the oracle account. Admin
+                // can no longer select the degenerate zero-funding arm by
+                // omission; only a confirmed-stale oracle triggers it.
+                AccountMeta::new_readonly(self.pyth_index, false),
             ],
             data: encode_update_config(
                 3600,                      // funding_horizon_slots
@@ -5473,6 +5477,10 @@ impl TestEnv {
                 AccountMeta::new(signer.pubkey(), true),
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
+                // Non-Hyperp UpdateConfig REQUIRES the oracle account. Admin
+                // can no longer select the degenerate zero-funding arm by
+                // omission; only a confirmed-stale oracle triggers it.
+                AccountMeta::new_readonly(self.pyth_index, false),
             ],
             data: encode_update_config(
                 funding_horizon_slots,
@@ -7425,8 +7433,13 @@ pub fn encode_init_market_with_limits(
     data.push(0u8); // invert
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
-    // Per-market admin limits
-    data.extend_from_slice(&max_maintenance_fee.to_le_bytes());
+    // Per-market admin limits.
+    // maintenance_fee_per_slot is gated to 0 at init — the feature is disabled
+    // pending per-account accrual. Ignore the `max_maintenance_fee` arg and
+    // always write 0 so these test helpers keep compiling without touching
+    // every call site.
+    let _ = max_maintenance_fee;
+    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (disabled)
     data.extend_from_slice(&max_risk_threshold.to_le_bytes());
     data.extend_from_slice(&min_oracle_price_cap_e2bps.to_le_bytes());
     // RiskParams

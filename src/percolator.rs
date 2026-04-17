@@ -3385,6 +3385,21 @@ pub mod processor {
                 if permissionless_resolve_stale_slots > 0 && force_close_delay_slots == 0 {
                     return Err(ProgramError::InvalidInstructionData);
                 }
+                // Maintenance-fee feature is disabled at the admission gate.
+                // A non-zero per-slot maintenance fee is only sound when every
+                // capital-sensitive instruction realizes due fees *before* the
+                // acting account's margin/withdrawal/close check, otherwise
+                // accounts can act on stale capital or escape the fee entirely
+                // via Close/Reclaim between cranks. The current design flushes
+                // fees only on KeeperCrank / InitUser / InitLP, which is not
+                // sufficient, and the full-sweep flush is O(used accounts)
+                // anyway. Until the feature is redesigned with either
+                // engine-native per-account accrual or a per-account wrapper
+                // cursor, markets must be initialized with
+                // maintenance_fee_per_slot == 0.
+                if maintenance_fee_per_slot != 0 {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
                 // §14.1: H_max must not exceed permissionless resolve delay.
                 // Otherwise warmup cohorts could mature after the market is already
                 // permissionlessly resolved, creating inconsistent terminal state.
@@ -5328,13 +5343,22 @@ pub mod processor {
                 funding_max_premium_bps,
                 funding_max_bps_per_slot,
             } => {
-                // Accept 3 or 4 accounts: (admin, slab, clock[, oracle]).
-                // Optional oracle enables authoritative accrual on non-Hyperp markets.
-                accounts::expect_len(accounts, 3)?;
+                // Accounts: (admin, slab, clock, oracle).
+                // For non-Hyperp markets the oracle is REQUIRED. Allowing the
+                // caller to omit the oracle account used to be a degenerate
+                // escape hatch: with no oracle, the accrual rate was forced to
+                // zero regardless of the actual live mark-vs-index premium,
+                // which meant admin could retroactively erase elapsed funding
+                // just by leaving the oracle off the instruction. Following
+                // the ResolveMarket pattern, the degenerate (rate=0) branch is
+                // reserved for the *engine-confirmed-dead* oracle case only
+                // (read_price_and_stamp returns OracleStale); admin may not
+                // choose degenerate by omission.
+                accounts::expect_len(accounts, 4)?;
                 let a_admin = &accounts[0];
                 let a_slab = &accounts[1];
                 let a_clock = &accounts[2];
-                let a_oracle_opt = if accounts.len() > 3 { Some(&accounts[3]) } else { None };
+                let a_oracle = &accounts[3];
 
                 accounts::expect_signer(a_admin)?;
                 accounts::expect_writable(a_slab)?;
@@ -5398,16 +5422,18 @@ pub mod processor {
                 // Resolve{Market,Permissionless}:
                 //   ORDINARY  — fresh non-Hyperp oracle reading (or Hyperp flushed index):
                 //       accrual_price = fresh reading (or index), rate = captured.
-                //   DEGENERATE — non-Hyperp oracle dead (or no oracle passed):
+                //   DEGENERATE — non-Hyperp oracle *engine-confirmed dead*:
                 //       accrual_price = P_last = engine.last_oracle_price, rate = 0.
-                // The degenerate arm must pass 0 — using the captured rate over an
-                // interval with no live oracle signal would realize an arbitrary
-                // funding transfer (spec §9.8 degenerate semantics).
+                // The degenerate arm is entered only when read_price_and_stamp
+                // returns OracleStale, i.e. the passed oracle is genuinely dead.
+                // Admin cannot select the degenerate arm by omitting the oracle
+                // account — the caller-supplied oracle is a required input now
+                // (enforced at expect_len(4) above).
                 {
                     let (accrual_price, rate_for_accrual): (u64, i128) =
                         if oracle::is_hyperp_mode(&config) {
                             (config.last_effective_price_e6, funding_rate_e9)
-                        } else if let Some(a_oracle) = a_oracle_opt {
+                        } else {
                             match read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data) {
                                 Ok(price) => {
                                     state::write_config(&mut data, &config);
@@ -5424,10 +5450,6 @@ pub mod processor {
                                     (engine.last_oracle_price, 0i128)
                                 }
                             }
-                        } else {
-                            // No oracle account supplied: degenerate arm.
-                            let engine = zc::engine_ref(&data)?;
-                            (engine.last_oracle_price, 0i128)
                         };
                     if accrual_price > 0 {
                         {

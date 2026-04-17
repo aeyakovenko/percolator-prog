@@ -805,7 +805,10 @@ fn test_admin_limits_lifecycle() {
         slab.data[MIN_OPC_OFF..MIN_OPC_OFF + 8].try_into().unwrap(),
     );
 
-    assert_eq!(maint_fee, 1000, "maintenance_fee_per_slot should be preserved");
+    // maintenance_fee_per_slot is disabled at init (the feature has an unsound
+    // between-cranks behavior pending per-account accrual). Encoders that
+    // used to pass a non-zero fee now coerce it to 0; the stored value is 0.
+    assert_eq!(maint_fee, 0, "maintenance_fee_per_slot is disabled at init");
     assert_eq!(max_ins, 50_000, "max_insurance_floor should be preserved");
     assert_eq!(min_opc, 5000, "min_oracle_price_cap_e2bps should be preserved");
 

@@ -1065,6 +1065,8 @@ fn test_funding_boundary_anti_retroactivity_update_config() {
                 AccountMeta::new(kp.pubkey(), true),
                 AccountMeta::new(env.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
+                // Non-Hyperp UpdateConfig requires the oracle account.
+                AccountMeta::new_readonly(env.pyth_index, false),
             ],
             data: encode_update_config(
                 100, k_bps,

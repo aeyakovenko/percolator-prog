@@ -851,13 +851,16 @@ fn test_hyperp_full_lifecycle_init_to_close_slab() {
     env.crank();
     println!("   Pushed $120 at slot 30, cranked at slot 40");
 
-    // 5. UpdateConfig (change funding params)
+    // 5. UpdateConfig (change funding params) — oracle is now required on
+    // non-Hyperp markets. This test runs on Hyperp where the oracle account
+    // isn't consulted, but expect_len requires 4 accounts regardless.
     let ix = Instruction {
         program_id: env.program_id,
         accounts: vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.slab, false),
             AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(env.pyth_index, false),
         ],
         data: encode_update_config(
             7200, 200, 200i64, 10i64,

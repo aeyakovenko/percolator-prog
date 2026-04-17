@@ -582,8 +582,14 @@ fn test_bpf_i128_alignment() {
         ],
         data: encode_init_market(&payer.pubkey(), &mint, &TEST_FEED_ID),
     };
+    // InitMarket now reads the oracle at genesis (§2.7, no sentinel), which
+    // pushes it past the default 200K CU budget. Request 1.4M like the rest
+    // of the test suite.
+    let cu_ix = solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(
+        1_400_000,
+    );
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix, ix],
         Some(&payer.pubkey()),
         &[&payer],
         svm.latest_blockhash(),
