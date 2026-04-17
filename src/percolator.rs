@@ -2292,6 +2292,55 @@ pub mod state {
         /// Set via SetDexPool (tag 74). All-zeros = not set.
         /// UpdateHyperpMark rejects pool keys that don't match this.
         pub dex_pool: [u8; 32],
+
+        // ========================================
+        // Previously-stubbed fields (pre-audit hygiene, 2026-04-17)
+        // ========================================
+
+        /// PERC-305: PnL cap for ADL pre-check. If `pnl_pos_tot <= max_pnl_cap`,
+        /// ADL returns early (no deleveraging needed). SECURITY(H-4).
+        /// 0 = cap disabled (ADL runs on any insurance-depleted market).
+        /// Set via SetMaxPnlCap (admin-only). Units: engine quote units (u128-compatible).
+        pub max_pnl_cap: u64,
+
+        /// PERC-277: Slot when AuditCrank last paused the market on invariant violation.
+        /// Used for the AUDIT_CRANK_COOLDOWN_SLOTS (150) rate-limit to prevent
+        /// audit-crank DoS. Updated automatically by handle_audit_crank.
+        /// 0 = never paused.
+        pub last_audit_pause_slot: u64,
+
+        /// PERC-309: OI cap multiplier in bps, used as a dynamic cap on LP
+        /// withdrawals under stress. Packed format: low 32 bits = multiplier_bps,
+        /// high 32 bits = soft_cap_bps (see unpack_oi_cap in lp_vault).
+        /// 0 = enforcement disabled. Set via SetOiCapMultiplier (admin-only).
+        pub oi_cap_multiplier_bps: u64,
+
+        /// PERC-314: Dispute window in slots after ResolveMarket during which
+        /// users can ChallengeSettlement. 0 = disputes disabled.
+        /// Set at InitMarket or via SetDisputeParams (admin-only).
+        pub dispute_window_slots: u64,
+
+        /// PERC-314: Bond amount (collateral tokens) required to open a dispute.
+        /// Refunded if dispute is upheld; forfeited to vault if rejected.
+        /// 0 = no bond required. Set at InitMarket or via SetDisputeParams.
+        pub dispute_bond_amount: u64,
+
+        /// PERC-315: LP collateral toggle. 1 = enabled, 0 = disabled.
+        /// When enabled, users can deposit LP vault tokens as perp collateral.
+        /// Set via SetLpCollateralParams (admin-only).
+        pub lp_collateral_enabled: u8,
+
+        /// Padding for `lp_collateral_ltv_bps` u16 alignment.
+        pub _lp_collateral_pad0: u8,
+
+        /// PERC-315: LP collateral loan-to-value in bps. Caps the engine-unit
+        /// credit granted for a given LP token amount (lp_token_value uses this).
+        /// Typical: 5000 bps (50% LTV). 0 = reject all LP collateral deposits.
+        pub lp_collateral_ltv_bps: u16,
+
+        /// Padding to align new-fields block to 8-byte boundary for clean
+        /// alignment of any future u64/u128 fields appended after.
+        pub _new_fields_pad: [u8; 4],
     }
 
     pub fn slab_data_mut<'a, 'b>(
@@ -2526,13 +2575,18 @@ pub mod state {
     #[inline]
     pub fn write_audit_status(_config: &mut MarketConfig, _status: u16) {}
 
-    /// Read last audit-crank pause slot — returns 0 (field absent).
+    /// Read last audit-crank pause slot. Used for AUDIT_CRANK_COOLDOWN_SLOTS
+    /// rate-limiting to prevent audit-crank DoS on a violating market.
     #[inline]
-    pub fn read_last_audit_pause_slot(_config: &MarketConfig) -> u64 { 0 }
+    pub fn read_last_audit_pause_slot(config: &MarketConfig) -> u64 {
+        config.last_audit_pause_slot
+    }
 
-    /// Write last audit-crank pause slot — no-op in this layout.
+    /// Write last audit-crank pause slot.
     #[inline]
-    pub fn write_last_audit_pause_slot(_config: &mut MarketConfig, _slot: u64) {}
+    pub fn write_last_audit_pause_slot(config: &mut MarketConfig, slot: u64) {
+        config.last_audit_pause_slot = slot;
+    }
 
     /// Get per-wallet position cap — returns 0 (disabled, field absent).
     #[inline]
@@ -2550,30 +2604,44 @@ pub mod state {
     #[inline]
     pub fn set_oi_imbalance_hard_block_bps(_config: &mut MarketConfig, _bps: u16) {}
 
-    // ─── Fork-specific MarketConfig field stubs ───────────────────────────────
-    // These fields do not exist in the current upstream MarketConfig layout.
-    // All getters return safe defaults (0 / disabled); all setters are no-ops.
+    // ─── Fork-specific MarketConfig field accessors ───────────────────────────
 
-    /// OI cap multiplier — 0 means disabled.
+    /// OI cap multiplier — 0 means disabled. Packed u64: low 32 bits =
+    /// multiplier_bps, high 32 bits = soft_cap_bps. Enforces dynamic LP
+    /// withdrawal caps under open-interest stress (PERC-309).
     #[inline]
-    pub fn get_oi_cap_multiplier_bps(_config: &MarketConfig) -> u64 { 0 }
+    pub fn get_oi_cap_multiplier_bps(config: &MarketConfig) -> u64 {
+        config.oi_cap_multiplier_bps
+    }
     #[inline]
-    pub fn set_oi_cap_multiplier_bps(_config: &mut MarketConfig, _v: u64) {}
+    pub fn set_oi_cap_multiplier_bps(config: &mut MarketConfig, v: u64) {
+        config.oi_cap_multiplier_bps = v;
+    }
 
-    /// Dispute window slots — 0 means disputes disabled.
+    /// Dispute window slots — 0 means disputes disabled. Post-resolution,
+    /// users may ChallengeSettlement within this slot window (PERC-314).
     #[inline]
-    pub fn get_dispute_window_slots(_config: &MarketConfig) -> u64 { 0 }
+    pub fn get_dispute_window_slots(config: &MarketConfig) -> u64 {
+        config.dispute_window_slots
+    }
     #[inline]
-    pub fn set_dispute_window_slots(_config: &mut MarketConfig, _v: u64) {}
+    pub fn set_dispute_window_slots(config: &mut MarketConfig, v: u64) {
+        config.dispute_window_slots = v;
+    }
 
     // resolved_slot is read from the engine via zc::engine_ref(&data)?.current_slot
     // (frozen at resolution time). The config-based stubs were removed — see commit c1f2903.
 
-    /// Dispute bond amount — 0 means no bond required.
+    /// Dispute bond amount (collateral tokens) — 0 means no bond required.
+    /// Refunded on dispute upheld, forfeited on dispute rejected (PERC-314).
     #[inline]
-    pub fn get_dispute_bond_amount(_config: &MarketConfig) -> u64 { 0 }
+    pub fn get_dispute_bond_amount(config: &MarketConfig) -> u64 {
+        config.dispute_bond_amount
+    }
     #[inline]
-    pub fn set_dispute_bond_amount(_config: &mut MarketConfig, _v: u64) {}
+    pub fn set_dispute_bond_amount(config: &mut MarketConfig, v: u64) {
+        config.dispute_bond_amount = v;
+    }
 
     /// Settlement price e6 — 0 if not set.
     #[inline]
@@ -2584,23 +2652,40 @@ pub mod state {
     // Insurance isolation BPS stubs removed — field not in MarketConfig layout
     // and handler (tag 42) was removed. Field was never persisted.
 
-    /// LP collateral enabled — 0 means disabled.
+    /// LP collateral toggle — 0 = disabled, 1 = enabled. Controls whether
+    /// DepositLpCollateral / WithdrawLpCollateral accept user calls (PERC-315).
     #[inline]
-    pub fn get_lp_collateral_enabled(_config: &MarketConfig) -> u8 { 0 }
+    pub fn get_lp_collateral_enabled(config: &MarketConfig) -> u8 {
+        config.lp_collateral_enabled
+    }
     #[inline]
-    pub fn set_lp_collateral_enabled(_config: &mut MarketConfig, _v: u8) {}
+    pub fn set_lp_collateral_enabled(config: &mut MarketConfig, v: u8) {
+        config.lp_collateral_enabled = v;
+    }
 
-    /// LP collateral LTV BPS — 0 means disabled.
+    /// LP collateral LTV in bps — caps engine-unit credit for a given LP
+    /// token deposit via lp_token_value (PERC-315). 5000 = 50% LTV.
+    /// 0 = reject all LP collateral deposits even when enabled.
     #[inline]
-    pub fn get_lp_collateral_ltv_bps(_config: &MarketConfig) -> u16 { 0 }
+    pub fn get_lp_collateral_ltv_bps(config: &MarketConfig) -> u16 {
+        config.lp_collateral_ltv_bps
+    }
     #[inline]
-    pub fn set_lp_collateral_ltv_bps(_config: &mut MarketConfig, _v: u16) {}
+    pub fn set_lp_collateral_ltv_bps(config: &mut MarketConfig, v: u16) {
+        config.lp_collateral_ltv_bps = v;
+    }
 
-    /// Max PnL cap — 0 means no cap.
+    /// PnL cap for ADL pre-check (PERC-305 / SECURITY(H-4)). If
+    /// `pnl_pos_tot <= max_pnl_cap`, ADL returns early (no deleveraging).
+    /// 0 = cap disabled (ADL always runs when insurance is depleted).
     #[inline]
-    pub fn get_max_pnl_cap(_config: &MarketConfig) -> u64 { 0 }
+    pub fn get_max_pnl_cap(config: &MarketConfig) -> u64 {
+        config.max_pnl_cap
+    }
     #[inline]
-    pub fn set_max_pnl_cap(_config: &mut MarketConfig, _v: u64) {}
+    pub fn set_max_pnl_cap(config: &mut MarketConfig, v: u64) {
+        config.max_pnl_cap = v;
+    }
 
     /// Market created slot — 0 if not tracked.
     #[inline]
@@ -6345,6 +6430,20 @@ pub mod processor {
             // DEX pool pinning: initialized to all-zeros (not set).
             // Admin must call SetDexPool (tag 74) for HYPERP markets.
             dex_pool: [0u8; 32],
+
+            // New config fields (pre-audit hygiene Phase A, 2026-04-17).
+            // All default to 0 (disabled) at init. Admin activates each via
+            // dedicated setter instructions (Phase B): SetMaxPnlCap,
+            // SetDisputeParams, SetLpCollateralParams, SetOiCapMultiplier.
+            max_pnl_cap: 0,
+            last_audit_pause_slot: 0,
+            oi_cap_multiplier_bps: 0,
+            dispute_window_slots: 0,
+            dispute_bond_amount: 0,
+            lp_collateral_enabled: 0,
+            _lp_collateral_pad0: 0,
+            lp_collateral_ltv_bps: 0,
+            _new_fields_pad: [0u8; 4],
         };
         // Hyperp markets must have non-zero cap for index smoothing
         if is_hyperp && config.oracle_price_cap_e2bps == 0 {

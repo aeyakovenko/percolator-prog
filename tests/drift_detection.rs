@@ -135,7 +135,11 @@ mod layout_constants {
     /// HEADER_LEN: size_of::<SlabHeader>() = 72 bytes
     pub const HEADER_LEN_EXPECTED: usize = 72;
     /// CONFIG_LEN: size_of::<MarketConfig>()
-    pub const CONFIG_LEN_EXPECTED: usize = 432;
+    // 2026-04-17: CONFIG_LEN extended from 432 → 480 by pre-audit hygiene Phase A.
+    // Added 48 bytes: 5×u64 + u8 + u8 pad + u16 + 4×u8 pad for 7 new config fields
+    // (max_pnl_cap, last_audit_pause_slot, oi_cap_multiplier_bps, dispute_window_slots,
+    // dispute_bond_amount, lp_collateral_enabled, lp_collateral_ltv_bps).
+    pub const CONFIG_LEN_EXPECTED: usize = 480;
     /// ACCOUNT_SIZE: size_of::<Account>() — v12.17 two-bucket warmup
     pub const ACCOUNT_SIZE_EXPECTED: usize = 368;
     /// ENGINE_OFF: align_up(HEADER_LEN + CONFIG_LEN, ENGINE_ALIGN)
