@@ -2498,10 +2498,6 @@ pub mod state {
     #[inline]
     pub fn set_phase2_delta_slots(_config: &mut MarketConfig, _delta: u32) {}
 
-    /// Get volatility margin scale bps — returns 0 (disabled in this layout).
-    #[inline]
-    pub fn get_vol_margin_scale_bps(_config: &MarketConfig) -> u16 { 0 }
-
     /// Compute effective created slot for phase logic.
     #[inline]
     pub fn effective_created_slot(market_created_slot: u64, current_slot: u64) -> u64 {
@@ -2613,7 +2609,15 @@ pub mod state {
     pub fn set_market_created_slot(_config: &mut MarketConfig, _v: u64) {}
 
     /// PERC-118: Read the mark oracle weight bps.
-    /// The field is absent in this layout — always returns 0 (pure DEX price, no oracle blend).
+    ///
+    /// INTENTIONAL DEFAULT: Always returns 0 (pure DEX price, no oracle blend).
+    /// This is the production-correct behavior — the Hyperp mark price for
+    /// permissionless tokens is derived solely from DEX pool state; blending
+    /// with an external oracle would require that oracle to exist, which
+    /// defeats the purpose of Hyperp markets (trading tokens that HAVE no
+    /// external oracle). If a future design needs oracle blending (e.g., for
+    /// markets that do have Pyth but also trade on DEX), wire this to a real
+    /// MarketConfig field with its own admin setter.
     #[inline]
     pub fn get_mark_oracle_weight_bps(_config: &MarketConfig) -> u16 {
         0
@@ -11774,9 +11778,9 @@ pub mod processor {
         let mut config = state::read_config(&data);
         let clock = Clock::get()?;
 
-        if state::get_vol_margin_scale_bps(&config) > 0 {
-            return Err(PercolatorError::InvalidConfigParam.into());
-        }
+        // vol_margin_scale_bps guard removed — the field never existed in the
+        // MarketConfig layout, so this check always passed. Dead guard per
+        // pre-audit hygiene pass.
 
         let old_phase = state::get_oracle_phase(&config);
 
