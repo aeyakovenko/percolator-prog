@@ -2785,6 +2785,15 @@ pub mod state {
         let mut buf = crate::risk_buffer::RiskBuffer::zeroed();
         let src = &data[RISK_BUF_OFF..RISK_BUF_OFF + RISK_BUF_LEN];
         bytemuck::bytes_of_mut(&mut buf).copy_from_slice(src);
+        // Sanitize: clamp count to RISK_BUF_CAP to prevent OOB panics
+        // from corrupted slab data in keeper hot paths.
+        if buf.count as usize > crate::constants::RISK_BUF_CAP {
+            buf.count = crate::constants::RISK_BUF_CAP as u8;
+        }
+        // Clamp scan_cursor to valid range
+        if buf.scan_cursor as usize >= percolator::MAX_ACCOUNTS {
+            buf.scan_cursor = 0;
+        }
         buf
     }
 
