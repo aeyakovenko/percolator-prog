@@ -1672,6 +1672,17 @@ pub mod ix {
                         limit_price_e6,
                     })
                 }
+                // SECURITY(P-4/HIGH): Tags 11 and 15 were removed upstream.
+                // Explicit rejection prevents any future reuse of these tag
+                // numbers from accidentally dispatching via a wildcard arm.
+                // Do not remove without also removing the constants from tags.rs.
+                11 | 15 => {
+                    // Tag 11 (SetRiskThreshold) and Tag 15 (SetMaintenanceFee) were
+                    // removed upstream. Explicit rejection for clarity — do not remove
+                    // without also removing constants from tags.rs to prevent silent null
+                    // dispatch.
+                    Err(ProgramError::InvalidInstructionData)
+                }
                 12 => {
                     // UpdateAdmin
                     let new_admin = read_pubkey(&mut rest)?;
@@ -2843,6 +2854,12 @@ pub mod units {
         units.checked_mul(scale as u64)
     }
 }
+
+/// Percolator NFT program ID — hardcoded to prevent NFT program spoofing
+/// in handle_transfer_ownership_cpi (P-1 / CRITICAL).
+/// Confirmed from percolator-sdk/src/abi/nft.ts:30.
+pub const PERCOLATOR_NFT_PROGRAM_ID: solana_program::pubkey::Pubkey =
+    solana_program::pubkey!("FqhKJT9gtScjrmfUuRMjeg7cXNpif1fqsy5Jh65tJmTS");
 
 // 8. mod oracle
 pub mod oracle {
@@ -7449,8 +7466,30 @@ pub mod processor {
         let bump_arr = [bump];
         let seeds: &[&[u8]] = &[b"lp", a_slab.key.as_ref(), &lp_bytes, &bump_arr];
 
+        // SECURITY(P-7/HIGH): Set reentrancy guard before CPI.
+        // slab_guard (called earlier on the immutable borrow) rejects any
+        // instruction that enters while FLAG_CPI_IN_PROGRESS is set. This
+        // prevents a malicious matcher from re-entering any slab-touching
+        // instruction mid-TradeCpi. The flag is cleared in a separate borrow
+        // scope immediately after the CPI returns so the slab is never borrowed
+        // across the CPI boundary (avoids ExternalAccountDataModified).
+        {
+            let mut data = state::slab_data_mut(a_slab)?;
+            state::set_cpi_in_progress(&mut data);
+        }
+
         // Phase 2: Use zc helper for CPI - slab not passed to avoid ExternalAccountDataModified
-        zc::invoke_signed_trade(&ix, a_lp_pda, a_matcher_ctx, a_matcher_prog, seeds)?;
+        let cpi_result = zc::invoke_signed_trade(&ix, a_lp_pda, a_matcher_ctx, a_matcher_prog, seeds);
+
+        // Always clear the reentrancy flag before propagating any CPI error.
+        {
+            let mut data = state::slab_data_mut(a_slab)?;
+            state::clear_cpi_in_progress(&mut data);
+        }
+
+        // Now propagate the CPI result (after flag is cleared so the slab is
+        // in a consistent state regardless of whether the CPI succeeded).
+        cpi_result?;
 
         let ctx_data = a_matcher_ctx.try_borrow_data()?;
         let ret = crate::matcher_abi::read_matcher_return(&ctx_data)?;
@@ -7646,6 +7685,11 @@ pub mod processor {
         let mut data = state::slab_data_mut(a_slab)?;
         slab_guard(program_id, a_slab, &data)?;
         require_initialized(&data)?;
+        // SECURITY(P-5/HIGH): Block liquidations while market is paused.
+        // Without this guard a paused market (e.g. emergency halt) would still
+        // allow permissionless liquidation, potentially force-closing positions
+        // at a stale oracle price during an emergency condition.
+        require_not_paused(&data)?;
 
         // Block liquidations after market resolution — resolved markets
         // are in withdraw-only settlement phase.
@@ -11391,6 +11435,16 @@ pub mod processor {
             && *a_nft_prog.owner != solana_program::bpf_loader::id()
             && *a_nft_prog.owner != solana_program::bpf_loader_deprecated::id()
         {
+            return Err(ProgramError::IncorrectProgramId);
+        }
+
+        // SECURITY(P-1/CRITICAL): Reject any NFT program that is not the
+        // canonical Percolator NFT deployment. Without this, any BPF program
+        // whose find_program_address("mint_authority", attacker_prog) happens
+        // to match the caller's key can pass the PDA check below and forge a
+        // TransferPositionOwnership call.
+        if a_nft_prog.key != &crate::PERCOLATOR_NFT_PROGRAM_ID {
+            solana_program::msg!("TransferPositionOwnership rejected: NFT program mismatch");
             return Err(ProgramError::IncorrectProgramId);
         }
 
