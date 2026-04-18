@@ -4858,6 +4858,74 @@ fn test_per_account_maintenance_fee_not_back_charged_to_new_user() {
     );
 }
 
+/// Disproof of the "fee sync erases market accrual" audit claim.
+///
+/// Hypothesis under test: when sync_account_fee self-advances
+/// engine.current_slot = clock.slot, a subsequent accrue_market_to
+/// becomes a no-op and the funding interval [prev, clock.slot] is lost.
+///
+/// Actual engine contract: accrue_market_to's dt is measured from
+/// `last_market_slot`, NOT `current_slot` (engine v12.18.x,
+/// accrue_market_to line 2143: `let total_dt = now_slot - last_market_slot`).
+/// sync_account_fee advances current_slot but NOT last_market_slot.
+/// So the next accrue_market_to still sees the full interval.
+///
+/// This test verifies empirically by reading `last_market_slot` before
+/// and after a fee-bearing operation. Under the hypothesis the field
+/// would stay behind; in practice it advances to clock.slot.
+#[test]
+fn test_fee_sync_does_not_erase_market_accrual_interval() {
+    program_path();
+    let mut env = TestEnv::new();
+    let data = encode_init_market_with_maint_fee_bounded(
+        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
+        1_000_000_000, 1_000, 0,
+    );
+    env.try_init_market_raw(data).expect("init_market");
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 100_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Seed engine at slot 100 via crank (set_slot adds +100 → clock=100).
+    env.set_slot(0);
+    env.crank();
+
+    // BPF layout offset for engine.last_market_slot (v12.18.x).
+    // 472 (ENGINE_OFF) + 656 (field offset after params grew by 8) = 1128.
+    const LAST_MARKET_SLOT_OFF: usize = 1128;
+    let read_last_market_slot = |e: &TestEnv| -> u64 {
+        let d = e.svm.get_account(&e.slab).unwrap().data;
+        u64::from_le_bytes(d[LAST_MARKET_SLOT_OFF..LAST_MARKET_SLOT_OFF + 8]
+            .try_into().unwrap())
+    };
+    let before = read_last_market_slot(&env);
+    assert_eq!(before, 100, "seeded last_market_slot at 100");
+
+    // Advance one slot. sync_account_fee will self-advance current_slot to
+    // 101. If the audit hypothesis held, the subsequent
+    // accrue_market_to(101, ...) inside withdraw_not_atomic would become a
+    // no-op and last_market_slot would stay at 100. Under the real engine
+    // contract, accrue_market_to's dt uses last_market_slot (100), applies
+    // funding for 1 slot, and advances last_market_slot to 101.
+    env.set_slot(1);
+    env.try_withdraw(&user, user_idx, 100)
+        .expect("Withdraw must succeed");
+
+    let after = read_last_market_slot(&env);
+    assert_eq!(
+        after, 101,
+        "last_market_slot MUST advance through the fee-bearing op — the \
+         audit's claim that fee-sync self-advance erases market accrual \
+         is false; accrue_market_to uses last_market_slot (not \
+         current_slot) to compute funding dt, so the interval is \
+         preserved.",
+    );
+}
+
 /// Disproof (extended) — exactly the shape the auditor described in the
 /// final pass: market at slot 100, user exists, clock advances to 101,
 /// maintenance_fee > 0. Every fee-bearing accrue path MUST succeed.

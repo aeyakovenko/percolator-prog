@@ -981,6 +981,14 @@ pub mod matcher_abi {
         if ret.abi_version != MATCHER_ABI_VERSION {
             return Err(ProgramError::InvalidAccountData);
         }
+        // Reject any flag bits outside the known set. Prevents a future
+        // matcher that uses a currently-undefined flag (e.g. a new partial
+        // fill semantics) from being silently accepted by this wrapper —
+        // upgraders must bump the ABI version to signal new flag meaning.
+        const KNOWN_FLAGS: u32 = FLAG_VALID | FLAG_PARTIAL_OK | FLAG_REJECTED;
+        if (ret.flags & !KNOWN_FLAGS) != 0 {
+            return Err(ProgramError::InvalidAccountData);
+        }
         // Must have VALID flag set
         if (ret.flags & FLAG_VALID) == 0 {
             return Err(ProgramError::InvalidAccountData);
@@ -2571,11 +2579,16 @@ pub mod oracle {
         external: Result<u64, ProgramError>,
         now_unix_ts: i64,
     ) -> Result<u64, ProgramError> {
-        // Update baseline from external oracle only (never from authority)
-        if let Ok(ext_price) = external {
+        // Borrow rather than consume the Result so `external` remains
+        // available for later propagation. ProgramError does not derive
+        // Copy (BorshIoError(String) kills the blanket derive), so
+        // `Result<u64, ProgramError>` is not Copy either — match by
+        // reference is the cheap, always-correct pattern.
+        let external_ok = external.is_ok();
+        if let Ok(ext_price) = external.as_ref() {
             let clamped_ext = clamp_oracle_price(
                 config.last_effective_price_e6,
-                ext_price,
+                *ext_price,
                 config.oracle_price_cap_e2bps,
             );
             config.last_effective_price_e6 = clamped_ext;
@@ -2592,7 +2605,7 @@ pub mod oracle {
             // When the live circuit breaker is active, require the external
             // oracle to have succeeded. Uses the active cap (not the immutable
             // floor) so zero-floor markets with a live breaker are also protected.
-            if config.oracle_price_cap_e2bps != 0 && external.is_err() {
+            if config.oracle_price_cap_e2bps != 0 && !external_ok {
                 return external; // propagate the external oracle error
             }
             // Authority price is clamped against the (now-updated) external baseline
