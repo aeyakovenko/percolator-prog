@@ -4858,6 +4858,70 @@ fn test_per_account_maintenance_fee_not_back_charged_to_new_user() {
     );
 }
 
+/// Disproof of the "fee sync ordering" audit claim: with maintenance fees
+/// enabled, a 1-slot gap before the next KeeperCrank / WithdrawCollateral /
+/// DepositCollateral MUST NOT cause the instruction to reject with
+/// "fee_slot_anchor > current_slot".
+///
+/// The engine's public entrypoint `sync_account_fee_to_slot_not_atomic`
+/// self-advances `current_slot = now_slot` BEFORE deriving the anchor, so
+/// the inner constraint `fee_slot_anchor <= current_slot` is always
+/// satisfied at call time. This test demonstrates that empirically against
+/// the exact shape described in the audit.
+#[test]
+fn test_fee_markets_survive_one_slot_gap_on_every_accrue_path() {
+    program_path();
+    let mut env = TestEnv::new();
+    let data = encode_init_market_with_maint_fee_bounded(
+        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
+        1_000_000_000, // max_maintenance_fee_per_slot
+        1_000,         // maintenance_fee_per_slot > 0 — fees ON
+        0,             // min_oracle_price_cap
+    );
+    env.try_init_market_raw(data).expect("init_market");
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 100_000_000_000);
+
+    // One user, deposited.
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Advance clock by ONE slot. set_slot adds +100 so effective gap is
+    // really a single-slot delta against the seeded engine state.
+    env.set_slot(1);
+
+    // KeeperCrank must succeed — fee sync uses engine-self-advanced anchor.
+    env.crank();
+
+    // Advance another slot and exercise WithdrawCollateral.
+    env.set_slot(2);
+    env.try_withdraw(&user, user_idx, 100)
+        .expect("WithdrawCollateral must succeed after 1-slot gap with fees ON");
+
+    // Advance another slot and exercise DepositCollateral (top-up path).
+    env.set_slot(3);
+    env.try_deposit(&user, user_idx, 500)
+        .expect("DepositCollateral must succeed after 1-slot gap with fees ON");
+
+    // DepositFeeCredits is also exercised — it reaches the debt-cap check
+    // only AFTER sync_account_fee succeeds, so a failure here must be
+    // InvalidArgument (units > debt), not Overflow / "fee anchor > current".
+    // That's the signature of a passing sync with no outstanding debt.
+    env.set_slot(4);
+    let r = env.try_deposit_fee_credits(&user, user_idx, 50);
+    match r {
+        Ok(_) => {} // had debt, repaid
+        Err(e) => assert!(
+            e.contains("InvalidArgument"),
+            "DepositFeeCredits must either succeed or reject via the \
+             debt-cap guard (InvalidArgument). A fee-sync-anchor failure \
+             would appear as Custom(Overflow). Got: {e}",
+        ),
+    }
+}
+
 /// KeeperCrank reward: a non-permissionless cranker earns 50% of the
 /// maintenance fees swept on that crank as capital credit, the other
 /// 50% stays in insurance. No additional cap — the sweep itself is the

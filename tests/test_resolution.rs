@@ -2225,7 +2225,7 @@ fn test_keeper_crank_succeeds_after_long_idle_via_catchup_accrue() {
     env.crank(); // engine.current_slot ~ 0-100
 
     // Idle for 250_000 slots — well past the 100_000 accrual envelope,
-    // but within CATCHUP_CHUNKS_MAX × max_dt = 10 × 100_000 = 1_000_000.
+    // but within CATCHUP_CHUNKS_MAX × max_dt = 20 × 100_000 = 2_000_000.
     // Set clock + oracle together so the oracle read itself succeeds (the
     // failure mode we're testing is the accrual envelope, not oracle
     // staleness).
@@ -2233,8 +2233,104 @@ fn test_keeper_crank_succeeds_after_long_idle_via_catchup_accrue() {
 
     // Under the pre-fix code this crank would fail with EngineOverflow
     // (dt=250_100 > max_accrual_dt_slots=100_000). With the fix, the
-    // wrapper pre-chunks accrual in up to 10 × max_dt steps, so a single
-    // call catches the engine up and completes the regular crank.
+    // wrapper pre-chunks accrual up to CATCHUP_CHUNKS_MAX × max_dt, so
+    // a single call catches the engine up and completes the regular crank.
     env.crank();
+}
+
+/// Regression for Finding 3 (CatchupAccrue instruction): a gap larger than
+/// CATCHUP_CHUNKS_MAX × max_accrual_dt_slots cannot be closed by a single
+/// accrue-bearing instruction — the main op would hit CatchupRequired and
+/// roll back all catchup progress. The dedicated CatchupAccrue instruction
+/// commits incremental progress without attempting any main op, letting
+/// callers call it repeatedly until the gap is small enough for regular
+/// instructions to succeed.
+#[test]
+fn test_catchup_accrue_commits_progress_past_in_line_cap() {
+    program_path();
+    let mut env = TestEnv::new();
+    // max_accrual_dt=100_000, CATCHUP_CHUNKS_MAX=20 → 2M slots per call.
+    env.init_market_with_cap(0, 10_000, 50_000);
+    env.crank(); // seed engine state
+
+    // Advance far beyond CATCHUP_CHUNKS_MAX × max_dt. 3M slots > 2M cap.
+    env.set_slot(3_000_000);
+
+    // A single KeeperCrank would fail (in-line catchup hits cap, returns
+    // CatchupRequired, rolls back). Instead, call CatchupAccrue twice to
+    // commit incremental progress.
+    env.try_catchup_accrue()
+        .expect("CatchupAccrue must commit partial progress unconditionally");
+    // After one catchup call, engine should have advanced by ≈2M slots.
+    // A second call closes the remaining gap.
+    env.try_catchup_accrue()
+        .expect("second CatchupAccrue must complete the remainder");
+
+    // Now a regular KeeperCrank should succeed.
+    env.crank();
+}
+
+/// Regression for Finding 5: ResolvePermissionless must check oracle
+/// authority freshness BEFORE stamping first_observed_stale_slot. Otherwise
+/// an attacker could observe external-oracle staleness once while the
+/// authority is fresh (stamping an old slot), then exploit a brief
+/// authority pause much later to resolve immediately — the stamp would
+/// carry over a long authority-healthy window.
+#[test]
+fn test_resolve_permissionless_fresh_authority_does_not_stamp() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_cap(0, 10_000, 50_000);
+    env.crank();
+
+    // Set a fresh oracle authority. The authority's push timestamp will
+    // be current, so authority_is_fresh = true on the next call.
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
+    // Push a price at the current unix timestamp so authority is fresh.
+    // Note: for non-Hyperp, pushing a price also requires the price to
+    // be compatible with the circuit breaker. Use a value close to the
+    // existing last_effective_price.
+    env.try_push_oracle_price(&admin, 138_000_000, 100).unwrap();
+
+    // Kill the EXTERNAL oracle (set max_staleness_secs very small so the
+    // external feed appears stale) while the authority remains fresh.
+    {
+        let mut slab = env.svm.get_account(&env.slab).unwrap();
+        slab.data[168..176].copy_from_slice(&30u64.to_le_bytes());
+        env.svm.set_account(env.slab, slab).unwrap();
+    }
+
+    // Advance clock a bit but keep authority fresh (unix_timestamp within
+    // max_staleness_secs of the last authority push).
+    env.svm.set_sysvar(&Clock {
+        slot: 200,
+        unix_timestamp: 115, // authority pushed at ts=100; 115-100=15 < 30
+        ..Clock::default()
+    });
+
+    // External oracle is stale, authority is fresh → the instruction
+    // MUST NOT stamp first_observed_stale_slot. Under the pre-fix code
+    // it would stamp before checking authority.
+    env.try_resolve_permissionless_once()
+        .expect("call must succeed and not resolve");
+    assert!(!env.is_market_resolved(), "market stays live (authority fresh)");
+
+    // Read first_observed_stale_slot from the slab — must still be 0.
+    const FIRST_OBS_STALE_OFF: usize = 72 + 296; // HEADER_LEN + offset_of!(MarketConfig, first_observed_stale_slot)
+    let stamp = {
+        let slab = env.svm.get_account(&env.slab).unwrap();
+        u64::from_le_bytes(
+            slab.data[FIRST_OBS_STALE_OFF..FIRST_OBS_STALE_OFF + 8]
+                .try_into()
+                .unwrap(),
+        )
+    };
+    assert_eq!(
+        stamp, 0,
+        "first_observed_stale_slot MUST NOT be stamped while authority is \
+         fresh — otherwise a later brief authority pause would short-circuit \
+         the continuous-death window (Finding 5)",
+    );
 }
 

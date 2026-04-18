@@ -1502,6 +1502,11 @@ pub fn encode_resolve_permissionless() -> Vec<u8> {
     vec![29u8]
 }
 
+/// Tag 31: CatchupAccrue — permissionless partial market-clock advance.
+pub fn encode_catchup_accrue() -> Vec<u8> {
+    vec![31u8]
+}
+
 pub fn encode_withdraw_insurance() -> Vec<u8> {
     vec![20u8] // Instruction tag for WithdrawInsurance
 }
@@ -2790,6 +2795,29 @@ impl TestEnv {
         self.svm.set_sysvar(&clk);
         // Second observation — duration check passes, market resolves.
         self.try_resolve_permissionless_once()
+    }
+
+    /// Tag 31: permissionless CatchupAccrue. Commits up to
+    /// CATCHUP_CHUNKS_MAX chunks of market-clock advancement.
+    pub fn try_catchup_accrue(&mut self) -> Result<(), String> {
+        let caller = Keypair::new();
+        self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_catchup_accrue(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_ix(), ix],
+            Some(&caller.pubkey()),
+            &[&caller],
+            self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).map(|_| ()).map_err(|e| format!("{:?}", e))
     }
 
     /// Try ForceCloseResolved instruction (permissionless, requires resolved + delay)

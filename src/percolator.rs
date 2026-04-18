@@ -1067,6 +1067,11 @@ pub mod error {
         InvalidConfigParam,
         HyperpTradeNoCpiDisabled,
         EngineCorruptState,
+        /// Wrapper-level: the gap between `engine.current_slot` and
+        /// `clock.slot` exceeds `CATCHUP_CHUNKS_MAX × max_accrual_dt_slots`.
+        /// Caller must run the dedicated `CatchupAccrue` instruction one
+        /// or more times to commit incremental progress, then retry.
+        CatchupRequired,
     }
 
     impl From<PercolatorError> for ProgramError {
@@ -1260,6 +1265,18 @@ pub mod ix {
         ForceCloseResolved {
             user_idx: u16,
         },
+        /// Permissionless market-clock catchup (tag 31). When a live market
+        /// has been idle for longer than
+        /// `CATCHUP_CHUNKS_MAX × max_accrual_dt_slots`, every accrue-bearing
+        /// instruction would fail with `CatchupRequired` — no progress can
+        /// be committed in a single failing transaction. This instruction
+        /// does pure catchup (up to CATCHUP_CHUNKS_MAX chunks) and commits
+        /// unconditionally, letting callers incrementally close the gap.
+        ///
+        /// Anyone can call. Takes slab + oracle + clock. For markets with a
+        /// confirmed-dead oracle, use ResolvePermissionless instead — its
+        /// Degenerate arm bypasses accrue entirely.
+        CatchupAccrue,
     }
 
     impl Instruction {
@@ -1540,6 +1557,7 @@ pub mod ix {
                     let user_idx = read_u16(&mut rest)?;
                     Ok(Instruction::ForceCloseResolved { user_idx })
                 }
+                31 => Ok(Instruction::CatchupAccrue),
                 _ => Err(ProgramError::InvalidInstructionData),
             };
             // Trailing-byte guard: every tag above fully consumes its expected
@@ -3017,33 +3035,46 @@ pub mod processor {
             .map_err(map_risk_error)
     }
 
-    /// Pre-chunk market-clock advancement when the gap since the last engine
-    /// operation exceeds `params.max_accrual_dt_slots`. The engine rejects
-    /// any single call whose dt exceeds the envelope (spec §1.4), which
-    /// under long idle periods makes EVERY accrue-bearing instruction
-    /// (KeeperCrank, TradeCpi, TradeNoCpi, Withdraw, Settle, Convert,
-    /// live Insurance withdraw, etc.) fail with `Overflow` — bricking the
-    /// market unless someone calls ResolvePermissionless (Degenerate arm
-    /// bypasses `accrue_market_to`).
+    /// Maximum number of max_dt chunks the in-line catchup can advance per
+    /// instruction. Bounded by CU budget — each `accrue_market_to` is cheap
+    /// but not free. For gaps beyond this, callers must use the dedicated
+    /// `CatchupAccrue` instruction which commits progress atomically
+    /// without attempting a main operation afterwards.
     ///
-    /// This helper advances the engine in chunks of `max_accrual_dt_slots`
-    /// using the engine's stored `last_oracle_price` and funding rate 0.
-    /// Rate 0 is the signal-free convention — during an idle interval no
-    /// one has observed mark/index, so no funding has been proven. The
-    /// stored price seeds `last_oracle_price` on each chunk; the caller's
-    /// subsequent `_not_atomic` call updates it with the fresh oracle.
+    /// 20 × max_dt ≈ 2M slots ≈ 11 days at 100k-slot envelope — well above
+    /// the auditor's pathological 1.3M-slot example.
+    const CATCHUP_CHUNKS_MAX: u32 = 20;
+
+    /// Pre-chunk market-clock advancement when the gap since the last
+    /// engine operation exceeds `params.max_accrual_dt_slots`. The engine
+    /// rejects any single `accrue_market_to` whose dt exceeds the envelope
+    /// (spec §1.4), so every accrue-bearing instruction (KeeperCrank,
+    /// TradeCpi, TradeNoCpi, Withdraw, Liquidate, Close, Settle, Convert,
+    /// live Insurance withdraw, Ordinary ResolveMarket, UpdateConfig) must
+    /// close that gap before its own accrue.
     ///
-    /// Bounded to `CATCHUP_CHUNKS_MAX` iterations per call to keep CU use
-    /// finite. After that cap, if the gap is still beyond the envelope, the
-    /// caller's own accrue will reject with Overflow and the natural
-    /// recovery path is ResolvePermissionless. In practice, the cap is well
-    /// above any realistic gap — CATCHUP_CHUNKS_MAX × max_dt = many days.
+    /// Caller supplies the catchup price and funding rate. Typical usage:
+    /// the pre-oracle-read funding rate (`funding_rate_e9_pre`) and the
+    /// fresh (or about-to-be-set) `oracle_price`. Using the caller-supplied
+    /// rate (not 0) preserves anti-retroactivity — the rate reflects the
+    /// mark/index state as it was before this instruction, not what the
+    /// idle interval "should have" been (which is unknowable).
     ///
-    /// No-op when `max_dt == 0` (misconfiguration guard) or when the gap
-    /// is already within the envelope.
+    /// If the gap exceeds `CATCHUP_CHUNKS_MAX × max_dt`, returns `Err`
+    /// with `CatchupRequired` so the caller can surface "call CatchupAccrue
+    /// first" instead of silently returning Ok and letting the subsequent
+    /// main engine call Overflow-and-rollback (which would discard the
+    /// catchup progress too, making the market unrecoverable in-line).
+    ///
+    /// No-op when the gap is already within the envelope, or when
+    /// `max_dt == 0` (misconfiguration guard), or when the engine has never
+    /// seen a real oracle observation (`last_oracle_price == 0`; the
+    /// caller's own `_not_atomic` call will seed it).
     fn catchup_accrue(
         engine: &mut RiskEngine,
         now_slot: u64,
+        price: u64,
+        funding_rate_e9: i128,
     ) -> Result<(), ProgramError> {
         let max_dt = engine.params.max_accrual_dt_slots;
         if max_dt == 0 {
@@ -3052,24 +3083,28 @@ pub mod processor {
         if now_slot <= engine.current_slot {
             return Ok(());
         }
-        const CATCHUP_CHUNKS_MAX: u32 = 10;
-        let stored_price = engine.last_oracle_price;
-        // Market never had a real oracle observation — nothing to carry over.
+        // Market never had a real oracle observation — nothing to catch up.
         // The caller's own _not_atomic call will seed last_oracle_price.
-        if stored_price == 0 {
+        if engine.last_oracle_price == 0 {
             return Ok(());
         }
+        // Use the caller's price if it's valid (> 0), otherwise the engine's
+        // stored last_oracle_price. accrue_market_to rejects price == 0.
+        let chunk_price = if price > 0 { price } else { engine.last_oracle_price };
         let mut chunks: u32 = 0;
         while now_slot.saturating_sub(engine.current_slot) > max_dt {
             if chunks >= CATCHUP_CHUNKS_MAX {
-                // Gap exceeds CATCHUP_CHUNKS_MAX × max_dt. The caller's
-                // accrue will reject; natural recovery is permissionless
-                // resolution (Degenerate arm skips accrue).
-                return Ok(());
+                // Refuse to proceed — silently returning Ok here would let
+                // the caller's main accrue hit Overflow on the residual
+                // gap, rolling back ALL catchup work (no net progress).
+                // Surfacing CatchupRequired instead tells callers/keepers
+                // to use the dedicated CatchupAccrue instruction which
+                // commits progress without attempting the main op.
+                return Err(PercolatorError::CatchupRequired.into());
             }
             let step = engine.current_slot.saturating_add(max_dt);
             engine
-                .accrue_market_to(step, stored_price, 0)
+                .accrue_market_to(step, chunk_price, funding_rate_e9)
                 .map_err(map_risk_error)?;
             chunks = chunks.saturating_add(1);
         }
@@ -4179,8 +4214,9 @@ pub mod processor {
                 let admit_h_max = engine.params.h_max;
                 // Pre-chunk catch-up so both the fee sync envelope and
                 // withdraw_not_atomic's internal accrue see dt ≤ max_dt
-                // (Finding 3).
-                catchup_accrue(engine, clock.slot)?;
+                // (Finding 3). Use the caller-supplied pre-read rate for
+                // catchup chunks — preserves anti-retroactivity (Finding 2).
+                catchup_accrue(engine, clock.slot, price, funding_rate_e9)?;
                 // Realize due maintenance fees BEFORE the withdrawal margin
                 // check, so the account can't withdraw against pre-fee capital.
                 sync_account_fee(engine, &config, user_idx, clock.slot)?;
@@ -4369,8 +4405,9 @@ pub mod processor {
                 // Catch the engine up in max_dt chunks BEFORE the sweep — the
                 // sweep's per-account sync also enforces the accrual envelope,
                 // so a long idle gap would otherwise brick the very crank meant
-                // to make progress (Finding 3).
-                catchup_accrue(engine, clock.slot)?;
+                // to make progress (Finding 3). Use the pre-read funding rate
+                // for catchup chunks to preserve anti-retroactivity (Finding 2).
+                catchup_accrue(engine, clock.slot, price, funding_rate_e9_pre)?;
                 let ins_before = engine.insurance_fund.balance.get();
                 sweep_maintenance_fees(engine, &mut config, clock.slot)?;
                 let sweep_delta = engine
@@ -4604,8 +4641,9 @@ pub mod processor {
                 // Side-mode gating is handled inside engine.execute_trade_not_atomic()
 
                 // Pre-chunk catch-up so execute_trade_not_atomic's internal
-                // accrue sees dt ≤ max_accrual_dt_slots (Finding 3).
-                catchup_accrue(engine, clock.slot)?;
+                // accrue sees dt ≤ max_accrual_dt_slots (Finding 3). Use the
+                // pre-read funding rate for catchup chunks (Finding 2).
+                catchup_accrue(engine, clock.slot, price, funding_rate_e9)?;
 
                 // Snapshot insurance fund balance for fee-weighted EWMA.
                 // The delta after execute_trade = fees_collected - losses_absorbed.
@@ -4996,8 +5034,9 @@ pub mod processor {
                     let mut data = state::slab_data_mut(a_slab)?;
                     let engine = zc::engine_mut(&mut data)?;
                     // Pre-chunk catch-up so the single accrue_market_to below
-                    // sees dt ≤ max_accrual_dt_slots (Finding 3).
-                    catchup_accrue(engine, clock.slot)?;
+                    // sees dt ≤ max_accrual_dt_slots (Finding 3). Use the
+                    // pre-read funding rate for catchup chunks (Finding 2).
+                    catchup_accrue(engine, clock.slot, price, funding_rate_e9_pre)?;
                     engine
                         .accrue_market_to(clock.slot, price, funding_rate_e9_pre)
                         .map_err(map_risk_error)?;
@@ -5054,8 +5093,9 @@ pub mod processor {
                     let engine = zc::engine_mut(&mut data)?;
 
                     // Pre-chunk catch-up so execute_trade_not_atomic's internal
-                    // accrue sees dt ≤ max_accrual_dt_slots (Finding 3).
-                    catchup_accrue(engine, clock.slot)?;
+                    // accrue sees dt ≤ max_accrual_dt_slots (Finding 3). Use
+                    // the pre-read funding rate for catchup (Finding 2).
+                    catchup_accrue(engine, clock.slot, price, funding_rate_e9_pre)?;
 
                     let trade_size = crate::verify::cpi_trade_size(ret.exec_size, size);
 
@@ -5222,7 +5262,8 @@ pub mod processor {
                 let admit_h_max = engine.params.h_max;
                 // Pre-chunk catch-up so fee sync + liquidate_at_oracle_not_atomic's
                 // internal accrue see dt ≤ max_accrual_dt_slots (Finding 3).
-                catchup_accrue(engine, clock.slot)?;
+                // Pre-read funding rate preserves anti-retroactivity (Finding 2).
+                catchup_accrue(engine, clock.slot, price, funding_rate_e9)?;
                 // Realize due maintenance fees on the target BEFORE liquidation
                 // so the maintenance-margin check sees post-fee equity.
                 sync_account_fee(engine, &config, target_idx, clock.slot)?;
@@ -5356,7 +5397,8 @@ pub mod processor {
                     let admit_h_max = engine.params.h_max;
                     // Pre-chunk catch-up so fee sync + close_account_not_atomic's
                     // internal accrue see dt ≤ max_accrual_dt_slots (Finding 3).
-                    catchup_accrue(engine, clock.slot)?;
+                    // Pre-read funding rate preserves anti-retroactivity (Finding 2).
+                    catchup_accrue(engine, clock.slot, price, funding_rate_e9)?;
                     // Realize due maintenance fees BEFORE close so the account
                     // cannot escape the unpaid interval by closing between cranks.
                     sync_account_fee(engine, &config, user_idx, clock.slot)?;
@@ -5785,6 +5827,13 @@ pub mod processor {
                     if accrual_price > 0 {
                         {
                             let engine = zc::engine_mut(&mut data)?;
+                            // Pre-chunk catch-up so accrue_market_to below sees
+                            // dt ≤ max_accrual_dt_slots (Finding 4). Use the
+                            // same (price, rate) the final accrue uses so the
+                            // catchup chunks are consistent with the boundary.
+                            catchup_accrue(
+                                engine, clock.slot, accrual_price, rate_for_accrual,
+                            )?;
                             engine.accrue_market_to(clock.slot, accrual_price,
                                 rate_for_accrual)
                                 .map_err(map_risk_error)?;
@@ -5945,10 +5994,26 @@ pub mod processor {
                     let push_clock2 = Clock::get()
                         .map_err(|_| ProgramError::UnsupportedSysvar)?;
                     let engine = zc::engine_mut(&mut data)?;
+                    // Pre-chunk catch-up so the accrue below sees
+                    // dt ≤ max_accrual_dt_slots (Finding 4).
+                    catchup_accrue(
+                        engine, push_clock2.slot, config.last_effective_price_e6,
+                        funding_rate_e9,
+                    )?;
                     engine.accrue_market_to(
                         push_clock2.slot, config.last_effective_price_e6,
                         funding_rate_e9,
                     ).map_err(map_risk_error)?;
+                }
+
+                // Successful authority push clears any prior stale-oracle
+                // observation — the market has a live price source right
+                // now (Finding 5). Without this, a stale stamp from an
+                // earlier external-oracle hiccup could persist across a
+                // long authority-healthy period and let permissionless
+                // resolve trigger on a short authority pause.
+                if config.first_observed_stale_slot != 0 {
+                    config.first_observed_stale_slot = 0;
                 }
 
                 let clamp_base = config.last_effective_price_e6;
@@ -6029,6 +6094,12 @@ pub mod processor {
                     config = state::read_config(&data);
                     // Accrue to boundary using engine's already-stored rate.
                     let engine = zc::engine_mut(&mut data)?;
+                    // Pre-chunk catch-up so the accrue below sees
+                    // dt ≤ max_accrual_dt_slots (Finding 4).
+                    catchup_accrue(
+                        engine, clock.slot, config.last_effective_price_e6,
+                        funding_rate_e9,
+                    )?;
                     engine.accrue_market_to(
                         clock.slot, config.last_effective_price_e6,
                         funding_rate_e9,
@@ -6257,8 +6328,12 @@ pub mod processor {
                 // bypasses accrue_market_to inside the engine, so no envelope
                 // check applies. Ordinary accrues through the final step and
                 // would otherwise hit Overflow when the gap exceeds max_dt.
+                // Catchup uses the same (price, rate) the final accrue will
+                // use, preserving anti-retroactivity (Finding 2).
                 if in_ordinary_arm {
-                    catchup_accrue(engine, clock.slot)?;
+                    catchup_accrue(
+                        engine, clock.slot, live_oracle, rate_for_final_accrual,
+                    )?;
                 }
                 engine.resolve_market_not_atomic(
                     resolve_mode,
@@ -6591,7 +6666,10 @@ pub mod processor {
                             let engine = zc::engine_mut(&mut data)?;
                             // Pre-chunk catch-up so the single accrue below
                             // sees dt ≤ max_accrual_dt_slots (Finding 3).
-                            catchup_accrue(engine, clock.slot)?;
+                            // Pre-read funding rate for anti-retroactivity (Finding 2).
+                            catchup_accrue(
+                                engine, clock.slot, accrual_price, funding_rate_e9,
+                            )?;
                             engine.accrue_market_to(
                                 clock.slot, accrual_price,
                                 funding_rate_e9,
@@ -6874,7 +6952,8 @@ pub mod processor {
                 let admit_h_max = engine.params.h_max;
                 // Pre-chunk catch-up so fee sync + settle_account_not_atomic's
                 // internal accrue see dt ≤ max_accrual_dt_slots (Finding 3).
-                catchup_accrue(engine, clock.slot)?;
+                // Pre-read funding rate for anti-retroactivity (Finding 2).
+                catchup_accrue(engine, clock.slot, price, funding_rate_e9)?;
                 // Realize due maintenance fees BEFORE settle so the settle's
                 // equity computation reflects post-fee capital.
                 sync_account_fee(engine, &config, user_idx, clock.slot)?;
@@ -7019,7 +7098,8 @@ pub mod processor {
                 let admit_h_max = engine.params.h_max;
                 // Pre-chunk catch-up so fee sync + convert_released_pnl_not_atomic's
                 // internal accrue see dt ≤ max_accrual_dt_slots (Finding 3).
-                catchup_accrue(engine, clock.slot)?;
+                // Pre-read funding rate for anti-retroactivity (Finding 2).
+                catchup_accrue(engine, clock.slot, price, funding_rate_e9)?;
                 // Realize due maintenance fees BEFORE conversion so the
                 // convertible-PnL bound reflects post-fee equity.
                 sync_account_fee(engine, &config, user_idx, clock.slot)?;
@@ -7060,10 +7140,38 @@ pub mod processor {
 
                 let clock = Clock::from_account_info(a_clock)?;
 
+                // Authority-freshness check runs FIRST (Finding 5). A live
+                // oracle authority keeps the market alive regardless of
+                // external-feed state. Stamping first_observed_stale_slot
+                // BEFORE this check — as the prior code did — would let an
+                // attacker observe external staleness once during a fresh-
+                // authority window, then exploit a brief authority pause
+                // later to pass the duration check against an artificially
+                // old stamp.
+                //
+                // If authority is configured AND fresh: the market is live.
+                // Clear any prior stamp and return Ok (no resolution).
+                // If authority is stale / never pushed / not configured: fall
+                // through to the external-oracle observation flow below.
+                let authority_is_fresh = config.oracle_authority != [0u8; 32]
+                    && config.authority_timestamp > 0
+                    && {
+                        let age = clock.unix_timestamp
+                            .saturating_sub(config.authority_timestamp);
+                        age >= 0 && (age as u64) < config.max_staleness_secs
+                    };
+                if authority_is_fresh {
+                    if config.first_observed_stale_slot != 0 {
+                        config.first_observed_stale_slot = 0;
+                        state::write_config(&mut data, &config);
+                    }
+                    return Ok(());
+                }
+
                 // Verify oracle is actually stale RIGHT NOW by trying to read it.
-                // Only OracleStale proves the oracle is dead. Other errors
-                // (wrong account, bad data) don't prove staleness — they could
-                // be an attacker passing garbage to fake oracle death.
+                // Only OracleStale / OracleConfTooWide prove the oracle is
+                // unusable. Other errors (wrong account, bad data) don't prove
+                // death — they could be an attacker passing garbage.
                 //
                 // Two-phase design (non-Hyperp): the first stale observation
                 // STAMPS first_observed_stale_slot and returns Ok with NO
@@ -7144,22 +7252,11 @@ pub mod processor {
                     }
                 }
 
-                // Block if an oracle authority is configured AND has pushed recently.
-                // If the authority has never pushed (timestamp=0) or their last push
-                // is stale, the authority is effectively dead and permissionless
-                // resolution should proceed. This prevents the deadlock where:
-                // authority set + external oracle dead = no resolution path.
-                if config.oracle_authority != [0u8; 32] && config.authority_timestamp > 0 {
-                    let authority_age_secs = clock.unix_timestamp
-                        .saturating_sub(config.authority_timestamp);
-                    // Authority is "fresh" if push happened within max_staleness_secs
-                    // (the same staleness window as the external oracle feed).
-                    if authority_age_secs >= 0
-                        && (authority_age_secs as u64) < config.max_staleness_secs
-                    {
-                        return Err(ProgramError::InvalidAccountData);
-                    }
-                }
+                // Authority freshness was already rejected at the top of the
+                // instruction (Finding 5). Reaching this point means either
+                // no authority is configured, or the authority has been stale
+                // for at least max_staleness_secs — the market has no live
+                // price source and qualifies for permissionless recovery.
 
                 // Require oracle/mark has been dead for the configured delay.
                 // Non-Hyperp: measure from first_observed_stale_slot. That field
@@ -7352,6 +7449,100 @@ pub mod processor {
                     a_token, a_vault, a_owner_ata, a_pda,
                     base_to_pay, &signer_seeds,
                 )?;
+            }
+
+            Instruction::CatchupAccrue => {
+                // Permissionless pure-catchup. Commits up to
+                // CATCHUP_CHUNKS_MAX × max_accrual_dt_slots of market-clock
+                // advancement without attempting a main operation, so
+                // progress is never rolled back even when the total gap
+                // exceeds what a single instruction can catch up in-line.
+                // Callers invoke this as many times as needed (each call
+                // extending engine.current_slot by ≤ CATCHUP_CHUNKS_MAX
+                // chunks) until any accrue-bearing instruction can succeed.
+                accounts::expect_len(accounts, 3)?;
+                let a_slab = &accounts[0];
+                let a_clock = &accounts[1];
+                let a_oracle = &accounts[2];
+
+                accounts::expect_writable(a_slab)?;
+
+                let mut data = state::slab_data_mut(a_slab)?;
+                slab_guard(program_id, a_slab, &data)?;
+                require_initialized(&data)?;
+
+                // Market must be Live. Resolved markets don't need catchup
+                // (engine time is frozen; force-close and close paths use
+                // the resolved slot directly).
+                if zc::engine_ref(&data)?.is_resolved() {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+
+                let mut config = state::read_config(&data);
+                let clock = Clock::from_account_info(a_clock)?;
+                // Anti-retroactivity: capture funding rate BEFORE any oracle
+                // mutation (§5.5). This is the rate that was in effect up to
+                // this instruction; catchup chunks use it.
+                let funding_rate_e9 = compute_current_funding_rate_e9(&config);
+
+                // Oracle read. For Hyperp this advances the internal index
+                // via clamp_toward_with_dt; for non-Hyperp it returns the
+                // clamped external price and stamps last_good_oracle_slot.
+                // If the oracle is dead, return a clear error — caller
+                // should use ResolvePermissionless (Degenerate arm bypasses
+                // accrue entirely) instead of CatchupAccrue.
+                let is_hyperp = oracle::is_hyperp_mode(&config);
+                let price = if is_hyperp {
+                    let eng = zc::engine_ref(&data)?;
+                    let last_slot = eng.current_slot;
+                    oracle::get_engine_oracle_price_e6(
+                        last_slot, clock.slot, clock.unix_timestamp,
+                        &mut config, a_oracle,
+                    )?
+                } else {
+                    read_price_and_stamp(
+                        &mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data,
+                    )?
+                };
+                state::write_config(&mut data, &config);
+
+                let engine = zc::engine_mut(&mut data)?;
+
+                // Do catchup, but CAP THE DESIRED TARGET to
+                // engine.current_slot + CATCHUP_CHUNKS_MAX × max_dt so we
+                // never raise CatchupRequired here — the whole point of
+                // this instruction is to commit partial progress even when
+                // the full gap can't be closed in one call.
+                let max_dt = engine.params.max_accrual_dt_slots;
+                let max_step_per_call = (CATCHUP_CHUNKS_MAX as u64)
+                    .saturating_mul(max_dt);
+                let target = core::cmp::min(
+                    clock.slot,
+                    engine.current_slot.saturating_add(max_step_per_call),
+                );
+                if target > engine.current_slot {
+                    // Use the fresh oracle price and pre-read funding rate
+                    // for the chunks, same policy as the in-line catchups.
+                    catchup_accrue(engine, target, price, funding_rate_e9)?;
+
+                    // If the full clock.slot is within envelope after the
+                    // chunked catchup, do a final accrue to clock.slot so
+                    // last_market_slot / last_oracle_price reflect the
+                    // freshest read. Otherwise leave engine at the chunked
+                    // boundary — subsequent CatchupAccrue calls will close
+                    // the remainder.
+                    if clock.slot.saturating_sub(engine.current_slot) <= max_dt
+                        && clock.slot > engine.current_slot
+                    {
+                        engine
+                            .accrue_market_to(clock.slot, price, funding_rate_e9)
+                            .map_err(map_risk_error)?;
+                    }
+                }
+
+                if !state::is_oracle_initialized(&data) {
+                    state::set_oracle_initialized(&mut data);
+                }
             }
         }
         Ok(())
