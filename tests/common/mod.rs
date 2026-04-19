@@ -2749,6 +2749,20 @@ impl TestEnv {
     /// have elapsed succeeds. Tests asserting specific single-call behavior
     /// (e.g., rejecting a premature resolve after idle) should use this.
     pub fn try_resolve_permissionless_once(&mut self) -> Result<(), String> {
+        // Auto-configure an authority if none exists. See
+        // try_resolve_permissionless for rationale (audit P0: Pyth-Pull
+        // markets require an authority beacon; setting it here with
+        // authority_timestamp = 0 keeps authority_is_fresh false so
+        // the intended stale-resolve flow still runs).
+        let needs_authority = {
+            let slab = self.svm.get_account(&self.slab).unwrap();
+            percolator_prog::state::read_config(&slab.data).oracle_authority
+                == [0u8; 32]
+        };
+        if needs_authority {
+            let admin = Keypair::from_bytes(&self.payer.to_bytes()).unwrap();
+            let _ = self.try_set_oracle_authority(&admin, &admin.pubkey());
+        }
         let caller = Keypair::new();
         self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
         let ix = Instruction {
@@ -2777,6 +2791,25 @@ impl TestEnv {
     /// both observations with an artificial clock advance between them so
     /// existing tests don't have to manually orchestrate the two-phase flow.
     pub fn try_resolve_permissionless(&mut self) -> Result<(), String> {
+        // Wrapper requires an oracle authority for permissionless-resolve
+        // on Pyth-Pull markets (audit P0): stale-of-a-given-Pyth-update
+        // cannot alone prove feed death. The authority acts as the
+        // external liveness beacon — tests that exercise the stale-
+        // resolve path must therefore have SOME configured authority
+        // even when they don't actually push prices through it. If the
+        // caller hasn't set one up (common for governance-free tests),
+        // set the payer as authority here. SetOracleAuthority sets
+        // authority_timestamp to 0, so authority_is_fresh stays false
+        // and the test's intended stale-resolve flow still proceeds.
+        let needs_authority = {
+            let slab = self.svm.get_account(&self.slab).unwrap();
+            percolator_prog::state::read_config(&slab.data).oracle_authority
+                == [0u8; 32]
+        };
+        if needs_authority {
+            let admin = Keypair::from_bytes(&self.payer.to_bytes()).unwrap();
+            let _ = self.try_set_oracle_authority(&admin, &admin.pubkey());
+        }
         // First observation — stamps first_observed_stale_slot, returns stale.
         // Idempotent on repeated calls within the same stale window.
         let _ = self.try_resolve_permissionless_once();

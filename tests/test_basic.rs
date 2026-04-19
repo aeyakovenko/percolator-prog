@@ -4473,6 +4473,14 @@ fn test_governance_free_inverted_sol_lifecycle_with_fee_weighted_ewma() {
     env.trade(&user, &lp, lp_idx, user_idx, 5_000_000); // large trade
 
     // Oracle dies → permissionless resolution
+    // Wrapper requires an oracle authority for permissionless resolve
+    // on Pyth-Pull markets (audit P0): a stale Pyth PriceUpdateV2 is
+    // caller-selected and can't alone prove feed death. An authority
+    // provides the external liveness beacon. Set one up before the
+    // resolve attempt.
+    let admin_kp2 = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_set_oracle_authority(&admin_kp2, &admin_kp2.pubkey()).unwrap();
+
     env.svm.set_sysvar(&Clock {
         slot: 700,
         unix_timestamp: 700,

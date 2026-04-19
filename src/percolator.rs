@@ -76,6 +76,38 @@ pub mod constants {
     pub const MAX_ACCRUAL_DT_SLOTS: u64 = 100_000;
     /// Max |funding_rate_e9_per_slot| the engine will accrue (spec §1.4).
     pub const MAX_ABS_FUNDING_E9_PER_SLOT: u64 = 1_000_000;
+    /// Cumulative-funding lifetime (engine §1.4 v12.18.x). Distinct from
+    /// the per-call `MAX_ACCRUAL_DT_SLOTS` envelope: this bounds the
+    /// lifetime sum of funding contributions, not any single call.
+    ///
+    /// Engine init asserts the safety envelope:
+    ///
+    ///     ADL_ONE · MAX_ORACLE_PRICE · max_abs_funding_e9_per_slot ·
+    ///       min_funding_lifetime_slots  ≤  i128::MAX
+    ///
+    /// With the engine-crate constants
+    ///     ADL_ONE            = 10^15
+    ///     MAX_ORACLE_PRICE   = 10^12
+    /// and this crate's
+    ///     MAX_ABS_FUNDING_E9_PER_SLOT = 10^6
+    /// the lifetime ceiling is
+    ///     i128::MAX / (10^15 · 10^12 · 10^6)  ≈ 170_141
+    ///
+    /// 170_000 is the largest value that passes the engine assert while
+    /// keeping the current funding cap. That gives a THEORETICAL safety
+    /// horizon of 170 000 slots (≈ 19 hours at 400 ms slots) when the
+    /// market sits at max funding rate continuously. Real markets
+    /// rarely hit the cap; at a typical 1 bps/day average rate the
+    /// effective horizon is many orders of magnitude longer.
+    ///
+    /// Deployments with a longer target lifetime should lower
+    /// `MAX_ABS_FUNDING_E9_PER_SLOT` proportionally, or (out of scope
+    /// for the wrapper) the engine should expose an F-index rebase.
+    /// The prior setting of `MAX_ACCRUAL_DT_SLOTS` (100_000) was a
+    /// strict under-provisioning — made the engine only guarantee one
+    /// call's worth of funding safety — and is raised here to the
+    /// engine's mathematical ceiling.
+    pub const MIN_FUNDING_LIFETIME_SLOTS: u64 = 170_000;
     pub const MATCHER_ABI_VERSION: u32 = 2;
     // MATCHER_CONTEXT_PREFIX_LEN removed — validation uses MATCHER_CONTEXT_LEN directly
     pub const MATCHER_CONTEXT_LEN: usize = 320;
@@ -1722,7 +1754,7 @@ pub mod ix {
             // same value because wrapper-deployed markets don't configure
             // a separate cumulative horizon. The engine asserts this at
             // init_engine_state and at every accrue.
-            min_funding_lifetime_slots: crate::constants::MAX_ACCRUAL_DT_SLOTS,
+            min_funding_lifetime_slots: crate::constants::MIN_FUNDING_LIFETIME_SLOTS,
         };
         Ok((params, insurance_floor))
     }
@@ -6731,27 +6763,54 @@ pub mod processor {
                     return Err(ProgramError::InvalidAccountData);
                 }
 
-                // Get insurance balance and convert to base tokens
+                // Terminal-surplus sweep (audit P1): once all accounts
+                // close and all settlement aggregates are zero, any
+                // remaining `engine.vault > 0` is pure rounding residue
+                // with no outstanding claims. Fold it into the insurance
+                // payout so CloseSlab can zero the vault. Without this,
+                // a market could arrive at num_used=0, insurance=0,
+                // vault>0 from conservative quote rounding and become
+                // un-closeable.
+                //
+                // Safety: all the aggregate zero-checks below MUST hold.
+                // If they don't, there are still settlement obligations
+                // and the surplus is NOT sweepable. In that case the
+                // normal insurance-only drain runs.
+                let c_tot_zero = engine.c_tot.get() == 0;
+                let pnl_zero = engine.pnl_pos_tot == 0
+                    && engine.pnl_matured_pos_tot == 0;
+                let oi_zero = engine.oi_eff_long_q == 0
+                    && engine.oi_eff_short_q == 0;
+                let terminal_surplus_ok = c_tot_zero && pnl_zero && oi_zero;
+
+                // Payout = insurance balance + terminal surplus (if any).
                 let insurance_units = engine.insurance_fund.balance.get();
-                if insurance_units == 0 {
+                let vault_units = engine.vault.get();
+                let payout_units = if terminal_surplus_ok {
+                    vault_units
+                } else {
+                    insurance_units
+                };
+                if payout_units == 0 {
                     return Ok(()); // Nothing to withdraw
                 }
 
-                // Reject if balance exceeds u64 — silent truncation would
+                // Reject if payout exceeds u64 — silent truncation would
                 // zero the engine balance but only pay out a capped amount.
-                let units_u64: u64 = insurance_units
+                let units_u64: u64 = payout_units
                     .try_into()
                     .map_err(|_| PercolatorError::EngineOverflow)?;
                 let base_amount = crate::units::units_to_base_checked(units_u64, config.unit_scale)
                     .ok_or(PercolatorError::EngineOverflow)?;
 
-                // Zero out insurance fund and decrement engine.vault
+                // Zero out insurance fund and decrement engine.vault by the
+                // full payout (insurance + any terminal surplus).
                 engine.insurance_fund.balance = percolator::U128::ZERO;
-                let ins = percolator::U128::new(insurance_units);
-                if ins > engine.vault {
+                let payout = percolator::U128::new(payout_units);
+                if payout > engine.vault {
                     return Err(PercolatorError::EngineInsufficientBalance.into());
                 }
-                engine.vault = engine.vault - ins;
+                engine.vault = engine.vault - payout;
 
                 // Transfer from vault to admin
                 let seed1: &[u8] = b"vault";
@@ -6857,8 +6916,33 @@ pub mod processor {
                 let header = state::read_header(&data);
                 let mut config = state::read_config(&data);
 
-                // If immutable insurance_withdraw_max_bps == 0, live-market
-                // withdrawals are disabled. Only resolved markets can withdraw.
+                // Live-market insurance withdrawals are DISABLED.
+                //
+                // Rationale (audit P0/P1): `accrue_market_to` only moves
+                // market-global K/F/oracle state. It does NOT touch
+                // individual accounts, realize losses on underwater
+                // positions, liquidate bankrupt accounts, or absorb
+                // losses into the insurance fund. Those remain lazy
+                // until each account is touched by settle / liquidate /
+                // close / crank. Permitting a live withdrawal based on
+                // the current `insurance_fund.balance` therefore lets
+                // the authority drain reserves that later losses would
+                // legitimately claim — a timing-window extraction from
+                // the insurance fund.
+                //
+                // A safe live path would require a "all losses at this
+                // oracle are realized" precondition — full-market
+                // settlement/liquidation sweep or a cursor process —
+                // which is out of scope for this wrapper design. Until
+                // such a precondition exists, live withdrawals are a
+                // soundness hole; resolved-market withdrawals remain
+                // correct because post-resolution all accounts must be
+                // closed before any insurance payout (see the
+                // `num_used_accounts != 0` gate below).
+                if !resolved {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
+                // Retained for resolved-market policy gating only.
                 if config.insurance_withdraw_max_bps == 0 && !resolved {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
@@ -7549,6 +7633,34 @@ pub mod processor {
                 // caused resolution depending on phase.
                 let is_hyperp = oracle::is_hyperp_mode(&config);
                 if !is_hyperp {
+                    // Pyth Pull (PriceUpdateV2) is CALLER-SELECTED: a stale
+                    // submission proves only that THIS submitted account
+                    // is stale, not that no fresh update exists elsewhere.
+                    // An attacker could submit an old verified
+                    // PriceUpdateV2 with the right feed_id, get
+                    // OracleStale, stamp first_observed_stale_slot, wait
+                    // the delay, and terminally resolve a live market.
+                    //
+                    // Mitigation: require an oracle AUTHORITY for Pyth
+                    // Pull permissionless resolution. A configured
+                    // authority acts as the external liveness beacon —
+                    // the earlier authority-fresh branch returns Ok
+                    // without stamping when the authority has pushed
+                    // recently, so a stale-Pyth attack is only reachable
+                    // once the authority has ALSO gone silent. Without
+                    // an authority, a stale Pyth account is the sole
+                    // "proof" of feed death, which is unsound.
+                    //
+                    // Pyth-pull markets that want governance-free
+                    // recovery MUST therefore configure an authority
+                    // (SetOracleAuthority before burning admin).
+                    // Markets without authority can still recover via
+                    // admin ResolveMarket before admin is burned.
+                    let pyth_pull = *a_oracle.owner == oracle::PYTH_RECEIVER_PROGRAM_ID;
+                    let authority_configured = config.oracle_authority != [0u8; 32];
+                    if pyth_pull && !authority_configured {
+                        return Err(PercolatorError::InvalidConfigParam.into());
+                    }
                     let oracle_result = oracle::read_engine_price_e6(
                         a_oracle, &config.index_feed_id,
                         clock.unix_timestamp, config.max_staleness_secs,
