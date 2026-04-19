@@ -5000,8 +5000,27 @@ pub mod processor {
                 // before the trade. Explicit accrue→sync→trade ordering.
                 ensure_market_accrued_to_now(engine, clock.slot, price, funding_rate_e9)?;
 
+                // Pre-sync maintenance fees for both counterparties BEFORE
+                // capturing ins_before for the mark-EWMA fee-weight
+                // snapshot. Without this, the `delta = ins_after -
+                // ins_before` used as `fee_paid` would include
+                // maintenance fees collected by execute_trade_with
+                // _matcher's own internal sync — inflating EWMA weight
+                // on a small trade after large maintenance accrual, a
+                // mark-manipulation vector. The internal sync at the
+                // same anchor becomes a no-op on `last_fee_slot`.
+                if config.maintenance_fee_per_slot > 0 {
+                    engine.sync_account_fee_to_slot_not_atomic(
+                        user_idx, clock.slot, config.maintenance_fee_per_slot,
+                    ).map_err(map_risk_error)?;
+                    engine.sync_account_fee_to_slot_not_atomic(
+                        lp_idx, clock.slot, config.maintenance_fee_per_slot,
+                    ).map_err(map_risk_error)?;
+                }
+
                 // Snapshot insurance fund balance for fee-weighted EWMA.
-                // The delta after execute_trade = fees_collected - losses_absorbed.
+                // The delta after execute_trade = trading_fees -
+                // losses_absorbed (maintenance fees already synced above).
                 // NOTE: If loss absorption occurs during the same trade (spec §5.4),
                 // delta undercounts the actual fee. This is the conservative direction:
                 // mark is stickier during volatile loss-absorption events, never
@@ -5452,11 +5471,25 @@ pub mod processor {
                     // before the trade. Explicit accrue→sync→trade ordering.
                     ensure_market_accrued_to_now(engine, clock.slot, price, funding_rate_e9_pre)?;
 
+                    // Pre-sync fees BEFORE the ins_before snapshot to
+                    // prevent maintenance-fee-inflated EWMA weight on
+                    // small trades (see TradeNoCpi for rationale).
+                    if config.maintenance_fee_per_slot > 0 {
+                        engine.sync_account_fee_to_slot_not_atomic(
+                            user_idx, clock.slot, config.maintenance_fee_per_slot,
+                        ).map_err(map_risk_error)?;
+                        engine.sync_account_fee_to_slot_not_atomic(
+                            lp_idx, clock.slot, config.maintenance_fee_per_slot,
+                        ).map_err(map_risk_error)?;
+                    }
+
                     let trade_size = crate::verify::cpi_trade_size(ret.exec_size, size);
 
                     // Snapshot insurance for fee-weighted EWMA (delta approach).
-                    // NOTE: delta = fees - losses_absorbed. Conservative undercount
-                    // during volatile loss-absorption events (see TradeNoCpi comment).
+                    // delta now captures ONLY trading_fees - losses_absorbed
+                    // (maintenance fees already synced above).
+                    // NOTE: Conservative undercount during volatile
+                    // loss-absorption events (see TradeNoCpi comment).
                     let ins_before_cpi = engine.insurance_fund.balance.get();
 
                     #[cfg(feature = "cu-audit")]
@@ -5940,18 +5973,47 @@ pub mod processor {
                     }
                     // Resolved + no accounts: allow unconditionally
 
-                    // Clear oracle authority on burn. PushOraclePrice authorizes off
-                    // config.oracle_authority, not header.admin. Without this, a
-                    // "burned" market still has a privileged signer that can push
-                    // prices, influence liquidations/funding, and block permissionless
-                    // resolution by staying fresh.
-                    // NOTE: do NOT clear config.authority_price_e6 — it may be needed
-                    // for legacy paths. Resolved exits now use engine.resolved_context().
-                    if config.oracle_authority != [0u8; 32] {
-                        config.oracle_authority = [0u8; 32];
-                        config.authority_timestamp = 0;
-                        state::write_config(&mut data, &config);
-                    }
+                    // Oracle authority preservation on burn (audit):
+                    // previously we unconditionally cleared
+                    // config.oracle_authority / authority_timestamp on
+                    // admin burn. That was DEFENSIVE against lingering
+                    // centralized price control, but it creates a
+                    // liveness hole for Pyth-Pull markets: the
+                    // wrapper requires a configured oracle_authority
+                    // (even if its timestamp is stale) to allow
+                    // ResolvePermissionless on Pyth-Pull — a caller-
+                    // selected stale PriceUpdateV2 alone can't prove
+                    // feed death. Clearing the authority on burn and
+                    // then demanding its presence at resolve time
+                    // contradicts the admin-burn liveness guard.
+                    //
+                    // New policy: KEEP oracle_authority as-is on burn.
+                    //   - Markets that want FULL decentralization must
+                    //     call SetOracleAuthority(Pubkey::default())
+                    //     BEFORE burning admin.
+                    //   - Markets that use the authority as a
+                    //     heartbeat beacon (Pyth-Pull governance-free
+                    //     deployments) keep it across burn. If the
+                    //     authority was the admin keypair, it becomes
+                    //     a dead beacon — still non-zero in config
+                    //     but never signs again — which is exactly
+                    //     what ResolvePermissionless's authority-stale
+                    //     branch is designed to handle.
+                    //
+                    // Rationale for not treating the retained
+                    // authority as a lingering privilege: the
+                    // authority can push prices, but clamped against
+                    // the circuit breaker and timestamp-monotonic,
+                    // and if the authority is a dead keypair those
+                    // pushes never happen. The security property
+                    // "burned admin cannot influence liquidations"
+                    // is therefore preserved by the circuit breaker,
+                    // not by clearing the authority pointer.
+                    // authority_price_e6 and authority_timestamp are
+                    // also left as-is: clearing them would wipe the
+                    // last signal of liveness from a market where
+                    // authority happens to have been active right
+                    // before burn.
                 }
 
                 header.admin = new_admin.to_bytes();
@@ -6688,17 +6750,44 @@ pub mod processor {
                 let engine = zc::engine_mut(&mut data)?;
                 let is_hyperp_local = oracle::is_hyperp_mode(&config);
 
+                // Detect stale Hyperp mark. If the Hyperp mark signal
+                // (max(mark_ewma_last_slot, last_mark_push_slot)) has
+                // been silent for longer than 3 × max_staleness_secs,
+                // the interval is signal-free and the admin-Ordinary
+                // path would fail (catchup + final accrue at
+                // last_effective_price_e6 exceeds
+                // CATCHUP_CHUNKS_MAX × max_dt). Route to Degenerate
+                // like ResolvePermissionless does — the market is
+                // effectively dead and should resolve at P_last with
+                // rate = 0 rather than get stuck.
+                let hyperp_stale = if is_hyperp_local {
+                    let last_update = core::cmp::max(
+                        config.mark_ewma_last_slot,
+                        config.last_mark_push_slot as u64,
+                    );
+                    let max_stale_slots = config.max_staleness_secs
+                        .saturating_mul(3);
+                    clock.slot.saturating_sub(last_update) > max_stale_slots
+                        && oracle_initialized
+                } else {
+                    false
+                };
+
                 let (live_oracle, rate_for_final_accrual, in_ordinary_arm): (u64, i128, bool) =
                     if let Some(fresh) = fresh_live_oracle {
                         // ORDINARY: fresh non-Hyperp oracle reading
                         (fresh, funding_rate_e9, true)
-                    } else if is_hyperp_local {
+                    } else if is_hyperp_local && !hyperp_stale {
                         // ORDINARY: Hyperp uses the just-flushed index as its live
                         // oracle; funding accrual uses the captured rate.
                         (config.last_effective_price_e6, funding_rate_e9, true)
-                    } else if oracle_initialized {
-                        // DEGENERATE: non-Hyperp oracle is dead. Resolve at P_last
-                        // with zero funding over the signal-free interval.
+                    } else if (is_hyperp_local && hyperp_stale) || oracle_initialized {
+                        // DEGENERATE: non-Hyperp oracle is dead, OR Hyperp
+                        // mark has been stale long enough that the live
+                        // signal is gone. Resolve at P_last with zero
+                        // funding over the signal-free interval. Engine's
+                        // Degenerate arm bypasses accrue_market_to so no
+                        // envelope/catchup issue.
                         (engine.last_oracle_price, 0i128, false)
                     } else {
                         // Oracle never initialized and no fresh read — cannot settle
@@ -6807,7 +6896,21 @@ pub mod processor {
                     && engine.pnl_matured_pos_tot == 0;
                 let oi_zero = engine.oi_eff_long_q == 0
                     && engine.oi_eff_short_q == 0;
-                let terminal_surplus_ok = c_tot_zero && pnl_zero && oi_zero;
+                // Fail-closed: also require every position/stale/neg-PnL
+                // counter to be zero. If any counter is nonzero in the
+                // face of num_used_accounts == 0, we have corrupt state
+                // and the surplus is NOT safely sweepable — the normal
+                // insurance-only drain runs instead, and the surplus
+                // remains (CloseSlab stays blocked until the invariant
+                // break is investigated).
+                let position_counters_zero =
+                    engine.stored_pos_count_long == 0
+                    && engine.stored_pos_count_short == 0
+                    && engine.stale_account_count_long == 0
+                    && engine.stale_account_count_short == 0
+                    && engine.neg_pnl_account_count == 0;
+                let terminal_surplus_ok =
+                    c_tot_zero && pnl_zero && oi_zero && position_counters_zero;
 
                 // Payout = insurance balance + terminal surplus (if any).
                 let insurance_units = engine.insurance_fund.balance.get();
