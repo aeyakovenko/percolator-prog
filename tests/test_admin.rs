@@ -459,6 +459,58 @@ fn test_update_admin_zero_accepted_for_burn() {
     println!("UPDATE ADMIN ZERO BURN: PASSED");
 }
 
+/// Regression: admin burn MUST reject if oracle_authority is still set.
+/// Otherwise PushOraclePrice would remain authorized via the configured
+/// oracle_authority even after admin is burned, defeating the
+/// "governance-free" property. Admins wanting to burn must first call
+/// SetOracleAuthority(Pubkey::default()).
+#[test]
+fn test_update_admin_burn_rejects_when_oracle_authority_configured() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_cap(0, 10_000, 100);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    // Configure an oracle authority (typically done via
+    // SetOracleAuthority). After this, PushOraclePrice would authorize
+    // against this authority pubkey.
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .expect("set authority must succeed");
+
+    // Verify authority is non-zero in config.
+    const AUTHORITY_OFF: usize = 72 + 128; // HEADER_LEN + offset_of!(MarketConfig, oracle_authority)
+    let authority_bytes = {
+        let slab = env.svm.get_account(&env.slab).unwrap();
+        let mut b = [0u8; 32];
+        b.copy_from_slice(&slab.data[AUTHORITY_OFF..AUTHORITY_OFF + 32]);
+        b
+    };
+    assert_ne!(
+        authority_bytes, [0u8; 32],
+        "precondition: oracle_authority is configured",
+    );
+
+    // Burn attempt MUST fail.
+    let zero_pubkey = Pubkey::new_from_array([0u8; 32]);
+    let result = env.try_update_admin(&admin, &zero_pubkey);
+    let err = result.expect_err(
+        "UpdateAdmin burn MUST reject when oracle_authority != 0 — the \
+         authority would otherwise retain price-pushing privilege on a \
+         burned-admin market, defeating the governance-free property",
+    );
+    assert!(
+        err.contains("0x1a"), // InvalidConfigParam = 26
+        "expected InvalidConfigParam rejection, got: {}", err,
+    );
+
+    // Positive case (burn-with-cleared-authority succeeds) is covered
+    // by test_update_admin_zero_accepted_for_burn above, which uses a
+    // fresh env and never sets an authority. The key invariant this
+    // test asserts — "burn rejects with authority set" — is complete.
+}
+
 /// Verify that InitMarket rejects initial risk_params that exceed per-market limits.
 #[test]
 fn test_init_market_risk_params_exceed_limits_rejected() {

@@ -5973,47 +5973,36 @@ pub mod processor {
                     }
                     // Resolved + no accounts: allow unconditionally
 
-                    // Oracle authority preservation on burn (audit):
-                    // previously we unconditionally cleared
-                    // config.oracle_authority / authority_timestamp on
-                    // admin burn. That was DEFENSIVE against lingering
-                    // centralized price control, but it creates a
-                    // liveness hole for Pyth-Pull markets: the
-                    // wrapper requires a configured oracle_authority
-                    // (even if its timestamp is stale) to allow
-                    // ResolvePermissionless on Pyth-Pull — a caller-
-                    // selected stale PriceUpdateV2 alone can't prove
-                    // feed death. Clearing the authority on burn and
-                    // then demanding its presence at resolve time
-                    // contradicts the admin-burn liveness guard.
+                    // Admin burn requires that no other privileged
+                    // price/liveness pusher remain. The previous attempt
+                    // to KEEP oracle_authority across burn (so Pyth-Pull
+                    // could use it as a liveness beacon) was unsound:
+                    // PushOraclePrice authorizes only against
+                    // oracle_authority, so a retained authority can
+                    // continue to push prices forever even after admin
+                    // is burned. If oracle_authority == old_admin
+                    // pubkey, burning admin does NOT make the keypair
+                    // dead on-chain; the same private key still signs
+                    // successfully.
                     //
-                    // New policy: KEEP oracle_authority as-is on burn.
-                    //   - Markets that want FULL decentralization must
-                    //     call SetOracleAuthority(Pubkey::default())
-                    //     BEFORE burning admin.
-                    //   - Markets that use the authority as a
-                    //     heartbeat beacon (Pyth-Pull governance-free
-                    //     deployments) keep it across burn. If the
-                    //     authority was the admin keypair, it becomes
-                    //     a dead beacon — still non-zero in config
-                    //     but never signs again — which is exactly
-                    //     what ResolvePermissionless's authority-stale
-                    //     branch is designed to handle.
+                    // Correct property: "burned admin" means no
+                    // privileged price authority exists. Reject burn
+                    // unless authority is already zero. Admins wanting
+                    // to burn must first call
+                    // SetOracleAuthority(Pubkey::default()).
                     //
-                    // Rationale for not treating the retained
-                    // authority as a lingering privilege: the
-                    // authority can push prices, but clamped against
-                    // the circuit breaker and timestamp-monotonic,
-                    // and if the authority is a dead keypair those
-                    // pushes never happen. The security property
-                    // "burned admin cannot influence liquidations"
-                    // is therefore preserved by the circuit breaker,
-                    // not by clearing the authority pointer.
-                    // authority_price_e6 and authority_timestamp are
-                    // also left as-is: clearing them would wipe the
-                    // last signal of liveness from a market where
-                    // authority happens to have been active right
-                    // before burn.
+                    // Trade-off: Pyth-Pull markets cannot use
+                    // permissionless stale resolution after burn
+                    // (ResolvePermissionless requires authority for
+                    // Pyth-Pull). That's the correct outcome —
+                    // caller-selected stale PriceUpdateV2 is an
+                    // unsound proof of feed death. Governance-free
+                    // deployments that want permissionless recovery
+                    // must use Chainlink (fixed oracle account) or
+                    // Hyperp (internal mark) — not Pyth Pull.
+                    if config.oracle_authority != [0u8; 32] {
+                        return Err(PercolatorError::InvalidConfigParam.into());
+                    }
                 }
 
                 header.admin = new_admin.to_bytes();
@@ -7707,26 +7696,32 @@ pub mod processor {
 
                 let clock = Clock::from_account_info(a_clock)?;
 
-                // Authority-freshness check runs FIRST (Finding 5). A live
-                // oracle authority keeps the market alive regardless of
-                // external-feed state. Stamping first_observed_stale_slot
-                // BEFORE this check — as the prior code did — would let an
-                // attacker observe external staleness once during a fresh-
-                // authority window, then exploit a brief authority pause
-                // later to pass the duration check against an artificially
-                // old stamp.
+                // Authority freshness only blocks permissionless resolve
+                // when the authority path would ACTUALLY be accepted by
+                // normal reads — otherwise it's a liveness trap: authority
+                // timestamp fresh + external oracle stale + cap != 0 means
+                // read_price_clamped_with_external rejects the authority
+                // fallback (see the `if cap != 0 && !external_ok` guard),
+                // so the market cannot be priced by normal ops BUT
+                // ResolvePermissionless would still return Ok here and
+                // block resolution forever.
                 //
-                // If authority is configured AND fresh: the market is live.
-                // Clear any prior stamp and return Ok (no resolution).
-                // If authority is stale / never pushed / not configured: fall
-                // through to the external-oracle observation flow below.
+                // Usability rule (matches read_price_clamped_with_external):
+                //   authority_usable ≡ authority fresh AND (
+                //       cap == 0              // authority is full fallback
+                //    OR external_read_ok      // external + authority both usable
+                //   )
+                //
+                // We don't know external_ok yet, so we do a SPECULATIVE
+                // read here. If external Ok: market is live via external,
+                // return Ok (and clear any stamp). If external not Ok but
+                // authority is live AND cap == 0: market is live via
+                // authority alone, return Ok. Otherwise: fall through to
+                // the stale-observation flow.
                 //
                 // Boundary: `age <= max_staleness_secs` matches the oracle
                 // helper `read_authority_price` (which rejects with
-                // `age > max_staleness_secs`), so at the boundary slot both
-                // paths agree the authority is fresh. Using `<` here would
-                // let permissionless resolve fire against an authority price
-                // that normal reads still accept.
+                // `age > max_staleness_secs`).
                 let authority_is_fresh = config.oracle_authority != [0u8; 32]
                     && config.authority_timestamp > 0
                     && {
@@ -7734,13 +7729,23 @@ pub mod processor {
                             .saturating_sub(config.authority_timestamp);
                         age >= 0 && (age as u64) <= config.max_staleness_secs
                     };
-                if authority_is_fresh {
+                // cap == 0 means authority fallback is unconditionally
+                // accepted by read_price_clamped_with_external. Fresh
+                // authority + cap==0 ⇒ market is priceable without external.
+                let authority_alone_sufficient =
+                    authority_is_fresh && config.oracle_price_cap_e2bps == 0;
+                if authority_alone_sufficient {
                     if config.first_observed_stale_slot != 0 {
                         config.first_observed_stale_slot = 0;
                         state::write_config(&mut data, &config);
                     }
                     return Ok(());
                 }
+                // If authority is fresh but cap != 0, authority only helps
+                // if external ALSO succeeds. The external read below will
+                // either clear-and-return (external live) or fall through
+                // to stamping (external dead). Stale authority + stale
+                // external is unambiguously dead.
 
                 // Verify oracle is actually stale RIGHT NOW by trying to read it.
                 // Only OracleStale / OracleConfTooWide prove the oracle is
