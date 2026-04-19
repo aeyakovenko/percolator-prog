@@ -2097,6 +2097,27 @@ fn test_resolve_permissionless_stamp_cleared_by_live_observation() {
     // the old stamp (from slot 200) plus the 50_000-slot delay would allow
     // resolve immediately at slot 50_250 despite the oracle having been
     // healthy for most of that window.
+    // Read the stamp AFTER live recovery to verify it was cleared.
+    // Without this, a stale (un-cleared) stamp from step 1 would still
+    // be in place — and `!is_market_resolved` would still pass if the
+    // duration check happened to not yet elapse, giving a false
+    // negative on the recovery-clearing property.
+    const FIRST_OBS_STALE_OFF: usize = 72 + 296;
+    let stamp_after_recovery = {
+        let slab = env.svm.get_account(&env.slab).unwrap();
+        u64::from_le_bytes(
+            slab.data[FIRST_OBS_STALE_OFF..FIRST_OBS_STALE_OFF + 8]
+                .try_into()
+                .unwrap(),
+        )
+    };
+    assert_eq!(
+        stamp_after_recovery, 0,
+        "first_observed_stale_slot MUST be cleared after the live \
+         oracle observation in step 2 — this is the actual safety \
+         property being tested, not just the downstream effect",
+    );
+
     env.svm.set_sysvar(&Clock {
         slot: 50_250, // 50_050 slots past the step-1 stamp — would have triggered under old code
         unix_timestamp: 50_250,
@@ -2104,6 +2125,21 @@ fn test_resolve_permissionless_stamp_cleared_by_live_observation() {
     });
     env.try_resolve_permissionless_once()
         .expect("fresh stale observation after recovery");
+    // The fresh call stamps at 50_250 (not at the old 200). The
+    // duration since 50_250 is 0, well under the 50k delay.
+    let stamp_after_fresh = {
+        let slab = env.svm.get_account(&env.slab).unwrap();
+        u64::from_le_bytes(
+            slab.data[FIRST_OBS_STALE_OFF..FIRST_OBS_STALE_OFF + 8]
+                .try_into()
+                .unwrap(),
+        )
+    };
+    assert_eq!(
+        stamp_after_fresh, 50_250,
+        "fresh stale observation must stamp the CURRENT slot (50_250), \
+         not carry over the ancient step-1 stamp of 200",
+    );
     assert!(
         !env.is_market_resolved(),
         "MUST NOT resolve — stamp from first hiccup was cleared by live \
@@ -2190,11 +2226,33 @@ fn test_resolve_permissionless_treats_conf_too_wide_as_stampable() {
     };
 
     wide_conf_at_slot(&mut env, 100_000);
+    let effective_slot_1 = 100_000u64 + 100; // set_slot adds +100
 
     // First observation: OracleConfTooWide must stamp first_observed_stale_slot.
     env.try_resolve_permissionless_once()
         .expect("OracleConfTooWide must be a stampable observation");
     assert!(!env.is_market_resolved(), "not yet resolved after stamp");
+
+    // Verify the stamp was actually set to the current slot on the
+    // first OracleConfTooWide observation. Without this check, the
+    // test could pass vacuously if the code path didn't stamp at all —
+    // the `!is_market_resolved` check is consistent with both
+    // "stamped but delay not elapsed" and "never stamped".
+    const FIRST_OBS_STALE_OFF: usize = 72 + 296;
+    let stamp_after_first = {
+        let slab = env.svm.get_account(&env.slab).unwrap();
+        u64::from_le_bytes(
+            slab.data[FIRST_OBS_STALE_OFF..FIRST_OBS_STALE_OFF + 8]
+                .try_into()
+                .unwrap(),
+        )
+    };
+    assert_eq!(
+        stamp_after_first, effective_slot_1,
+        "first OracleConfTooWide observation must stamp \
+         first_observed_stale_slot at the current slot — asserting the \
+         stamping code path actually ran, not just its downstream effect",
+    );
 
     // Advance past the delay and retry — stamp stays set, duration check
     // passes, resolve succeeds even though the feed's failure mode is

@@ -5535,6 +5535,23 @@ fn test_tradecpi_zero_fill_advances_engine_time() {
         env.read_account_position(user_idx), 0,
         "zero-fill means no position change",
     );
+
+    // Functional verification (not just impl-field-read): advance clock
+    // by a SMALL delta and crank. The crank's accrue_market_to should
+    // advance last_market_slot by that small delta only — NOT replay
+    // the interval [150, 350] that the zero-fill already covered. Under
+    // the pre-fix impl (engine stuck at 150), this crank would either
+    // (a) re-accrue the full [150, 350+Δ] with stale config state — a
+    // retroactivity violation — or (b) hit Overflow if Δ > max_dt.
+    env.set_slot(251); // clock becomes 351
+    env.crank();
+    let slot_after_followup_crank = read_last_market_slot(&env);
+    assert_eq!(
+        slot_after_followup_crank, 351,
+        "follow-up crank must advance last_market_slot by the small \
+         post-zero-fill delta only, proving the zero-fill's accrue \
+         already committed and subsequent accrue is incremental",
+    );
 }
 
 // ============================================================================
