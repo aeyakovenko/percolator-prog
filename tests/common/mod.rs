@@ -2215,7 +2215,34 @@ pub fn encode_init_vamm(
     max_fill_abs: u128,
     max_inventory_abs: u128,
 ) -> Vec<u8> {
-    let mut data = vec![0u8; 70]; // 66 + fee_to_insurance_bps(2) + skew_spread_mult_bps(2)
+    encode_init_vamm_with_id(
+        mode,
+        trading_fee_bps,
+        base_spread_bps,
+        max_total_bps,
+        impact_k_bps,
+        liquidity_notional_e6,
+        max_fill_abs,
+        max_inventory_abs,
+        1, // default synthetic lp_account_id for direct-to-matcher tests
+    )
+}
+
+/// Encode InitVamm instruction (Tag 2) — explicit `lp_account_id` variant.
+/// Matcher's `InitParams::parse` requires the full 78-byte layout; the trailing
+/// 8 bytes are the per-LP generation counter used for cross-market spoof protection.
+pub fn encode_init_vamm_with_id(
+    mode: MatcherMode,
+    trading_fee_bps: u32,
+    base_spread_bps: u32,
+    max_total_bps: u32,
+    impact_k_bps: u32,
+    liquidity_notional_e6: u128,
+    max_fill_abs: u128,
+    max_inventory_abs: u128,
+    lp_account_id: u64,
+) -> Vec<u8> {
+    let mut data = vec![0u8; 78]; // 70 + 8 (lp_account_id)
     data[0] = MATCHER_INIT_VAMM_TAG;
     data[1] = mode as u8;
     data[2..6].copy_from_slice(&trading_fee_bps.to_le_bytes());
@@ -2226,6 +2253,7 @@ pub fn encode_init_vamm(
     data[34..50].copy_from_slice(&max_fill_abs.to_le_bytes());
     data[50..66].copy_from_slice(&max_inventory_abs.to_le_bytes());
     // fee_to_insurance_bps at [66..68] = 0, skew_spread_mult_bps at [68..70] = 0
+    data[70..78].copy_from_slice(&lp_account_id.to_le_bytes());
     data
 }
 
@@ -3362,7 +3390,7 @@ impl TradeCpiTestEnv {
                 0,                      // impact_k_bps
                 0,                      // liquidity_notional_e6
                 1_000_000_000_000,      // max_fill_abs
-                0,                      // max_inventory_abs
+                1_000_000_000_000,      // max_inventory_abs (matcher validate() requires > 0)
                 0,                      // fee_to_insurance_bps
                 0,                      // skew_spread_mult_bps
             ),

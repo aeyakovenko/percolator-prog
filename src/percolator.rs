@@ -13370,10 +13370,23 @@ pub mod processor {
             return Err(ProgramError::InvalidSeeds);
         }
 
+        // Read lp_account_id (generation counter) before dropping the borrow.
+        // This is the per-instance identity the matcher uses to validate every
+        // subsequent MatcherCall — it must be set at init time.
+        let lp_account_id = state::read_account_generation(&data, lp_idx);
+        if lp_account_id == 0 {
+            // Slot was never materialized via InitLP — refuse to init matcher.
+            return Err(PercolatorError::EngineAccountNotFound.into());
+        }
+
         drop(data);
 
-        // Build matcher init CPI data (matcher tag 2 + InitParams, 70 bytes total).
-        let mut cpi_data = [0u8; 70];
+        // Build matcher init CPI data (matcher tag 2 + InitParams, 78 bytes total).
+        // Layout: tag(1) + kind(1) + trading_fee_bps(4) + base_spread_bps(4) +
+        //   max_total_bps(4) + impact_k_bps(4) + liquidity_notional_e6(16) +
+        //   max_fill_abs(16) + max_inventory_abs(16) + fee_to_insurance_bps(2) +
+        //   skew_spread_mult_bps(2) + lp_account_id(8) = 78
+        let mut cpi_data = [0u8; 78];
         cpi_data[0] = 2; // MATCHER_INIT_TAG
         cpi_data[1] = kind;
         cpi_data[2..6].copy_from_slice(&trading_fee_bps.to_le_bytes());
@@ -13385,6 +13398,7 @@ pub mod processor {
         cpi_data[50..66].copy_from_slice(&max_inventory_abs.to_le_bytes());
         cpi_data[66..68].copy_from_slice(&fee_to_insurance_bps.to_le_bytes());
         cpi_data[68..70].copy_from_slice(&skew_spread_mult_bps.to_le_bytes());
+        cpi_data[70..78].copy_from_slice(&lp_account_id.to_le_bytes());
 
         let metas = [
             solana_program::instruction::AccountMeta::new_readonly(

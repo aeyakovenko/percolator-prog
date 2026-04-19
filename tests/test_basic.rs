@@ -527,7 +527,7 @@ fn test_matcher_init_vamm_passive_mode() {
             0,                 // impact_k not used in Passive
             0,                 // liquidity not needed for Passive
             1_000_000_000_000, // max fill
-            0,                 // no inventory limit
+            1_000_000_000_000, // max_inventory_abs — validate() requires > 0 (PERC-322 3E.4)
         ),
     };
 
@@ -588,7 +588,7 @@ fn test_matcher_call_after_init() {
             AccountMeta::new_readonly(lp.pubkey(), true), // LP PDA (must sign)
             AccountMeta::new(ctx_pubkey, false),           // Context account
         ],
-        data: encode_init_vamm(
+        data: encode_init_vamm_with_id(
             MatcherMode::Passive,
             5,
             10,
@@ -596,7 +596,8 @@ fn test_matcher_call_after_init() {
             0,
             0,
             1_000_000_000_000, // max fill
-            0,
+            1_000_000_000_000, // max_inventory_abs — validate() requires > 0
+            100,               // lp_account_id — must match encode_matcher_call below
         ),
     };
 
@@ -694,7 +695,7 @@ fn test_matcher_rejects_double_init() {
             AccountMeta::new_readonly(lp_pda, true), // LP PDA (must sign)
             AccountMeta::new(ctx_pubkey, false),      // Context account
         ],
-        data: encode_init_vamm(MatcherMode::Passive, 5, 10, 200, 0, 0, 1_000_000_000_000, 0),
+        data: encode_init_vamm(MatcherMode::Passive, 5, 10, 200, 0, 0, 1_000_000_000_000, 1_000_000_000_000),
     };
 
     let tx1 = Transaction::new_signed_with_payer(
@@ -713,7 +714,7 @@ fn test_matcher_rejects_double_init() {
             AccountMeta::new_readonly(lp_pda, true), // LP PDA (must sign)
             AccountMeta::new(ctx_pubkey, false),      // Context account
         ],
-        data: encode_init_vamm(MatcherMode::Passive, 5, 10, 200, 0, 0, 1_000_000_000_000, 0),
+        data: encode_init_vamm(MatcherMode::Passive, 5, 10, 200, 0, 0, 1_000_000_000_000, 1_000_000_000_000),
     };
 
     let tx2 = Transaction::new_signed_with_payer(
@@ -770,7 +771,7 @@ fn test_matcher_vamm_mode_with_impact() {
             AccountMeta::new_readonly(lp.pubkey(), true), // LP PDA (must sign)
             AccountMeta::new(ctx_pubkey, false),           // Context account
         ],
-        data: encode_init_vamm(
+        data: encode_init_vamm_with_id(
             MatcherMode::Vamm,
             5,                 // 0.05% trading fee
             10,                // 0.10% base spread
@@ -778,7 +779,8 @@ fn test_matcher_vamm_mode_with_impact() {
             50,                // 0.50% impact at full liquidity
             10_000_000_000,    // 10B notional_e6 liquidity
             1_000_000_000_000, // max fill
-            0,
+            1_000_000_000_000, // max_inventory_abs — validate() requires > 0
+            100,               // lp_account_id — must match encode_matcher_call below
         ),
     };
 

@@ -34,6 +34,7 @@ arrayref = "0.3"
 num-derive = "0.4"
 num-traits = "0.2"
 percolator = { path = "../percolator" }
+serde_json = "1"
 
 [profile.release]
 overflow-checks = true
@@ -53,4 +54,3 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serial_test = "3"
 litesvm = "0.1"
 shellexpand = "3"
-serde_json = "1"

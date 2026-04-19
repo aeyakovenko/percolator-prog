@@ -4648,7 +4648,7 @@ fn test_tradecpi_zero_fill_succeeds() {
                 0,    // impact_k_bps
                 0,    // liquidity_notional_e6
                 0,    // max_fill_abs = 0 => zero fill
-                0,    // max_inventory_abs
+                1_000_000_000_000, // max_inventory_abs (matcher validate() requires > 0)
                 0,    // fee_to_insurance_bps
                 0,    // skew_spread_mult_bps
             ),
@@ -5270,7 +5270,7 @@ fn test_tradecpi_zero_fill_does_not_walk_index() {
                 0,    // impact_k_bps
                 0,    // liquidity_notional_e6
                 0,    // max_fill_abs = 0 => zero fill
-                0,    // max_inventory_abs
+                1_000_000_000_000, // max_inventory_abs (matcher validate() requires > 0)
                 0,    // fee_to_insurance_bps
                 0,    // skew_spread_mult_bps
             ),
