@@ -2092,13 +2092,21 @@ fn test_insurance_withdraw_limited_requires_recent_crank() {
     env.crank();
     env.set_slot(100);
 
-    // Live withdrawal with oracle account should succeed
-    // (try_withdraw_insurance_limited now passes the oracle account)
+    // Live withdrawals are now DISABLED (audit P0/P1): accrue_market_to
+    // moves market-global state only, doesn't realize per-account losses.
+    // Insurance authority could drain after a price move but before
+    // underwater accounts settle. Withdrawals are resolved-only now.
     let result = env.try_withdraw_insurance_limited(&admin, 1000);
     assert!(
-        result.is_ok(),
-        "WithdrawInsuranceLimited with oracle should succeed on live market: {:?}",
-        result,
+        result.is_err(),
+        "WithdrawInsuranceLimited on live market MUST reject — live \
+         withdrawals can race lazy loss realization",
+    );
+    let err_msg = result.unwrap_err();
+    assert!(
+        err_msg.contains("0x1a"), // InvalidConfigParam = 26
+        "Expected InvalidConfigParam rejection, got: {}",
+        err_msg,
     );
 }
 

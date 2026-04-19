@@ -1447,9 +1447,24 @@ pub mod ix {
                     // format_version 1: u16 idx + u8 policy_tag per candidate
                     //   policy tag 0 = FullClose, 1 = ExactPartial(u128), 0xFF = touch-only
                     let mut candidates = alloc::vec::Vec::new();
+                    // Cap candidate count to prevent CU exhaustion via
+                    // padding: the engine's keeper_crank_not_atomic scans
+                    // every candidate in the slice, but only counts
+                    // VALID existing entries against its per-crank
+                    // budget. A keeper could otherwise submit thousands
+                    // of invalid indices to burn CU before any useful
+                    // work. We accept up to 2 × LIQ_BUDGET_PER_CRANK
+                    // candidates — enough room for over-specification
+                    // of deduplication / expired entries while keeping
+                    // the total scan bounded.
+                    const MAX_CANDIDATES: usize =
+                        (percolator::LIQ_BUDGET_PER_CRANK as usize) * 2;
                     if format_version == 1 {
                         // Extended: u16 idx + u8 policy tag per candidate
                         while rest.len() >= 3 {
+                            if candidates.len() >= MAX_CANDIDATES {
+                                return Err(ProgramError::InvalidInstructionData);
+                            }
                             let idx = read_u16(&mut rest)?;
                             let tag = read_u8(&mut rest)?;
                             let policy = match tag {
@@ -4613,6 +4628,17 @@ pub mod processor {
                     ));
                 }
                 combined.extend_from_slice(&candidates);
+                // Defense-in-depth cap: the decode-time check already
+                // bounds candidates, but truncating `combined` here as
+                // well ensures the engine's scan is bounded even if the
+                // decode cap is loosened in the future or an insider
+                // path ever constructs `combined` differently. Cap:
+                // 4 (risk buffer max) + 2 × LIQ_BUDGET_PER_CRANK.
+                const COMBINED_CAP: usize =
+                    4 + (percolator::LIQ_BUDGET_PER_CRANK as usize) * 2;
+                if combined.len() > COMBINED_CAP {
+                    combined.truncate(COMBINED_CAP);
+                }
 
                 // ── Periodic maintenance fees (wrapper-owned, §8.3) ──
                 //
