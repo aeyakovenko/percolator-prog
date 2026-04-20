@@ -770,6 +770,63 @@ between word 0 and wrap-around.
 BITMAP_WORDS=64 iterations regardless of bit distribution. Each
 word is visited at most once per crank.
 
+### D57. Admin-controlled funding rate extraction
+
+**Threat model**: Compromised/malicious admin extracts user capital
+via adversarial funding rate + mark manipulation. Classic
+centralized-protocol rug vector.
+
+**Exploit path**:
+1. Attacker is admin AND oracle_authority on a live market with
+   open user positions.
+2. Attacker opens a large LP on the opposite side of users'
+   aggregate exposure (e.g., SHORT if users are net LONG).
+3. Attacker calls PushOraclePrice to push the mark significantly
+   away from the index, creating a large premium.
+4. Attacker calls UpdateConfig to raise `funding_max_bps_per_slot`
+   to the engine-enforced max of 10 bps/slot (21,600% per day at
+   max rate).
+5. Funding accrues against users' positions; their capital shrinks
+   each slot, transferring to attacker's LP.
+6. Users who don't close positions fast enough lose up to 100%
+   of their capital over hours.
+7. Attacker closes LP, withdraws profit.
+
+**Why this is not a protocol vulnerability**:
+- User can ALWAYS CloseAccount to exit and reclaim remaining
+  capital. No permanent lock.
+- Conservation V ≥ C_tot + I is preserved — funding is a transfer
+  between users' accounts, not a mint/burn.
+- The cap `MAX_ABS_FUNDING_E9_PER_SLOT = 10^6` is protocol-enforced;
+  any higher would violate the engine's i128 envelope. This is the
+  MAXIMUM admin can set.
+- The protocol explicitly supports "burn admin after init" as a
+  user-protection feature. Markets with burned admin cannot have
+  their funding params adversarially updated.
+- Spec §5 documents funding as admin-configurable within the
+  envelope. Users must trust admin (or use burned-admin markets).
+
+**Why this is classified as "operational risk, not protocol bug"**:
+The protocol's trust model explicitly includes admin configuration.
+Users entering a market with a live admin accept that admin can
+update params. The protocol provides THREE mitigations:
+1. Admin can be burned (rug-proof markets)
+2. Per-market cap (operators can lower the effective cap below
+   engine max when they deploy)
+3. User's close-position escape hatch
+
+**Lazarus-style attacker would look at**: the engine's envelope max
+(10 bps/slot) as the WORST CASE and ask "does any honest market
+deployment need higher than 1 bps/slot? If not, the envelope
+max should match real-world funding caps to limit admin abuse
+surface." This is an operational recommendation, not a ship-blocker:
+deployers choose their own per-market caps.
+
+**Attack surface for a sophisticated attacker**:
+- Compromise admin's private key (social engineering, key theft)
+- Then follow the exploit path above
+- Mitigation: burn admin, or use multisig/timelock for admin
+
 ## Audit completion status
 
 **54 concrete attack hypotheses probed across three rounds.** Every
