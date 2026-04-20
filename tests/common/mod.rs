@@ -4033,12 +4033,12 @@ impl TradeCpiTestEnv {
             unix_timestamp: ts + 1,
             ..clock
         });
+        // PushOraclePrice handler expects exactly 2 accounts (authority, slab).
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.slab, false),
-                AccountMeta::new_readonly(sysvar::clock::ID, false),
             ],
             data: encode_push_oracle_price(price_e6, ts),
         };

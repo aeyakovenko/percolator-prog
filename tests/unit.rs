@@ -651,7 +651,6 @@ fn test_trade() {
             f.vault.to_info(),
             f.token_prog.to_info(),
             f.clock.to_info(),
-            f.pyth_index.to_info(),
         ];
         process_instruction(&f.program_id, &accounts, &encode_init_user(100)).unwrap();
     }
@@ -694,7 +693,6 @@ fn test_trade() {
             f.vault.to_info(),
             f.token_prog.to_info(),
             f.clock.to_info(),
-            f.pyth_index.to_info(),
         ];
         process_instruction(
             &f.program_id,
@@ -868,7 +866,6 @@ fn test_permissionless_crank_gc() {
             f.vault.to_info(),
             f.token_prog.to_info(),
             f.clock.to_info(),
-            f.pyth_index.to_info(),
         ];
         process_instruction(&f.program_id, &accounts, &encode_init_user(100)).unwrap();
     }

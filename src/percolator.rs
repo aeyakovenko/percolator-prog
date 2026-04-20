@@ -422,18 +422,18 @@ pub mod verify {
 
     /// Account count requirement: must have at least `need` accounts.
     #[inline]
-    /// Account-count check. Most handlers want "at least N" — the
-    /// handler only indexes into the first N slots and ignores any
-    /// trailing accounts. A blanket strict-equal rule would be more
-    /// defensive but would break every caller/test that appends a
-    /// conventional trailing clock/sysvar to a Solana tx out of habit;
-    /// the blast radius of that change is large and each handler
-    /// needs per-site review.
-    ///
-    /// TradeCpi deliberately uses this "at least" behavior: the
-    /// variadic tail beyond its 8 fixed accounts is forwarded to the
-    /// matcher CPI. See the TradeCpi handler for the full ABI.
+    /// Strict equality check for instruction account-count ABIs.
+    /// Each handler has a fixed account count; accepting extra trailing
+    /// accounts is a footgun (caller pads with unrelated accounts →
+    /// still accepted). TradeCpi is the one documented exception and
+    /// uses `len_at_least`.
     pub fn len_ok(actual: usize, need: usize) -> bool {
+        actual == need
+    }
+
+    /// Loose "at least N" check for instructions with a variadic tail
+    /// (TradeCpi forwards the tail to the matcher CPI).
+    pub fn len_at_least(actual: usize, need: usize) -> bool {
         actual >= need
     }
 
@@ -1861,9 +1861,8 @@ pub mod accounts {
     use crate::error::PercolatorError;
     use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
 
-    /// Account-count floor. See `verify::len_ok` — this is "at least
-    /// N" today. TradeCpi specifically documents and uses the tail;
-    /// other handlers ignore extras.
+    /// Strict account-count check. Rejects if the caller passes more
+    /// or fewer accounts than the handler expects.
     pub fn expect_len(accounts: &[AccountInfo], n: usize) -> Result<(), ProgramError> {
         if !crate::verify::len_ok(accounts.len(), n) {
             return Err(ProgramError::NotEnoughAccountKeys);
@@ -1871,11 +1870,13 @@ pub mod accounts {
         Ok(())
     }
 
-    /// Alias for `expect_len` that documents the variadic-tail intent
-    /// at the callsite. Functionally identical; the value is making
-    /// the TradeCpi handler self-documenting.
+    /// Variadic-tail check — used only by instructions with a
+    /// documented tail forwarding convention (TradeCpi).
     pub fn expect_len_min(accounts: &[AccountInfo], n: usize) -> Result<(), ProgramError> {
-        expect_len(accounts, n)
+        if !crate::verify::len_at_least(accounts.len(), n) {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        }
+        Ok(())
     }
 
     pub fn expect_signer(ai: &AccountInfo) -> Result<(), ProgramError> {
