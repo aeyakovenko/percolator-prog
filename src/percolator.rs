@@ -1241,24 +1241,16 @@ pub mod ix {
         /// Resolve market: force-close all positions at admin oracle price, enter withdraw-only mode.
         /// Admin only. Uses authority_price_e6 as settlement price.
         ResolveMarket,
-        /// Withdraw insurance fund balance (admin only, requires RESOLVED flag).
+        /// Withdraw insurance fund balance. Gated by the scoped
+        /// `header.insurance_authority`. Insurance withdrawal is
+        /// purely BINARY: insurance_authority either has full
+        /// withdrawal power or it's burned to zero (no paper-policy
+        /// in between). The former SetInsuranceWithdrawPolicy /
+        /// WithdrawInsuranceLimited instructions were removed —
+        /// they were non-binding (same signer could always bypass by
+        /// calling the unbounded path) and added complexity without
+        /// a real security property.
         WithdrawInsurance,
-        /// Set limited insurance-withdraw policy (admin only, resolved market).
-        /// The policy's bounded-withdraw authority is the SCOPED
-        /// `header.insurance_authority`, unified with the unbounded
-        /// WithdrawInsurance path. Admin sets the policy's numerical
-        /// parameters; insurance_authority (set separately via
-        /// UpdateAuthority) signs the actual withdrawals.
-        SetInsuranceWithdrawPolicy {
-            min_withdraw_base: u64,
-            max_withdraw_bps: u16,
-            cooldown_slots: u64,
-        },
-        /// Withdraw insurance under configured min/max/cooldown constraints.
-        /// Signed by `header.insurance_authority`.
-        WithdrawInsuranceLimited {
-            amount: u64,
-        },
         /// Admin force-close an abandoned account after market resolution.
         /// Requires RESOLVED flag, zero position, admin signer.
         AdminForceCloseAccount {
@@ -1581,20 +1573,11 @@ pub mod ix {
                     let user_idx = read_u16(&mut rest)?;
                     Ok(Instruction::AdminForceCloseAccount { user_idx })
                 }
-                22 => {
-                    let min_withdraw_base = read_u64(&mut rest)?;
-                    let max_withdraw_bps = read_u16(&mut rest)?;
-                    let cooldown_slots = read_u64(&mut rest)?;
-                    Ok(Instruction::SetInsuranceWithdrawPolicy {
-                        min_withdraw_base,
-                        max_withdraw_bps,
-                        cooldown_slots,
-                    })
-                }
-                23 => {
-                    let amount = read_u64(&mut rest)?;
-                    Ok(Instruction::WithdrawInsuranceLimited { amount })
-                }
+                // Tags 22 (SetInsuranceWithdrawPolicy) and 23
+                // (WithdrawInsuranceLimited) deleted — the bounded
+                // policy was non-binding (same insurance_authority
+                // could bypass via tag 20 WithdrawInsurance) and
+                // added complexity without a real security property.
                 24 => {
                     let lp_idx = read_u16(&mut rest)?;
                     Ok(Instruction::QueryLpFees { lp_idx })
@@ -2096,10 +2079,11 @@ pub mod state {
     /// Offset of flags byte in SlabHeader (_padding[0])
     pub const FLAGS_OFF: usize = 13;
 
-    /// Flag bit: SetInsuranceWithdrawPolicy has been explicitly called.
-    /// Prevents WithdrawInsuranceLimited from misinterpreting oracle
-    /// timestamps as policy metadata via authority_timestamp bit patterns.
-    pub const FLAG_POLICY_CONFIGURED: u8 = 1 << 1;
+    // Bit 1 (formerly FLAG_POLICY_CONFIGURED) is unused — the
+    // policy-configured flag was removed along with the
+    // SetInsuranceWithdrawPolicy / WithdrawInsuranceLimited
+    // instructions. Do NOT reuse this bit without a state migration
+    // (it may be set on any pre-delete slab; fresh deploy only).
     /// Flag bit: CPI is in progress (reentrancy guard for TradeCpi).
     /// Set before matcher CPI, cleared after. Any reentrant instruction
     /// that sees this flag must abort.
@@ -2133,17 +2117,6 @@ pub mod state {
     /// Clear CPI-in-progress flag (call after matcher CPI returns).
     pub fn clear_cpi_in_progress(data: &mut [u8]) {
         let flags = read_flags(data) & !FLAG_CPI_IN_PROGRESS;
-        write_flags(data, flags);
-    }
-
-    /// Check if insurance withdraw policy was explicitly configured.
-    pub fn is_policy_configured(data: &[u8]) -> bool {
-        read_flags(data) & FLAG_POLICY_CONFIGURED != 0
-    }
-
-    /// Set the policy-configured flag.
-    pub fn set_policy_configured(data: &mut [u8]) {
-        let flags = read_flags(data) | FLAG_POLICY_CONFIGURED;
         write_flags(data, flags);
     }
 
@@ -3966,20 +3939,11 @@ pub mod processor {
                 config.oracle_authority = new_bytes;
                 // Clear stored price on authority change for non-Hyperp
                 // markets — prevents carrying over a prior authority's
-                // last push. SKIP the clear when a limited-insurance
-                // policy is configured: in that resolved-mode state,
-                // config.authority_price_e6 and config.authority_timestamp
-                // are REPURPOSED to hold the policy's min_withdraw_base
-                // and packed (max_bps, last_withdraw_slot). Zeroing them
-                // would corrupt the policy metadata while leaving
-                // FLAG_POLICY_CONFIGURED set, breaking subsequent
-                // WithdrawInsuranceLimited calls. is_policy_configured
-                // requires is_resolved at set time, so the oracle is
-                // already terminal here and the push-state it would
-                // nominally guard no longer matters.
-                if !oracle::is_hyperp_mode(&config)
-                    && !state::is_policy_configured(&data)
-                {
+                // last push. (The prior is_policy_configured
+                // exemption is gone along with the removed
+                // SetInsuranceWithdrawPolicy; oracle fields are no
+                // longer repurposed post-resolve.)
+                if !oracle::is_hyperp_mode(&config) {
                     config.authority_price_e6 = 0;
                     config.authority_timestamp = 0;
                 }
@@ -5418,10 +5382,13 @@ pub mod processor {
                     msg!("CU_CHECKPOINT: trade_nocpi_execute_start");
                     sol_log_compute_units();
                 }
+                // Pass maintenance_fee_per_slot = 0 so the helper's
+                // internal sync is a no-op — we already pre-synced both
+                // sides just above. Halves fee-sync CU on the hot path.
                 execute_trade_with_matcher(
                     engine, &NoOpMatcher, lp_idx, user_idx, clock.slot, price, size,
                     funding_rate_e9, 0, // NoOpMatcher ignores lp_account_id
-                    config.maintenance_fee_per_slot,
+                    0,
                 ).map_err(map_risk_error)?;
 
                 // Update mark EWMA from trade (NoOpMatcher fills at oracle price).
@@ -5887,11 +5854,15 @@ pub mod processor {
                         exec_price,
                         exec_size: trade_size,
                     };
-                    // Use pre-oracle-read funding rate (anti-retroactivity §5.5)
+                    // Use pre-oracle-read funding rate (anti-retroactivity §5.5).
+                    // Pass maintenance_fee_per_slot = 0 so the helper's
+                    // internal sync is a no-op — we already pre-synced
+                    // both sides just above (pre-ins_before-snapshot).
+                    // Halves fee-sync CU on the hot path.
                     execute_trade_with_matcher(
                         engine, &matcher, lp_idx, user_idx, clock.slot, price, trade_size,
                         funding_rate_e9_pre, lp_account_id,
-                        config.maintenance_fee_per_slot,
+                        0,
                     ).map_err(map_risk_error)?;
                     #[cfg(feature = "cu-audit")]
                     {
@@ -7363,365 +7334,6 @@ pub mod processor {
                 )?;
             }
 
-            Instruction::SetInsuranceWithdrawPolicy {
-                min_withdraw_base,
-                max_withdraw_bps,
-                cooldown_slots,
-            } => {
-                accounts::expect_len(accounts, 2)?;
-                let a_admin = &accounts[0];
-                let a_slab = &accounts[1];
-
-                accounts::expect_signer(a_admin)?;
-                accounts::expect_writable(a_slab)?;
-
-                let mut data = state::slab_data_mut(a_slab)?;
-                slab_guard(program_id, a_slab, &data)?;
-                require_initialized(&data)?;
-
-                // Policy writes oracle/index fields. Only safe when all accounts
-                // are closed — prevents corrupting Hyperp settlement math.
-                if !zc::engine_ref(&data)?.is_resolved() {
-                    return Err(ProgramError::InvalidAccountData);
-                }
-                {
-                    let engine = zc::engine_ref(&data)?;
-                    if engine.num_used_accounts != 0 {
-                        return Err(ProgramError::InvalidAccountData);
-                    }
-                }
-
-                let header = state::read_header(&data);
-                require_admin(header.admin, a_admin.key)?;
-
-                if min_withdraw_base == 0 {
-                    return Err(PercolatorError::InvalidConfigParam.into());
-                }
-                if max_withdraw_bps == 0 || max_withdraw_bps > 10_000 {
-                    return Err(PercolatorError::InvalidConfigParam.into());
-                }
-
-                let mut config = state::read_config(&data);
-                if config.unit_scale != 0 && min_withdraw_base % (config.unit_scale as u64) != 0 {
-                    return Err(PercolatorError::InvalidConfigParam.into());
-                }
-
-                let packed = pack_ins_withdraw_meta(
-                    max_withdraw_bps,
-                    crate::INS_WITHDRAW_LAST_SLOT_NONE,
-                )
-                    .ok_or(PercolatorError::InvalidConfigParam)?;
-
-                // Policy numerical state is parked in resolved-mode
-                // oracle fields (the market is past resolve; oracle
-                // state is no longer semantically meaningful). The
-                // POLICY AUTHORITY field (previously oracle_authority)
-                // is DROPPED — WithdrawInsuranceLimited is signed by
-                // the scoped `header.insurance_authority`, unified
-                // with the unbounded WithdrawInsurance path. Admin
-                // sets the numerical caps here; the insurance_authority
-                // key (managed via UpdateAuthority) signs actual
-                // withdrawals.
-                config.last_effective_price_e6 = min_withdraw_base;
-                config.oracle_price_cap_e2bps = cooldown_slots;
-                config.authority_timestamp = packed;
-                state::write_config(&mut data, &config);
-                // Set explicit flag so WithdrawInsuranceLimited can distinguish
-                // real policy from oracle timestamp bit patterns.
-                state::set_policy_configured(&mut data);
-            }
-
-            Instruction::WithdrawInsuranceLimited { amount } => {
-                // Limited insurance withdraw (configured authority + min/max/cooldown checks)
-                // Accept 7 or 8 accounts: optional oracle for same-instruction accrual
-                accounts::expect_len(accounts, 7)?;
-                let a_authority = &accounts[0];
-                let a_slab = &accounts[1];
-                let a_authority_ata = &accounts[2];
-                let a_vault = &accounts[3];
-                let a_token = &accounts[4];
-                let a_vault_pda = &accounts[5];
-                let a_clock = &accounts[6];
-                let a_oracle_opt = if accounts.len() > 7 { Some(&accounts[7]) } else { None };
-
-                accounts::expect_signer(a_authority)?;
-                accounts::expect_writable(a_slab)?;
-                verify_token_program(a_token)?;
-
-                let mut data = state::slab_data_mut(a_slab)?;
-                slab_guard(program_id, a_slab, &data)?;
-                require_initialized(&data)?;
-
-                let resolved = zc::engine_ref(&data)?.is_resolved();
-                let header = state::read_header(&data);
-                let mut config = state::read_config(&data);
-
-                // Live-market insurance withdrawals are DISABLED.
-                //
-                // Rationale (audit P0/P1): `accrue_market_to` only moves
-                // market-global K/F/oracle state. It does NOT touch
-                // individual accounts, realize losses on underwater
-                // positions, liquidate bankrupt accounts, or absorb
-                // losses into the insurance fund. Those remain lazy
-                // until each account is touched by settle / liquidate /
-                // close / crank. Permitting a live withdrawal based on
-                // the current `insurance_fund.balance` therefore lets
-                // the authority drain reserves that later losses would
-                // legitimately claim — a timing-window extraction from
-                // the insurance fund.
-                //
-                // A safe live path would require a "all losses at this
-                // oracle are realized" precondition — full-market
-                // settlement/liquidation sweep or a cursor process —
-                // which is out of scope for this wrapper design. Until
-                // such a precondition exists, live withdrawals are a
-                // soundness hole; resolved-market withdrawals remain
-                // correct because post-resolution all accounts must be
-                // closed before any insurance payout (see the
-                // `num_used_accounts != 0` gate below).
-                if !resolved {
-                    return Err(PercolatorError::InvalidConfigParam.into());
-                }
-                // Retained for resolved-market policy gating only.
-                if config.insurance_withdraw_max_bps == 0 && !resolved {
-                    return Err(PercolatorError::InvalidConfigParam.into());
-                }
-                let clock = Clock::from_account_info(a_clock)?;
-
-                // Use explicit flag to determine if SetInsuranceWithdrawPolicy was called.
-                // Previously inferred from authority_timestamp bit patterns, which an
-                // oracle authority could forge via crafted PushOraclePrice timestamps.
-                let configured = state::is_policy_configured(&data);
-                // Defensive: configured flag should only be set on resolved markets
-                // (SetInsuranceWithdrawPolicy is gated on is_resolved). If this
-                // invariant is ever broken, reject rather than use repurposed fields.
-                if configured && !resolved {
-                    return Err(ProgramError::InvalidAccountData);
-                }
-                let (stored_bps, stored_last_slot) = if configured {
-                    unpack_ins_withdraw_meta(config.authority_timestamp)
-                } else {
-                    (0u16, crate::INS_WITHDRAW_LAST_SLOT_NONE)
-                };
-                // Unified authorization: both the configured-policy path
-                // and the unconfigured-default path use the scoped
-                // `header.insurance_authority`. This kills the old
-                // overload of `config.oracle_authority` as a secondary
-                // policy-authority slot — oracle authority is strictly
-                // the price-push role, nothing else.
-                let policy_authority = header.insurance_authority;
-                let policy_min_base = if configured {
-                    config.last_effective_price_e6
-                } else {
-                    // Default floor should represent at least one withdrawable unit.
-                    // On scaled markets (unit_scale > 1), base amounts must be aligned
-                    // to unit_scale, so a base-min of 1 would otherwise collapse to 0 units.
-                    core::cmp::max(DEFAULT_INSURANCE_WITHDRAW_MIN_BASE, config.unit_scale as u64)
-                };
-                let policy_max_bps = if configured {
-                    stored_bps
-                } else if config.insurance_withdraw_max_bps > 0 {
-                    // Use immutable config value (live or resolved unconfigured)
-                    config.insurance_withdraw_max_bps
-                } else {
-                    DEFAULT_INSURANCE_WITHDRAW_MAX_BPS
-                };
-                let policy_cooldown = if configured {
-                    config.oracle_price_cap_e2bps
-                } else {
-                    DEFAULT_INSURANCE_WITHDRAW_COOLDOWN_SLOTS
-                };
-                let last_withdraw_slot = if configured {
-                    stored_last_slot
-                } else if config.last_insurance_withdraw_slot > 0 {
-                    // Unconfigured: always use dedicated config field (live or resolved)
-                    config.last_insurance_withdraw_slot
-                } else {
-                    crate::INS_WITHDRAW_LAST_SLOT_NONE
-                };
-
-                if policy_min_base == 0 {
-                    return Err(PercolatorError::InvalidConfigParam.into());
-                }
-                if policy_authority != a_authority.key.to_bytes() {
-                    return Err(PercolatorError::EngineUnauthorized.into());
-                }
-                if config.unit_scale != 0 && amount % (config.unit_scale as u64) != 0 {
-                    return Err(ProgramError::InvalidInstructionData);
-                }
-                // On live markets, use config cooldown directly (not max with defaults).
-                // On resolved markets, use stricter of policy and config.
-                let effective_cooldown = if !resolved && config.insurance_withdraw_cooldown_slots > 0 {
-                    config.insurance_withdraw_cooldown_slots
-                } else if config.insurance_withdraw_cooldown_slots > 0 {
-                    core::cmp::max(policy_cooldown, config.insurance_withdraw_cooldown_slots)
-                } else {
-                    policy_cooldown
-                };
-                if last_withdraw_slot != crate::INS_WITHDRAW_LAST_SLOT_NONE
-                    && clock.slot < last_withdraw_slot.saturating_add(effective_cooldown)
-                {
-                    return Err(ProgramError::InvalidAccountData);
-                }
-
-                let mint = Pubkey::new_from_array(config.collateral_mint);
-                let auth = accounts::derive_vault_authority_with_bump(
-                    program_id, a_slab.key, config.vault_authority_bump,
-                )?;
-                verify_vault(
-                    a_vault,
-                    &auth,
-                    &mint,
-                    &Pubkey::new_from_array(config.vault_pubkey),
-                )?;
-                verify_token_account(a_authority_ata, a_authority.key, &mint)?;
-                accounts::expect_key(a_vault_pda, &auth)?;
-
-                let (units_u64, _) = crate::units::base_to_units(amount, config.unit_scale);
-                let units_requested = units_u64 as u128;
-                if units_requested == 0 {
-                    return Err(ProgramError::InvalidInstructionData);
-                }
-                let (policy_min_units_u64, _) =
-                    crate::units::base_to_units(policy_min_base, config.unit_scale);
-                let policy_min_units = policy_min_units_u64 as u128;
-
-                // `resolved` already computed above
-                {
-                    let engine = zc::engine_mut(&mut data)?;
-                    if resolved {
-                        // Require all accounts fully closed, not just effective_pos_q==0
-                        // (which returns 0 for epoch-mismatched stale positions).
-                        if engine.num_used_accounts != 0 {
-                            return Err(ProgramError::InvalidAccountData);
-                        }
-                    }
-
-                    // On live markets, require oracle for same-instruction loss realization.
-                    // accrue_market_to with fresh price updates insurance_fund.balance
-                    // to reflect current market state before any withdrawal.
-                    if !resolved {
-                        // Anti-retroactivity: capture funding rate before oracle read (§5.5)
-                        let funding_rate_e9 = compute_current_funding_rate_e9(&config);
-                        let a_oracle = a_oracle_opt
-                            .ok_or(PercolatorError::OracleInvalid)?;
-                        let is_hyperp = oracle::is_hyperp_mode(&config);
-                        let accrual_price = if is_hyperp {
-                            let last_slot = engine.current_slot;
-                            drop(engine);
-                            let px = oracle::get_engine_oracle_price_e6(
-                                last_slot, clock.slot, clock.unix_timestamp,
-                                &mut config, a_oracle,
-                            )?;
-                            state::write_config(&mut data, &config);
-                            px
-                        } else {
-                            drop(engine);
-                            let px = read_price_and_stamp(
-                                &mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data,
-                            )?;
-                            state::write_config(&mut data, &config);
-                            px
-                        };
-                        {
-                            let engine = zc::engine_mut(&mut data)?;
-                            // Pre-chunk catch-up so the single accrue below
-                            // sees dt ≤ max_accrual_dt_slots (Finding 3).
-                            // Pre-read funding rate for anti-retroactivity (Finding 2).
-                            catchup_accrue(
-                                engine, clock.slot, accrual_price, funding_rate_e9,
-                            )?;
-                            engine.accrue_market_to(
-                                clock.slot, accrual_price,
-                                funding_rate_e9,
-                            ).map_err(map_risk_error)?;
-                        }
-                        // Engine v12.18.1: accrue_market_to is market-global only;
-                        // no per-account resets to finalize on this path, and the
-                        // end-of-instruction lifecycle is no longer exposed publicly.
-                        if !state::is_oracle_initialized(&data) {
-                            state::set_oracle_initialized(&mut data);
-                        }
-                    } else {
-                        drop(engine);
-                    }
-
-                    let engine = zc::engine_mut(&mut data)?;
-                    let insurance_units = engine.insurance_fund.balance.get();
-                    if insurance_units == 0 {
-                        return Ok(());
-                    }
-                    if units_requested > insurance_units {
-                        return Err(PercolatorError::EngineInsufficientBalance.into());
-                    }
-
-                    // On live markets, cannot withdraw below insurance_floor
-                    if !resolved {
-                        let floor = engine.params.insurance_floor.get();
-                        let post_balance = insurance_units.saturating_sub(units_requested);
-                        if post_balance < floor {
-                            return Err(PercolatorError::EngineInsufficientBalance.into());
-                        }
-                    }
-
-                    // On live markets, policy_max_bps already IS the config value.
-                    // On resolved markets, cap to the stricter of policy and config.
-                    let effective_max_bps = if resolved && config.insurance_withdraw_max_bps > 0 {
-                        core::cmp::min(policy_max_bps, config.insurance_withdraw_max_bps)
-                    } else {
-                        policy_max_bps
-                    };
-
-                    let pct_limited_units =
-                        insurance_units.saturating_mul(effective_max_bps as u128) / 10_000u128;
-                    let max_allowed_units = core::cmp::max(pct_limited_units, policy_min_units);
-                    if units_requested > max_allowed_units {
-                        return Err(ProgramError::InvalidInstructionData);
-                    }
-
-                    // effective_cooldown already computed and enforced above
-
-                    let req = percolator::U128::new(units_requested);
-                    if req > engine.vault {
-                        return Err(PercolatorError::EngineInsufficientBalance.into());
-                    }
-                    engine.insurance_fund.balance = engine.insurance_fund.balance - req;
-                    engine.vault = engine.vault - req;
-                }
-
-                // Persist cooldown slot.
-                if configured {
-                    // Configured policy: pack slot into authority_timestamp.
-                    // oracle_authority is NOT written here — it's the
-                    // separate oracle-push role, unrelated to the
-                    // insurance-withdraw policy after the 4-way split.
-                    let packed = pack_ins_withdraw_meta(policy_max_bps, clock.slot)
-                        .ok_or(PercolatorError::EngineOverflow)?;
-                    config.last_effective_price_e6 = policy_min_base;
-                    config.oracle_price_cap_e2bps = policy_cooldown;
-                    config.authority_timestamp = packed;
-                } else {
-                    // Unconfigured (default): use dedicated field for cooldown
-                    config.last_insurance_withdraw_slot = clock.slot;
-                }
-                state::write_config(&mut data, &config);
-
-                let seed1: &[u8] = b"vault";
-                let seed2: &[u8] = a_slab.key.as_ref();
-                let bump_arr: [u8; 1] = [config.vault_authority_bump];
-                let seed3: &[u8] = &bump_arr;
-                let seeds: [&[u8]; 3] = [seed1, seed2, seed3];
-                let signer_seeds: [&[&[u8]]; 1] = [&seeds];
-
-                collateral::withdraw(
-                    a_token,
-                    a_vault,
-                    a_authority_ata,
-                    a_vault_pda,
-                    amount,
-                    &signer_seeds,
-                )?;
-            }
 
             Instruction::AdminForceCloseAccount { user_idx } => {
                 // Admin force-close an abandoned account after market resolution.

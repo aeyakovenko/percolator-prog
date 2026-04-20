@@ -1514,28 +1514,7 @@ pub fn encode_withdraw_insurance() -> Vec<u8> {
     vec![20u8] // Instruction tag for WithdrawInsurance
 }
 
-pub fn encode_set_insurance_withdraw_policy(
-    _authority: &Pubkey, // deprecated: WithdrawInsuranceLimited is now
-                         // signed by header.insurance_authority (the
-                         // scoped 4-way-auth slot). Kept in the fn
-                         // signature for call-site compatibility —
-                         // value is ignored.
-    min_withdraw_base: u64,
-    max_withdraw_bps: u16,
-    cooldown_slots: u64,
-) -> Vec<u8> {
-    let mut data = vec![22u8];
-    data.extend_from_slice(&min_withdraw_base.to_le_bytes());
-    data.extend_from_slice(&max_withdraw_bps.to_le_bytes());
-    data.extend_from_slice(&cooldown_slots.to_le_bytes());
-    data
-}
 
-pub fn encode_withdraw_insurance_limited(amount: u64) -> Vec<u8> {
-    let mut data = vec![23u8];
-    data.extend_from_slice(&amount.to_le_bytes());
-    data
-}
 
 pub fn encode_withdraw(user_idx: u16, amount: u64) -> Vec<u8> {
     let mut data = vec![4u8]; // Instruction tag for WithdrawCollateral
@@ -3009,74 +2988,8 @@ impl TestEnv {
     }
 
     /// Configure limited insurance-withdraw policy (admin only, resolved market only).
-    pub fn try_set_insurance_withdraw_policy(
-        &mut self,
-        admin: &Keypair,
-        authority: &Pubkey,
-        min_withdraw_base: u64,
-        max_withdraw_bps: u16,
-        cooldown_slots: u64,
-    ) -> Result<(), String> {
-        let ix = Instruction {
-            program_id: self.program_id,
-            accounts: vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(self.slab, false),
-            ],
-            data: encode_set_insurance_withdraw_policy(
-                authority,
-                min_withdraw_base,
-                max_withdraw_bps,
-                cooldown_slots,
-            ),
-        };
-        let tx = Transaction::new_signed_with_payer(
-            &[cu_ix(), ix],
-            Some(&admin.pubkey()),
-            &[admin],
-            self.svm.latest_blockhash(),
-        );
-        self.svm
-            .send_transaction(tx)
-            .map(|_| ())
-            .map_err(|e| format!("{:?}", e))
-    }
 
     /// Limited insurance withdraw by configured authority.
-    pub fn try_withdraw_insurance_limited(
-        &mut self,
-        authority: &Keypair,
-        amount: u64,
-    ) -> Result<(), String> {
-        // Live markets require oracle (8th account). Pass pyth_index for accrual.
-        let authority_ata = self.create_ata(&authority.pubkey(), 0);
-        let (vault_pda, _) =
-            Pubkey::find_program_address(&[b"vault", self.slab.as_ref()], &self.program_id);
-        let ix = Instruction {
-            program_id: self.program_id,
-            accounts: vec![
-                AccountMeta::new(authority.pubkey(), true),
-                AccountMeta::new(self.slab, false),
-                AccountMeta::new(authority_ata, false),
-                AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-                AccountMeta::new_readonly(vault_pda, false),
-                AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(self.pyth_index, false),
-            ],
-            data: encode_withdraw_insurance_limited(amount),
-        };
-        let tx = Transaction::new_signed_with_payer(
-            &[cu_ix(), ix],
-            Some(&authority.pubkey()),
-            &[authority],
-            self.svm.latest_blockhash(),
-        );
-        self.svm
-            .send_transaction(tx)
-            .map(|_| ())
-            .map_err(|e| format!("{:?}", e))
-    }
 
     /// Check if market is resolved. Since engine_ref uses native struct layout
     /// which differs from BPF, we check resolved_price > 0 as a proxy.
