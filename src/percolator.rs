@@ -3466,8 +3466,14 @@ pub mod processor {
         engine: &mut RiskEngine,
         config: &mut MarketConfig,
         now_slot: u64,
+        max_syncs: usize,
     ) -> Result<(), ProgramError> {
         if config.maintenance_fee_per_slot == 0 {
+            return Ok(());
+        }
+        // Early-out when the caller has already exhausted the per-
+        // instruction sync budget on pre-sweep candidate syncs.
+        if max_syncs == 0 {
             return Ok(());
         }
         const BITMAP_WORDS: usize = (percolator::MAX_ACCOUNTS + 63) / 64;
@@ -3477,7 +3483,7 @@ pub mod processor {
         let mut syncs_done: usize = 0;
         let mut words_scanned: usize = 0;
         // Budget check is inside the inner loop so we can stop exactly at
-        // FEE_SWEEP_BUDGET, not after completing the current word.
+        // max_syncs, not after completing the current word.
         'outer: while words_scanned < BITMAP_WORDS {
             // Skip bits below bit_cursor on the resume word.
             let resume_mask = if bit_cursor == 0 {
@@ -3488,7 +3494,7 @@ pub mod processor {
             };
             let mut bits = engine.used[word_cursor] & resume_mask;
             while bits != 0 {
-                if syncs_done >= crate::constants::FEE_SWEEP_BUDGET {
+                if syncs_done >= max_syncs {
                     // Stop EXACTLY at budget. Save the next unprocessed bit
                     // as the resume point for the following crank.
                     let next_bit = bits.trailing_zeros() as usize;
@@ -3517,7 +3523,7 @@ pub mod processor {
             words_scanned += 1;
             // Budget may have hit right at the end of the word — avoid one
             // wasted iteration on the next (empty in the caller's view) word.
-            if syncs_done >= crate::constants::FEE_SWEEP_BUDGET {
+            if syncs_done >= max_syncs {
                 break 'outer;
             }
         }
@@ -5042,20 +5048,22 @@ pub mod processor {
                 // run on a fully-accrued market. keeper_crank_not_atomic's
                 // internal accrue then no-ops on dt=0+same-price.
                 ensure_market_accrued_to_now(engine, clock.slot, price, funding_rate_e9_pre)?;
-                let ins_before = engine.insurance_fund.balance.get();
-                sweep_maintenance_fees(engine, &mut config, clock.slot)?;
-                let sweep_delta = engine
-                    .insurance_fund
-                    .balance
-                    .get()
-                    .saturating_sub(ins_before);
 
-                // Sweep cursor may not have touched every liquidation
-                // candidate in `combined`. keeper_crank_not_atomic runs
-                // health checks on these accounts and MUST see post-fee
-                // equity (wrapper invariant: recurring fees realized
-                // before health-sensitive ops). Explicitly sync each
-                // candidate that the engine will process.
+                // Shared per-instruction fee-sync budget (audit #2).
+                // Candidate syncs run FIRST so the engine's crank sees
+                // post-fee equity for health checks. The sweep then
+                // runs with the REMAINING budget, so the worst-case
+                // total syncs per instruction is capped at
+                // FEE_SWEEP_BUDGET (not FEE_SWEEP_BUDGET +
+                // LIQ_BUDGET_PER_CRANK as it was previously). This
+                // keeps the crank's CU usage bounded by the stated
+                // envelope even when a full candidate list is paired
+                // with a full sweep.
+                //
+                // Ordering: candidates first, then sweep with
+                // remaining budget, then crank. Sweep-delta (keeper
+                // reward) is computed from balance BEFORE the sweep
+                // only, so candidate syncs don't inflate the reward.
                 //
                 // Budget accounting MUST MIRROR keeper_crank_not_atomic's:
                 // invalid / out-of-range / unused entries are SKIPPED
@@ -5074,6 +5082,7 @@ pub mod processor {
                 // on consecutive entries, which is idempotent at the same
                 // anchor). The wrapper skips duplicate SYNC calls purely
                 // to save CU — dedup is within the loop, not the budget.
+                let mut candidate_syncs = 0usize;
                 if config.maintenance_fee_per_slot > 0 {
                     let cap = percolator::LIQ_BUDGET_PER_CRANK as usize;
                     let mut synced: [u16; percolator::LIQ_BUDGET_PER_CRANK as usize]
@@ -5083,13 +5092,8 @@ pub mod processor {
                     for &(idx, _policy) in combined.iter() {
                         if attempts >= cap { break; }
                         let i = idx as usize;
-                        // Invalid / unused entries DON'T consume attempts —
-                        // matches engine's candidate-processing loop.
                         if i >= percolator::MAX_ACCOUNTS { continue; }
                         if !engine.is_used(i) { continue; }
-                        // Valid existing candidate: counts against the
-                        // engine's per-crank budget. Sync before the
-                        // engine health-checks it, deduped to save CU.
                         attempts += 1;
                         let mut already = false;
                         for j in 0..synced_count {
@@ -5105,8 +5109,23 @@ pub mod processor {
                             .map_err(map_risk_error)?;
                         synced[synced_count] = idx;
                         synced_count += 1;
+                        candidate_syncs += 1;
                     }
                 }
+
+                // Sweep with the REMAINING fee-sync budget. Keeper
+                // reward (sweep_delta) is computed from balance
+                // BEFORE the sweep, so candidate-sync deltas are
+                // excluded from the reward.
+                let ins_before = engine.insurance_fund.balance.get();
+                let remaining_budget = crate::constants::FEE_SWEEP_BUDGET
+                    .saturating_sub(candidate_syncs);
+                sweep_maintenance_fees(engine, &mut config, clock.slot, remaining_budget)?;
+                let sweep_delta = engine
+                    .insurance_fund
+                    .balance
+                    .get()
+                    .saturating_sub(ins_before);
 
                 let admit_h_min = engine.params.h_min;
                 let admit_h_max = engine.params.h_max;

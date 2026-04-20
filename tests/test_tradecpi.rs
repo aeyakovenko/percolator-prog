@@ -5737,3 +5737,79 @@ fn test_slot_reuse_does_not_reuse_lp_matcher_identity() {
     assert_ne!(lp1_idx, lp2_idx, "LPs must be at different slots");
 }
 
+
+/// Audit #1 regression: honest same-price Hyperp trades MUST refresh
+/// the mark-liveness timer, otherwise a fully admin-free Hyperp market
+/// with steady-price real trading would expire into
+/// ResolvePermissionless.
+///
+/// Under the prior rule, liveness refreshed only when
+/// `config.mark_ewma_e6 != old_ewma_cpi` — same-price trades with a
+/// flat EWMA didn't count. The fix checks observation eligibility
+/// (fee_paid >= mark_min_fee) instead, so honest full-fee same-price
+/// trades DO refresh the liveness slots.
+#[test]
+fn test_hyperp_same_price_trades_refresh_liveness_and_market_stays_live() {
+    let mut env = TradeCpiTestEnv::new();
+    env.init_market_hyperp(1_000_000);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let matcher_prog = env.matcher_program_id;
+
+    // Set up trading parties.
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+
+    // Seed the mark via an initial admin push (Hyperp needs a mark
+    // source before trades can produce exec prices at the mark).
+    env.try_push_oracle_price(&admin, 1_000_000, 1).unwrap();
+
+    const MARK_EWMA_LAST_OFF: usize = 136 + 312; // HEADER_LEN + offset_of(mark_ewma_last_slot)
+    const LAST_MARK_PUSH_OFF: usize = 136 + 272; // HEADER_LEN + offset_of(last_mark_push_slot) (u128, low 8 bytes = slot)
+    let read_slots = |env: &TradeCpiTestEnv| -> (u64, u64) {
+        let slab = env.svm.get_account(&env.slab).unwrap().data;
+        let e = u64::from_le_bytes(
+            slab[MARK_EWMA_LAST_OFF..MARK_EWMA_LAST_OFF + 8]
+                .try_into().unwrap());
+        let p = u64::from_le_bytes(
+            slab[LAST_MARK_PUSH_OFF..LAST_MARK_PUSH_OFF + 8]
+                .try_into().unwrap());
+        (e, p)
+    };
+
+    // Snapshot liveness slots BEFORE the test trade.
+    env.set_slot(100);
+    let (ewma_before, push_before) = read_slots(&env);
+
+    // Execute a same-price TradeCpi fill at a later slot. Under the
+    // old rule (EWMA-value-change refresh), same-price trades with a
+    // flat EWMA wouldn't move the liveness slots. Under the fix, an
+    // observation-eligible fill (mark_min_fee == 0 here) refreshes
+    // both mark_ewma_last_slot and last_mark_push_slot.
+    env.set_slot(500);
+    env
+        .try_trade_cpi(
+            &user, &lp.pubkey(), lp_idx, user_idx,
+            100_000_000, &matcher_prog, &matcher_ctx,
+        )
+        .expect("same-price Hyperp trade must succeed");
+
+    let (ewma_after, push_after) = read_slots(&env);
+
+    assert!(
+        ewma_after > ewma_before,
+        "mark_ewma_last_slot must advance on observation-eligible \
+         same-price trade (audit #1). before={} after={}",
+        ewma_before, ewma_after,
+    );
+    assert!(
+        push_after > push_before,
+        "last_mark_push_slot must advance on observation-eligible \
+         same-price Hyperp trade (audit #1). before={} after={}",
+        push_before, push_after,
+    );
+}
