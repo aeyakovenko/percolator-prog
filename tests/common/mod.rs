@@ -156,6 +156,66 @@ pub fn encode_init_market_hyperp(admin: &Pubkey, mint: &Pubkey, initial_mark_pri
     encode_init_market_full_v2(admin, mint, &[0u8; 32], 0, initial_mark_price_e6, 0)
 }
 
+/// Encode Hyperp InitMarket with explicit max_staleness_secs and
+/// permissionless_resolve_stale_slots. Used by the catchup-budget /
+/// terminal-behavior tests that need to drive the market across the
+/// perm-resolve boundary.
+pub fn encode_init_market_hyperp_with_stale(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    initial_mark_price_e6: u64,
+    max_staleness_secs: u64,
+    permissionless_resolve_stale_slots: u64,
+) -> Vec<u8> {
+    let mut data = vec![0u8];
+    data.extend_from_slice(admin.as_ref());
+    data.extend_from_slice(mint.as_ref());
+    data.extend_from_slice(&[0u8; 32]); // Hyperp feed_id
+    data.extend_from_slice(&max_staleness_secs.to_le_bytes());
+    data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
+    data.push(0u8); // invert
+    data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
+    data.extend_from_slice(&initial_mark_price_e6.to_le_bytes());
+    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
+    data.extend_from_slice(&10_000_000_000_000_000u128.to_le_bytes()); // max_insurance_floor
+    data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps (Hyperp default kicks in)
+    // RiskParams
+    data.extend_from_slice(&0u64.to_le_bytes()); // h_min
+    data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
+    data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
+    data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
+    data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
+    data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+    data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
+    data.extend_from_slice(&1u64.to_le_bytes()); // h_max
+    // max_crank_staleness: must be < perm_resolve
+    let max_crank = if permissionless_resolve_stale_slots > 0 {
+        permissionless_resolve_stale_slots.saturating_sub(1).max(1)
+    } else {
+        u64::MAX
+    };
+    data.extend_from_slice(&max_crank.to_le_bytes());
+    data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
+    data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
+    data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
+    data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
+    data.extend_from_slice(&100u128.to_le_bytes()); // min_initial_deposit
+    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
+    data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
+    data.extend_from_slice(&permissionless_resolve_stale_slots.to_le_bytes());
+    data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots
+    data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
+    data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
+    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot
+    data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee
+    // force_close_delay must be > 0 when perm_resolve > 0
+    let force_close = if permissionless_resolve_stale_slots > 0 { 50u64 } else { 0u64 };
+    data.extend_from_slice(&force_close.to_le_bytes());
+    data
+}
+
 /// Full InitMarket encoder with all new fields
 pub fn encode_init_market_with_conf_bps(
     admin: &Pubkey,
@@ -3694,6 +3754,113 @@ impl TradeCpiTestEnv {
         self.svm
             .send_transaction(tx)
             .expect("init_market_hyperp failed");
+    }
+
+    /// Init a Hyperp market with configurable staleness and
+    /// permissionless-resolve window. Returns the raw send result so
+    /// tests can assert either init-success or init-reject.
+    pub fn try_init_market_hyperp_with_stale(
+        &mut self,
+        initial_mark_price_e6: u64,
+        max_staleness_secs: u64,
+        permissionless_resolve_stale_slots: u64,
+    ) -> Result<(), String> {
+        let admin = &self.payer;
+        let dummy_ata = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                dummy_ata,
+                Account {
+                    lamports: 1_000_000,
+                    data: vec![0u8; TokenAccount::LEN],
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(self.mint, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(sysvar::rent::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+            ],
+            data: encode_init_market_hyperp_with_stale(
+                &admin.pubkey(),
+                &self.mint,
+                initial_mark_price_e6,
+                max_staleness_secs,
+                permissionless_resolve_stale_slots,
+            ),
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_ix(), ix],
+            Some(&admin.pubkey()),
+            &[admin],
+            self.svm.latest_blockhash(),
+        );
+        self.svm
+            .send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
+    }
+
+    pub fn try_resolve_permissionless(&mut self) -> Result<(), String> {
+        let caller = Keypair::new();
+        self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+        // ResolvePermissionless takes [slab, clock] — no caller, no oracle.
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_resolve_permissionless(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_ix(), ix],
+            Some(&caller.pubkey()),
+            &[&caller],
+            self.svm.latest_blockhash(),
+        );
+        self.svm
+            .send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
+    }
+
+    pub fn try_catchup_accrue(&mut self) -> Result<(), String> {
+        let caller = Keypair::new();
+        self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+        // CatchupAccrue takes [slab, clock, oracle] — no caller account.
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_catchup_accrue(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_ix(), ix],
+            Some(&caller.pubkey()),
+            &[&caller],
+            self.svm.latest_blockhash(),
+        );
+        self.svm
+            .send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
     }
 
     pub fn set_slot(&mut self, slot: u64) {

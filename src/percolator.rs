@@ -4252,23 +4252,35 @@ pub mod processor {
                     return Err(ProgramError::InvalidInstructionData);
                 }
 
-                // Hyperp dead-zone guard. get_engine_oracle_price_e6
-                // rejects Hyperp price reads when
-                //   clock.slot - max(mark_ewma_last_slot, last_mark
-                //   _push_slot) > max_staleness_secs * 3
-                // If permissionless_resolve_stale_slots >
-                // max_staleness_secs * 3, there's a window where the
-                // price-read rejection fires BEFORE the permissionless
-                // resolve timer matures — the market is frozen but
-                // not yet resolvable. Prevent this at init by
-                // requiring perm_resolve <= max_staleness_secs * 3
-                // for Hyperp markets. (Non-Hyperp markets have no
-                // analogous staleness rejection in
-                // get_engine_oracle_price_e6 — their stale gate is
-                // just permissionless_stale_matured itself.)
+                // Hyperp catchup-budget invariant. The real safety
+                // property under the "resolve-only after maturity"
+                // design is: before the market matures into the
+                // permissionless-resolve window, a single live
+                // recovery call (PushOraclePrice + catchup_accrue)
+                // must be able to close the accrued market gap.
+                // catchup_accrue loops at most CATCHUP_CHUNKS_MAX
+                // accrue_market_to calls per instruction, each
+                // advancing by up to max_accrual_dt_slots, so the
+                // single-call recovery budget is
+                //   CATCHUP_CHUNKS_MAX × MAX_ACCRUAL_DT_SLOTS.
+                // If perm_resolve exceeds that budget, a market that
+                // has gone stale near maturity may not be recoverable
+                // in one shot — users would have to invoke the
+                // dedicated CatchupAccrue instruction multiple times.
+                // Refuse that configuration at init so the bound is
+                // mechanically enforced.
+                //
+                // Note: the general-purpose check above (perm_resolve
+                // <= risk_params.max_accrual_dt_slots) is strictly
+                // tighter, so this assertion is currently redundant —
+                // kept as a first-class, self-contained statement of
+                // the Hyperp safety property in case either constant
+                // moves.
                 if is_hyperp && permissionless_resolve_stale_slots > 0 {
-                    let max_stale_slots = max_staleness_secs.saturating_mul(3);
-                    if permissionless_resolve_stale_slots > max_stale_slots {
+                    let max_recoverable_gap =
+                        (CATCHUP_CHUNKS_MAX as u64)
+                            .saturating_mul(crate::constants::MAX_ACCRUAL_DT_SLOTS);
+                    if permissionless_resolve_stale_slots > max_recoverable_gap {
                         return Err(ProgramError::InvalidInstructionData);
                     }
                 }
