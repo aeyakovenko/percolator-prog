@@ -442,6 +442,32 @@ detection. The user can top up via DepositCollateral any time before
 a keeper races in with reclaim. This is the intended dormant-account
 cleanup semantics (spec §2.6).
 
+### D32. Malicious matcher: attacker controls matcher program
+
+**Hypothesis**: Attacker is the LP AND controls the matcher program.
+They can make the matcher return adversarial exec_prices (within
+1% band) to steal a small amount from each counterparty across
+many trades.
+
+**Why discarded**: LP delegation to a matcher is an explicit trust
+choice. The matcher is bounded by the anti-off-market band (≥1% or
+2× trading_fee_bps, whichever is larger). Within that band, the
+matcher can indeed pick unfavorable prices for the counterparty —
+this is the cost of using that LP. Counterparties can choose a
+different LP with a trusted matcher. The wrapper's job is to
+ENFORCE the band, not to pick matchers for LPs.
+
+### D33. InitMarket with tiny min_initial_deposit reduces DoS cost
+
+**Hypothesis**: Operator sets min_initial_deposit = 1 base token.
+DoS cost drops to 4096 × 1 = 4096 tokens — trivial.
+
+**Why discarded**: Spec parameter choice, operator responsibility.
+Wrapper does bound min_initial_deposit (min > 0, max ≤
+MAX_VAULT_TVL in RiskParams validation), but does not prescribe a
+minimum floor — it's left to operator economics. Not a protocol
+bug.
+
 ## Audit completion status
 
 **16 concrete attack hypotheses probed across two rounds.** Every
