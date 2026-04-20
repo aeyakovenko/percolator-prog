@@ -297,6 +297,47 @@ The matcher cannot elevate privileges via cross-slab CPI. It can
 only do what the attacker could already do by calling market B
 directly. Not a reentrancy flaw.
 
+### D23. Stale matcher_ctx data passes ABI validation
+
+**Hypothesis**: Malicious matcher writes `req_id=N` to matcher_ctx
+then panics before writing exec_price. Wrapper reads ctx, sees
+req_id=N matches current request, accepts. Partial data bypasses
+security.
+
+**Why discarded**: `validate_matcher_return` checks ALL of:
+`abi_version == v2`, `flags has VALID + !REJECTED`, `lp_account_id ==
+expected`, `oracle_price_e6 == expected`, `reserved == 0`,
+`req_id == expected`, AND `exec_price_e6 != 0`. A partial write that
+leaves exec_price = 0 (or any zero field) is rejected. The request
+ID is strictly monotonic, so stale data from prior trades has a
+different req_id and gets rejected.
+
+### D24. Fee debt forgiveness at reclaim is theft from insurance
+
+**Hypothesis**: Account reaches reclaim eligibility with negative
+fee_credits (unpaid fee debt). On reclaim, engine zeroes the debt
+(engine reclaim line: `self.accounts[idx].fee_credits = I128::new(0)`).
+Insurance fund permanently loses this expected revenue.
+
+**Why discarded**: Spec §2.6 explicitly describes this as debt
+write-off for abandoned accounts. Not theft — the user had no capital
+to pay (else reclaim wouldn't fire). Charging a zero-capital account
+more fees is accounting theater. Insurance only loses revenue it
+would not have collected anyway.
+
+### D25. LP matcher registration cannot be changed
+
+**Hypothesis**: LP's matcher_program and matcher_context are set at
+InitLP and immutable. If the matcher is upgraded or compromised,
+the LP is stuck with the broken matcher forever — effectively their
+funds are controlled by whoever controls the matcher upgrade key.
+
+**Why discarded**: LP can CloseAccount (wrapper handles final
+settlement) and re-init with a new matcher. The "immutability" is
+within a single account's lifetime, not across re-init. Operational
+risk (LP should pick a matcher whose upgrade authority they trust)
+but not a protocol-level vulnerability.
+
 ### D22. Dust-capital account remains operational
 
 **Hypothesis**: User's capital drops below min_initial_deposit (e.g.,
