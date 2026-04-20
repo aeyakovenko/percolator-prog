@@ -277,6 +277,55 @@ header. InitMarket sets admin to `a_admin.key.to_bytes()`
 (src/percolator.rs:4633) — if the admin signer is zero, it fails
 validation upstream (Solana signer-flag checks).
 
+## Audit completion status
+
+**16 concrete attack hypotheses probed across two rounds.** Every
+candidate discarded under inspection. No ship-blocking findings.
+
+### Coverage
+
+Rounds 1 + 2 together walked:
+- All 28 live instruction tags — each handler's account layout,
+  signature requirements, state transitions, and failure modes.
+- Cross-instruction state transitions: InitUser's current_slot
+  split, TradeCpi's reentrancy guard, post-resolve close paths.
+- Privilege model: the 4-way authority split (admin / oracle /
+  insurance / close), burn guards, zero-address rejection.
+- Oracle paths: Pyth, Chainlink, authority fallback, circuit
+  breaker, hard-timeout gate, Hyperp EWMA.
+- Matcher ABI: account-shape validation, signer forwarding in the
+  variadic tail, return-field echo validation, reentrancy.
+- Warmup / reserve mechanics: close-path rejection of any reserve
+  state, ConvertReleasedPnl's flat-account safety cap.
+- Money-flow paths: maintenance fee → insurance, trading fee →
+  insurance, liquidation fee → insurance, reclaim dust → insurance,
+  stranded vault → close_authority.
+- Nonce / replay: checked_add bounds, per-slab scoping.
+- Layout safety: zero-copy cast, bool/enum validation before cast.
+
+### Residual review scope
+
+Worth someone else's eyes because I didn't construct custom test
+infrastructure for them:
+- Funding rate AT MAX_ABS_FUNDING_E9_PER_SLOT with OI AT MAX_VAULT_TVL
+  on both sides — exact arithmetic stress at the envelope boundary.
+- Multi-block attacks where the attacker coordinates across tx
+  boundaries (e.g., keeper-timing collusion between miner + attacker).
+- Future multi-market deployments would need re-audit of cross-slab
+  isolation.
+
+### Confidence
+
+The wrapper has 646 integration tests + 243 Kani proofs (across
+wrapper and engine crates) + 19 proptest fuzzers. The instructions
+under test here are not green-field code — each has been through
+multiple prior audit rounds with specific regression tests. This
+round found no new class of bug that those prior rounds missed.
+
+That is consistent with a system that's been adversarially audited
+to convergence. It is NOT proof of complete absence of bugs — just
+that the straightforward attack vectors tried here don't land.
+
 ## Next sweep targets
 
 Remaining angles for future sweeps:
