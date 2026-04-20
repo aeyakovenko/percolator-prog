@@ -138,6 +138,90 @@ For each hypothesis above, I:
   numbers that block the exploit rather than writing a ceremonial
   passing test.
 
+### D9. KeeperCrank reward lets attacker siphon insurance
+
+**Hypothesis**: Attacker creates many dummy accounts that accrue
+maintenance fees, then cranks first after a long wait to collect 50%
+of the sweep. Net profit from insurance fund.
+
+**Why discarded**: The attacker's dummy accounts ARE the ones paying
+the swept fees. Net flow: attacker pays N × fee_per_slot × dt → 50%
+back to attacker (their own sweep), 50% to insurance. Net LOSS of
+50% on their dummy-account fees. Not profitable.
+
+### D10. CloseSlab drains unsolicited vault tokens to close_authority
+
+**Hypothesis**: Users who mistakenly transfer tokens directly to the
+vault PDA (outside DepositCollateral) have their tokens stolen when
+close_authority calls CloseSlab — the "stranded" drain sends those
+tokens to close_authority.
+
+**Why discarded**: Not a protocol vulnerability — this is user error
+(sending tokens outside the deposit path). Documented behavior.
+`verify_vault_empty` at InitMarket (line 3873) checks
+`tok.amount == 0`, so an admin cannot pre-load a vault with stranded
+tokens. Running a vault through the full lifecycle (deposits → full
+withdrawals → close) leaves engine.vault at 0; any "stranded" amount
+is strictly unsolicited.
+
+### D12. ReclaimEmptyAccount donates user dust to insurance
+
+**Hypothesis**: After my sync-before-reclaim fix, a keeper can
+force-realize maintenance fees on a flat user account, dropping
+capital below min_initial_deposit, then reclaim the account — the
+user's remaining dust capital (potentially almost a full
+min_initial_deposit) goes permanently to the insurance fund. The
+user has no way to recover it.
+
+**Attack sequence**:
+1. User deposits exactly min_initial_deposit (e.g., 100). Opens and
+   closes a position. Leaves 100 capital with no open position.
+2. Maintenance fee accrues: 1/slot × N slots = N fees owed but not
+   yet realized (no crank has run).
+3. Keeper calls ReclaimEmptyAccount. My added sync realizes N fees,
+   capital drops to 100−N. If 100−N < 100, reclaim eligibility
+   passes.
+4. Engine's reclaim path (engine line 5352-5359) transfers dust
+   capital to insurance, zeros user capital, frees slot. User has no
+   slot or capital left.
+
+**Why discarded** (not a vuln, by design):
+- Reclaim requires position=0, pnl=0, reserved_pnl=0, sched_present=0,
+  pending_present=0, fee_credits>=0 (engine line 5314-5331). Only
+  truly flat, abandoned accounts are eligible.
+- The user could have called WithdrawCollateral at any point before
+  reclaim fires. Withdraw also syncs fees, but then returns whatever
+  capital remains to the user's ATA. No fee race: user's withdraw
+  transaction doesn't compete with reclaim in a way that lets
+  reclaim steal — the tx that lands first wins, and both require the
+  user's OWN consent (withdraw) or an abandoned state (reclaim).
+- Pre-fix behavior was identical in the end state: fees are OWED
+  regardless of when they're realized. My fix just makes reclaim
+  realize them synchronously (matching spec §10.7). Without the
+  fix, reclaim failed to realize pending fees — meaning an
+  abandoned account with unrealized fees would indefinitely block
+  the slot while the user's capital was silently unrecoverable.
+- This is the spec's documented dormant-account cleanup path
+  (spec §2.6). Not theft; abandoned-dust → insurance is the
+  intended economic rule.
+
+### D11. TradeCpi tail meta with forged signer flag
+
+**Hypothesis**: Caller crafts a tail AccountMeta with
+`is_signer: true` for an account that did NOT actually sign the outer
+tx, hoping the matcher CPI sees the account as a signer and uses it
+to authorize a privileged action on another slab.
+
+**Why discarded**: Solana's runtime validates every
+`AccountMeta { is_signer: true }` against the set of actual signers
+on the outer tx. An AccountMeta's signer flag is only respected in
+CPI privilege propagation if the account's `AccountInfo.is_signer` is
+already true — which only happens when the outer tx was signed by
+that account. A caller cannot fake signer privileges on a tail
+account. My tail forwarding code preserves `tail_ai.is_signer`
+verbatim (src/percolator.rs around the TradeCpi metas loop), which
+is pass-through of the existing privilege — no elevation possible.
+
 ## Next sweep targets
 
 - KeeperCrank reward split fairness (adversarial crank timing)
