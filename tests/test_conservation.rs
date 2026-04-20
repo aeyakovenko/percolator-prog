@@ -1643,9 +1643,9 @@ fn test_attack_init_user_fee_conservation() {
     let user = Keypair::new();
     env.svm.airdrop(&user.pubkey(), 5_000_000_000).unwrap();
 
-    // v12.17: deposit_not_atomic charges new_account_fee AND handler charges it again.
-    // Payment must be >= max(min_initial_deposit + fee, 2 * fee) = 2 * fee + some margin.
-    let fee_payment: u64 = 2 * (new_account_fee as u64) + 100;
+    // deposit_not_atomic gate: fee_payment >= min_initial_deposit + new_account_fee.
+    // Use fee + margin for excess capital beyond the gate.
+    let fee_payment: u64 = (new_account_fee as u64) + 100;
     let ata = env.create_ata(&user.pubkey(), fee_payment);
 
     // Manually construct InitUser with fee covering new_account_fee + min_initial_deposit
@@ -1673,12 +1673,12 @@ fn test_attack_init_user_fee_conservation() {
         .send_transaction(tx)
         .expect("init_user with fee failed");
 
-    // v12.17: deposit_not_atomic charges new_account_fee AND handler charges it again = 2x.
+    // Fee is charged once by deposit_not_atomic during materialization.
     let insurance = env.read_insurance_balance();
     assert_eq!(
-        insurance, 2 * new_account_fee,
-        "Insurance should equal 2 * new_account_fee ({}): got {}",
-        2 * new_account_fee, insurance
+        insurance, new_account_fee,
+        "Insurance should equal new_account_fee ({}): got {}",
+        new_account_fee, insurance
     );
 
     // Verify SPL vault == engine vault (conservation)

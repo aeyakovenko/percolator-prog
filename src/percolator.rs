@@ -6576,32 +6576,15 @@ pub mod processor {
 
         let engine = zc::engine_mut(&mut data)?;
         // Canonical deposit-based materialization (spec §10.3).
+        // deposit_not_atomic internally routes new_account_fee from capital
+        // to insurance_fund when materializing a fresh slot (percolator.rs
+        // engine-side). Historic handler-side fee surgery was removed here
+        // because it double-charged the fee (left user capital below
+        // min_initial_deposit). Upstream v12.18.1 (5666357) later removed
+        // new_account_fee entirely; we keep the param but charge it once.
         let idx = engine.free_head;
         engine.deposit_not_atomic(idx, units as u128, 0, clock.slot)
             .map_err(map_risk_error)?;
-        // Charge new_account_fee: deduct from capital → insurance
-        // Tokens are already in the vault from deposit() above, so we
-        // only move the internal accounting (capital → insurance) without
-        // touching engine.vault (which was already incremented by deposit).
-        // Charge new_account_fee: capital → insurance.
-        // engine.set_capital() is test_visible! (private in prod), so manual
-        // adjustment is required. Mirrors set_capital's signed-delta logic.
-        let fee = engine.params.new_account_fee.get();
-        if fee > 0 {
-            let cap = engine.accounts[idx as usize].capital.get();
-            if cap < fee {
-                return Err(PercolatorError::EngineInsufficientBalance.into());
-            }
-            engine.accounts[idx as usize].capital = percolator::U128::new(cap - fee);
-            engine.c_tot = percolator::U128::new(
-                engine.c_tot.get().checked_sub(fee)
-                    .ok_or(ProgramError::ArithmeticOverflow)?,
-            );
-            let new_ins = engine.insurance_fund.balance.get()
-                .checked_add(fee)
-                .ok_or(ProgramError::ArithmeticOverflow)?;
-            engine.insurance_fund.balance = percolator::U128::new(new_ins);
-        }
         engine.set_owner(idx, a_user.key.to_bytes())
             .map_err(map_risk_error)?;
         drop(engine);
@@ -6674,28 +6657,11 @@ pub mod processor {
 
         let engine = zc::engine_mut(&mut data)?;
         let idx = engine.free_head;
+        // deposit_not_atomic routes new_account_fee on materialization (engine
+        // side). Redundant handler-side fee surgery was removed to fix the
+        // 2x-fee regression that left LP capital below min_initial_deposit.
         engine.deposit_not_atomic(idx, units as u128, 0, clock.slot)
             .map_err(map_risk_error)?;
-        // Charge new_account_fee: capital → insurance (no vault change)
-        // Charge new_account_fee: capital → insurance.
-        // engine.set_capital() is test_visible! (private in prod), so manual
-        // adjustment is required. Mirrors set_capital's signed-delta logic.
-        let fee = engine.params.new_account_fee.get();
-        if fee > 0 {
-            let cap = engine.accounts[idx as usize].capital.get();
-            if cap < fee {
-                return Err(PercolatorError::EngineInsufficientBalance.into());
-            }
-            engine.accounts[idx as usize].capital = percolator::U128::new(cap - fee);
-            engine.c_tot = percolator::U128::new(
-                engine.c_tot.get().checked_sub(fee)
-                    .ok_or(ProgramError::ArithmeticOverflow)?,
-            );
-            let new_ins = engine.insurance_fund.balance.get()
-                .checked_add(fee)
-                .ok_or(ProgramError::ArithmeticOverflow)?;
-            engine.insurance_fund.balance = percolator::U128::new(new_ins);
-        }
         // Set LP fields
         engine.accounts[idx as usize].kind = percolator::Account::KIND_LP;
         engine.accounts[idx as usize].matcher_program = matcher_program.to_bytes();

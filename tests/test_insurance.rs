@@ -1296,9 +1296,8 @@ fn test_attack_new_account_fee_goes_to_insurance() {
 
     let mut env = TestEnv::new();
     let fee: u64 = 1_000_000;
-    // v12.17: deposit_not_atomic charges new_account_fee AND handler charges it again.
-    // Payment must be >= max(min_initial_deposit + fee, 2 * fee) = 2 * fee.
-    let payment: u64 = 2 * fee + 100;
+    // deposit_not_atomic gate: payment >= min_initial_deposit + new_account_fee.
+    let payment: u64 = fee + 100;
     // Use init_market_full with a non-zero new_account_fee
     env.init_market_full(0, 0, fee as u128);
 
@@ -1348,12 +1347,12 @@ fn test_attack_new_account_fee_goes_to_insurance() {
         .expect("init_lp with fee failed");
     env.account_count += 1;
 
-    // v12.17: deposit_not_atomic charges fee AND handler charges fee again = 2x per account.
+    // Fee charged once by deposit_not_atomic during materialization.
     let insurance_after_lp = env.read_insurance_balance();
     assert_eq!(
         insurance_after_lp,
-        insurance_before + 2 * fee as u128,
-        "Insurance should grow by 2 * new_account_fee after InitLP: before={} after={}",
+        insurance_before + fee as u128,
+        "Insurance should grow by new_account_fee after InitLP: before={} after={}",
         insurance_before,
         insurance_after_lp
     );
@@ -1387,22 +1386,22 @@ fn test_attack_new_account_fee_goes_to_insurance() {
         .expect("init_user with fee failed");
     env.account_count += 1;
 
-    // InitUser also charges 2x new_account_fee (engine + handler)
+    // InitUser also charges new_account_fee once (engine side, during materialization)
     let insurance_after_user = env.read_insurance_balance();
     assert_eq!(
         insurance_after_user,
-        insurance_after_lp + 2 * fee as u128,
-        "Insurance should grow by 2 * new_account_fee after InitUser: before={} after={}",
+        insurance_after_lp + fee as u128,
+        "Insurance should grow by new_account_fee after InitUser: before={} after={}",
         insurance_after_lp,
         insurance_after_user
     );
 
-    // Insurance should have grown by 4x fee (2x per account, 2 accounts)
+    // Insurance should have grown by 2x fee (1x per account, 2 accounts)
     let growth = insurance_after_user - insurance_before;
     assert_eq!(
         growth,
-        4 * fee as u128,
-        "Insurance should grow by 4x new_account_fee (2 accounts * 2x each): growth={}",
+        2 * fee as u128,
+        "Insurance should grow by 2x new_account_fee (2 accounts * 1x each): growth={}",
         growth
     );
 }

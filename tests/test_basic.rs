@@ -211,22 +211,21 @@ fn test_bug4_fee_overpayment_should_be_handled() {
         engine_vault, vault_after
     );
 
-    // v12.17 behavior: deposit_not_atomic charges new_account_fee internally
-    // (capital_amount = amount - fee, insurance += fee), then the handler
-    // charges it again (capital -= fee, insurance += fee). Total deduction
-    // from capital is 2 * new_account_fee.
+    // Fee is charged once by deposit_not_atomic during materialization:
+    // capital_amount = fee_payment - new_account_fee, insurance += new_account_fee.
+    // (The prior handler-side fee surgery was removed — it double-charged.)
     let user_idx = _user_idx;
     let user_capital = env.read_account_capital(user_idx);
     let insurance = env.read_insurance_balance();
 
     assert_eq!(
-        insurance, 2000,
-        "Insurance should equal 2 * new_account_fee (2 * 1000 = 2000), got {}",
+        insurance, 1000,
+        "Insurance should equal new_account_fee (1000), got {}",
         insurance
     );
     assert_eq!(
-        user_capital, 3000,
-        "User capital should be fee_payment - 2 * new_account_fee (5000 - 2000 = 3000), got {}",
+        user_capital, 4000,
+        "User capital should be fee_payment - new_account_fee (5000 - 1000 = 4000), got {}",
         user_capital
     );
 
@@ -2522,15 +2521,14 @@ fn test_init_user_charges_new_account_fee() {
     let insurance_before = env.read_insurance_balance();
 
     let user = Keypair::new();
-    // v12.17: deposit_not_atomic charges new_account_fee (500) AND handler charges it again.
-    // So fee_payment must be >= min_initial_deposit(100) + 2 * new_account_fee(1000) = 1100.
-    let _user_idx = env.init_user_with_fee(&user, 1100);
+    // deposit_not_atomic requires fee_payment >= min_initial_deposit(100) + new_account_fee(500) = 600.
+    let _user_idx = env.init_user_with_fee(&user, 600);
 
     let insurance_after = env.read_insurance_balance();
-    // v12.17: fee is charged twice (once by deposit_not_atomic, once by handler)
+    // Fee is charged once by deposit_not_atomic during materialization.
     assert_eq!(
-        insurance_after - insurance_before, 1000,
-        "Insurance must increase by 2 * new_account_fee (2 * 500 = 1000). Before={}, after={}",
+        insurance_after - insurance_before, 500,
+        "Insurance must increase by new_account_fee (500). Before={}, after={}",
         insurance_before, insurance_after
     );
 }
