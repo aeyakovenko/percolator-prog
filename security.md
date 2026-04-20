@@ -665,6 +665,34 @@ current implementation is correct — losses are absorbed purely via
 the haircut mechanism after insurance is drained, without additional
 vault reduction.
 
+### D49. Cross-close reconcile ordering
+
+**Hypothesis**: In a resolved market with many winners and losers,
+the order in which users call CloseAccount matters. Closing losers
+first vs. winners first might produce different total payouts due
+to haircut snapshot timing.
+
+**Why discarded**: The haircut snapshot (`resolved_payout_h_num/
+h_den`) is LOCKED AT THE MOMENT `is_terminal_ready()` becomes true
+— which is exactly when `neg_pnl_account_count` reaches 0 (all
+losers reconciled). Winners calling Phase 2 before this point
+receive `ProgressOnly` (no payout, just persistence). After the
+snapshot locks, every winner's payout uses the SAME (h_num, h_den).
+Order-invariant by design.
+
+### D50. Epoch wrap in stale-reconcile check
+
+**Hypothesis**: `adl_epoch_snap` is u64; after 2^64 epochs, wrap
+could make `epoch_snap + 1 == epoch_side` spuriously match a
+non-stale account in a corrupted way.
+
+**Why discarded**: Epoch increments only on reset_pending → reset
+lifecycle, which happens at most a few times per market. Reaching
+2^64 epochs would take >10^10 years of continuous reset activity.
+Not a practical attack surface; the engine uses `checked_add(1)` at
+line 5155 which would fail with `None` on wrap, producing
+CorruptState rejection rather than a silent wrap-induced match.
+
 ## Audit completion status
 
 **16 concrete attack hypotheses probed across two rounds.** Every
