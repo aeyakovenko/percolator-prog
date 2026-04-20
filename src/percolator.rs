@@ -6443,11 +6443,19 @@ pub mod processor {
                 // Convert base tokens to units for engine
                 let (units, _dust) = crate::units::base_to_units(amount, config.unit_scale);
                 let engine = zc::engine_mut(&mut data)?;
-                // No-oracle path: cap at last_market_slot. top_up_insurance
-                // _fund self-advances current_slot; unbounded advance would
-                // brick the next accrue-bearing op.
-                let bounded_now = core::cmp::min(
-                    clock.slot, engine.last_market_slot,
+                // No-oracle path. bounded_now:
+                //   - upper-bounded by last_market_slot so we don't
+                //     advance current_slot past the accrue envelope,
+                //   - floored at current_slot so the engine's
+                //     monotonicity guard (`now_slot >= current_slot`)
+                //     still holds after a prior no-oracle op (InitUser,
+                //     DepositCollateral, ReclaimEmptyAccount) has
+                //     advanced current_slot past last_market_slot.
+                // Full accrue for the tail `(last_market_slot,
+                // clock.slot]` happens on the next oracle-backed op.
+                let bounded_now = core::cmp::max(
+                    core::cmp::min(clock.slot, engine.last_market_slot),
+                    engine.current_slot,
                 );
                 engine
                     .top_up_insurance_fund(units as u128, bounded_now)
@@ -7796,18 +7804,22 @@ pub mod processor {
                 collateral::deposit(a_token, a_user_ata, a_vault, a_user, amount)?;
 
                 // Phase 4: book the repayment in the engine. The engine's
-                // deposit_fee_credits self-advances current_slot, so bound
-                // its now_slot at last_market_slot too — matches the fee
-                // sync above and avoids the current_slot > last_market_slot
-                // split that would brick the next oracle-backed op's accrue.
+                // deposit_fee_credits self-advances current_slot; bound its
+                // now_slot at last_market_slot BUT floor at current_slot
+                // so the engine monotonicity guard (`now_slot >= current
+                // _slot`) holds after any prior no-oracle self-advance
+                // (InitUser, DepositCollateral, ReclaimEmptyAccount,
+                // TopUpInsurance). Full accrue for the residual tail
+                // happens on the next oracle-backed op.
                 let mut data = state::slab_data_mut(a_slab)?;
                 let config = state::read_config(&data);
                 let clock = Clock::from_account_info(a_clock)?;
                 let (units2, _dust) = crate::units::base_to_units(amount, config.unit_scale);
                 let engine = zc::engine_mut(&mut data)?;
                 let _ = &config; // Phase 1 synced; no second sync needed.
-                let bounded_now = core::cmp::min(
-                    clock.slot, engine.last_market_slot,
+                let bounded_now = core::cmp::max(
+                    core::cmp::min(clock.slot, engine.last_market_slot),
+                    engine.current_slot,
                 );
                 engine.deposit_fee_credits(user_idx, units2 as u128, bounded_now)
                     .map_err(map_risk_error)?;
