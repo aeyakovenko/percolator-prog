@@ -615,6 +615,29 @@ c_tot by exactly the account's prior capital. `assert_public_post
 conditions` then verifies conservation; a drift would surface as
 CorruptState.
 
+### D45. Haircut ratio with senior sum overflow
+
+**Hypothesis**: `c_tot + insurance_fund.balance` overflows u128,
+engine treats this as residual=0 (maximum haircut). Could this be
+exploited to force-haircut winners unfairly?
+
+**Why discarded**: c_tot ≤ MAX_VAULT_TVL (10^16), insurance ≤
+MAX_VAULT_TVL (10^16). Sum ≤ 2×10^16 ≪ u128::MAX (~3.4×10^38).
+Overflow is not reachable in practice. The conservative "treat as
+zero residual" on hypothetical overflow is a SAFE failure mode:
+winners get MORE haircut (smaller payout) which preserves
+conservation V ≥ C_tot + I. Cannot cause over-payout to winners.
+
+### D46. Zero-margin configuration
+
+**Hypothesis**: Admin sets initial_margin_bps = 0 at init. User
+opens huge positions with only min_nonzero_im_req capital,
+creating risk the protocol can't cover.
+
+**Why discarded**: Wrapper rejects `initial_margin_bps == 0` at
+init (src/percolator.rs:4190-4194). Both initial and maintenance
+must be nonzero. Admin cannot configure a zero-margin market.
+
 ## Audit completion status
 
 **16 concrete attack hypotheses probed across two rounds.** Every
