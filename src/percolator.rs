@@ -2771,9 +2771,14 @@ pub mod oracle {
     /// "Liveness slot" is:
     ///   non-Hyperp → config.last_good_oracle_slot (advances on successful
     ///                external reads only; NOT on authority fallback)
-    ///   Hyperp     → max(mark_ewma_last_slot, last_mark_push_slot)
-    ///                (advances on trades that update the EWMA, and on
-    ///                 PushOraclePrice that updates the mark)
+    ///   Hyperp     → config.last_mark_push_slot (advances ONLY on
+    ///                full-weight mark observations: PushOraclePrice,
+    ///                or a TradeCpi fill whose fee paid the mark_min
+    ///                _fee threshold). mark_ewma_last_slot is the
+    ///                EWMA-math clock, NOT a liveness signal —
+    ///                partial-fee sub-threshold trades advance the
+    ///                EWMA clock so dt stays correct for weighting,
+    ///                but they must NOT extend market life.
     ///
     /// Once this returns true, the market is DEAD: ResolvePermissionless
     /// may be called, and every price-taking live instruction
@@ -2788,10 +2793,7 @@ pub mod oracle {
             return false;
         }
         let last_live_slot = if is_hyperp_mode(config) {
-            core::cmp::max(
-                config.mark_ewma_last_slot,
-                config.last_mark_push_slot as u64,
-            )
+            config.last_mark_push_slot as u64
         } else {
             config.last_good_oracle_slot
         };
@@ -4184,6 +4186,27 @@ pub mod processor {
                     return Err(ProgramError::InvalidInstructionData);
                 }
 
+                // Hyperp dead-zone guard. get_engine_oracle_price_e6
+                // rejects Hyperp price reads when
+                //   clock.slot - max(mark_ewma_last_slot, last_mark
+                //   _push_slot) > max_staleness_secs * 3
+                // If permissionless_resolve_stale_slots >
+                // max_staleness_secs * 3, there's a window where the
+                // price-read rejection fires BEFORE the permissionless
+                // resolve timer matures — the market is frozen but
+                // not yet resolvable. Prevent this at init by
+                // requiring perm_resolve <= max_staleness_secs * 3
+                // for Hyperp markets. (Non-Hyperp markets have no
+                // analogous staleness rejection in
+                // get_engine_oracle_price_e6 — their stale gate is
+                // just permissionless_stale_matured itself.)
+                if is_hyperp && permissionless_resolve_stale_slots > 0 {
+                    let max_stale_slots = max_staleness_secs.saturating_mul(3);
+                    if permissionless_resolve_stale_slots > max_stale_slots {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
+                }
+
                 // Validate custom funding parameters (same checks as UpdateConfig).
                 // These are immutable after init for governance-free deployments.
                 if let Some(h) = custom_funding_horizon {
@@ -5084,13 +5107,33 @@ pub mod processor {
                 // to save CU — dedup is within the loop, not the budget.
                 let mut candidate_syncs = 0usize;
                 if config.maintenance_fee_per_slot > 0 {
-                    let cap = percolator::LIQ_BUDGET_PER_CRANK as usize;
+                    // Candidate syncs share the FEE_SWEEP_BUDGET with
+                    // the maintenance sweep below. Hard-cap at
+                    // min(LIQ_BUDGET_PER_CRANK, FEE_SWEEP_BUDGET) so
+                    // that (a) the engine's per-crank liquidation
+                    // attempts cap is respected, and (b) candidate
+                    // syncs ALONE can never exceed the total fee-sync
+                    // budget — no matter how the two engine constants
+                    // relate, the total syncs per instruction is
+                    // bounded by FEE_SWEEP_BUDGET.
+                    let cap = core::cmp::min(
+                        percolator::LIQ_BUDGET_PER_CRANK as usize,
+                        crate::constants::FEE_SWEEP_BUDGET,
+                    );
                     let mut synced: [u16; percolator::LIQ_BUDGET_PER_CRANK as usize]
                         = [u16::MAX; percolator::LIQ_BUDGET_PER_CRANK as usize];
                     let mut synced_count = 0usize;
                     let mut attempts = 0usize;
                     for &(idx, _policy) in combined.iter() {
                         if attempts >= cap { break; }
+                        // Defense-in-depth: also bail if we're already
+                        // at the shared budget. The attempts cap above
+                        // subsumes this under today's constants, but
+                        // keeps the bound mechanical if either
+                        // constant changes.
+                        if candidate_syncs >= crate::constants::FEE_SWEEP_BUDGET {
+                            break;
+                        }
                         let i = idx as usize;
                         if i >= percolator::MAX_ACCOUNTS { continue; }
                         if !engine.is_used(i) { continue; }
@@ -5937,19 +5980,23 @@ pub mod processor {
                             fee_paid_cpi,
                             config.mark_min_fee,
                         );
-                        // Liveness refresh: a trade is an "observation-
-                        // eligible" event when it paid full EWMA weight
-                        // (fee_paid >= mark_min_fee, or mark_min_fee == 0).
-                        // Honest same-price trades still count — the
-                        // fee-weighted EWMA value may not move
-                        // numerically when price matches the prior
-                        // EWMA, but the observation itself is a real
-                        // market signal. Dust-wash trades below
-                        // mark_min_fee are excluded (they don't meet
-                        // the cost-of-observation threshold).
-                        let eligible = config.mark_min_fee == 0
+                        // EWMA math clock refreshes when:
+                        //   (a) the EWMA VALUE changed (any partial-
+                        //       fee sub-threshold trade that moves
+                        //       mark_ewma_e6 must advance the clock,
+                        //       otherwise the next ewma_update sees
+                        //       a stale dt and over-weights), OR
+                        //   (b) the trade was a full-weight
+                        //       observation (same-price trades don't
+                        //       move the value but do reset the dt
+                        //       anchor to "we just saw this price").
+                        // This is distinct from Hyperp liveness
+                        // (below), which only counts full-weight
+                        // observations.
+                        let full_weight_observation = config.mark_min_fee == 0
                             || fee_paid_cpi >= config.mark_min_fee;
-                        if eligible {
+                        let ewma_moved = config.mark_ewma_e6 != old_ewma_cpi;
+                        if ewma_moved || full_weight_observation {
                             config.mark_ewma_last_slot = clock.slot;
                         }
                         // NOTE: do NOT stamp funding rate here — execute_trade_not_atomic
@@ -5957,30 +6004,32 @@ pub mod processor {
                     }
 
                     // Hyperp: also update authority_price (legacy mark field).
-                    // Liveness refresh on observation-eligible trades
-                    // (same rule as mark_ewma_last_slot above). Honest
-                    // same-price Hyperp trades refresh the stale timer;
-                    // sub-threshold dust wash trades do not.
+                    // Hyperp-liveness clock (last_mark_push_slot) refreshes
+                    // ONLY on full-weight observations — sub-threshold
+                    // dust-wash trades must not keep a dead market
+                    // artificially alive. This is the ONLY Hyperp
+                    // liveness signal: permissionless_stale_matured for
+                    // Hyperp uses last_mark_push_slot, not
+                    // max(mark_ewma_last_slot, last_mark_push_slot),
+                    // so partial-fee EWMA-math clock advances don't
+                    // accidentally extend market life.
                     if is_hyperp {
                         config.authority_price_e6 = oracle::clamp_oracle_price(
                             config.last_effective_price_e6,
                             ret.exec_price_e6,
                             config.oracle_price_cap_e2bps,
                         );
-                        // Recompute eligibility in this scope — the
-                        // EWMA branch above is gated on
-                        // oracle_price_cap_e2bps > 0, so its local
-                        // `eligible` isn't visible here.
-                        let eligible = config.mark_min_fee == 0
-                            || if config.mark_min_fee > 0 {
-                                let ins_after_cpi = engine.insurance_fund.balance.get();
-                                let delta = ins_after_cpi.saturating_sub(ins_before_cpi);
-                                (core::cmp::min(delta, u64::MAX as u128) as u64)
-                                    >= config.mark_min_fee
-                            } else {
-                                true
-                            };
-                        if eligible {
+                        // Full-weight observation check: recompute here
+                        // because the earlier `full_weight_observation`
+                        // binding is in the cap>0 branch's scope.
+                        let fee_paid_hyperp = if config.mark_min_fee > 0 {
+                            let ins_after_cpi = engine.insurance_fund.balance.get();
+                            let delta = ins_after_cpi.saturating_sub(ins_before_cpi);
+                            core::cmp::min(delta, u64::MAX as u128) as u64
+                        } else { 0u64 };
+                        let full_weight = config.mark_min_fee == 0
+                            || fee_paid_hyperp >= config.mark_min_fee;
+                        if full_weight {
                             config.last_mark_push_slot = clock.slot as u128;
                         }
                     }
