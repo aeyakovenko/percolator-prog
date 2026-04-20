@@ -222,10 +222,69 @@ account. My tail forwarding code preserves `tail_ai.is_signer`
 verbatim (src/percolator.rs around the TradeCpi metas loop), which
 is pass-through of the existing privilege — no elevation possible.
 
+### D13. Nonce wrapping replay on TradeCpi
+
+**Hypothesis**: `req_id` nonce wraps after 2^64 increments, allowing
+a stored matcher_ctx buffer from an old trade to match a new request
+with the same req_id modulo wrap.
+
+**Why discarded**: `verify::nonce_on_success` (src/percolator.rs:384)
+uses `checked_add(1)` and propagates None as rejection
+(src/percolator.rs:5789 treats overflow as `EngineOverflow`). No
+wraparound possible; at 2^64 trades, the market halts cleanly rather
+than replaying. Not a practical attack surface (>10^11 years at 1
+trade per 0.4s slot).
+
+### D14. Matcher_ctx aliasing with slab
+
+**Hypothesis**: Attacker passes the slab as `matcher_ctx`. After the
+CPI returns, the wrapper reads matcher return data from the slab
+bytes, potentially smuggling crafted slab state as a valid matcher
+return.
+
+**Why discarded**: `verify::matcher_shape_ok`
+(src/percolator.rs:5668-5676) requires
+`ctx_owner_is_prog: a_matcher_ctx.owner == a_matcher_prog.key`. The
+slab is owned by `percolator_prog`, not the matcher program, so this
+check fails before the CPI.
+
+### D15. Account close bypasses warmup
+
+**Hypothesis**: User opens a position, matures positive PnL into
+reserved_pnl, then calls CloseAccount to extract the pending bucket
+as capital before warmup period elapses.
+
+**Why discarded**: `close_account_not_atomic`
+(percolator/src/percolator.rs:4888-4894) rejects with
+`Undercollateralized` if ANY of:
+- `reserved_pnl != 0`
+- `sched_present != 0`
+- `pending_present != 0`
+All three warmup signals must be clean before close. Early close
+with pending warmup PnL is not possible.
+
+### D16. InitMarket with zero admin
+
+**Hypothesis**: Admin is set to `[0; 32]` at init; `require_admin`
+check would need careful handling or a malicious caller with a zero
+signer key (unreachable but worth checking) could spoof admin.
+
+**Why discarded**: `verify::admin_ok`
+(src/percolator.rs:339-341) explicitly rejects
+`admin == [0; 32]`. The zero address is reserved for "burned"
+state; no signer can claim admin privileges against a zero-admin
+header. InitMarket sets admin to `a_admin.key.to_bytes()`
+(src/percolator.rs:4633) — if the admin signer is zero, it fails
+validation upstream (Solana signer-flag checks).
+
 ## Next sweep targets
 
-- KeeperCrank reward split fairness (adversarial crank timing)
-- Deposit/withdraw during warmup matured-PnL conversion
-- Oracle circuit breaker under sustained price divergence
-- Cross-market state pollution (none yet, but any future multi-market
-  deployment needs re-auditing)
+Remaining angles for future sweeps:
+- Multi-tx coordinated: stale-market + reward timing across blocks
+- Cross-market: currently single-market design, but multi-market
+  deployment would need re-audit
+- Engine-side: the engine crate (`percolator`) has its own audit
+  surface; prior Kani proofs + proptest fuzzing cover most paths
+- Specific funding rate edge: rate = MAX_ABS_FUNDING_E9_PER_SLOT
+  with opposing OI of MAX_VAULT_TVL. Finding the test infrastructure
+  for this was out-of-scope for this sweep.
