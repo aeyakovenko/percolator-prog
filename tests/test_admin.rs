@@ -1562,3 +1562,4 @@ fn test_update_authority_insurance_survives_admin_burn() {
         .expect("insurance_authority survives admin burn");
 }
 
+

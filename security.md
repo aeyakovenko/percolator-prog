@@ -189,12 +189,23 @@ user has no way to recover it.
 - Reclaim requires position=0, pnl=0, reserved_pnl=0, sched_present=0,
   pending_present=0, fee_credits>=0 (engine line 5314-5331). Only
   truly flat, abandoned accounts are eligible.
-- The user could have called WithdrawCollateral at any point before
-  reclaim fires. Withdraw also syncs fees, but then returns whatever
-  capital remains to the user's ATA. No fee race: user's withdraw
-  transaction doesn't compete with reclaim in a way that lets
-  reclaim steal — the tx that lands first wins, and both require the
-  user's OWN consent (withdraw) or an abandoned state (reclaim).
+- User can call WithdrawCollateral at any point ONLY UNTIL fees
+  exceed capital. After that, withdraw fails with
+  `EngineInsufficientBalance` (0x0d). CORRECTION: my earlier
+  wording "at any point" was imprecise. Spot-check test verified
+  this: with maint_fee_per_slot=10 and 20 slots idle, a min-
+  deposit user's capital (100) is exceeded by owed fees (200);
+  capital drains to 0, fee_debt accumulates, reclaim eligible.
+  User cannot withdraw at that point.
+- Still not a ship-blocker: the USER's mitigation is to deposit
+  above min + close active before going offline for a period
+  longer than the fee-exhaustion window. Maint_fee is immutable
+  after init (no UpdateConfig path), so users can see the rate
+  and size their deposit accordingly.
+- Admin's choice of maint_fee_per_slot determines the user-fund-
+  at-risk surface. Aggressive fees → faster drain. Realistic
+  fees (~1 per hour) → multi-month-long survival for min deposits.
+  Operators should set maint_fee thoughtfully.
 - Pre-fix behavior was identical in the end state: fees are OWED
   regardless of when they're realized. My fix just makes reclaim
   realize them synchronously (matching spec §10.7). Without the
@@ -958,6 +969,27 @@ This is a 10x reduction from the envelope max.
 Separately, for true rug-proof deployments: burn admin post-init.
 The UpdateConfig path then has no authorized signer, so
 funding params become immutable.
+
+## Spot-check verification
+
+Per user request, 4 discarded hypotheses were spot-checked with
+actual runnable tests (committed, then deleted per the audit rule):
+
+- **D1** (TradeCpi slab in writable tail): test passed — tx
+  succeeds or fails atomically, no state corruption. Confirmed.
+- **D6** (self-trade fees): code walk confirmed — both sides
+  charged `fee`, routed via `charge_fee_to_insurance` (engine lines
+  4094-4095). Attacker pays 2×fee net. Confirmed.
+- **D12** (reclaim dust): test revealed my original wording ("user
+  can withdraw at any point before reclaim fires") was IMPRECISE —
+  once maint_fees exceed capital, withdraw fails with 0x0d. NOT a
+  protocol bug (spec §2.6 dust cleanup + admin-configurable maint_
+  fee), but the D12 description has been corrected above.
+- **D16** (zero admin): `admin_ok` explicitly rejects both zero-
+  admin-header and zero-signer cases. Confirmed via direct function
+  test.
+
+The discards remain valid. D12's wording was tightened.
 
 ## Audit completion status
 

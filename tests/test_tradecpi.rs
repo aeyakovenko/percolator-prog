@@ -6056,3 +6056,4 @@ fn test_tradecpi_empty_tail_is_canonical() {
     )
     .expect("TradeCpi with empty tail must succeed (canonical 8-account form)");
 }
+
