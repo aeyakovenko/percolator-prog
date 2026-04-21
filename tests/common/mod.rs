@@ -294,7 +294,7 @@ pub fn encode_init_market_with_conf_bps(
     data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
     data.extend_from_slice(&warmup_period_slots.max(1).to_le_bytes()); // h_max (must be >= h_min)
 
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
+    data.extend_from_slice(&1800u64.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
@@ -344,7 +344,7 @@ pub fn encode_init_market_full_v2(
     data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
     data.extend_from_slice(&warmup_period_slots.max(1).to_le_bytes()); // h_max (must be >= h_min)
 
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
+    data.extend_from_slice(&1800u64.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
@@ -518,7 +518,7 @@ pub fn encode_init_market_with_trading_fee(
     data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
 
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
+    data.extend_from_slice(&1800u64.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
@@ -587,7 +587,7 @@ pub fn encode_init_market_with_maint_fee_bounded(
     data.extend_from_slice(&0u128.to_le_bytes()); // insurance_floor
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
 
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
+    data.extend_from_slice(&1800u64.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
@@ -1652,7 +1652,7 @@ pub fn encode_init_market_full(
     data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
 
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
+    data.extend_from_slice(&1800u64.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
@@ -1699,7 +1699,7 @@ pub fn encode_init_market_with_warmup(
     data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
     data.extend_from_slice(&warmup_period_slots.max(1).to_le_bytes()); // h_max (must be >= h_min)
 
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
+    data.extend_from_slice(&1800u64.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
@@ -5215,7 +5215,7 @@ impl TestEnv {
         data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
         data.extend_from_slice(&1u64.to_le_bytes()); // h_max
 
-        data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
+        data.extend_from_slice(&1800u64.to_le_bytes()); // max_crank_staleness_slots
         data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
         data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
         data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
@@ -5296,7 +5296,7 @@ impl TestEnv {
         data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
         data.extend_from_slice(&warmup_period_slots.max(1).to_le_bytes()); // h_max (must be >= h_min)
 
-        data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
+        data.extend_from_slice(&1800u64.to_le_bytes()); // max_crank_staleness_slots
         data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
         data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
         data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
@@ -7829,7 +7829,7 @@ pub fn encode_init_market_with_limits(
     data.extend_from_slice(&0u128.to_le_bytes()); // risk_reduction_threshold
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
 
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
+    data.extend_from_slice(&1800u64.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
@@ -7874,7 +7874,7 @@ pub fn encode_init_market_with_maintenance_fee(
     data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&0u128.to_le_bytes()); // insurance_floor
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
+    data.extend_from_slice(&1800u64.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
@@ -7917,7 +7917,7 @@ pub fn encode_init_market_with_insurance_floor(
     data.extend_from_slice(&insurance_floor.to_le_bytes()); // insurance_floor
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
 
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
+    data.extend_from_slice(&1800u64.to_le_bytes()); // max_crank_staleness_slots
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps

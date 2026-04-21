@@ -187,6 +187,12 @@ pub mod constants {
     pub const DEFAULT_INSURANCE_WITHDRAW_MAX_BPS: u16 = 100; // 1%
     pub const DEFAULT_INSURANCE_WITHDRAW_COOLDOWN_SLOTS: u64 = 400_000;
     pub const DEFAULT_MARK_EWMA_HALFLIFE_SLOTS: u64 = 100; // ~40 sec @ 2.5 slots/sec
+    /// Default slot-based oracle staleness window before anyone may resolve.
+    /// ~10 hours at 400 ms/slot. Chosen to tolerate multi-hour Pyth or keeper
+    /// outages while staying well under the engine's `MAX_ACCRUAL_DT_SLOTS`
+    /// envelope. A cluster hard-fork restart bypasses this threshold
+    /// entirely via the `LastRestartSlot` sysvar check on `init_restart_slot`.
+    pub const DEFAULT_PERMISSIONLESS_RESOLVE_STALE_SLOTS: u64 = 90_000;
     /// Upper bound on `force_close_delay_slots` (Finding 6). Without a bound, an
     /// init-time config of `u64::MAX` passes the "nonzero" liveness guard but
     /// makes ForceCloseResolved unreachable — `resolved_slot + delay` saturates
@@ -1477,8 +1483,24 @@ pub mod ix {
                         mark_min_fee,
                         force_close_delay_slots,
                     ) = if rest.is_empty() {
-                        // Minimal payload: all extended fields use defaults
-                        (0u16, 0u64, 0u64, None, None, None, None, 0u64, 0u64)
+                        // Minimal payload: all extended fields use defaults.
+                        // permissionless_resolve_stale_slots seeds to
+                        // DEFAULT_PERMISSIONLESS_RESOLVE_STALE_SLOTS so
+                        // abandoned markets always have a permissionless exit.
+                        // force_close_delay_slots seeds to 1 slot (minimum
+                        // liveness) to satisfy the init-time validation that
+                        // permissionless_resolve > 0 ⇒ force_close > 0.
+                        (
+                            0u16,
+                            0u64,
+                            crate::constants::DEFAULT_PERMISSIONLESS_RESOLVE_STALE_SLOTS,
+                            None,
+                            None,
+                            None,
+                            None,
+                            0u64,
+                            1u64,
+                        )
                     } else if rest.len() >= EXTENDED_TAIL_LEN {
                         // Full extended payload
                         let iwm = read_u16(&mut rest)?;
@@ -2077,8 +2099,15 @@ pub mod state {
         pub mark_ewma_last_slot: u64,
         /// EWMA decay half-life in slots. 0 = last trade price directly.
         pub mark_ewma_halflife_slots: u64,
-        /// Padding for u128 alignment.
-        pub _ewma_padding: u64,
+        /// `LastRestartSlot` sysvar reading captured at InitMarket, used to
+        /// detect post-init cluster restarts. Once any observer sees
+        /// `LastRestartSlot::get() > init_restart_slot`, the market is
+        /// considered dead regardless of oracle-staleness configuration —
+        /// `permissionless_stale_matured` returns true and resolution settles
+        /// at `engine.last_oracle_price` (the pre-restart cached price).
+        /// Occupies the slot previously reserved as u128-alignment padding
+        /// for the `maintenance_fee_per_slot` u128 that follows.
+        pub init_restart_slot: u64,
 
         // ========================================
         // Permissionless Resolution
@@ -2912,6 +2941,14 @@ pub mod oracle {
         config: &super::state::MarketConfig,
         clock_slot: u64,
     ) -> bool {
+        // Cluster-restart gate (SIMD-0047 `LastRestartSlot` sysvar):
+        // any hard-fork restart after `InitMarket` freezes the market
+        // unconditionally, even when slot-based staleness is disabled.
+        // Resolution flows through the Degenerate arm and settles at the
+        // last cached pre-restart oracle price.
+        if cluster_restarted_since_init(config) {
+            return true;
+        }
         if config.permissionless_resolve_stale_slots == 0 {
             return false;
         }
@@ -2922,6 +2959,35 @@ pub mod oracle {
         };
         clock_slot.saturating_sub(last_live_slot)
             >= config.permissionless_resolve_stale_slots
+    }
+
+    /// Pure comparison the on-chain path uses after reading the sysvar.
+    /// Separated so Kani can prove it symbolically without stubbing syscalls.
+    #[inline]
+    pub fn restart_detected(init_restart_slot: u64, current_last_restart_slot: u64) -> bool {
+        current_last_restart_slot > init_restart_slot
+    }
+
+    /// On-chain restart check. Invokes `sol_get_last_restart_slot` and
+    /// compares against the slot captured at `InitMarket`. Returns false
+    /// under `cfg(kani)` so verification harnesses don't need to stub the
+    /// syscall — the pure comparison is proved separately via
+    /// `restart_detected`.
+    #[cfg(not(kani))]
+    #[inline]
+    pub fn cluster_restarted_since_init(config: &super::state::MarketConfig) -> bool {
+        use solana_program::sysvar::last_restart_slot::LastRestartSlot;
+        use solana_program::sysvar::Sysvar;
+        match LastRestartSlot::get() {
+            Ok(lrs) => restart_detected(config.init_restart_slot, lrs.last_restart_slot),
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(kani)]
+    #[inline]
+    pub fn cluster_restarted_since_init(_config: &super::state::MarketConfig) -> bool {
+        false
     }
 
     /// Move `index` toward `mark`, but clamp movement by cap_e2bps * dt_slots.
@@ -4618,7 +4684,13 @@ pub mod processor {
                     mark_ewma_e6: if is_hyperp { initial_mark_price_e6 } else { 0 },
                     mark_ewma_last_slot: if is_hyperp { clock.slot } else { 0 },
                     mark_ewma_halflife_slots: DEFAULT_MARK_EWMA_HALFLIFE_SLOTS,
-                    _ewma_padding: 0,
+                    init_restart_slot: {
+                        use solana_program::sysvar::last_restart_slot::LastRestartSlot;
+                        use solana_program::sysvar::Sysvar;
+                        LastRestartSlot::get()
+                            .map(|lrs| lrs.last_restart_slot)
+                            .unwrap_or(0)
+                    },
                     permissionless_resolve_stale_slots,
                     // Init to clock.slot so permissionless resolution timer starts
                     // from market creation, not slot 0 (prevents immediate resolution

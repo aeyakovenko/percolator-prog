@@ -25,7 +25,7 @@ use percolator_prog::constants::MAX_UNIT_SCALE;
 use percolator_prog::matcher_abi::{
     validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
 };
-use percolator_prog::oracle::{clamp_oracle_price, clamp_toward_with_dt};
+use percolator_prog::oracle::{clamp_oracle_price, clamp_toward_with_dt, restart_detected};
 use percolator_prog::verify::{
     abi_ok,
     // Fee-weighted EWMA
@@ -45,6 +45,7 @@ use percolator_prog::verify::{
     init_market_scale_ok,
     // New: Oracle inversion math
     invert_price_e6,
+    len_at_least,
     len_ok,
     matcher_identity_ok,
     matcher_shape_ok,
@@ -823,21 +824,43 @@ fn kani_tradecpi_any_accept_increments_nonce() {
 // Note: signer_ok and writable_ok are identity functions (return input unchanged).
 // Testing them would be trivial (proving true==true). Only len_ok has real logic.
 
-/// Prove: len_ok requires actual >= need (universal)
+/// Prove: len_ok requires actual == need (strict equality)
 ///
-/// CODE-EQUALS-SPEC: The body of `len_ok` IS `actual >= need`. This proof asserts
+/// CODE-EQUALS-SPEC: The body of `len_ok` IS `actual == need`. This proof asserts
 /// the function equals its own body for all symbolic inputs. Fully symbolic;
 /// provides regression protection if the function body is modified.
+///
+/// The stricter contract (was `>=` until the "strict-equality for instruction
+/// account counts" fix) prevents callers from padding with unrelated trailing
+/// accounts on handlers that expect a fixed shape. `len_at_least` is the
+/// documented escape hatch for TradeCpi's variadic matcher-tail.
 #[kani::proof]
 fn kani_len_ok_universal() {
     let actual: usize = kani::any();
     let need: usize = kani::any();
 
-    // Universal proof: len_ok returns true iff actual >= need
     assert_eq!(
         len_ok(actual, need),
+        actual == need,
+        "len_ok must return (actual == need)"
+    );
+}
+
+/// Prove: len_at_least requires actual >= need (TradeCpi variadic-tail helper)
+///
+/// CODE-EQUALS-SPEC: `len_at_least` is the documented loose check used by
+/// TradeCpi (which forwards tail accounts to the matcher CPI). Covering it
+/// ensures the variadic-tail ABI keeps exactly the "≥" semantics it is
+/// specified to have.
+#[kani::proof]
+fn kani_len_at_least_universal() {
+    let actual: usize = kani::any();
+    let need: usize = kani::any();
+
+    assert_eq!(
+        len_at_least(actual, need),
         actual >= need,
-        "len_ok must return (actual >= need)"
+        "len_at_least must return (actual >= need)"
     );
 }
 
@@ -2933,3 +2956,26 @@ fn proof_ewma_weight_at_threshold_equals_unweighted() {
         "At-or-above threshold must equal disabled-weighting result");
 }
 
+
+// =============================================================================
+// V. CLUSTER RESTART DETECTION (1 proof)
+// =============================================================================
+
+/// Prove: restart_detected returns true iff the current LastRestartSlot value
+/// is strictly greater than the slot captured at InitMarket.
+///
+/// CODE-EQUALS-SPEC: `restart_detected` is the pure comparison the on-chain
+/// path runs after `LastRestartSlot::get()`. Separating it from the syscall
+/// lets Kani prove the comparison symbolically while cfg-gating the sysvar
+/// itself. Universal over all u64 pairs.
+#[kani::proof]
+fn kani_restart_detected_universal() {
+    let init: u64 = kani::any();
+    let current: u64 = kani::any();
+
+    assert_eq!(
+        restart_detected(init, current),
+        current > init,
+        "restart_detected must return (current > init_restart_slot)"
+    );
+}
