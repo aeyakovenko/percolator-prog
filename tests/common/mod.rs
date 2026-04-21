@@ -15,11 +15,16 @@ pub use solana_sdk::{
 pub use spl_token::state::{Account as TokenAccount, AccountState};
 pub use std::path::PathBuf;
 
-// SLAB_LEN for production BPF (MAX_ACCOUNTS=4096)
-// Note: We use production BPF (not test feature) because test feature
-// bypasses CPI for token transfers, which fails in LiteSVM.
-// Haircut-ratio engine (ADL/socialization scratch arrays removed)
-pub const SLAB_LEN: usize = 1525656; // 4-way-auth: SlabHeader +64 (insurance_authority + close_authority)
+// SLAB_LEN hard-coded for default MAX_ACCOUNTS=4096. Uses BPF-target
+// alignment (u128 aligned to 8 on sbf vs 16 on x86_64), so this
+// constant CANNOT be derived from `percolator_prog::constants::SLAB
+// _LEN` — that compiles with native alignment and produces a
+// different value than the BPF binary the tests actually run.
+//
+// To test with `percolator/small` (1024) or `percolator/medium`
+// (1024), this constant (and the BPF build flags) would need to
+// match. Today the test suite is tied to the default tier.
+pub const SLAB_LEN: usize = 1525656; // 4-way-auth (default 4096 accounts, BPF target)
 pub const MAX_ACCOUNTS: usize = 4096;
 
 // Pyth Receiver program ID
