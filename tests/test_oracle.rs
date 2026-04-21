@@ -1076,7 +1076,7 @@ fn test_funding_boundary_anti_retroactivity_update_config() {
             ],
             data: encode_update_config(
                 100, k_bps,
-                10_000i64, 10i64,  // funding_max_bps_per_slot=10 fits engine's e9=1e6 cap
+                10_000i64, 10i64,  // funding_max_e9_per_slot=10 fits engine's e9=1e6 cap
                 0u128, 100, 100, 100, 1000,
                 0u128, 1_000_000_000_000_000u128, 1u128,
             ),

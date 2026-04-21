@@ -3955,14 +3955,14 @@ fn test_init_market_custom_funding_max_premium() {
     );
 }
 
-/// InitMarket with custom funding_max_bps_per_slot overrides the default (5).
+/// InitMarket with custom funding_max_e9_per_slot overrides the default (5).
 #[test]
 fn test_init_market_custom_funding_max_per_slot() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_funding(0, 10_000, 0, 500, 100, 500, 10);
     assert_eq!(
-        env.read_funding_max_bps_per_slot(),
+        env.read_funding_max_e9_per_slot(),
         10,
         "Custom max_bps_per_slot must be stored"
     );
@@ -3973,13 +3973,13 @@ fn test_init_market_custom_funding_max_per_slot() {
 fn test_init_market_custom_all_funding_params() {
     program_path();
     let mut env = TestEnv::new();
-    // funding_max_bps_per_slot must fit the engine's per-market envelope
+    // funding_max_e9_per_slot must fit the engine's per-market envelope
     // (max_abs_funding_e9_per_slot = 1_000_000, i.e. 10 bps/slot). Use 10.
     env.init_market_with_funding(0, 10_000, 0, 2000, 300, 800, 10);
     assert_eq!(env.read_funding_horizon(), 2000);
     assert_eq!(env.read_funding_k_bps(), 300);
     assert_eq!(env.read_funding_max_premium_bps(), 800);
-    assert_eq!(env.read_funding_max_bps_per_slot(), 10);
+    assert_eq!(env.read_funding_max_e9_per_slot(), 10);
 }
 
 /// Without trailing funding params, defaults should be used (backward compat).
@@ -3993,7 +3993,7 @@ fn test_init_market_no_funding_params_uses_defaults() {
     assert_eq!(env.read_funding_horizon(), 500, "Default horizon");
     assert_eq!(env.read_funding_k_bps(), 100, "Default k_bps");
     assert_eq!(env.read_funding_max_premium_bps(), 500, "Default max_premium");
-    assert_eq!(env.read_funding_max_bps_per_slot(), 5, "Default max_per_slot");
+    assert_eq!(env.read_funding_max_e9_per_slot(), 1_000, "Default max_per_slot");
 }
 
 // ============================================================================
@@ -4047,7 +4047,7 @@ fn test_init_market_rejects_negative_max_premium() {
     assert!(result.is_err(), "negative funding_max_premium_bps must be rejected");
 }
 
-/// InitMarket with negative funding_max_bps_per_slot must be rejected.
+/// InitMarket with negative funding_max_e9_per_slot must be rejected.
 #[test]
 fn test_init_market_rejects_negative_max_per_slot() {
     program_path();
@@ -4059,7 +4059,7 @@ fn test_init_market_rejects_negative_max_per_slot() {
         -1, // negative (invalid)
     );
     let result = env.try_init_market_raw(data);
-    assert!(result.is_err(), "negative funding_max_bps_per_slot must be rejected");
+    assert!(result.is_err(), "negative funding_max_e9_per_slot must be rejected");
 }
 
 /// InitMarket cap check for mark_min_fee is against MAX_PROTOCOL_FEE_ABS
@@ -4916,13 +4916,12 @@ fn test_trade_nocpi_allows_user_user_bilateral() {
 // Regression tests: TDD round-4 blockers
 // ============================================================================
 
-/// Blocker 3 regression: funding_max_bps_per_slot is compared in i128 space;
-/// huge positive inputs must NOT wrap through `as u64` into the per-market
-/// envelope. With the wrapper envelope = 1_000_000 (10 bps/slot), a value of
-/// i64::MAX bps_per_slot would yield funding_bps_to_e9 ≈ 9.2e23, which casts
-/// modulo 2^64 to a small value and used to sneak past the check.
+/// Blocker 3 regression: funding_max_e9_per_slot is compared in i128 space
+/// so that i64::MAX can't wrap through `as u64` and silently pass the
+/// per-market envelope check. With the wrapper envelope = 10_000 e9/slot,
+/// i64::MAX (≈ 9.2e18) is 14+ orders of magnitude over the cap.
 #[test]
-fn test_init_market_rejects_huge_funding_max_bps_per_slot_without_wrap() {
+fn test_init_market_rejects_huge_funding_max_e9_per_slot_without_wrap() {
     program_path();
     let mut env = TestEnv::new();
     // Send the largest legal i64 through the custom-funding path.
@@ -4936,12 +4935,12 @@ fn test_init_market_rejects_huge_funding_max_bps_per_slot_without_wrap() {
             200,   // funding_horizon_slots
             200,   // funding_k_bps
             1_000, // funding_max_premium_bps
-            i64::MAX, // funding_max_bps_per_slot — MUST be rejected
+            i64::MAX, // funding_max_e9_per_slot — MUST be rejected
         );
     }));
     assert!(
         result.is_err(),
-        "InitMarket must reject funding_max_bps_per_slot = i64::MAX (beyond per-market envelope)"
+        "InitMarket must reject funding_max_e9_per_slot = i64::MAX (beyond per-market envelope)"
     );
 }
 

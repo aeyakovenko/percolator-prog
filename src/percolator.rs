@@ -79,57 +79,72 @@ pub mod constants {
     // invariant
     //   ADL_ONE * MAX_ORACLE_PRICE * MAX_ABS_FUNDING_E9_PER_SLOT *
     //     MAX_ACCRUAL_DT_SLOTS <= i128::MAX
-    // must hold: 1e15 * 1e12 * 1e6 * 1e5 = 1e38 < i128::MAX (≈1.7e38). ✓
+    // must hold: 1e15 * 1e12 * 1e4 * 1e7 = 1e38 < i128::MAX (≈1.7e38). ✓
+    //
+    // Tightened from the prior stress-test values (1e6 rate / 1e5 dt) to the
+    // production-aligned trade-off (low rate cap, long accrual window) in
+    // concert with engine-crate commit 95665cb which dropped the GLOBAL
+    // `MAX_ABS_FUNDING_E9_PER_SLOT` to 10_000.
     //
     // Surface them here as named constants so operators and auditors can see
     // exactly what values ship, rather than having them buried inside the
     // RiskParams literal in read_risk_params.
     /// Max dt allowed in a single `accrue_market_to` call (spec §1.4).
-    pub const MAX_ACCRUAL_DT_SLOTS: u64 = 100_000;
+    /// 10_000_000 slots at 400 ms/slot ≈ 46 days — the permissionless-
+    /// resolve / outage-tolerance window. Must be ≤ min_funding_lifetime_slots.
+    pub const MAX_ACCRUAL_DT_SLOTS: u64 = 10_000_000;
     /// Max |funding_rate_e9_per_slot| the engine will accrue (spec §1.4).
-    pub const MAX_ABS_FUNDING_E9_PER_SLOT: u64 = 1_000_000;
+    /// Matches the engine-crate GLOBAL ceiling. Realistic perp funding is
+    /// 3-5 orders of magnitude below this (see compute_current_funding_rate_e9
+    /// clamp math), so this cap exists to bound the integer-overflow envelope,
+    /// not to shape market behavior.
+    pub const MAX_ABS_FUNDING_E9_PER_SLOT: u64 = 10_000;
     /// Cumulative-funding lifetime (engine §1.4 v12.18.x). Distinct from
     /// the per-call `MAX_ACCRUAL_DT_SLOTS` envelope: this bounds the
     /// lifetime sum of funding contributions, not any single call.
     ///
     /// Engine init asserts the safety envelope:
     ///
-    ///     ADL_ONE · MAX_ORACLE_PRICE · max_abs_funding_e9_per_slot ·
-    ///       min_funding_lifetime_slots  ≤  i128::MAX
+    /// ```text
+    /// ADL_ONE · MAX_ORACLE_PRICE · max_abs_funding_e9_per_slot ·
+    ///   min_funding_lifetime_slots  ≤  i128::MAX
+    /// ```
     ///
     /// With the engine-crate constants
     ///     ADL_ONE            = 10^15
     ///     MAX_ORACLE_PRICE   = 10^12
-    /// and this crate's
-    ///     MAX_ABS_FUNDING_E9_PER_SLOT = 10^6
+    /// and this crate's (tightened) ceiling
+    ///     MAX_ABS_FUNDING_E9_PER_SLOT = 10^4
     /// the lifetime ceiling is
-    ///     i128::MAX / (10^15 · 10^12 · 10^6)  ≈ 170_141
+    ///     i128::MAX / (10^15 · 10^12 · 10^4)  ≈ 1.7 × 10^7 slots
     ///
     /// ═════════════════════════════════════════════════════════════════
     /// OPERATIONAL ASSUMPTION — accepted finite market lifetime
     /// ═════════════════════════════════════════════════════════════════
     /// The engine does not expose an F-index rebase, so every deployed
     /// market has a finite cumulative-funding lifetime bounded by the
-    /// envelope above. The theoretical floor under the worst-case
-    /// assumption (continuous max-rate funding) is:
+    /// envelope above. At 400 ms/slot (~7.89 × 10^7 slots/year), the
+    /// worst-case lifetimes at sustained max-rate funding are:
     ///
-    ///     170_000 slots @ 400 ms/slot ≈ 19 hours
+    /// ```text
+    /// rate <= 10_000 (global max)  ⇒ ~1.7e7 slots  ≈ 2.6 months
+    /// rate <=  1_000               ⇒ ~1.7e8 slots  ≈ 2.15 years
+    /// rate <=    100               ⇒ ~1.7e9 slots  ≈ 21.5 years
+    /// rate <=     10               ⇒ ~1.7e10 slots ≈ 215  years
+    /// ```
     ///
-    /// The EFFECTIVE horizon under realistic rates is vastly longer.
-    /// Real perpetual markets average 1 bps/day, i.e. 4.6 × 10⁻¹⁰ per
-    /// slot at 2.5 slots/sec. The ratio to the envelope's worst-case
-    /// assumption (10⁶ in e9 units = 10⁻³/slot) is ≈ 2.2 × 10⁶, giving
-    /// an effective lifetime of ≈ 170_000 × 2.2M = 3.7 × 10¹¹ slots
-    /// (thousands of years).
+    /// The EFFECTIVE horizon at realistic rates is vastly longer.
+    /// Real perp funding averages 1 bps/day ≈ 4.6 × 10⁻¹⁰ per slot at
+    /// 2.5 slots/sec. At 10^1 e9 units/slot (2.2 × 10^6 × realistic)
+    /// the effective lifetime is measured in centuries.
     ///
     /// Tuning options a deployer has for extending the floor:
     ///   (a) Lower `MAX_ABS_FUNDING_E9_PER_SLOT` — the envelope scales
     ///       linearly, so halving the funding cap doubles the lifetime.
-    ///       Default `funding_max_bps_per_slot = 5` (500_000 in e9)
-    ///       pins the practical floor; values below that break the
-    ///       configured defaults.
-    ///   (b) Reduce the default `funding_max_bps_per_slot` in concert
-    ///       with (a) to match real-market funding caps (≤ 1 bps/slot).
+    ///   (b) Reduce the per-market `funding_max_e9_per_slot` (but note
+    ///       the integer-bps granularity trap: 1 bps = 100_000 e9, which
+    ///       is 10× the current engine ceiling — only `0` fits the
+    ///       envelope, which disables the cap).
     ///   (c) Engine-side F-index rebase (out of wrapper scope).
     ///
     /// Admin-free deployments that intend to run indefinitely should
@@ -140,7 +155,7 @@ pub mod constants {
     /// path for users. Operators MUST set that field > 0 on admin-
     /// free markets (a zero value combined with envelope exhaustion
     /// would trap capital).
-    pub const MIN_FUNDING_LIFETIME_SLOTS: u64 = 170_000;
+    pub const MIN_FUNDING_LIFETIME_SLOTS: u64 = 10_000_000;
     pub const MATCHER_ABI_VERSION: u32 = 2;
     // MATCHER_CONTEXT_PREFIX_LEN removed — validation uses MATCHER_CONTEXT_LEN directly
     pub const MATCHER_CONTEXT_LEN: usize = 320;
@@ -159,7 +174,13 @@ pub mod constants {
     pub const DEFAULT_FUNDING_HORIZON_SLOTS: u64 = 500; // ~4 min @ ~2 slots/sec
     pub const DEFAULT_FUNDING_K_BPS: u64 = 100; // 1.00x multiplier
     pub const DEFAULT_FUNDING_MAX_PREMIUM_BPS: i64 = 500; // cap premium at 5.00%
-    pub const DEFAULT_FUNDING_MAX_BPS_PER_SLOT: i64 = 5; // cap per-slot funding
+    /// Default per-market cap on wrapper-computed funding rate, in engine-native
+    /// e9 (parts-per-billion) per slot. 1_000 e9/slot ≈ 2.16e-4/slot ≈ 21.6 %/day
+    /// at 2.5 slots/sec — loose enough to be non-binding on realistic markets
+    /// (1 bps/day ≈ 4.6e-10/slot) and comfortably under the engine global
+    /// ceiling MAX_ABS_FUNDING_E9_PER_SLOT = 10_000. Clients compute this from
+    /// operator-friendly units (e.g. bps/day) at market-setup time.
+    pub const DEFAULT_FUNDING_MAX_E9_PER_SLOT: i64 = 1_000;
     pub const DEFAULT_HYPERP_PRICE_CAP_E2BPS: u64 = 10_000; // 1% per slot max price change for Hyperp
     pub const MAX_ORACLE_PRICE_CAP_E2BPS: u64 = 1_000_000; // 100% — hard ceiling for circuit breaker
     pub const DEFAULT_INSURANCE_WITHDRAW_MIN_BASE: u64 = 1;
@@ -1252,7 +1273,7 @@ pub mod ix {
             funding_horizon_slots: Option<u64>,
             funding_k_bps: Option<u64>,
             funding_max_premium_bps: Option<i64>,
-            funding_max_bps_per_slot: Option<i64>,
+            funding_max_e9_per_slot: Option<i64>,
             /// Fee-weighted EWMA: min fee for full mark weight. 0 = disabled.
             mark_min_fee: u64,
             /// Permissionless force-close delay after resolution. 0 = disabled.
@@ -1306,7 +1327,7 @@ pub mod ix {
             funding_horizon_slots: u64,
             funding_k_bps: u64,
             funding_max_premium_bps: i64,
-            funding_max_bps_per_slot: i64,
+            funding_max_e9_per_slot: i64,
         },
         /// Push oracle price (oracle authority only).
         /// Stores the price for use by crank/trade operations.
@@ -1452,7 +1473,7 @@ pub mod ix {
                         funding_horizon_slots,
                         funding_k_bps,
                         funding_max_premium_bps,
-                        funding_max_bps_per_slot,
+                        funding_max_e9_per_slot,
                         mark_min_fee,
                         force_close_delay_slots,
                     ) = if rest.is_empty() {
@@ -1500,7 +1521,7 @@ pub mod ix {
                         funding_horizon_slots,
                         funding_k_bps,
                         funding_max_premium_bps,
-                        funding_max_bps_per_slot,
+                        funding_max_e9_per_slot,
                         mark_min_fee,
                         force_close_delay_slots,
                     })
@@ -1629,12 +1650,12 @@ pub mod ix {
                     let funding_horizon_slots = read_u64(&mut rest)?;
                     let funding_k_bps = read_u64(&mut rest)?;
                     let funding_max_premium_bps = read_i64(&mut rest)?;
-                    let funding_max_bps_per_slot = read_i64(&mut rest)?;
+                    let funding_max_e9_per_slot = read_i64(&mut rest)?;
                     Ok(Instruction::UpdateConfig {
                         funding_horizon_slots,
                         funding_k_bps,
                         funding_max_premium_bps,
-                        funding_max_bps_per_slot,
+                        funding_max_e9_per_slot,
                     })
                 }
                 // Tag 16 (SetOracleAuthority) deleted — use
@@ -1988,7 +2009,7 @@ pub mod state {
         /// Max premium in basis points (500 = 5%)
         pub funding_max_premium_bps: i64,
         /// Max funding rate per slot in basis points
-        pub funding_max_bps_per_slot: i64,
+        pub funding_max_e9_per_slot: i64,
 
         // ========================================
         // Oracle Authority (optional signer-based oracle)
@@ -3160,7 +3181,7 @@ pub mod processor {
         accounts, collateral,
         constants::{
             CONFIG_LEN, DEFAULT_FUNDING_HORIZON_SLOTS,
-            DEFAULT_FUNDING_K_BPS, DEFAULT_FUNDING_MAX_BPS_PER_SLOT,
+            DEFAULT_FUNDING_K_BPS, DEFAULT_FUNDING_MAX_E9_PER_SLOT,
             DEFAULT_FUNDING_MAX_PREMIUM_BPS, DEFAULT_HYPERP_PRICE_CAP_E2BPS, MAX_ORACLE_PRICE_CAP_E2BPS,
             DEFAULT_INSURANCE_WITHDRAW_COOLDOWN_SLOTS, DEFAULT_INSURANCE_WITHDRAW_MAX_BPS,
             DEFAULT_INSURANCE_WITHDRAW_MIN_BASE, DEFAULT_MARK_EWMA_HALFLIFE_SLOTS,
@@ -3669,14 +3690,9 @@ pub mod processor {
         // Per-slot: divide by horizon
         let per_slot = scaled / (config.funding_horizon_slots as i128);
 
-        // Clamp: max_bps_per_slot * 100_000 converts bps to e9
-        let max_rate_e9 = (config.funding_max_bps_per_slot as i128) * 100_000;
+        // Clamp: funding_max_e9_per_slot is already in engine-native e9 units.
+        let max_rate_e9 = config.funding_max_e9_per_slot as i128;
         per_slot.clamp(-max_rate_e9, max_rate_e9)
-    }
-
-    /// Convert bps to e9 for validation only (admin-configured limits).
-    fn funding_bps_to_e9(bps: i64) -> i128 {
-        (bps as i128) * 100_000
     }
 
     fn execute_trade_with_matcher<M: MatchingEngine>(
@@ -4131,7 +4147,7 @@ pub mod processor {
                 funding_horizon_slots: custom_funding_horizon,
                 funding_k_bps: custom_funding_k,
                 funding_max_premium_bps: custom_max_premium,
-                funding_max_bps_per_slot: custom_max_per_slot,
+                funding_max_e9_per_slot: custom_max_per_slot,
                 mark_min_fee,
                 force_close_delay_slots,
             } => {
@@ -4390,16 +4406,11 @@ pub mod processor {
                     }
                 }
                 if let Some(ms) = custom_max_per_slot {
-                    // The wrapper's RiskParams envelope stores a per-market cap
-                    // (read_risk_params). Validate against it. Compare in i128
-                    // space — casting funding_bps_to_e9(ms) (i128) to u64 would
-                    // wrap modulo 2^64 on large inputs (e.g., ms = i64::MAX
-                    // yields ~9e23), silently admitting huge caps the engine
-                    // would later reject at accrue time.
-                    if ms < 0
-                        || funding_bps_to_e9(ms)
-                            > risk_params.max_abs_funding_e9_per_slot as i128
-                    {
+                    // Wire value is already in engine-native e9 units; compare
+                    // directly against the RiskParams envelope stored by the
+                    // wrapper (read_risk_params). Compare in i128 so i64::MAX
+                    // can't wrap before the bound check.
+                    if ms < 0 || (ms as i128) > risk_params.max_abs_funding_e9_per_slot as i128 {
                         return Err(PercolatorError::InvalidConfigParam.into());
                     }
                 }
@@ -4544,7 +4555,7 @@ pub mod processor {
                     funding_horizon_slots: custom_funding_horizon.unwrap_or(DEFAULT_FUNDING_HORIZON_SLOTS),
                     funding_k_bps: custom_funding_k.unwrap_or(DEFAULT_FUNDING_K_BPS),
                     funding_max_premium_bps: custom_max_premium.unwrap_or(DEFAULT_FUNDING_MAX_PREMIUM_BPS),
-                    funding_max_bps_per_slot: custom_max_per_slot.unwrap_or(DEFAULT_FUNDING_MAX_BPS_PER_SLOT),
+                    funding_max_e9_per_slot: custom_max_per_slot.unwrap_or(DEFAULT_FUNDING_MAX_E9_PER_SLOT),
                     // Oracle authority defaults to the creator's pubkey
                     // (super-admin by default, consistent with
                     // insurance_authority and close_authority). The
@@ -6701,7 +6712,7 @@ pub mod processor {
                 funding_horizon_slots,
                 funding_k_bps,
                 funding_max_premium_bps,
-                funding_max_bps_per_slot,
+                funding_max_e9_per_slot,
             } => {
                 // Accounts: (admin, slab, clock, oracle).
                 // For non-Hyperp markets the oracle is REQUIRED. Allowing the
@@ -6744,11 +6755,11 @@ pub mod processor {
                 // Compare in i128 space: `as u64` would wrap modulo 2^64 for
                 // huge positive inputs (e.g., i64::MAX * 1e5 ≈ 9e23) and
                 // silently pass the envelope.
-                if funding_max_premium_bps < 0 || funding_max_bps_per_slot < 0 {
+                if funding_max_premium_bps < 0 || funding_max_e9_per_slot < 0 {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
                 let engine_envelope = zc::engine_ref(&data)?.params.max_abs_funding_e9_per_slot;
-                if funding_bps_to_e9(funding_max_bps_per_slot) > engine_envelope as i128 {
+                if (funding_max_e9_per_slot as i128) > engine_envelope as i128 {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
 
@@ -6856,7 +6867,7 @@ pub mod processor {
                 config.funding_horizon_slots = funding_horizon_slots;
                 config.funding_k_bps = funding_k_bps;
                 config.funding_max_premium_bps = funding_max_premium_bps;
-                config.funding_max_bps_per_slot = funding_max_bps_per_slot;
+                config.funding_max_e9_per_slot = funding_max_e9_per_slot;
                 // Engine v12.18.1: accrue_market_to only updates market-global state
                 // (K/F/slot_last). No per-account touches means no resets to
                 // schedule or finalize, so the end-of-instruction lifecycle — which

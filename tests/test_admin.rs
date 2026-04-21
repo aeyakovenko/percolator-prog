@@ -861,7 +861,7 @@ fn test_init_market_risk_params_at_boundary_accepted() {
     data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
-    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot
+    data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot
     data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee
     data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots
 
@@ -1184,9 +1184,9 @@ fn test_update_config_rejects_negative_funding_max_premium() {
     assert_eq!(env.read_update_config_snapshot(), config_before, "config must be preserved after rejected UpdateConfig");
 }
 
-/// UpdateConfig must reject negative funding_max_bps_per_slot.
+/// UpdateConfig must reject negative funding_max_e9_per_slot.
 #[test]
-fn test_update_config_rejects_negative_funding_max_bps_per_slot() {
+fn test_update_config_rejects_negative_funding_max_e9_per_slot() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
@@ -1205,7 +1205,7 @@ fn test_update_config_rejects_negative_funding_max_bps_per_slot() {
         data: encode_update_config(
             3600, 100,
             100i64,
-            -5i64,  // negative funding_max_bps_per_slot — must be rejected
+            -5i64,  // negative funding_max_e9_per_slot — must be rejected
             0u128, 100, 100, 100, 5000, 0, 1_000_000u128, 1u128,
         ),
     };
@@ -1213,7 +1213,7 @@ fn test_update_config_rejects_negative_funding_max_bps_per_slot() {
         &[cu_ix(), ix], Some(&admin.pubkey()), &[&admin], env.svm.latest_blockhash(),
     );
     let result = env.svm.send_transaction(tx);
-    assert!(result.is_err(), "Negative funding_max_bps_per_slot must be rejected");
+    assert!(result.is_err(), "Negative funding_max_e9_per_slot must be rejected");
 
     // Config must be unchanged after rejection
     assert_eq!(env.read_update_config_snapshot(), config_before, "config must be preserved after rejected UpdateConfig");

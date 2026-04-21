@@ -177,7 +177,7 @@ fn append_default_extended_tail(data: &mut Vec<u8>) {
     data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots (default)
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps (default)
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps (default)
-    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot (default)
+    data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot (default)
     data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee (disabled)
     data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots (default tail has permissionless=0)
 }
@@ -250,7 +250,7 @@ pub fn encode_init_market_hyperp_with_stale(
     data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
-    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot
+    data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot
     data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee
     // force_close_delay must be > 0 when perm_resolve > 0
     let force_close = if permissionless_resolve_stale_slots > 0 { 50u64 } else { 0u64 };
@@ -413,7 +413,7 @@ pub fn encode_init_market_with_cap(
     data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots (default)
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps (default)
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps (default)
-    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot (default)
+    data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot (default)
     data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee (disabled)
     // force_close_delay must be > 0 when permissionless_resolve > 0
     let force_close = if permissionless_resolve_stale_slots > 0 { 50u64 } else { 0u64 };
@@ -433,7 +433,7 @@ pub fn encode_init_market_with_funding(
     funding_horizon_slots: u64,
     funding_k_bps: u64,
     funding_max_premium_bps: i64,
-    funding_max_bps_per_slot: i64,
+    funding_max_e9_per_slot: i64,
 ) -> Vec<u8> {
     let mut data = encode_init_market_with_cap(
         admin,
@@ -450,7 +450,7 @@ pub fn encode_init_market_with_funding(
     data.extend_from_slice(&funding_horizon_slots.to_le_bytes());
     data.extend_from_slice(&funding_k_bps.to_le_bytes());
     data.extend_from_slice(&funding_max_premium_bps.to_le_bytes());
-    data.extend_from_slice(&funding_max_bps_per_slot.to_le_bytes());
+    data.extend_from_slice(&funding_max_e9_per_slot.to_le_bytes());
     data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee (disabled)
     let fc = if permissionless_resolve_stale_slots > 0 { 50u64 } else { 0u64 };
     data.extend_from_slice(&fc.to_le_bytes()); // force_close_delay_slots
@@ -468,14 +468,14 @@ pub fn encode_init_market_with_min_fee(
     funding_horizon_slots: u64,
     funding_k_bps: u64,
     funding_max_premium_bps: i64,
-    funding_max_bps_per_slot: i64,
+    funding_max_e9_per_slot: i64,
     mark_min_fee: u64,
 ) -> Vec<u8> {
     let mut data = encode_init_market_with_funding(
         admin, mint, feed_id, invert,
         min_oracle_price_cap_e2bps, permissionless_resolve_stale_slots,
         funding_horizon_slots, funding_k_bps,
-        funding_max_premium_bps, funding_max_bps_per_slot,
+        funding_max_premium_bps, funding_max_e9_per_slot,
     );
     // Truncate default mark_min_fee + force_close_delay (16 bytes), replace with custom
     data.truncate(data.len() - 16);
@@ -534,7 +534,7 @@ pub fn encode_init_market_with_trading_fee(
     data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
-    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot
+    data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot
     // mark_min_fee
     data.extend_from_slice(&mark_min_fee.to_le_bytes());
     data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots
@@ -915,7 +915,7 @@ impl TestEnv {
         funding_horizon_slots: u64,
         funding_k_bps: u64,
         funding_max_premium_bps: i64,
-        funding_max_bps_per_slot: i64,
+        funding_max_e9_per_slot: i64,
     ) {
         let admin = &self.payer;
         let dummy_ata = Pubkey::new_unique();
@@ -955,7 +955,7 @@ impl TestEnv {
                 funding_horizon_slots,
                 funding_k_bps,
                 funding_max_premium_bps,
-                funding_max_bps_per_slot,
+                funding_max_e9_per_slot,
             ),
         };
 
@@ -1906,10 +1906,10 @@ impl TestEnv {
         percolator_prog::state::read_config(&d).funding_max_premium_bps
     }
 
-    /// Read funding_max_bps_per_slot from config
-    pub fn read_funding_max_bps_per_slot(&self) -> i64 {
+    /// Read funding_max_e9_per_slot from config
+    pub fn read_funding_max_e9_per_slot(&self) -> i64 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        percolator_prog::state::read_config(&d).funding_max_bps_per_slot
+        percolator_prog::state::read_config(&d).funding_max_e9_per_slot
     }
 
     /// Read mark_min_fee from config.
@@ -2619,7 +2619,7 @@ pub fn encode_update_config(
     funding_horizon_slots: u64,
     funding_k_bps: u64,
     funding_max_premium_bps: i64,        // i64!
-    funding_max_bps_per_slot: i64,       // i64!
+    funding_max_e9_per_slot: i64,       // i64!
     // Legacy trailing threshold fields kept in the signature so test call
     // sites compile unchanged. The wrapper's UpdateConfig ABI no longer
     // accepts them — the decoder rejects trailing bytes — so we swallow
@@ -2637,7 +2637,7 @@ pub fn encode_update_config(
     data.extend_from_slice(&funding_horizon_slots.to_le_bytes());
     data.extend_from_slice(&funding_k_bps.to_le_bytes());
     data.extend_from_slice(&funding_max_premium_bps.to_le_bytes()); // i64
-    data.extend_from_slice(&funding_max_bps_per_slot.to_le_bytes()); // i64
+    data.extend_from_slice(&funding_max_e9_per_slot.to_le_bytes()); // i64
     data
 }
 
@@ -3152,7 +3152,7 @@ impl TestEnv {
                 3600,                      // funding_horizon_slots
                 100,                       // funding_k_bps
                 100i64,                    // funding_max_premium_bps (i64)
-                10i64,                     // funding_max_bps_per_slot (i64)
+                10i64,                     // funding_max_e9_per_slot (i64)
                 0u128,                     // thresh_floor (u128)
                 100,                       // thresh_risk_bps
                 100,                       // thresh_update_interval_slots
@@ -5864,7 +5864,7 @@ impl TestEnv {
                 funding_horizon_slots,
                 100, // funding_k_bps
                 100i64, // funding_max_premium_bps
-                10i64,  // funding_max_bps_per_slot
+                10i64,  // funding_max_e9_per_slot
                 0u128,  // thresh_floor
                 100,    // thresh_risk_bps
                 100,    // thresh_update_interval_slots
@@ -6587,7 +6587,7 @@ impl TestEnv {
 // ============================================================================
 
 /// ATTACK: UpdateConfig with extreme funding parameters.
-/// Set funding_max_bps_per_slot to max i64, verify crank doesn't overflow.
+/// Set funding_max_e9_per_slot to max i64, verify crank doesn't overflow.
 
 
 /// ATTACK: Zero-slot crank loops shouldn't compound funding.
@@ -6663,7 +6663,7 @@ impl TestEnv {
 
 
 /// ATTACK: Funding with extreme max_bps_per_slot.
-/// Set funding_max_bps_per_slot to extreme value, verify engine caps at ±10,000.
+/// Set funding_max_e9_per_slot to extreme value, verify engine caps at ±10,000.
 
 
 /// ATTACK: Deposit with wrong mint token account.

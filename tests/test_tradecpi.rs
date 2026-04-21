@@ -5954,18 +5954,18 @@ fn test_hyperp_never_has_pre_resolve_unrecoverable_window() {
 }
 
 /// Test 3: Init rejects Hyperp perm_resolve values too large to
-/// recover within the accrue envelope. In the current code the general
-/// `perm_resolve <= risk_params.max_accrual_dt_slots` guard (100_000)
-/// is strictly tighter than the new Hyperp catchup-budget guard
-/// (CATCHUP_CHUNKS_MAX × MAX_ACCRUAL_DT_SLOTS = 2_000_000), so the
-/// general guard always fires first. The substantive assertion this
-/// test makes is that init REJECTS any Hyperp perm_resolve past the
-/// accrue envelope — we pick a value above the general bound so the
-/// test is meaningful regardless of which guard fires.
+/// recover within the accrue envelope. The general `perm_resolve <=
+/// risk_params.max_accrual_dt_slots` guard (MAX_ACCRUAL_DT_SLOTS =
+/// 10_000_000) is strictly tighter than the Hyperp catchup-budget guard
+/// (CATCHUP_CHUNKS_MAX × MAX_ACCRUAL_DT_SLOTS), so the general guard
+/// always fires first. The substantive assertion is that init REJECTS
+/// any Hyperp perm_resolve past the accrue envelope — pick a value
+/// above the general bound so the test is meaningful regardless of
+/// which guard fires.
 #[test]
 fn test_hyperp_init_rejects_permissionless_window_past_accrue_envelope() {
     let mut env = TradeCpiTestEnv::new();
-    let too_large: u64 = 100_001; // MAX_ACCRUAL_DT_SLOTS + 1
+    let too_large: u64 = 10_000_001; // MAX_ACCRUAL_DT_SLOTS + 1
     env.try_init_market_hyperp_with_stale(
         1_000_000,
         86_400,

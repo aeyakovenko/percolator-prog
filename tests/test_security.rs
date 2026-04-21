@@ -2221,7 +2221,7 @@ fn test_attack_update_config_extreme_values() {
             1,        // funding_horizon_slots (minimum)
             10000,    // funding_k_bps (100%)
             10000i64, // funding_max_premium_bps (max allowed)
-            10i64,    // funding_max_bps_per_slot (fits per-market envelope = 10 bps/slot)
+            10i64,    // funding_max_e9_per_slot (fits per-market envelope = 10 bps/slot)
             0u128,
             10000,
             1,
@@ -5616,7 +5616,7 @@ fn test_attack_old_admin_blocked_after_transfer() {
 }
 
 /// ATTACK: UpdateConfig with extreme funding parameters.
-/// Set funding_max_bps_per_slot to max i64, verify crank doesn't overflow.
+/// Set funding_max_e9_per_slot to max i64, verify crank doesn't overflow.
 #[test]
 fn test_attack_config_extreme_funding_max_bps() {
     program_path();
@@ -6360,7 +6360,7 @@ fn test_attack_funding_extreme_k_bps_capped() {
             100,                        // funding_horizon_slots
             100_000,                    // funding_k_bps (max allowed = 1000x)
             100,                        // funding_max_premium_bps
-            10,                         // funding_max_bps_per_slot
+            10,                         // funding_max_e9_per_slot
             0u128,                      // thresh_floor
             100,                        // thresh_risk_bps
             100,                        // thresh_update_interval_slots
@@ -6443,7 +6443,7 @@ fn test_attack_funding_extreme_max_premium_capped() {
             100,                        // funding_horizon_slots
             100,                        // funding_k_bps
             i64::MAX,                   // funding_max_premium_bps (extreme!)
-            10,                         // funding_max_bps_per_slot
+            10,                         // funding_max_e9_per_slot
             0u128,                      // thresh_floor
             100,                        // thresh_risk_bps
             100,                        // thresh_update_interval_slots
@@ -6492,7 +6492,7 @@ fn test_attack_funding_extreme_max_premium_capped() {
 }
 
 /// ATTACK: Funding with extreme max_bps_per_slot.
-/// Set funding_max_bps_per_slot to extreme value, verify engine caps at ±10,000.
+/// Set funding_max_e9_per_slot to extreme value, verify engine caps at ±10,000.
 #[test]
 fn test_attack_funding_extreme_max_bps_per_slot() {
     program_path();
@@ -6526,7 +6526,7 @@ fn test_attack_funding_extreme_max_bps_per_slot() {
             100,                        // funding_horizon_slots
             100,                        // funding_k_bps
             100,                        // funding_max_premium_bps
-            i64::MAX,                   // funding_max_bps_per_slot (extreme!)
+            i64::MAX,                   // funding_max_e9_per_slot (extreme!)
             0u128,                      // thresh_floor
             100,                        // thresh_risk_bps
             100,                        // thresh_update_interval_slots
@@ -6546,7 +6546,7 @@ fn test_attack_funding_extreme_max_bps_per_slot() {
     let config_result = env.svm.send_transaction(tx);
     assert!(
         config_result.is_err(),
-        "Extreme funding_max_bps_per_slot (> MAX_ABS_FUNDING) must be rejected"
+        "Extreme funding_max_e9_per_slot (> MAX_ABS_FUNDING) must be rejected"
     );
 
     env.trade(&user, &lp, lp_idx, user_idx, 100_000);
@@ -13512,7 +13512,7 @@ fn test_attack_resolve_rejects_stale_settlement_push() {
     data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
-    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot
+    data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot
     data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee
     data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots
 

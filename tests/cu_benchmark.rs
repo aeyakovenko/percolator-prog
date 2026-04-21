@@ -158,7 +158,7 @@ fn encode_init_market_with_params(
     data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
-    data.extend_from_slice(&5i64.to_le_bytes()); // funding_max_bps_per_slot
+    data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot
     data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee
     data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots
     data
@@ -685,7 +685,7 @@ fn encode_update_config(
     funding_horizon_slots: u64,
     funding_k_bps: u64,
     funding_max_premium_bps: i64,
-    funding_max_bps_per_slot: i64,
+    funding_max_e9_per_slot: i64,
 ) -> Vec<u8> {
     // UpdateConfig wire format in v12.18.1: tag (1) + 4 u64/i64 funding params.
     // Earlier revisions had trailing threshold fields; the decoder now rejects
@@ -694,7 +694,7 @@ fn encode_update_config(
     data.extend_from_slice(&funding_horizon_slots.to_le_bytes());
     data.extend_from_slice(&funding_k_bps.to_le_bytes());
     data.extend_from_slice(&funding_max_premium_bps.to_le_bytes());
-    data.extend_from_slice(&funding_max_bps_per_slot.to_le_bytes());
+    data.extend_from_slice(&funding_max_e9_per_slot.to_le_bytes());
     data
 }
 
@@ -1834,7 +1834,7 @@ fn benchmark_all_instructions() {
                 3600,   // funding_horizon_slots
                 100,    // funding_k_bps
                 500,    // funding_max_premium_bps
-                5,      // funding_max_bps_per_slot
+                5,      // funding_max_e9_per_slot
             ),
         };
         let cu = measure(&mut env.svm, ix, &[&admin]).unwrap();

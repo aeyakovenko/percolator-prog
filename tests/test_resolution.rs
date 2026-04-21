@@ -1185,14 +1185,14 @@ fn test_governance_free_full_lifecycle() {
         200,    // funding_horizon_slots (custom, not default 500)
         200,    // funding_k_bps (2x, not default 1x)
         1000,   // funding_max_premium_bps (10%, not default 5%)
-        10,     // funding_max_bps_per_slot (custom cap)
+        10,     // funding_max_e9_per_slot (custom cap)
     );
 
     // Verify custom params stored
     assert_eq!(env.read_funding_horizon(), 200);
     assert_eq!(env.read_funding_k_bps(), 200);
     assert_eq!(env.read_funding_max_premium_bps(), 1000);
-    assert_eq!(env.read_funding_max_bps_per_slot(), 10);
+    assert_eq!(env.read_funding_max_e9_per_slot(), 10);
 
     // Step 2: Set bounded staleness (so oracle can go stale for permissionless resolution)
     {
