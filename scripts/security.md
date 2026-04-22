@@ -4,6 +4,219 @@ Whitehat deep-dive after the `d19a712` fixes landed. All four findings
 below were verified against the actual code at that commit. Each cites
 file:line, describes the concrete attack, severity, and fix.
 
+---
+
+# Security R&D loop for Claude (perp DEX, DPRK-style adversarial mode)
+
+This is the idealized methodology for future sessions. Follow it
+verbatim. The loop runs until a budget is exhausted or a STOP
+condition fires. Output of every iteration is a disposition.
+
+## Mindset
+
+Assume the code is wrong. Assume every comment is a lie. Assume every
+invariant asserted in docs has a contradicting path somewhere in the
+code. Your job is to find the path, not to confirm the doc. If you
+find yourself thinking "this is probably fine," stop and write the
+test.
+
+Economic-exploit lens: "safe" means the adversary cannot leave the
+transaction richer than they entered it, and cannot deny others that
+same property. Anything else — weird state, spec violations, undefined
+behavior — is a potential exploit primitive even if no single test
+proves the drain.
+
+## The loop
+
+For each iteration:
+
+1. **Pick a target.** Use the selection criteria below. Prefer areas
+   not already in the *Verified Secure Areas* list in
+   `memory/MEMORY.md`. Record the choice.
+
+2. **State the attacker model.** One paragraph, concrete:
+   - What does the attacker control (accounts, signatures, tx
+     ordering, tail accounts for matcher CPI)?
+   - What does the attacker own or have access to (capital, fresh
+     oracle observation, matcher program, slab admin keys)?
+   - What is the protocol invariant they intend to break (vault
+     conservation, haircut correctness, fee anti-retroactivity,
+     oracle monotonicity, risk-buffer consistency, etc.)?
+   - What is the observable success criterion (`cap_delta > 0 with
+     no position`, `insurance_delta < 0 with no admin action`,
+     `vault - c_tot - insurance - net_pnl > 0`, etc.)?
+
+3. **Write one LiteSVM integration test.** Rules:
+   - Use `TestEnv` / existing helpers. No custom scaffolding.
+   - Exercise full transaction flow against the production BPF
+     binary (`env.svm.send_transaction`). Unit-tested internals
+     are out of scope — this loop is for end-to-end adversarial
+     behavior.
+   - The test name encodes the attack: `test_attack_<thing>_
+     <mechanism>_<expected_or_weird>`. If it passes, the name
+     will read as a negative result ("…_rejected"); if it fails,
+     as a positive finding ("…_leaks_insurance").
+   - Assert the success criterion directly. No "just doesn't
+     panic" assertions — DPRK attackers are happy to pass a test
+     that returned inconsistent state.
+
+4. **Run.** `cargo test --release --test <file> <name>`. Read the
+   actual output — not the exit code alone. Weird logs (unexpected
+   errors, panics in CI-only paths, CU anomalies) are findings even
+   when the test "passes."
+
+5. **Disposition.** Exactly one of:
+
+   - **PASS_SAFE** — protocol behaved correctly under attack. If the
+     test exercises a genuinely under-tested path, keep it as
+     regression coverage and add a one-line `// regression: <attack>`
+     comment. Otherwise **delete the test** (don't let passing
+     adversarial probes accumulate as noise). Record the attempt in
+     session notes but do NOT add to `scripts/security.md`.
+
+   - **PASS_WEIRD** — protocol reverted, but with a wrong error code,
+     leaked state via logs, consumed anomalous CU, or returned
+     inconsistent-looking state that the test's success criterion
+     doesn't catch. Write a `Fn — <title> (severity, conditional?)`
+     entry in `scripts/security.md` citing the exact file:line and
+     observable quirk. Keep the test. Do NOT claim exploit until
+     you've chained the weirdness into an actual economic success
+     criterion — then promote to **EXPLOIT**.
+
+   - **EXPLOIT** — the attacker's success criterion was met. STOP
+     the loop. Write the finding in `scripts/security.md` with:
+     1. Exact file:line of the broken check.
+     2. Reproduction steps (commit SHA + `cargo test` incantation).
+     3. Economic quantification (how much per attack, how often
+        repeatable, what fraction of TVL at risk).
+     4. Root-cause analysis from first principles (no "add a
+        check here" band-aids until RCA is written).
+     5. Proposed fix.
+     Keep the test. Do not loop further until the exploit is
+     closed and the test is passing (i.e., attack rejected).
+
+6. **If fixed:** verify the fixed test now asserts the SAFE outcome
+   (failure of the attack), re-run ALL tiers (default, small,
+   medium), commit, push. Only then resume the loop.
+
+## Target selection criteria
+
+Rank candidates by adversarial signal, pick the top-ranked un-audited
+one each iteration:
+
+| Signal | Weight | Why |
+|---|---|---|
+| Multi-instruction state machine (e.g. init → catchup → trade → withdraw) | HIGH | Cross-instruction timing windows, stale state |
+| Admin-changeable config that affects math (funding cap, unit_scale, mark_min_fee) | HIGH | Retroactivity, rate-change racing |
+| Wide-math (U256/U512) operations near boundary values | HIGH | Overflow, rounding exploits |
+| Self-referential dispatch (matcher CPI, LP PDA derivation) | HIGH | Identity spoofing, CPI reentrancy |
+| Frozen-time modes (resolved, stale-matured) | MED | Post-freeze writes, zombie state |
+| Permissionless paths callable by anyone (crank, catchup, reclaim) | MED | DoS + grief vectors |
+| Oracle-free paths (hyperp, dead-oracle) | MED | Mark manipulation, liveness spoofing |
+| Aggregate counters (c_tot, pnl_pos_tot, oi_eff_*) updated across many paths | MED | Drift between aggregate and sum-of-accounts |
+| Bitmap/cursor state (fee sweep cursor, risk buffer scan cursor) | LOW | Consistency under partial progress |
+| Pure functions (no state) | LOW | Already well-covered by Kani |
+
+De-prioritize targets already listed under *Verified Secure Areas* in
+`memory/MEMORY.md`. Re-audit only if the code has changed since the
+verification date.
+
+## Attack pattern library (seed for hypothesis generation)
+
+Use these as prompts when nothing obvious jumps out. Each is worth at
+least one iteration.
+
+- **Retroactive rate change**: admin changes a rate, next call
+  charges OLD slots at NEW rate. (Applies to funding, maintenance
+  fee, cap — but maintenance fee is init-immutable in this codebase,
+  verified.)
+- **Double-accounting via alternate entry points**: same mutation
+  reachable via instruction A and instruction B; one path forgets a
+  precondition check the other enforces.
+- **Aggregate drift**: update one field directly (e.g.
+  `acc.pnl = X`) without going through the setter that maintains the
+  aggregate (`set_pnl`). Previously hit as Bug #10.
+- **TOCTOU across CPI**: value read before matcher CPI, used after,
+  assumed unchanged — but matcher could have reentered or a co-signer
+  could have mutated.
+- **Partial-progress leak**: a multi-step operation that persists
+  intermediate state (e.g. sweep cursor, catchup chunk progress).
+  Abort mid-way → resume → state is inconsistent with the original
+  caller's assumption.
+- **Sentinel re-materialization**: an identifier that's "never seen"
+  (generation=0, lp_account_id=0, entry_price=0) gets reused after
+  reclaim → old check-against-sentinel logic misfires.
+- **Dust sweep capture**: vault accumulates orphaned dust (from
+  rounding, misaligned deposits, set_capital bypasses), then the
+  empty-market sweep captures it into insurance. Attacker deposits
+  dust on purpose and triggers the sweep.
+- **Frozen-time write**: resolved or stale-matured markets should be
+  read-only. Any write path that forgets the gate is a finding.
+- **Idempotency gap**: two calls at the same anchor should equal one
+  call at that anchor. If the second call has side effects (advances
+  cursor, stamps liveness, triggers reward), it's an amplifier.
+- **Zeno admission**: a cap/cooldown/gate that's expressed as a bps
+  or fraction. Around small values, `x * bps / 10_000 == 0` →
+  operation is silently skipped or misbehaves. Fund can't drain, a
+  key never rotates, etc.
+- **Rounding asymmetry**: floor vs ceiling chosen differently on
+  credit vs debit paths. Attacker arbitrages the rounding.
+- **Bitmap-cursor replay**: cursor wraps around MAX_ACCOUNTS, revisits
+  a freshly-reclaimed slot, applies stale state.
+- **Signed-integer overflow at boundary**: `i128::MIN` negation, sign
+  flip on max position, `checked_neg` assumption.
+- **Matcher-returned zero**: exec_size=0 with FLAG_VALID set, exec_price=0,
+  req_id=0 echoed. Each is a potential parser corner.
+- **Panic-reachable-from-instruction**: if any `unwrap()`, `panic!()`,
+  `unreachable!()` is reachable with attacker-controlled inputs,
+  that's a DoS.
+
+## Outcome disposition rules
+
+1. **Never commit a test without understanding what it proves.** If
+   the test passes for reasons you don't fully explain, that is a
+   finding in itself — it means you don't understand the code well
+   enough to trust your adversarial model.
+
+2. **Delete aggressively.** A failed attack that doesn't add coverage
+   is clutter. The test suite's job is to catch regressions, not
+   document every attack you considered.
+
+3. **One finding per test.** If a test surfaces two issues, split.
+
+4. **A fix is not "add a check here".** Every fix starts with "the
+   root cause is …" in prose, then the code. If you can't state the
+   root cause, you don't have a fix, you have a symptom suppressor.
+
+5. **Re-run ALL tiers** (default 4096, small 256, medium 1024) after
+   any code change. A fix that only passes at default size is not a
+   fix — it's a coincidence.
+
+## Stop conditions
+
+Halt the loop and report when any of these fire:
+- EXPLOIT disposition (fix before continuing).
+- Discovery that an entire area listed in *Verified Secure* is
+  actually not (prior audit was wrong → re-audit required, new pass).
+- Two consecutive PASS_SAFE iterations on different targets — the
+  easy-to-find attacks are out, the expected-value of the next
+  iteration is low, hand back to the user for target guidance.
+- User-defined budget (time, CU, iterations).
+
+## Where to write
+
+- Findings: `scripts/security.md` (append to existing F-series).
+- Long-form analysis / per-session journal: `research/journal/YYYY-MM-DD.md`
+  (gitignored).
+- Tests: `tests/test_basic.rs` (small / protocol-level) or
+  `tests/test_security.rs` (explicit attack tests). Put adversarial
+  tests in `test_security.rs` when they're >20 lines — keeps the
+  mental model clear.
+- Cross-reference: every finding in security.md cites a specific
+  `tests/<file>::<fn>` that reproduces or regresses it.
+
+---
+
 ## F1 — CatchupAccrue partial mode rolls back `last_oracle_publish_time` (HIGH, conditional)
 
 **Location:** `src/percolator.rs:8385-8387` (partial-catchup branch of
