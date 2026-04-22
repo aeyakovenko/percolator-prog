@@ -5335,21 +5335,12 @@ fn test_init_market_accepts_any_new_account_fee_when_unit_scale_zero() {
 }
 
 /// Slot-exhaustion DoS defense: maintenance fees + permissionless
-/// crank GC must drain dust accounts and free their slots WITHOUT
-/// any other user action. This is the core anti-spam mechanism — if
-/// `maintenance_fee_per_slot > 0`, an attacker who fills account
-/// slots with dust will see those slots reclaimed over time purely
-/// from cranking.
-///
-/// CURRENTLY EXPECTED TO FAIL: the engine's `garbage_collect_dust`
-/// is implemented and bounded but is NOT wired into
-/// `keeper_crank_not_atomic` (engine §9.7 comment defers GC to the
-/// explicit `ReclaimEmptyAccount` instruction). Until either the
-/// engine wires GC into the crank or the wrapper calls
-/// `garbage_collect_dust` after `keeper_crank_not_atomic`, slot
-/// reclamation requires per-account `ReclaimEmptyAccount` calls.
+/// crank reclaim must drain dust accounts and free their slots
+/// WITHOUT any other user action. The wrapper's fee-sweep visits
+/// the account, fees drain capital to zero, and the same sweep
+/// immediately calls `reclaim_empty_account_not_atomic` on the
+/// flat zero-capital account.
 #[test]
-#[ignore = "dust GC not wired into KeeperCrank — see test doc"]
 fn test_dust_account_drained_and_gc_by_crank_alone() {
     program_path();
 
@@ -5405,26 +5396,26 @@ fn test_dust_account_drained_and_gc_by_crank_alone() {
     );
 }
 
-/// Stronger variant: an account holds a position and is otherwise
-/// healthy at init (capital meets the maintenance margin). As fees
-/// drain capital, the account becomes liquidatable. Crank's
-/// risk-buffer scan + liquidation pass must close the position
-/// permissionlessly, then continue draining the remaining capital
-/// to zero, then GC the slot. End-to-end: just keep cranking.
-///
-/// CURRENTLY EXPECTED TO FAIL: same root cause as
-/// `test_dust_account_drained_and_gc_by_crank_alone` — the engine's
-/// dust-GC is not wired into KeeperCrank.
+/// Stronger variant: account holds an open position. The chain is
+/// fees → equity drops below `min_nonzero_mm_req` (the absolute MM
+/// floor that prevents dust positions from staying "permanently
+/// healthy" at ~0 equity) → risk-buffer scan flags the account →
+/// next crank's liquidation pass closes the position → subsequent
+/// fee sweep drains residual capital → reclaim. End-to-end: just
+/// keep cranking.
 #[test]
-#[ignore = "dust GC not wired into KeeperCrank — see test doc"]
 fn test_dust_position_account_eventually_liquidated_and_gc_by_crank() {
     program_path();
 
     let mut env = TestEnv::new();
+    // Aggressive fee so the test drains in reasonable iterations:
+    // capital 150M, fee 1M/slot → ~150 slots to bankruptcy. With
+    // each set_slot_and_price advancing the slot by 5, ~30 cranks
+    // drain capital and the position becomes liquidatable.
     let data = encode_init_market_with_maint_fee_bounded(
         &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
-        1000,
-        1,    // maintenance_fee_per_slot
+        1_000_000_000,                  // max_maintenance_fee (vestigial arg)
+        1_000_000,                      // maintenance_fee_per_slot
         0,
     );
     env.try_init_market_raw(data).expect("init");
@@ -5434,35 +5425,37 @@ fn test_dust_position_account_eventually_liquidated_and_gc_by_crank() {
     let lp_idx = env.init_lp(&lp);
     env.deposit(&lp, lp_idx, 100_000_000_000);
 
-    // User with modest capital. Open a small position.
+    // User: 0.15 SOL capital (matches the "minimal-equity" pattern
+    // already used in `test_position_flip_minimal_equity`). Enough to
+    // back a 1M-size position at 10% initial margin (notional = 138M,
+    // IM = 13.8M).
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
-    env.deposit(&user, user_idx, 1_000_000); // 1 SOL worth
-
-    // Open a long position. Size deliberately larger than what the
-    // user's capital comfortably backs at maintenance margin (5%) so
-    // any fee-driven capital decay trips the liquidation threshold.
-    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+    env.deposit(&user, user_idx, 150_000_000);
+    env.set_slot_and_price(100, 138_000_000);
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
     let pos_after_open = env.read_account_position(user_idx);
-    assert!(pos_after_open != 0, "precondition: user has open position, got {}", pos_after_open);
+    assert!(
+        pos_after_open != 0,
+        "precondition: user has open position, got {}",
+        pos_after_open,
+    );
 
     let used_after_open = env.read_num_used_accounts();
     assert_eq!(used_after_open, 2, "LP + user materialized");
 
-    // Crank repeatedly with advancing slots. Maintenance fees drain
-    // user capital each crank; risk-buffer scan flags the unhealthy
-    // user; subsequent crank liquidates the position; further cranks
-    // continue draining residual capital to 0; GC frees the slot.
-    //
-    // Use generous iteration count and slot stride to give the full
-    // pipeline (drain → flag → liquidate → drain → GC) time to
-    // complete. Each iteration also advances the wall clock so
-    // permissionless_stale_matured doesn't trip.
+    // Crank repeatedly with advancing slots. Pipeline:
+    //   1. Maintenance fees drain user capital each crank.
+    //   2. Once equity < maint_margin (≈ 6.9M), risk-buffer scan
+    //      flags the user.
+    //   3. Following crank's `combined` candidate list runs
+    //      liquidation; FullClose closes the position.
+    //   4. User is now flat. Further fee-sweep visits drain residual
+    //      capital to 0 and reclaim the slot.
     let mut user_freed = false;
-    for i in 1..=200 {
+    for i in 1..=400 {
         env.set_slot_and_price(100 + i * 5, 138_000_000);
         env.crank();
-        // Stop once the user slot is reclaimed.
         if env.read_num_used_accounts() < used_after_open {
             user_freed = true;
             break;
@@ -5471,8 +5464,8 @@ fn test_dust_position_account_eventually_liquidated_and_gc_by_crank() {
 
     assert!(
         user_freed,
-        "user account must be liquidated and GC'd within 200 cranks \
-         purely from maintenance-fee accrual; saw num_used = {}",
+        "user account must be liquidated and reclaimed within 400 \
+         cranks purely from maintenance-fee accrual; saw num_used = {}",
         env.read_num_used_accounts(),
     );
 }

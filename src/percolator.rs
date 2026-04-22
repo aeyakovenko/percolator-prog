@@ -3578,6 +3578,30 @@ pub mod processor {
                     )
                     .map_err(map_risk_error)?;
                 syncs_done += 1;
+
+                // Permissionless dust reclaim: fee accrual just charged
+                // this account; if that drained capital to zero on a
+                // flat account (no position, no PnL, no reserve, no
+                // pending), free the slot now. The engine's reclaim
+                // call re-checks all preconditions and forgives any
+                // fee_credits debt < 0, so we don't need to mirror
+                // those checks here — `capital == 0` is the cheap
+                // gate, the engine guarantees the rest. Without this,
+                // an attacker could fill `max_accounts` with dust and
+                // brick onboarding even when fees drain capital,
+                // because slot reclamation would still require an
+                // explicit per-account `ReclaimEmptyAccount` call.
+                let acc = &engine.accounts[idx];
+                if acc.capital.is_zero()
+                    && acc.position_basis_q == 0
+                    && acc.pnl == 0
+                    && acc.reserved_pnl == 0
+                    && acc.sched_present == 0
+                    && acc.pending_present == 0
+                {
+                    let _ = engine
+                        .reclaim_empty_account_not_atomic(idx as u16, now_slot);
+                }
             }
             // Word fully drained — advance to next word, reset bit cursor.
             word_cursor = (word_cursor + 1) % BITMAP_WORDS;
