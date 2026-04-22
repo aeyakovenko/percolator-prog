@@ -1252,7 +1252,7 @@ fn test_vulnerability_stale_pnl_pos_tot_after_force_close() {
     // Resolve market at 2.0 (2_000_000 e6) - user's long position is profitable
     // This means user has positive PnL = position * (2.0 - 1.0) / 1e6
     env.set_slot(100);
-    env.crank(); // fresh crank required before PushOraclePrice on hyperp
+    env.crank(); // fresh crank required before PushHyperpMark on hyperp
     env.try_push_oracle_price(&admin, 2_000_000, 200)
         .expect("resolution oracle push must succeed");
     env.try_resolve_market(&admin).unwrap();
@@ -1679,7 +1679,7 @@ fn test_attack_trade_after_force_close() {
 
     // Resolve + settle PnL via crank + force-close positions
     env.set_slot(200);
-    env.crank(); // fresh crank required before PushOraclePrice on hyperp
+    env.crank(); // fresh crank required before PushHyperpMark on hyperp
     env.try_push_oracle_price(&admin, 1_000_000, 200)
         .expect("oracle price push must succeed");
     env.try_resolve_market(&admin)
@@ -5817,7 +5817,7 @@ fn test_hyperp_same_price_trades_refresh_liveness_and_market_stays_live() {
 //
 //   1. POST-MATURITY TERMINAL. Once clock.slot - last_live_slot >=
 //      permissionless_resolve_stale_slots, the market is resolve-only:
-//      PushOraclePrice and CatchupAccrue reject with OracleStale;
+//      PushHyperpMark and CatchupAccrue reject with OracleStale;
 //      ResolvePermissionless succeeds.
 //
 //   2. NO PRE-MATURITY UNRECOVERABLE WINDOW. Just before maturity a
@@ -5864,10 +5864,10 @@ fn test_hyperp_after_stale_maturity_is_resolve_only() {
 
     // Admin push must NOT revive the market.
     let err = env.try_push_oracle_price(&admin, 1_020_000, 10 + 301)
-        .expect_err("PushOraclePrice must reject past perm_resolve maturity");
+        .expect_err("PushHyperpMark must reject past perm_resolve maturity");
     assert!(
         err.contains("0x6"),
-        "PushOraclePrice past maturity must surface OracleStale (0x6), got: {}", err,
+        "PushHyperpMark past maturity must surface OracleStale (0x6), got: {}", err,
     );
 
     // TradeCpi must also reject — same hard-timeout gate. This is the
@@ -5934,7 +5934,7 @@ fn test_hyperp_never_has_pre_resolve_unrecoverable_window() {
     // Admin push still works — perm_resolve hasn't matured, market is
     // recoverable.
     env.try_push_oracle_price(&admin, 1_020_000, 10 + 299)
-        .expect("PushOraclePrice must succeed before perm_resolve maturity");
+        .expect("PushHyperpMark must succeed before perm_resolve maturity");
     assert!(
         !env.is_market_resolved(),
         "market must still be live before perm_resolve maturity"

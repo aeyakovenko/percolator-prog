@@ -657,12 +657,6 @@ fn encode_top_up_insurance(amount: u64) -> Vec<u8> {
     data
 }
 
-fn encode_set_risk_threshold(new_threshold: u128) -> Vec<u8> {
-    let mut data = vec![11u8];
-    data.extend_from_slice(&new_threshold.to_le_bytes());
-    data
-}
-
 fn encode_update_admin(new_admin: &Pubkey) -> Vec<u8> {
     // UpdateAuthority { kind: AUTHORITY_ADMIN = 0, new_pubkey }
     let mut data = vec![32u8];
@@ -1796,24 +1790,7 @@ fn benchmark_all_instructions() {
         println!("TopUpInsurance:        {:>8} CU", cu);
     }
 
-    // --- SetRiskThreshold (Tag 11) ---
-    {
-        env.set_price(100_000_000, 500);
-        let ix = Instruction {
-            program_id: env.program_id,
-            accounts: vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(env.slab, false),
-                AccountMeta::new_readonly(sysvar::clock::ID, false),
-            ],
-            data: encode_set_risk_threshold(1_000_000),
-        };
-        // SetRiskThreshold always rejects (I_floor immutable per spec §2.2.1)
-        match measure(&mut env.svm, ix, &[&admin]) {
-            Ok(cu) => println!("SetRiskThreshold:      {:>8} CU (rejected)", cu),
-            Err(_) => println!("SetRiskThreshold:      (rejected — I_floor immutable)"),
-        }
-    }
+    // Tag 11 (SetRiskThreshold) benchmark removed: instruction deleted.
 
     // --- UpdateConfig (Tag 14) ---
     {

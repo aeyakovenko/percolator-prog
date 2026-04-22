@@ -336,7 +336,7 @@ pub mod verify {
     }
 
     /// Admin authorization: admin must be non-zero (not burned) and match signer.
-    /// Used by: UpdateAdmin, UpdateConfig, SetOracleAuthority
+    /// Used by: UpdateAuthority, UpdateConfig, and other admin-gated ops.
     #[inline]
     pub fn admin_ok(admin: [u8; 32], signer: [u8; 32]) -> bool {
         admin != [0u8; 32] && admin == signer
@@ -724,7 +724,7 @@ pub mod verify {
         }
     }
 
-    /// Decision for admin operations (UpdateAdmin, UpdateConfig, SetOracleAuthority, etc.).
+    /// Decision for admin operations (UpdateAuthority, UpdateConfig, etc.).
     #[inline]
     pub fn decide_admin_op(admin: [u8; 32], signer: [u8; 32]) -> SimpleDecision {
         if admin_ok(admin, signer) {
@@ -1314,8 +1314,9 @@ pub mod ix {
             size: i128,
             limit_price_e6: u64, // 0 = no limit (backward compat)
         },
-        /// Close the market slab and recover SOL to close_authority.
-        /// Requires: no active accounts, no vault funds, no insurance funds.
+        /// Close the market slab and recover SOL to the admin-supplied
+        /// destination. Requires: no active accounts, no vault funds,
+        /// no insurance funds.
         CloseSlab,
         /// Update configurable funding parameters. Admin only.
         UpdateConfig {
@@ -2012,8 +2013,8 @@ pub mod state {
     pub const RESERVED_OFF: usize = offset_of!(SlabHeader, _reserved);
 
     // Portable compile-time assertion that RESERVED_OFF is 48 (expected layout).
-    // The new insurance_authority / close_authority fields go AFTER _reserved,
-    // so this offset is unchanged at 48.
+    // Subsequent authority fields (insurance_authority, insurance_operator) sit
+    // after _reserved, so this offset is stable at 48.
     const _: [(); 48] = [(); RESERVED_OFF];
 
     #[repr(C)]
@@ -2132,14 +2133,12 @@ pub mod state {
         /// 0 = disabled (admin-only resolution). Set at InitMarket, immutable.
         pub permissionless_resolve_stale_slots: u64,
         /// Slot of last successful external oracle read (non-Hyperp only).
-        /// Under the STRICT HARD-TIMEOUT model, this is the authoritative
-        /// liveness signal: `clock.slot - last_good_oracle_slot >=
+        /// Authoritative liveness signal under the strict hard-timeout
+        /// model: `clock.slot - last_good_oracle_slot >=
         /// permissionless_resolve_stale_slots` makes the market stale
-        /// and eligible for ResolvePermissionless, and also causes
+        /// and eligible for ResolvePermissionless, and causes
         /// read_price_and_stamp to reject further price-taking ops.
-        /// Stamped in read_price_and_stamp ONLY when the external
-        /// oracle read returned Ok — authority fallback does NOT
-        /// advance this field. Seeded to clock.slot at InitMarket.
+        /// Seeded to clock.slot at InitMarket.
         pub last_good_oracle_slot: u64,
 
         // ========================================
@@ -2811,7 +2810,7 @@ pub mod oracle {
     ///
     /// "Liveness slot" is:
     ///   non-Hyperp → config.last_good_oracle_slot (advances on successful
-    ///                external reads only; NOT on authority fallback)
+    ///                external Pyth/Chainlink reads)
     ///   Hyperp     → config.last_mark_push_slot (advances ONLY on
     ///                full-weight mark observations: PushHyperpMark,
     ///                or a TradeCpi fill whose fee paid the mark_min
@@ -5257,11 +5256,7 @@ pub mod processor {
                     let mut reward = sweep_delta
                         .saturating_mul(crate::constants::CRANK_REWARD_BPS)
                         / 10_000u128;
-                    // Cap reward by post-crank insurance balance. The old
-                    // logic subtracted `insurance_floor` here; with the
-                    // floor deleted, the cap is just the remaining
-                    // insurance balance (which was what the floor-minus-
-                    // balance gate effectively enforced once floor = 0).
+                    // Cap reward by post-crank insurance balance.
                     let ins_now = engine.insurance_fund.balance.get();
                     if reward > ins_now {
                         reward = ins_now;
@@ -6971,28 +6966,14 @@ pub mod processor {
                 {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
-                // Non-Hyperp: cap=0 disables clamping, but if the immutable
-                // floor is set, disabling clamping would let PushHyperpMark
-                // walk last_effective_price_e6 arbitrarily, poisoning the
-                // baseline that ResolveMarket checks against. Reject cap=0
-                // when the floor is non-zero.
+                // Non-Hyperp: cap=0 disables the external-price circuit
+                // breaker (clamp_external_price returns Pyth readings
+                // unclamped). If the admin committed to a non-zero floor
+                // at init, reject runtime cap=0 — silently turning off
+                // flash-crash protection would defeat the floor promise.
                 if !is_hyperp
                     && max_change_e2bps == 0
                     && config.min_oracle_price_cap_e2bps != 0
-                {
-                    return Err(PercolatorError::InvalidConfigParam.into());
-                }
-                // Weaker-authority invariant (Model 1): once an oracle
-                // authority is configured on a non-Hyperp market, the cap
-                // may not be disabled. Disabling the cap would upgrade
-                // authority from a bounded fallback to an unbounded price
-                // setter — equivalent to admin — which breaks the
-                // separation that lets admin burn leave authority alive.
-                // Admins that want to remove the cap must first zero out
-                // the authority via SetOracleAuthority(Pubkey::default()).
-                if !is_hyperp
-                    && max_change_e2bps == 0
-                    && config.hyperp_authority != [0u8; 32]
                 {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
@@ -7947,30 +7928,18 @@ pub mod processor {
                 // STRICT HARD-TIMEOUT POLICY:
                 //
                 //   clock.slot - last_live_slot >= permissionless_resolve_stale_slots
-                //     → market is stale, anyone resolves at engine.last_oracle_price
+                //     → market is stale; anyone resolves at engine.last_oracle_price.
                 //
                 //   last_live_slot is:
                 //     non-Hyperp → config.last_good_oracle_slot
-                //                  (advances ONLY on successful external oracle
-                //                  reads; authority fallback does NOT advance it)
+                //                  (advances on successful external Pyth/Chainlink reads)
                 //     Hyperp     → max(mark_ewma_last_slot, last_mark_push_slot)
-                //                  (advances on trades and mark pushes)
+                //                  (advances on full-weight trades and admin mark pushes)
                 //
-                // No challenge window, no first-observation stamp, no oracle
-                // account submitted at resolve time. The timer is purely
-                // "slots since last accepted fresh oracle update for this
-                // market". If no one has fed the market a fresh oracle for
-                // N slots, it's dead. Period.
-                //
-                // Settlement is at engine.last_oracle_price (the last price
-                // the engine actually accrued against), for both Hyperp and
-                // non-Hyperp. Authority-fallback drift during the stale
-                // window IS reflected here — trades and cranks that ran on
-                // authority fallback fed into the engine — but once the
-                // window matures, all price-taking live instructions also
-                // reject (see permissionless_stale_matured() check in
-                // read_price_and_stamp and the Hyperp price path), so there
-                // is no further drift from the point of maturity onward.
+                // No challenge window, no oracle account submitted at resolve
+                // time. If no one has fed the market a fresh price for N
+                // slots, it's dead. Settlement is at engine.last_oracle_price
+                // (the last price the engine actually accrued against).
                 accounts::expect_len(accounts, 2)?;
                 let a_slab = &accounts[0];
                 let a_clock = &accounts[1];
@@ -8276,15 +8245,12 @@ pub mod processor {
                             .accrue_market_to(target, stored_p_last, funding_rate_e9_pre)
                             .map_err(map_risk_error)?;
                     }
-                    // Rollback selectively: roll back price/index state
-                    // that would retroactively apply a post-observation
-                    // index to pre-observation engine slots, but PRESERVE
-                    // liveness-recovery evidence from the successful
-                    // read. Otherwise a partial catchup during an idle
-                    // market's oracle recovery would resurrect an old
-                    // `first_observed_stale_slot`, potentially letting
-                    // ResolvePermissionless span two disjoint stale
-                    // windows as if they were continuous.
+                    // Rollback selectively: revert price/index state that
+                    // would retroactively apply a post-observation index to
+                    // pre-observation engine slots, but PRESERVE the
+                    // liveness stamp from the successful read so partial
+                    // catchups during oracle recovery can't resurrect a
+                    // previously-expired stale window.
                     //
                     // Fields rolled back (price/index — time-travel risk):
                     //   - last_effective_price_e6     (baseline)
@@ -8293,9 +8259,6 @@ pub mod processor {
                     // Fields preserved from the fresh read (liveness):
                     //   - last_good_oracle_slot       (stamp proving
                     //       external oracle was observed live this call)
-                    //
-                    // All other fields come from config_pre (no changes
-                    // expected from the oracle read anyway).
                     let mut restored = config_pre;
                     restored.last_good_oracle_slot = config.last_good_oracle_slot;
                     state::write_config(&mut data, &restored);

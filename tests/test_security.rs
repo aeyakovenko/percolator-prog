@@ -395,7 +395,7 @@ fn test_attack_close_account_wrong_owner() {
     );
 }
 
-/// ATTACK: Non-admin tries admin operations (UpdateAdmin,
+/// ATTACK: Non-admin tries admin operations (UpdateAuthority { AUTHORITY_ADMIN },
 /// UpdateConfig, SetMaintenanceFee, ResolveMarket).
 /// Expected: All admin operations fail for non-admin.
 #[test]
@@ -411,9 +411,9 @@ fn test_attack_admin_op_as_user() {
     let spl_vault_before = env.vault_balance();
     let engine_vault_before = env.read_engine_vault();
 
-    // UpdateAdmin
+    // UpdateAuthority { kind: AUTHORITY_ADMIN }
     let result = env.try_update_admin(&attacker, &attacker.pubkey());
-    assert!(result.is_err(), "ATTACK: Non-admin UpdateAdmin should fail");
+    assert!(result.is_err(), "ATTACK: Non-admin admin rotation should fail");
 
     // UpdateConfig
     let result = env.try_update_config(&attacker);
@@ -436,11 +436,11 @@ fn test_attack_admin_op_as_user() {
         "ATTACK: Non-admin ResolveMarket should fail"
     );
 
-    // SetOracleAuthority
+    // UpdateAuthority { kind: AUTHORITY_HYPERP_MARK }
     let result = env.try_set_oracle_authority(&attacker, &attacker.pubkey());
     assert!(
         result.is_err(),
-        "ATTACK: Non-admin SetOracleAuthority should fail"
+        "ATTACK: Non-admin hyperp-authority rotation should fail"
     );
 
     // SetOraclePriceCap
@@ -466,7 +466,7 @@ fn test_attack_admin_op_as_user() {
     );
 }
 
-/// UpdateAdmin to zero address permanently burns admin authority.
+/// UpdateAuthority burn: rotating admin to zero permanently removes it.
 /// After burning, all admin instructions must fail.
 #[test]
 fn test_attack_burned_admin_cannot_act() {
@@ -484,7 +484,7 @@ fn test_attack_burned_admin_cannot_act() {
     let result = env.try_update_admin(&admin, &zero_pubkey);
     assert!(
         result.is_ok(),
-        "UpdateAdmin to zero should succeed (admin burn)"
+        "admin burn should succeed"
     );
 
     // Admin instructions should now permanently fail
@@ -561,10 +561,9 @@ fn test_attack_trade_without_margin() {
 /// ATTACK: OI-increasing trade when long side is in DrainOnly mode (spec §9.6).
 /// Expected: Trade rejected with SideBlocked → EngineRiskReductionOnlyMode (0x16).
 ///
-/// The new spec (§9.6) uses side-mode gating: trades that increase net side OI
-/// on DrainOnly/ResetPending sides are rejected (RiskError::SideBlocked →
-/// EngineRiskReductionOnlyMode). The old insurance_floor is no longer a trade gate;
-/// it governs insurance withdrawal reserves only.
+/// Side-mode gating (§9.6): trades that increase net side OI on
+/// DrainOnly/ResetPending sides are rejected (RiskError::SideBlocked →
+/// EngineRiskReductionOnlyMode).
 ///
 /// To trigger DrainOnly in a live integration scenario requires many ADL cycles
 /// (A_side decaying below MIN_A_SIDE = 2^64), which is impractical to set up.
@@ -1975,18 +1974,10 @@ fn test_attack_update_config_extreme_values() {
             AccountMeta::new_readonly(env.pyth_index, false),
         ],
         data: encode_update_config(
-            1,        // funding_horizon_slots (minimum)
-            10000,    // funding_k_bps (100%)
-            10000i64, // funding_max_premium_bps (max allowed)
-            10i64,    // funding_max_e9_per_slot (fits per-market envelope = 10 bps/slot)
-            0u128,
-            10000,
-            1,
-            10000,
-            10000,
-            0u128,
-            10_000_000_000_000_000u128, // thresh_max (= max_insurance_floor cap = MAX_VAULT_TVL)
-            0u128,
+            1,// funding_horizon_slots (minimum)
+            10000,// funding_k_bps (100%)
+            10000i64,// funding_max_premium_bps (max allowed)
+            10i64,// funding_max_e9_per_slot (fits per-market envelope = 10 bps/slot)
         ),
     };
     let tx = Transaction::new_signed_with_payer(
@@ -2167,13 +2158,7 @@ fn test_attack_config_zero_funding_horizon() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let cfg_before = env.read_update_config_snapshot();
     let vault_before = env.vault_balance();
-    let result = env.try_update_config_with_params(
-        &admin,
-        0,                     // funding_horizon_slots = 0 (invalid)
-        1000,                  // normal alpha
-        0,
-        u128::MAX, // min/max
-    );
+    let result = env.try_update_config_with_params(&admin, 0);
     assert!(
         result.is_err(),
         "ATTACK: Zero funding_horizon_slots should be rejected (InvalidConfigParam)"
@@ -3625,7 +3610,7 @@ fn test_attack_double_resolve_market() {
     assert!(result.is_err(), "ATTACK: Double resolve succeeded!");
 }
 
-/// ATTACK: UpdateAdmin to zero address is now rejected at the instruction level.
+/// ATTACK: admin burn when the lifecycle guard fails must be rejected.
 /// Verify that the zero-admin foot-gun guard prevents the lockout.
 #[test]
 fn test_attack_update_admin_to_zero_locks_out() {
@@ -3639,7 +3624,7 @@ fn test_attack_update_admin_to_zero_locks_out() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
 
     // Burn admin via UpdateAuthority (tag 32, kind=ADMIN, new=zero,
-    // single-sig). Legacy UpdateAdmin tag 12 was deleted.
+    // single-sig). Legacy UpdateAdmin (tag 12) was replaced by UpdateAuthority.
     let result = env.try_update_authority(&admin, AUTHORITY_ADMIN, None);
     assert!(
         result.is_ok(),
@@ -5153,7 +5138,7 @@ fn test_attack_engine_vault_spl_vault_consistency() {
     );
 }
 
-/// ATTACK: UpdateAdmin then attempt old admin operations.
+/// ATTACK: rotate admin then attempt old admin operations.
 /// After admin transfer, old admin should be unable to perform admin operations.
 #[test]
 fn test_attack_old_admin_blocked_after_transfer() {
@@ -5219,13 +5204,7 @@ fn test_attack_config_extreme_funding_max_bps() {
 
     // Try to set thresh_max to extreme value
     // The engine should either accept (with clamping) or reject this
-    let result = env.try_update_config_with_params(
-        &admin,
-        100,                        // funding_horizon_slots
-        1000,                       // thresh_alpha_bps
-        0,                          // thresh_min
-        10_000_000_000_000_000u128, // thresh_max (= max_insurance_floor cap = MAX_VAULT_TVL)
-    );
+    let result = env.try_update_config_with_params(&admin, 100);
     assert!(
         result.is_ok(),
         "Extreme-but-valid thresh_max update should be accepted: {:?}",
@@ -5934,18 +5913,10 @@ fn test_attack_funding_extreme_k_bps_capped() {
             AccountMeta::new_readonly(env.pyth_index, false),
         ],
         data: encode_update_config(
-            100,                        // funding_horizon_slots
-            100_000,                    // funding_k_bps (max allowed = 1000x)
-            100,                        // funding_max_premium_bps
-            10,                         // funding_max_e9_per_slot
-            0u128,                      // thresh_floor
-            100,                        // thresh_risk_bps
-            100,                        // thresh_update_interval_slots
-            100,                        // thresh_step_bps
-            1000,                       // thresh_alpha_bps
-            0u128,                      // thresh_min
-            10_000_000_000_000_000u128, // thresh_max (= max_insurance_floor cap = MAX_VAULT_TVL)
-            1u128,                      // thresh_min_step
+            100,// funding_horizon_slots
+            100_000,// funding_k_bps (max allowed = 1000x)
+            100,// funding_max_premium_bps
+            10,// funding_max_e9_per_slot
         ),
     };
     let tx = Transaction::new_signed_with_payer(
@@ -6017,18 +5988,10 @@ fn test_attack_funding_extreme_max_premium_capped() {
             AccountMeta::new_readonly(env.pyth_index, false),
         ],
         data: encode_update_config(
-            100,                        // funding_horizon_slots
-            100,                        // funding_k_bps
-            i64::MAX,                   // funding_max_premium_bps (extreme!)
-            10,                         // funding_max_e9_per_slot
-            0u128,                      // thresh_floor
-            100,                        // thresh_risk_bps
-            100,                        // thresh_update_interval_slots
-            100,                        // thresh_step_bps
-            1000,                       // thresh_alpha_bps
-            0u128,                      // thresh_min
-            10_000_000_000_000_000u128, // thresh_max (= max_insurance_floor cap = MAX_VAULT_TVL)
-            1u128,             // thresh_min_step
+            100,// funding_horizon_slots
+            100,// funding_k_bps
+            i64::MAX,// funding_max_premium_bps (extreme!)
+            10,// funding_max_e9_per_slot
         ),
     };
     let tx = Transaction::new_signed_with_payer(
@@ -6100,18 +6063,10 @@ fn test_attack_funding_extreme_max_bps_per_slot() {
             AccountMeta::new_readonly(env.pyth_index, false),
         ],
         data: encode_update_config(
-            100,                        // funding_horizon_slots
-            100,                        // funding_k_bps
-            100,                        // funding_max_premium_bps
-            i64::MAX,                   // funding_max_e9_per_slot (extreme!)
-            0u128,                      // thresh_floor
-            100,                        // thresh_risk_bps
-            100,                        // thresh_update_interval_slots
-            100,                        // thresh_step_bps
-            1000,                       // thresh_alpha_bps
-            0u128,                      // thresh_min
-            10_000_000_000_000_000u128, // thresh_max (= max_insurance_floor cap = MAX_VAULT_TVL)
-            1u128,                      // thresh_min_step
+            100,// funding_horizon_slots
+            100,// funding_k_bps
+            100,// funding_max_premium_bps
+            i64::MAX,// funding_max_e9_per_slot (extreme!)
         ),
     };
     let tx = Transaction::new_signed_with_payer(
@@ -7359,8 +7314,8 @@ fn test_attack_close_slab_blocked_by_dormant_account() {
     );
 }
 
-/// ATTACK: UpdateAdmin transfers control, old admin tries operation.
-/// After UpdateAdmin, the old admin should be unauthorized.
+/// ATTACK: admin rotated; old admin tries an operation.
+/// After the rotation the previous admin should be unauthorized.
 #[test]
 fn test_attack_update_admin_old_admin_rejected() {
     program_path();
@@ -7380,7 +7335,7 @@ fn test_attack_update_admin_old_admin_rejected() {
     let result = env.try_update_admin(&admin, &admin.pubkey());
     assert!(
         result.is_err(),
-        "ATTACK: Old admin still authorized after UpdateAdmin!"
+        "ATTACK: Old admin still authorized after rotation!"
     );
     let slab_after_old_admin_attempt = env.svm.get_account(&env.slab).unwrap().data;
     assert_eq!(
@@ -7399,7 +7354,7 @@ fn test_attack_update_admin_old_admin_rejected() {
 
 /// ATTACK: Set maintenance fee to extreme value, accrue fees.
 /// Verify fee debt accumulates but doesn't cause overflow or negative capital.
-/// ATTACK: SetOracleAuthority to zero disables PushOraclePrice.
+/// ATTACK: burning hyperp_authority disables PushHyperpMark.
 /// Oracle authority cleared means stored price is cleared and push fails.
 #[test]
 fn test_attack_set_oracle_authority_to_zero_disables_push() {
@@ -7451,7 +7406,7 @@ fn test_attack_set_oracle_authority_to_zero_disables_push() {
     let result = env.try_push_oracle_price(&admin, 2_000_000, 2000);
     assert!(
         result.is_err(),
-        "ATTACK: PushOraclePrice succeeded after authority cleared!"
+        "ATTACK: PushHyperpMark succeeded after authority cleared!"
     );
     let slab_after = env.svm.get_account(&env.slab).unwrap().data;
     let auth_price_after =
@@ -7533,9 +7488,6 @@ fn test_attack_multi_lp_independent_positions() {
     );
 }
 
-/// Per spec v10.5, insurance_floor (SetRiskThreshold) does NOT gate trades.
-/// Trade gating is side-mode based (DrainOnly/ResetPending only).
-/// This test verifies that changing insurance_floor does not affect trading.
 /// ATTACK: Close account after round-trip trade with PnL.
 /// Protocol requires position=0 and PnL=0 for close.
 #[test]
@@ -7594,7 +7546,7 @@ fn test_attack_close_account_after_roundtrip_pnl() {
     assert_eq!(cap, 0, "Capital should be zero after close");
 }
 
-/// ATTACK: UpdateAdmin to same address (no-op).
+/// ATTACK: admin-self-rotate (no-op).
 /// Should succeed without side effects.
 #[test]
 fn test_attack_update_admin_same_address_noop() {
@@ -10533,7 +10485,7 @@ fn test_attack_update_config_during_active_trades() {
     );
 }
 
-/// ATTACK: PushOraclePrice with same price as last effective price.
+/// ATTACK: PushHyperpMark with same price as last effective price.
 /// When price doesn't change, circuit breaker should produce stable state.
 #[test]
 fn test_attack_push_oracle_same_as_last_price() {
@@ -10897,7 +10849,7 @@ fn test_attack_update_config_after_resolution() {
     );
 }
 
-/// ATTACK: PushOraclePrice after resolution.
+/// ATTACK: PushHyperpMark after resolution.
 /// Settlement parameters must be frozen once market is resolved.
 #[test]
 fn test_attack_push_oracle_after_resolution_rejected() {
@@ -10924,7 +10876,7 @@ fn test_attack_push_oracle_after_resolution_rejected() {
     let result = env.try_push_oracle_price(&admin, 200_000_000, 200);
     assert!(
         result.is_err(),
-        "SECURITY: PushOraclePrice must be rejected after resolution"
+        "SECURITY: PushHyperpMark must be rejected after resolution"
     );
 
     let slab_after = env.svm.get_account(&env.slab).unwrap().data;
@@ -10939,7 +10891,7 @@ fn test_attack_push_oracle_after_resolution_rejected() {
     );
 }
 
-/// ATTACK: SetOracleAuthority after resolution.
+/// ATTACK: UpdateAuthority { AUTHORITY_HYPERP_MARK } after resolution.
 /// Oracle authority must remain frozen once market is resolved.
 #[test]
 fn test_attack_set_oracle_authority_after_resolution_rejected() {
@@ -10963,7 +10915,7 @@ fn test_attack_set_oracle_authority_after_resolution_rejected() {
     let result = env.try_set_oracle_authority(&admin, &Pubkey::new_unique());
     assert!(
         result.is_err(),
-        "SECURITY: SetOracleAuthority must be rejected after resolution"
+        "SECURITY: hyperp-authority rotation must be rejected after resolution"
     );
 
     let slab_after = env.svm.get_account(&env.slab).unwrap().data;
@@ -11263,10 +11215,6 @@ fn test_attack_slot_reuse_multi_user_gc_reinit() {
     );
 }
 
-/// SetRiskThreshold sets insurance_floor. Per spec §4.7, insurance_floor
-/// reserves a portion of the insurance fund that cannot be withdrawn.
-/// Trades are NOT gated by insurance_floor (spec v10.5 uses side-mode gating).
-/// This test verifies insurance_floor can be set and the engine state is consistent.
 /// ATTACK: LP tries to withdraw when haircut is active (vault < c_tot + insurance).
 /// After a user takes a large loss, LP capital might be haircutted - can LP
 /// withdraw more than their haircutted equity?
@@ -12470,14 +12418,14 @@ fn test_attack_oracle_timestamp_zero_then_crank() {
     );
 
     // The legacy authority-timestamp slot is now reserved padding
-    // (`_reserved_auth_ts`). PushOraclePrice must not touch it.
+    // (`_reserved_auth_ts`). PushHyperpMark must not touch it.
     const AUTH_TS_OFF: usize = 320;
     let slab_data = env.svm.get_account(&env.slab).unwrap().data;
     let funding_state =
         i64::from_le_bytes(slab_data[AUTH_TS_OFF..AUTH_TS_OFF + 8].try_into().unwrap());
     assert_eq!(
         funding_state, 0,
-        "Hyperp funding-rate state must remain unchanged by PushOraclePrice"
+        "Hyperp funding-rate state must remain unchanged by PushHyperpMark"
     );
 
     env.set_slot(200);
@@ -12615,7 +12563,7 @@ fn test_attack_deposit_to_lp_wrong_owner() {
     );
 }
 
-/// ATTACK: Settlement guard bypass via cap=0 + PushOraclePrice baseline poisoning.
+/// ATTACK: Settlement guard bypass via cap=0 + PushHyperpMark baseline poisoning.
 ///
 /// If admin can set oracle_price_cap to 0 on a non-Hyperp market with
 /// min_oracle_price_cap > 0, they can push arbitrary prices that overwrite
@@ -12663,9 +12611,7 @@ fn test_attack_settlement_guard_bypass_cap_zero_poisoning() {
             &admin.pubkey(),
             &env.mint,
             &TEST_FEED_ID,
-            100_000_000_000_000_000_000u128, // max_maintenance_fee
-            10_000_000_000_000_000u128,       // max_insurance_floor
-            10_000u64,                        // min_oracle_price_cap_e2bps = 1%
+            10_000u64, // min_oracle_price_cap_e2bps = 1%
         ),
     };
 
@@ -12772,7 +12718,7 @@ fn test_trade_nocpi_user_bilateral_allowed_by_spec() {
 
 /// ATTACK: Settlement guard bypass via first-push baseline poisoning.
 ///
-/// On non-Hyperp markets, PushOraclePrice must NOT overwrite
+/// On non-Hyperp markets, PushHyperpMark must NOT overwrite
 /// last_effective_price_e6 — only external oracle reads (crank/trade)
 /// should set the baseline. Otherwise the admin can push an arbitrary
 /// price, poisoning the baseline, then resolve against it.
@@ -12815,8 +12761,6 @@ fn test_attack_first_push_does_not_poison_baseline() {
             &admin.pubkey(),
             &env.mint,
             &TEST_FEED_ID,
-            100_000_000_000_000_000_000u128,
-            10_000_000_000_000_000u128,
             10_000u64, // min_oracle_price_cap = 1%
         ),
     };

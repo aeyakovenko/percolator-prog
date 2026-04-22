@@ -791,13 +791,7 @@ fn test_attack_updateconfig_preserves_conservation() {
 
     // UpdateConfig with different parameters
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    let result = env.try_update_config_with_params(
-        &admin,
-        7200,                       // funding_horizon_slots
-        2000,                       // alpha_bps
-        0,
-        10_000_000_000_000_000u128, // thresh_max (= max_insurance_floor cap = MAX_VAULT_TVL)
-    );
+    let result = env.try_update_config_with_params(&admin, 7200);
     assert!(
         result.is_ok(),
         "UpdateConfig should succeed with valid params"
