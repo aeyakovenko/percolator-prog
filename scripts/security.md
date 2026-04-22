@@ -122,6 +122,28 @@ For each iteration:
       induced revert looks identical to an exploit. One wasted
       iteration per false positive minimum.
 
+   a.6. **Equivalent-path check.** Before claiming a "dangerous
+      privilege is forwarded through path X" finding, ask: *can
+      an attacker achieve the same outcome via a simpler path?*
+      The tx-level signer set is already the full attack surface
+      a malicious frontend has. A CPI that forwards signer flags
+      to a subprogram only ADDS attack surface if that subprogram
+      can do something the attacker couldn't do with a separate
+      top-level instruction in the same tx.
+
+      Example: "wrapper forwards user signer to matcher CPI →
+      malicious matcher drains user's ATA via spl_token::transfer."
+      This is NOT a finding, because a malicious frontend can
+      achieve the same drain by appending a plain
+      spl_token::transfer instruction to the tx — no matcher CPI
+      required. The forwarding doesn't expand attack surface
+      beyond "user signed a malicious tx."
+
+      General form: X is a finding only if the attacker's
+      capability after X > their capability without X. If
+      capability is identical, X is design/documentation, not
+      exploit.
+
    b. **Reproduce with a minimal setup.** Strip the scenario to
       the smallest that still surfaces the weirdness. Fewer moving
       pieces = clearer attribution.
