@@ -98,6 +98,30 @@ For each iteration:
       to include every field the spec says moves, then re-run.**
       Only claim a finding after the widened invariant still breaks.
 
+   a.5. **Test-setup check.** Verify the account(s) you're probing
+      are in the intended state RIGHT BEFORE the tx you're
+      probing — not just after your initial `set_account`. Helper
+      functions (`set_slot`, `set_slot_and_price`, `crank`,
+      `top_up_insurance`, ...) may silently overwrite or reset
+      accounts you touched earlier. The pattern:
+
+      ```rust
+      // your override
+      env.svm.set_account(env.some_account, Account { ... });
+      // ... some intermediate helper calls ...
+      env.set_slot(500);           // may reset env.some_account!
+      env.svm.expire_blockhash();
+
+      // VERIFY right before the probe:
+      let right_before = env.svm.get_account(&env.some_account).unwrap();
+      println!("{:?}", &right_before.data[OFFSET..]);
+      // Then send the probe tx.
+      ```
+
+      Without this check, a "finding" that's really a helper-
+      induced revert looks identical to an exploit. One wasted
+      iteration per false positive minimum.
+
    b. **Reproduce with a minimal setup.** Strip the scenario to
       the smallest that still surfaces the weirdness. Fewer moving
       pieces = clearer attribution.
