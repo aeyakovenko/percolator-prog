@@ -2787,36 +2787,39 @@ pub mod oracle {
     }
 
     /// Circuit-breaker clamp applied to an already-parsed external
-    /// observation, with non-regressing source-feed timestamp tracking.
+    /// observation, with strict source-feed timestamp ordering.
     ///
     /// Pyth's `publish_time` and Chainlink's `timestamp` are signed by
     /// the off-chain network and can't be forged by the caller, so we
-    /// use them as a one-way clock on observations:
+    /// use them as a strictly increasing clock on observations:
     ///
-    ///   publish_time >= last_oracle_publish_time
-    ///       → accept the submitted observation, clamp it against the
-    ///         baseline, advance both the baseline and the timestamp.
+    ///   publish_time >  last_oracle_publish_time
+    ///       → fresh observation. Clamp against baseline, then
+    ///         advance baseline and timestamp.
     ///
-    ///   publish_time <  last_oracle_publish_time
-    ///       → an even-newer observation has already been accepted.
-    ///         Don't error — the caller may have signed before the
-    ///         newer update was posted (offline signers, hardware
-    ///         wallets, multi-sigs) and forcing a retry would just
-    ///         deadlock them as the on-chain state moves forward.
-    ///         Return the stored `last_effective_price_e6` and leave
-    ///         baseline + timestamp unchanged. The caller's op runs
-    ///         against the freshest price the wrapper has on file
-    ///         and cannot pull state backward.
+    ///   publish_time <= last_oracle_publish_time
+    ///       → stale or duplicate. Return stored
+    ///         `last_effective_price_e6` and DO NOT advance any
+    ///         field. Caller's tx still succeeds (offline signers,
+    ///         hardware wallets, and multi-sigs that signed before
+    ///         a competing keeper updated Pyth aren't deadlocked),
+    ///         but the wrapper's view of the oracle does not move
+    ///         and no liveness signal is recorded for this read.
     ///
-    /// This preserves caller liveness while preventing baseline-rewind
-    /// (the only way to lower the effective price is via a fresh
-    /// downward-clamped observation, not via a replay of an old one).
+    /// The strict-greater branch is the ONLY way the baseline or
+    /// timestamp advance. This closes the cap-walk attack where a
+    /// caller replayed the same observation N times to walk
+    /// `last_effective_price_e6` by N cap-steps. Callers needing to
+    /// decide whether THIS particular read advanced state (e.g. to
+    /// stamp `last_good_oracle_slot`) should snapshot
+    /// `config.last_oracle_publish_time` before the call and compare
+    /// after.
     pub fn clamp_external_price(
         config: &mut super::state::MarketConfig,
         external: Result<(u64, i64), ProgramError>,
     ) -> Result<u64, ProgramError> {
         let (ext_price, publish_time) = external?;
-        if publish_time < config.last_oracle_publish_time {
+        if publish_time <= config.last_oracle_publish_time {
             return Ok(config.last_effective_price_e6);
         }
         let clamped = clamp_oracle_price(
@@ -3174,10 +3177,18 @@ pub mod processor {
             config.invert,
             config.unit_scale,
         );
+        // Snapshot the source-feed clock before the call so we can
+        // tell whether THIS read advanced state. Stale/duplicate
+        // observations get the cached price from
+        // `clamp_external_price` without advancing the timestamp; we
+        // must not stamp the liveness cursor on those — otherwise an
+        // attacker can replay an old Pyth account to extend market
+        // life past `permissionless_resolve_stale_slots`.
+        let prev_publish_time = config.last_oracle_publish_time;
         let price = oracle::clamp_external_price(config, external)?;
-
-        // External succeeded (we have a price); advance liveness cursor.
-        config.last_good_oracle_slot = clock_slot;
+        if config.last_oracle_publish_time > prev_publish_time {
+            config.last_good_oracle_slot = clock_slot;
+        }
         let _ = slab_data; // reserved for future per-read slab stamping
         Ok(price)
     }
@@ -4137,6 +4148,18 @@ pub mod processor {
 
                 // Validate new_account_fee: 0 ≤ fee ≤ MAX_VAULT_TVL.
                 if new_account_fee > percolator::MAX_VAULT_TVL {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+                // Scale alignment: `new_account_fee` is paid in BASE units
+                // and split out of `fee_payment` at InitUser/InitLP. The
+                // wrapper rejects misaligned `fee_payment` (the outer
+                // dust check), but the SPLIT into (fee, capital) can
+                // still produce dust on each side if `new_account_fee`
+                // itself isn't aligned to `unit_scale`. That dust is
+                // silently discarded into the vault by the units-conversion.
+                // Reject the misconfig at init so admins can't ship a
+                // market that leaks per-account dust to the vault.
+                if unit_scale > 0 && new_account_fee % (unit_scale as u128) != 0 {
                     return Err(ProgramError::InvalidInstructionData);
                 }
 
@@ -5961,14 +5984,28 @@ pub mod processor {
                     engine
                         .accrue_market_to(clock.slot, price, funding_rate_e9_pre)
                         .map_err(map_risk_error)?;
-                    // Restore pre-oracle config, but preserve oracle/index state
-                    // that legitimately advanced during the instruction:
-                    // - last_good_oracle_slot: liveness proof from successful read
-                    // - last_effective_price_e6: index legitimately moved toward mark
-                    // - last_hyperp_index_slot: prevents dt-accumulation attack
+                    // Restore pre-oracle config, but preserve oracle/index
+                    // state that legitimately advanced during the instruction:
+                    // - last_good_oracle_slot:        liveness proof from
+                    //                                 successful read
+                    // - last_effective_price_e6:      baseline (clamped from
+                    //                                 the fresh observation)
+                    // - last_oracle_publish_time:     MUST be preserved
+                    //                                 atomically with the
+                    //                                 baseline — otherwise a
+                    //                                 zero-fill could keep
+                    //                                 the new baseline while
+                    //                                 rolling the timestamp
+                    //                                 back, letting the same
+                    //                                 Pyth update advance
+                    //                                 baseline N times via
+                    //                                 interleaved zero-fills.
+                    // - last_hyperp_index_slot:       prevents dt-accumulation
+                    //                                 attack on Hyperp index.
                     let mut restored = config_pre_oracle;
                     restored.last_good_oracle_slot = config.last_good_oracle_slot;
                     restored.last_effective_price_e6 = config.last_effective_price_e6;
+                    restored.last_oracle_publish_time = config.last_oracle_publish_time;
                     restored.last_hyperp_index_slot = config.last_hyperp_index_slot;
                     state::write_config(&mut data, &restored);
                     state::write_req_nonce(&mut data, req_id);
@@ -7112,15 +7149,15 @@ pub mod processor {
                     );
                     match oracle_result {
                         Ok((fresh_oracle, publish_time)) => {
-                            if publish_time < config.last_oracle_publish_time {
-                                // Older observation: substitute the stored
-                                // last-known-good price. Mirrors the live
-                                // graceful-fallback policy in
-                                // `clamp_external_price` so admin resolve
+                            if publish_time <= config.last_oracle_publish_time {
+                                // Stale or duplicate observation: substitute
+                                // the stored baseline as the live anchor and
+                                // do not advance baseline or timestamp.
+                                // Mirrors the live policy in
+                                // `clamp_external_price` — admin resolve
                                 // doesn't error when a newer update has
-                                // already advanced state past the
-                                // admin's signed reading. Baseline and
-                                // timestamp remain unchanged.
+                                // already landed, but the wrapper's view
+                                // of the oracle does not move on this read.
                                 fresh_live_oracle = Some(config.last_effective_price_e6);
                             } else {
                                 fresh_live_oracle = Some(fresh_oracle);

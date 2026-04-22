@@ -1203,18 +1203,110 @@ fn test_oracle_older_observation_uses_stored_price_and_does_not_rewind() {
     );
 }
 
-/// Equal `publish_time` must be accepted: two transactions in the same
-/// slot reading the same on-chain Pyth update is not "out of order".
+/// Equal `publish_time` must succeed (caller's tx doesn't fail) but
+/// must NOT re-clamp the baseline. Replaying the same Pyth observation
+/// N times must be a no-op — otherwise an attacker can walk
+/// `last_effective_price_e6` toward the raw oracle price by one
+/// cap-step per replay.
 #[test]
-fn test_oracle_publish_time_equal_observation_succeeds() {
+fn test_oracle_equal_publish_time_replay_does_not_walk_baseline() {
     let mut env = TestEnv::new();
-    env.init_market_with_invert(0);
+    // Set a tight 1% cap so each cap-step would be visible.
+    env.init_market_with_cap(0, 10_000, 0);
 
-    // First crank stamps publish_time.
+    const LAST_ORACLE_PUB_TS_OFF: usize = 320;
+    const LAST_EFFECTIVE_PRICE_OFF: usize = 336;
+    let read_pub_ts = |env: &TestEnv| -> i64 {
+        let d = env.svm.get_account(&env.slab).unwrap().data;
+        i64::from_le_bytes(
+            d[LAST_ORACLE_PUB_TS_OFF..LAST_ORACLE_PUB_TS_OFF + 8].try_into().unwrap(),
+        )
+    };
+    let read_baseline = |env: &TestEnv| -> u64 {
+        let d = env.svm.get_account(&env.slab).unwrap().data;
+        u64::from_le_bytes(
+            d[LAST_EFFECTIVE_PRICE_OFF..LAST_EFFECTIVE_PRICE_OFF + 8].try_into().unwrap(),
+        )
+    };
+
+    // Genesis Pyth at price 100, accepted at init.
+    env.set_slot_and_price(100, 100_000_000);
+    env.crank();
+    let baseline_before = read_baseline(&env);
+    let pub_ts_before = read_pub_ts(&env);
+
+    // Replace on-chain Pyth with the SAME publish_time but a wildly
+    // different raw price (would clamp to baseline + 1% per re-read
+    // if the equal-timestamp branch fell through to the clamp path).
+    let attack_pyth = make_pyth_data(&TEST_FEED_ID, 999_999_999, -6, 1, pub_ts_before);
+    env.svm
+        .set_account(
+            env.pyth_index,
+            Account {
+                lamports: 1_000_000,
+                data: attack_pyth,
+                owner: PYTH_RECEIVER_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    // Replay the same publish_time N times. Each crank must succeed
+    // but baseline + timestamp must not advance.
+    for _ in 0..10 {
+        env.crank();
+    }
+
+    assert_eq!(
+        read_baseline(&env),
+        baseline_before,
+        "10× replay of the same publish_time must not walk baseline",
+    );
+    assert_eq!(
+        read_pub_ts(&env),
+        pub_ts_before,
+        "replay must not advance last_oracle_publish_time",
+    );
+}
+
+/// Liveness cursor: stale-or-duplicate observations must NOT advance
+/// `last_good_oracle_slot`. Otherwise an attacker can keep the market
+/// alive past `permissionless_resolve_stale_slots` by replaying an old
+/// (still-within-max_staleness_secs) Pyth account every slot.
+#[test]
+fn test_oracle_replay_does_not_advance_liveness_cursor() {
+    let mut env = TestEnv::new();
+    env.init_market_with_cap(0, 10_000, 0);
+
+    const LAST_GOOD_SLOT_OFF: usize = 136 + 328; // HEADER_LEN(136) + last_good_oracle_slot offset
+    let read_last_good = |env: &TestEnv| -> u64 {
+        let d = env.svm.get_account(&env.slab).unwrap().data;
+        u64::from_le_bytes(
+            d[LAST_GOOD_SLOT_OFF..LAST_GOOD_SLOT_OFF + 8].try_into().unwrap(),
+        )
+    };
+
+    // Fresh Pyth at slot 100 stamps last_good_oracle_slot.
     env.set_slot_and_price(100, 138_000_000);
     env.crank();
+    let last_good_after_first = read_last_good(&env);
+    assert!(
+        last_good_after_first >= 100,
+        "first crank must stamp last_good_oracle_slot, got {}",
+        last_good_after_first,
+    );
 
-    // Second crank without advancing the Pyth account: same publish_time.
-    // This must succeed (equal is not "older").
+    // Advance the wall clock without touching Pyth. Same publish_time
+    // gets re-read; liveness must NOT advance.
+    let mut clk = env.svm.get_sysvar::<solana_sdk::clock::Clock>();
+    clk.slot += 50;
+    env.svm.set_sysvar(&clk);
     env.crank();
+
+    assert_eq!(
+        read_last_good(&env),
+        last_good_after_first,
+        "duplicate-publish_time read must not advance last_good_oracle_slot",
+    );
 }

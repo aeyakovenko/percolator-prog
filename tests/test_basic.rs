@@ -5272,3 +5272,64 @@ fn test_keeper_crank_permissionless_pays_no_reward() {
 
 
 
+
+/// InitMarket must reject `new_account_fee` not aligned to `unit_scale`.
+/// The InitUser/InitLP split divides `fee_payment` into (fee, capital);
+/// if `new_account_fee` isn't a multiple of `unit_scale`, the
+/// per-side units conversion silently discards dust into the vault
+/// every time an account is created. Reject the misconfig at init.
+#[test]
+fn test_init_market_rejects_new_account_fee_not_scale_aligned() {
+    let mut env = TestEnv::new();
+    // unit_scale = 1000, new_account_fee = 1500 → split would discard
+    // 500 base from fee side and 500 from capital side per InitUser.
+    let data = common::encode_init_market_full(
+        &env.payer.pubkey(),
+        &env.mint,
+        &common::TEST_FEED_ID,
+        0,    // invert
+        1000, // unit_scale
+        1500, // new_account_fee (NOT aligned to 1000)
+    );
+    let err = env
+        .try_init_market_raw(data)
+        .expect_err("init must reject misaligned new_account_fee");
+    assert!(
+        err.contains("InvalidInstructionData") || err.contains("0x0"),
+        "expected InvalidInstructionData, got: {}",
+        err,
+    );
+}
+
+/// Counterpart: aligned `new_account_fee` is accepted.
+#[test]
+fn test_init_market_accepts_scale_aligned_new_account_fee() {
+    let mut env = TestEnv::new();
+    let data = common::encode_init_market_full(
+        &env.payer.pubkey(),
+        &env.mint,
+        &common::TEST_FEED_ID,
+        0,
+        1000, // unit_scale
+        2000, // new_account_fee (aligned)
+    );
+    env.try_init_market_raw(data)
+        .expect("aligned new_account_fee must be accepted");
+}
+
+/// Counterpart: with `unit_scale = 0` (no scaling), any `new_account_fee`
+/// is trivially aligned.
+#[test]
+fn test_init_market_accepts_any_new_account_fee_when_unit_scale_zero() {
+    let mut env = TestEnv::new();
+    let data = common::encode_init_market_full(
+        &env.payer.pubkey(),
+        &env.mint,
+        &common::TEST_FEED_ID,
+        0,
+        0,    // unit_scale = 0 → no scaling, alignment trivial
+        1500, // any value is fine
+    );
+    env.try_init_market_raw(data)
+        .expect("unit_scale=0 makes alignment trivial");
+}
