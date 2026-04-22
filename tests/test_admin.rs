@@ -453,7 +453,7 @@ fn test_update_admin_zero_accepted_for_burn() {
     );
 
     // After burn, admin instructions must fail
-    let result = env.try_set_risk_threshold(&admin, 999);
+    let result = env.try_set_oracle_price_cap(&admin, 999);
     assert!(
         result.is_err(),
         "Admin operations must fail after admin burn"

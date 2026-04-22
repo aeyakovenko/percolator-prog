@@ -12,8 +12,6 @@ use solana_sdk::{
     sysvar,
     transaction::Transaction,
 };
-use spl_token::state::{Account as TokenAccount, AccountState};
-
 /// Test that an inverted market can successfully run crank operations.
 ///
 /// This verifies the funding calculation uses market price (inverted) correctly.
@@ -1710,7 +1708,6 @@ fn test_withdrawal_under_haircut_conditions() {
     // Their initial deposit was 5B; if they got full PnL they'd get significantly more.
     // Verify returned amount is less than initial deposit + generous upper bound.
     // (This confirms the haircut mechanism is working.)
-    let winner_initial_deposit: u64 = 5_000_000_000;
     assert!(
         returned_to_winner <= vault_before_close,
         "Returned capital cannot exceed vault balance (conservation)"

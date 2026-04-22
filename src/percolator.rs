@@ -1423,10 +1423,12 @@ pub mod ix {
         /// Scoped-authority update (tag 32).
         ///
         /// kind:
-        ///   0 = AUTHORITY_ADMIN          (header.admin)
-        ///   1 = AUTHORITY_HYPERP_MARK         (config.hyperp_authority)
-        ///   2 = AUTHORITY_INSURANCE      (config.insurance_authority)
-        ///   3 = AUTHORITY_CLOSE          (config.close_authority)
+        ///   0 = AUTHORITY_ADMIN              (header.admin)
+        ///   1 = AUTHORITY_HYPERP_MARK        (config.hyperp_authority)
+        ///   2 = AUTHORITY_INSURANCE          (header.insurance_authority)
+        ///   4 = AUTHORITY_INSURANCE_OPERATOR (header.insurance_operator)
+        /// (kind = 3 / AUTHORITY_CLOSE was deleted; close authority merged
+        /// into admin.)
         ///
         /// Authorization: the CURRENT authority of the specified kind
         /// must sign. When `new_pubkey != Pubkey::default()` the NEW
@@ -4101,12 +4103,6 @@ pub mod processor {
                     return Err(ProgramError::InvalidInstructionData);
                 }
 
-                // `max_insurance_floor` + `insurance_floor` are vestigial:
-                // the floor formerly gated `use_insurance_buffer` but is now
-                // unused (bounded tag-23 extraction supersedes it). Both
-                // fields are retained at the wire-format level to avoid
-                // breaking instruction-data layout, but no validation is
-                // performed and the engine ignores them at runtime.
                 // Oracle cap floor: hard-bounded to MAX (100%)
                 if min_oracle_price_cap_e2bps > MAX_ORACLE_PRICE_CAP_E2BPS {
                     return Err(ProgramError::InvalidInstructionData);
@@ -4606,7 +4602,6 @@ pub mod processor {
                         .top_up_insurance_fund(fee_units as u128, clock.slot)
                         .map_err(map_risk_error)?;
                 }
-                drop(engine);
                 let gen = state::next_mat_counter(&mut data)
                     .ok_or(PercolatorError::EngineOverflow)?;
                 state::write_account_generation(&mut data, idx, gen);
@@ -4723,7 +4718,6 @@ pub mod processor {
                         .top_up_insurance_fund(fee_units as u128, clock.slot)
                         .map_err(map_risk_error)?;
                 }
-                drop(engine);
                 let gen = state::next_mat_counter(&mut data)
                     .ok_or(PercolatorError::EngineOverflow)?;
                 state::write_account_generation(&mut data, idx, gen);
@@ -4931,7 +4925,6 @@ pub mod processor {
                     .withdraw_not_atomic(user_idx, units_requested as u128, price, withdraw_slot,
                         funding_rate_e9, admit_h_min, admit_h_max)
                     .map_err(map_risk_error)?;
-                drop(engine);
                 if !state::is_oracle_initialized(&data) {
                     state::set_oracle_initialized(&mut data);
                 }
@@ -5316,7 +5309,6 @@ pub mod processor {
                 // reflects real liquidations, not a hard-coded zero.
                 let liqs = outcome.num_liquidations as u64;
                 let ins_low = engine.insurance_fund.balance.get() as u64;
-                drop(engine);
 
                 // Engine has now processed a real oracle price via accrue_market_to.
                 // engine.last_oracle_price is no longer the init sentinel.
@@ -5396,7 +5388,6 @@ pub mod processor {
                         }
                     }
 
-                    drop(engine); // release immutable borrow before write
                     state::write_risk_buffer(&mut data, &buf);
                 }
 
@@ -5564,7 +5555,6 @@ pub mod processor {
                 // Collect post-trade positions for risk buffer
                 let user_eff_nocpi = engine.effective_pos_q(user_idx as usize);
                 let lp_eff_nocpi = engine.effective_pos_q(lp_idx as usize);
-                drop(engine);
                 if !state::is_oracle_initialized(&data) {
                     state::set_oracle_initialized(&mut data);
                 }
@@ -6092,7 +6082,7 @@ pub mod processor {
                         // handles it via the funding_rate parameter (§5.5 anti-retroactivity).
                     }
 
-                    // Hyperp: also update authority_price (legacy mark field).
+                    // Hyperp: also update hyperp_mark_e6.
                     // Hyperp-liveness clock (last_mark_push_slot) refreshes
                     // ONLY on full-weight observations — sub-threshold
                     // dust-wash trades must not keep a dead market
@@ -6227,7 +6217,6 @@ pub mod processor {
 
                 // Collect post-liquidation position for risk buffer
                 let liq_eff = engine.effective_pos_q(target_idx as usize);
-                drop(engine);
                 if !state::is_oracle_initialized(&data) {
                     state::set_oracle_initialized(&mut data);
                 }
@@ -6382,7 +6371,6 @@ pub mod processor {
                     .map_err(|_| PercolatorError::EngineOverflow)?;
 
                 // Remove from risk buffer (drop engine borrow first to release data)
-                drop(engine);
                 // Live close processes a real oracle price through the engine
                 if !resolved && !state::is_oracle_initialized(&data) {
                     state::set_oracle_initialized(&mut data);
@@ -6511,15 +6499,10 @@ pub mod processor {
                         return Err(ProgramError::InvalidAccountData);
                     }
 
-                    // CloseSlab is gated by `admin`. The former scoped
-                    // `close_authority` is vestigial — the auth split
-                    // added complexity for a rare operational pattern
-                    // (burn admin early, retain close-only authority
-                    // for later rent cleanup). Operators who want
-                    // full rug-proofing now burn admin; doing so
-                    // traps the slab rent, which is an acceptable
-                    // ~0.04 SOL cost for the traders-are-rug-proof
-                    // configuration.
+                    // CloseSlab is gated by `admin`. Operators who burn
+                    // admin for rug-proofing trap the slab rent (~0.04 SOL),
+                    // which is the accepted cost of the fully admin-free
+                    // terminal state.
                     let header = state::read_header(&data);
                     require_admin(header.admin, a_dest.key)?;
                     let config = state::read_config(&data);
@@ -7660,7 +7643,6 @@ pub mod processor {
                 }
 
                 // Remove from risk buffer (drop engine first)
-                drop(engine);
                 {
                     let mut buf = state::read_risk_buffer(&data);
                     buf.remove(user_idx);
@@ -7795,7 +7777,6 @@ pub mod processor {
                     admit_h_min,
                     admit_h_max)
                     .map_err(map_risk_error)?;
-                drop(engine);
                 if !state::is_oracle_initialized(&data) {
                     state::set_oracle_initialized(&mut data);
                 }
@@ -7957,7 +7938,6 @@ pub mod processor {
                     admit_h_min,
                     admit_h_max)
                     .map_err(map_risk_error)?;
-                drop(engine);
                 if !state::is_oracle_initialized(&data) {
                     state::set_oracle_initialized(&mut data);
                 }
@@ -8127,7 +8107,6 @@ pub mod processor {
                     .map_err(|_| PercolatorError::EngineOverflow)?;
 
                 // Remove from risk buffer before withdraw
-                drop(engine);
                 {
                     let mut buf = state::read_risk_buffer(&data);
                     buf.remove(user_idx);

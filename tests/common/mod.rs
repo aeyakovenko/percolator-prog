@@ -2558,21 +2558,16 @@ pub fn encode_update_admin(new_admin: &Pubkey) -> Vec<u8> {
     encode_update_authority(AUTHORITY_ADMIN, new_admin)
 }
 
-pub fn encode_set_risk_threshold(new_threshold: u128) -> Vec<u8> {
-    let mut data = vec![11u8]; // Tag 11: SetRiskThreshold
-    data.extend_from_slice(&new_threshold.to_le_bytes());
-    data
-}
-
 pub fn encode_set_oracle_authority(new_authority: &Pubkey) -> Vec<u8> {
     encode_update_authority(AUTHORITY_HYPERP_MARK, new_authority)
 }
 
-// 4-way authority split constants (must match src/percolator.rs)
+// Authority split constants (must match src/percolator.rs).
+// kind=3 (AUTHORITY_CLOSE) was deleted — close_authority merged into admin.
 pub const AUTHORITY_ADMIN: u8 = 0;
 pub const AUTHORITY_HYPERP_MARK: u8 = 1;
 pub const AUTHORITY_INSURANCE: u8 = 2;
-pub const AUTHORITY_CLOSE: u8 = 3;
+pub const AUTHORITY_INSURANCE_OPERATOR: u8 = 4;
 
 pub fn encode_update_authority(kind: u8, new_pubkey: &Pubkey) -> Vec<u8> {
     let mut data = vec![32u8]; // Tag 32: UpdateAuthority
@@ -2735,33 +2730,6 @@ impl TestEnv {
             &[cu_ix(), ix],
             Some(&current.pubkey()),
             &signers,
-            self.svm.latest_blockhash(),
-        );
-        self.svm
-            .send_transaction(tx)
-            .map(|_| ())
-            .map_err(|e| format!("{:?}", e))
-    }
-
-    /// Try SetRiskThreshold instruction
-    pub fn try_set_risk_threshold(
-        &mut self,
-        signer: &Keypair,
-        new_threshold: u128,
-    ) -> Result<(), String> {
-        let ix = Instruction {
-            program_id: self.program_id,
-            accounts: vec![
-                AccountMeta::new(signer.pubkey(), true),
-                AccountMeta::new(self.slab, false),
-                AccountMeta::new_readonly(sysvar::clock::ID, false),
-            ],
-            data: encode_set_risk_threshold(new_threshold),
-        };
-        let tx = Transaction::new_signed_with_payer(
-            &[cu_ix(), ix],
-            Some(&signer.pubkey()),
-            &[signer],
             self.svm.latest_blockhash(),
         );
         self.svm
@@ -7889,111 +7857,7 @@ pub fn encode_init_market_with_maintenance_fee(
     data
 }
 
-/// Encode InitMarket with configurable insurance_floor
-pub fn encode_init_market_with_insurance_floor(
-    admin: &Pubkey,
-    mint: &Pubkey,
-    feed_id: &[u8; 32],
-    invert: u8,
-    insurance_floor: u128,
-) -> Vec<u8> {
-    let mut data = vec![0u8];
-    data.extend_from_slice(admin.as_ref());
-    data.extend_from_slice(mint.as_ref());
-    data.extend_from_slice(feed_id);
-    data.extend_from_slice(&86400u64.to_le_bytes()); // max_staleness_secs
-    data.extend_from_slice(&500u16.to_le_bytes()); // conf_filter_bps
-    data.push(invert);
-    data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
-    data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
-    data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
-    // Resolvability invariant: ship max cap (default tail has perm_resolve=0).
-    data.extend_from_slice(&1_000_000u64.to_le_bytes()); // min_oracle_price_cap_e2bps
-    // RiskParams
-    data.extend_from_slice(&0u64.to_le_bytes()); // h_min
-    data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
-    data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
-    data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
-    data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
-    data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
-    data.extend_from_slice(&1u64.to_le_bytes()); // h_max
-
-    data.extend_from_slice(&1800u64.to_le_bytes()); // max_crank_staleness_slots
-    data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
-    data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
-    data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
-    data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    append_default_extended_tail(&mut data);
-    data
-}
-
 impl TestEnv {
-    /// Initialize market with custom insurance_floor
-    pub fn init_market_with_insurance_floor(&mut self, invert: u8, insurance_floor: u128) {
-        let admin = &self.payer;
-        let dummy_ata = Pubkey::new_unique();
-        self.svm
-            .set_account(
-                dummy_ata,
-                Account {
-                    lamports: 1_000_000,
-                    data: vec![0u8; TokenAccount::LEN],
-                    owner: spl_token::ID,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
-
-        let ix = Instruction {
-            program_id: self.program_id,
-            accounts: vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(self.slab, false),
-                AccountMeta::new_readonly(self.mint, false),
-                AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-                AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
-                AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
-            ],
-            data: encode_init_market_with_insurance_floor(
-                &admin.pubkey(),
-                &self.mint,
-                &TEST_FEED_ID,
-                invert,
-                insurance_floor,
-            ),
-        };
-
-        let tx = Transaction::new_signed_with_payer(
-            &[cu_ix(), ix],
-            Some(&admin.pubkey()),
-            &[admin],
-            self.svm.latest_blockhash(),
-        );
-        self.svm
-            .send_transaction(tx)
-            .expect("init_market_with_insurance_floor failed");
-    }
-
-    /// Read insurance_floor from RiskEngine (standalone field, not in RiskParams)
-    pub fn read_insurance_floor(&self) -> u128 {
-        let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        // params.insurance_floor. Engine v12.18.1 removed new_account_fee (U128=16B),
-        // so fields after it shifted by -16. Within RiskParams:
-        //   6×u64 (48) + 3×U128 (48) + 2×u128 (32) = 128 for insurance_floor.
-        pub const INSURANCE_FLOOR_OFFSET: usize = 536 + 32 + 128;
-        u128::from_le_bytes(
-            slab_data[INSURANCE_FLOOR_OFFSET..INSURANCE_FLOOR_OFFSET + 16]
-                .try_into()
-                .unwrap(),
-        )
-    }
-
     /// Read the risk buffer from the slab.
     /// Read risk buffer from BPF slab layout.
     /// Buffer is at (SLAB_LEN - GEN_TABLE_LEN - RISK_BUF_LEN) in BPF.
