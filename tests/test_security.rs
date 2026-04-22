@@ -12884,3 +12884,258 @@ fn test_attack_bad_oracle_with_authority_requires_external_success() {
     );
 }
 
+/// regression (security R&D loop, iteration 1 — PASS_SAFE + coverage gap):
+/// Sentinel re-materialization — can a fresh user on a reclaimed slot be
+/// back-charged maintenance fees for slots BEFORE they arrived?
+///
+/// Attacker model: Bob arrives at a market where Alice's account was
+/// reclaimed long ago. If the engine's slot-reuse path leaks Alice's
+/// stale `last_fee_slot` (or worse, 0 from `free_slot`) into Bob's
+/// fresh account, then Bob's first fee sync computes
+/// `dt = now - leaked_slot` instead of `dt = now - bob_init_slot`,
+/// and the engine silently charges Bob for the entire pre-Bob history.
+///
+/// Observable success criterion: Bob's capital Δ on his first crank
+/// exceeds `(elapsed_since_bob_init) * maintenance_fee_per_slot`.
+///
+/// Invariant to preserve: `materialize_at(idx, clock.slot)` anchors
+/// `last_fee_slot = clock.slot`. This is the only safe anchor — spec
+/// §2.7 calls this out as "anti-Goal-47" (no back-charge on newly
+/// created accounts).
+///
+/// Regression: covers the InitUser → reclaim → free_head reuse →
+/// InitUser path end-to-end against the BPF binary. No existing test
+/// exercised this specific sequence.
+#[test]
+fn test_attack_reclaimed_slot_init_user_no_retroactive_fee_backcharge() {
+    program_path();
+    let mut env = TestEnv::new();
+    let data = common::encode_init_market_with_maint_fee_bounded(
+        &env.payer.pubkey(),
+        &env.mint,
+        &common::TEST_FEED_ID,
+        1_000_000_000, // max_maintenance_fee_per_slot
+        1_000,         // maintenance_fee_per_slot
+        0,             // min_oracle_price_cap
+    );
+    env.try_init_market_raw(data).expect("init_market");
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 100_000_000_000);
+
+    // Phase 1: Alice materializes at slot ~0, then gets drained to zero.
+    let alice = Keypair::new();
+    let alice_idx = env.init_user(&alice);
+    assert_eq!(alice_idx, 0, "setup: Alice should be first user at idx=0");
+    env.deposit(&alice, alice_idx, 10_000_000);
+    assert_eq!(env.read_num_used_accounts(), 1, "setup: 1 used account");
+
+    // Drain Alice's capital via maintenance fees. The wrapper-side
+    // auto-reclaim (F6 in security.md) fires inside sweep_maintenance
+    // _fees once capital hits 0 and all other flat-clean predicates
+    // pass — so a single crank both drains and reclaims her slot.
+    env.set_slot(50_000); // 50k × 1000 = 50M > 10M capital
+    env.crank();
+    assert_eq!(
+        env.read_num_used_accounts(), 0,
+        "setup: crank must have both drained AND reclaimed Alice's slot \
+         (wrapper dust-reclaim path). Got num_used != 0 — reclaim \
+         conditions not met; adjust fee/capital so all predicates pass.",
+    );
+
+    // Phase 2: Bob arrives much later and takes Alice's recycled slot.
+    env.set_slot(100_000);
+    env.svm.expire_blockhash();
+    let bob = Keypair::new();
+    // TestEnv.init_user() returns its own counter, not the engine's
+    // assigned idx — so after slot reuse the two diverge. Ignore the
+    // returned value and look up Bob's actual engine slot via owner.
+    let _ = env.init_user(&bob);
+    // TestEnv.init_user returns its own monotonic counter, not the
+    // engine's free_head-assigned idx. After slot reuse the two
+    // diverge. Find Bob's actual engine idx by scanning for his
+    // pubkey: the first 32-byte match inside the accounts array
+    // gives the Account slot and the inner offset of the `owner`
+    // field. (Account layout is #[repr(C)] with non-obvious
+    // padding; locating by pubkey avoids depending on the exact
+    // inner-field offset.)
+    let bob_idx = {
+        let slab_data = env.svm.get_account(&env.slab).unwrap().data;
+        let bob_key = bob.pubkey().to_bytes();
+        const ACCOUNTS_OFFSET: usize = 536 + common::ENGINE_ACCOUNTS_OFFSET;
+        const ACCOUNT_SIZE: usize = 360;
+        let accounts_end = ACCOUNTS_OFFSET + 4096 * ACCOUNT_SIZE;
+        let mut hit = None;
+        let mut i = ACCOUNTS_OFFSET;
+        while i + 32 <= slab_data.len().min(accounts_end) {
+            if slab_data[i..i + 32] == bob_key {
+                hit = Some(((i - ACCOUNTS_OFFSET) / ACCOUNT_SIZE) as u16);
+                break;
+            }
+            i += 1;
+        }
+        hit.expect("Bob's pubkey must appear in the accounts array")
+    };
+    assert_eq!(
+        bob_idx, alice_idx,
+        "setup: Bob must take Alice's recycled slot via free_head reuse \
+         to exercise the back-charge path. Engine did not reuse the slot.",
+    );
+    env.deposit(&bob, bob_idx, 10_000_000);
+    let bob_cap_after_deposit = env.read_account_capital(bob_idx);
+
+    // Phase 3: Advance BOB_ELAPSED slots, crank, measure Bob's fee.
+    const BOB_ELAPSED: u64 = 200;
+    env.set_slot(100_000 + BOB_ELAPSED);
+    env.svm.expire_blockhash();
+    env.crank();
+
+    let bob_cap_after_crank = env.read_account_capital(bob_idx);
+    let bob_fee_paid: i128 =
+        (bob_cap_after_deposit as i128) - (bob_cap_after_crank as i128);
+
+    // Expected: Bob pays for BOB_ELAPSED slots only (his own history).
+    // maintenance_fee_per_slot = 1_000.
+    let expected_bob_fee: i128 = (BOB_ELAPSED as i128) * 1_000;
+
+    // Back-charge signature: if last_fee_slot leaked as 0 (free_slot
+    // wipe), Bob's dt would be 100_000+BOB_ELAPSED → fee ≈ 100M. If
+    // leaked as Alice's old last_fee_slot, fee would be somewhere
+    // between. Either is an exploit.
+    assert_eq!(
+        bob_fee_paid, expected_bob_fee,
+        "RETROACTIVE BACK-CHARGE DETECTED: Bob paid {bob_fee_paid} \
+         but should have paid {expected_bob_fee} (= BOB_ELAPSED × rate \
+         = {BOB_ELAPSED} × 1_000). If actual >> expected, the engine \
+         leaked a stale last_fee_slot from the pre-reclaim state into \
+         Bob's freshly-materialized account — charging him for time \
+         before he existed.",
+    );
+
+    // Secondary invariant: Bob should have no fee debt (capital >
+    // fee_charge), since expected fee 200_000 << bob's 10_000_000 capital.
+    let bob_debt = env.read_account_fee_credits(bob_idx);
+    assert!(
+        bob_debt >= 0,
+        "Bob should have no fee debt after a bounded crank on a \
+         well-funded fresh account. Debt = {bob_debt} indicates \
+         backdated fee accrual.",
+    );
+}
+
+/// regression (security R&D loop, iteration 2 — PASS_SAFE + coverage gap):
+/// Double-accounting via alternate entry points — DepositFeeCredits
+/// moves tokens user → insurance (paying off fee debt); it must NOT
+/// also credit them to `capital`. If it did, a user could pay debt then
+/// withdraw the same tokens as capital and leave richer than they
+/// entered, draining insurance by exactly `debt_paid` per cycle.
+///
+/// Attacker model: Alice has `capital = X` and `fee_credits = -D`
+/// (debt D). She calls DepositFeeCredits(amount=D) — legitimate.
+/// Immediately after, she calls WithdrawCollateral(amount=X+D). If the
+/// engine treats the D tokens as her capital, the withdraw succeeds
+/// and she extracted D from insurance.
+///
+/// Observable success criterion: Alice's ATA_end > ATA_start (net
+/// positive extraction). The legitimate flow has her down exactly D
+/// (fee debt settled). Anything less is theft.
+///
+/// Invariant to preserve: `DepositFeeCredits` increments `insurance`
+/// and `fee_credits`, leaves `capital` and `c_tot` unchanged.
+///
+/// No prior test covers the withdraw-after-repay sequence against the
+/// BPF binary; `test_deposit_fee_credits_reduces_debt` checks only the
+/// debt-reduction half, not the capital-inflation exploit.
+#[test]
+fn test_attack_deposit_fee_credits_does_not_inflate_capital() {
+    program_path();
+    let mut env = TestEnv::new();
+    // maintenance fee rate fast enough to generate debt inside the test.
+    let data = common::encode_init_market_with_maint_fee_bounded(
+        &env.payer.pubkey(),
+        &env.mint,
+        &common::TEST_FEED_ID,
+        1_000_000_000,
+        10_000,  // maintenance_fee_per_slot (aggressive)
+        0,
+    );
+    env.try_init_market_raw(data).expect("init_market");
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 100_000_000_000);
+
+    // Alice deposits 10M, accrues fee debt so she's upside-down.
+    let alice = Keypair::new();
+    let alice_idx = env.init_user(&alice);
+    env.deposit(&alice, alice_idx, 10_000_000);
+
+    // Drain her capital and then some — capital=0, fee_credits<0.
+    env.set_slot(2_000); // 2000 × 10_000 = 20M charge > 10M capital
+    env.crank();
+    let alice_capital_after_drain = env.read_account_capital(alice_idx);
+    let alice_debt_after_drain = env.read_account_fee_credits(alice_idx);
+    // If the wrapper's dust-reclaim auto-fired and freed Alice's slot,
+    // this test can't run (no account to attack). Skip cleanly in that
+    // case — the test's purpose is to probe the debt-repay withdraw
+    // path, which requires Alice still be materialized with fee debt.
+    if env.read_num_used_accounts() == 0 {
+        eprintln!(
+            "skipping: Alice auto-reclaimed during drain crank — \
+             attack scenario unreachable in this configuration"
+        );
+        return;
+    }
+    assert_eq!(alice_capital_after_drain, 0, "Alice drained to 0 capital");
+    assert!(
+        alice_debt_after_drain < 0,
+        "Alice must have negative fee_credits (debt) to exercise the \
+         repayment path; got {alice_debt_after_drain}",
+    );
+    let debt_magnitude: u64 = (-alice_debt_after_drain) as u64;
+
+    // Phase 1: Alice repays her fee debt. Tokens flow user → insurance;
+    // her capital stays at 0 and fee_credits → 0.
+    env.svm.expire_blockhash();
+    let ins_before_repay = env.read_insurance_balance();
+    env.try_deposit_fee_credits(&alice, alice_idx, debt_magnitude)
+        .expect("DepositFeeCredits with exact debt must succeed");
+    let ins_after_repay = env.read_insurance_balance();
+    let alice_debt_after_repay = env.read_account_fee_credits(alice_idx);
+    let alice_capital_after_repay = env.read_account_capital(alice_idx);
+    assert_eq!(
+        alice_debt_after_repay, 0,
+        "Alice's debt must be fully settled after repayment",
+    );
+    assert_eq!(
+        alice_capital_after_repay, 0,
+        "CRITICAL: DepositFeeCredits MUST NOT inflate capital. Tokens \
+         went user → insurance, not user → capital. If capital > 0 \
+         here, the engine double-credits and the repay→withdraw drain \
+         is live.",
+    );
+    assert_eq!(
+        ins_after_repay - ins_before_repay,
+        debt_magnitude as u128,
+        "Insurance must grow by exactly the repaid amount — \
+         this is where the tokens landed",
+    );
+
+    // Phase 2: Attack — Alice tries to withdraw. capital=0, so ANY
+    // positive withdraw must be rejected.
+    env.svm.expire_blockhash();
+    let attempt_withdraw = env.try_withdraw(&alice, alice_idx, debt_magnitude);
+    assert!(
+        attempt_withdraw.is_err(),
+        "ATTACK SUCCEEDED: WithdrawCollateral({debt_magnitude}) must \
+         FAIL after debt repayment — Alice's capital is 0 and the \
+         repaid tokens went to insurance. If this succeeded, she \
+         drained {debt_magnitude} from insurance via repay→withdraw. \
+         Result: {attempt_withdraw:?}",
+    );
+
+    // Phase 3: Insurance must not have moved from post-repay baseline.
+    let ins_after_failed_withdraw = env.read_insurance_balance();
+    assert_eq!(
+        ins_after_failed_withdraw, ins_after_repay,
+        "Insurance balance must not decrease on a rejected withdraw",
+    );
+}
+
