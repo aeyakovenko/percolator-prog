@@ -966,3 +966,55 @@ if acc.capital.is_zero()
 
 Existing dust-reclaim regression coverage
 (`test_dust_account_drained_and_gc_by_crank_alone`) still passes.
+
+---
+
+## F8 — `permissionless_stale_matured` gate missing on 6 live-mutation instructions (MEDIUM, conditional)
+
+**Location:** wrapper `src/percolator.rs` at commit `06f86fb` — six user-reachable instructions enter stale-matured state without the 48h dead-horizon gate that their peer instructions enforce.
+
+**Asymmetry:**
+
+| Gated (correct) | Line | Not gated (bug) | Line |
+|---|---|---|---|
+| `DepositCollateral` | 4906 | `WithdrawCollateral` | 4970 |
+| `InitUser` | 4669 | `TradeNoCpi` | 5539 |
+| `InitLP` | 4791 | `LiquidateAtOracle` | 6312 |
+| `DepositFeeCredits` | 7989 | `CloseAccount` | 6407 |
+| `ReclaimEmptyAccount` | 7860 | `SettleAccount` | 7896 |
+| `TopUpInsurance` | 7633 | `ConvertReleasedPnl` | 8044 |
+| `TradeCpi` | 6607 | | |
+
+`CatchupAccrue` and `ForceCloseResolved` are also un-gated; those omissions are intentional (their purpose is post-stale processing).
+
+**Bug.** The gate's documented intent is at `DepositCollateral:4899-4905`:
+
+> *"once the market has been oracle-stale for >= permissionless_resolve_stale_slots, it is terminally dead. No live mutations — including no-oracle deposits — should proceed. Users must exit via ResolvePermissionless + resolved-market close paths."*
+
+Withdraw / TradeNoCpi / Close / Liquidate / Settle / ConvertReleasedPnl ARE live mutations. The engine layer explicitly delegates this check to the wrapper:
+
+```rust
+// engine/src/percolator.rs:3736
+// No require_fresh_crank: spec §10.4 does not gate withdraw_not_atomic on keeper liveness
+// engine/src/percolator.rs:3890
+// No require_fresh_crank: spec §10.5 does not gate execute_trade_not_atomic on ...
+```
+
+The wrapper is the sole enforcement site. The omission is an oversight.
+
+**Attack (conditional on Pyth halt).** When Pyth has been silent on the configured feed for `>= permissionless_resolve_stale_slots` (48h on mainnet), `config.last_effective_price_e6` is frozen at the pre-outage value. Any caller can:
+
+1. Observe real Pyth pythnet price off-chain (it's moved since the on-chain freeze)
+2. Submit `TradeNoCpi` picking the direction that will profit once oracle catches up — trade fills at the stale engine price
+3. Wait for oracle refresh — position marks to real price, realizing the full gap as PnL
+4. Call `WithdrawCollateral` (also un-gated) to extract
+
+Extracted value routes from the counterparty on the other side of the trade: an honest LP takes the loss directly; an attacker-owned under-collateralized LP has its loss absorbed by the insurance fund via `use_insurance_buffer`.
+
+**Severity MEDIUM-conditional.** Pyth 48h silence on the specific feed is rare but not unthinkable (historical Pyth publisher disruptions, Solana cluster halts >48h). Not actively exploitable on current mainnet state; the exploit arms when the precondition fires.
+
+**Fix.** Introduce a helper `require_oracle_fresh(&config, clock.slot)` and call it in each of the six handlers after `config` is read and `clock` is obtained, matching the pattern at `DepositCollateral:4906`. For `CloseAccount`, the check only fires when `!resolved` — resolved-mode uses `settlement_price` and IS the intended post-stale exit.
+
+**Reproduction.** Engine-level PoC simulates the primitive: attacker opens SHORT at stale price P_stale=100 while real price has moved to P_real=70; upon oracle refresh the position marks to real price, attacker extracts +1491 units (from 2000 deposit to 3491 final capital). `check_conservation()` holds throughout. Counterparty (honest LP) absorbs the loss directly.
+
+**Note on fix.** A local attempt to add `require_oracle_fresh(&config, clock.slot)?` to each handler produces 137 BPF stack-overwrite warnings on `process_instruction` with `solana-cargo-build-sbf 3.1.13` (0 on the baseline) — the additions push the function over the 4KB BPF stack limit. The binary compiles and existing tests pass, but a clean merge likely needs handler bodies factored out of `process_instruction` first. Filing the finding separately from the fix.
