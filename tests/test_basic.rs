@@ -3802,29 +3802,25 @@ fn test_funding_bootstrap_inverted_market() {
     assert!(ewma < 100_000, "Inverted price should be small (not raw), got {}", ewma);
 }
 
-/// Without oracle price cap (cap=0), EWMA never updates and funding stays 0.
-/// This is the control case: markets without cap cannot bootstrap funding.
+/// Historical: cap=0 disabled EWMA on non-Hyperp markets. This config
+/// is now REJECTED at init because it's the mainnet-bounty footgun —
+/// cap=0 lets any Pyth move land unclamped, which the self-trade drain
+/// exploits. The test now asserts the INIT rejection instead of the
+/// no-EWMA consequence.
 #[test]
-fn test_funding_no_cap_means_no_ewma() {
+fn test_funding_no_cap_nonhyperp_rejected_at_init() {
     program_path();
     let mut env = TestEnv::new();
-    // cap = 0 means EWMA is disabled. Pair with perm_resolve > 0 so the
-    // market still has a resolve path (non-Hyperp + cap=0 + perm=0 is
-    // now rejected at init as unresolvable).
-    env.init_market_with_cap(0, 0, 50_000);
-
-    let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
-    env.deposit(&lp, lp_idx, 10_000_000_000);
-
-    let user = Keypair::new();
-    let user_idx = env.init_user(&user);
-    env.deposit(&user, user_idx, 1_000_000_000);
-
-    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
-
-    assert_eq!(env.read_mark_ewma(), 0, "No cap → no EWMA update");
-    assert_eq!(env.read_funding_rate(), 0, "No cap → no funding rate");
+    // Hitting the same config that the live mainnet market
+    // `5ZamU...kTqB` initialized with: non-Hyperp + cap=0 +
+    // perm_resolve > 0. Must now fail at init.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        env.init_market_with_cap(0, 0, 50_000);
+    }));
+    assert!(
+        result.is_err(),
+        "init with min_cap=0 on non-Hyperp market must be rejected"
+    );
 }
 
 /// Non-Hyperp market with cap: multiple trades across slots converge EWMA toward index.

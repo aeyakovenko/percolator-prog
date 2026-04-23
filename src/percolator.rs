@@ -342,6 +342,19 @@ pub mod verify {
         admin != [0u8; 32] && admin == signer
     }
 
+    /// Counterparty isolation — reject trades where the two slots
+    /// share one owner pubkey. This blocks the trivial single-key
+    /// self-match (one owner opens both sides to externalise losses
+    /// into shared insurance). The two-key cartel variant is NOT
+    /// closed by this check alone — an engine-level counterparty
+    /// stamp on `Account` is the structural fix (separate PR).
+    ///
+    /// Used by: TradeNoCpi, TradeCpi.
+    #[inline]
+    pub fn owners_distinct_ok(lhs: [u8; 32], rhs: [u8; 32]) -> bool {
+        lhs != rhs
+    }
+
     /// CPI identity binding: matcher program and context must match LP registration.
     /// This is the critical CPI security check.
     #[inline]
@@ -1203,6 +1216,11 @@ pub mod error {
         /// (with a minimum floor of 1 unit to avoid Zeno's-paradox lockout
         /// at small bps × small insurance).
         InsuranceWithdrawCapExceeded,
+        /// `TradeNoCpi` / `TradeCpi` with both counterparties owned by
+        /// the same pubkey. Blocks the trivial single-key self-match
+        /// insurance-drain primitive. Two-key cartel variants require
+        /// an engine-level counterparty-stamp fix (separate PR).
+        SameOwnerTradeForbidden,
     }
 
     impl From<PercolatorError> for ProgramError {
@@ -4002,6 +4020,34 @@ pub mod processor {
                     // policy is bounded by what admin configured BEFORE
                     // burn. Operators who want full rug-proofing also
                     // burn insurance_authority.
+
+                    // Refuse to lock in a permanent drain-enabling
+                    // config. Burn makes the config immutable forever,
+                    // so any cap in the drain-vulnerable zone becomes
+                    // a permanent vulnerability. Gate at burn time.
+                    let is_hyperp_mode = oracle::is_hyperp_mode(&config);
+
+                    // (1) Effective cap in drain zone at time of burn:
+                    //     non-Hyperp cap=0 IS the live mainnet footgun
+                    //     (`5ZamU...kTqB`). Hyperp cap=0 is disallowed
+                    //     elsewhere but defensive here.
+                    if !is_hyperp_mode && config.oracle_price_cap_e2bps == 0 {
+                        return Err(PercolatorError::InvalidConfigParam.into());
+                    }
+                    if config.oracle_price_cap_e2bps >= 900_000 {
+                        return Err(PercolatorError::InvalidConfigParam.into());
+                    }
+
+                    // (2) Insurance-withdraw combo that would allow an
+                    //     insurance_operator (if alive) to single-tx
+                    //     drain the full insurance fund. If the burn
+                    //     leaves insurance_operator live on this config
+                    //     it bakes that drain path in forever.
+                    if config.insurance_withdraw_max_bps > 5_000
+                        && config.insurance_withdraw_cooldown_slots == 0
+                    {
+                        return Err(PercolatorError::InvalidConfigParam.into());
+                    }
                 }
             }
             AUTHORITY_HYPERP_MARK => {
@@ -4207,7 +4253,13 @@ pub mod processor {
                     return Err(ProgramError::InvalidInstructionData);
                 }
 
-                // Oracle cap floor: hard-bounded to MAX (100%)
+                // Oracle cap floor: hard-bounded to MAX (100%).
+                // (Additional at-init hardening — rejecting the 90-99%
+                // drain zone and extreme leverage — deferred to a
+                // follow-up PR after test-helper conventions are
+                // updated. This iteration focuses on the mainnet
+                // footgun: cap==0. The admin-burn gate below already
+                // refuses the 90-99% range at lock-in time.)
                 if min_oracle_price_cap_e2bps > MAX_ORACLE_PRICE_CAP_E2BPS {
                     return Err(ProgramError::InvalidInstructionData);
                 }
@@ -4327,6 +4379,20 @@ pub mod processor {
                     && permissionless_resolve_stale_slots == 0
                     && min_oracle_price_cap_e2bps == 0
                 {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
+
+                // Forbid `min_oracle_price_cap_e2bps == 0` on non-
+                // Hyperp markets UNCONDITIONALLY. Even with
+                // permissionless_resolve > 0 (the escape-hatch branch
+                // above), cap=0 disables `clamp_oracle_price` entirely
+                // — any Pyth move lands in effective unclamped in a
+                // single read. That IS the live mainnet bounty
+                // (`5ZamU...kTqB`): cap=0 + perm_resolve > 0 + admin
+                // burnt = permanently drainable on any SOL/USD move.
+                // Reject at init so no future market inherits the same
+                // footgun.
+                if !is_hyperp && min_oracle_price_cap_e2bps == 0 {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
 
@@ -5597,6 +5663,15 @@ pub mod processor {
                     return Err(PercolatorError::EngineUnauthorized.into());
                 }
 
+                // Counterparty isolation. Reject trades where both
+                // slots share one owner pubkey — blocks the single-
+                // key self-match insurance drain. Two-key cartels are
+                // NOT closed here; the engine-level counterparty-stamp
+                // fix is the companion change.
+                if !crate::verify::owners_distinct_ok(u_owner, l_owner) {
+                    return Err(PercolatorError::SameOwnerTradeForbidden.into());
+                }
+
                 // Side-mode gating is handled inside engine.execute_trade_not_atomic()
 
                 // Fully accrue market to clock.slot BEFORE execute_trade_with
@@ -5876,6 +5951,13 @@ pub mod processor {
                     let l_owner = engine.accounts[lp_idx as usize].owner;
                     if !crate::verify::owner_ok(l_owner, a_lp_owner.key.to_bytes()) {
                         return Err(PercolatorError::EngineUnauthorized.into());
+                    }
+
+                    // Counterparty isolation. See TradeNoCpi for full
+                    // rationale. Blocks single-key self-match across
+                    // both TradeNoCpi and TradeCpi uniformly.
+                    if !crate::verify::owners_distinct_ok(u_owner, l_owner) {
+                        return Err(PercolatorError::SameOwnerTradeForbidden.into());
                     }
 
                     let lp_acc = &engine.accounts[lp_idx as usize];
