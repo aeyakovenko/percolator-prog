@@ -3170,7 +3170,7 @@ pub mod processor {
         clock_unix_ts: i64,
         clock_slot: u64,
         slab_data: &mut [u8],
-    ) -> Result<u64, ProgramError> {
+    ) -> Result<(u64, bool), ProgramError> {
         if oracle::permissionless_stale_matured(config, clock_slot) {
             return Err(PercolatorError::OracleStale.into());
         }
@@ -3184,6 +3184,15 @@ pub mod processor {
             config.invert,
             config.unit_scale,
         );
+        // Gap T (hardening, Toly's follow-up to the derived-cap proposal):
+        // capture the raw ext_price before `clamp_external_price` consumes
+        // the Result so we can tell whether the clamp actually bound this
+        // read. clamp_fired is true iff a fresh observation (publish_time
+        // advanced) landed outside the cap band; stale/duplicate reads
+        // report false even if the cached price happens to differ from
+        // what the caller passed, because no clamp decision was made on
+        // those.
+        let ext_price_raw: Option<u64> = external.as_ref().ok().map(|&(p, _)| p);
         // Snapshot the source-feed clock before the call so we can
         // tell whether THIS read advanced state. Stale/duplicate
         // observations get the cached price from
@@ -3193,11 +3202,16 @@ pub mod processor {
         // life past `permissionless_resolve_stale_slots`.
         let prev_publish_time = config.last_oracle_publish_time;
         let price = oracle::clamp_external_price(config, external)?;
-        if config.last_oracle_publish_time > prev_publish_time {
+        let publish_time_advanced = config.last_oracle_publish_time > prev_publish_time;
+        if publish_time_advanced {
             config.last_good_oracle_slot = clock_slot;
         }
+        let clamp_fired = match ext_price_raw {
+            Some(raw) => publish_time_advanced && raw != price,
+            None => false,
+        };
         let _ = slab_data; // reserved for future per-read slab stamping
-        Ok(price)
+        Ok((price, clamp_fired))
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3675,6 +3689,7 @@ pub mod processor {
         funding_rate_e9: i128,
         lp_account_id: u64,
         maintenance_fee_per_slot: u128,
+        clamp_fired: bool,
     ) -> Result<(), RiskError> {
         let lp = &engine.accounts[lp_idx as usize];
         let exec = matcher.execute_match(
@@ -3699,7 +3714,11 @@ pub mod processor {
         } else {
             return Err(RiskError::Overflow);
         };
-        let admit_h_min = engine.params.h_min;
+        // Gap T (hardening): when clamp_fired, pin admit_h_min to h_max so
+        // fresh positive PnL from this trade takes the long warmup horizon.
+        // admit_h_max is unchanged; engine stickiness propagates h_max to
+        // later same-instruction admissions via h_max_sticky_accounts.
+        let admit_h_min = if clamp_fired { engine.params.h_max } else { engine.params.h_min };
         let admit_h_max = engine.params.h_max;
         // Realize due maintenance fees on both counterparties BEFORE the trade
         // so margin checks see post-fee capital. No-op when fee rate is 0.
@@ -5076,20 +5095,21 @@ pub mod processor {
                 let clock = Clock::from_account_info(a_clock)?;
                 // Anti-retroactivity: capture funding rate before oracle read (§5.5)
                 let funding_rate_e9 = compute_current_funding_rate_e9(&config);
-                let price = {
+                let (price, clamp_fired) = {
                     let is_hyperp = oracle::is_hyperp_mode(&config);
-                    let px = if is_hyperp {
+                    let pair = if is_hyperp {
                         let eng = zc::engine_ref(&data)?;
                         let last_slot = eng.current_slot;
-                        oracle::get_engine_oracle_price_e6(
+                        let p = oracle::get_engine_oracle_price_e6(
                             last_slot, clock.slot, clock.unix_timestamp,
                             &mut config, a_oracle_idx,
-                        )?
+                        )?;
+                        (p, false)
                     } else {
                         read_price_and_stamp(&mut config, a_oracle_idx, clock.unix_timestamp, clock.slot, &mut data)?
                     };
                     state::write_config(&mut data, &config);
-                    px
+                    pair
                 };
 
                 let engine = zc::engine_mut(&mut data)?;
@@ -5108,7 +5128,10 @@ pub mod processor {
                 let (units_requested, _) = crate::units::base_to_units(amount, config.unit_scale);
 
                 let withdraw_slot = clock.slot;
-                let admit_h_min = engine.params.h_min;
+                // Gap T (hardening): flip admit_h_min to h_max when the
+                // oracle read clamped; stops winners extracting at a
+                // distorted post-clamp price.
+                let admit_h_min = if clamp_fired { engine.params.h_max } else { engine.params.h_min };
                 let admit_h_max = engine.params.h_max;
                 // Fully accrue the market to clock.slot BEFORE syncing fees.
                 // Explicit ordering — the engine already handles this via
@@ -5220,15 +5243,16 @@ pub mod processor {
                 // mark vs index DURING that interval, not the post-read state.
                 let funding_rate_e9_pre = compute_current_funding_rate_e9(&config);
 
-                let price = if is_hyperp {
+                let (price, clamp_fired) = if is_hyperp {
                     // Hyperp mode: update index toward mark with rate limiting
-                    oracle::get_engine_oracle_price_e6(
+                    let p = oracle::get_engine_oracle_price_e6(
                         engine_last_slot,
                         clock.slot,
                         clock.unix_timestamp,
                         &mut config,
                         a_oracle,
-                    )?
+                    )?;
+                    (p, false)
                 } else {
                     read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
                 };
@@ -5427,7 +5451,9 @@ pub mod processor {
                     .get()
                     .saturating_sub(ins_before);
 
-                let admit_h_min = engine.params.h_min;
+                // Gap T (hardening): flip admit_h_min to h_max when the
+                // oracle read clamped.
+                let admit_h_min = if clamp_fired { engine.params.h_max } else { engine.params.h_min };
                 let admit_h_max = engine.params.h_max;
                 let outcome = engine
                     .keeper_crank_not_atomic(
@@ -5639,7 +5665,7 @@ pub mod processor {
                 let funding_rate_e9 = compute_current_funding_rate_e9(&config);
 
                 // Read oracle price with circuit-breaker clamping
-                let price =
+                let (price, clamp_fired) =
                     read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?;
                 state::write_config(&mut data, &config);
 
@@ -5708,6 +5734,10 @@ pub mod processor {
                     engine, &NoOpMatcher, lp_idx, user_idx, clock.slot, price, size,
                     funding_rate_e9, 0, // NoOpMatcher ignores lp_account_id
                     0,
+                    // Gap T (hardening): propagate clamp_fired from the
+                    // oracle read so the helper can flip admit_h_min to
+                    // h_max when the cap bound this read.
+                    clamp_fired,
                 ).map_err(map_risk_error)?;
 
                 // Update mark EWMA from trade (NoOpMatcher fills at oracle price).
@@ -5981,16 +6011,17 @@ pub mod processor {
                 // via clamp_toward_with_dt (prevents stale-index manipulation).
                 // Non-Hyperp: standard circuit-breaker clamping.
                 let is_hyperp = oracle::is_hyperp_mode(&config);
-                let price = if is_hyperp {
-                    oracle::get_engine_oracle_price_e6(
+                let (price, clamp_fired) = if is_hyperp {
+                    let p = oracle::get_engine_oracle_price_e6(
                         engine_current_slot, clock.slot, clock.unix_timestamp,
                         &mut config, a_oracle,
-                    )?
+                    )?;
+                    (p, false)
                 } else {
                     let mut slab_data = state::slab_data_mut(a_slab)?;
-                    let price = read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut slab_data)?;
+                    let pair = read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut slab_data)?;
                     drop(slab_data);
-                    price
+                    pair
                 };
 
                 // Note: We don't zero the matcher_ctx before CPI because we don't own it.
@@ -6248,6 +6279,10 @@ pub mod processor {
                         engine, &matcher, lp_idx, user_idx, clock.slot, price, trade_size,
                         funding_rate_e9_pre, lp_account_id,
                         0,
+                        // Gap T (hardening): propagate clamp_fired from the
+                        // oracle read so the helper can flip admit_h_min to
+                        // h_max when the cap bound this read.
+                        clamp_fired,
                     ).map_err(map_risk_error)?;
                     #[cfg(feature = "cu-audit")]
                     {
@@ -6396,13 +6431,14 @@ pub mod processor {
                 let is_hyperp = oracle::is_hyperp_mode(&config);
                 // Anti-retroactivity: capture funding rate before oracle read (§5.5)
                 let funding_rate_e9 = compute_current_funding_rate_e9(&config);
-                let price = if is_hyperp {
+                let (price, clamp_fired) = if is_hyperp {
                     let eng = zc::engine_ref(&data)?;
                     let last_slot = eng.current_slot;
-                    oracle::get_engine_oracle_price_e6(
+                    let p = oracle::get_engine_oracle_price_e6(
                         last_slot, clock.slot, clock.unix_timestamp,
                         &mut config, a_oracle,
-                    )?
+                    )?;
+                    (p, false)
                 } else {
                     read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
                 };
@@ -6426,7 +6462,9 @@ pub mod processor {
                     msg!("CU_CHECKPOINT: liquidate_start");
                     sol_log_compute_units();
                 }
-                let admit_h_min = engine.params.h_min;
+                // Gap T (hardening): flip admit_h_min to h_max when the
+                // oracle read clamped.
+                let admit_h_min = if clamp_fired { engine.params.h_max } else { engine.params.h_min };
                 let admit_h_max = engine.params.h_max;
                 // Fully accrue market to clock.slot BEFORE fee sync +
                 // liquidate_at_oracle_not_atomic. Explicit accrue→sync→op.
@@ -6505,27 +6543,28 @@ pub mod processor {
                 let clock = Clock::from_account_info(&accounts[6])?;
                 // Anti-retroactivity: capture funding rate before oracle read (§5.5)
                 let funding_rate_e9 = compute_current_funding_rate_e9(&config);
-                let price = if resolved {
+                let (price, clamp_fired) = if resolved {
                     let eng = zc::engine_ref(&data)?;
                     let (settlement, _) = eng.resolved_context();
                     if settlement == 0 {
                         return Err(ProgramError::InvalidAccountData);
                     }
-                    settlement
+                    (settlement, false)
                 } else {
                     let is_hyperp = oracle::is_hyperp_mode(&config);
-                    let px = if is_hyperp {
+                    let pair = if is_hyperp {
                         let eng = zc::engine_ref(&data)?;
                         let last_slot = eng.current_slot;
-                        oracle::get_engine_oracle_price_e6(
+                        let p = oracle::get_engine_oracle_price_e6(
                             last_slot, clock.slot, clock.unix_timestamp,
                             &mut config, a_oracle,
-                        )?
+                        )?;
+                        (p, false)
                     } else {
                         read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
                     };
                     state::write_config(&mut data, &config);
-                    px
+                    pair
                 };
 
                 let engine = zc::engine_mut(&mut data)?;
@@ -6573,7 +6612,9 @@ pub mod processor {
                         percolator::ResolvedCloseResult::Closed(payout) => payout,
                     }
                 } else {
-                    let admit_h_min = engine.params.h_min;
+                    // Gap T (hardening): flip admit_h_min to h_max when the
+                    // oracle read clamped.
+                    let admit_h_min = if clamp_fired { engine.params.h_max } else { engine.params.h_min };
                     let admit_h_max = engine.params.h_max;
                     // Fully accrue market to clock.slot BEFORE fee sync +
                     // close_account_not_atomic. Explicit accrue→sync→op.
@@ -6941,7 +6982,10 @@ pub mod processor {
                             (config.last_effective_price_e6, funding_rate_e9)
                         } else {
                             match read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data) {
-                                Ok(price) => {
+                                // UpdateConfig is a pure-accrual path: no
+                                // fresh-PnL admission, so clamp_fired is
+                                // ignored (no admit pair downstream).
+                                Ok((price, _clamp_fired)) => {
                                     state::write_config(&mut data, &config);
                                     (price, funding_rate_e9)
                                 }
@@ -7979,20 +8023,23 @@ pub mod processor {
                 let is_hyperp = oracle::is_hyperp_mode(&config);
                 // Anti-retroactivity: capture funding rate before oracle read (§5.5)
                 let funding_rate_e9 = compute_current_funding_rate_e9(&config);
-                let price = if is_hyperp {
+                let (price, clamp_fired) = if is_hyperp {
                     let eng = zc::engine_ref(&data)?;
                     let last_slot = eng.current_slot;
-                    oracle::get_engine_oracle_price_e6(
+                    let p = oracle::get_engine_oracle_price_e6(
                         last_slot, clock.slot, clock.unix_timestamp,
                         &mut config, a_oracle,
-                    )?
+                    )?;
+                    (p, false)
                 } else {
                     read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
                 };
                 state::write_config(&mut data, &config);
 
                 let engine = zc::engine_mut(&mut data)?;
-                let admit_h_min = engine.params.h_min;
+                // Gap T (hardening): flip admit_h_min to h_max when the
+                // oracle read clamped.
+                let admit_h_min = if clamp_fired { engine.params.h_max } else { engine.params.h_min };
                 let admit_h_max = engine.params.h_max;
                 // Fully accrue market to clock.slot BEFORE fee sync +
                 // settle_account_not_atomic. Explicit accrue→sync→op.
@@ -8130,13 +8177,14 @@ pub mod processor {
                 let is_hyperp = oracle::is_hyperp_mode(&config);
                 // Anti-retroactivity: capture funding rate before oracle read (§5.5)
                 let funding_rate_e9 = compute_current_funding_rate_e9(&config);
-                let price = if is_hyperp {
+                let (price, clamp_fired) = if is_hyperp {
                     let eng = zc::engine_ref(&data)?;
                     let last_slot = eng.current_slot;
-                    oracle::get_engine_oracle_price_e6(
+                    let p = oracle::get_engine_oracle_price_e6(
                         last_slot, clock.slot, clock.unix_timestamp,
                         &mut config, a_oracle,
-                    )?
+                    )?;
+                    (p, false)
                 } else {
                     read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
                 };
@@ -8153,7 +8201,9 @@ pub mod processor {
                 if dust != 0 {
                     return Err(ProgramError::InvalidArgument);
                 }
-                let admit_h_min = engine.params.h_min;
+                // Gap T (hardening): flip admit_h_min to h_max when the
+                // oracle read clamped.
+                let admit_h_min = if clamp_fired { engine.params.h_max } else { engine.params.h_min };
                 let admit_h_max = engine.params.h_max;
                 // Fully accrue market to clock.slot BEFORE fee sync +
                 // convert_released_pnl_not_atomic. Explicit accrue→sync→op.
@@ -8426,9 +8476,13 @@ pub mod processor {
                         &mut config, a_oracle,
                     )?
                 } else {
-                    read_price_and_stamp(
+                    // CatchupAccrue is a pure-accrual path: no fresh-PnL
+                    // admission, so the Gap T clamp_fired signal is ignored
+                    // (no admit pair downstream).
+                    let (price, _clamp_fired) = read_price_and_stamp(
                         &mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data,
-                    )?
+                    )?;
+                    price
                 };
 
                 let engine = zc::engine_mut(&mut data)?;
