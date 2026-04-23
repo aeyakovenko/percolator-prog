@@ -745,6 +745,19 @@ pub struct TestEnv {
 }
 
 impl TestEnv {
+    fn ensure_owner_funded(&mut self, owner: &Pubkey) {
+        const MIN_OWNER_LAMPORTS: u64 = 1_000_000_000;
+        let current = self
+            .svm
+            .get_account(owner)
+            .map(|account| account.lamports)
+            .unwrap_or(0);
+        let needed = MIN_OWNER_LAMPORTS.saturating_sub(current);
+        if needed > 0 {
+            self.svm.airdrop(owner, needed).unwrap();
+        }
+    }
+
     pub fn new() -> Self {
         let path = program_path();
 
@@ -1201,7 +1214,7 @@ impl TestEnv {
 
     pub fn init_lp(&mut self, owner: &Keypair) -> u16 {
         let idx = self.account_count;
-        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        self.ensure_owner_funded(&owner.pubkey());
         let ata = self.create_ata(&owner.pubkey(), 100);
         let matcher = spl_token::ID;
         let ctx = Pubkey::new_unique();
@@ -1244,7 +1257,7 @@ impl TestEnv {
 
     pub fn init_lp_with_fee(&mut self, owner: &Keypair, fee: u64) -> u16 {
         let idx = self.account_count;
-        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        self.ensure_owner_funded(&owner.pubkey());
         let ata = self.create_ata(&owner.pubkey(), fee);
         let matcher = spl_token::ID;
         let ctx = Pubkey::new_unique();
@@ -1287,7 +1300,7 @@ impl TestEnv {
 
     pub fn init_user(&mut self, owner: &Keypair) -> u16 {
         let idx = self.account_count;
-        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        self.ensure_owner_funded(&owner.pubkey());
         let ata = self.create_ata(&owner.pubkey(), 100);
 
         let ix = Instruction {
@@ -1861,7 +1874,7 @@ impl TestEnv {
     /// Returns the next available user index (first user is 0, second is 1, etc)
     pub fn init_user_with_fee(&mut self, owner: &Keypair, fee: u64) -> u16 {
         let idx = self.account_count;
-        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        self.ensure_owner_funded(&owner.pubkey());
         let ata = self.create_ata(&owner.pubkey(), fee);
 
         let ix = Instruction {
@@ -3200,6 +3213,19 @@ pub struct TradeCpiTestEnv {
 }
 
 impl TradeCpiTestEnv {
+    fn ensure_owner_funded(&mut self, owner: &Pubkey) {
+        const MIN_OWNER_LAMPORTS: u64 = 1_000_000_000;
+        let current = self
+            .svm
+            .get_account(owner)
+            .map(|account| account.lamports)
+            .unwrap_or(0);
+        let needed = MIN_OWNER_LAMPORTS.saturating_sub(current);
+        if needed > 0 {
+            self.svm.airdrop(owner, needed).unwrap();
+        }
+    }
+
     pub fn new() -> Self {
         let percolator_path = program_path();
         let matcher_path = matcher_program_path();
@@ -3366,7 +3392,7 @@ impl TradeCpiTestEnv {
     /// Returns (lp_idx, matcher_context_pubkey)
     pub fn init_lp_with_matcher(&mut self, owner: &Keypair, matcher_prog: &Pubkey) -> (u16, Pubkey) {
         let idx = self.account_count;
-        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        self.ensure_owner_funded(&owner.pubkey());
         let ata = self.create_ata(&owner.pubkey(), 100);
 
         // Derive the LP PDA that will be used later (must match percolator derivation)
@@ -3452,7 +3478,7 @@ impl TradeCpiTestEnv {
         matcher_ctx: &Pubkey,
     ) -> u16 {
         let idx = self.account_count;
-        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        self.ensure_owner_funded(&owner.pubkey());
         let ata = self.create_ata(&owner.pubkey(), 100);
 
         let ix = Instruction {
@@ -3483,7 +3509,7 @@ impl TradeCpiTestEnv {
 
     pub fn init_user(&mut self, owner: &Keypair) -> u16 {
         let idx = self.account_count;
-        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        self.ensure_owner_funded(&owner.pubkey());
         let ata = self.create_ata(&owner.pubkey(), 100);
 
         let ix = Instruction {
@@ -4728,7 +4754,7 @@ impl TestEnv {
     /// Try to init user with a specific signer (for auth tests)
     pub fn try_init_user(&mut self, owner: &Keypair) -> Result<u16, String> {
         let idx = self.account_count;
-        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        self.ensure_owner_funded(&owner.pubkey());
         let ata = self.create_ata(&owner.pubkey(), 0);
 
         let ix = Instruction {
@@ -5478,7 +5504,7 @@ impl TestEnv {
     /// Try to init user with specific fee, returns Result.
     pub fn try_init_user_with_fee(&mut self, owner: &Keypair, fee: u64) -> Result<u16, String> {
         let idx = self.account_count;
-        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        self.ensure_owner_funded(&owner.pubkey());
         let ata = self.create_ata(&owner.pubkey(), fee);
 
         let ix = Instruction {
@@ -5512,7 +5538,7 @@ impl TestEnv {
     /// Try to init LP with correct 8-account layout, returns Result.
     pub fn try_init_lp_proper(&mut self, owner: &Keypair, matcher: &Pubkey, ctx: &Pubkey, fee: u64) -> Result<u16, String> {
         let idx = self.account_count;
-        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        self.ensure_owner_funded(&owner.pubkey());
         let ata = self.create_ata(&owner.pubkey(), fee);
 
         let ix = Instruction {
@@ -5914,7 +5940,7 @@ impl TestEnv {
 impl TestEnv {
     pub fn try_init_lp(&mut self, owner: &Keypair) -> Result<u16, String> {
         let idx = self.account_count;
-        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        self.ensure_owner_funded(&owner.pubkey());
         let ata = self.create_ata(&owner.pubkey(), 0);
 
         let ix = Instruction {
