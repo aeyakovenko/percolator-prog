@@ -335,6 +335,13 @@ pub mod verify {
         stored == signer
     }
 
+    /// Counterparty isolation: the two trade slots must not share one owner.
+    /// Used by: TradeNoCpi, TradeCpi.
+    #[inline]
+    pub fn owners_distinct_ok(lhs: [u8; 32], rhs: [u8; 32]) -> bool {
+        lhs != rhs
+    }
+
     /// Admin authorization: admin must be non-zero (not burned) and match signer.
     /// Used by: UpdateAuthority, UpdateConfig, and other admin-gated ops.
     #[inline]
@@ -488,6 +495,7 @@ pub mod verify {
     ///   LP authorization is delegated to the matcher program at registration
     ///   time — the CPI identity binding (matcher_identity_ok) is the actual
     ///   LP-side authorization gate. This parameter models key-equality only.
+    /// * `owners_distinct` - Whether the two counterparties have different owners
     /// * `exec_size` - The exec_size from matcher return
     #[inline]
     pub fn decide_trade_cpi(
@@ -498,6 +506,7 @@ pub mod verify {
         abi_ok: bool,
         user_auth_ok: bool,
         lp_key_ok: bool,
+        owners_distinct: bool,
         exec_size: i128,
     ) -> TradeCpiDecision {
         // Check in order of actual program execution:
@@ -509,8 +518,8 @@ pub mod verify {
         if !pda_ok {
             return TradeCpiDecision::Reject;
         }
-        // 3. Owner authorization (user signer + LP key equality)
-        if !user_auth_ok || !lp_key_ok {
+        // 3. Owner authorization + counterparty isolation
+        if !user_auth_ok || !lp_key_ok || !owners_distinct {
             return TradeCpiDecision::Reject;
         }
         // 4. Matcher identity binding
@@ -610,6 +619,7 @@ pub mod verify {
     /// * `user_auth_ok` - Whether user signer matches user owner
     /// * `lp_key_ok` - Whether provided LP owner key matches stored LP owner
     ///   (key-equality only, not signer — see decide_trade_cpi docs)
+    /// * `owners_distinct` - Whether the two counterparties have different owners
     /// * `ret` - The matcher return fields (from CPI)
     /// * `lp_account_id` - Expected LP account ID from request
     /// * `oracle_price_e6` - Expected oracle price from request
@@ -622,6 +632,7 @@ pub mod verify {
         pda_ok: bool,
         user_auth_ok: bool,
         lp_key_ok: bool,
+        owners_distinct: bool,
         ret: MatcherReturnFields,
         lp_account_id: u64,
         oracle_price_e6: u64,
@@ -636,8 +647,8 @@ pub mod verify {
         if !pda_ok {
             return TradeCpiDecision::Reject;
         }
-        // 3. Owner authorization (user signer + LP key equality)
-        if !user_auth_ok || !lp_key_ok {
+        // 3. Owner authorization + counterparty isolation
+        if !user_auth_ok || !lp_key_ok || !owners_distinct {
             return TradeCpiDecision::Reject;
         }
         // 4. Matcher identity binding
@@ -673,12 +684,14 @@ pub mod verify {
     /// Pure decision function for TradeNoCpi instruction.
     /// * `lp_auth_ok` - Whether LP signer matches stored LP owner.
     ///   NOTE: TradeNoCpi requires LP to be a signer (unlike TradeCpi).
+    /// * `owners_distinct` - Whether the two counterparties have different owners.
     #[inline]
     pub fn decide_trade_nocpi(
         user_auth_ok: bool,
         lp_auth_ok: bool,
+        owners_distinct: bool,
     ) -> TradeNoCpiDecision {
-        if !user_auth_ok || !lp_auth_ok {
+        if !user_auth_ok || !lp_auth_ok || !owners_distinct {
             return TradeNoCpiDecision::Reject;
         }
         TradeNoCpiDecision::Accept
@@ -1203,6 +1216,9 @@ pub mod error {
         /// (with a minimum floor of 1 unit to avoid Zeno's-paradox lockout
         /// at small bps × small insurance).
         InsuranceWithdrawCapExceeded,
+        /// Trade counterparties must have distinct owners. Rejects same-owner
+        /// self-matching before one account can externalize losses to insurance.
+        SameOwnerTradeForbidden,
     }
 
     impl From<PercolatorError> for ProgramError {
@@ -5596,6 +5612,9 @@ pub mod processor {
                 if !crate::verify::owner_ok(l_owner, a_lp.key.to_bytes()) {
                     return Err(PercolatorError::EngineUnauthorized.into());
                 }
+                if !crate::verify::owners_distinct_ok(u_owner, l_owner) {
+                    return Err(PercolatorError::SameOwnerTradeForbidden.into());
+                }
 
                 // Side-mode gating is handled inside engine.execute_trade_not_atomic()
 
@@ -5876,6 +5895,9 @@ pub mod processor {
                     let l_owner = engine.accounts[lp_idx as usize].owner;
                     if !crate::verify::owner_ok(l_owner, a_lp_owner.key.to_bytes()) {
                         return Err(PercolatorError::EngineUnauthorized.into());
+                    }
+                    if !crate::verify::owners_distinct_ok(u_owner, l_owner) {
+                        return Err(PercolatorError::SameOwnerTradeForbidden.into());
                     }
 
                     let lp_acc = &engine.accounts[lp_idx as usize];

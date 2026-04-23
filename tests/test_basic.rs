@@ -4874,6 +4874,60 @@ fn test_trade_nocpi_allows_user_user_bilateral() {
     assert!(result.is_ok(), "User-user bilateral trade must be allowed: {:?}", result);
 }
 
+/// Regression: TradeNoCpi must reject same-owner counterparties.
+/// Without this, one owner can split state across two slots and self-match.
+#[test]
+fn test_trade_nocpi_rejects_same_owner_counterparties() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let owner = Keypair::new();
+    let lp_idx = env.init_lp(&owner);
+    env.deposit(&owner, lp_idx, 10_000_000_000);
+
+    let user_idx = env.init_user(&owner);
+    env.deposit(&owner, user_idx, 10_000_000_000);
+
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let vault_before = env.vault_balance();
+
+    let result = env.try_trade(&owner, &owner, lp_idx, user_idx, 1_000);
+    assert!(
+        result.is_err(),
+        "Same-owner TradeNoCpi must reject instead of self-matching: {:?}",
+        result
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Rejected same-owner TradeNoCpi must preserve user position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected same-owner TradeNoCpi must preserve counterparty position"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Rejected same-owner TradeNoCpi must preserve user capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected same-owner TradeNoCpi must preserve counterparty capital"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        vault_before,
+        "Rejected same-owner TradeNoCpi must preserve the SPL vault"
+    );
+}
+
 // ============================================================================
 // Regression tests: TDD round-4 blockers
 // ============================================================================

@@ -500,7 +500,7 @@ fn valid_shape() -> MatcherAccountsShape {
 }
 
 /// Universal characterization of decide_trade_cpi: fully symbolic inputs.
-/// Proves: Accept iff shape_ok && identity && pda && abi && user && lp.
+/// Proves: Accept iff shape_ok && identity && pda && abi && user && lp && distinct_owner.
 /// On Accept: new_nonce == nonce_on_success(old_nonce), chosen_size == exec_size.
 #[kani::proof]
 fn kani_decide_trade_cpi_universal() {
@@ -517,15 +517,16 @@ fn kani_decide_trade_cpi_universal() {
     let abi_ok: bool = kani::any();
     let user_auth_ok: bool = kani::any();
     let lp_key_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
 
     let decision = decide_trade_cpi(
         old_nonce, shape, identity_ok, pda_ok, abi_ok,
-        user_auth_ok, lp_key_ok, exec_size,
+        user_auth_ok, lp_key_ok, owners_distinct, exec_size,
     );
 
     let should_accept = matcher_shape_ok(shape)
         && identity_ok && pda_ok && abi_ok
-        && user_auth_ok && lp_key_ok
+        && user_auth_ok && lp_key_ok && owners_distinct
         && old_nonce < u64::MAX; // nonce overflow gate
 
     if should_accept {
@@ -560,7 +561,7 @@ fn kani_tradecpi_reject_nonce_unchanged() {
     kani::assume(!matcher_shape_ok(shape));
 
     let decision = decide_trade_cpi(
-        old_nonce, shape, true, true, true, true, true, exec_size,
+        old_nonce, shape, true, true, true, true, true, true, exec_size,
     );
 
     assert_eq!(
@@ -604,6 +605,7 @@ fn kani_tradecpi_accept_increments_nonce() {
         true,
         true,
         true,
+        true,
         exec_size,
     );
 
@@ -640,11 +642,12 @@ fn kani_tradecpi_accept_increments_nonce() {
 fn kani_tradenocpi_auth_failure_rejects() {
     let user_auth_ok: bool = kani::any();
     let lp_auth_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
 
     // At least one auth must fail
     kani::assume(!user_auth_ok || !lp_auth_ok);
 
-    let decision = decide_trade_nocpi(user_auth_ok, lp_auth_ok);
+    let decision = decide_trade_nocpi(user_auth_ok, lp_auth_ok, owners_distinct);
     assert_eq!(
         decision,
         TradeNoCpiDecision::Reject,
@@ -657,11 +660,12 @@ fn kani_tradenocpi_auth_failure_rejects() {
 fn kani_tradenocpi_universal_characterization() {
     let user_auth_ok: bool = kani::any();
     let lp_auth_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
 
-    let decision = decide_trade_nocpi(user_auth_ok, lp_auth_ok);
+    let decision = decide_trade_nocpi(user_auth_ok, lp_auth_ok, owners_distinct);
 
     // Full characterization: accept iff all auth passes
-    let should_accept = user_auth_ok && lp_auth_ok;
+    let should_accept = user_auth_ok && lp_auth_ok && owners_distinct;
     if should_accept {
         assert_eq!(decision, TradeNoCpiDecision::Accept, "must accept when all conditions pass");
     } else {
@@ -718,7 +722,7 @@ fn kani_tradecpi_any_reject_nonce_unchanged() {
             ctx_owner_is_prog: true,
             ctx_len_ok: true,
         };
-        let d = decide_trade_cpi(0, bad, true, true, true, true, true, 0);
+        let d = decide_trade_cpi(0, bad, true, true, true, true, true, true, 0);
         assert!(
             matches!(d, TradeCpiDecision::Reject),
             "non-vacuity: bad shape must reject"
@@ -740,6 +744,7 @@ fn kani_tradecpi_any_reject_nonce_unchanged() {
     let abi_ok: bool = kani::any();
     let user_auth_ok: bool = kani::any();
     let lp_auth_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
     let exec_size: i128 = kani::any();
 
     let decision = decide_trade_cpi(
@@ -750,6 +755,7 @@ fn kani_tradecpi_any_reject_nonce_unchanged() {
         abi_ok,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         exec_size,
     );
 
@@ -771,7 +777,7 @@ fn kani_tradecpi_any_reject_nonce_unchanged() {
 fn kani_tradecpi_any_accept_increments_nonce() {
     // Non-vacuity witness: all-valid inputs produce Accept
     {
-        let d = decide_trade_cpi(0, valid_shape(), true, true, true, true, true, 0);
+        let d = decide_trade_cpi(0, valid_shape(), true, true, true, true, true, true, 0);
         assert!(
             matches!(d, TradeCpiDecision::Accept { .. }),
             "non-vacuity: all-valid inputs must accept"
@@ -793,6 +799,7 @@ fn kani_tradecpi_any_accept_increments_nonce() {
     let abi_ok: bool = kani::any();
     let user_auth_ok: bool = kani::any();
     let lp_auth_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
     let exec_size: i128 = kani::any();
 
     let decision = decide_trade_cpi(
@@ -803,6 +810,7 @@ fn kani_tradecpi_any_accept_increments_nonce() {
         abi_ok,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         exec_size,
     );
 
@@ -1012,7 +1020,7 @@ fn kani_tradecpi_from_ret_any_reject_nonce_unchanged() {
             oracle_price_e6: 0,
             reserved: 0,
         };
-        let d = decide_trade_cpi_from_ret(0, bad, true, true, true, true, dummy_ret, 0, 0, 0);
+        let d = decide_trade_cpi_from_ret(0, bad, true, true, true, true, true, dummy_ret, 0, 0, 0);
         assert!(
             matches!(d, TradeCpiDecision::Reject),
             "non-vacuity: bad shape must reject"
@@ -1030,6 +1038,7 @@ fn kani_tradecpi_from_ret_any_reject_nonce_unchanged() {
     let pda_ok: bool = kani::any();
     let user_auth_ok: bool = kani::any();
     let lp_auth_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
     let ret = any_matcher_return_fields();
     let lp_account_id: u64 = kani::any();
     let oracle_price_e6: u64 = kani::any();
@@ -1042,6 +1051,7 @@ fn kani_tradecpi_from_ret_any_reject_nonce_unchanged() {
         pda_ok,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         ret,
         lp_account_id,
         oracle_price_e6,
@@ -1078,7 +1088,7 @@ fn kani_tradecpi_from_ret_any_accept_increments_nonce() {
             reserved: 0,
         };
         let d = decide_trade_cpi_from_ret(
-            42, valid_shape(), true, true, true, true, valid_ret, 1, 50_000_000, 100,
+            42, valid_shape(), true, true, true, true, true, valid_ret, 1, 50_000_000, 100,
         );
         assert!(
             matches!(d, TradeCpiDecision::Accept { .. }),
@@ -1097,6 +1107,7 @@ fn kani_tradecpi_from_ret_any_accept_increments_nonce() {
     let pda_ok: bool = kani::any();
     let user_auth_ok: bool = kani::any();
     let lp_auth_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
     let ret = any_matcher_return_fields();
     let lp_account_id: u64 = kani::any();
     let oracle_price_e6: u64 = kani::any();
@@ -1109,6 +1120,7 @@ fn kani_tradecpi_from_ret_any_accept_increments_nonce() {
         pda_ok,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         ret,
         lp_account_id,
         oracle_price_e6,
@@ -1187,6 +1199,7 @@ fn kani_tradecpi_from_ret_accept_uses_exec_size() {
         pda_ok,
         user_auth_ok,
         lp_auth_ok,
+        true,
         ret,
         lp_account_id,
         oracle_price_e6,
@@ -1509,6 +1522,7 @@ fn kani_universal_shape_fail_rejects() {
     let abi_ok: bool = kani::any();
     let user_auth_ok: bool = kani::any();
     let lp_auth_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
     let exec_size: i128 = kani::any();
 
     let decision = decide_trade_cpi(
@@ -1519,6 +1533,7 @@ fn kani_universal_shape_fail_rejects() {
         abi_ok,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         exec_size,
     );
 
@@ -1545,6 +1560,7 @@ fn kani_universal_pda_fail_rejects() {
     let abi_ok: bool = kani::any();
     let user_auth_ok: bool = kani::any();
     let lp_auth_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
     let exec_size: i128 = kani::any();
 
     let decision = decide_trade_cpi(
@@ -1555,6 +1571,7 @@ fn kani_universal_pda_fail_rejects() {
         abi_ok,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         exec_size,
     );
 
@@ -1581,6 +1598,7 @@ fn kani_universal_user_auth_fail_rejects() {
     let abi_ok: bool = kani::any();
     let user_auth_ok = false; // Force failure
     let lp_auth_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
     let exec_size: i128 = kani::any();
 
     let decision = decide_trade_cpi(
@@ -1591,6 +1609,7 @@ fn kani_universal_user_auth_fail_rejects() {
         abi_ok,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         exec_size,
     );
 
@@ -1617,6 +1636,7 @@ fn kani_universal_lp_auth_fail_rejects() {
     let abi_ok: bool = kani::any();
     let user_auth_ok: bool = kani::any();
     let lp_auth_ok = false; // Force failure
+    let owners_distinct: bool = kani::any();
     let exec_size: i128 = kani::any();
 
     let decision = decide_trade_cpi(
@@ -1627,6 +1647,7 @@ fn kani_universal_lp_auth_fail_rejects() {
         abi_ok,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         exec_size,
     );
 
@@ -1653,6 +1674,7 @@ fn kani_universal_identity_fail_rejects() {
     let abi_ok: bool = kani::any();
     let user_auth_ok: bool = kani::any();
     let lp_auth_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
     let exec_size: i128 = kani::any();
 
     let decision = decide_trade_cpi(
@@ -1663,6 +1685,7 @@ fn kani_universal_identity_fail_rejects() {
         abi_ok,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         exec_size,
     );
 
@@ -1689,6 +1712,7 @@ fn kani_universal_abi_fail_rejects() {
     let abi_ok = false; // Force failure
     let user_auth_ok: bool = kani::any();
     let lp_auth_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
     let exec_size: i128 = kani::any();
 
     let decision = decide_trade_cpi(
@@ -1699,6 +1723,7 @@ fn kani_universal_abi_fail_rejects() {
         abi_ok,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         exec_size,
     );
 
@@ -1724,6 +1749,7 @@ fn kani_tradecpi_variants_consistent_valid_shape() {
     let pda_ok: bool = kani::any();
     let user_auth_ok: bool = kani::any();
     let lp_auth_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
 
     // Create ret fields
     let ret = any_matcher_return_fields();
@@ -1750,6 +1776,7 @@ fn kani_tradecpi_variants_consistent_valid_shape() {
         abi_passes,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         ret.exec_size,
     );
 
@@ -1760,6 +1787,7 @@ fn kani_tradecpi_variants_consistent_valid_shape() {
         pda_ok,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         ret,
         lp_account_id,
         oracle_price_e6,
@@ -1809,6 +1837,7 @@ fn kani_tradecpi_variants_consistent_invalid_shape() {
     let pda_ok: bool = kani::any();
     let user_auth_ok: bool = kani::any();
     let lp_auth_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
     let ret = any_matcher_return_fields();
     let lp_account_id: u64 = kani::any();
     let oracle_price_e6: u64 = kani::any();
@@ -1827,6 +1856,7 @@ fn kani_tradecpi_variants_consistent_invalid_shape() {
         abi_passes,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         ret.exec_size,
     );
 
@@ -1837,6 +1867,7 @@ fn kani_tradecpi_variants_consistent_invalid_shape() {
         pda_ok,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         ret,
         lp_account_id,
         oracle_price_e6,
@@ -1896,6 +1927,7 @@ fn kani_tradecpi_from_ret_req_id_is_nonce_plus_one() {
         true,  // pda_ok
         true,  // user_auth_ok
         true,  // lp_auth_ok
+        true,  // owners_distinct
         ret,
         lp_account_id,
         oracle_price_e6,
@@ -1970,6 +2002,7 @@ fn kani_tradecpi_from_ret_forced_acceptance() {
         true,  // pda_ok
         true,  // user_auth_ok
         true,  // lp_auth_ok
+        true,  // owners_distinct
         ret,
         lp_account_id,
         oracle_price_e6,
@@ -2621,6 +2654,7 @@ fn kani_decide_trade_cpi_from_ret_universal() {
     let pda_ok: bool = kani::any();
     let user_auth_ok: bool = kani::any();
     let lp_auth_ok: bool = kani::any();
+    let owners_distinct: bool = kani::any();
 
     // Construct an ABI-valid ret symbolically.
     // The `abi_ok` call inside `decide_trade_cpi_from_ret` uses:
@@ -2640,6 +2674,7 @@ fn kani_decide_trade_cpi_from_ret_universal() {
                 pda_ok,
                 user_auth_ok,
                 lp_auth_ok,
+                owners_distinct,
                 any_matcher_return_fields(),
                 kani::any(),
                 kani::any(),
@@ -2676,6 +2711,7 @@ fn kani_decide_trade_cpi_from_ret_universal() {
         && pda_ok
         && user_auth_ok
         && lp_auth_ok
+        && owners_distinct
         && identity_ok
         && abi_valid;
 
@@ -2686,6 +2722,7 @@ fn kani_decide_trade_cpi_from_ret_universal() {
         pda_ok,
         user_auth_ok,
         lp_auth_ok,
+        owners_distinct,
         ret,
         lp_account_id,
         oracle_price_e6,

@@ -117,6 +117,76 @@ fn test_tradecpi_permissionless_lp_no_signature_required() {
     println!("  - This enables permissionless trading for LP pools");
 }
 
+/// Regression: TradeCpi must reject same-owner counterparties.
+/// LP-side delegation to a matcher is not permission to self-match one owner's
+/// user and LP slots against each other.
+#[test]
+fn test_tradecpi_rejects_same_owner_counterparties() {
+    let mut env = TradeCpiTestEnv::new();
+    env.init_market();
+
+    let matcher_prog = env.matcher_program_id;
+    let owner = Keypair::new();
+    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&owner, &matcher_prog);
+    env.deposit(&owner, lp_idx, 100_000_000_000);
+
+    let user_idx = env.init_user(&owner);
+    env.deposit(&owner, user_idx, 10_000_000_000);
+
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let spl_vault_before = env.vault_balance();
+    let engine_vault_before = env.read_vault();
+
+    let result = env.try_trade_cpi(
+        &owner,
+        &owner.pubkey(),
+        lp_idx,
+        user_idx,
+        1_000_000,
+        &matcher_prog,
+        &matcher_ctx,
+    );
+
+    assert!(
+        result.is_err(),
+        "Same-owner TradeCpi must reject instead of self-matching: {:?}",
+        result
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Rejected same-owner TradeCpi must preserve user position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected same-owner TradeCpi must preserve LP position"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Rejected same-owner TradeCpi must preserve user capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected same-owner TradeCpi must preserve LP capital"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        spl_vault_before,
+        "Rejected same-owner TradeCpi must preserve the SPL vault"
+    );
+    assert_eq!(
+        env.read_vault(),
+        engine_vault_before,
+        "Rejected same-owner TradeCpi must preserve engine vault accounting"
+    );
+}
+
 /// CRITICAL: TradeCpi rejects PDA that exists but has wrong shape
 ///
 /// Even if the correct PDA address is passed, it must have:
@@ -6055,4 +6125,3 @@ fn test_tradecpi_empty_tail_is_canonical() {
     )
     .expect("TradeCpi with empty tail must succeed (canonical 8-account form)");
 }
-

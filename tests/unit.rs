@@ -5,11 +5,11 @@
 
 use percolator::{I128, MAX_ACCOUNTS, U128};
 use percolator_prog::{
-    constants::MAGIC,
+    constants::{MAGIC, MATCHER_CONTEXT_LEN},
     error::PercolatorError,
     oracle,
     processor::process_instruction,
-    state, units, zc,
+    state, units, verify, zc,
 };
 use solana_program::{
     account_info::AccountInfo, clock::Clock, program_error::ProgramError, program_pack::Pack,
@@ -376,6 +376,7 @@ fn encode_trade_cpi(lp: u16, user: u16, size: i128) -> Vec<u8> {
     encode_u16(lp, &mut data);
     encode_u16(user, &mut data);
     encode_i128(size, &mut data);
+    encode_u64(0, &mut data); // limit_price_e6 = 0 => no slippage bound
     data
 }
 
@@ -721,6 +722,328 @@ fn test_trade() {
         )
         .unwrap();
     }
+}
+
+#[test]
+fn test_trade_runtime_rejects_same_owner_counterparties() {
+    let mut f = setup_market();
+    let init_data = encode_init_market(&f, 100);
+    {
+        let accounts = vec![
+            f.admin.to_info(),
+            f.slab.to_info(),
+            f.mint.to_info(),
+            f.vault.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+            f.rent.to_info(),
+            f.pyth_index.to_info(),
+            f.system.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &init_data).unwrap();
+    }
+
+    let owner_key = Pubkey::new_unique();
+
+    let mut lp_owner = TestAccount::new(
+        owner_key,
+        solana_program::system_program::id(),
+        0,
+        vec![],
+    )
+    .signer();
+    let mut lp_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_token_account(f.mint.key, owner_key, 2_000),
+    )
+    .writable();
+    let matcher_prog_key = Pubkey::new_unique();
+    let matcher_ctx_key = Pubkey::new_unique();
+    {
+        let accounts = vec![
+            lp_owner.to_info(),
+            f.slab.to_info(),
+            lp_ata.to_info(),
+            f.vault.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+        ];
+        process_instruction(
+            &f.program_id,
+            &accounts,
+            &encode_init_lp(matcher_prog_key, matcher_ctx_key, 100),
+        )
+        .unwrap();
+    }
+    let lp_idx = 0u16;
+    {
+        let accounts = vec![
+            lp_owner.to_info(),
+            f.slab.to_info(),
+            lp_ata.to_info(),
+            f.vault.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &encode_deposit(lp_idx, 1_000)).unwrap();
+    }
+
+    let mut user_owner = TestAccount::new(
+        owner_key,
+        solana_program::system_program::id(),
+        0,
+        vec![],
+    )
+    .signer();
+    let mut user_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_token_account(f.mint.key, owner_key, 2_000),
+    )
+    .writable();
+    {
+        let accounts = vec![
+            user_owner.to_info(),
+            f.slab.to_info(),
+            user_ata.to_info(),
+            f.vault.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &encode_init_user(100)).unwrap();
+    }
+    let user_idx = 1u16;
+    {
+        let accounts = vec![
+            user_owner.to_info(),
+            f.slab.to_info(),
+            user_ata.to_info(),
+            f.vault.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &encode_deposit(user_idx, 1_000)).unwrap();
+    }
+
+    let slab_before = f.slab.data.clone();
+    let vault_before = f.vault.data.clone();
+    let mut user_signer = TestAccount::new(
+        owner_key,
+        solana_program::system_program::id(),
+        0,
+        vec![],
+    )
+    .signer();
+    let mut lp_signer = TestAccount::new(
+        owner_key,
+        solana_program::system_program::id(),
+        0,
+        vec![],
+    )
+    .signer();
+    let accounts = vec![
+        user_signer.to_info(),
+        lp_signer.to_info(),
+        f.slab.to_info(),
+        f.clock.to_info(),
+        f.pyth_index.to_info(),
+    ];
+    let res = process_instruction(
+        &f.program_id,
+        &accounts,
+        &encode_trade(lp_idx, user_idx, 100),
+    );
+    assert_eq!(res, Err(PercolatorError::SameOwnerTradeForbidden.into()));
+    assert_eq!(
+        f.slab.data,
+        slab_before,
+        "Rejected same-owner TradeNoCpi must not mutate slab state"
+    );
+    assert_eq!(
+        f.vault.data,
+        vault_before,
+        "Rejected same-owner TradeNoCpi must not mutate vault state"
+    );
+}
+
+#[test]
+fn test_trade_cpi_runtime_rejects_same_owner_counterparties() {
+    let mut f = setup_market();
+    let init_data = encode_init_market(&f, 100);
+    {
+        let accounts = vec![
+            f.admin.to_info(),
+            f.slab.to_info(),
+            f.mint.to_info(),
+            f.vault.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+            f.rent.to_info(),
+            f.pyth_index.to_info(),
+            f.system.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &init_data).unwrap();
+    }
+
+    let owner_key = Pubkey::new_unique();
+    let matcher_prog_key = Pubkey::new_unique();
+    let matcher_ctx_key = Pubkey::new_unique();
+
+    let mut lp_owner = TestAccount::new(
+        owner_key,
+        solana_program::system_program::id(),
+        0,
+        vec![],
+    )
+    .signer();
+    let mut lp_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_token_account(f.mint.key, owner_key, 2_000),
+    )
+    .writable();
+    {
+        let accounts = vec![
+            lp_owner.to_info(),
+            f.slab.to_info(),
+            lp_ata.to_info(),
+            f.vault.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+        ];
+        process_instruction(
+            &f.program_id,
+            &accounts,
+            &encode_init_lp(matcher_prog_key, matcher_ctx_key, 100),
+        )
+        .unwrap();
+    }
+    let lp_idx = 0u16;
+    {
+        let accounts = vec![
+            lp_owner.to_info(),
+            f.slab.to_info(),
+            lp_ata.to_info(),
+            f.vault.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &encode_deposit(lp_idx, 1_000)).unwrap();
+    }
+
+    let mut user_owner = TestAccount::new(
+        owner_key,
+        solana_program::system_program::id(),
+        0,
+        vec![],
+    )
+    .signer();
+    let mut user_ata = TestAccount::new(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        0,
+        make_token_account(f.mint.key, owner_key, 2_000),
+    )
+    .writable();
+    {
+        let accounts = vec![
+            user_owner.to_info(),
+            f.slab.to_info(),
+            user_ata.to_info(),
+            f.vault.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &encode_init_user(100)).unwrap();
+    }
+    let user_idx = 1u16;
+    {
+        let accounts = vec![
+            user_owner.to_info(),
+            f.slab.to_info(),
+            user_ata.to_info(),
+            f.vault.to_info(),
+            f.token_prog.to_info(),
+            f.clock.to_info(),
+        ];
+        process_instruction(&f.program_id, &accounts, &encode_deposit(user_idx, 1_000)).unwrap();
+    }
+
+    let lp_bytes = lp_idx.to_le_bytes();
+    let (lp_pda_key, _) =
+        Pubkey::find_program_address(&[b"lp", f.slab.key.as_ref(), &lp_bytes], &f.program_id);
+    let mut user_signer = TestAccount::new(
+        owner_key,
+        solana_program::system_program::id(),
+        0,
+        vec![],
+    )
+    .signer();
+    let mut lp_owner_meta = TestAccount::new(
+        owner_key,
+        solana_program::system_program::id(),
+        0,
+        vec![],
+    );
+    let mut matcher_prog = TestAccount::new(
+        matcher_prog_key,
+        Pubkey::default(),
+        0,
+        vec![],
+    )
+    .executable();
+    let mut matcher_ctx = TestAccount::new(
+        matcher_ctx_key,
+        matcher_prog_key,
+        0,
+        vec![0u8; MATCHER_CONTEXT_LEN],
+    )
+    .writable();
+    let mut lp_pda = TestAccount::new(
+        lp_pda_key,
+        solana_program::system_program::id(),
+        0,
+        vec![],
+    );
+
+    let slab_before = f.slab.data.clone();
+    let vault_before = f.vault.data.clone();
+    let matcher_ctx_before = matcher_ctx.data.clone();
+    let accounts = vec![
+        user_signer.to_info(),
+        lp_owner_meta.to_info(),
+        f.slab.to_info(),
+        f.clock.to_info(),
+        f.pyth_index.to_info(),
+        matcher_prog.to_info(),
+        matcher_ctx.to_info(),
+        lp_pda.to_info(),
+    ];
+    let res = process_instruction(
+        &f.program_id,
+        &accounts,
+        &encode_trade_cpi(lp_idx, user_idx, 100),
+    );
+    assert_eq!(res, Err(PercolatorError::SameOwnerTradeForbidden.into()));
+    assert_eq!(
+        f.slab.data,
+        slab_before,
+        "Rejected same-owner TradeCpi must not mutate slab state"
+    );
+    assert_eq!(
+        f.vault.data,
+        vault_before,
+        "Rejected same-owner TradeCpi must not mutate vault state"
+    );
+    assert_eq!(
+        matcher_ctx.data,
+        matcher_ctx_before,
+        "Rejected same-owner TradeCpi must not mutate matcher context"
+    );
 }
 
 #[test]
@@ -1078,4 +1401,83 @@ fn test_nonce_overflow_does_not_reopen_request_id_space() {
     // Verify the previous value still works
     let before_max = percolator_prog::verify::nonce_on_success(u64::MAX - 1);
     assert_eq!(before_max, Some(u64::MAX), "u64::MAX-1 should advance to u64::MAX");
+}
+
+#[test]
+fn test_verify_owners_distinct_ok_rejects_same_owner() {
+    assert!(verify::owners_distinct_ok([1u8; 32], [2u8; 32]));
+    assert!(!verify::owners_distinct_ok([7u8; 32], [7u8; 32]));
+}
+
+#[test]
+fn test_verify_trade_nocpi_rejects_same_owner_even_with_auth() {
+    assert_eq!(
+        verify::decide_trade_nocpi(true, true, false),
+        verify::TradeNoCpiDecision::Reject,
+        "TradeNoCpi must reject same-owner counterparties even when auth passes"
+    );
+}
+
+#[test]
+fn test_verify_trade_cpi_rejects_same_owner_even_when_other_gates_pass() {
+    let shape = verify::MatcherAccountsShape {
+        prog_executable: true,
+        ctx_executable: false,
+        ctx_owner_is_prog: true,
+        ctx_len_ok: true,
+    };
+
+    assert_eq!(
+        verify::decide_trade_cpi(
+            41,
+            shape,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            123,
+        ),
+        verify::TradeCpiDecision::Reject,
+        "TradeCpi must reject same-owner counterparties before matcher execution"
+    );
+}
+
+#[test]
+fn test_verify_trade_cpi_from_ret_rejects_same_owner_before_abi() {
+    let shape = verify::MatcherAccountsShape {
+        prog_executable: true,
+        ctx_executable: false,
+        ctx_owner_is_prog: true,
+        ctx_len_ok: true,
+    };
+    let ret = verify::MatcherReturnFields {
+        abi_version: 0,
+        flags: 0,
+        exec_price_e6: 0,
+        exec_size: 0,
+        req_id: 0,
+        lp_account_id: 0,
+        oracle_price_e6: 0,
+        reserved: 0,
+    };
+
+    assert_eq!(
+        verify::decide_trade_cpi_from_ret(
+            41,
+            shape,
+            true,
+            true,
+            true,
+            true,
+            false,
+            ret,
+            0,
+            0,
+            0,
+        ),
+        verify::TradeCpiDecision::Reject,
+        "TradeCpi from_ret path must reject same-owner counterparties before ABI validation"
+    );
 }
