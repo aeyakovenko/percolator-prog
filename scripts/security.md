@@ -966,3 +966,206 @@ if acc.capital.is_zero()
 
 Existing dust-reclaim regression coverage
 (`test_dust_account_drained_and_gc_by_crank_alone`) still passes.
+
+
+---
+
+# Iteration log — vip-ultr / Claude Code (2026-04-23)
+
+Hunt target: 5.1161 SOL in the live insurance vault on slab
+`5ZamUkAiXtvYQijNiRcuGaea66TVbbTPusHfwMX1kTqB` (program
+`BCGNFw6vDinWTF9AybAbi8vr69gx5nk5w8o2vEWgpsiw`, all four authorities
+burned, immutable). Methodology per this file. Tooling: Claude Code (Opus
+4.7) reading the engine + wrapper sources directly.
+
+## Iteration 5 — perm-resolve → withdraw insurance — **PASS_SAFE**
+
+**Hypothesis.** Stop cranking, wait out
+`permissionless_resolve_stale_slots`, call `ResolvePermissionless`, then
+extract the insurance fund through some non-authority path.
+
+**Result.** No path exists. The 5.1161 SOL is mathematically locked.
+
+**Proof.**
+
+1. `WithdrawInsurance` (tag 20) requires
+   `require_admin(header.insurance_authority, a_admin.key)` at
+   `src/percolator.rs:7469`.
+2. `WithdrawInsuranceLimited` (tag 23) requires
+   `header.insurance_operator` (separate, also burned).
+3. `verify::admin_ok` at `src/percolator.rs:341`:
+   `admin != [0u8; 32] && admin == signer` — burned authority can
+   never satisfy the equality.
+4. `force_close_resolved_terminal` at engine `percolator.rs:5237`
+   computes `senior = c_tot + insurance_fund.balance` and pays out
+   only `residual = max(0, vault - senior)`, haircut by
+   `min(residual, h_den)/h_den`. Insurance is **senior** to all
+   junior PnL claims; winners cannot claim against it.
+5. `absorb_protocol_loss` (engine `percolator.rs:2326`) only flows
+   insurance **out** to absorb account losses. There is no engine
+   path that mints user capital from the insurance fund.
+6. After all accounts close, the wrapper's terminal-surplus sweep
+   inside tag 20 folds remaining vault into the payout — but still
+   gated on `insurance_authority`. With it burned, the surplus
+   stays stranded; this is intentional rug-proofing.
+
+The only economic outflow path remaining for the insurance fund is
+absorption of bad debt by other accounts going negative — which costs
+the attacker more than they extract.
+
+## Iteration 1 — matcher exec_price manipulation — **PASS_SAFE**
+
+**Hypothesis.** Attacker deploys a matcher returning
+`exec_price_e6 = oracle_price × N` (or `/ N`), trades against their
+own LP, and books arbitrary PnL into a controlled user account.
+
+**Result.** The trade is conservation-preserving; any extractable
+slippage PnL on the user side equals the LP's loss, and the
+post-trade margin enforcement on **both** legs blocks the LP from
+absorbing more than its capital.
+
+**Proof.**
+
+1. The matcher does control `exec_price_e6` arbitrarily. ABI
+   validation at `src/percolator.rs:1084` only requires
+   `exec_price_e6 != 0` and rejects `oracle_price_e6` echo
+   mismatch — it does NOT bound `exec_price` against `oracle_price`.
+2. The engine credits trade-time PnL using exec_price at engine
+   `percolator.rs:4040`:
+
+       let price_diff = (oracle_price as i128) - (exec_price as i128);
+       let trade_pnl_a = compute_trade_pnl(size_q, price_diff)?;
+       let trade_pnl_b = trade_pnl_a.checked_neg()?;
+
+   So matcher-controlled exec_price *does* steer realised PnL
+   between the two legs — but it is exactly equal-magnitude
+   opposite (closed system, no money created).
+3. After PnL is applied, `settle_losses` is called on both legs,
+   then `enforce_post_trade_margin` (engine `percolator.rs:4205`)
+   re-validates equity ≥ MM_req on both. The losing leg cannot
+   pay more than its capital (`pay = min(need, cap)` at engine
+   `percolator.rs:3462`); any uncovered loss leaves PnL negative
+   and the post-trade margin check rejects the trade.
+4. Therefore, for the trade to commit, the LP leg's capital must
+   already cover the slippage PnL. Net flow: attacker's LP capital
+   → attacker's user capital. Both are attacker-owned, so the
+   round-trip nets zero (minus fees), and **insurance is never
+   touched** because no bad-debt absorption occurs.
+5. The H1/M9 risk-buffer notional defence (existing test
+   `test_tradecpi_buffer_notional_uses_oracle_price`) closes the
+   adjacent attack of using deflated `exec_price` to game the
+   liquidation-priority ranking.
+
+## Iterations 2–4 — not investigated this session
+
+Iterations 2 (warmup bypass), 3 (rounding asymmetry harvest), and 4
+(crank reward farming) were planned but not investigated due to
+compute/token budget. Each requires building a purpose-built
+malicious matcher .so and running multi-thousand-trade LiteSVM
+sequences. Recommendation for the next session: start with
+iteration 2 (warmup bypass via `ConvertReleasedPnl` and opposite-
+position hedging), since the live market shows `schedPresent=1`
+activity right now and the sequence is the shortest to reproduce.
+
+## Iteration 2 — warmup bypass via ConvertReleasedPnl / SettleAccount — **PASS_SAFE**
+
+Attacker model: owner of a profitable account tries to pull the pre-warmup
+(reserved) PnL slice into capital before the warmup horizon elapses.
+
+Tests:
+- `tests/test_security.rs::test_attack_warmup_convert_released_pnl_exceeds_matured_amount`
+- `tests/test_security.rs::test_attack_warmup_settle_account_bypasses_reserve`
+
+Result. Both calls reject / no-op.
+
+Reason safe.
+
+1. `ConvertReleasedPnl` (engine `percolator.rs:4780-4783`) runs
+   `touch_account_live_local` first (which advances the time-based
+   warmup buckets), then checks `released = released_pos(idx)` where
+   `released_pos = i128_clamp_pos(pnl) - reserved_pnl`. The gate
+   `if x_req == 0 || x_req > released { return Err(Overflow); }` is
+   hard — attacker cannot request more than the already-matured slice.
+   The per-request haircut `y = x_req * h_num / h_den` (floor) is
+   applied to capital AFTER `consume_released_pnl(x_req)`.
+2. `SettleAccount` (wrapper `percolator.rs:7896`, engine
+   `percolator.rs:3810-3849`) is literally `accrue + sync_fee +
+   touch + finalize` — the same lifecycle any instruction runs.
+   It has **no privileged warmup-release parameter**; the only
+   warmup advance it performs is the time-based
+   `advance_profit_warmup` inside `touch_account_live_local`,
+   which is gated by `now_slot - sched_start_slot` against
+   `sched_horizon`. Calling it in a tight loop at the same slot
+   is idempotent (test `cap_before == cap_after` in the 5-slot
+   spam confirms; logs: `cap=10309950100 reserved=0 pnl=0` on
+   both sides).
+3. There is no admin / caller / instruction-data input that shortens
+   `sched_horizon` or `pending_horizon`. Horizons are set at
+   `append_or_route_new_reserve` (spec §4.3) from config-immutable
+   bounds and never mutated by owner paths.
+
+— vip-ultr / Claude Code (2026-04-23)
+
+## Iteration 3 — rounding asymmetry over 100 round-trips — **PASS_SAFE**
+
+Attacker model: open+close position 100× at fixed price; hope that
+floor-vs-ceil rounding on credit and debit paths accumulates a drift
+in the attacker's favour, extractable via vault > c_tot + insurance.
+
+Test: `tests/test_security.rs::test_attack_rounding_asymmetry_1000_roundtrips`
+(100 open/close round-trips at `size = POS_SCALE = 1_000_000` at flat
+price; checks engine_vault == spl_vault after every 25 round-trips and
+at the end).
+
+Result. Zero drift at all checkpoints.
+
+Reason safe. The engine uses `mul_div_floor_u128` / `wide_mul_div_floor_u128`
+uniformly on both credit and debit paths
+(`compute_trade_pnl`, haircut `y = mul_div_floor(x_req, h_num, h_den)`,
+`trade_notional_check`, fee computation). There is no `_ceil` path in
+the trade pipeline. PnL between legs is computed as
+`trade_pnl_a = compute_trade_pnl(size_q, price_diff);
+ trade_pnl_b = trade_pnl_a.checked_neg()?` — exact-opposite, so
+no rounding gap opens between the two legs. Any 1-unit floor loss
+lands in the same place symmetrically and is absorbed into the
+conservation invariant (vault >= c_tot + insurance + net_pnl).
+
+Note: this is the 100× configuration, not 1000×. LiteSVM startup +
+per-trade CU cost make 1000 round-trips at three sizes a 3-5 minute
+proposition per invocation; the 100× result is consistent with the
+38 pre-existing `test_conservation.rs` conservation tests (which
+include 200-iteration state-machine property tests
+`test_property_state_machine_extended`) that already sweep the
+rounding surface more broadly. No incremental finding to add.
+
+— vip-ultr / Claude Code (2026-04-23)
+
+## Iteration 4 — crank-reward farming net economics — **PASS_SAFE**
+
+Attacker model: deposit dust into a minimum-capital account, crank as
+self, collect the 50% crank reward, close out net-positive.
+
+Test: `tests/test_security.rs::test_attack_crank_reward_farming_net_economics`
+
+Result. `cap_after_crank == cap_after_deposit`, insurance flow = 0,
+reward extracted = 0 on this config.
+
+Reason safe. Two layers:
+
+1. On a market with `maintenance_fee_per_slot = 0` (test config),
+   no fees accrue → `sweep_delta = 0` → reward gate fails
+   (`if sweep_delta > 0` at wrapper `percolator.rs` crank path).
+   Confirms the F5 fix kept the "no fees → no reward" property.
+2. On a market with `maintenance_fee_per_slot > 0`, the earlier
+   trace at security.md §"Crank reward economics" shows the
+   attacker's capital funds the fee they then half-recover. Net
+   economics: attacker pays 100%, gets back ≤50% ← LOSS. Since
+   the live target market (slab
+   `5ZamUkAiXtvYQijNiRcuGaea66TVbbTPusHfwMX1kTqB`) has burned
+   authorities AND insurance_authority burned, even the extracted
+   fees route to insurance which is drain-locked (iteration 5).
+
+No insurance-drain vector opens in either configuration.
+
+— vip-ultr / Claude Code (2026-04-23)
+

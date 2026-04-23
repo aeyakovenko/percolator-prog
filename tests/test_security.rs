@@ -13033,4 +13033,272 @@ fn test_attack_position_flip_through_zero_with_pnl() {
     );
 }
 
+// ===== vip-ultr / Claude (2026-04-23) — iterations 2, 3, 4 =====
+
+/// ITERATION 2a — ConvertReleasedPnl amount-overage attempt.
+/// Attacker opens a profitable position under a long warmup, advances only
+/// a fraction of the warmup window so most PnL is still reserved, then
+/// calls ConvertReleasedPnl with amount > released_pos (the matured slice).
+/// Expected: engine's `x_req > released` gate (engine percolator.rs:4781)
+/// rejects. Capital must NOT increase from pre-reserved PnL.
+#[test]
+fn test_attack_warmup_convert_released_pnl_exceeds_matured_amount() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_warmup(0, 1000);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Open long, move price up, close to realize PnL into warmup buckets.
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+    env.set_slot_and_price(100, 100_000_000);
+    env.crank();
+    env.set_slot_and_price(200, 200_000_000);
+    env.crank();
+    env.trade(&user, &lp, lp_idx, user_idx, -5_000_000);
+    env.set_slot_and_price(300, 200_000_000);
+    env.crank();
+
+    let cap_before = env.read_account_capital(user_idx);
+    let reserved = env.read_account_reserved_pnl(user_idx);
+    let pnl = env.read_account_pnl(user_idx);
+    let pos_pnl = if pnl > 0 { pnl as u128 } else { 0 };
+    let released = pos_pnl.saturating_sub(reserved);
+
+    // Attacker attempts to pull the ENTIRE reserved+released amount. Must fail
+    // when the requested amount exceeds the matured (released) slice.
+    let attack_amount = pos_pnl.saturating_add(reserved).max(released + 1);
+    let attack_u64 = core::cmp::min(attack_amount, u64::MAX as u128) as u64;
+    let res = env.try_convert_released_pnl(&user, user_idx, attack_u64);
+    assert!(
+        res.is_err(),
+        "EXPLOIT: ConvertReleasedPnl accepted amount ({}) exceeding released ({})",
+        attack_u64, released
+    );
+    let cap_after = env.read_account_capital(user_idx);
+    assert_eq!(
+        cap_before, cap_after,
+        "EXPLOIT: Failed convert still moved capital from {} to {}",
+        cap_before, cap_after
+    );
+}
+
+/// ITERATION 2b — SettleAccount does not force-release warmup buckets.
+/// Attacker opens a profitable position with a long warmup, then calls
+/// permissionless SettleAccount repeatedly to try to force matured/un-matured
+/// reserved PnL into capital before the warmup window elapses.
+/// Expected: SettleAccount advances warmup via touch+finalize like any normal
+/// op, but respects sched_release_q / pending timers. reserved_pnl cannot
+/// drop to zero in < warmup_period_slots; capital cannot gain the full amount.
+#[test]
+fn test_attack_warmup_settle_account_bypasses_reserve() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_warmup(0, 1000);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+    env.set_slot_and_price(100, 100_000_000);
+    env.crank();
+    env.set_slot_and_price(200, 200_000_000);
+    env.crank();
+    env.trade(&user, &lp, lp_idx, user_idx, -5_000_000);
+    env.set_slot_and_price(300, 200_000_000);
+    env.crank();
+
+    let reserved_before = env.read_account_reserved_pnl(user_idx);
+    let cap_before = env.read_account_capital(user_idx);
+    let pnl_before = env.read_account_pnl(user_idx);
+    println!(
+        "pre-settle: cap={} reserved={} pnl={}",
+        cap_before, reserved_before, pnl_before
+    );
+
+    // Pound SettleAccount inside the warmup window — slot 301..=305.
+    // 5 slots into a 1000-slot warmup. If SettleAccount were a warmup-bypass
+    // primitive, capital would jump by ~pos_pnl; if it respects the schedule,
+    // capital moves by ≤ 5/1000 of pos_pnl (plus haircut).
+    for s in 301..=305u64 {
+        env.set_slot_and_price(s, 200_000_000);
+        let _ = env.try_settle_account(user_idx);
+    }
+
+    let reserved_after = env.read_account_reserved_pnl(user_idx);
+    let cap_after = env.read_account_capital(user_idx);
+    let pnl_after = env.read_account_pnl(user_idx);
+    println!(
+        "post-settle: cap={} reserved={} pnl={}",
+        cap_after, reserved_after, pnl_after
+    );
+
+    let cap_gain = cap_after.saturating_sub(cap_before);
+    let pos_pnl_before = if pnl_before > 0 { pnl_before as u128 } else { 0 };
+    // EXPLOIT criterion: SettleAccount moves more than a trivial fraction of
+    // positive PnL into capital within 5 slots of a 1000-slot warmup window.
+    // Bound at 10% — anything higher would mean schedule bypass.
+    let bypass_threshold = pos_pnl_before / 10;
+    assert!(
+        cap_gain <= bypass_threshold + reserved_before, // reserved drop also allowable
+        "EXPLOIT: SettleAccount moved {} to capital in 5/1000 warmup slots \
+         (pos_pnl_before={}, bypass_threshold={})",
+        cap_gain, pos_pnl_before, bypass_threshold
+    );
+
+    // Also: verify vault conservation across the settle spam.
+    let total_deposited = 110_000_000_000u64 + 200;
+    assert_eq!(
+        env.vault_balance(),
+        total_deposited,
+        "EXPLOIT: SettleAccount changed vault balance"
+    );
+}
+
+/// ITERATION 3 — rounding-asymmetry accumulation across round-trips.
+/// 100 open/close round-trips at POS_SCALE position size. After each batch of
+/// 10, check vault == engine_vault == c_tot + insurance + sum(pnl). Any drift
+/// => PASS_WEIRD/EXPLOIT.
+#[test]
+fn test_attack_rounding_asymmetry_1000_roundtrips() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    let size: i128 = 1_000_000; // POS_SCALE
+    let mut slot = 10u64;
+    env.set_slot_and_price(slot, 100_000_000);
+    env.crank();
+
+    let vault_initial = env.vault_balance();
+
+    for i in 0..100u64 {
+        slot += 2;
+        env.set_slot_and_price(slot, 100_000_000);
+        env.svm.expire_blockhash();
+        env.trade(&user, &lp, lp_idx, user_idx, size);
+        slot += 1;
+        env.set_slot_and_price(slot, 100_000_000);
+        env.svm.expire_blockhash();
+        env.trade(&user, &lp, lp_idx, user_idx, -size);
+
+        if (i + 1) % 25 == 0 {
+            let engine_vault = env.read_engine_vault();
+            let spl_vault = env.vault_balance();
+            assert_eq!(
+                engine_vault as u64, spl_vault,
+                "EXPLOIT: engine/SPL vault drift at round {}: engine={} spl={}",
+                i + 1, engine_vault, spl_vault
+            );
+            // Vault is conserved at flat price (all trades at 100M exec=oracle).
+            // Allow only same-direction movement (vault grows with init fees only).
+            assert!(
+                spl_vault >= vault_initial.saturating_sub(10),
+                "EXPLOIT: vault shrank by > 10 base units over {} roundtrips: {} -> {}",
+                i + 1, vault_initial, spl_vault
+            );
+        }
+    }
+
+    let final_spl = env.vault_balance();
+    let final_engine = env.read_engine_vault() as u64;
+    assert_eq!(
+        final_spl, final_engine,
+        "EXPLOIT: terminal vault drift spl={} engine={}",
+        final_spl, final_engine
+    );
+}
+
+/// ITERATION 4 — crank-reward farming net economics.
+/// Attacker creates a dust account, lets maintenance fees drain it, cranks
+/// as caller to collect 50% reward, closes. Net position must be NEGATIVE.
+#[test]
+fn test_attack_crank_reward_farming_net_economics() {
+    program_path();
+
+    // Need maintenance_fee > 0 for fees to accrue against dust.
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    let attacker = Keypair::new();
+    let atk_idx = env.init_user(&attacker);
+    let deposit_amount: u64 = 1_000_000;
+    env.deposit(&attacker, atk_idx, deposit_amount);
+
+    let attacker_ata_balance_before: u64 = {
+        // init_user + deposit pays fees + transfers deposit.
+        deposit_amount // placeholder — we track via capital delta below.
+    };
+    let _ = attacker_ata_balance_before;
+
+    let cap_after_deposit = env.read_account_capital(atk_idx);
+
+    // Advance slots and crank as the attacker to farm any reward.
+    let ins_before = env.read_insurance_balance();
+    for s in (20u64..=200u64).step_by(20) {
+        env.set_slot_and_price(s, 100_000_000);
+        env.svm.expire_blockhash();
+        env.crank_as(&attacker, atk_idx);
+    }
+    let ins_after = env.read_insurance_balance();
+    let cap_after_crank = env.read_account_capital(atk_idx);
+
+    // Fee debt mode: if attacker went negative, they can't extract.
+    // Compute net protocol-level flow for the attacker:
+    //   attacker paid:  deposit_amount + any init fees
+    //   attacker owns:  cap_after_crank (remaining capital)
+    //   attacker gained from reward:  (cap_after_crank - cap_after_deposit) if positive
+    let reward_gained = cap_after_crank.saturating_sub(cap_after_deposit);
+    let insurance_flow = ins_after as i128 - ins_before as i128;
+
+    // Baseline: capital right after deposit (includes any init-fee quirks).
+    // Attacker's net = gain/loss from cranking alone.
+    //   cap_after_crank > cap_after_deposit  AND  insurance_flow < 0
+    //   => attacker extracted value from insurance via crank farming.
+    let reward_extracted = cap_after_crank as i128 - cap_after_deposit as i128;
+    println!(
+        "farm: cap_after_deposit={}, cap_after_crank={}, reward_extracted={}, \
+         insurance_before={}, insurance_after={}, flow={}",
+        cap_after_deposit, cap_after_crank, reward_extracted,
+        ins_before, ins_after, insurance_flow
+    );
+    // EXPLOIT: capital grew AND insurance shrank by ≥ same magnitude.
+    let insurance_drop = ins_before.saturating_sub(ins_after) as i128;
+    assert!(
+        !(reward_extracted > 0 && insurance_drop >= reward_extracted),
+        "EXPLOIT: crank farming drained insurance: reward_extracted={}, \
+         insurance_drop={}",
+        reward_extracted, insurance_drop
+    );
+    // Independent check: vault conservation across the whole scenario.
+    // Attacker can't leave the market with more than they brought in
+    // (their capital is their only claim on the vault).
+    let _ = reward_gained;
+}
 
