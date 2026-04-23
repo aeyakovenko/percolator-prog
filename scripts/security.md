@@ -966,3 +966,101 @@ if acc.capital.is_zero()
 
 Existing dust-reclaim regression coverage
 (`test_dust_account_drained_and_gc_by_crank_alone`) still passes.
+
+---
+
+## F7 — Deployment-config composition: `oracle_price_cap_e2bps = 0` × IM-vs-band gap (HIGH, config-class, already surfaced)
+
+**Status.** Not novel — the concrete mainnet-market instance was filed by
+external researchers (`aeyakovenko/percolator-prog#35`, `#36`, `#43`,
+`aeyakovenko/percolator-cli#22`, `#23`) between 2026-04-22 and
+2026-04-23. Filed here as a checklist item under the framework in this
+document so future deployers have a named failure mode to audit against,
+rather than re-derive. `d19a712` and PR #41 close the init-time
+footgun for new markets; this entry documents the composition for
+operator awareness on the already-deployed immutable instance.
+
+**Location.**
+- `percolator/src/percolator.rs` — `clamp_oracle_price` short-circuits
+  when `max_change_e2bps == 0` (returns raw price unclamped).
+- `percolator-prog/src/percolator.rs` — `clamp_external_price` passes
+  `config.oracle_price_cap_e2bps` as the cap, writing the result directly
+  into `config.last_effective_price_e6`.
+
+**Composition, not a code bug.** The engine math is correct. The
+`clamp_oracle_price` zero-cap short-circuit is spec-compliant
+(Kani-proven). The failure is in how three independent, individually
+safe configuration axes compose:
+
+```
+axis A: oracle_price_cap_e2bps     = 0        (per-update clamp disabled)
+axis B: min_oracle_price_cap_e2bps = 0        (floor permits A=0)
+axis C: all authorities burned               (no runtime remediation)
+axis D: IM − MM gap < max single-observation Pyth jump
+        in real-world volatility events
+```
+
+Any three of {A, B, C, D} is recoverable. The composition of all four
+produces an unclamped baseline that, on a sufficient single Pyth
+observation, marks max-leveraged positions into bankruptcy; residual
+loss routes through `absorb_protocol_loss` → `use_insurance_buffer`.
+The winning counterparty's matured PnL is then extractable via the
+normal settle/convert/withdraw path.
+
+**Why it belongs in the checklist and not just the issues.** Every
+future deployer following the "burn admin keys" template inherits the
+same InitMarket defaults. A deployer can (a) leave `oracle_price_cap`
+at 0 for tighter mark-to-oracle tracking under moderate volatility, or
+(b) set a non-zero per-update cap and accept mark-to-oracle lag during
+flash events. This is a legitimate trade-off — but it is a trade-off
+that must be made **knowingly**, which requires naming it.
+
+**Detection primitive (one-line probe for any deployed percolator market).**
+```bash
+curl -sS -X POST <rpc> -H 'Content-Type: application/json' -d \
+  '{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":
+    ["<slab-pubkey>",{"encoding":"base64","dataSlice":{"offset":0,"length":584}}]}' \
+  | python3 -c '
+import sys,json,base64,struct
+r=json.load(sys.stdin); d=base64.b64decode(r["result"]["value"]["data"][0])
+assert d[0:8]==b"TALOCREP"
+mm=struct.unpack("<Q",d[568:576])[0]
+im=struct.unpack("<Q",d[576:584])[0]
+off=136+32+32+32+8+2+1+1+4+8+8+8+8+32+8+8
+cap=struct.unpack("<Q",d[off:off+8])[0]
+min_cap=struct.unpack("<Q",d[off+16:off+24])[0]
+status="EXPOSED" if (cap==0 and min_cap==0) else "capped"
+print(f"MM={mm} IM={im} cap={cap} min_cap={min_cap}  → {status}")'
+```
+Exact byte offsets per `@alsk1992` in `#36`.
+
+**Fix (new deployments).** Two independent guardrails, either is
+sufficient to close F7; both together give defense-in-depth:
+
+1. **Init-time invariant (PR #41, `@abishekk92`; @aeyakovenko's derived-
+   cap proposal in PR #44, `@dcccrypto`).** Reject `InitMarket` when
+   `min_oracle_price_cap_e2bps == 0` on non-Hyperp markets, OR derive
+   `oracle_price_cap_e2bps = (IM_bps − MM_bps) · 100 / max_crank_staleness_slots`
+   at init and refuse the config when truncation yields 0. Makes A=0
+   unreachable at deployment.
+2. **Operator playbook.** Document in the README that "burn all admin
+   keys" MUST be composed with `oracle_price_cap_e2bps ≥ 2 · trading_fee_bps`
+   (lower bound from the anti-off-market band) and
+   `≤ initial_margin_bps` (upper bound from the single-observation
+   solvency budget). A deployer who burns admin with `cap = 0` has
+   permanently installed F7.
+
+**Fix (already-deployed immutable instance).** None on-chain — the
+upgrade authority is burned. Off-chain mitigations:
+
+- Reduce TVL below `insurance_balance / (observed_p99_60s_move% − IM%)`
+  so that a qualifying flash event is bounded below the attacker's
+  pre-positioning cost.
+- Publicly document the exposure in any user-facing docs so depositors
+  know the insurance ceiling.
+
+**Cross-reference.** `F1` (CatchupAccrue partial-mode liveness leak) and
+`F7` (cap-disable composition) interact — a PARTIAL catchup during a
+flash event under `cap = 0` compresses the attacker's window further.
+Neither finding subsumes the other; closing one leaves the other
+live.
