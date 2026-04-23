@@ -966,3 +966,193 @@ if acc.capital.is_zero()
 
 Existing dust-reclaim regression coverage
 (`test_dust_account_drained_and_gc_by_crank_alone`) still passes.
+
+---
+
+## F7 — Insurance teleport via residual inflation in self-trade liquidation (HIGH, drains insurance fund)
+
+**Location:**
+- `percolator/src/percolator.rs:2291-2301` — `use_insurance_buffer`
+  (engine; the asymmetric mutation)
+- `percolator/src/percolator.rs:3567-3576` — haircut residual in
+  `finalize_touched_accounts_post_live` (engine; live-mode payout)
+- `percolator/src/percolator.rs:5236-5242` — same residual formula in
+  resolved-mode payout (also affected)
+- `percolator/src/percolator.rs:1652-1712` — `attach_effective_position`
+  (engine; does NOT decrement the side K-accumulator on partial-close)
+- `src/percolator.rs:5539-5737` — `TradeNoCpi` (wrapper; the bilateral
+  self-trade entrypoint)
+- `src/percolator.rs:6312-6406` — `LiquidateAtOracle` (wrapper;
+  permissionless, no admin gate)
+
+**Code (engine — the asymmetric mutation):**
+```rust
+fn use_insurance_buffer(&mut self, loss: u128) -> u128 {
+    if loss == 0 { return 0; }
+    let ins_bal = self.insurance_fund.balance.get();
+    let pay = core::cmp::min(loss, ins_bal);
+    if pay > 0 {
+        self.insurance_fund.balance = U128::new(ins_bal - pay);
+        // vault is NOT debited here
+    }
+    loss - pay
+}
+```
+
+**Code (engine — the haircut residual that "caps" jr payouts):**
+```rust
+let senior_sum = self.c_tot.get().checked_add(
+    self.insurance_fund.balance.get()).unwrap_or(u128::MAX);
+let residual = if self.vault.get() >= senior_sum {
+    self.vault.get() - senior_sum
+} else { 0u128 };
+```
+
+**Bug.** The two snippets compose into an insurance teleport when the
+same operator controls both sides of a position pair.
+
+`use_insurance_buffer` shrinks `insurance_fund.balance` without
+touching `vault`. The residual `vault − (c_tot + insurance)` therefore
+**grows by exactly the absorbed amount**. In the honest setting (Alice
+gains, Bob loses, two independent parties) this is by design: the
+absorbed loss is repurposed as residual that backstops junior PnL
+claimants — see the adjacent doc comment at
+`percolator/src/percolator.rs:2303-2321` explaining why
+`record_uninsured_protocol_loss` is a no-op (draining V would
+double-penalize juniors). The same "don't drain V" choice in
+`use_insurance_buffer` is consistent with that family of design
+decisions.
+
+In a **self-trade**, the K/F-winning side IS the attacker. The
+residual that would have protected honest junior claimants is now
+claimed by the attacker through their own winning leg. The third
+protection in the listed defense triangle —
+
+| Protection | Status under self-trade |
+|---|---|
+| 1. Loss settlement local-before-insurance | holds: loser's capital is charged first |
+| 2. K/F PnL conservation (A's gain = B's loss exactly) | holds: side accumulators preserve this |
+| 3. Haircut residual cap `Residual = V − (C_tot + I)` | **vacuous: residual grows by exactly the insurance-absorbed amount, so the "cap" never bites** |
+
+— is structurally vacuous. Protections 1 and 2 do exactly what the
+comments say they do; the cap exists, but it is constructed to grow
+by the absorbed amount, so it doesn't actually cap.
+
+**Attack sequence (permissionless on the deployed mainnet program).**
+
+The mainnet program at `BCGNFw6vDinWTF9AybAbi8vr69gx5nk5w8o2vEWgpsiw`
+ships with `admin = insuranceAuthority = insuranceOperator =
+hyperpAuthority = [0;32]`. Every "operator-only" gate on these tags
+is therefore open. Take IM = 20%, insurance ≈ 5 SOL.
+
+1. `InitUser` (account A) and `InitLP` (account B) — both with
+   `matcher_program = [0;32]` (`NoOpMatcher` path; bilaterally signed,
+   no third-party matcher needed).
+2. `TradeNoCpi`: A long N at oracle, B short N at oracle. Both post
+   `0.2N` IM. Vault = `5 + 0.4N`, `c_tot = 0.4N`, insurance = `5`.
+3. Wait for any oracle move ΔK > 0.2 (= IM threshold). Maintenance
+   fee `265 lamports/slot` lets the attacker hold for months. Pyth
+   SOL/USD swings of this magnitude occur naturally — the attacker
+   never needs to move price themselves.
+4. `LiquidateAtOracle(B)` (permissionless):
+   - `touch B` → `B.pnl = −ΔK·N`
+   - `settle_losses(B)` → charges B.capital = 0.2N → `B.pnl =
+     −(ΔK − 0.2)·N`
+   - `attach_effective_position(B, 0)` → B's effective position
+     zeroed, but the side K-accumulator (`adl_coeff_long/short`)
+     is NOT decremented (`percolator/src/percolator.rs:1652-1712`)
+   - `enqueue_adl` → `use_insurance_buffer((ΔK − 0.2)·N)` —
+     insurance shrinks; **vault unchanged**
+5. Touch A via any path (a second `TradeNoCpi`, `Withdraw`, or a
+   `KeeperCrank` — all call `accrue_market_to + touch_account_live_local`).
+6. `settle_side_effects_live(A)` reads the side K-accumulator (still
+   at `+ΔK`; not decremented in step 4) → `A.pnl = +ΔK·N` →
+   warmup → matured.
+7. `finalize_touched_accounts_post_live`:
+   ```
+   senior_sum = c_tot + insurance
+              = 0.2N + (5 − (ΔK − 0.2)·N)
+   residual   = vault − senior_sum
+              = (5 + 0.4N) − (0.2N + 5 − (ΔK − 0.2)·N)
+              = ΔK·N
+   h_num      = min(residual, matured_pos_tot) = min(ΔK·N, ΔK·N) = ΔK·N
+   is_whole   = true → A's matured PnL converts whole to capital
+   ```
+8. A withdraws `0.2N + ΔK·N`. Net P&L: `−0.4N + (0.2N + ΔK·N) =
+   (ΔK − 0.2)·N`. Insurance loss: `(ΔK − 0.2)·N`. Exact match.
+
+For `ΔK = 0.4` and `N = 25 SOL`, attacker nets 5 SOL ≈ entire
+insurance fund.
+
+**Distinction from D6.** D6 ("Self-trade via same-owner LP + user")
+was discarded because fee routing to insurance makes EWMA
+manipulation pay a real cost. F7 does not manipulate the EWMA. It
+pays every fee, accepts every "loss-local-first" charge, and accepts
+that K/F is conservative across the two attacker-controlled
+accounts. The exploit fires inside the haircut conversion path
+**after** all three of D6's protections have done their job
+correctly. Round-trip fees are bounded by trade notional; insurance
+captured is bounded only by `insurance_fund.balance`.
+
+**Severity HIGH** because:
+- Permissionless on the deployed mainnet program (no admin gate;
+  `matcher_program = [0;32]` is accepted on `InitLP`/`TradeNoCpi`).
+- Attacker's only cost is the round-trip fee plus IM, which is
+  recovered on withdraw; net P&L is the entire insurance balance for
+  any cumulative oracle drift `ΔK > IM`.
+- Patient attacker waits for natural oracle swings; no price
+  manipulation required.
+- Affects both live-mode (`finalize_touched_accounts_post_live`) and
+  resolved-mode (`percolator/src/percolator.rs:5236-5242`) payout
+  paths via the same `vault − c_tot − insurance` residual formula.
+
+**On-chain triggering caveat.** `clamp_oracle_price` in the wrapper
+bounds the per-crank oracle move, raising the bar for triggering
+ΔK > IM in a single transaction. The exploit does not require a
+single-tx ΔK: because `attach_effective_position` does not
+decrement the side K-accumulator, the K-accumulator carries the full
+cumulative drift across many cranks, and A's matured PnL settles
+against the current accumulator at touch time regardless of how
+many cranks were needed to get there. The clamp slows the drift
+that the engine sees per crank, but does not bound the cumulative
+drift the engine eventually realizes.
+
+**Fix options (any one suffices; (1) is the smallest change).**
+
+**(1) Vault-debit on insurance use.** `insurance_fund.balance` is
+already held inside `vault` at the SPL level; make
+`use_insurance_buffer` debit `vault` by the same `pay`:
+```rust
+if pay > 0 {
+    self.insurance_fund.balance = U128::new(ins_bal - pay);
+    self.vault = U128::new(self.vault.get() - pay);
+}
+```
+Effect: `residual = vault − c_tot − insurance` is invariant under
+insurance absorption — the haircut cap actually caps. The Alice/Bob
+example in the comment at `percolator/src/percolator.rs:2303-2321`
+goes through unchanged because that example is about uninsured
+forgiveness (`record_uninsured_protocol_loss`), not absorbed loss.
+
+**(2) Track consumed insurance in the residual formula.** Add an
+epoch-scoped accumulator `insurance_consumed_this_epoch` and subtract
+it in the haircut:
+```
+residual = vault − c_tot − insurance − insurance_consumed_this_epoch
+```
+Reset on epoch advance. Same economic effect as (1) without
+mutating `vault`.
+
+**(3) Reject the bilateral self-trade primitive at the wrapper.**
+In `TradeNoCpi`, reject when `matcher_program == [0;32]` and both
+signers resolve to the same controlling owner (or any common owner
+across A's and B's `owner` fields). Most surgical, hardest to
+enforce robustly — a determined attacker can split keys across two
+owners they both control.
+
+Recommended: ship (1) immediately as the structural fix; consider
+(3) as defense-in-depth.
+
+**Reporter / acknowledgment.** Reported by @btr_corpus via X
+2026-04-22, acknowledged by @aeyakovenko same day ("Amazing find").
+This entry is the formal write-up for the engine team.
