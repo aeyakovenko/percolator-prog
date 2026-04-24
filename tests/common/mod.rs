@@ -1697,6 +1697,7 @@ impl TestEnv {
                 AccountMeta::new_readonly(vault_pda, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
             ],
             data: encode_close_account(user_idx),
         };
@@ -2780,7 +2781,6 @@ impl TestEnv {
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
-                AccountMeta::new(caller.pubkey(), true),
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
@@ -3301,7 +3301,6 @@ impl TestEnv {
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
-                AccountMeta::new(caller.pubkey(), true),
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
