@@ -4527,10 +4527,10 @@ pub mod processor {
                     if p.h_max == 0 || p.h_min > p.h_max {
                         return Err(ProgramError::InvalidInstructionData);
                     }
-                    // Settlement deviation band: 0 < bps <= MAX (engine asserts)
-                    if p.resolve_price_deviation_bps == 0
-                        || p.resolve_price_deviation_bps > percolator::MAX_RESOLVE_PRICE_DEVIATION_BPS
-                    {
+                    // Settlement deviation band: 0 <= bps <= MAX per spec
+                    // v12.19.6. Zero means "no deviation tolerance" — the
+                    // authority settlement path admits only exact P_last.
+                    if p.resolve_price_deviation_bps > percolator::MAX_RESOLVE_PRICE_DEVIATION_BPS {
                         return Err(ProgramError::InvalidInstructionData);
                     }
                 }
