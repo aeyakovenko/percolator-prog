@@ -140,23 +140,20 @@ fn encode_init_market_with_params(
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_max (must be >= h_min)
-    data.extend_from_slice(&1800u64.to_le_bytes()); // max_crank_staleness_slots
+    data.extend_from_slice(&50u64.to_le_bytes()); // max_crank_staleness_slots (< perm_resolve <= MAX_ACCRUAL_DT_SLOTS)
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&1000u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    // v12.19 solvency envelope: 2 bps/slot * 1800 = 3600, funding 10_000 e9/slot *
-    // 1800 * 10_000 / 1e9 = 180, liq_fee 50 — sum 3830 <= maintenance_margin 500 FAILS.
-    // cu_benchmark uses max_crank_staleness=1800 but MAX_ACCRUAL_DT_SLOTS=100 at the
-    // wrapper; the solvency check folds in max_accrual_dt, not max_crank_staleness.
-    // 2*100 + floor(10000*100*10000/1e9) + 50 = 260 <= 500. OK.
+    // v12.19 solvency envelope: 2 bps/slot * 100 = 200, funding 10_000 e9/slot *
+    // 100 * 10_000 / 1e9 = 10, liq_fee 50 — sum 260 <= maintenance_margin 500 OK.
     data.extend_from_slice(&2u64.to_le_bytes()); // max_price_move_bps_per_slot
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
-    // v12.19: non-Hyperp needs perm_resolve > max_crank_staleness (1800).
-    data.extend_from_slice(&10_000u64.to_le_bytes()); // permissionless_resolve_stale_slots
+    // v12.19.6: perm_resolve must be > max_crank_staleness (50) AND <= MAX_ACCRUAL_DT_SLOTS (100).
+    data.extend_from_slice(&80u64.to_le_bytes()); // permissionless_resolve_stale_slots
     data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps

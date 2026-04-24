@@ -264,8 +264,10 @@ fn encode_init_market(fixture: &MarketFixture, crank_staleness: u64) -> Vec<u8> 
     encode_u16(0, &mut data); // insurance_withdraw_max_bps
     encode_u64(0, &mut data); // insurance_withdraw_cooldown_slots
 
-    // v12.19: non-Hyperp needs perm_resolve > max_crank_staleness (crank_staleness arg here).
-    encode_u64(crank_staleness.saturating_add(1).max(10_000), &mut data); // permissionless_resolve_stale_slots
+    // v12.19.6: non-Hyperp needs perm_resolve > max_crank_staleness AND
+    // perm_resolve <= MAX_ACCRUAL_DT_SLOTS (= 100). Callers must pass
+    // crank_staleness < 100 for a resolvable market.
+    encode_u64(crank_staleness.saturating_add(1).min(100), &mut data); // permissionless_resolve_stale_slots
     encode_u64(500, &mut data); // funding_horizon_slots
     encode_u64(100, &mut data); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
@@ -311,8 +313,9 @@ fn encode_init_market_invert(
     encode_u16(0, &mut data); // insurance_withdraw_max_bps
     encode_u64(0, &mut data); // insurance_withdraw_cooldown_slots
 
-    // v12.19: non-Hyperp needs perm_resolve > max_crank_staleness.
-    encode_u64(crank_staleness.saturating_add(1).max(10_000), &mut data); // permissionless_resolve_stale_slots
+    // v12.19.6: non-Hyperp needs perm_resolve > max_crank_staleness AND
+    // perm_resolve <= MAX_ACCRUAL_DT_SLOTS (= 100).
+    encode_u64(crank_staleness.saturating_add(1).min(100), &mut data); // permissionless_resolve_stale_slots
     encode_u64(500, &mut data); // funding_horizon_slots
     encode_u64(100, &mut data); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
@@ -554,7 +557,7 @@ fn test_zc_cast_safety_invariant() {
 #[test]
 fn test_init_market() {
     let mut f = setup_market();
-    let data = encode_init_market(&f, 100);
+    let data = encode_init_market(&f, 50);
 
     {
         let mut dummy_ata = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
@@ -584,7 +587,7 @@ fn test_init_market() {
 fn test_vault_validation() {
     let mut f = setup_market();
     f.vault.owner = solana_program::system_program::id();
-    let init_data = encode_init_market(&f, 100);
+    let init_data = encode_init_market(&f, 50);
     let mut dummy_ata = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
     let init_accounts = vec![
         f.admin.to_info(),
@@ -604,7 +607,7 @@ fn test_vault_validation() {
 #[test]
 fn test_trade() {
     let mut f = setup_market();
-    let init_data = encode_init_market(&f, 100);
+    let init_data = encode_init_market(&f, 50);
     {
         let mut dummy_ata = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);
         let init_accounts = vec![
@@ -726,7 +729,7 @@ fn test_trade() {
 #[test]
 fn test_set_risk_threshold() {
     let mut f = setup_market();
-    let init_data = encode_init_market(&f, 100);
+    let init_data = encode_init_market(&f, 50);
     {
         let accs = vec![
             f.admin.to_info(),
@@ -766,7 +769,7 @@ fn test_set_risk_threshold() {
 #[test]
 fn test_set_risk_threshold_non_admin_fails() {
     let mut f = setup_market();
-    let init_data = encode_init_market(&f, 100);
+    let init_data = encode_init_market(&f, 50);
     {
         let accs = vec![
             f.admin.to_info(),
@@ -812,7 +815,7 @@ fn test_set_risk_threshold_non_admin_fails() {
 fn test_permissionless_crank_gc() {
     // Non-vacuous test: create a dust account and verify GC frees it
     let mut f = setup_market();
-    let init_data = encode_init_market(&f, 100);
+    let init_data = encode_init_market(&f, 50);
 
     // Init market
     {
@@ -1007,7 +1010,7 @@ fn test_unit_scale_conversion() {
 fn test_unit_scale_validation_at_init() {
     // Test that unit_scale > 1_000_000_000 is rejected
     let mut f = setup_market();
-    let data = encode_init_market_invert(&f, 100, 0, 2_000_000_000); // Too large
+    let data = encode_init_market_invert(&f, 50, 0, 2_000_000_000); // Too large
 
     {
         let mut dummy_ata = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0, vec![]);

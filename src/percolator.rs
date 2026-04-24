@@ -209,11 +209,15 @@ pub mod constants {
     pub const DEFAULT_INSURANCE_WITHDRAW_COOLDOWN_SLOTS: u64 = 400_000;
     pub const DEFAULT_MARK_EWMA_HALFLIFE_SLOTS: u64 = 100; // ~40 sec @ 2.5 slots/sec
     /// Default slot-based oracle staleness window before anyone may resolve.
-    /// ~10 hours at 400 ms/slot. Chosen to tolerate multi-hour Pyth or keeper
-    /// outages while staying well under the engine's `MAX_ACCRUAL_DT_SLOTS`
-    /// envelope. A cluster hard-fork restart bypasses this threshold
-    /// entirely via the `LastRestartSlot` sysvar check on `init_restart_slot`.
-    pub const DEFAULT_PERMISSIONLESS_RESOLVE_STALE_SLOTS: u64 = 90_000;
+    /// Disabled by default (0 == opt-out): v12.19.6 restores the invariant
+    /// `permissionless_resolve_stale_slots <= max_accrual_dt_slots`, and the
+    /// engine's `MAX_ACCRUAL_DT_SLOTS = 100` is far too tight for any
+    /// meaningful public staleness window. Markets that need permissionless
+    /// resolution MUST set this explicitly on the extended InitMarket tail
+    /// to a value in `1..=max_accrual_dt_slots`. The non-Hyperp resolvability
+    /// guard (see InitMarket) still requires a non-zero value OR Hyperp mode,
+    /// so an admin-free non-Hyperp market can't be shipped with this at 0.
+    pub const DEFAULT_PERMISSIONLESS_RESOLVE_STALE_SLOTS: u64 = 0;
     /// Upper bound on `force_close_delay_slots` (Finding 6). Without a bound, an
     /// init-time config of `u64::MAX` passes the "nonzero" liveness guard but
     /// makes ForceCloseResolved unreachable — `resolved_slot + delay` saturates
@@ -4333,18 +4337,18 @@ pub mod processor {
                 {
                     return Err(ProgramError::InvalidInstructionData);
                 }
-                // v12.19: the old "perm_resolve <= max_accrual_dt_slots"
-                // check is dropped. MAX_ACCRUAL_DT_SLOTS was tightened to
-                // 100 slots (solvency envelope), while perm_resolve is a
-                // cluster-timeout in the 10_000-slot range; they are
-                // independent parameters. Admin ResolveMarket's Ordinary
-                // arm can still hit CatchupRequired on a market with
-                // large dt — callers run the dedicated CatchupAccrue
-                // instruction, which is why it exists. The Hyperp
-                // `CATCHUP_CHUNKS_MAX * MAX_ACCRUAL_DT_SLOTS` bound is
-                // also dropped: Hyperp stale recovery uses the same
-                // CatchupAccrue loop, so a multi-call recovery is an
-                // explicit contract, not a misconfiguration.
+                // §12.19.6: permissionless resolution must fire within a
+                // single accrue envelope, else the last accrue on the
+                // market would exceed `max_accrual_dt_slots` and starve
+                // permissionless resolve (callers would have to run
+                // CatchupAccrue first, which is an admin/keeper path).
+                // This invariant is the opt-in gate: markets that don't
+                // enable permissionless resolve pass trivially (perm==0).
+                if permissionless_resolve_stale_slots > 0
+                    && permissionless_resolve_stale_slots > risk_params.max_accrual_dt_slots
+                {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
 
                 // Non-Hyperp resolvability invariant: a non-Hyperp market
                 // with `permissionless_resolve_stale_slots == 0` has only

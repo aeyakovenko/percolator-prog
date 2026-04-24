@@ -5832,7 +5832,7 @@ fn test_hyperp_after_stale_maturity_is_resolve_only() {
     env.try_init_market_hyperp_with_stale(
         1_000_000,
         100,  // max_staleness_secs
-        300,  // permissionless_resolve_stale_slots
+        80,  // permissionless_resolve_stale_slots (v12.19.6: <= MAX_ACCRUAL_DT_SLOTS=100)
     ).expect("init Hyperp with explicit stale/perm-resolve");
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
@@ -5855,8 +5855,8 @@ fn test_hyperp_after_stale_maturity_is_resolve_only() {
         10_000_000, &matcher_prog, &matcher_ctx,
     ).expect("opening trade succeeds while fresh");
 
-    // Advance past permissionless_resolve_stale_slots (= 300).
-    env.set_slot(10 + 301);
+    // Advance past permissionless_resolve_stale_slots (= 80).
+    env.set_slot(10 + 81);
 
     // Admin push must NOT revive the market.
     let err = env.try_push_oracle_price(&admin, 1_020_000, 10 + 301)
@@ -5904,7 +5904,7 @@ fn test_hyperp_never_has_pre_resolve_unrecoverable_window() {
     env.try_init_market_hyperp_with_stale(
         1_000_000,
         100,  // max_staleness_secs
-        300,  // permissionless_resolve_stale_slots
+        80,  // permissionless_resolve_stale_slots (v12.19.6: <= MAX_ACCRUAL_DT_SLOTS=100)
     ).expect("init Hyperp with explicit stale/perm-resolve");
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
@@ -5924,12 +5924,12 @@ fn test_hyperp_never_has_pre_resolve_unrecoverable_window() {
         10_000_000, &matcher_prog, &matcher_ctx,
     ).unwrap();
 
-    // Advance to JUST BEFORE perm_resolve maturity.
-    env.set_slot(10 + 299);
+    // Advance to JUST BEFORE perm_resolve maturity (= 80).
+    env.set_slot(10 + 79);
 
     // Admin push still works — perm_resolve hasn't matured, market is
     // recoverable.
-    env.try_push_oracle_price(&admin, 1_020_000, 10 + 299)
+    env.try_push_oracle_price(&admin, 1_020_000, 10 + 79)
         .expect("PushHyperpMark must succeed before perm_resolve maturity");
     assert!(
         !env.is_market_resolved(),

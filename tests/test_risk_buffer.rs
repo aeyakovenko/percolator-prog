@@ -311,7 +311,7 @@ fn test_empty_buffer_first_crank() {
 fn test_liquidation_removes_from_buffer() {
     program_path();
     let mut env = TestEnv::new();
-    env.init_market_with_cap(0, 10_000); // liquidation: max cap (100%/read)
+    env.init_market_with_cap(0, 80); // liquidation: max cap (100%/read)
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -429,7 +429,7 @@ fn test_buffer_entries_persist_across_cranks() {
 fn test_buffer_notional_refreshed_on_price_change() {
     program_path();
     let mut env = TestEnv::new();
-    env.init_market_with_cap(0, 10_000); // liquidation: max cap (100%/read)
+    env.init_market_with_cap(0, 80); // liquidation: max cap (100%/read)
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -683,7 +683,7 @@ fn test_buffer_with_five_accounts_evicts_smallest() {
 fn test_crank_liquidates_undercollateralized_buffer_entry() {
     program_path();
     let mut env = TestEnv::new();
-    env.init_market_with_cap(0, 10_000); // liquidation: max cap (100%/read)
+    env.init_market_with_cap(0, 80); // liquidation: max cap (100%/read)
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -734,7 +734,7 @@ fn test_buffer_only_liquidation_no_external_candidates() {
 
     program_path();
     let mut env = TestEnv::new();
-    env.init_market_with_cap(0, 10_000); // liquidation: max cap (100%/read)
+    env.init_market_with_cap(0, 80); // liquidation: max cap (100%/read)
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);

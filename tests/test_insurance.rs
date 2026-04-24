@@ -177,7 +177,7 @@ fn test_attack_withdraw_insurance_with_open_positions() {
     program_path();
 
     let mut env = TestEnv::new();
-    env.init_market_with_cap(0, 10_000);
+    env.init_market_with_cap(0, 80);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
 
@@ -295,7 +295,7 @@ fn test_attack_topup_insurance_after_resolution() {
     program_path();
 
     let mut env = TestEnv::new();
-    env.init_market_with_cap(0, 10_000);
+    env.init_market_with_cap(0, 80);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.set_slot(100);
@@ -890,7 +890,7 @@ fn test_withdraw_insurance_decrements_engine_vault() {
     program_path();
 
     let mut env = TestEnv::new();
-    env.init_market_with_cap(0, 10_000);
+    env.init_market_with_cap(0, 80);
     let admin = env.payer.insecure_clone();
 
     // Create LP and user

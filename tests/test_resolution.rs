@@ -1096,10 +1096,11 @@ fn test_governance_free_full_lifecycle() {
     // horizon=200 (shorter for faster funding), k=200 (2x multiplier), max_premium=1000, max_per_slot=10
     env.init_market_with_funding(
         0,      // invert=0 (direct, e.g., BTC/USD)
-        // permissionless_resolve_stale_slots: 1000 slots so the test's
-        // natural slot advances (init → 200 → 300 → 600) stay within
-        // the live window.
-        1000,
+        // permissionless_resolve_stale_slots: 80 slots (v12.19.6: must be
+        // <= MAX_ACCRUAL_DT_SLOTS=100). The natural slot advances in this
+        // test (init → 200 → 300 → 600) go well past the live window, so
+        // the final Resolve branch exercises the permissionless path.
+        80,
         200,    // funding_horizon_slots (custom, not default 500)
         200,    // funding_k_bps (2x, not default 1x)
         1000,   // funding_max_premium_bps (10%, not default 5%)
@@ -1179,7 +1180,7 @@ fn test_governance_free_full_lifecycle_inverted() {
 
     env.init_market_with_funding(
         1,      // invert=1
-        1000,   // permissionless_resolve_stale_slots (wider than max_crank_staleness)
+        80,     // permissionless_resolve_stale_slots (v12.19.6: <= MAX_ACCRUAL_DT_SLOTS=100)
         300,    // custom horizon
         150,    // 1.5x k
         800,    // 8% max premium
@@ -1326,7 +1327,7 @@ fn test_resolve_permissionless_inverted_settlement_price() {
 fn test_resolve_permissionless_inverted_with_positions() {
     program_path();
     let mut env = TestEnv::new();
-    env.init_market_with_cap(1, 1000);
+    env.init_market_with_cap(1, 80);
 
     {
         let mut slab = env.svm.get_account(&env.slab).unwrap();
@@ -1750,8 +1751,10 @@ fn test_sentinel_invariant_nonzero_oi_implies_oracle_initialized() {
 fn test_resolve_permissionless_succeeds_after_outage_exceeding_max_accrual_dt() {
     program_path();
     let mut env = TestEnv::new();
-    // min_oracle_price_cap = 10_000 e2bps, perm-resolve threshold = 50_000 slots
-    env.init_market_with_cap(0, 50_000);
+    // perm-resolve threshold = 80 slots (v12.19.6: <= MAX_ACCRUAL_DT_SLOTS=100).
+    // The test still drives the clock to 500_000 — far past the threshold —
+    // exercising the permissionless-resolve Degenerate path.
+    env.init_market_with_cap(0, 80);
 
     // Tighten oracle staleness so clock advance → oracle death.
     {
@@ -1821,12 +1824,11 @@ fn test_keeper_crank_succeeds_after_long_idle_via_catchup_accrue() {
     program_path();
     let mut env = TestEnv::new();
     // This test exercises the accrual-envelope recovery, not
-    // permissionless resolution. Disable the hard-timeout feature
-    // entirely (perm_resolve_stale_slots=0) so the 250_000-slot idle
-    // period doesn't trip the stale gate — the engine-level constraint
-    // perm_resolve_stale_slots <= max_accrual_dt_slots (100_000) makes
-    // it impossible to set a window wider than the idle period.
-    env.init_market_with_cap(0, 10_000);
+    // permissionless resolution. Choose perm_resolve=80 (the envelope
+    // upper bound is 100 in v12.19.6); the 250_000-slot idle is FAR
+    // past this window — the test path under examination here is the
+    // live accrue-envelope recovery that the CATCHUP loop closes.
+    env.init_market_with_cap(0, 80);
     env.crank(); // engine.current_slot ~ 0-100
 
     // Idle for 250_000 slots — well past the 100_000 accrual envelope,
@@ -1854,12 +1856,11 @@ fn test_keeper_crank_succeeds_after_long_idle_via_catchup_accrue() {
 fn test_catchup_accrue_commits_progress_past_in_line_cap() {
     program_path();
     let mut env = TestEnv::new();
-    // Disable permissionless resolution for this test — the idle
-    // period (3M slots) exceeds the engine-level constraint
-    // perm_resolve_stale_slots <= max_accrual_dt_slots (100_000).
     // The scenario under test is the accrual-envelope recovery, not
-    // the stale-oracle resolve.
-    env.init_market_with_cap(0, 10_000);
+    // the stale-oracle resolve. perm_resolve=80 satisfies the invariant
+    // `<= MAX_ACCRUAL_DT_SLOTS (100)`; the 3M-slot clock advance is
+    // independent of that window and tests the CatchupAccrue loop.
+    env.init_market_with_cap(0, 80);
     env.crank(); // seed engine state
 
     // Advance far beyond CATCHUP_CHUNKS_MAX × max_dt. 3M slots > 2M cap.
