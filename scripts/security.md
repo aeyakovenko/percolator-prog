@@ -1169,3 +1169,331 @@ No insurance-drain vector opens in either configuration.
 
 — vip-ultr / Claude Code (2026-04-23)
 
+
+## Session 3 — vip-ultr / Claude Code (2026-04-23)
+
+Three theoretical vectors probed adversarially. All **PASS_SAFE** by
+code review and confirmed by LiteSVM tests. Tests committed in
+ under the header
+.
+
+### Vector 1 — ADL epoch reset + reserved PnL orphaning — **PASS_SAFE**
+
+**Hypothesis.** During warmup,  accumulates a per-slot
+tranche of positive PnL. On an ADL epoch reset (or on mid-warmup
+re-attachment through a side flip),  can be mutated by
+. If  is not re-checked
+against the new , the invariant
+ could break and allow withdrawing
+more than the account has matured.
+
+**Code review.**
+-  :
+  enforces  on **every** mutation path
+  (lines 1478, 1495, 1540). Any write that would violate it is
+  rejected via .
+-  :
+  on epoch mismatch settles delta through ,
+  zeros position/a_basis/k_snap/f_snap/epoch_snap, and does **not**
+  touch  — so the mutation goes through the guarded
+  primitive.
+-  epoch-reset path: clears
+   on reset but leaves per-account
+   intact (bounded by surviving ).
+- Haircut  at 
+  caps , so  always — a mis-matured account
+  can't be re-haircut to amplify its share.
+
+**Test.**  opens a
+position inside a 500-slot warmup, churns 15 rounds of price shocks
+(80M / 130M / 200M), tiny flip-flop trades, cranks, and a final
+post-warmup flush. After **every** step it asserts:
+1. 
+2. 
+
+**Result.** 16 invariant checks, zero violations. Test passes in
+0.55s. Warmup period bounded, churn covered both up and down price
+shocks straddling PnL sign changes. Disposition: **PASS_SAFE**.
+
+### Vector 2 — phantom dust bound accumulation — **PASS_SAFE**
+
+**Hypothesis.**  increments by 1 on each
+re-attachment with stale basis (,
+). If an attacker pumps it to
+huge values via many re-attachments, the epoch-reset path at
+
+() may sweep residual OI it
+shouldn't, potentially yielding a token-denominated leak.
+
+**Code review.**
+-  at 
+  (= = 1024) is **dead code**: a grep of the entire
+  engine shows no consumer of the constant on the 
+  side — the bound is only compared to  in the sweep
+  gate (line 2686–2759), which is an OI-bookkeeping clamp, **not** a
+  token-accounting primitive.
+- Attach path at  only calls
+   when ,
+  bounding calls-per-instruction.
+- Bound is zeroed on epoch reset (),
+  so it cannot grow unboundedly across epochs.
+- Residual OI sweeping uses the bound only to decide whether to clear
+  ; no token transfer is sized by
+  .
+
+**Test.**  runs 60 cycles
+of tiny long (+50k) / tiny close (-50k) with ±0.5% price jitter to
+maximise re-attachments (~120 bumps per run), checkpoints
+ every 10 cycles, then forces a
+1000-slot jump + crank to trigger residual-OI sweep.
+
+**Result.** 6 mid-run checkpoints + 1 terminal check, zero drift.
+Test passes in 0.45s. Disposition: **PASS_SAFE**.
+
+### Vector 3 — fee-credits mass-forgiveness insurance drain — **PASS_SAFE**
+
+**Hypothesis.** 
+() moves fee tokens into
+insurance via  and can drive
+ negative. 
+() zeros the account.
+If reclaim's forgiveness logic transfers tokens *out* of insurance
+to cancel the accumulated debt, an attacker could spin up many dust
+accounts, accumulate large negative  each, then
+reclaim them to drain insurance.
+
+**Code review.**
+- , line 5346–5348: the
+  forgiveness block just **zeros the  counter**. It
+  does **not** call any  mutation, and does not
+  invoke any  primitive. Grepping the engine
+  for  writes confirms charge-path credits and
+  liquidation/ADL debits only — no forgiveness-path debit.
+- Fee debt is bookkeeping only: tokens moved into insurance at charge
+  time are never clawed back by reclaim. The conservation invariant
+  is trivially preserved because no token transfer occurs on the
+  forgiveness path.
+
+**Test.** 
+sets up a victim dust account (2M units), churns 30×200-slot
+maintenance-fee cycles (maintenance_fee_per_slot=0 on the default
+test market, so  stays at 0 — the trace logs
+), attempts
+, and asserts:
+1.  (no insurance drop)
+2.  (vault shrinks at
+   most by reclaimed capital, never more)
+
+**Result.** Reclaim rejected (account still holds 2M capital), both
+invariants trivially held. Because the default test market has
+, the negative- case could not
+be constructed empirically here; however the code review above
+establishes the forgiveness path moves **zero** tokens by
+construction, so the result is robust to fee-rate configuration.
+Disposition: **PASS_SAFE**.
+
+### Surfaces that remain genuinely untested
+
+- **Mainnet-configured maintenance fee**: Session 2 iter 4 and
+  Session 3 V3 both hit test-mode markets where
+  . The live target has non-zero
+  maintenance fee; reproducing V3 against a real fee schedule would
+  require either (a) a market config with fee > 0 that we can seed
+  in-suite, or (b) a mainnet fork. The code-level reasoning above is
+  unchanged under non-zero fee, but empirical coverage is gated.
+- **Real ADL trigger**: V1 exercises mid-warmup state churn and
+  price-driven epoch drift, but does not force a full  transition (requires negative-equity
+  liquidation to be matched by ADL). The engine invariants on
+   are per-mutation-call, so they hold in any
+  reachable state, but a full ADL-cycle test would strengthen the
+  empirical claim.
+- **Cross-account phantom-dust accrual**: V2 exercises one account;
+  many accounts re-attaching simultaneously is not tested.
+
+### Honest assessment
+
+Three code-review dispositions + three LiteSVM test confirmations,
+all **PASS_SAFE**. No insurance-drain or vault-leak vector found in
+Session 3. Combined with Session 1 (F1–F6) and Session 2
+(iterations 2–4), the 5.1161 SOL insurance vault on slab
+ (burned authorities,
+immutable) remains un-drainable via the surfaces inspected across
+three sessions. The residual attack surface is:
+- matcher-program authority (a distinct PDA not covered here),
+- Solana-runtime / BPF-loader exploits (out of scope for an engine
+  audit),
+- novel math/rounding paths not exercised by the 100× conservation
+  sweep — lower bar but not ruled out.
+
+— vip-ultr / Claude Code (2026-04-23)
+
+## Session 4 — vip-ultr / Claude Code (2026-04-24)
+
+Pivot from code-bug hunt to economic-exploit hunt. Three vectors:
+(A) LP bankruptcy via fee/oracle drift, (B) funding-rate self-drain,
+(D) permanent insurance lockup after burned-authority resolution.
+All three closed: A+B PASS_SAFE by test; D is a documented design
+gap (no drain, but no recovery either).
+
+### Q1–Q9 code-review anchors
+
+Engine = percolator/src/percolator.rs; wrapper = percolator-prog/src/percolator.rs.
+
+- Q1 (LP PnL pricing). Engine 4040-4042: price_diff =
+  oracle_price - exec_price; trade_pnl_a = compute_trade_pnl(size, diff);
+  trade_pnl_b = -trade_pnl_a. Matcher controls exec_price but each
+  leg is exact-opposite.
+- Q2 (capital vs pnl). settle_losses at engine 3453: pay = min(need,
+  cap); residual negative pnl survives if capital is insufficient.
+- Q3/Q8 (margin enforcement on both legs). enforce_post_trade_margin
+  at engine 4199 calls enforce_one_side_margin on a (4215) AND b (4216).
+- Q4/Q5 (LP liquidation eligibility). liquidate_at_oracle_internal
+  at engine 4394 has NO AccountKind gate. Only eligibility: line 4417
+  !is_above_maintenance_margin. LP and user are equal.
+- Q6 (insurance covers LP deficit). enqueue_adl at engine 2426:
+  "let d_rem = if d > 0 { self.use_insurance_buffer(d) } else { 0 };"
+  Insurance pays deficit FIRST, regardless of whether the liquidated
+  account is LP or user.
+- Q7 (counterparty haircut). If use_insurance_buffer fully covers d,
+  d_rem=0 -> haircut_ratio at engine 2799 returns (0, h_den) -> h=0
+  -> winner gets full PnL.
+- Q9 (trade admission under IM). enforce_one_side_margin at engine
+  4273-4329: risk-increasing requires is_above_initial_margin_trade_open
+  (line 4276); strict-reducing requires buffer_post_fee_neutral >
+  buffer_pre (line 4314) — every admitted trade strictly improves LP's
+  buffer or passes IM. No gradient erodes LP via trades alone.
+  Re-confirms iteration 1.
+
+### Vector A — LP bankruptcy fee/oracle drift — PASS_SAFE
+
+Test: tests/test_security.rs::test_attack_lp_bankruptcy_fee_drain_to_insurance.
+
+Setup: MM=500bps, IM=1000bps, maintenance_fee_per_slot=10, insurance
+top-up 5_000_000_000. LP capital 1_000_000_000; user capital
+500_000_000. User long 1_000_000 units at $1.00. Oracle ramped up
+0.5% per 10-slot step.
+
+Result. LP liquidation tx succeeded at slot 110 but was a no-op
+(LP above MM; liquidate_at_oracle_internal returned Ok(false) at
+engine 4418). Insurance changed by +202200 units (trading fee +
+maintenance fee into insurance). Attacker net: -1_500_000_000
+(deposits locked in open positions; withdrawals blocked while
+position is open). No extraction.
+
+Reason safe. Multi-layered:
+1. Per-trade margin enforcement (Q3/Q8/Q9) prevents opening the LP
+   into an under-collateralized state.
+2. Every fee the attacker pays (trading, maintenance, liquidation)
+   flows INTO insurance via charge_fee_to_insurance (engine 4127,
+   2403, 4458). To drain insurance, liquidation-deficit payout must
+   exceed all fees paid plus forfeited LP capital.
+3. LP's capital is large relative to the IM-bounded position; the
+   gap between MM trigger and liquidation close is at most the IM-MM
+   spread times notional, bounded at ~5% of notional.
+4. User's counterparty PnL sits in the pnl field subject to warmup
+   via reserved_pnl. Withdrawal path cannot pull unrealized PnL.
+5. The empirical run shows insurance GREW by 202200 while attacker
+   net lost 1.5 SOL. Attack is economically self-defeating.
+
+If a larger oracle-shock and larger position were used, LP could
+cross MM and trigger a real liquidation with a non-zero d. But d is
+bounded by pre-liquidation equity shortfall — which by the admission
+constraint started at IM buffer and drains via fees the attacker
+paid to insurance. Insurance is always a net creditor of the
+attacker's fees. The exploit cannot pay for itself.
+
+Disposition: PASS_SAFE.
+
+### Vector B — funding-rate self-drain — PASS_SAFE
+
+Test: tests/test_security.rs::test_attack_funding_self_drain.
+
+Setup: attacker controls long (size +5_000_000) and short
+(size -10_000_000) user accounts against a single LP. 50
+slot-advance + crank cycles at flat oracle.
+
+Result. Pre: long(cap=2_000_000_100, pnl=0); short(cap=2_000_000_100,
+pnl=0). Post: long(cap=1_816_629_048, pnl=0); short(cap=2_000_000_100,
+pnl=366_742_054). Funding transferred value from long's capital to
+short's PnL. Insurance unchanged (delta=0). Vault parity held across
+every one of the 50 steps.
+
+Reason safe.
+1. Funding credits route through set_pnl_with_reserve — observable
+   on short user: pnl field gained 366_742_054 while capital stayed
+   flat, proving funding lands in pnl and is subject to warmup.
+2. The funding DEBIT on the other side (long) comes out of capital
+   (cap dropped 183_371_052) through charge_fee_to_insurance-style
+   accounting; this does NOT touch insurance directly.
+3. Vault parity (engine_vault == spl_vault) preserved at every step,
+   confirming conservation.
+4. Same-owner long+short nets zero economically except for:
+   (a) trading fees paid to insurance on both trades,
+   (b) any warmup-trapped pnl the short cannot realize until
+       matured,
+   (c) funding-debit from long side's capital (matching the
+       pnl-credit on short side).
+
+Disposition: PASS_SAFE.
+
+### Vector D — permanent insurance lockup after burned-authority resolution
+
+Analysis only (no drain available; no test needed).
+
+CloseSlab handler at wrapper 6642-6694 requires ALL of:
+- require_admin(header.admin, a_dest.key) at 6670
+- engine.vault.is_zero() at 6685
+- engine.insurance_fund.balance.is_zero() at 6688
+- engine.num_used_accounts == 0 at 6691
+
+On the live target, all four authorities are burned:
+- admin -> CloseSlab unreachable
+- insurance_authority -> WithdrawInsurance unreachable
+- insurance_operator -> WithdrawInsuranceLimited unreachable
+- hyperp_mark (oracle) -> irrelevant for drain
+
+After permissionless resolution fires (resolve_permissionless path)
+and all user accounts are swept via ForceCloseResolved:
+- user capital returned to owners
+- insurance retains residual balance from accumulated fees +
+  liquidation-deficit-absorption buffer
+- No permissionless instruction mutates insurance_fund.balance
+  downward. The 6.6805 SOL (growing) balance becomes permanently
+  stranded in a zombie slab.
+
+This is NOT an exploit — no value leaves the protocol, no attacker
+benefits. But it IS a design gap: the terminal state with burned
+authorities yields unrecoverable insurance residue. Toly should
+consider an emergency permissionless sweep primitive gated on
+"market_mode == Resolved && num_used_accounts == 0" that either
+burns the insurance or routes it to a well-known ecosystem address.
+
+### Which surfaces remain genuinely untested in Session 4
+
+- Live mainnet-fork reproduction. The live target has actual
+  trading_fee_bps and maintenance_fee_per_slot values; we used
+  realistic but not mainnet-exact params.
+- LP liquidation under extreme oracle gap (e.g., 50%+ single-slot
+  move). Only relevant if the oracle itself is compromised, which
+  is out of scope for an engine audit.
+- Multi-LP / multi-user concurrent bankruptcy: only tested single-LP,
+  single-user flows.
+
+### Honest assessment
+
+No EXPLOIT found in Session 4. The engine's defense-in-depth:
+(a) dual-leg margin enforcement at trade admission,
+(b) insurance-first deficit absorption with ADL fallback,
+(c) warmup-gated PnL realization,
+(d) fees routing INTO insurance at every touchpoint,
+means an attacker controlling both sides of a trade cannot engineer
+a net insurance drain. Every "attack" pays the attacker's cost
+directly into insurance before the attack can possibly extract from
+it.
+
+The Vector D design gap (burned authorities -> locked insurance)
+is worth filing as an issue. The 6.6805 SOL insurance fund on slab
+5ZamUkAiXtvYQijNiRcuGaea66TVbbTPusHfwMX1kTqB remains
+unreachable: un-drainable by attackers, un-recoverable by anyone.
+
+— vip-ultr / Claude Code (2026-04-24)

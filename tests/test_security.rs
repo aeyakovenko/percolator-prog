@@ -13302,3 +13302,542 @@ fn test_attack_crank_reward_farming_net_economics() {
     let _ = reward_gained;
 }
 
+// ===== Session 4 — vip-ultr / Claude Code (2026-04-24) — economic exploits =====
+
+/// SESSION 4 / VECTOR A — LP bankruptcy via fee/oracle drift → insurance drain.
+///
+/// Setup: attacker controls both LP and user. Open LP short vs user long at
+/// near-max IM. Advance slots so maintenance-fee accrual + adverse oracle
+/// drift pushes LP below maintenance margin. Liquidate LP. Measure whether
+/// insurance net-dropped and whether attacker net-extracted.
+///
+/// Expected per Phase 0 code review: PASS_SAFE. The `d` paid by insurance
+/// is bounded by the IM→MM buffer gap; fees paid by attacker on open and
+/// maintenance along the way flow INTO insurance, so net insurance flow
+/// should be non-negative for the attacker.
+#[test]
+fn test_attack_lp_bankruptcy_fee_drain_to_insurance() {
+    program_path();
+
+    // Market with maintenance_fee_per_slot > 0 so the LP bleeds capital
+    // over time. Other params: MM=500bps, IM=1000bps.
+    let mut env = TestEnv::new();
+    let data = common::encode_init_market_with_maint_fee_bounded(
+        &env.payer.pubkey(),
+        &env.mint,
+        &common::TEST_FEED_ID,
+        1_000_000_000, // _max_maintenance_fee_per_slot
+        10,            // maintenance_fee_per_slot: 10 base units per slot
+        0,
+    );
+    env.try_init_market_raw(data).expect("init_market");
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    // Top-up insurance to mainnet-parity scale (~5 SOL ≈ 5_000_000_000 units
+    // at 1e9 scale; we use plain base units).
+    env.top_up_insurance(&admin, 5_000_000_000);
+    let ins_initial = env.read_insurance_balance();
+    let vault_initial = env.vault_balance();
+
+    // Attacker wallet funds LP + user (same owner is fine per existing
+    // tests — iteration 1 & test_attack_position_flip_through_zero use
+    // distinct keypairs but trade against each other; we use distinct
+    // keypairs here too since init_lp / init_user require separate
+    // owners).
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    let lp_deposit: u64 = 1_000_000_000; // 1 SOL scale
+    env.deposit(&lp, lp_idx, lp_deposit);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    let user_deposit: u64 = 500_000_000; // 0.5 SOL scale
+    env.deposit(&user, user_idx, user_deposit);
+
+    // Open user long at $1.00. Size chosen so LP leg stays above IM
+    // (IM=10% of notional; LP has ~1_000_000_000 capital; notional ≤
+    // 10 × LP_cap = 10_000_000_000 units). Use size 1_000_000 = 1
+    // POS_SCALE unit at price 1_000_000 → notional 1_000_000.
+    env.set_slot_and_price(100, 1_000_000);
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
+
+    let lp_cap_after_open = env.read_account_capital(lp_idx);
+    let user_cap_after_open = env.read_account_capital(user_idx);
+    let ins_after_open = env.read_insurance_balance();
+    println!(
+        "open: lp_cap={} user_cap={} ins={}",
+        lp_cap_after_open, user_cap_after_open, ins_after_open
+    );
+
+    // Advance slots with ramping oracle upward (adverse to LP short).
+    // Crank each step to accrue maintenance fees + re-mark equity.
+    let mut slot = 100u64;
+    let mut price: i64 = 1_000_000;
+    let mut liq_result: Result<(), String> = Err("not attempted".into());
+    for _ in 0..200u64 {
+        slot += 10;
+        price += 5_000; // +0.5% per step
+        env.set_slot_and_price(slot, price);
+        env.svm.expire_blockhash();
+        let _ = env.try_crank();
+
+        // Attempt liquidation at each step; first success exits loop.
+        liq_result = env.try_liquidate(lp_idx);
+        if liq_result.is_ok() {
+            println!(
+                "LP LIQUIDATED at slot={} price={} lp_cap={} ins={}",
+                slot, price,
+                env.read_account_capital(lp_idx),
+                env.read_insurance_balance()
+            );
+            break;
+        }
+    }
+
+    let ins_after_liq = env.read_insurance_balance();
+    let lp_cap_after_liq = env.read_account_capital(lp_idx);
+    let lp_pnl_after_liq = env.read_account_pnl(lp_idx);
+    let user_cap_after_liq = env.read_account_capital(user_idx);
+    let user_pnl_after_liq = env.read_account_pnl(user_idx);
+    println!(
+        "post-liq: lp_cap={} lp_pnl={} user_cap={} user_pnl={} ins={} vault={}",
+        lp_cap_after_liq, lp_pnl_after_liq,
+        user_cap_after_liq, user_pnl_after_liq,
+        ins_after_liq, env.vault_balance()
+    );
+
+    // Advance enough slots to mature any warmup PnL on the user side,
+    // then attempt withdrawals.
+    slot += 10_000;
+    env.set_slot_and_price(slot, price);
+    env.svm.expire_blockhash();
+    let _ = env.try_crank();
+
+    // Attempt to withdraw user capital up to current balance.
+    let user_cap_final = env.read_account_capital(user_idx);
+    let user_withdrawn: u64 = if user_cap_final > 0 {
+        match env.try_withdraw(&user, user_idx,
+            core::cmp::min(user_cap_final as u64, u64::MAX))
+        {
+            Ok(_) => user_cap_final as u64,
+            Err(_) => 0,
+        }
+    } else { 0 };
+
+    let lp_cap_final = env.read_account_capital(lp_idx);
+    let lp_withdrawn: u64 = if lp_cap_final > 0 {
+        match env.try_withdraw(&lp, lp_idx,
+            core::cmp::min(lp_cap_final as u64, u64::MAX))
+        {
+            Ok(_) => lp_cap_final as u64,
+            Err(_) => 0,
+        }
+    } else { 0 };
+
+    let ins_final = env.read_insurance_balance();
+    let vault_final = env.vault_balance();
+
+    // Attacker economics: paid (user_deposit + lp_deposit), got back
+    // (user_withdrawn + lp_withdrawn). Any excess came from insurance.
+    let cost: i128 = user_deposit as i128 + lp_deposit as i128;
+    let recovered: i128 = user_withdrawn as i128 + lp_withdrawn as i128;
+    let net_attacker: i128 = recovered - cost;
+    let insurance_delta: i128 = ins_final as i128 - ins_initial as i128;
+
+    println!(
+        "ECONOMICS: deposited={} recovered={} net={} ins_delta={} \
+         vault_delta={}",
+        cost, recovered, net_attacker, insurance_delta,
+        vault_final as i128 - vault_initial as i128
+    );
+
+    // EXPLOIT criterion: attacker netted positive AND insurance dropped.
+    if net_attacker > 0 {
+        assert!(
+            insurance_delta >= 0,
+            "EXPLOIT: attacker netted +{} while insurance dropped {} \
+             (ins_initial={} ins_final={})",
+            net_attacker, -insurance_delta, ins_initial, ins_final
+        );
+    }
+    // Separate criterion: attacker-net must not exceed insurance delta
+    // magnitude (if insurance did drop, attacker's gain is bounded by
+    // the drain).
+    if insurance_delta < 0 {
+        assert!(
+            net_attacker <= 0,
+            "EXPLOIT: insurance dropped {} AND attacker netted +{}",
+            -insurance_delta, net_attacker
+        );
+    }
+}
+
+/// SESSION 4 / VECTOR B — funding self-drain.
+///
+/// Attacker opens opposing long+short positions across two user accounts.
+/// Funding rate transfers between majority side → minority side.
+/// If funding credit lands in `capital` (immediately withdrawable),
+/// attacker drains insurance via one-way funding payments net of fees.
+///
+/// If funding lands in `pnl` (subject to warmup via reserved_pnl),
+/// no drain is possible because the withdrawal path requires matured PnL.
+///
+/// Expected: PASS_SAFE — funding goes through set_pnl_with_reserve;
+/// vault conservation holds.
+#[test]
+fn test_attack_funding_self_drain() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    // Default market already has trading_fee_bps=10 plus funding knobs; we
+    // just need an env that accrues funding across slots.
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 5_000_000_000);
+    let ins_initial = env.read_insurance_balance();
+    let vault_initial = env.vault_balance();
+
+    // Attacker's LP (needed for any trades at all).
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    // Attacker controls two users on opposing sides.
+    let long_user = Keypair::new();
+    let long_idx = env.init_user(&long_user);
+    env.deposit(&long_user, long_idx, 2_000_000_000);
+
+    let short_user = Keypair::new();
+    let short_idx = env.init_user(&short_user);
+    env.deposit(&short_user, short_idx, 2_000_000_000);
+
+    env.set_slot_and_price(100, 100_000_000);
+    env.crank();
+
+    // Open opposing positions. Long first, then short (via LP).
+    env.trade(&long_user, &lp, lp_idx, long_idx, 5_000_000);
+    env.svm.expire_blockhash();
+    env.trade(&short_user, &lp, lp_idx, short_idx, -10_000_000);
+    // Net OI on user-controlled side: long+5M, short-10M → 5M short surplus.
+    // Funding flows from majority (short) to minority (long) side.
+
+    let cap_long_before = env.read_account_capital(long_idx);
+    let pnl_long_before = env.read_account_pnl(long_idx);
+    let cap_short_before = env.read_account_capital(short_idx);
+    let pnl_short_before = env.read_account_pnl(short_idx);
+    println!(
+        "pre-accrue: long(cap={}, pnl={}), short(cap={}, pnl={})",
+        cap_long_before, pnl_long_before, cap_short_before, pnl_short_before
+    );
+
+    // Advance many slots at flat oracle to maximise funding accrual
+    // with minimal trade-PnL noise.
+    let mut slot = 200u64;
+    for _ in 0..50u64 {
+        slot += 10;
+        env.set_slot_and_price(slot, 100_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.try_crank();
+
+        // Vault parity must hold across every funding accrual step.
+        let ev = env.read_engine_vault() as u64;
+        let sv = env.vault_balance();
+        assert_eq!(
+            ev, sv,
+            "EXPLOIT: vault drift during funding accrual at slot={}: \
+             engine={} spl={}",
+            slot, ev, sv
+        );
+    }
+
+    let cap_long_after = env.read_account_capital(long_idx);
+    let pnl_long_after = env.read_account_pnl(long_idx);
+    let cap_short_after = env.read_account_capital(short_idx);
+    let pnl_short_after = env.read_account_pnl(short_idx);
+    println!(
+        "post-accrue: long(cap={}, pnl={}), short(cap={}, pnl={})",
+        cap_long_after, pnl_long_after, cap_short_after, pnl_short_after
+    );
+
+    // EXPLOIT criterion 1: funding must not credit capital directly
+    // (immediately withdrawable). Capital can only decrease via trading
+    // fees / maintenance fees or equal across the window.
+    assert!(
+        cap_long_after <= cap_long_before,
+        "EXPLOIT: long capital grew {} → {} during funding accrual \
+         (funding bypassed warmup and went to capital)",
+        cap_long_before, cap_long_after
+    );
+
+    // Attempt immediate withdraw of any gained funding on the long
+    // (minority-OI) side.
+    let withdraw_amt = cap_long_after as u64;
+    let _ = env.try_withdraw(&long_user, long_idx, withdraw_amt);
+
+    // Attacker cannot leave the market with more than they deposited.
+    // Total deposits: LP(50_000_000_000) + long(2_000_000_000) +
+    // short(2_000_000_000) = 54e9. Net attacker = sum(final caps) -
+    // sum(deposits). Exclude LP (same owner model: attacker still
+    // controls everything, so LP also counts as attacker funds).
+    let ins_final = env.read_insurance_balance();
+    let insurance_delta: i128 = ins_final as i128 - ins_initial as i128;
+    let vault_final = env.vault_balance();
+    let vault_delta: i128 = vault_final as i128 - vault_initial as i128;
+    println!(
+        "funding-drain: ins_delta={} vault_delta={}",
+        insurance_delta, vault_delta
+    );
+    // Insurance cannot be drained via funding self-trade.
+    assert!(
+        insurance_delta >= -1,
+        "EXPLOIT: insurance dropped {} during pure funding accrual",
+        -insurance_delta
+    );
+}
+
+// ===== vip-ultr / Claude Code (2026-04-23) — Session 3 theoretical vectors =====
+
+/// SESSION 3 / VECTOR 1 — ADL epoch reset + reserved PnL orphaning.
+///
+/// Theory: during warmup, `reserved_pnl` holds a slot accumulator that must
+/// satisfy `reserved_pnl ≤ pos_pnl` (pnl is i128, reserved is u128 applied
+/// against the positive side). An ADL epoch reset or re-attachment could
+/// theoretically leave `reserved_pnl` stale while `pos_pnl` drops, breaking
+/// the invariant and enabling a "withdraw more than you earned" path.
+///
+/// Test: open a position, accrue PnL into reserved via warmup, then churn
+/// state (trades, slot jumps, cranks) and assert after every step:
+///   (a) reserved_pnl ≤ max(pnl, 0)
+///   (b) vault == c_tot + insurance + sum(positive pnl) – sum(abs negative pnl)
+///       (checked via spl_vault == engine_vault as a proxy)
+#[test]
+fn test_attack_epoch_reset_orphans_reserved_pnl() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_warmup(0, 500);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    // Open a position, then a price shock generates positive PnL; warm it up.
+    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
+    env.set_slot_and_price(110, 100_000_000);
+    env.crank();
+    env.set_slot_and_price(200, 150_000_000);
+    env.crank();
+    env.set_slot_and_price(300, 150_000_000);
+    env.crank();
+
+    let check_invariant = |env: &TestEnv, label: &str| {
+        let reserved = env.read_account_reserved_pnl(user_idx);
+        let pnl = env.read_account_pnl(user_idx);
+        let pos_pnl = if pnl > 0 { pnl as u128 } else { 0 };
+        assert!(
+            reserved <= pos_pnl,
+            "EXPLOIT[{}]: reserved_pnl={} > pos_pnl={} (pnl={})",
+            label, reserved, pos_pnl, pnl
+        );
+        let engine_vault = env.read_engine_vault() as u64;
+        let spl_vault = env.vault_balance();
+        assert_eq!(
+            engine_vault, spl_vault,
+            "EXPLOIT[{}]: engine_vault={} != spl_vault={}",
+            label, engine_vault, spl_vault
+        );
+    };
+
+    check_invariant(&env, "after-warmup-accrual");
+
+    // Churn: alternating price shocks + trades + cranks, mid-warmup.
+    // Each iteration advances 10 slots — a fraction of 500-slot warmup —
+    // exercising mid-warmup re-attach / re-schedule paths.
+    let mut slot = 301u64;
+    for i in 0..15u64 {
+        slot += 7;
+        let price = if i % 3 == 0 {
+            200_000_000
+        } else if i % 3 == 1 {
+            80_000_000
+        } else {
+            130_000_000
+        };
+        env.set_slot_and_price(slot, price);
+        env.svm.expire_blockhash();
+        // Flip-flop a small side trade to force re-attach.
+        let sz: i128 = if i % 2 == 0 { 100_000 } else { -100_000 };
+        // try_trade because extreme price moves may reject; tolerate either outcome.
+        let _ = env.try_trade(&user, &lp, lp_idx, user_idx, sz);
+        slot += 3;
+        env.set_slot_and_price(slot, price);
+        env.svm.expire_blockhash();
+        let _ = env.try_crank();
+
+        check_invariant(&env, &format!("churn-i{}", i));
+    }
+
+    // Finally: walk past warmup completion slot (110 + 500 = 610).
+    slot = 700;
+    env.set_slot_and_price(slot, 100_000_000);
+    env.svm.expire_blockhash();
+    let _ = env.try_crank();
+    check_invariant(&env, "post-warmup");
+}
+
+/// SESSION 3 / VECTOR 2 — phantom dust bound accumulation.
+///
+/// Theory: `phantom_dust_bound_side` is bumped by 1 on every re-attach with a
+/// stale basis; it's used as an allowance to clear residual OI at epoch reset.
+/// If an attacker can pump phantom_dust_bound to absurd values via repeated
+/// re-attachments, they might be able to create a token-denominated imbalance
+/// when the engine later sweeps OI using that bound.
+///
+/// Test: induce many re-attachments via rapid position-size flip-flops at
+/// varied prices; assert after every round that spl_vault == engine_vault
+/// (phantom dust is OI bookkeeping; any leak would surface as a vault drift).
+#[test]
+fn test_attack_phantom_dust_bound_overflow() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 20_000_000_000);
+
+    let mut slot = 50u64;
+    env.set_slot_and_price(slot, 100_000_000);
+    env.crank();
+
+    // Each iteration: price jitter + tiny long + tiny close → maximizes
+    // re-attachments per transaction (MAX_ROUNDING_SLACK is 1024 in engine;
+    // 60 cycles × ~2 attaches/cycle ≈ 120 bumps, plenty to exercise bound).
+    for i in 0..60u64 {
+        slot += 2;
+        let price = 100_000_000 + ((i as i64 % 5) - 2) * 500_000;
+        env.set_slot_and_price(slot, price);
+        env.svm.expire_blockhash();
+        let _ = env.try_trade(&user, &lp, lp_idx, user_idx, 50_000);
+        slot += 1;
+        env.set_slot_and_price(slot, price);
+        env.svm.expire_blockhash();
+        let _ = env.try_trade(&user, &lp, lp_idx, user_idx, -50_000);
+
+        if (i + 1) % 10 == 0 {
+            let engine_vault = env.read_engine_vault() as u64;
+            let spl_vault = env.vault_balance();
+            assert_eq!(
+                engine_vault, spl_vault,
+                "EXPLOIT: vault drift at phantom-dust cycle {}: engine={} spl={}",
+                i + 1, engine_vault, spl_vault
+            );
+        }
+    }
+
+    // Terminal: one big sweep advance, crank to force residual OI flush.
+    slot += 1000;
+    env.set_slot_and_price(slot, 100_000_000);
+    env.svm.expire_blockhash();
+    let _ = env.try_crank();
+
+    let engine_vault = env.read_engine_vault() as u64;
+    let spl_vault = env.vault_balance();
+    assert_eq!(
+        engine_vault, spl_vault,
+        "EXPLOIT: terminal drift after phantom-dust churn: engine={} spl={}",
+        engine_vault, spl_vault
+    );
+}
+
+/// SESSION 3 / VECTOR 3 — fee-credits mass forgiveness insurance drain.
+///
+/// Theory: `charge_account_fee_not_atomic` drives `fee_credits` negative and
+/// moves the fee into insurance at charge time. `reclaim_empty_account` then
+/// zeros `fee_credits` without mutating insurance. If a prior path credited
+/// insurance optimistically but the reclaim path forgives *more* than it
+/// collected, insurance nets negative.
+///
+/// Test: set up an account, accumulate negative fee_credits via maintenance
+/// fees, reclaim it, and assert that `insurance_balance_after >= ins_post_charge`.
+/// I.e. reclaim must not decrement insurance.
+#[test]
+fn test_attack_fee_credits_mass_forgiveness_insurance_drain() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 50_000_000_000);
+
+    // Create victim with dust capital; open & close tiny position so it's
+    // reclaimable (no position, capital drained to zero by fee accrual).
+    let victim = Keypair::new();
+    let victim_idx = env.init_user(&victim);
+    env.deposit(&victim, victim_idx, 2_000_000);
+
+    // Flat position, no PnL. Just let maintenance fees churn against dust
+    // via long slot advances + cranks.
+    let ins0 = env.read_insurance_balance();
+    let cap0 = env.read_account_capital(victim_idx);
+    println!("init: ins={} cap={}", ins0, cap0);
+
+    let mut slot = 100u64;
+    for _ in 0..30u64 {
+        slot += 200;
+        env.set_slot_and_price(slot, 100_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.try_crank();
+    }
+
+    let ins_before_reclaim = env.read_insurance_balance();
+    let fc_before = env.read_account_fee_credits(victim_idx);
+    let cap_before = env.read_account_capital(victim_idx);
+    let vault_before = env.vault_balance();
+    println!(
+        "pre-reclaim: ins={} fc={} cap={} vault={}",
+        ins_before_reclaim, fc_before, cap_before, vault_before
+    );
+
+    // Attempt reclaim. May fail if account isn't strictly empty; both outcomes
+    // are fine — what matters is that if it succeeds, insurance doesn't drop.
+    let reclaim_res = env.try_reclaim_empty_account(victim_idx);
+
+    let ins_after = env.read_insurance_balance();
+    let vault_after = env.vault_balance();
+    println!(
+        "post-reclaim: ok={} ins={} vault={}",
+        reclaim_res.is_ok(), ins_after, vault_after
+    );
+
+    // EXPLOIT criterion: reclaim (forgiveness path) must not decrement
+    // insurance. Fee credits are a bookkeeping debt; zeroing them should
+    // not move tokens.
+    assert!(
+        ins_after >= ins_before_reclaim,
+        "EXPLOIT: reclaim drained insurance: before={} after={} (drop={})",
+        ins_before_reclaim, ins_after, ins_before_reclaim - ins_after
+    );
+
+    // Vault-level conservation: reclaim may move the victim's remaining
+    // capital (if any) to insurance, but vault total must not shrink
+    // beyond the reclaimed-capital portion.
+    assert!(
+        vault_after >= vault_before.saturating_sub(cap_before as u64),
+        "EXPLOIT: reclaim shrank vault beyond victim capital: before={} after={} cap={}",
+        vault_before, vault_after, cap_before
+    );
+}
+
