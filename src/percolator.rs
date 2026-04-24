@@ -1717,10 +1717,6 @@ pub mod ix {
                         timestamp,
                     })
                 }
-                // Tag 18 (SetOraclePriceCap) removed in v12.19: the
-                // per-slot price-move cap is now init-immutable via
-                // RiskParams.max_price_move_bps_per_slot (spec §1.4
-                // solvency envelope).
                 19 => Ok(Instruction::ResolveMarket),
                 20 => Ok(Instruction::WithdrawInsurance),
                 21 => {
@@ -3403,8 +3399,9 @@ pub mod processor {
     /// `CatchupAccrue` instruction which commits progress atomically
     /// without attempting a main operation afterwards.
     ///
-    /// 20 × max_dt ≈ 2M slots ≈ 11 days at 100k-slot envelope — well above
-    /// the auditor's pathological 1.3M-slot example.
+    /// 20 × max_dt = 20 × 100 = 2_000 slots per single instruction. Larger
+    /// gaps require multiple CatchupAccrue calls — that's the design
+    /// contract, not a misconfig.
     const CATCHUP_CHUNKS_MAX: u32 = 20;
 
     /// Pre-chunk market-clock advancement when the gap since the last
