@@ -4220,6 +4220,22 @@ pub mod processor {
                 if risk_params.initial_margin_bps < risk_params.maintenance_margin_bps {
                     return Err(ProgramError::InvalidInstructionData);
                 }
+                // Spec §12.21: public wrappers MUST NOT admit the combination
+                //   (admit_h_min == 0 && admit_h_max_consumption_threshold_bps == None)
+                // at any admission call site. The wrapper's runtime default
+                // passes `Some(maintenance_margin_bps)` as the threshold
+                // (see `admit_threshold = Some(engine.params
+                // .maintenance_margin_bps as u128)` in every execute_trade /
+                // withdraw / convert / settle call site). maintenance_margin_bps
+                // is validated > 0 immediately above, so the forbidden
+                // combination cannot arise at runtime. This assert makes the
+                // invariant explicit at init so a future change that relaxes
+                // the `maintenance_margin_bps == 0` reject (or swaps the
+                // runtime threshold to `None`) trips here, not silently via
+                // a §12.21-violating admission.
+                if risk_params.h_min == 0 && risk_params.maintenance_margin_bps == 0 {
+                    return Err(PercolatorError::InvalidConfigParam.into());
+                }
                 // insurance_withdraw_max_bps is a percentage (0..=10_000)
                 if insurance_withdraw_max_bps > 10_000 {
                     return Err(ProgramError::InvalidInstructionData);
