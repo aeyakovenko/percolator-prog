@@ -4915,7 +4915,7 @@ fn test_zero_fill_must_not_advance_circuit_breaker_baseline() {
     env.crank();
 
     // Read the circuit-breaker baseline (last_effective_price_e6) from slab
-    const LAST_EFF_PRICE_OFF: usize = 336; // HEADER_LEN(72) + offset_of!(MarketConfig, last_effective_price_e6)(200) // last_effective_price_e6 in slab (config offset)
+    const LAST_EFF_PRICE_OFF: usize = 328; // HEADER_LEN(136) + last_effective_price_e6(192) (v12.19)
     let baseline_before = {
         let data = env.svm.get_account(&env.slab).unwrap().data;
         u64::from_le_bytes(data[LAST_EFF_PRICE_OFF..LAST_EFF_PRICE_OFF + 8].try_into().unwrap())
@@ -5355,7 +5355,7 @@ fn test_tradecpi_zero_fill_does_not_walk_index() {
     env.crank();
 
     // Read last_effective_price_e6 before the zero-fill trade
-    const LAST_EFF_PRICE_OFF: usize = 336; // HEADER_LEN(72) + offset_of!(MarketConfig, last_effective_price_e6)(200)
+    const LAST_EFF_PRICE_OFF: usize = 328; // HEADER_LEN(136) + last_effective_price_e6(192) (v12.19)
     let index_before = {
         let data = env.svm.get_account(&env.slab).unwrap().data;
         u64::from_le_bytes(
@@ -5421,18 +5421,12 @@ fn test_tradecpi_zero_fill_does_not_walk_index() {
 /// offset_of!(RiskEngine, last_market_slot)=672, so 480+672=1152).
 #[test]
 fn test_tradecpi_zero_fill_advances_engine_time() {
-    // BPF layout offset for engine.last_market_slot.
-    // ENGINE_OFF=536; last_market_slot at engine offset 624 (after
-    // insurance_floor and min_initial_deposit deletes); slab offset 1160.
-    const LAST_MARKET_SLOT_OFF: usize = 1160;
-
+    // Layout-stable accessor: reads through `zc::engine_ref` rather than
+    // a hand-rolled byte offset, so the test doesn't drift when the
+    // engine struct changes.
     let read_last_market_slot = |env: &TradeCpiTestEnv| -> u64 {
         let data = env.svm.get_account(&env.slab).unwrap().data;
-        u64::from_le_bytes(
-            data[LAST_MARKET_SLOT_OFF..LAST_MARKET_SLOT_OFF + 8]
-                .try_into()
-                .unwrap(),
-        )
+        percolator_prog::zc::engine_ref(&data).unwrap().last_market_slot
     };
 
     let mut env = TradeCpiTestEnv::new();
@@ -5763,8 +5757,11 @@ fn test_hyperp_same_price_trades_refresh_liveness_and_market_stays_live() {
     // source before trades can produce exec prices at the mark).
     env.try_push_oracle_price(&admin, 1_000_000, 1).unwrap();
 
-    const MARK_EWMA_LAST_OFF: usize = 136 + 296; // HEADER_LEN + offset_of(mark_ewma_last_slot)
-    const LAST_MARK_PUSH_OFF: usize = 136 + 256; // HEADER_LEN + offset_of(last_mark_push_slot) (u128, low 8 bytes = slot)
+    // v12.19 MarketConfig layout (u128 alignment pulls fields forward):
+    //   last_mark_push_slot (u128) starts at config offset 240.
+    //   mark_ewma_last_slot (u64) is at config offset 280.
+    const MARK_EWMA_LAST_OFF: usize = 136 + 280;
+    const LAST_MARK_PUSH_OFF: usize = 136 + 240; // low 8 bytes of u128 = slot
     let read_slots = |env: &TradeCpiTestEnv| -> (u64, u64) {
         let slab = env.svm.get_account(&env.slab).unwrap().data;
         let e = u64::from_le_bytes(

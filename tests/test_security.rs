@@ -3199,7 +3199,7 @@ fn test_attack_hyperp_same_slot_crank_no_index_movement() {
     // Read last_effective_price_e6 (the index) before same-slot crank
     // last_effective_price_e6 is at config offset 312: slab bytes [384..392]
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
-    const INDEX_OFF: usize = 336; // HEADER_LEN(72) + offset_of!(MarketConfig, last_effective_price_e6)(200)
+    const INDEX_OFF: usize = 328; // HEADER_LEN(136) + last_effective_price_e6(192) (v12.19)
     let index_before =
         u64::from_le_bytes(slab_before[INDEX_OFF..INDEX_OFF + 8].try_into().unwrap());
     assert!(index_before > 0, "Index should be non-zero before crank");
@@ -3276,7 +3276,7 @@ fn test_attack_hyperp_push_extreme_price() {
     // Read stored last_effective_price_e6 - must be clamped, not u64::MAX/2
     // last_effective_price_e6 is at slab offset 384 (last u64 in config before engine)
     let slab_data = env.svm.get_account(&env.slab).unwrap().data;
-    const INDEX_OFF: usize = 336; // HEADER_LEN(72) + offset_of!(MarketConfig, last_effective_price_e6)(200)
+    const INDEX_OFF: usize = 328; // HEADER_LEN(136) + last_effective_price_e6(192) (v12.19)
     let stored_price = u64::from_le_bytes(slab_data[INDEX_OFF..INDEX_OFF + 8].try_into().unwrap());
     // With 5% cap and base price 1_000_000, max clamped = 1_050_000
     assert!(
@@ -5622,7 +5622,9 @@ fn test_attack_liquidation_after_price_crash() {
     // With 5B tokens capital, this should make the account deeply insolvent
     // maintenance_margin_bps=200 -> 2%, required margin = 100M*50/1e6*0.02 = 100 tokens
     // equity = 5000 - 8800 = -3800 -> deeply negative -> liquidated
-    env.set_slot_and_price(100, 50_000_000);
+    // Drive the oracle down far enough (compounded per-slot cap) for
+    // the account to be deeply insolvent.
+    env.set_slot_and_price(2000, 80_000_000);
     env.crank(); // Settle mark-to-oracle (crank does not liquidate with None hint)
 
     // Use explicit liquidation instruction to liquidate the insolvent account

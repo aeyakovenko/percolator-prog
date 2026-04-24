@@ -340,7 +340,7 @@ fn test_liquidation_removes_from_buffer() {
     assert!(buf.find(user_idx).is_some(), "User must be in buffer after trade");
 
     // Price drop → liquidate
-    env.set_slot_and_price(500, 110_000_000);
+    env.set_slot_and_price(2000, 90_000_000);
     env.try_liquidate(user_idx).expect("Liquidation must succeed");
 
     let buf = env.read_risk_buffer();
@@ -713,7 +713,7 @@ fn test_crank_liquidates_undercollateralized_buffer_entry() {
     assert!(buf.find(user_idx).is_some(), "User must be in buffer after trade");
 
     // Price drop → user undercollateralized
-    env.set_slot_and_price(500, 110_000_000);
+    env.set_slot_and_price(2000, 90_000_000);
 
     // Crank should liquidate via buffer candidate
     env.crank();
@@ -764,7 +764,7 @@ fn test_buffer_only_liquidation_no_external_candidates() {
     assert!(buf.find(user_idx).is_some(), "User must be in buffer after trade");
 
     // Price drop → user undercollateralized
-    env.set_slot_and_price(500, 110_000_000);
+    env.set_slot_and_price(2000, 90_000_000);
 
     // Crank with EMPTY candidate list — only buffer entries drive liquidation
     let caller = Keypair::new();

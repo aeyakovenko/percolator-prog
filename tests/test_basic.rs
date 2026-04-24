@@ -1599,7 +1599,7 @@ fn test_liquidation_reduces_position_and_charges_fee() {
     // compound to ~15-20% drift. At 500 slots with ~9 walk chunks of 2%
     // each, the engine's effective price lands well below the liquidation
     // threshold (~$129.5M for this position size + capital).
-    env.set_slot_and_price(500, 110_000_000); // walk target: $138 → ~$115
+    env.set_slot_and_price(2000, 90_000_000); // walk target: $138 → ~$115
 
     // Call LiquidateAtOracle directly (no crank first).
     let result = env.try_liquidate(user_idx);
@@ -1794,7 +1794,7 @@ fn test_keeper_crank_format_v1_full_close() {
     // Drive oracle adversarially over enough slots for the per-slot
     // price-move cap to compound to a price-deep-enough for liquidation
     // (~$130 threshold given 1.5 SOL capital, 100M-unit position).
-    env.set_slot_and_price(500, 110_000_000);
+    env.set_slot_and_price(2000, 90_000_000);
 
     // Build format_version=1 crank instruction with FullClose policy (tag=0)
     let caller = Keypair::new();
@@ -4168,7 +4168,7 @@ fn test_liquidation_fee_goes_to_insurance() {
 
     // Drive oracle over enough slots for per-slot cap to compound below
     // the liquidation threshold.
-    env.set_slot_and_price(500, 110_000_000);
+    env.set_slot_and_price(2000, 90_000_000);
 
     // Direct liquidation (not crank — crank may skip per hint logic)
     let result = env.try_liquidate(user_idx);
@@ -4723,11 +4723,11 @@ fn test_haircut_new_mm_capital_protected_inverted() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.top_up_insurance(&admin, 1_000_000_000);
 
-    // Price moves to create profit for user (inverted price goes up = SOL gets cheaper)
-    // Inverted: raw 138M → inverted ~7246. To make inverted price go up,
-    // raw price must go DOWN (cheaper SOL = more SOL per USD).
-    env.set_slot_and_price(200, 70_000_000); // raw drops from 138M to 70M
-    // Inverted: 1e12/70M ≈ 14286 (up from 7246)
+    // Drive the raw oracle lower (→ inverted price higher → user long
+    // profit). The per-slot cap (4 bps/slot) compounds across many
+    // chunks, so widen the horizon enough for a detectable adverse
+    // walk to land.
+    env.set_slot_and_price(2000, 90_000_000);
     env.crank();
 
     let user_pnl = env.read_account_pnl(user_idx);
@@ -5190,7 +5190,17 @@ fn test_keeper_crank_reward_pays_half_of_swept_fees_to_non_permissionless_caller
     let u3_idx = env.init_user(&u3);
     env.deposit(&u3, u3_idx, 10_000_000_000);
 
-    env.set_slot(500);
+    // Jump directly to the target effective slot without running
+    // intermediate cranks. `env.set_slot(500)` normally chunks through
+    // `set_slot_and_price` + best-effort cranks, which would pre-sweep
+    // the fees we want to observe on this test's single `crank_as`.
+    // The internal +100 offset places the initial clock at 100, so
+    // `set_slot(500)` maps to effective clock 600; use that directly.
+    env.svm.set_sysvar(&solana_sdk::clock::Clock {
+        slot: 600,
+        unix_timestamp: 600,
+        ..Default::default()
+    });
 
     let cranker_cap_before = env.read_account_capital(cranker_idx);
     let ins_before = env.read_insurance_balance();
@@ -5271,20 +5281,26 @@ fn test_keeper_crank_reward_pays_on_second_crank_with_populated_risk_buffer() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    env.set_slot(10);
+    // Advance clock via direct sysvar update — `env.set_slot` chunks
+    // internally now and would pre-sweep the fees before we observe
+    // the single crank's effect.
+    let clock_at = |s: u64| solana_sdk::clock::Clock {
+        slot: s, unix_timestamp: s as i64, ..Default::default()
+    };
+    env.svm.set_sysvar(&clock_at(110));
     env.trade(&user, &lp, lp_idx, user_idx, 100_000_000);
 
-    // Crank #1 at slot 500: empty risk buffer, all fees flow through the
+    // Crank #1 at slot 600: empty risk buffer, all fees flow through the
     // sweep, reward pays. Phase C at the end populates the buffer.
-    env.set_slot(500);
+    env.svm.set_sysvar(&clock_at(600));
     env.crank_as(&user, user_idx);
     env.svm.expire_blockhash();
 
-    // Crank #2 at slot 1000: buffer is populated, `combined` includes
+    // Crank #2 at slot 1100: buffer is populated, `combined` includes
     // LP + user. Without the fix, candidate-sync realizes their fees
     // to insurance before ins_before is captured → sweep_delta == 0 →
     // reward gate fails silently.
-    env.set_slot(1000);
+    env.svm.set_sysvar(&clock_at(1100));
     let cap_before = env.read_account_capital(user_idx);
     let ins_before = env.read_insurance_balance();
     env.crank_as(&user, user_idx);
@@ -5409,7 +5425,12 @@ fn test_keeper_crank_permissionless_pays_no_reward() {
     let u1_idx = env.init_user(&u1);
     env.deposit(&u1, u1_idx, 10_000_000_000);
 
-    env.set_slot(500);
+    // Direct clock jump — see other keeper_crank_reward tests.
+    env.svm.set_sysvar(&solana_sdk::clock::Clock {
+        slot: 600,
+        unix_timestamp: 600,
+        ..Default::default()
+    });
 
     let ins_before = env.read_insurance_balance();
     env.crank(); // permissionless (caller_idx = u16::MAX)
@@ -5733,11 +5754,6 @@ fn test_init_hyperp_with_perm_resolve_requires_nonzero_mark_min_fee() {
     );
     // The helper's perm_resolve = 0 in its default tail — need a
     // variant with perm_resolve > 0. For this test, craft inline.
-    let mut data = data;
-    // Find and patch perm_resolve_stale_slots (u64). In the helper,
-    // perm_resolve sits at the start of the extended tail after
-    // insurance_withdraw_max_bps(u16) + insurance_withdraw_cooldown_slots(u64).
-    // Simpler: rebuild inline.
     let _ = data;
 
     // Inline construction with perm_resolve = 1000, mark_min_fee = 0.

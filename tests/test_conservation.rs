@@ -742,10 +742,7 @@ fn test_attack_multi_crank_funding_conservation() {
     );
 
     // Engine vault should still be total deposited amount
-    let engine_vault = {
-        let slab = env.svm.get_account(&env.slab).unwrap();
-        u128::from_le_bytes(slab.data[536..552].try_into().unwrap()) // BPF ENGINE_OFF=472, vault at engine offset 0
-    };
+    let engine_vault = env.read_engine_vault();
     assert_eq!(
         engine_vault, 20_000_000_200,
         "ATTACK: Multi-crank funding changed engine vault! Expected 20B, got {}",

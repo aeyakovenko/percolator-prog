@@ -382,9 +382,6 @@ pub fn encode_init_market_with_conf_bps(
     data.extend_from_slice(&initial_mark_price_e6.to_le_bytes()); // initial_mark_price_e6
     // Per-market admin limits (uncapped defaults for tests)
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
-    // Resolvability invariant: ship max cap for non-Hyperp since the
-    // default tail has perm_resolve=0.
-    let default_cap: u64 = if feed_id == &[0u8; 32] { 0 } else { 1_000_000 };
     // RiskParams
     data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
@@ -432,7 +429,6 @@ pub fn encode_init_market_full_v2(
     // carry cap=0 — the wrapper promotes to DEFAULT_HYPERP_PRICE_CAP
     // at init.
     let is_hyperp = feed_id == &[0u8; 32];
-    let default_cap: u64 = if is_hyperp { 0 } else { 1_000_000 };
     // RiskParams
     data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps

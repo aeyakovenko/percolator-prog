@@ -1194,7 +1194,7 @@ fn test_oracle_equal_publish_time_replay_does_not_walk_baseline() {
     env.init_market_with_cap(0, 10_000);
 
     const LAST_ORACLE_PUB_TS_OFF: usize = 320;
-    const LAST_EFFECTIVE_PRICE_OFF: usize = 336;
+    const LAST_EFFECTIVE_PRICE_OFF: usize = 328; // HEADER_LEN(136) + last_effective_price_e6(192) (v12.19)
     let read_pub_ts = |env: &TestEnv| -> i64 {
         let d = env.svm.get_account(&env.slab).unwrap().data;
         i64::from_le_bytes(
@@ -1258,7 +1258,7 @@ fn test_oracle_replay_does_not_advance_liveness_cursor() {
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 10_000);
 
-    const LAST_GOOD_SLOT_OFF: usize = 136 + 328; // HEADER_LEN(136) + last_good_oracle_slot offset
+    const LAST_GOOD_SLOT_OFF: usize = 136 + 312; // v12.19: HEADER_LEN + last_good_oracle_slot(312)
     let read_last_good = |env: &TestEnv| -> u64 {
         let d = env.svm.get_account(&env.slab).unwrap().data;
         u64::from_le_bytes(
