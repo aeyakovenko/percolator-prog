@@ -3,6 +3,7 @@
 //! These tests verify the Solana program wrapper's instruction handling,
 //! including account validation, state management, and invariants.
 
+use bytemuck::Zeroable;
 use percolator::{I128, MAX_ACCOUNTS, U128};
 use percolator_prog::{
     constants::MAGIC,
@@ -463,6 +464,32 @@ fn test_matcher_nonzero_partial_requires_partial_ok() {
         ret_with_partial.req_id,
     )
     .is_ok());
+}
+
+#[test]
+fn test_external_oracle_flat_market_uses_raw_target() {
+    let mut config = state::MarketConfig::zeroed();
+
+    let price =
+        oracle::clamp_external_price(&mut config, Ok((120_000_000, 1)), 100_000_000, 1, 0, false)
+            .unwrap();
+
+    assert_eq!(price, 120_000_000);
+    assert_eq!(config.last_effective_price_e6, 120_000_000);
+    assert_eq!(config.oracle_target_price_e6, 120_000_000);
+}
+
+#[test]
+fn test_external_oracle_with_open_interest_respects_zero_dt_clamp() {
+    let mut config = state::MarketConfig::zeroed();
+
+    let price =
+        oracle::clamp_external_price(&mut config, Ok((120_000_000, 1)), 100_000_000, 1, 0, true)
+            .unwrap();
+
+    assert_eq!(price, 100_000_000);
+    assert_eq!(config.last_effective_price_e6, 100_000_000);
+    assert_eq!(config.oracle_target_price_e6, 120_000_000);
 }
 
 #[test]

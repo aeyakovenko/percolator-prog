@@ -1861,8 +1861,10 @@ fn test_attack_hyperp_index_lag_exploitation() {
     // Push mark price up significantly (circuit breaker will clamp)
     env.try_push_oracle_price(&admin, 2_000_000, 2000).unwrap();
 
-    // Trade at slot 101 (index lags behind new mark). The wrapper now
-    // rejects user risk changes while target/effective divergence exists.
+    // Trade at slot 101 after the mark moves. With zero existing OI,
+    // the wrapper may feed the raw target directly; no live position
+    // can lose equity during the catch-up, so the opening trade should
+    // proceed at the now-current effective price.
     env.set_slot(101);
     let result = env.try_trade_cpi(
         &user,
@@ -1874,8 +1876,8 @@ fn test_attack_hyperp_index_lag_exploitation() {
         &matcher_ctx,
     );
     assert!(
-        result.is_err(),
-        "Lagged-index TradeCpi should be rejected: {:?}",
+        result.is_ok(),
+        "Flat-market TradeCpi should catch up and execute: {:?}",
         result
     );
 
@@ -5675,8 +5677,9 @@ fn test_tradecpi_zero_fill_does_not_walk_index() {
     env.try_push_oracle_price(&admin, 2_000_000, 1000).unwrap();
     env.set_slot(100);
 
-    // Execute zero-fill TradeCpi. The lag gate rejects before CPI, so a
-    // zero fill cannot be used as a no-op index walk.
+    // Execute zero-fill TradeCpi. With zero OI, the wrapper is allowed
+    // to accept the raw target directly; the no-op fill may refresh the
+    // flat market's index because no live account can lose equity.
     let result = env.try_trade_cpi(
         &user,
         &lp.pubkey(),
@@ -5687,8 +5690,8 @@ fn test_tradecpi_zero_fill_does_not_walk_index() {
         &lp_idx.1,
     );
     assert!(
-        result.is_err(),
-        "Zero-fill TradeCpi should be rejected while target lags: {:?}",
+        result.is_ok(),
+        "Zero-fill TradeCpi should refresh a flat market: {:?}",
         result
     );
 
@@ -5702,11 +5705,11 @@ fn test_tradecpi_zero_fill_does_not_walk_index() {
         )
     };
 
-    // Rejection happens before the matcher CPI/oracle mutation path, so a
-    // zero-fill cannot be used to walk the index while target/effective lags.
-    assert_eq!(
-        index_before, index_after,
-        "Rejected zero-fill must not walk index"
+    assert!(
+        index_after >= index_before,
+        "Flat zero-fill may refresh but must not move index backward: before={} after={}",
+        index_before,
+        index_after
     );
 
     // Also verify no position change (sanity check for zero-fill)

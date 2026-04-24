@@ -2818,6 +2818,7 @@ pub mod oracle {
         max_change_bps: u64,
         p_last: u64,
         price_move_dt_slots: u64,
+        oi_any: bool,
     ) -> Result<u64, ProgramError> {
         let external = read_engine_price_e6(
             price_ai,
@@ -2834,6 +2835,7 @@ pub mod oracle {
             p_last,
             max_change_bps,
             price_move_dt_slots,
+            oi_any,
         )
     }
 
@@ -2850,6 +2852,7 @@ pub mod oracle {
         p_last: u64,
         max_change_bps: u64,
         price_move_dt_slots: u64,
+        oi_any: bool,
     ) -> Result<u64, ProgramError> {
         let (ext_price, publish_time) = external?;
         if publish_time > config.oracle_target_publish_time {
@@ -2870,7 +2873,11 @@ pub mod oracle {
         } else {
             target
         };
-        let effective = clamp_toward_engine_dt(anchor, target, max_change_bps, price_move_dt_slots);
+        let effective = if oi_any {
+            clamp_toward_engine_dt(anchor, target, max_change_bps, price_move_dt_slots)
+        } else {
+            target
+        };
         config.last_effective_price_e6 = effective;
         Ok(effective)
     }
@@ -3029,6 +3036,7 @@ pub mod oracle {
         config: &mut super::state::MarketConfig,
         a_oracle: &AccountInfo,
         max_change_bps: u64,
+        oi_any: bool,
     ) -> Result<u64, ProgramError> {
         // Strict hard-timeout gate (applies to both Hyperp and non-Hyperp):
         // once the oracle has been stale for >=
@@ -3078,8 +3086,11 @@ pub mod oracle {
             } else {
                 mark
             };
-            let new_index =
-                clamp_toward_engine_dt(anchor, mark, max_change_bps, price_move_dt_slots);
+            let new_index = if oi_any {
+                clamp_toward_engine_dt(anchor, mark, max_change_bps, price_move_dt_slots)
+            } else {
+                mark
+            };
 
             config.last_effective_price_e6 = new_index;
             if new_index != anchor || new_index == mark {
@@ -3097,6 +3108,7 @@ pub mod oracle {
             max_change_bps,
             engine_last_oracle_price,
             price_move_dt_slots,
+            oi_any,
         )
     }
 }
@@ -3212,12 +3224,13 @@ pub mod processor {
 
         // Source the per-slot price-move cap from RiskParams (init-
         // immutable per spec §1.4 solvency envelope). Standard bps.
-        let (p_last, max_change_bps, price_move_dt_slots) = {
+        let (p_last, max_change_bps, price_move_dt_slots, oi_any) = {
             let engine = zc::engine_ref(slab_data)?;
             (
                 engine.last_oracle_price,
                 engine.params.max_price_move_bps_per_slot,
                 price_move_residual_dt(engine, clock_slot)?,
+                engine.oi_eff_long_q != 0 || engine.oi_eff_short_q != 0,
             )
         };
 
@@ -3244,6 +3257,7 @@ pub mod processor {
             p_last,
             max_change_bps,
             price_move_dt_slots,
+            oi_any,
         )?;
         if config.oracle_target_publish_time > prev_publish_time {
             config.last_good_oracle_slot = clock_slot;
@@ -3832,14 +3846,18 @@ pub mod processor {
                 // engine change introduces a new precondition, we get
                 // a transaction rollback instead of silent corruption.
                 let acc = &engine.accounts[idx];
+                let fee_credits = acc.fee_credits.get();
                 if acc.capital.is_zero()
                     && acc.position_basis_q == 0
                     && acc.pnl == 0
                     && acc.reserved_pnl == 0
                     && acc.sched_present == 0
                     && acc.pending_present == 0
-                    && acc.fee_credits.get() <= 0
+                    && fee_credits <= 0
                 {
+                    if fee_credits == i128::MIN {
+                        return Err(PercolatorError::EngineCorruptState.into());
+                    }
                     engine
                         .reclaim_empty_account_not_atomic(idx as u16, now_slot)
                         .map_err(map_risk_error)?;
@@ -3962,7 +3980,7 @@ pub mod processor {
     #[cfg(feature = "cu-audit")]
     use solana_program::{log::sol_log_64, msg};
 
-    fn slab_guard(
+    fn slab_shape_guard(
         program_id: &Pubkey,
         slab: &AccountInfo,
         data: &[u8],
@@ -3979,6 +3997,15 @@ pub mod processor {
             solana_program::log::sol_log_64(SLAB_LEN as u64, data.len() as u64, 0, 0, 0);
             return Err(PercolatorError::InvalidSlabLen.into());
         }
+        Ok(())
+    }
+
+    fn slab_guard(
+        program_id: &Pubkey,
+        slab: &AccountInfo,
+        data: &[u8],
+    ) -> Result<(), ProgramError> {
+        slab_shape_guard(program_id, slab, data)?;
         // Reentrancy guard: reject ALL instructions while a CPI is in progress.
         // A malicious matcher can re-enter any permissionless instruction during
         // TradeCpi's matcher CPI, manipulating engine state mid-instruction.
@@ -4565,7 +4592,7 @@ pub mod processor {
                 }
 
                 let mut data = state::slab_data_mut(a_slab)?;
-                slab_guard(program_id, a_slab, &data)?;
+                slab_shape_guard(program_id, a_slab, &data)?;
 
                 // Check magic BEFORE any unsafe cast — raw bytes may contain
                 // invalid enum discriminants that would be UB if cast to RiskEngine.
@@ -5203,6 +5230,7 @@ pub mod processor {
                         let p_last = eng.last_oracle_price;
                         let price_move_dt = price_move_residual_dt(eng, clock.slot)?;
                         let cap_bps = eng.params.max_price_move_bps_per_slot;
+                        let oi_any = eng.oi_eff_long_q != 0 || eng.oi_eff_short_q != 0;
                         oracle::get_engine_oracle_price_e6(
                             p_last,
                             price_move_dt,
@@ -5211,6 +5239,7 @@ pub mod processor {
                             &mut config,
                             a_oracle_idx,
                             cap_bps,
+                            oi_any,
                         )?
                     } else {
                         read_price_and_stamp(
@@ -5359,12 +5388,13 @@ pub mod processor {
                 // Hyperp mode updates the internal index toward mark; external
                 // mode reads the signed oracle and lets the engine enforce caps.
                 let is_hyperp = oracle::is_hyperp_mode(&config);
-                let (engine_last_oracle_price, price_move_dt, cap_bps) = {
+                let (engine_last_oracle_price, price_move_dt, cap_bps, oi_any) = {
                     let engine = zc::engine_ref(&data)?;
                     (
                         engine.last_oracle_price,
                         price_move_residual_dt(engine, clock.slot)?,
                         engine.params.max_price_move_bps_per_slot,
+                        engine.oi_eff_long_q != 0 || engine.oi_eff_short_q != 0,
                     )
                 };
 
@@ -5383,6 +5413,7 @@ pub mod processor {
                         &mut config,
                         a_oracle,
                         cap_bps,
+                        oi_any,
                     )?
                 } else {
                     read_price_and_stamp(
@@ -6107,6 +6138,7 @@ pub mod processor {
                     engine_last_market_slot,
                     engine_max_accrual_dt_slots,
                     engine_cap_bps,
+                    engine_oi_any,
                 ) = {
                     let data = a_slab.try_borrow_data()?;
                     slab_guard(program_id, a_slab, &*data)?;
@@ -6177,6 +6209,7 @@ pub mod processor {
                         engine.last_market_slot,
                         engine.params.max_accrual_dt_slots,
                         engine.params.max_price_move_bps_per_slot,
+                        engine.oi_eff_long_q != 0 || engine.oi_eff_short_q != 0,
                     )
                 };
 
@@ -6212,6 +6245,7 @@ pub mod processor {
                         &mut config,
                         a_oracle,
                         engine_cap_bps,
+                        engine_oi_any,
                     )?
                 } else {
                     let mut slab_data = state::slab_data_mut(a_slab)?;
@@ -6679,6 +6713,7 @@ pub mod processor {
                     let p_last = eng.last_oracle_price;
                     let price_move_dt = price_move_residual_dt(eng, clock.slot)?;
                     let cap_bps = eng.params.max_price_move_bps_per_slot;
+                    let oi_any = eng.oi_eff_long_q != 0 || eng.oi_eff_short_q != 0;
                     oracle::get_engine_oracle_price_e6(
                         p_last,
                         price_move_dt,
@@ -6687,6 +6722,7 @@ pub mod processor {
                         &mut config,
                         a_oracle,
                         cap_bps,
+                        oi_any,
                     )?
                 } else {
                     read_price_and_stamp(
@@ -6808,8 +6844,7 @@ pub mod processor {
 
                 let resolved = zc::engine_ref(&data)?.is_resolved();
                 let clock = Clock::from_account_info(&accounts[6])?;
-                // Anti-retroactivity: capture funding rate before oracle read (§5.5)
-                let funding_rate_e9 = compute_current_funding_rate_e9(&config)?;
+                let mut funding_rate_e9 = 0i128;
                 let price = if resolved {
                     let eng = zc::engine_ref(&data)?;
                     let (settlement, _) = eng.resolved_context();
@@ -6818,12 +6853,15 @@ pub mod processor {
                     }
                     settlement
                 } else {
+                    // Anti-retroactivity: capture funding rate before oracle read (§5.5)
+                    funding_rate_e9 = compute_current_funding_rate_e9(&config)?;
                     let is_hyperp = oracle::is_hyperp_mode(&config);
                     let px = if is_hyperp {
                         let eng = zc::engine_ref(&data)?;
                         let p_last = eng.last_oracle_price;
                         let price_move_dt = price_move_residual_dt(eng, clock.slot)?;
                         let cap_bps = eng.params.max_price_move_bps_per_slot;
+                        let oi_any = eng.oi_eff_long_q != 0 || eng.oi_eff_short_q != 0;
                         oracle::get_engine_oracle_price_e6(
                             p_last,
                             price_move_dt,
@@ -6832,6 +6870,7 @@ pub mod processor {
                             &mut config,
                             a_oracle,
                             cap_bps,
+                            oi_any,
                         )?
                     } else {
                         read_price_and_stamp(
@@ -7259,8 +7298,12 @@ pub mod processor {
                             mark
                         };
                         let dt = price_move_residual_dt(engine, clock.slot)?;
-                        let new_index =
-                            oracle::clamp_toward_engine_dt(anchor, mark, max_change_bps, dt);
+                        let oi_any = engine.oi_eff_long_q != 0 || engine.oi_eff_short_q != 0;
+                        let new_index = if oi_any {
+                            oracle::clamp_toward_engine_dt(anchor, mark, max_change_bps, dt)
+                        } else {
+                            mark
+                        };
                         config.last_effective_price_e6 = new_index;
                         if new_index != anchor || new_index == mark {
                             config.last_hyperp_index_slot = clock.slot;
@@ -7335,6 +7378,8 @@ pub mod processor {
                     }
                 }
 
+                reject_any_target_lag(&config, zc::engine_ref(&data)?)?;
+
                 config.funding_horizon_slots = funding_horizon_slots;
                 config.funding_k_bps = funding_k_bps;
                 config.funding_max_premium_bps = funding_max_premium_bps;
@@ -7406,8 +7451,12 @@ pub mod processor {
                             mark
                         };
                         let dt = price_move_residual_dt(engine, push_clock.slot)?;
-                        let new_index =
-                            oracle::clamp_toward_engine_dt(anchor, mark, max_change_bps, dt);
+                        let oi_any = engine.oi_eff_long_q != 0 || engine.oi_eff_short_q != 0;
+                        let new_index = if oi_any {
+                            oracle::clamp_toward_engine_dt(anchor, mark, max_change_bps, dt)
+                        } else {
+                            mark
+                        };
                         config.last_effective_price_e6 = new_index;
                         if new_index != anchor || new_index == mark {
                             config.last_hyperp_index_slot = push_clock.slot;
@@ -7635,8 +7684,12 @@ pub mod processor {
                             mark
                         };
                         let dt = price_move_residual_dt(engine, clock.slot)?;
-                        let new_index =
-                            oracle::clamp_toward_engine_dt(anchor, mark, max_change_bps, dt);
+                        let oi_any = engine.oi_eff_long_q != 0 || engine.oi_eff_short_q != 0;
+                        let new_index = if oi_any {
+                            oracle::clamp_toward_engine_dt(anchor, mark, max_change_bps, dt)
+                        } else {
+                            mark
+                        };
                         config.last_effective_price_e6 = new_index;
                         if new_index != anchor || new_index == mark {
                             config.last_hyperp_index_slot = clock.slot;
@@ -8173,6 +8226,7 @@ pub mod processor {
                     let p_last = eng.last_oracle_price;
                     let price_move_dt = price_move_residual_dt(eng, clock.slot)?;
                     let cap_bps = eng.params.max_price_move_bps_per_slot;
+                    let oi_any = eng.oi_eff_long_q != 0 || eng.oi_eff_short_q != 0;
                     oracle::get_engine_oracle_price_e6(
                         p_last,
                         price_move_dt,
@@ -8181,6 +8235,7 @@ pub mod processor {
                         &mut config,
                         a_oracle,
                         cap_bps,
+                        oi_any,
                     )?
                 } else {
                     read_price_and_stamp(
@@ -8288,6 +8343,9 @@ pub mod processor {
                     // engine.last_market_slot (see sync_account_fee doc).
                     sync_account_fee_bounded_to_market(engine, &cfg, user_idx, clock.slot)?;
                     let fc = engine.accounts[user_idx as usize].fee_credits.get();
+                    if fc > 0 || fc == i128::MIN {
+                        return Err(PercolatorError::EngineCorruptState.into());
+                    }
                     let debt = if fc < 0 { fc.unsigned_abs() } else { 0u128 };
                     (cfg.unit_scale, debt)
                 };
@@ -8346,6 +8404,7 @@ pub mod processor {
                     let p_last = eng.last_oracle_price;
                     let price_move_dt = price_move_residual_dt(eng, clock.slot)?;
                     let cap_bps = eng.params.max_price_move_bps_per_slot;
+                    let oi_any = eng.oi_eff_long_q != 0 || eng.oi_eff_short_q != 0;
                     oracle::get_engine_oracle_price_e6(
                         p_last,
                         price_move_dt,
@@ -8354,6 +8413,7 @@ pub mod processor {
                         &mut config,
                         a_oracle,
                         cap_bps,
+                        oi_any,
                     )?
                 } else {
                     read_price_and_stamp(
@@ -8374,7 +8434,7 @@ pub mod processor {
                 }
 
                 let (units, dust) = crate::units::base_to_units(amount, config.unit_scale);
-                if dust != 0 {
+                if units == 0 || dust != 0 {
                     return Err(ProgramError::InvalidArgument);
                 }
                 let admit_h_min = engine.params.h_min;
@@ -8667,6 +8727,7 @@ pub mod processor {
                     let p_last = eng.last_oracle_price;
                     let price_move_dt = price_move_residual_dt(eng, clock.slot)?;
                     let cap_bps = eng.params.max_price_move_bps_per_slot;
+                    let oi_any = eng.oi_eff_long_q != 0 || eng.oi_eff_short_q != 0;
                     oracle::get_engine_oracle_price_e6(
                         p_last,
                         price_move_dt,
@@ -8675,6 +8736,7 @@ pub mod processor {
                         &mut config,
                         a_oracle,
                         cap_bps,
+                        oi_any,
                     )?
                 } else {
                     read_price_and_stamp(
