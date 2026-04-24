@@ -443,12 +443,9 @@ fn test_attack_admin_op_as_user() {
         "ATTACK: Non-admin hyperp-authority rotation should fail"
     );
 
-    // SetOraclePriceCap
-    let result = env.try_set_oracle_price_cap(&attacker, 100);
-    assert!(
-        result.is_err(),
-        "ATTACK: Non-admin SetOraclePriceCap should fail"
-    );
+    // SetOraclePriceCap was removed in v12.19; the authorization surface for
+    // the now-immutable init-time `max_price_move_bps_per_slot` does not exist.
+    // Nothing to probe for non-admin rejection here.
     let slab_after = env.svm.get_account(&env.slab).unwrap().data;
     assert_eq!(
         slab_after, slab_before,
@@ -3188,7 +3185,7 @@ fn test_attack_hyperp_same_slot_crank_no_index_movement() {
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .unwrap();
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
-    env.try_set_oracle_price_cap(&admin, 100).unwrap(); // 1% per slot
+    // v12.19: price-move cap is immutable init-time, no runtime call.
 
     // First crank at slot 100 - this sets engine.current_slot = 100
     env.set_slot(100);
@@ -3268,7 +3265,7 @@ fn test_attack_hyperp_push_extreme_price() {
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .unwrap();
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
-    env.try_set_oracle_price_cap(&admin, 500).unwrap(); // 5% per slot
+    // v12.19: price-move cap is immutable init-time, no runtime call.
 
     // Push extreme price — rejected at ingress (exceeds MAX_ORACLE_PRICE after normalization)
     let result = env.try_push_oracle_price(&admin, u64::MAX / 2, 2000);
@@ -4123,9 +4120,8 @@ fn test_attack_circuit_breaker_clamping_second_price() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    // Set a non-zero oracle price cap so circuit breaker is active
-    env.try_set_oracle_price_cap(&admin, 10_000).unwrap(); // 1% per slot
+    let _admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    // v12.19: price-move cap is immutable init-time (TEST_MAX_PRICE_MOVE_BPS_PER_SLOT=2).
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -10927,39 +10923,10 @@ fn test_attack_set_oracle_authority_after_resolution_rejected() {
     );
 }
 
-/// ATTACK: SetOraclePriceCap after resolution.
-/// Price-cap settings must be frozen after market resolution.
-#[test]
-fn test_attack_set_oracle_price_cap_after_resolution_rejected() {
-    program_path();
-
-    let mut env = TestEnv::new();
-    env.init_market_hyperp(138_000_000);
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey())
-        .unwrap();
-    env.try_push_oracle_price(&admin, 140_000_000, 100).unwrap();
-    env.try_set_oracle_price_cap(&admin, 1_000_000).unwrap();
-    env.try_resolve_market(&admin).unwrap();
-
-    const CAP_OFF: usize = 392; // HEADER_LEN(72) + offset_of!(MarketConfig, oracle_price_cap_e2bps)(192)
-    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
-    let cap_before = u64::from_le_bytes(slab_before[CAP_OFF..CAP_OFF + 8].try_into().unwrap());
-
-    let result = env.try_set_oracle_price_cap(&admin, 10);
-    assert!(
-        result.is_err(),
-        "SECURITY: SetOraclePriceCap must be rejected after resolution"
-    );
-
-    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
-    let cap_after = u64::from_le_bytes(slab_after[CAP_OFF..CAP_OFF + 8].try_into().unwrap());
-    assert_eq!(
-        cap_before, cap_after,
-        "Oracle price cap changed after rejected post-resolution update"
-    );
-}
+// test_attack_set_oracle_price_cap_after_resolution_rejected deleted:
+// SetOraclePriceCap (tag 18) was removed in v12.19; the per-slot price-move
+// cap is an immutable init-time RiskParam, so there is no post-resolution
+// mutation path left to attack.
 
 /// ATTACK: Multiple trades filling LP position in alternating directions.
 /// LP position oscillates: +5M, +2M (net -3M), -1M (net +4M), etc.
@@ -11019,49 +10986,13 @@ fn test_attack_lp_position_oscillation() {
     );
 }
 
-/// ATTACK: SetOraclePriceCap to u64::MAX.
-/// Effectively disables circuit breaker. Verify large price moves are accepted.
-#[test]
-fn test_attack_oracle_price_cap_u64_max() {
-    program_path();
-
-    let mut env = TestEnv::new();
-    env.init_market_with_invert(0);
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-
-    let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
-    env.deposit(&lp, lp_idx, 50_000_000_000);
-
-    let user = Keypair::new();
-    let user_idx = env.init_user(&user);
-    env.deposit(&user, user_idx, 10_000_000_000);
-
-    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
-    env.crank();
-    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
-
-    // Set price cap to hard maximum (100% per slot — effectively disabling)
-    env.try_set_oracle_price_cap(&admin, 1_000_000).unwrap();
-
-    // Large price jump should now be accepted in one crank
-    env.set_slot_and_price(200, 200_000_000); // $138 → $200 (45% jump)
-    env.crank();
-
-    // Conservation must still hold
-    let vault = env.vault_balance();
-    let engine_vault = env.read_engine_vault();
-    assert_eq!(
-        engine_vault as u64, vault,
-        "Conservation with disabled circuit breaker: engine={} vault={}",
-        engine_vault, vault
-    );
-
-    let c_tot = env.read_c_tot();
-    let sum = env.read_account_capital(lp_idx) + env.read_account_capital(user_idx);
-    assert_eq!(c_tot, sum, "c_tot conservation");
-}
+// test_attack_oracle_price_cap_u64_max deleted:
+// Test's premise was to disable the circuit breaker via SetOraclePriceCap(max)
+// and observe conservation under large price jumps. In v12.19 the cap is
+// immutable init-time (TEST_MAX_PRICE_MOVE_BPS_PER_SLOT = 2), so the test
+// cannot be rewritten without building a different market fixture — and the
+// conservation property it verified is already covered by the §1.4-envelope
+// tests elsewhere in this file.
 
 /// ATTACK: SetMaintenanceFee then immediately close account.
 /// Fee set then close in rapid sequence should settle fees correctly.
@@ -12570,75 +12501,10 @@ fn test_attack_deposit_to_lp_wrong_owner() {
 /// The immutable floor check in ResolveMarket would trivially pass because
 /// both authority_price and last_effective_price are the same arbitrary value.
 ///
-/// Fix: non-Hyperp SetOraclePriceCap rejects cap=0 when min floor is set.
-#[test]
-fn test_attack_settlement_guard_bypass_cap_zero_poisoning() {
-    program_path();
-
-    let mut env = TestEnv::new();
-
-    // Init market with non-zero min_oracle_price_cap_e2bps = 10_000 (1%)
-    let admin = &env.payer;
-    let dummy_ata = Pubkey::new_unique();
-    env.svm
-        .set_account(
-            dummy_ata,
-            Account {
-                lamports: 1_000_000,
-                data: vec![0u8; TokenAccount::LEN],
-                owner: spl_token::ID,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-
-    let ix = Instruction {
-        program_id: env.program_id,
-        accounts: vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(env.slab, false),
-            AccountMeta::new_readonly(env.mint, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-            AccountMeta::new_readonly(sysvar::clock::ID, false),
-            AccountMeta::new_readonly(sysvar::rent::ID, false),
-            AccountMeta::new_readonly(env.pyth_index, false),
-            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
-        ],
-        data: encode_init_market_with_limits(
-            &admin.pubkey(),
-            &env.mint,
-            &TEST_FEED_ID,
-            10_000u64, // min_oracle_price_cap_e2bps = 1%
-        ),
-    };
-
-    let tx = Transaction::new_signed_with_payer(
-        &[cu_ix(), ix],
-        Some(&admin.pubkey()),
-        &[admin],
-        env.svm.latest_blockhash(),
-    );
-    env.svm.send_transaction(tx).expect("init market with min_cap");
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-
-    // Step 1: try to set cap to 0 to disable clamping
-    let result = env.try_set_oracle_price_cap(&admin, 0);
-    assert!(
-        result.is_err(),
-        "SetOraclePriceCap(0) must be rejected when min_oracle_price_cap > 0 (prevents settlement bypass)"
-    );
-
-    // Verify cap above floor is accepted
-    let result = env.try_set_oracle_price_cap(&admin, 10_000);
-    assert!(
-        result.is_ok(),
-        "SetOraclePriceCap at floor should succeed: {:?}",
-        result,
-    );
-}
+// test_attack_settlement_guard_bypass_cap_zero_poisoning deleted:
+// The attack reasoned about SetOraclePriceCap(0) mutating an active market's
+// baseline-clamp policy at runtime. v12.19 removed SetOraclePriceCap and made
+// the per-slot cap immutable init-time, so this exact attack surface is gone.
 
 /// ATTACK: i128::MIN trade size overflows -size_q (unary negation).
 ///

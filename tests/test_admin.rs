@@ -261,84 +261,6 @@ fn test_critical_invalid_account_indices_rejected() {
     println!("CRITICAL TEST PASSED: Invalid account indices rejection verified");
 }
 
-/// Verify per-market admin limits are enforced for Set* operations.
-#[test]
-fn test_init_market_admin_limits_enforced() {
-    program_path();
-
-    let mut env = TestEnv::new();
-
-    // Init market with specific limits
-    let admin = &env.payer;
-    let dummy_ata = Pubkey::new_unique();
-    env.svm
-        .set_account(
-            dummy_ata,
-            Account {
-                lamports: 1_000_000,
-                data: vec![0u8; TokenAccount::LEN],
-                owner: spl_token::ID,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-
-    let ix = Instruction {
-        program_id: env.program_id,
-        accounts: vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(env.slab, false),
-            AccountMeta::new_readonly(env.mint, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-            AccountMeta::new_readonly(sysvar::clock::ID, false),
-            AccountMeta::new_readonly(sysvar::rent::ID, false),
-            AccountMeta::new_readonly(env.pyth_index, false),
-            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
-        ],
-        data: encode_init_market_with_limits(
-            &admin.pubkey(),
-            &env.mint,
-            &TEST_FEED_ID,
-            5000,
-        ),
-    };
-
-    let tx = Transaction::new_signed_with_payer(
-        &[cu_ix(), ix],
-        Some(&admin.pubkey()),
-        &[admin],
-        env.svm.latest_blockhash(),
-    );
-    env.svm.send_transaction(tx).expect("init_market failed");
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-
-    // SetOraclePriceCap: above floor should succeed
-    let result = env.try_set_oracle_price_cap(&admin, 5000);
-    assert!(
-        result.is_ok(),
-        "Cap at floor should succeed: {:?}",
-        result
-    );
-
-    // SetOraclePriceCap: below floor (non-zero) should fail
-    let result = env.try_set_oracle_price_cap(&admin, 4999);
-    assert!(result.is_err(), "Cap below floor should fail");
-
-    // SetOraclePriceCap: zero is rejected when min floor is set
-    // (prevents settlement guard bypass via baseline poisoning)
-    let result = env.try_set_oracle_price_cap(&admin, 0);
-    assert!(
-        result.is_err(),
-        "Cap=0 must be rejected when min_oracle_price_cap > 0 (settlement guard)"
-    );
-
-    println!("INIT MARKET ADMIN LIMITS ENFORCED: PASSED");
-}
-
-
 /// Verify admin burn (rotate to zero) lifecycle rules.
 #[test]
 fn test_update_admin_zero_accepted_for_burn() {
@@ -359,8 +281,9 @@ fn test_update_admin_zero_accepted_for_burn() {
         "admin burn should succeed under the lifecycle guard"
     );
 
-    // After burn, admin instructions must fail
-    let result = env.try_set_oracle_price_cap(&admin, 999);
+    // After burn, admin instructions must fail. SetMaintenanceFee is also
+    // admin-gated; use it as the probe now that SetOraclePriceCap is gone.
+    let result = env.try_set_maintenance_fee(&admin, 0);
     assert!(
         result.is_err(),
         "Admin operations must fail after admin burn"
@@ -438,122 +361,13 @@ fn test_init_accepts_non_hyperp_cap_zero_with_perm_resolve() {
 }
 
 
-/// SetOraclePriceCap may not disable the circuit breaker (cap = 0) on a
-/// non-Hyperp market that was initialized with a non-zero floor. Silent
-/// runtime disable would defeat the flash-crash protection the floor
-/// promised.
-#[test]
-fn test_set_oracle_price_cap_rejects_zero_when_floor_nonzero() {
-    program_path();
+// test_set_oracle_price_cap_rejects_zero_when_floor_nonzero deleted:
+// SetOraclePriceCap (tag 18) was removed in v12.19. The per-slot price-move
+// cap is now the immutable init-time `max_price_move_bps_per_slot` field,
+// so there is no runtime admin path to disable/change it.
 
-    let mut env = TestEnv::new();
-    env.init_market_with_cap(0, 10_000, 0);
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    let err = env
-        .try_set_oracle_price_cap(&admin, 0)
-        .expect_err("SetOraclePriceCap(0) must reject when floor != 0");
-    assert!(
-        err.contains("0x1a"),
-        "expected InvalidConfigParam, got: {}", err,
-    );
-}
-
-
-/// Full lifecycle test: init with limits -> Set* ops -> UpdateConfig -> crank -> Set* again.
-/// Verifies limits survive across all operation types.
-#[test]
-fn test_admin_limits_lifecycle() {
-    program_path();
-
-    let mut env = TestEnv::new();
-
-    // Init market with specific limits
-    let admin = &env.payer;
-    let dummy_ata = Pubkey::new_unique();
-    env.svm
-        .set_account(
-            dummy_ata,
-            Account {
-                lamports: 1_000_000,
-                data: vec![0u8; TokenAccount::LEN],
-                owner: spl_token::ID,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-
-    let ix = Instruction {
-        program_id: env.program_id,
-        accounts: vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(env.slab, false),
-            AccountMeta::new_readonly(env.mint, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-            AccountMeta::new_readonly(sysvar::clock::ID, false),
-            AccountMeta::new_readonly(sysvar::rent::ID, false),
-            AccountMeta::new_readonly(env.pyth_index, false),
-            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
-        ],
-        data: encode_init_market_with_limits(
-            &admin.pubkey(),
-            &env.mint,
-            &TEST_FEED_ID,
-            5000,
-        ),
-    };
-
-    let tx = Transaction::new_signed_with_payer(
-        &[cu_ix(), ix],
-        Some(&admin.pubkey()),
-        &[admin],
-        env.svm.latest_blockhash(),
-    );
-    env.svm.send_transaction(tx).expect("init_market failed");
-
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-
-    // Step 1: Set oracle price cap within limits
-    env.try_set_oracle_price_cap(&admin, 10_000).unwrap();
-
-    // Step 2: UpdateConfig with thresh_max at limit
-    env.try_update_config_with_params(&admin, 3600)
-        .unwrap();
-
-    // Step 3: Crank
-    env.set_slot_and_price(10, 100_000_000);
-    env.crank();
-    env.set_slot_and_price(12, 100_000_000);
-    env.crank();
-
-    // Step 4: Limits still enforced after UpdateConfig + crank
-    let result = env.try_set_oracle_price_cap(&admin, 4999);
-    assert!(result.is_err(), "Limit still enforced after lifecycle: SetOraclePriceCap");
-
-    // Step 5: At-limit values still work
-    env.try_set_oracle_price_cap(&admin, 5000).unwrap();
-
-    // Step 6: Verify limit fields in config haven't been corrupted.
-    //   min_oracle_price_cap_e2bps: u64 @ config offset 208
-    //   maintenance_fee_per_slot:   u128 @ config offset 336
-    let slab = env.svm.get_account(&env.slab).unwrap();
-    const MAINT_FEE_OFF: usize = 136 + 336;
-    const MIN_OPC_OFF: usize = 136 + 208;
-
-    let maint_fee = u128::from_le_bytes(
-        slab.data[MAINT_FEE_OFF..MAINT_FEE_OFF + 16].try_into().unwrap(),
-    );
-    let min_opc = u64::from_le_bytes(
-        slab.data[MIN_OPC_OFF..MIN_OPC_OFF + 8].try_into().unwrap(),
-    );
-
-    assert_eq!(maint_fee, 0, "maintenance_fee_per_slot is disabled at init");
-    assert_eq!(min_opc, 5000, "min_oracle_price_cap_e2bps should be preserved");
-
-    println!("ADMIN LIMITS LIFECYCLE: PASSED");
-}
+// test_admin_limits_lifecycle deleted for the same reason: every step
+// exercised the now-gone SetOraclePriceCap runtime surface.
 
 /// Vault with pre-set delegate must be rejected by InitMarket.
 #[test]
