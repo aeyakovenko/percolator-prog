@@ -1909,12 +1909,19 @@ pub mod ix {
         // Init-immutable per spec §1.4 solvency invariant.
         let max_price_move_bps_per_slot = read_u64(input)?;
 
-        // v12.19.6 §1.4 solvency envelope prevalidation. Engine's
-        // `validate_params` asserts this at init_in_place; wrapper surfaces
-        // as a clean `InvalidConfigParam` before the engine gets the chance
-        // to panic. Exact arithmetic using u128 for the sum — worst-case
-        // terms: price_budget <= 10_000*1_000_000 < 2^44, funding_budget
-        // has the same order; liquidation_fee_bps < 2^32; total fits u128.
+        // §1.4 requires `cfg_max_price_move_bps_per_slot > 0`. Reject before
+        // any engine call so the error surfaces as `InvalidConfigParam`
+        // rather than an engine-side panic.
+        if max_price_move_bps_per_slot == 0 {
+            return Err(crate::error::PercolatorError::InvalidConfigParam.into());
+        }
+
+        // §1.4 solvency envelope prevalidation. Engine's `validate_params`
+        // asserts this at init_in_place; wrapper surfaces as a clean
+        // `InvalidConfigParam` before the engine gets the chance to panic.
+        // Exact arithmetic using u128 for the sum — worst-case terms:
+        // price_budget <= 10_000*1_000_000 < 2^44, funding_budget has the
+        // same order; liquidation_fee_bps < 2^32; total fits u128.
         //
         //   price_budget = max_price_move_bps_per_slot * max_accrual_dt_slots
         //   funding_budget = (max_abs_funding_e9_per_slot * max_accrual_dt_slots
