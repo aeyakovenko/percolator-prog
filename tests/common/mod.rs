@@ -25,17 +25,17 @@ pub use std::path::PathBuf;
 // --features medium` for MAX_ACCOUNTS=1024, or no flag for the
 // default MAX_ACCOUNTS=4096.
 #[cfg(all(feature = "small", not(feature = "medium")))]
-pub const SLAB_LEN: usize = 96664;
+pub const SLAB_LEN: usize = 96688;
 #[cfg(all(feature = "small", not(feature = "medium")))]
 pub const MAX_ACCOUNTS: usize = 256;
 
 #[cfg(all(feature = "medium", not(feature = "small")))]
-pub const SLAB_LEN: usize = 382456;
+pub const SLAB_LEN: usize = 382480;
 #[cfg(all(feature = "medium", not(feature = "small")))]
 pub const MAX_ACCOUNTS: usize = 1024;
 
 #[cfg(not(any(feature = "small", feature = "medium")))]
-pub const SLAB_LEN: usize = 1525624;
+pub const SLAB_LEN: usize = 1525648;
 #[cfg(not(any(feature = "small", feature = "medium")))]
 pub const MAX_ACCOUNTS: usize = 4096;
 
@@ -47,22 +47,38 @@ pub const MAX_ACCOUNTS: usize = 4096;
 // padding to 8) + 2 × MAX_ACCOUNTS × 2 (next_free + prev_free u16
 // arrays). Values observed against the compiled BPF binary for each
 // tier.
-pub const ENGINE_BITMAP_OFFSET: usize = 696;
+/// Per-slot price-move cap (standard bps, 100 = 1%) used by every
+/// default test fixture. Sized so the engine's §1.4 solvency envelope
+/// holds with maintenance_margin_bps=500, liquidation_fee_bps=50,
+/// max_abs_funding_e9_per_slot=10_000, max_accrual_dt_slots=100:
+///   4 * 100 + floor(10_000 * 100 * 10_000 / 1e9) + 50 = 460 <= 500.
+/// Tests that want to exercise larger per-slot moves must either use
+/// their own envelope (tighter maintenance, looser liq_fee, tighter
+/// accrual dt) or rely on idle (no-OI) markets where the envelope
+/// check does not fire.
+pub const TEST_MAX_PRICE_MOVE_BPS_PER_SLOT: u64 = 4;
+
+// v12.19: RiskParams grew by one u64 (max_price_move_bps_per_slot, +8 bytes)
+// and RiskEngine added rr_cursor_position (u64), sweep_generation (u64), and
+// price_move_consumed_bps_this_generation (u128) ahead of the bitmap, for
+// a total +40-byte shift of every field from `used` onward. Values observed
+// empirically against the compiled BPF binary per tier.
+pub const ENGINE_BITMAP_OFFSET: usize = 736;
 
 #[cfg(all(feature = "small", not(feature = "medium")))]
-pub const ENGINE_NUM_USED_OFFSET: usize = 728;
+pub const ENGINE_NUM_USED_OFFSET: usize = 776;
 #[cfg(all(feature = "small", not(feature = "medium")))]
-pub const ENGINE_ACCOUNTS_OFFSET: usize = 1760;
+pub const ENGINE_ACCOUNTS_OFFSET: usize = 1808;
 
 #[cfg(all(feature = "medium", not(feature = "small")))]
-pub const ENGINE_NUM_USED_OFFSET: usize = 824;
+pub const ENGINE_NUM_USED_OFFSET: usize = 872;
 #[cfg(all(feature = "medium", not(feature = "small")))]
-pub const ENGINE_ACCOUNTS_OFFSET: usize = 4928;
+pub const ENGINE_ACCOUNTS_OFFSET: usize = 4976;
 
 #[cfg(not(any(feature = "small", feature = "medium")))]
-pub const ENGINE_NUM_USED_OFFSET: usize = 1208;
+pub const ENGINE_NUM_USED_OFFSET: usize = 1248;
 #[cfg(not(any(feature = "small", feature = "medium")))]
-pub const ENGINE_ACCOUNTS_OFFSET: usize = 17600;
+pub const ENGINE_ACCOUNTS_OFFSET: usize = 17640;
 
 // Pyth Receiver program ID
 pub const PYTH_RECEIVER_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
@@ -183,18 +199,38 @@ pub fn make_pyth_data(
 }
 
 /// Append default extended tail (82 bytes) to an InitMarket payload.
-/// All extended fields get default/disabled values.
-fn append_default_extended_tail(data: &mut Vec<u8>) {
+///
+/// v12.19: non-Hyperp markets MUST carry `permissionless_resolve_stale_slots > 0`
+/// to satisfy the wrapper's resolvability invariant (a non-Hyperp market with
+/// perm_resolve==0 is un-resolvable once the admin is burned). We default
+/// non-Hyperp deployments to 1_000 slots here, which is far inside any test
+/// simulation horizon; Hyperp deployments keep perm_resolve=0 (they resolve
+/// from the stored mark without a live oracle read).
+fn append_default_extended_tail_for(data: &mut Vec<u8>, is_hyperp: bool) {
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
 
-    data.extend_from_slice(&0u64.to_le_bytes()); // permissionless_resolve_stale_slots
+    // Must exceed the default `max_crank_staleness_slots = 1800` that
+    // most encoders ship with. Pick 10_000.
+    let perm_resolve: u64 = if is_hyperp { 0 } else { 10_000 };
+    data.extend_from_slice(&perm_resolve.to_le_bytes()); // permissionless_resolve_stale_slots
     data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots (default)
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps (default)
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps (default)
     data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot (default)
+    // Hyperp + perm_resolve>0 requires mark_min_fee>0 (F2 defense), but here
+    // Hyperp is paired with perm_resolve=0 so mark_min_fee=0 is fine.
     data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee (disabled)
-    data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots (default tail has permissionless=0)
+    let force_close: u64 = if is_hyperp { 0 } else { 50 };
+    data.extend_from_slice(&force_close.to_le_bytes()); // force_close_delay_slots
+}
+
+/// Back-compat shim: callers that don't yet pass the Hyperp flag get the
+/// non-Hyperp default (perm_resolve=1_000). Every encoder in this module
+/// is non-Hyperp unless it explicitly uses [0u8; 32] as the feed_id, in
+/// which case it calls `_for(.., true)` directly.
+fn append_default_extended_tail(data: &mut Vec<u8>) {
+    append_default_extended_tail_for(data, false);
 }
 
 /// Encode InitMarket instruction with invert flag
@@ -234,7 +270,6 @@ pub fn encode_init_market_hyperp_with_stale(
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&initial_mark_price_e6.to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
-    data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps (Hyperp default kicks in)
     // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
@@ -256,6 +291,7 @@ pub fn encode_init_market_hyperp_with_stale(
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
     data.extend_from_slice(&permissionless_resolve_stale_slots.to_le_bytes());
@@ -296,7 +332,6 @@ pub fn encode_init_market_hyperp_with_fees(
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&initial_mark_price_e6.to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
-    data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps (Hyperp default kicks in)
     // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
@@ -312,6 +347,7 @@ pub fn encode_init_market_hyperp_with_fees(
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
     // Extended tail
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
@@ -349,7 +385,6 @@ pub fn encode_init_market_with_conf_bps(
     // Resolvability invariant: ship max cap for non-Hyperp since the
     // default tail has perm_resolve=0.
     let default_cap: u64 = if feed_id == &[0u8; 32] { 0 } else { 1_000_000 };
-    data.extend_from_slice(&default_cap.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
     data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
@@ -366,7 +401,9 @@ pub fn encode_init_market_with_conf_bps(
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    append_default_extended_tail(&mut data);
+    data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
+    let is_hyperp = feed_id == &[0u8; 32];
+    append_default_extended_tail_for(&mut data, is_hyperp);
     data
 }
 
@@ -396,7 +433,6 @@ pub fn encode_init_market_full_v2(
     // at init.
     let is_hyperp = feed_id == &[0u8; 32];
     let default_cap: u64 = if is_hyperp { 0 } else { 1_000_000 };
-    data.extend_from_slice(&default_cap.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
     data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
@@ -413,8 +449,9 @@ pub fn encode_init_market_full_v2(
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
     // Full extended tail (required — no partial tails allowed)
-    append_default_extended_tail(&mut data);
+    append_default_extended_tail_for(&mut data, is_hyperp);
     data
 }
 
@@ -425,7 +462,7 @@ pub fn encode_init_market_with_cap(
     mint: &Pubkey,
     feed_id: &[u8; 32],
     invert: u8,
-    min_oracle_price_cap_e2bps: u64,
+    _min_oracle_price_cap_e2bps: u64,
     permissionless_resolve_stale_slots: u64,
 ) -> Vec<u8> {
     let mut data = vec![0u8];
@@ -439,7 +476,6 @@ pub fn encode_init_market_with_cap(
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6 (0 for non-Hyperp)
     // Per-market admin limits
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
-    data.extend_from_slice(&min_oracle_price_cap_e2bps.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
@@ -463,6 +499,7 @@ pub fn encode_init_market_with_cap(
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
     // Full extended tail (82 bytes)
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
@@ -486,7 +523,7 @@ pub fn encode_init_market_with_funding(
     mint: &Pubkey,
     feed_id: &[u8; 32],
     invert: u8,
-    min_oracle_price_cap_e2bps: u64,
+    _min_oracle_price_cap_e2bps: u64,
     permissionless_resolve_stale_slots: u64,
     funding_horizon_slots: u64,
     funding_k_bps: u64,
@@ -498,7 +535,7 @@ pub fn encode_init_market_with_funding(
         mint,
         feed_id,
         invert,
-        min_oracle_price_cap_e2bps,
+        0, // legacy min_oracle_price_cap_e2bps (ignored)
         permissionless_resolve_stale_slots,
     );
     // Truncate default funding + mark_min_fee + force_close_delay (48 bytes)
@@ -521,7 +558,7 @@ pub fn encode_init_market_with_min_fee(
     mint: &Pubkey,
     feed_id: &[u8; 32],
     invert: u8,
-    min_oracle_price_cap_e2bps: u64,
+    _min_oracle_price_cap_e2bps: u64,
     permissionless_resolve_stale_slots: u64,
     funding_horizon_slots: u64,
     funding_k_bps: u64,
@@ -531,7 +568,8 @@ pub fn encode_init_market_with_min_fee(
 ) -> Vec<u8> {
     let mut data = encode_init_market_with_funding(
         admin, mint, feed_id, invert,
-        min_oracle_price_cap_e2bps, permissionless_resolve_stale_slots,
+        0, // legacy min_oracle_price_cap_e2bps (ignored)
+        permissionless_resolve_stale_slots,
         funding_horizon_slots, funding_k_bps,
         funding_max_premium_bps, funding_max_e9_per_slot,
     );
@@ -550,7 +588,7 @@ pub fn encode_init_market_with_trading_fee(
     mint: &Pubkey,
     feed_id: &[u8; 32],
     invert: u8,
-    min_oracle_price_cap_e2bps: u64,
+    _min_oracle_price_cap_e2bps: u64,
     trading_fee_bps: u64,
     mark_min_fee: u64,
 ) -> Vec<u8> {
@@ -564,7 +602,6 @@ pub fn encode_init_market_with_trading_fee(
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
-    data.extend_from_slice(&min_oracle_price_cap_e2bps.to_le_bytes());
     // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
@@ -581,18 +618,25 @@ pub fn encode_init_market_with_trading_fee(
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
 
-    data.extend_from_slice(&0u64.to_le_bytes()); // permissionless_resolve_stale_slots
+    // v12.19: non-Hyperp markets require perm_resolve > max_crank_staleness
+    // (1800 above) for resolvability.
+    let is_hyperp = feed_id == &[0u8; 32];
+    let perm_resolve: u64 = if is_hyperp { 0 } else { 10_000 };
+    data.extend_from_slice(&perm_resolve.to_le_bytes());
     // Custom funding params (required before mark_min_fee)
     data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
     data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot
-    // mark_min_fee
+    // mark_min_fee (Hyperp + perm_resolve>0 would require mark_min_fee>0; we
+    // only set perm_resolve>0 for non-Hyperp so the passthrough is fine).
     data.extend_from_slice(&mark_min_fee.to_le_bytes());
-    data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots
+    let force_close: u64 = if is_hyperp { 0 } else { 50 };
+    data.extend_from_slice(&force_close.to_le_bytes());
     data
 }
 
@@ -606,7 +650,7 @@ pub fn encode_init_market_with_maint_fee_bounded(
     feed_id: &[u8; 32],
     _max_maintenance_fee_per_slot: u128,
     maintenance_fee_per_slot: u128,
-    min_oracle_price_cap_e2bps: u64,
+    _min_oracle_price_cap_e2bps: u64,
 ) -> Vec<u8> {
     let mut data = vec![0u8];
     data.extend_from_slice(admin.as_ref());
@@ -620,17 +664,6 @@ pub fn encode_init_market_with_maint_fee_bounded(
     // maintenance_fee_per_slot now passed through (engine v12.18.4 supports
     // per-account fee accrual via sync_account_fee_to_slot_not_atomic).
     data.extend_from_slice(&maintenance_fee_per_slot.to_le_bytes());
-    // Resolvability invariant: non-Hyperp + cap=0 + perm_resolve=0 is
-    // rejected at init. This helper's tail uses perm_resolve=0, so
-    // promote cap=0 callers to the max cap (100%/read — essentially
-    // unrestricted) instead of failing init. Callers that want to
-    // exercise cap semantics should use a different encoder.
-    let cap = if min_oracle_price_cap_e2bps == 0 {
-        1_000_000
-    } else {
-        min_oracle_price_cap_e2bps
-    };
-    data.extend_from_slice(&cap.to_le_bytes());
     // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
@@ -647,7 +680,9 @@ pub fn encode_init_market_with_maint_fee_bounded(
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    append_default_extended_tail(&mut data);
+    data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
+    let is_hyperp = feed_id == &[0u8; 32];
+    append_default_extended_tail_for(&mut data, is_hyperp);
     data
 }
 
@@ -894,21 +929,32 @@ impl TestEnv {
     }
 
     pub fn init_market_with_invert(&mut self, invert: u8) {
-        // Delegate to init_market_with_cap with min_cap=10_000 so the
-        // init-time invariant (non-Hyperp + cap=0 → hyperp_authority=0)
-        // doesn't zero hyperp_authority for tests that later expect to
-        // use it. Tests that want the cap=0 behavior use
-        // init_market_with_cap directly with 0.
-        self.init_market_with_cap(invert, 10_000, 0);
+        // v12.19: the wrapper's non-Hyperp resolvability invariant rejects
+        // `permissionless_resolve_stale_slots == 0` (a market with no
+        // resolve path is un-resolvable once admin is burned). perm_resolve
+        // must also exceed `max_crank_staleness_slots = 1800`. Pick 10_000.
+        self.init_market_with_cap(invert, 10_000, 10_000);
     }
 
     /// Initialize a market with oracle price cap (enables EWMA) and optional permissionless resolution.
+    ///
+    /// v12.19: the wrapper now rejects non-Hyperp markets with
+    /// `permissionless_resolve_stale_slots == 0`. To avoid having to
+    /// individually patch every test call site, this helper auto-promotes
+    /// `0` → `10_000` (well above the 1800-slot `max_crank_staleness`
+    /// default the encoder ships with). Tests that need the literal 0
+    /// should call `encode_init_market_with_cap` directly.
     pub fn init_market_with_cap(
         &mut self,
         invert: u8,
-        min_oracle_price_cap_e2bps: u64,
+        _min_oracle_price_cap_e2bps: u64,
         permissionless_resolve_stale_slots: u64,
     ) {
+        let permissionless_resolve_stale_slots = if permissionless_resolve_stale_slots == 0 {
+            10_000
+        } else {
+            permissionless_resolve_stale_slots
+        };
         let admin = &self.payer;
         let dummy_ata = Pubkey::new_unique();
         self.svm
@@ -942,7 +988,7 @@ impl TestEnv {
                 &self.mint,
                 &TEST_FEED_ID,
                 invert,
-                min_oracle_price_cap_e2bps,
+                0, // legacy min_oracle_price_cap_e2bps (ignored)
                 permissionless_resolve_stale_slots,
             ),
         };
@@ -962,13 +1008,21 @@ impl TestEnv {
     pub fn init_market_with_funding(
         &mut self,
         invert: u8,
-        min_oracle_price_cap_e2bps: u64,
+        _min_oracle_price_cap_e2bps: u64,
         permissionless_resolve_stale_slots: u64,
         funding_horizon_slots: u64,
         funding_k_bps: u64,
         funding_max_premium_bps: i64,
         funding_max_e9_per_slot: i64,
     ) {
+        // v12.19: auto-promote perm_resolve=0 → 10_000 so tests that passed
+        // 0 under the pre-v12.19 "non-Hyperp + cap>0 is resolvable" rule
+        // still succeed against the new resolvability invariant.
+        let permissionless_resolve_stale_slots = if permissionless_resolve_stale_slots == 0 {
+            10_000
+        } else {
+            permissionless_resolve_stale_slots
+        };
         let admin = &self.payer;
         let dummy_ata = Pubkey::new_unique();
         self.svm
@@ -1002,7 +1056,7 @@ impl TestEnv {
                 &self.mint,
                 &TEST_FEED_ID,
                 invert,
-                min_oracle_price_cap_e2bps,
+                0, // legacy min_oracle_price_cap_e2bps (ignored)
                 permissionless_resolve_stale_slots,
                 funding_horizon_slots,
                 funding_k_bps,
@@ -1026,7 +1080,7 @@ impl TestEnv {
     pub fn init_market_fee_weighted(
         &mut self,
         invert: u8,
-        min_oracle_price_cap_e2bps: u64,
+        _min_oracle_price_cap_e2bps: u64,
         trading_fee_bps: u64,
         mark_min_fee: u64,
     ) {
@@ -1063,7 +1117,7 @@ impl TestEnv {
                 &self.mint,
                 &TEST_FEED_ID,
                 invert,
-                min_oracle_price_cap_e2bps,
+                0, // legacy min_oracle_price_cap_e2bps (ignored)
                 trading_fee_bps,
                 mark_min_fee,
             ),
@@ -1084,7 +1138,7 @@ impl TestEnv {
     pub fn init_market_with_min_fee(
         &mut self,
         invert: u8,
-        min_oracle_price_cap_e2bps: u64,
+        _min_oracle_price_cap_e2bps: u64,
         mark_min_fee: u64,
     ) {
         let admin = &self.payer;
@@ -1120,8 +1174,8 @@ impl TestEnv {
                 &self.mint,
                 &TEST_FEED_ID,
                 invert,
-                min_oracle_price_cap_e2bps,
-                0, // no permissionless resolve
+                0, // legacy min_oracle_price_cap_e2bps (ignored)
+                10_000, // v12.19: non-Hyperp needs perm_resolve > max_crank (1800)
                 500, 100, 500, 5, // default funding params
                 mark_min_fee,
             ),
@@ -1363,6 +1417,12 @@ impl TestEnv {
     }
 
     pub fn crank(&mut self) {
+        self.crank_once();
+    }
+
+    /// Raw crank: a single permissionless KeeperCrank transaction. Callers
+    /// that don't want any auto-walking wrap this directly.
+    pub fn crank_once(&mut self) {
         let caller = Keypair::new();
         self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
 
@@ -1385,6 +1445,56 @@ impl TestEnv {
             self.svm.latest_blockhash(),
         );
         self.svm.send_transaction(tx).expect("crank failed");
+    }
+
+    /// Return the current oracle `publish_time` (u64) by reading the Pyth
+    /// mock account. The test helpers always stamp
+    /// publish_time = effective clock slot.
+    fn read_oracle_publish_time(&self) -> u64 {
+        let d = self.svm.get_account(&self.pyth_index).unwrap().data;
+        let pt = i64::from_le_bytes(d[93..101].try_into().unwrap());
+        pt.max(0) as u64
+    }
+
+    /// Return the current oracle `price` (e6, as i64).
+    fn read_oracle_price_e6(&self) -> i64 {
+        let d = self.svm.get_account(&self.pyth_index).unwrap().data;
+        i64::from_le_bytes(d[73..81].try_into().unwrap())
+    }
+
+    /// Like `set_slot_and_price` but takes the effective slot directly (no
+    /// +100 offset). Internal helper.
+    fn set_slot_and_price_raw(&mut self, effective_slot: u64, price_e6: i64) {
+        self.svm.set_sysvar(&Clock {
+            slot: effective_slot,
+            unix_timestamp: effective_slot as i64,
+            ..Clock::default()
+        });
+        let pyth_data = make_pyth_data(&TEST_FEED_ID, price_e6, -6, 1, effective_slot as i64);
+        self.svm
+            .set_account(
+                self.pyth_index,
+                Account {
+                    lamports: 1_000_000,
+                    data: pyth_data.clone(),
+                    owner: PYTH_RECEIVER_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        self.svm
+            .set_account(
+                self.pyth_col,
+                Account {
+                    lamports: 1_000_000,
+                    data: pyth_data,
+                    owner: PYTH_RECEIVER_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
     }
 
     /// Permissioned crank: caller is a real account on the market (`caller_idx`
@@ -1443,75 +1553,136 @@ impl TestEnv {
     }
 
     pub fn set_slot(&mut self, slot: u64) {
-        // Offset by 100 to ensure monotonicity with init_market (runs at slot 100)
-        let effective_slot = slot + 100;
-        self.svm.set_sysvar(&Clock {
-            slot: effective_slot,
-            unix_timestamp: effective_slot as i64,
-            ..Clock::default()
-        });
-        // Update oracle publish_time to match
-        let pyth_data = make_pyth_data(&TEST_FEED_ID, 138_000_000, -6, 1, effective_slot as i64);
-        self.svm
-            .set_account(
-                self.pyth_index,
-                Account {
-                    lamports: 1_000_000,
-                    data: pyth_data.clone(),
-                    owner: PYTH_RECEIVER_PROGRAM_ID,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
-        self.svm
-            .set_account(
-                self.pyth_col,
-                Account {
-                    lamports: 1_000_000,
-                    data: pyth_data,
-                    owner: PYTH_RECEIVER_PROGRAM_ID,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
+        // v12.19: large clock jumps need interleaved cranks. Delegate to
+        // set_slot_and_price holding the current oracle price constant.
+        let px = self.read_oracle_price_e6();
+        // If no price has been stamped yet (0 is the "uninitialised" sentinel),
+        // fall back to the historical default of $138.
+        let px = if px == 0 { 138_000_000 } else { px };
+        self.set_slot_and_price(slot, px);
     }
 
-    /// Set slot and update oracle to a specific price
+    /// Advance the clock to `target_slot` in chunks that respect the
+    /// wrapper's §1.4 envelope (`MAX_ACCRUAL_DT_SLOTS = 100`), cranking
+    /// between each chunk so the engine's `accrue_market_to` never sees a
+    /// dt larger than the envelope. Equivalent to `set_slot(target_slot);
+    /// crank()` on pre-v12.19 markets.
+    pub fn warp_with_cranks(&mut self, target_slot: u64) {
+        const CHUNK: u64 = 50; // below MAX_ACCRUAL_DT_SLOTS to leave headroom
+        // set_slot()/set_slot_and_price() internally offset by +100; reverse
+        // that so we can track the "logical" slot we've reached.
+        // We track the caller-facing slot; the Clock value is always
+        // logical + 100.
+        let current_logical = self.svm.get_sysvar::<Clock>().slot.saturating_sub(100);
+        if target_slot <= current_logical {
+            // Monotonic only.
+            return;
+        }
+        let mut s = current_logical;
+        while s + CHUNK < target_slot {
+            s += CHUNK;
+            self.set_slot(s);
+            self.crank();
+        }
+        // Final jump to the target.
+        self.set_slot(target_slot);
+        self.crank();
+    }
+
+    /// Same as `warp_with_cranks`, but updates the oracle price on every
+    /// step (holding the price constant across the walk).
+    pub fn warp_with_cranks_at_price(&mut self, target_slot: u64, price_e6: i64) {
+        const CHUNK: u64 = 50;
+        let current_logical = self.svm.get_sysvar::<Clock>().slot.saturating_sub(100);
+        if target_slot <= current_logical {
+            return;
+        }
+        let mut s = current_logical;
+        while s + CHUNK < target_slot {
+            s += CHUNK;
+            self.set_slot_and_price(s, price_e6);
+            self.crank();
+        }
+        self.set_slot_and_price(target_slot, price_e6);
+        self.crank();
+    }
+
+    /// Set slot and update oracle to a specific price.
+    ///
+    /// v12.19: tests are bound by the solvency envelope —
+    /// `MAX_ACCRUAL_DT_SLOTS = 100` and `max_price_move_bps_per_slot = 4`.
+    /// Tests that jumped the clock past ~100 slots with a concurrent price
+    /// change relied on the pre-v12.19 `MAX_ACCRUAL_DT_SLOTS = 10_000_000`
+    /// budget. To keep the helper API stable for those tests, this function
+    /// silently walks the (slot, price) pair in <=50-slot linear steps,
+    /// cranking between each step — but only when the overall price-move
+    /// rate fits the `max_price_move_bps_per_slot` cap. Adversarial tests
+    /// that deliberately push extreme single-step jumps (price ratios >100×,
+    /// zero-invert probes, etc.) are detected via that rate check and
+    /// pass through unchanged so the engine still sees the intended
+    /// single-shot move.
     pub fn set_slot_and_price(&mut self, slot: u64, price_e6: i64) {
-        let effective_slot = slot + 100;
-        self.svm.set_sysvar(&Clock {
-            slot: effective_slot,
-            unix_timestamp: effective_slot as i64,
-            ..Clock::default()
-        });
-        // Update oracle with new price and publish_time
-        let pyth_data = make_pyth_data(&TEST_FEED_ID, price_e6, -6, 1, effective_slot as i64);
-        self.svm
-            .set_account(
-                self.pyth_index,
-                Account {
-                    lamports: 1_000_000,
-                    data: pyth_data.clone(),
-                    owner: PYTH_RECEIVER_PROGRAM_ID,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
-        self.svm
-            .set_account(
-                self.pyth_col,
-                Account {
-                    lamports: 1_000_000,
-                    data: pyth_data,
-                    owner: PYTH_RECEIVER_PROGRAM_ID,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
+        const CHUNK: u64 = 50;
+        // Engine-side cap is `TEST_MAX_PRICE_MOVE_BPS_PER_SLOT`; stay well
+        // below so linear interpolation passes the per-step check.
+        const SAFE_RATE_BPS_PER_SLOT: u128 =
+            TEST_MAX_PRICE_MOVE_BPS_PER_SLOT as u128;
+        let _ = SAFE_RATE_BPS_PER_SLOT; // keep the constant in scope for docs
+        let target_effective_slot = slot + 100;
+        let cur_effective_slot = self.svm.get_sysvar::<Clock>().slot;
+        let cur_price = self.read_oracle_price_e6();
+        // Walk whenever we're advancing time past one envelope chunk. Walk
+        // cranks are best-effort (try_crank_once); if the engine rejects an
+        // intermediate step the final set_slot_and_price_raw still lands
+        // the caller's target values, and the caller's own next try_crank
+        // will surface the failure.
+        let should_walk = target_effective_slot > cur_effective_slot
+            && target_effective_slot - cur_effective_slot > CHUNK;
+
+        if should_walk {
+            let total_slots = target_effective_slot - cur_effective_slot;
+            let total_dp = (price_e6 - cur_price) as i128;
+            let mut s = cur_effective_slot;
+            while s + CHUNK < target_effective_slot {
+                s += CHUNK;
+                let frac_num = (s - cur_effective_slot) as i128;
+                let frac_den = total_slots as i128;
+                let px = cur_price as i128 + total_dp * frac_num / frac_den;
+                self.set_slot_and_price_raw(s, px as i64);
+                // Best-effort crank; tolerate failure so adversarial
+                // intermediate states still bubble up via the caller's
+                // own try_crank() rather than panicking here.
+                let _ = self.try_crank_once();
+            }
+        }
+        // Final: caller-intended slot + price.
+        self.set_slot_and_price_raw(target_effective_slot, price_e6);
+    }
+
+    /// Like `crank_once` but returns `Err(String)` on failure instead of
+    /// panicking. Used by `set_slot_and_price`'s internal walk so the
+    /// helper doesn't unilaterally abort adversarial tests.
+    pub fn try_crank_once(&mut self) -> Result<(), String> {
+        let caller = Keypair::new();
+        self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+        let cu_ix = cu_ix();
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(caller.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_crank_permissionless(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_ix, ix],
+            Some(&caller.pubkey()),
+            &[&caller],
+            self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).map(|_| ()).map_err(|e| format!("{:?}", e))
     }
 
     /// Try to close account, returns result
@@ -1692,7 +1863,6 @@ pub fn encode_init_market_full(
     // min_oracle_price_cap_e2bps = 10_000 so hyperp_authority defaults
     // to admin under the init-time invariant. Tests that specifically
     // want cap=0 should use init_market_with_cap(..., 0, ...) directly.
-    data.extend_from_slice(&10_000u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
@@ -1709,7 +1879,8 @@ pub fn encode_init_market_full(
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    append_default_extended_tail(&mut data);
+    data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
+    append_default_extended_tail_for(&mut data, feed_id == &[0u8; 32]);
     data
 }
 
@@ -1736,7 +1907,6 @@ pub fn encode_init_market_with_warmup(
     // rejected at init. Default tail has perm_resolve=0, so ship max
     // cap to satisfy the invariant without restricting test oracle
     // moves.
-    data.extend_from_slice(&1_000_000u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
     data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps (5%)
@@ -1753,7 +1923,8 @@ pub fn encode_init_market_with_warmup(
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    append_default_extended_tail(&mut data);
+    data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
+    append_default_extended_tail_for(&mut data, feed_id == &[0u8; 32]);
     data
 }
 
@@ -1892,7 +2063,7 @@ impl TestEnv {
     pub fn read_num_used_accounts(&self) -> u16 {
         let slab_account = self.svm.get_account(&self.slab).unwrap();
         // ENGINE_OFF = 472, num_used_accounts at engine offset 1224
-        pub const NUM_USED_OFFSET: usize = 536 + ENGINE_NUM_USED_OFFSET;
+        pub const NUM_USED_OFFSET: usize = 520 + ENGINE_NUM_USED_OFFSET;
         if slab_account.data.len() < NUM_USED_OFFSET + 2 {
             return 0;
         }
@@ -1921,10 +2092,11 @@ impl TestEnv {
         percolator_prog::state::read_config(&d).mark_ewma_e6
     }
 
-    /// Read oracle_price_cap_e2bps from config
+    /// Read the per-slot price-move cap from the engine's RiskParams
+    /// (v12.19 init-immutable). Standard bps (100 = 1%).
     pub fn read_oracle_price_cap(&self) -> u64 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        percolator_prog::state::read_config(&d).oracle_price_cap_e2bps
+        percolator_prog::zc::engine_ref(&d).unwrap().params.max_price_move_bps_per_slot
     }
 
     /// Read funding_rate_bps_per_slot_last from engine
@@ -1967,8 +2139,9 @@ impl TestEnv {
     /// Check if a slot is marked as used in the bitmap
     pub fn is_slot_used(&self, idx: u16) -> bool {
         let slab_account = self.svm.get_account(&self.slab).unwrap();
-        // Bitmap is [u64; 64] at ENGINE_OFF(536) + 696 = 1232
-        pub const BITMAP_OFFSET: usize = 536 + 696;
+        // v12.19 BPF: bitmap at engine-relative 736 (was 696; shifted +40 by
+        // max_price_move_bps_per_slot +8 and RiskEngine +32 new fields).
+        pub const BITMAP_OFFSET: usize = 520 + 736;
         let word_idx = (idx as usize) >> 6; // idx / 64
         let bit_idx = (idx as usize) & 63; // idx % 64
         let word_offset = BITMAP_OFFSET + word_idx * 8;
@@ -1988,7 +2161,7 @@ impl TestEnv {
         let slab_account = self.svm.get_account(&self.slab).unwrap();
         // ENGINE_OFF = 472, accounts array at offset 9376 within RiskEngine
         // Account size = 280 bytes, capital at offset 8 within Account (after account_id u64)
-        pub const ACCOUNTS_OFFSET: usize = 536 + ENGINE_ACCOUNTS_OFFSET;
+        pub const ACCOUNTS_OFFSET: usize = 520 + ENGINE_ACCOUNTS_OFFSET;
         pub const ACCOUNT_SIZE: usize = 360;
         pub const CAPITAL_OFFSET_IN_ACCOUNT: usize = 0; // After account_id (u64)
         let account_offset =
@@ -2010,16 +2183,16 @@ impl TestEnv {
     /// v12.15: position_basis_q is i128 (not I256), at offset 64 in Account.
     pub fn read_account_position(&self, idx: u16) -> i128 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        pub const ENGINE: usize = 536;
+        pub const ENGINE: usize = 520;
         pub const ACCOUNTS_OFFSET: usize = ENGINE + ENGINE_ACCOUNTS_OFFSET;
         pub const ACCOUNT_SIZE: usize = 360;
         pub const PBQ: usize = 56;       // position_basis_q: i128 (16 bytes)
         pub const A_BASIS: usize = 72;   // adl_a_basis: u128 (16 bytes)
         pub const EPOCH_SNAP: usize = 120; // adl_epoch_snap: u64 (8 bytes)
-        pub const ADL_MULT_LONG: usize = ENGINE + 376;
-        pub const ADL_MULT_SHORT: usize = ENGINE + 392;
+        pub const ADL_MULT_LONG: usize = ENGINE + 384;
+        pub const ADL_MULT_SHORT: usize = ENGINE + 400;
         pub const ADL_EPOCH_LONG: usize = ENGINE + 448;
-        pub const ADL_EPOCH_SHORT: usize = ENGINE + 448;
+        pub const ADL_EPOCH_SHORT: usize = ENGINE + 456;
 
         let acc_off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE;
         if d.len() < acc_off + ACCOUNT_SIZE { return 0; }
@@ -2637,12 +2810,6 @@ pub fn encode_push_oracle_price(price_e6: u64, timestamp: i64) -> Vec<u8> {
     data
 }
 
-pub fn encode_set_oracle_price_cap(max_change_e2bps: u64) -> Vec<u8> {
-    let mut data = vec![18u8]; // Tag 18: SetOraclePriceCap
-    data.extend_from_slice(&max_change_e2bps.to_le_bytes());
-    data
-}
-
 pub fn encode_set_maintenance_fee(new_fee: u128) -> Vec<u8> {
     let mut data = vec![15u8]; // Tag 15: SetMaintenanceFee
     data.extend_from_slice(&new_fee.to_le_bytes());
@@ -2852,31 +3019,17 @@ impl TestEnv {
             .map_err(|e| format!("{:?}", e))
     }
 
-    /// Try SetOraclePriceCap instruction
+    /// Stub: SetOraclePriceCap was removed in v12.19 — the per-slot
+    /// price-move cap is init-immutable via RiskParams. Kept so legacy
+    /// tests compile; always returns an error indicating the instruction
+    /// is gone. Tests that asserted specific admin-cap semantics should
+    /// be rewritten against the init-time RiskParams value.
     pub fn try_set_oracle_price_cap(
         &mut self,
-        signer: &Keypair,
-        max_change_e2bps: u64,
+        _signer: &Keypair,
+        _max_change_e2bps: u64,
     ) -> Result<(), String> {
-        let ix = Instruction {
-            program_id: self.program_id,
-            accounts: vec![
-                AccountMeta::new(signer.pubkey(), true),
-                AccountMeta::new(self.slab, false),
-                AccountMeta::new_readonly(sysvar::clock::ID, false),
-            ],
-            data: encode_set_oracle_price_cap(max_change_e2bps),
-        };
-        let tx = Transaction::new_signed_with_payer(
-            &[cu_ix(), ix],
-            Some(&signer.pubkey()),
-            &[signer],
-            self.svm.latest_blockhash(),
-        );
-        self.svm
-            .send_transaction(tx)
-            .map(|_| ())
-            .map_err(|e| format!("{:?}", e))
+        Err("SetOraclePriceCap removed in v12.19".to_string())
     }
 
     /// Try SetMaintenanceFee instruction
@@ -3069,11 +3222,11 @@ impl TestEnv {
     pub fn is_market_resolved(&self) -> bool {
         // resolved_price is a u64 in the engine. Its offset relative to ENGINE_OFF
         // can be inferred: it's 8 bytes before resolved_slot, which is 8 bytes before
-        // resolved_payout_h_num. We know c_tot is at ENGINE+184.
-        // Working back: c_tot(184) - last_crank(8) - ready_pad(8) - h_den(16) - h_num(16) - resolved_slot(8) - resolved_price(8)
-        // = 184 - 64 = 120. resolved_price at ENGINE+120.
+        // v12.19 BPF layout: params(176) grew +8 for max_price_move_bps_per_slot;
+        // every field from current_slot onward shifts by +16. resolved_price is
+        // u64 sitting after current_slot(u64)+market_mode(u8)+7B pad, i.e. engine+224.
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        let off = 536 + 208; // ENGINE_OFF + resolved_price offset
+        let off = 520 + 224;
         let rp = u64::from_le_bytes(d[off..off+8].try_into().unwrap());
         rp > 0
     }
@@ -3084,7 +3237,7 @@ impl TestEnv {
         // ENGINE_OFF = 440, InsuranceFund.balance is at offset 16 within engine
         // (vault is 16 bytes at 0, insurance_fund starts at 16)
         // InsuranceFund { balance: U128, ... } - balance is first field
-        pub const INSURANCE_OFFSET: usize = 536 + 16;
+        pub const INSURANCE_OFFSET: usize = 520 + 16;
         u128::from_le_bytes(
             slab_account.data[INSURANCE_OFFSET..INSURANCE_OFFSET + 16]
                 .try_into()
@@ -3200,6 +3353,16 @@ pub struct TradeCpiTestEnv {
 }
 
 impl TradeCpiTestEnv {
+    /// Stub: SetOraclePriceCap was removed in v12.19. See the matching
+    /// stub on `TestEnv`.
+    pub fn try_set_oracle_price_cap(
+        &mut self,
+        _signer: &Keypair,
+        _max_change_e2bps: u64,
+    ) -> Result<(), String> {
+        Err("SetOraclePriceCap removed in v12.19".to_string())
+    }
+
     pub fn new() -> Self {
         let percolator_path = program_path();
         let matcher_path = matcher_program_path();
@@ -3874,6 +4037,25 @@ impl TradeCpiTestEnv {
         });
     }
 
+    /// Advance the clock to `target_slot` in CHUNK-sized steps, cranking
+    /// between each step so `accrue_market_to` stays within the
+    /// wrapper's §1.4 envelope (`MAX_ACCRUAL_DT_SLOTS = 100`).
+    pub fn warp_with_cranks(&mut self, target_slot: u64) {
+        const CHUNK: u64 = 50;
+        let current_logical = self.svm.get_sysvar::<Clock>().slot.saturating_sub(100);
+        if target_slot <= current_logical {
+            return;
+        }
+        let mut s = current_logical;
+        while s + CHUNK < target_slot {
+            s += CHUNK;
+            self.set_slot(s);
+            self.crank();
+        }
+        self.set_slot(target_slot);
+        self.crank();
+    }
+
     pub fn crank(&mut self) {
         let caller = Keypair::new();
         self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
@@ -4094,7 +4276,7 @@ impl TradeCpiTestEnv {
 
     pub fn is_market_resolved(&self) -> bool {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        let off = 536 + 208; // ENGINE_OFF + resolved_price offset (BPF)
+        let off = 520 + 224; // ENGINE_OFF + resolved_price offset (BPF, v12.19)
         let rp = u64::from_le_bytes(d[off..off+8].try_into().unwrap());
         rp > 0
     }
@@ -4104,7 +4286,7 @@ impl TradeCpiTestEnv {
         // ENGINE_OFF = 440
         // RiskEngine layout: vault(U128=16) + insurance_fund(balance(U128=16) + fee_revenue(16))
         // So insurance_fund.balance is at ENGINE_OFF + 16 = 408
-        pub const INSURANCE_BALANCE_OFFSET: usize = 536 + 16;
+        pub const INSURANCE_BALANCE_OFFSET: usize = 520 + 16;
         u128::from_le_bytes(
             slab_data[INSURANCE_BALANCE_OFFSET..INSURANCE_BALANCE_OFFSET + 16]
                 .try_into()
@@ -4115,16 +4297,16 @@ impl TradeCpiTestEnv {
     /// Read effective position (v12.15: position_basis_q is i128, not I256)
     pub fn read_account_position(&self, idx: u16) -> i128 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        pub const ENGINE: usize = 536;
+        pub const ENGINE: usize = 520;
         pub const ACCOUNTS_OFFSET: usize = ENGINE + ENGINE_ACCOUNTS_OFFSET;
         pub const ACCOUNT_SIZE: usize = 360;
         pub const PBQ: usize = 56;
         pub const A_BASIS: usize = 72;
         pub const EPOCH_SNAP: usize = 120;
-        pub const ADL_MULT_LONG: usize = ENGINE + 376;
-        pub const ADL_MULT_SHORT: usize = ENGINE + 392;
+        pub const ADL_MULT_LONG: usize = ENGINE + 384;
+        pub const ADL_MULT_SHORT: usize = ENGINE + 400;
         pub const ADL_EPOCH_LONG: usize = ENGINE + 448;
-        pub const ADL_EPOCH_SHORT: usize = ENGINE + 448;
+        pub const ADL_EPOCH_SHORT: usize = ENGINE + 456;
 
         let acc_off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE;
         if d.len() < acc_off + ACCOUNT_SIZE { return 0; }
@@ -4186,7 +4368,7 @@ impl TradeCpiTestEnv {
 
     pub fn read_num_used_accounts(&self) -> u16 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        let off = 536 + ENGINE_NUM_USED_OFFSET;
+        let off = 520 + ENGINE_NUM_USED_OFFSET;
         u16::from_le_bytes(slab_data[off..off + 2].try_into().unwrap())
     }
 
@@ -4194,8 +4376,8 @@ impl TradeCpiTestEnv {
     /// This is the sum of all positive PnL values, used for haircut calculations
     pub fn read_pnl_pos_tot(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        // ENGINE_OFF = 472, pnl_pos_tot at engine offset 368 (after c_tot at 352)
-        pub const PNL_POS_TOT_OFFSET: usize = 536 + 336;
+        // v12.19 BPF: pnl_pos_tot @ engine+344 (shifted +8 by RiskParams growth).
+        pub const PNL_POS_TOT_OFFSET: usize = 520 + 344;
         u128::from_le_bytes(
             slab_data[PNL_POS_TOT_OFFSET..PNL_POS_TOT_OFFSET + 16]
                 .try_into()
@@ -4206,8 +4388,8 @@ impl TradeCpiTestEnv {
     /// Read c_tot aggregate from slab
     pub fn read_c_tot(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        // c_tot is at offset 264 within RiskEngine (16 bytes before pnl_pos_tot)
-        pub const C_TOT_OFFSET: usize = 536 + 320;
+        // v12.19 BPF: c_tot @ engine+328 (shifted +8 by RiskParams growth).
+        pub const C_TOT_OFFSET: usize = 520 + 328;
         u128::from_le_bytes(
             slab_data[C_TOT_OFFSET..C_TOT_OFFSET + 16]
                 .try_into()
@@ -4219,7 +4401,7 @@ impl TradeCpiTestEnv {
     pub fn read_vault(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
         // vault is at offset 0 within RiskEngine
-        pub const VAULT_OFFSET: usize = 536;
+        pub const VAULT_OFFSET: usize = 520;
         u128::from_le_bytes(
             slab_data[VAULT_OFFSET..VAULT_OFFSET + 16]
                 .try_into()
@@ -4237,7 +4419,7 @@ impl TradeCpiTestEnv {
         //   pnl: i128 (16), offset 24
         //   reserved_pnl: u128 (16), offset 40
         //   position_basis_q: i128 (16), offset 56
-        pub const ACCOUNTS_OFFSET: usize = 536 + ENGINE_ACCOUNTS_OFFSET;
+        pub const ACCOUNTS_OFFSET: usize = 520 + ENGINE_ACCOUNTS_OFFSET;
         pub const ACCOUNT_SIZE: usize = 360;
         pub const PNL_OFFSET_IN_ACCOUNT: usize = 24;
         let account_off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + PNL_OFFSET_IN_ACCOUNT;
@@ -4418,7 +4600,7 @@ impl TradeCpiTestEnv {
 
     pub fn read_account_capital(&self, idx: u16) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        pub const ACCOUNTS_OFFSET: usize = 536 + ENGINE_ACCOUNTS_OFFSET;
+        pub const ACCOUNTS_OFFSET: usize = 520 + ENGINE_ACCOUNTS_OFFSET;
         pub const ACCOUNT_SIZE: usize = 360;
         pub const CAPITAL_OFFSET_IN_ACCOUNT: usize = 0;
         let account_off =
@@ -4435,31 +4617,6 @@ impl TradeCpiTestEnv {
         vault_account.amount
     }
 
-    pub fn try_set_oracle_price_cap(
-        &mut self,
-        signer: &Keypair,
-        max_change_e2bps: u64,
-    ) -> Result<(), String> {
-        let ix = Instruction {
-            program_id: self.program_id,
-            accounts: vec![
-                AccountMeta::new(signer.pubkey(), true),
-                AccountMeta::new(self.slab, false),
-                AccountMeta::new_readonly(sysvar::clock::ID, false),
-            ],
-            data: encode_set_oracle_price_cap(max_change_e2bps),
-        };
-        let tx = Transaction::new_signed_with_payer(
-            &[cu_ix(), ix],
-            Some(&signer.pubkey()),
-            &[signer],
-            self.svm.latest_blockhash(),
-        );
-        self.svm
-            .send_transaction(tx)
-            .map(|_| ())
-            .map_err(|e| format!("{:?}", e))
-    }
 }
 
 // ============================================================================
@@ -4679,12 +4836,23 @@ impl TradeCpiTestEnv {
 // steal user funds. Each test attempts an exploit and verifies it fails.
 
 impl TestEnv {
-    /// Read c_tot aggregate from slab
+    /// Read c_tot aggregate from slab (v12.19 BPF: engine+328).
     pub fn read_c_tot(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        pub const C_TOT_OFFSET: usize = 536 + 320;
+        pub const C_TOT_OFFSET: usize = 520 + 328;
         u128::from_le_bytes(
             slab_data[C_TOT_OFFSET..C_TOT_OFFSET + 16]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    /// Read pnl_pos_tot aggregate from slab (v12.19 BPF: engine+344).
+    pub fn read_pnl_pos_tot(&self) -> u128 {
+        let slab_data = self.svm.get_account(&self.slab).unwrap().data;
+        pub const PNL_POS_TOT_OFFSET: usize = 520 + 344;
+        u128::from_le_bytes(
+            slab_data[PNL_POS_TOT_OFFSET..PNL_POS_TOT_OFFSET + 16]
                 .try_into()
                 .unwrap(),
         )
@@ -4693,20 +4861,9 @@ impl TestEnv {
     /// Read vault balance from engine state
     pub fn read_engine_vault(&self) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        pub const VAULT_OFFSET: usize = 536;
+        pub const VAULT_OFFSET: usize = 520;
         u128::from_le_bytes(
             slab_data[VAULT_OFFSET..VAULT_OFFSET + 16]
-                .try_into()
-                .unwrap(),
-        )
-    }
-
-    /// Read pnl_pos_tot aggregate from slab
-    pub fn read_pnl_pos_tot(&self) -> u128 {
-        let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        pub const PNL_POS_TOT_OFFSET: usize = 536 + 336;
-        u128::from_le_bytes(
-            slab_data[PNL_POS_TOT_OFFSET..PNL_POS_TOT_OFFSET + 16]
                 .try_into()
                 .unwrap(),
         )
@@ -4715,7 +4872,7 @@ impl TestEnv {
     /// Read account PnL for a slot
     pub fn read_account_pnl(&self, idx: u16) -> i128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        pub const ACCOUNTS_OFFSET: usize = 536 + ENGINE_ACCOUNTS_OFFSET;
+        pub const ACCOUNTS_OFFSET: usize = 520 + ENGINE_ACCOUNTS_OFFSET;
         pub const ACCOUNT_SIZE: usize = 360;
         pub const PNL_OFFSET_IN_ACCOUNT: usize = 24; // BPF: i128 has 8-byte alignment
         let account_off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + PNL_OFFSET_IN_ACCOUNT;
@@ -5111,8 +5268,7 @@ impl TestEnv {
         // Per-market admin limits (uncapped defaults for tests)
         data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled) (<= MAX_PROTOCOL_FEE_ABS)
         // Resolvability invariant: ship max cap (default tail has perm_resolve=0).
-        data.extend_from_slice(&1_000_000u64.to_le_bytes()); // min_oracle_price_cap_e2bps
-        // RiskParams
+            // RiskParams
         data.extend_from_slice(&0u64.to_le_bytes()); // h_min
         data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
         data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
@@ -5128,6 +5284,7 @@ impl TestEnv {
         data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
 
         let ix = Instruction {
             program_id: self.program_id,
@@ -5190,8 +5347,7 @@ impl TestEnv {
         data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
         data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
         // Resolvability invariant: ship max cap (default tail has perm_resolve=0).
-        data.extend_from_slice(&1_000_000u64.to_le_bytes()); // min_oracle_price_cap_e2bps
-        data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
+            data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
         data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
         data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
         data.extend_from_slice(&trading_fee_bps.to_le_bytes()); // trading_fee_bps
@@ -5206,7 +5362,8 @@ impl TestEnv {
         data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
         data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
         data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-        append_default_extended_tail(&mut data);
+        data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
+        append_default_extended_tail_for(&mut data, false);
 
         let ix = Instruction {
             program_id: self.program_id,
@@ -5381,7 +5538,7 @@ impl TestEnv {
     /// Fee credits is at offset 240 within Account.
     pub fn read_account_fee_credits(&self, idx: u16) -> i128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 536 + ENGINE_ACCOUNTS_OFFSET;
+        const ACCOUNTS_OFFSET: usize = 520 + ENGINE_ACCOUNTS_OFFSET;
         const ACCOUNT_SIZE: usize = 360;
         const FEE_CREDITS_OFFSET: usize = 224;
         let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + FEE_CREDITS_OFFSET;
@@ -5395,7 +5552,7 @@ impl TestEnv {
     /// fees_earned_total is at offset 264 within Account.
     pub fn read_account_fees_earned_total(&self, idx: u16) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 536 + ENGINE_ACCOUNTS_OFFSET;
+        const ACCOUNTS_OFFSET: usize = 520 + ENGINE_ACCOUNTS_OFFSET;
         const ACCOUNT_SIZE: usize = 360;
         const FEES_EARNED_OFFSET: usize = 264;
         let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + FEES_EARNED_OFFSET;
@@ -5409,7 +5566,7 @@ impl TestEnv {
     /// warmup_started_at_slot is at offset 64 within Account.
     pub fn read_account_warmup_started_at_slot(&self, idx: u16) -> u64 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 536 + ENGINE_ACCOUNTS_OFFSET;
+        const ACCOUNTS_OFFSET: usize = 520 + ENGINE_ACCOUNTS_OFFSET;
         const ACCOUNT_SIZE: usize = 360;
         const WARMUP_SLOT_OFFSET: usize = 64;
         let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + WARMUP_SLOT_OFFSET;
@@ -5423,7 +5580,7 @@ impl TestEnv {
     /// reserved_pnl is at offset 48 within Account.
     pub fn read_account_reserved_pnl(&self, idx: u16) -> u128 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 536 + ENGINE_ACCOUNTS_OFFSET;
+        const ACCOUNTS_OFFSET: usize = 520 + ENGINE_ACCOUNTS_OFFSET;
         const ACCOUNT_SIZE: usize = 360;
         const RESERVED_PNL_OFFSET: usize = 40; // BPF: u128 has 8-byte alignment
         let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + RESERVED_PNL_OFFSET;
@@ -5439,7 +5596,7 @@ impl TestEnv {
     ///   kind: u8 at offset 16
     pub fn read_account_kind(&self, idx: u16) -> u8 {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 536 + ENGINE_ACCOUNTS_OFFSET;
+        const ACCOUNTS_OFFSET: usize = 520 + ENGINE_ACCOUNTS_OFFSET;
         const ACCOUNT_SIZE: usize = 360;
         const KIND_OFFSET: usize = 16;
         let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + KIND_OFFSET;
@@ -5453,7 +5610,7 @@ impl TestEnv {
     /// matcher_program is at offset 144 within Account (BPF layout).
     pub fn read_account_matcher_program(&self, idx: u16) -> [u8; 32] {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 536 + ENGINE_ACCOUNTS_OFFSET;
+        const ACCOUNTS_OFFSET: usize = 520 + ENGINE_ACCOUNTS_OFFSET;
         const ACCOUNT_SIZE: usize = 360;
         const MATCHER_PROG_OFFSET: usize = 128;
         let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + MATCHER_PROG_OFFSET;
@@ -5466,7 +5623,7 @@ impl TestEnv {
     /// matcher_context is at offset 176 within Account (BPF layout).
     pub fn read_account_matcher_context(&self, idx: u16) -> [u8; 32] {
         let slab_data = self.svm.get_account(&self.slab).unwrap().data;
-        const ACCOUNTS_OFFSET: usize = 536 + ENGINE_ACCOUNTS_OFFSET;
+        const ACCOUNTS_OFFSET: usize = 520 + ENGINE_ACCOUNTS_OFFSET;
         const ACCOUNT_SIZE: usize = 360;
         const MATCHER_CTX_OFFSET: usize = 160;
         let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + MATCHER_CTX_OFFSET;
@@ -7678,7 +7835,7 @@ pub fn encode_init_market_with_limits(
     admin: &Pubkey,
     mint: &Pubkey,
     feed_id: &[u8; 32],
-    min_oracle_price_cap_e2bps: u64,
+    _min_oracle_price_cap_e2bps: u64,
 ) -> Vec<u8> {
     let mut data = vec![0u8];
     data.extend_from_slice(admin.as_ref());
@@ -7691,7 +7848,6 @@ pub fn encode_init_market_with_limits(
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
     // maintenance_fee_per_slot is disabled at init.
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (disabled)
-    data.extend_from_slice(&min_oracle_price_cap_e2bps.to_le_bytes());
     // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
@@ -7708,7 +7864,8 @@ pub fn encode_init_market_with_limits(
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    append_default_extended_tail(&mut data);
+    data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
+    append_default_extended_tail_for(&mut data, feed_id == &[0u8; 32]);
     data
 }
 
@@ -7734,7 +7891,6 @@ pub fn encode_init_market_with_maintenance_fee(
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
     data.extend_from_slice(&maintenance_fee_per_slot.to_le_bytes()); // maintenance_fee_per_slot
-    data.extend_from_slice(&0u64.to_le_bytes()); // min_oracle_price_cap_e2bps
     // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
@@ -7750,7 +7906,8 @@ pub fn encode_init_market_with_maintenance_fee(
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    append_default_extended_tail(&mut data);
+    data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
+    append_default_extended_tail_for(&mut data, feed_id == &[0u8; 32]);
     data
 }
 

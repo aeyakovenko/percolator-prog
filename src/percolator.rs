@@ -59,15 +59,23 @@ pub mod constants {
     /// it pays for its full elapsed interval in one charge.
     pub const FEE_SWEEP_BUDGET: usize = 128;
 
+    /// Phase 1 revalidation/liquidation budget per KeeperCrank (wrapper-owned
+    /// since v12.19, which dropped the engine-level `LIQ_BUDGET_PER_CRANK`).
+    /// Matches the engine's `MAX_TOUCHED_PER_INSTRUCTION = 64` ctx-capacity
+    /// cap — the engine enforces that `max_revalidations + rr_window_size
+    /// <= MAX_TOUCHED_PER_INSTRUCTION`, so this wrapper picks 64 for Phase 1
+    /// and passes 0 for Phase 2 rr_window in the current mode.
+    pub const LIQ_BUDGET_PER_CRANK: u16 = 64;
+
     // Compile-time invariant: the crank's total fee-sync budget
-    // (FEE_SWEEP_BUDGET) must accommodate the engine's per-crank
+    // (FEE_SWEEP_BUDGET) must accommodate the wrapper's per-crank
     // liquidation/candidate-sync allowance. The candidate-sync path
     // caps itself at min(LIQ_BUDGET_PER_CRANK, FEE_SWEEP_BUDGET); if
-    // the engine constant were raised above the wrapper constant the
-    // belt-and-braces min() would silently under-apply the engine
-    // budget. Assert the relation so a mismatch is a build error.
+    // this constant were raised above FEE_SWEEP_BUDGET the belt-and-
+    // braces min() would silently under-apply the budget. Assert so
+    // a mismatch is a build error.
     const _: () = assert!(
-        (percolator::LIQ_BUDGET_PER_CRANK as usize) <= FEE_SWEEP_BUDGET,
+        (LIQ_BUDGET_PER_CRANK as usize) <= FEE_SWEEP_BUDGET,
         "LIQ_BUDGET_PER_CRANK must not exceed FEE_SWEEP_BUDGET"
     );
 
@@ -90,9 +98,24 @@ pub mod constants {
     // exactly what values ship, rather than having them buried inside the
     // RiskParams literal in read_risk_params.
     /// Max dt allowed in a single `accrue_market_to` call (spec §1.4).
-    /// 10_000_000 slots at 400 ms/slot ≈ 46 days — the permissionless-
-    /// resolve / outage-tolerance window. Must be ≤ min_funding_lifetime_slots.
-    pub const MAX_ACCRUAL_DT_SLOTS: u64 = 10_000_000;
+    ///
+    /// Tightened from the legacy 10_000_000 to satisfy the v12.19 engine
+    /// solvency envelope (§1.4):
+    ///
+    ///   max_price_move_bps_per_slot * max_accrual_dt_slots
+    ///     + floor(max_abs_funding_e9_per_slot * max_accrual_dt_slots
+    ///             * 10_000 / FUNDING_DEN)
+    ///     + liquidation_fee_bps
+    ///     <= maintenance_margin_bps
+    ///
+    /// For a deployment with maintenance=500, liq=50, max_price_move=2
+    /// bps/slot, max_abs_funding_e9_per_slot=10_000 the envelope
+    /// collapses to max_accrual_dt_slots <= ~216 (= (500 - 50) / 2.09
+    /// ignoring floor). The wrapper picks 100 so both idle and price-
+    /// moving / funding-active markets have an ~40 sec per-crank window
+    /// at 400 ms slots. Catchup loops up to `CATCHUP_CHUNKS_MAX × 100`
+    /// = 2000 slots in one instruction before `CatchupRequired`.
+    pub const MAX_ACCRUAL_DT_SLOTS: u64 = 100;
     /// Max |funding_rate_e9_per_slot| the engine will accrue (spec §1.4).
     /// Matches the engine-crate GLOBAL ceiling. Realistic perp funding is
     /// 3-5 orders of magnitude below this (see compute_current_funding_rate_e9
@@ -181,8 +204,6 @@ pub mod constants {
     /// ceiling MAX_ABS_FUNDING_E9_PER_SLOT = 10_000. Clients compute this from
     /// operator-friendly units (e.g. bps/day) at market-setup time.
     pub const DEFAULT_FUNDING_MAX_E9_PER_SLOT: i64 = 1_000;
-    pub const DEFAULT_HYPERP_PRICE_CAP_E2BPS: u64 = 10_000; // 1% per slot max price change for Hyperp
-    pub const MAX_ORACLE_PRICE_CAP_E2BPS: u64 = 1_000_000; // 100% — hard ceiling for circuit breaker
     pub const DEFAULT_INSURANCE_WITHDRAW_MIN_BASE: u64 = 1;
     pub const DEFAULT_INSURANCE_WITHDRAW_MAX_BPS: u16 = 100; // 1%
     pub const DEFAULT_INSURANCE_WITHDRAW_COOLDOWN_SLOTS: u64 = 400_000;
@@ -1250,8 +1271,6 @@ pub mod ix {
             initial_mark_price_e6: u64,
             /// Periodic maintenance fee per slot per account (engine units). 0 = disabled.
             maintenance_fee_per_slot: u128,
-            /// Per-market admin limit: min oracle price cap (e2bps floor for non-zero values)
-            min_oracle_price_cap_e2bps: u64,
             /// Insurance withdrawal: max bps per withdrawal (0 = no live withdrawals)
             insurance_withdraw_max_bps: u16,
             /// Insurance withdrawal: cooldown slots between withdrawals
@@ -1333,11 +1352,6 @@ pub mod ix {
         PushHyperpMark {
             price_e6: u64,
             timestamp: i64,
-        },
-        /// Set oracle price circuit breaker cap (admin only).
-        /// max_change_e2bps in 0.01 bps units (1_000_000 = 100%). 0 = disabled.
-        SetOraclePriceCap {
-            max_change_e2bps: u64,
         },
         /// Resolve market: force-close all positions at admin oracle price, enter withdraw-only mode.
         /// Admin only. Uses hyperp_mark_e6 as settlement price.
@@ -1473,7 +1487,6 @@ pub mod ix {
                     let unit_scale = read_u32(&mut rest)?;
                     let initial_mark_price_e6 = read_u64(&mut rest)?;
                     let maintenance_fee_per_slot = read_u128(&mut rest)?; // periodic fee per slot per account
-                    let min_oracle_price_cap_e2bps = read_u64(&mut rest)?;
                     // Insurance withdrawal limits (immutable after init)
                     let (risk_params, new_account_fee) = read_risk_params(&mut rest)?;
                     // Extended fields: either ALL present (66 bytes) or NONE.
@@ -1542,7 +1555,6 @@ pub mod ix {
                         unit_scale,
                         initial_mark_price_e6,
                         maintenance_fee_per_slot,
-                        min_oracle_price_cap_e2bps,
                         insurance_withdraw_max_bps,
                         insurance_withdraw_cooldown_slots,
                         risk_params,
@@ -1602,7 +1614,7 @@ pub mod ix {
                     // of deduplication / expired entries while keeping
                     // the total scan bounded.
                     const MAX_CANDIDATES: usize =
-                        (percolator::LIQ_BUDGET_PER_CRANK as usize) * 2;
+                        (crate::constants::LIQ_BUDGET_PER_CRANK as usize) * 2;
                     if format_version == 1 {
                         // Extended: u16 idx + u8 policy tag per candidate
                         while rest.len() >= 3 {
@@ -1701,11 +1713,10 @@ pub mod ix {
                         timestamp,
                     })
                 }
-                18 => {
-                    // SetOraclePriceCap
-                    let max_change_e2bps = read_u64(&mut rest)?;
-                    Ok(Instruction::SetOraclePriceCap { max_change_e2bps })
-                }
+                // Tag 18 (SetOraclePriceCap) removed in v12.19: the
+                // per-slot price-move cap is now init-immutable via
+                // RiskParams.max_price_move_bps_per_slot (spec §1.4
+                // solvency envelope).
                 19 => Ok(Instruction::ResolveMarket),
                 20 => Ok(Instruction::WithdrawInsurance),
                 21 => {
@@ -1881,6 +1892,9 @@ pub mod ix {
         }
         let min_nonzero_mm_req = read_u128(input)?;
         let min_nonzero_im_req = read_u128(input)?;
+        // v12.19: per-slot price-move cap (standard bps, 100 = 1%).
+        // Init-immutable per spec §1.4 solvency invariant.
+        let max_price_move_bps_per_slot = read_u64(input)?;
         let params = RiskParams {
             maintenance_margin_bps,
             initial_margin_bps,
@@ -1909,6 +1923,7 @@ pub mod ix {
             // a separate cumulative horizon. The engine asserts this at
             // init_engine_state and at every accrue.
             min_funding_lifetime_slots: crate::constants::MIN_FUNDING_LIFETIME_SLOTS,
+            max_price_move_bps_per_slot,
         };
         Ok((params, new_account_fee))
     }
@@ -2074,22 +2089,9 @@ pub mod state {
         /// policy. Initialized at InitMarket from the genesis Pyth read.
         pub last_oracle_publish_time: i64,
 
-        // ========================================
-        // Oracle Price Circuit Breaker
-        // ========================================
-        /// Max oracle price change per update in 0.01 bps (e2bps).
-        /// 0 = disabled (no cap). 1_000_000 = 100%.
-        pub oracle_price_cap_e2bps: u64,
         /// Last effective oracle price (after clamping), in e6 format.
         /// 0 = no history (first price accepted as-is).
         pub last_effective_price_e6: u64,
-
-        // ========================================
-        // Per-Market Admin Limits (set at InitMarket, immutable)
-        // ========================================
-        /// Minimum oracle price cap (e2bps) admin can set (floor for non-zero values).
-        /// 0 = no floor (admin can set any value).
-        pub min_oracle_price_cap_e2bps: u64,
 
         // ========================================
         // Insurance Withdrawal Limits (set at InitMarket, immutable)
@@ -2757,11 +2759,11 @@ pub mod oracle {
 
     /// Clamp `raw_price` so it cannot move more than `max_change_e2bps` from `last_price`.
     /// Units: 1_000_000 e2bps = 100%. 0 = disabled (no cap). last_price == 0 = first-time.
-    pub fn clamp_oracle_price(last_price: u64, raw_price: u64, max_change_e2bps: u64) -> u64 {
-        if max_change_e2bps == 0 || last_price == 0 {
+    pub fn clamp_oracle_price(last_price: u64, raw_price: u64, max_change_bps: u64) -> u64 {
+        if max_change_bps == 0 || last_price == 0 {
             return raw_price;
         }
-        let max_delta_128 = (last_price as u128) * (max_change_e2bps as u128) / 1_000_000;
+        let max_delta_128 = (last_price as u128) * (max_change_bps as u128) / 10_000;
         let max_delta = core::cmp::min(max_delta_128, u64::MAX as u128) as u64;
         let lower = last_price.saturating_sub(max_delta);
         let upper = last_price.saturating_add(max_delta);
@@ -2780,6 +2782,7 @@ pub mod oracle {
         config: &mut super::state::MarketConfig,
         price_ai: &AccountInfo,
         now_unix_ts: i64,
+        max_change_bps: u64,
     ) -> Result<u64, ProgramError> {
         let external = read_engine_price_e6(
             price_ai,
@@ -2790,7 +2793,7 @@ pub mod oracle {
             config.invert,
             config.unit_scale,
         );
-        clamp_external_price(config, external)
+        clamp_external_price(config, external, max_change_bps)
     }
 
     /// Circuit-breaker clamp applied to an already-parsed external
@@ -2824,6 +2827,7 @@ pub mod oracle {
     pub fn clamp_external_price(
         config: &mut super::state::MarketConfig,
         external: Result<(u64, i64), ProgramError>,
+        max_change_bps: u64,
     ) -> Result<u64, ProgramError> {
         let (ext_price, publish_time) = external?;
         if publish_time <= config.last_oracle_publish_time {
@@ -2832,7 +2836,7 @@ pub mod oracle {
         let clamped = clamp_oracle_price(
             config.last_effective_price_e6,
             ext_price,
-            config.oracle_price_cap_e2bps,
+            max_change_bps,
         );
         config.last_effective_price_e6 = clamped;
         config.last_oracle_publish_time = publish_time;
@@ -2926,22 +2930,22 @@ pub mod oracle {
         false
     }
 
-    /// Move `index` toward `mark`, but clamp movement by cap_e2bps * dt_slots.
-    /// cap_e2bps units: 1_000_000 = 100.00%
+    /// Move `index` toward `mark`, but clamp movement by cap_bps * dt_slots.
+    /// cap_bps units: standard bps (10_000 = 100%).
     /// Returns the new index value.
     ///
-    /// Security: When dt_slots == 0 (same slot) or cap_e2bps == 0 (cap disabled),
+    /// Security: When dt_slots == 0 (same slot) or cap_bps == 0 (cap disabled),
     /// returns index unchanged to prevent bypassing rate limits.
     /// Maximum effective dt for rate-limiting. Caps accumulated movement to
     /// prevent a crank pause from allowing a full-magnitude index jump.
     /// ~1 hour at 2.5 slots/sec = 9000 slots.
     const MAX_CLAMP_DT_SLOTS: u64 = 9_000;
 
-    pub fn clamp_toward_with_dt(index: u64, mark: u64, cap_e2bps: u64, dt_slots: u64) -> u64 {
+    pub fn clamp_toward_with_dt(index: u64, mark: u64, cap_bps: u64, dt_slots: u64) -> u64 {
         if index == 0 {
             return mark;
         }
-        if cap_e2bps == 0 || dt_slots == 0 {
+        if cap_bps == 0 || dt_slots == 0 {
             return index;
         }
 
@@ -2949,9 +2953,9 @@ pub mod oracle {
         let capped_dt = dt_slots.min(MAX_CLAMP_DT_SLOTS);
 
         let max_delta_u128 = (index as u128)
-            .saturating_mul(cap_e2bps as u128)
+            .saturating_mul(cap_bps as u128)
             .saturating_mul(capped_dt as u128)
-            / 1_000_000u128;
+            / 10_000u128;
 
         let max_delta = core::cmp::min(max_delta_u128, u64::MAX as u128) as u64;
         let lo = index.saturating_sub(max_delta);
@@ -2969,6 +2973,7 @@ pub mod oracle {
         now_unix_ts: i64,
         config: &mut super::state::MarketConfig,
         a_oracle: &AccountInfo,
+        max_change_bps: u64,
     ) -> Result<u64, ProgramError> {
         // Strict hard-timeout gate (applies to both Hyperp and non-Hyperp):
         // once the oracle has been stale for >=
@@ -3013,7 +3018,7 @@ pub mod oracle {
             let last_idx_slot = config.last_hyperp_index_slot;
             let dt = now_slot.saturating_sub(last_idx_slot);
             let new_index =
-                clamp_toward_with_dt(prev_index.max(1), mark, config.oracle_price_cap_e2bps, dt);
+                clamp_toward_with_dt(prev_index.max(1), mark, max_change_bps, dt);
 
             config.last_effective_price_e6 = new_index;
             config.last_hyperp_index_slot = now_slot;
@@ -3021,7 +3026,7 @@ pub mod oracle {
         }
 
         // Non-Hyperp: existing behavior (authority -> Pyth/Chainlink) + circuit breaker
-        read_price_clamped(config, a_oracle, now_unix_ts)
+        read_price_clamped(config, a_oracle, now_unix_ts, max_change_bps)
     }
 
     /// Compute premium-based funding rate (Hyperp funding model).
@@ -3134,7 +3139,7 @@ pub mod processor {
         constants::{
             CONFIG_LEN, DEFAULT_FUNDING_HORIZON_SLOTS,
             DEFAULT_FUNDING_K_BPS, DEFAULT_FUNDING_MAX_E9_PER_SLOT,
-            DEFAULT_FUNDING_MAX_PREMIUM_BPS, DEFAULT_HYPERP_PRICE_CAP_E2BPS, MAX_ORACLE_PRICE_CAP_E2BPS,
+            DEFAULT_FUNDING_MAX_PREMIUM_BPS,
             DEFAULT_INSURANCE_WITHDRAW_COOLDOWN_SLOTS, DEFAULT_INSURANCE_WITHDRAW_MAX_BPS,
             DEFAULT_INSURANCE_WITHDRAW_MIN_BASE, DEFAULT_MARK_EWMA_HALFLIFE_SLOTS,
             MAGIC, MATCHER_CALL_LEN, MATCHER_CALL_TAG,
@@ -3175,6 +3180,12 @@ pub mod processor {
             return Err(PercolatorError::OracleStale.into());
         }
 
+        // Source the per-slot price-move cap from RiskParams (init-
+        // immutable per spec §1.4 solvency envelope). Standard bps.
+        let max_change_bps = zc::engine_ref(slab_data)?
+            .params
+            .max_price_move_bps_per_slot;
+
         let external = oracle::read_engine_price_e6(
             a_oracle,
             &config.index_feed_id,
@@ -3192,11 +3203,10 @@ pub mod processor {
         // attacker can replay an old Pyth account to extend market
         // life past `permissionless_resolve_stale_slots`.
         let prev_publish_time = config.last_oracle_publish_time;
-        let price = oracle::clamp_external_price(config, external)?;
+        let price = oracle::clamp_external_price(config, external, max_change_bps)?;
         if config.last_oracle_publish_time > prev_publish_time {
             config.last_good_oracle_slot = clock_slot;
         }
-        let _ = slab_data; // reserved for future per-read slab stamping
         Ok(price)
     }
 
@@ -3711,6 +3721,7 @@ pub mod processor {
                 b, now_slot, maintenance_fee_per_slot,
             )?;
         }
+        let admit_threshold = Some(engine.params.maintenance_margin_bps as u128);
         engine.execute_trade_not_atomic(
             a,
             b,
@@ -3721,6 +3732,7 @@ pub mod processor {
             funding_rate_e9,
             admit_h_min,
             admit_h_max,
+            admit_threshold,
         )
     }
 
@@ -4076,7 +4088,6 @@ pub mod processor {
                 unit_scale,
                 initial_mark_price_e6,
                 maintenance_fee_per_slot,
-                min_oracle_price_cap_e2bps,
                 insurance_withdraw_max_bps,
                 insurance_withdraw_cooldown_slots,
                 risk_params,
@@ -4207,10 +4218,9 @@ pub mod processor {
                     return Err(ProgramError::InvalidInstructionData);
                 }
 
-                // Oracle cap floor: hard-bounded to MAX (100%)
-                if min_oracle_price_cap_e2bps > MAX_ORACLE_PRICE_CAP_E2BPS {
-                    return Err(ProgramError::InvalidInstructionData);
-                }
+                // Per-slot price-move cap is validated by the engine's
+                // RiskEngine::new (spec §1.4 solvency envelope). The wrapper
+                // lets the engine panic on misconfiguration.
                 // Permissionless resolve: if enabled, must exceed max_crank_staleness
                 // to prevent accidental instant-resolution from one missed crank.
                 if permissionless_resolve_stale_slots > 0
@@ -4249,84 +4259,29 @@ pub mod processor {
                 {
                     return Err(ProgramError::InvalidInstructionData);
                 }
-                // Envelope compatibility — conservative product bound kept
-                // even though ResolvePermissionless itself bypasses
-                // accrue_market_to via the engine's Degenerate arm (which
-                // runs at rate = 0 and jumps last_market_slot to now_slot
-                // without an envelope check). Reasoning for keeping it:
-                //  (a) Admin ResolveMarket's Ordinary arm DOES accrue,
-                //      and the engine's envelope check can reject if dt
-                //      exceeds max_accrual_dt_slots. Keeping this check
-                //      at init time keeps the two configs aligned so any
-                //      resolve path — admin or permissionless — can be
-                //      reached without hitting an envelope-rejection.
-                //  (b) It's a sanity ceiling on how long a healthy market
-                //      can stay unresolved; a stale threshold larger than
-                //      the envelope would imply "wait N days before
-                //      resolving" without ever re-accruing the market in
-                //      that window, which usually indicates misconfiguration.
-                // Not required for safety of the permissionless path alone.
-                if permissionless_resolve_stale_slots > 0
-                    && permissionless_resolve_stale_slots > risk_params.max_accrual_dt_slots
-                {
-                    return Err(ProgramError::InvalidInstructionData);
-                }
+                // v12.19: the old "perm_resolve <= max_accrual_dt_slots"
+                // check is dropped. MAX_ACCRUAL_DT_SLOTS was tightened to
+                // 100 slots (solvency envelope), while perm_resolve is a
+                // cluster-timeout in the 10_000-slot range; they are
+                // independent parameters. Admin ResolveMarket's Ordinary
+                // arm can still hit CatchupRequired on a market with
+                // large dt — callers run the dedicated CatchupAccrue
+                // instruction, which is why it exists. The Hyperp
+                // `CATCHUP_CHUNKS_MAX * MAX_ACCRUAL_DT_SLOTS` bound is
+                // also dropped: Hyperp stale recovery uses the same
+                // CatchupAccrue loop, so a multi-call recovery is an
+                // explicit contract, not a misconfiguration.
 
-                // Hyperp catchup-budget invariant. The real safety
-                // property under the "resolve-only after maturity"
-                // design is: before the market matures into the
-                // permissionless-resolve window, a single live
-                // recovery call (PushHyperpMark + catchup_accrue)
-                // must be able to close the accrued market gap.
-                // catchup_accrue loops at most CATCHUP_CHUNKS_MAX
-                // accrue_market_to calls per instruction, each
-                // advancing by up to max_accrual_dt_slots, so the
-                // single-call recovery budget is
-                //   CATCHUP_CHUNKS_MAX × MAX_ACCRUAL_DT_SLOTS.
-                // If perm_resolve exceeds that budget, a market that
-                // has gone stale near maturity may not be recoverable
-                // in one shot — users would have to invoke the
-                // dedicated CatchupAccrue instruction multiple times.
-                // Refuse that configuration at init so the bound is
-                // mechanically enforced.
-                //
-                // Note: the general-purpose check above (perm_resolve
-                // <= risk_params.max_accrual_dt_slots) is strictly
-                // tighter, so this assertion is currently redundant —
-                // kept as a first-class, self-contained statement of
-                // the Hyperp safety property in case either constant
-                // moves.
-                if is_hyperp && permissionless_resolve_stale_slots > 0 {
-                    let max_recoverable_gap =
-                        (CATCHUP_CHUNKS_MAX as u64)
-                            .saturating_mul(crate::constants::MAX_ACCRUAL_DT_SLOTS);
-                    if permissionless_resolve_stale_slots > max_recoverable_gap {
-                        return Err(ProgramError::InvalidInstructionData);
-                    }
-                }
-
-                // Non-Hyperp resolvability invariant. A non-Hyperp market
-                // resolves by one of two paths:
-                //   (a) admin ResolveMarket, which requires a non-zero
-                //       hyperp_mark_e6. The only way to populate that
-                //       field is PushHyperpMark, which in turn requires a
-                //       non-zero hyperp_authority AND oracle_price_cap_
-                //       e2bps > 0. The init-time default of oracle_
-                //       authority is zero when min_oracle_price_cap_e2bps
-                //       == 0, so a zero cap removes path (a) forever.
-                //   (b) ResolvePermissionless, gated by permissionless_
-                //       stale_matured which returns false when perm_
-                //       resolve == 0.
-                // Refuse init configurations that start without BOTH
-                // paths. This preserves the "dead means resolvable"
-                // invariant for non-Hyperp markets regardless of later
-                // authority burns. Hyperp is exempt — mark is trade-
-                // sourced and the Hyperp dead-zone guard above handles
-                // its own resolvability.
-                if !is_hyperp
-                    && permissionless_resolve_stale_slots == 0
-                    && min_oracle_price_cap_e2bps == 0
-                {
+                // Non-Hyperp resolvability invariant: a non-Hyperp market
+                // with `permissionless_resolve_stale_slots == 0` has only
+                // the admin-ResolveMarket path. If the admin is later burned
+                // (UpdateAuthority → Pubkey::zero()), the market is
+                // permanently un-resolvable — positions and insurance would
+                // be stranded. Reject this combo outright so clients can't
+                // deploy a bricked-on-burn market. Hyperp markets are
+                // exempt: they resolve from the stored `hyperp_mark_e6`
+                // without a live oracle read.
+                if !is_hyperp && permissionless_resolve_stale_slots == 0 {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
 
@@ -4533,23 +4488,11 @@ pub mod processor {
                     hyperp_authority: if is_hyperp { a_admin.key.to_bytes() } else { [0u8; 32] },
                     hyperp_mark_e6: if is_hyperp { initial_mark_price_e6 } else { 0 },
                     last_oracle_publish_time: init_publish_time,
-                    // Oracle price circuit breaker
-                    // In Hyperp mode: used for rate-limited index smoothing AND mark price clamping
-                    // Default: disabled for non-Hyperp, 1% per slot for Hyperp
-                    oracle_price_cap_e2bps: if is_hyperp {
-                        DEFAULT_HYPERP_PRICE_CAP_E2BPS.max(min_oracle_price_cap_e2bps)
-                    } else {
-                        // Non-Hyperp: start at the immutable floor so the circuit
-                        // breaker is active from genesis. 0 floor = no breaker.
-                        min_oracle_price_cap_e2bps
-                    },
                     // Seed last_effective_price_e6 with the genesis reading so the
                     // circuit-breaker baseline is real from genesis too (not 0, which
                     // disables the breaker on first oracle read). For non-Hyperp we
                     // just read init_price from the feed above, so reuse it.
                     last_effective_price_e6: if is_hyperp { initial_mark_price_e6 } else { init_price },
-                    // Per-market admin limits (immutable after init)
-                    min_oracle_price_cap_e2bps,
                     // Insurance withdrawal limits (immutable after init)
                     insurance_withdraw_max_bps,
                     tvl_insurance_cap_mult: 0, // disabled at init; admin opts in via UpdateConfig
@@ -4585,10 +4528,6 @@ pub mod processor {
                     force_close_delay_slots,
                     new_account_fee,
                 };
-                // Hyperp markets must have non-zero cap for index smoothing
-                if is_hyperp && config.oracle_price_cap_e2bps == 0 {
-                    return Err(ProgramError::InvalidInstructionData);
-                }
                 state::write_config(&mut data, &config);
 
                 let new_header = SlabHeader {
@@ -4729,7 +4668,7 @@ pub mod processor {
                     return Err(PercolatorError::EngineOverflow.into());
                 }
                 engine
-                    .deposit_not_atomic(idx, capital_units as u128, 0, clock.slot)
+                    .deposit_not_atomic(idx, capital_units as u128, clock.slot)
                     .map_err(map_risk_error)?;
                 engine.set_owner(idx, a_user.key.to_bytes())
                     .map_err(map_risk_error)?;
@@ -4842,7 +4781,7 @@ pub mod processor {
                     return Err(PercolatorError::EngineOverflow.into());
                 }
                 engine
-                    .deposit_not_atomic(idx, capital_units as u128, 0, clock.slot)
+                    .deposit_not_atomic(idx, capital_units as u128, clock.slot)
                     .map_err(map_risk_error)?;
                 engine.set_owner(idx, a_user.key.to_bytes())
                     .map_err(map_risk_error)?;
@@ -4964,7 +4903,7 @@ pub mod processor {
                 )?;
 
                 engine
-                    .deposit_not_atomic(user_idx, units as u128, 0, clock.slot)
+                    .deposit_not_atomic(user_idx, units as u128, clock.slot)
                     .map_err(map_risk_error)?;
             }
             Instruction::WithdrawCollateral { user_idx, amount } => {
@@ -5016,9 +4955,10 @@ pub mod processor {
                     let px = if is_hyperp {
                         let eng = zc::engine_ref(&data)?;
                         let last_slot = eng.current_slot;
+                        let cap_bps = eng.params.max_price_move_bps_per_slot;
                         oracle::get_engine_oracle_price_e6(
                             last_slot, clock.slot, clock.unix_timestamp,
-                            &mut config, a_oracle_idx,
+                            &mut config, a_oracle_idx, cap_bps,
                         )?
                     } else {
                         read_price_and_stamp(&mut config, a_oracle_idx, clock.unix_timestamp, clock.slot, &mut data)?
@@ -5057,9 +4997,10 @@ pub mod processor {
                 // Realize due maintenance fees BEFORE the withdrawal margin
                 // check, so the account can't withdraw against pre-fee capital.
                 sync_account_fee(engine, &config, user_idx, clock.slot)?;
+                let admit_threshold = Some(engine.params.maintenance_margin_bps as u128);
                 engine
                     .withdraw_not_atomic(user_idx, units_requested as u128, price, withdraw_slot,
-                        funding_rate_e9, admit_h_min, admit_h_max)
+                        funding_rate_e9, admit_h_min, admit_h_max, admit_threshold)
                     .map_err(map_risk_error)?;
                 if !state::is_oracle_initialized(&data) {
                     state::set_oracle_initialized(&mut data);
@@ -5145,9 +5086,9 @@ pub mod processor {
                 // Hyperp mode: use get_engine_oracle_price_e6 for rate-limited index smoothing
                 // Otherwise: use read_price_clamped as before
                 let is_hyperp = oracle::is_hyperp_mode(&config);
-                let engine_last_slot = {
+                let (engine_last_slot, cap_bps) = {
                     let engine = zc::engine_ref(&data)?;
-                    engine.current_slot
+                    (engine.current_slot, engine.params.max_price_move_bps_per_slot)
                 };
 
                 // Capture pre-oracle-read funding rate for anti-retroactivity (§5.5).
@@ -5163,6 +5104,7 @@ pub mod processor {
                         clock.unix_timestamp,
                         &mut config,
                         a_oracle,
+                        cap_bps,
                     )?
                 } else {
                     read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
@@ -5209,7 +5151,7 @@ pub mod processor {
                 // path ever constructs `combined` differently. Cap:
                 // 4 (risk buffer max) + 2 × LIQ_BUDGET_PER_CRANK.
                 const COMBINED_CAP: usize =
-                    4 + (percolator::LIQ_BUDGET_PER_CRANK as usize) * 2;
+                    4 + (crate::constants::LIQ_BUDGET_PER_CRANK as usize) * 2;
                 if combined.len() > COMBINED_CAP {
                     combined.truncate(COMBINED_CAP);
                 }
@@ -5314,11 +5256,11 @@ pub mod processor {
                     // relate, the total syncs per instruction is
                     // bounded by FEE_SWEEP_BUDGET.
                     let cap = core::cmp::min(
-                        percolator::LIQ_BUDGET_PER_CRANK as usize,
+                        crate::constants::LIQ_BUDGET_PER_CRANK as usize,
                         crate::constants::FEE_SWEEP_BUDGET,
                     );
-                    let mut synced: [u16; percolator::LIQ_BUDGET_PER_CRANK as usize]
-                        = [u16::MAX; percolator::LIQ_BUDGET_PER_CRANK as usize];
+                    let mut synced: [u16; crate::constants::LIQ_BUDGET_PER_CRANK as usize]
+                        = [u16::MAX; crate::constants::LIQ_BUDGET_PER_CRANK as usize];
                     let mut synced_count = 0usize;
                     let mut attempts = 0usize;
                     for &(idx, _policy) in combined.iter() {
@@ -5364,15 +5306,18 @@ pub mod processor {
 
                 let admit_h_min = engine.params.h_min;
                 let admit_h_max = engine.params.h_max;
+                let admit_threshold = Some(engine.params.maintenance_margin_bps as u128);
                 let outcome = engine
                     .keeper_crank_not_atomic(
                         clock.slot,
                         price,
                         &combined,
-                        percolator::LIQ_BUDGET_PER_CRANK,
+                        crate::constants::LIQ_BUDGET_PER_CRANK,
                         funding_rate_e9_pre,
                         admit_h_min,
                         admit_h_max,
+                        admit_threshold,
+                        0,
                     )
                     .map_err(map_risk_error)?;
                 #[cfg(feature = "cu-audit")]
@@ -5650,13 +5595,13 @@ pub mod processor {
                 // for TradeNoCpi trades. This means TradeNoCpi-only markets have zero premium
                 // and zero funding. Markets that need funding must use TradeCpi with a matcher
                 // that can set exec_price != oracle (creating mark/index divergence).
-                // Only when circuit breaker is active (cap > 0) — without cap,
-                // exec prices are unbounded and EWMA would be manipulable.
-                if config.oracle_price_cap_e2bps > 0 {
+                // Per-slot price-move cap is init-immutable (engine RiskParams).
+                let max_change_bps = engine.params.max_price_move_bps_per_slot;
+                if max_change_bps > 0 {
                     let clamped_price = oracle::clamp_oracle_price(
                         crate::verify::mark_ewma_clamp_base(config.last_effective_price_e6),
                         price,
-                        config.oracle_price_cap_e2bps,
+                        max_change_bps,
                     );
                     // fee_paid = actual fee collected into insurance (post - pre).
                     // This is exact: no overestimate from pre-trade capital snapshot.
@@ -5828,7 +5773,7 @@ pub mod processor {
                 // Phase 3 & 4: Read engine state, generate nonce, validate matcher identity
                 // Note: Use immutable borrow for reading to avoid ExternalAccountDataModified
                 // Nonce write is deferred until after execute_trade
-                let (lp_account_id, mut config, config_pre_oracle, req_id, lp_matcher_prog, lp_matcher_ctx, engine_current_slot) = {
+                let (lp_account_id, mut config, config_pre_oracle, req_id, lp_matcher_prog, lp_matcher_ctx, engine_current_slot, engine_cap_bps) = {
                     let data = a_slab.try_borrow_data()?;
                     slab_guard(program_id, a_slab, &*data)?;
                     require_initialized(&*data)?;
@@ -5895,6 +5840,7 @@ pub mod processor {
                         lp_acc.matcher_program,
                         lp_acc.matcher_context,
                         engine.current_slot,
+                        engine.params.max_price_move_bps_per_slot,
                     )
                 };
 
@@ -5919,7 +5865,7 @@ pub mod processor {
                 let price = if is_hyperp {
                     oracle::get_engine_oracle_price_e6(
                         engine_current_slot, clock.slot, clock.unix_timestamp,
-                        &mut config, a_oracle,
+                        &mut config, a_oracle, engine_cap_bps,
                     )?
                 } else {
                     let mut slab_data = state::slab_data_mut(a_slab)?;
@@ -6195,13 +6141,13 @@ pub mod processor {
                     // whether the mark actually moved.
                     let old_ewma_cpi = config.mark_ewma_e6;
                     // Update trade-derived mark EWMA (all market types).
-                    // Only when circuit breaker is active — without cap, exec prices
-                    // are unbounded and EWMA would be manipulable.
-                    if config.oracle_price_cap_e2bps > 0 {
+                    // Per-slot price-move cap is init-immutable (engine RiskParams).
+                    let max_change_bps_cpi = engine.params.max_price_move_bps_per_slot;
+                    if max_change_bps_cpi > 0 {
                         let clamped_exec = oracle::clamp_oracle_price(
                             crate::verify::mark_ewma_clamp_base(config.last_effective_price_e6),
                             ret.exec_price_e6,
-                            config.oracle_price_cap_e2bps,
+                            max_change_bps_cpi,
                         );
                         // fee_paid = actual fee collected into insurance (post - pre).
                         let fee_paid_cpi = if config.mark_min_fee > 0 {
@@ -6259,7 +6205,7 @@ pub mod processor {
                         config.hyperp_mark_e6 = oracle::clamp_oracle_price(
                             config.last_effective_price_e6,
                             ret.exec_price_e6,
-                            config.oracle_price_cap_e2bps,
+                            max_change_bps_cpi,
                         );
                         // Full-weight observation check: recompute here
                         // because the earlier `full_weight_observation`
@@ -6334,9 +6280,10 @@ pub mod processor {
                 let price = if is_hyperp {
                     let eng = zc::engine_ref(&data)?;
                     let last_slot = eng.current_slot;
+                    let cap_bps = eng.params.max_price_move_bps_per_slot;
                     oracle::get_engine_oracle_price_e6(
                         last_slot, clock.slot, clock.unix_timestamp,
-                        &mut config, a_oracle,
+                        &mut config, a_oracle, cap_bps,
                     )?
                 } else {
                     read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
@@ -6369,12 +6316,14 @@ pub mod processor {
                 // Realize due maintenance fees on the target BEFORE liquidation
                 // so the maintenance-margin check sees post-fee equity.
                 sync_account_fee(engine, &config, target_idx, clock.slot)?;
+                let admit_threshold = Some(engine.params.maintenance_margin_bps as u128);
                 let _res = engine
                     .liquidate_at_oracle_not_atomic(target_idx, clock.slot, price,
                         percolator::LiquidationPolicy::FullClose,
                         funding_rate_e9,
                         admit_h_min,
-                        admit_h_max)
+                        admit_h_max,
+                        admit_threshold)
                     .map_err(map_risk_error)?;
                 sol_log_64(_res as u64, 0, 0, 0, 4); // result
 
@@ -6452,9 +6401,10 @@ pub mod processor {
                     let px = if is_hyperp {
                         let eng = zc::engine_ref(&data)?;
                         let last_slot = eng.current_slot;
+                        let cap_bps = eng.params.max_price_move_bps_per_slot;
                         oracle::get_engine_oracle_price_e6(
                             last_slot, clock.slot, clock.unix_timestamp,
-                            &mut config, a_oracle,
+                            &mut config, a_oracle, cap_bps,
                         )?
                     } else {
                         read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
@@ -6520,7 +6470,8 @@ pub mod processor {
                         .close_account_not_atomic(user_idx, clock.slot, price,
                             funding_rate_e9,
                             admit_h_min,
-                            admit_h_max)
+                            admit_h_max,
+                            Some(engine.params.maintenance_margin_bps as u128))
                         .map_err(map_risk_error)?
                 };
                 #[cfg(feature = "cu-audit")]
@@ -6846,13 +6797,15 @@ pub mod processor {
                 // (admin recovery path; the hard-timeout gate above
                 // handles the terminal case).
                 if oracle::is_hyperp_mode(&config) {
+                    let max_change_bps = zc::engine_ref(&data)?
+                        .params.max_price_move_bps_per_slot;
                     let prev_index = config.last_effective_price_e6;
                     let mark = if config.mark_ewma_e6 > 0 { config.mark_ewma_e6 } else { config.hyperp_mark_e6 };
                     if mark > 0 && prev_index > 0 {
                         let last_idx_slot = config.last_hyperp_index_slot;
                         let dt = clock.slot.saturating_sub(last_idx_slot);
                         let new_index = oracle::clamp_toward_with_dt(
-                            prev_index.max(1), mark, config.oracle_price_cap_e2bps, dt,
+                            prev_index.max(1), mark, max_change_bps, dt,
                         );
                         config.last_effective_price_e6 = new_index;
                         config.last_hyperp_index_slot = clock.slot;
@@ -6980,6 +6933,8 @@ pub mod processor {
                 }
                 // Flush index WITHOUT external staleness check
                 // (the hard-timeout gate above covers mark staleness).
+                let max_change_bps = zc::engine_ref(&data)?
+                    .params.max_price_move_bps_per_slot;
                 {
                     let prev_index = config.last_effective_price_e6;
                     let mark = if config.mark_ewma_e6 > 0 { config.mark_ewma_e6 } else { config.hyperp_mark_e6 };
@@ -6987,7 +6942,7 @@ pub mod processor {
                         let last_idx_slot = config.last_hyperp_index_slot;
                         let dt = push_clock.slot.saturating_sub(last_idx_slot);
                         let new_index = oracle::clamp_toward_with_dt(
-                            prev_index.max(1), mark, config.oracle_price_cap_e2bps, dt,
+                            prev_index.max(1), mark, max_change_bps, dt,
                         );
                         config.last_effective_price_e6 = new_index;
                         config.last_hyperp_index_slot = push_clock.slot;
@@ -7041,7 +6996,7 @@ pub mod processor {
                 let clamped = oracle::clamp_oracle_price(
                     clamp_base,
                     normalized_price,
-                    config.oracle_price_cap_e2bps,
+                    max_change_bps,
                 );
                 config.hyperp_mark_e6 = clamped;
                 config.last_mark_push_slot = push_clock.slot as u128;
@@ -7053,106 +7008,6 @@ pub mod processor {
                     config.mark_min_fee, config.mark_min_fee,
                 );
                 config.mark_ewma_last_slot = push_clock.slot;
-                state::write_config(&mut data, &config);
-            }
-
-            Instruction::SetOraclePriceCap { max_change_e2bps } => {
-                accounts::expect_len(accounts, 3)?;
-                let a_admin = &accounts[0];
-                let a_slab = &accounts[1];
-                let a_clock = &accounts[2];
-
-                accounts::expect_signer(a_admin)?;
-                accounts::expect_writable(a_slab)?;
-
-                let mut data = state::slab_data_mut(a_slab)?;
-                slab_guard(program_id, a_slab, &data)?;
-                require_initialized(&data)?;
-                if zc::engine_ref(&data)?.is_resolved() {
-                    return Err(ProgramError::InvalidAccountData);
-                }
-
-                let header = state::read_header(&data);
-                require_admin(header.admin, a_admin.key)?;
-
-                let mut config = state::read_config(&data);
-                let is_hyperp = oracle::is_hyperp_mode(&config);
-                // Anti-retroactivity: capture funding rate before any config mutation (§5.5)
-                let funding_rate_e9 = compute_current_funding_rate_e9(&config);
-
-                // Hard-timeout gate: SetOraclePriceCap's Hyperp branch
-                // flushes the index and calls accrue_market_to, both
-                // of which mutate engine.last_oracle_price. After
-                // maturity, admin must not be able to shift the
-                // terminal settlement anchor — resolve through
-                // Degenerate at the engine's already-accrued P_last
-                // instead.
-                let clock = Clock::from_account_info(a_clock)?;
-                if oracle::permissionless_stale_matured(&config, clock.slot) {
-                    return Err(PercolatorError::OracleStale.into());
-                }
-
-                // Flush Hyperp index (admin path; no external staleness
-                // check — the hard-timeout gate above handles the
-                // terminal case).
-                if is_hyperp {
-                    let prev_index = config.last_effective_price_e6;
-                    let mark = if config.mark_ewma_e6 > 0 { config.mark_ewma_e6 } else { config.hyperp_mark_e6 };
-                    if mark > 0 && prev_index > 0 {
-                        let last_idx_slot = config.last_hyperp_index_slot;
-                        let dt = clock.slot.saturating_sub(last_idx_slot);
-                        let new_index = oracle::clamp_toward_with_dt(
-                            prev_index.max(1), mark, config.oracle_price_cap_e2bps, dt,
-                        );
-                        config.last_effective_price_e6 = new_index;
-                        config.last_hyperp_index_slot = clock.slot;
-                    }
-                    state::write_config(&mut data, &config);
-                    config = state::read_config(&data);
-                    // Accrue to boundary using engine's already-stored rate.
-                    let engine = zc::engine_mut(&mut data)?;
-                    // Pre-chunk catch-up so the accrue below sees
-                    // dt ≤ max_accrual_dt_slots (Finding 4).
-                    catchup_accrue(
-                        engine, clock.slot, config.last_effective_price_e6,
-                        funding_rate_e9,
-                    )?;
-                    engine.accrue_market_to(
-                        clock.slot, config.last_effective_price_e6,
-                        funding_rate_e9,
-                    ).map_err(map_risk_error)?;
-                }
-
-                // Hyperp markets must not set cap to 0 — it would freeze index
-                // smoothing (clamp_toward_with_dt returns mark unchanged when cap==0).
-                if is_hyperp && max_change_e2bps == 0 {
-                    return Err(PercolatorError::InvalidConfigParam.into());
-                }
-                // Non-zero cap must be >= per-market floor.
-                if max_change_e2bps != 0
-                    && max_change_e2bps < config.min_oracle_price_cap_e2bps
-                {
-                    return Err(PercolatorError::InvalidConfigParam.into());
-                }
-                // Non-Hyperp: cap=0 disables the external-price circuit
-                // breaker (clamp_external_price returns Pyth readings
-                // unclamped). If the admin committed to a non-zero floor
-                // at init, reject runtime cap=0 — silently turning off
-                // flash-crash protection would defeat the floor promise.
-                if !is_hyperp
-                    && max_change_e2bps == 0
-                    && config.min_oracle_price_cap_e2bps != 0
-                {
-                    return Err(PercolatorError::InvalidConfigParam.into());
-                }
-                // Hard ceiling: cap above 100% makes the circuit breaker vacuous
-                if max_change_e2bps > MAX_ORACLE_PRICE_CAP_E2BPS {
-                    return Err(PercolatorError::InvalidConfigParam.into());
-                }
-
-                config.oracle_price_cap_e2bps = max_change_e2bps;
-                // Engine v12.18.1: accrue_market_to is market-global only; the
-                // end-of-instruction lifecycle is not exposed and not needed here.
                 state::write_config(&mut data, &config);
             }
 
@@ -7181,6 +7036,9 @@ pub mod processor {
 
                 // Require admin oracle price to be set (hyperp_mark_e6 > 0)
                 let mut config = state::read_config(&data);
+                // Per-slot price-move cap (init-immutable via RiskParams).
+                let max_change_bps = zc::engine_ref(&data)?
+                    .params.max_price_move_bps_per_slot;
                 // Anti-retroactivity: capture funding rate before any config mutation (§5.5)
                 let funding_rate_e9 = compute_current_funding_rate_e9(&config);
 
@@ -7258,7 +7116,7 @@ pub mod processor {
                                 config.last_effective_price_e6 = oracle::clamp_oracle_price(
                                     config.last_effective_price_e6,
                                     fresh_oracle,
-                                    config.oracle_price_cap_e2bps,
+                                    max_change_bps,
                                 );
                                 config.last_oracle_publish_time = publish_time;
                             }
@@ -7275,15 +7133,12 @@ pub mod processor {
                             // circuit breaker protects ongoing live operation;
                             // resolution is a one-shot terminal event where
                             // the raw oracle is the right signal.
-                            // B3 fix: the spec's settlement deviation band is
+                            // The spec's settlement deviation band is
                             // `resolve_price_deviation_bps` (plain bps, max
-                            // MAX_RESOLVE_PRICE_DEVIATION_BPS=10_000), not the
-                            // oracle-update circuit breaker `oracle_price_cap_e2bps`
-                            // (e2bps, max 1_000_000). Applying the latter here would
-                            // enforce the wrong band by two orders of magnitude and
-                            // also duplicate the engine's own §9.8 step 7 check.
-                            // Drop the wrapper pre-check and let resolve_market_not_atomic
-                            // apply the canonical band with the canonical parameter.
+                            // MAX_RESOLVE_PRICE_DEVIATION_BPS=10_000), not
+                            // the per-slot price-move cap. Let
+                            // resolve_market_not_atomic apply the canonical
+                            // §9.8 step 7 band with the canonical parameter.
                         }
                         Err(e) => {
                             // Only skip guard if oracle is genuinely
@@ -7319,7 +7174,7 @@ pub mod processor {
                         let last_idx_slot = config.last_hyperp_index_slot;
                         let dt = clock.slot.saturating_sub(last_idx_slot);
                         let new_index = oracle::clamp_toward_with_dt(
-                            prev_index.max(1), mark, config.oracle_price_cap_e2bps, dt,
+                            prev_index.max(1), mark, max_change_bps, dt,
                         );
                         config.last_effective_price_e6 = new_index;
                         config.last_hyperp_index_slot = clock.slot;
@@ -7917,9 +7772,10 @@ pub mod processor {
                 let price = if is_hyperp {
                     let eng = zc::engine_ref(&data)?;
                     let last_slot = eng.current_slot;
+                    let cap_bps = eng.params.max_price_move_bps_per_slot;
                     oracle::get_engine_oracle_price_e6(
                         last_slot, clock.slot, clock.unix_timestamp,
-                        &mut config, a_oracle,
+                        &mut config, a_oracle, cap_bps,
                     )?
                 } else {
                     read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
@@ -7935,10 +7791,12 @@ pub mod processor {
                 // Realize due maintenance fees BEFORE settle so the settle's
                 // equity computation reflects post-fee capital.
                 sync_account_fee(engine, &config, user_idx, clock.slot)?;
+                let admit_threshold = Some(engine.params.maintenance_margin_bps as u128);
                 engine.settle_account_not_atomic(user_idx, price, clock.slot,
                     funding_rate_e9,
                     admit_h_min,
-                    admit_h_max)
+                    admit_h_max,
+                    admit_threshold)
                     .map_err(map_risk_error)?;
                 if !state::is_oracle_initialized(&data) {
                     state::set_oracle_initialized(&mut data);
@@ -8068,9 +7926,10 @@ pub mod processor {
                 let price = if is_hyperp {
                     let eng = zc::engine_ref(&data)?;
                     let last_slot = eng.current_slot;
+                    let cap_bps = eng.params.max_price_move_bps_per_slot;
                     oracle::get_engine_oracle_price_e6(
                         last_slot, clock.slot, clock.unix_timestamp,
-                        &mut config, a_oracle,
+                        &mut config, a_oracle, cap_bps,
                     )?
                 } else {
                     read_price_and_stamp(&mut config, a_oracle, clock.unix_timestamp, clock.slot, &mut data)?
@@ -8099,7 +7958,8 @@ pub mod processor {
                 engine.convert_released_pnl_not_atomic(user_idx, units as u128, price, clock.slot,
                     funding_rate_e9,
                     admit_h_min,
-                    admit_h_max)
+                    admit_h_max,
+                    Some(engine.params.maintenance_margin_bps as u128))
                     .map_err(map_risk_error)?;
                 if !state::is_oracle_initialized(&data) {
                     state::set_oracle_initialized(&mut data);
@@ -8356,9 +8216,10 @@ pub mod processor {
                 let fresh_price = if is_hyperp {
                     let eng = zc::engine_ref(&data)?;
                     let last_slot = eng.current_slot;
+                    let cap_bps = eng.params.max_price_move_bps_per_slot;
                     oracle::get_engine_oracle_price_e6(
                         last_slot, clock.slot, clock.unix_timestamp,
-                        &mut config, a_oracle,
+                        &mut config, a_oracle, cap_bps,
                     )?
                 } else {
                     read_price_and_stamp(

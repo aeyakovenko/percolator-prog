@@ -245,7 +245,6 @@ fn encode_init_market(fixture: &MarketFixture, crank_staleness: u64) -> Vec<u8> 
     encode_u64(0, &mut data); // initial_mark_price_e6 (0 for non-Hyperp markets)
     // Per-market admin limits (uncapped defaults for tests)
     encode_u128(0u128, &mut data); // maintenance_fee_per_slot (0 = disabled)
-    encode_u64(1_000_000, &mut data); // min_oracle_price_cap_e2bps (resolvability invariant: cap>0 satisfies guard)
     // RiskParams: warmup, maintenance_margin_bps, initial_margin_bps, trading_fee_bps
     encode_u64(0, &mut data);   // warmup_period_slots
     encode_u64(500, &mut data); // maintenance_margin_bps (must be < initial_margin_bps)
@@ -261,16 +260,18 @@ fn encode_init_market(fixture: &MarketFixture, crank_staleness: u64) -> Vec<u8> 
     encode_u128(0, &mut data);  // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    encode_u64(2, &mut data); // max_price_move_bps_per_slot (v12.19)
     encode_u16(0, &mut data); // insurance_withdraw_max_bps
     encode_u64(0, &mut data); // insurance_withdraw_cooldown_slots
 
-    encode_u64(0, &mut data); // permissionless_resolve_stale_slots
+    // v12.19: non-Hyperp needs perm_resolve > max_crank_staleness (crank_staleness arg here).
+    encode_u64(crank_staleness.saturating_add(1).max(10_000), &mut data); // permissionless_resolve_stale_slots
     encode_u64(500, &mut data); // funding_horizon_slots
     encode_u64(100, &mut data); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
     data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot
     encode_u64(0, &mut data); // mark_min_fee
-    encode_u64(0, &mut data); // force_close_delay_slots
+    encode_u64(50, &mut data); // force_close_delay_slots (required when perm_resolve>0)
     data
 }
 
@@ -291,7 +292,6 @@ fn encode_init_market_invert(
     encode_u64(0, &mut data); // initial_mark_price_e6 (0 for non-Hyperp markets)
     // Per-market admin limits (uncapped defaults for tests)
     encode_u128(0u128, &mut data); // maintenance_fee_per_slot (0 = disabled)
-    encode_u64(1_000_000, &mut data); // min_oracle_price_cap_e2bps (resolvability invariant: cap>0 satisfies guard)
     // RiskParams: warmup, maintenance_margin_bps, initial_margin_bps, trading_fee_bps
     encode_u64(0, &mut data);    // warmup_period_slots
     encode_u64(500, &mut data);  // maintenance_margin_bps (must be < initial_margin_bps)
@@ -307,16 +307,18 @@ fn encode_init_market_invert(
     encode_u128(0, &mut data);   // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    encode_u64(2, &mut data); // max_price_move_bps_per_slot (v12.19)
     encode_u16(0, &mut data); // insurance_withdraw_max_bps
     encode_u64(0, &mut data); // insurance_withdraw_cooldown_slots
 
-    encode_u64(0, &mut data); // permissionless_resolve_stale_slots
+    // v12.19: non-Hyperp needs perm_resolve > max_crank_staleness.
+    encode_u64(crank_staleness.saturating_add(1).max(10_000), &mut data); // permissionless_resolve_stale_slots
     encode_u64(500, &mut data); // funding_horizon_slots
     encode_u64(100, &mut data); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
     data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot
     encode_u64(0, &mut data); // mark_min_fee
-    encode_u64(0, &mut data); // force_close_delay_slots
+    encode_u64(50, &mut data); // force_close_delay_slots
     data
 }
 
@@ -477,8 +479,8 @@ fn test_struct_sizes() {
     println!("Slab offset of last_effective_price_e6: {}", percolator_prog::constants::HEADER_LEN + offset_of!(state::MarketConfig, last_effective_price_e6));
     println!("Offset of hyperp_mark_e6: {}", offset_of!(state::MarketConfig, hyperp_mark_e6));
     println!("Slab offset of hyperp_mark_e6: {}", percolator_prog::constants::HEADER_LEN + offset_of!(state::MarketConfig, hyperp_mark_e6));
-    println!("Offset of oracle_price_cap_e2bps: {}", offset_of!(state::MarketConfig, oracle_price_cap_e2bps));
-    println!("Slab offset of oracle_price_cap_e2bps: {}", percolator_prog::constants::HEADER_LEN + offset_of!(state::MarketConfig, oracle_price_cap_e2bps));
+    // oracle_price_cap_e2bps and min_oracle_price_cap_e2bps removed in v12.19 —
+    // per-slot price-move cap is now in RiskParams.max_price_move_bps_per_slot.
     println!("Offset of max_staleness_secs: {}", offset_of!(state::MarketConfig, max_staleness_secs));
     println!("Slab offset of max_staleness_secs: {}", percolator_prog::constants::HEADER_LEN + offset_of!(state::MarketConfig, max_staleness_secs));
     println!("Offset of RiskEngine.side_mode_long: {}", offset_of!(RiskEngine, side_mode_long));
@@ -486,8 +488,6 @@ fn test_struct_sizes() {
     // MarketConfig field offsets for admin limits test
     println!("Offset of maintenance_fee_per_slot: {}", offset_of!(state::MarketConfig, maintenance_fee_per_slot));
     println!("Slab offset of maintenance_fee_per_slot: {}", percolator_prog::constants::HEADER_LEN + offset_of!(state::MarketConfig, maintenance_fee_per_slot));
-    println!("Offset of min_oracle_price_cap_e2bps: {}", offset_of!(state::MarketConfig, min_oracle_price_cap_e2bps));
-    println!("Slab offset of min_oracle_price_cap_e2bps: {}", percolator_prog::constants::HEADER_LEN + offset_of!(state::MarketConfig, min_oracle_price_cap_e2bps));
     println!("Offset of mark_ewma_e6: {}", offset_of!(state::MarketConfig, mark_ewma_e6));
     println!("Slab offset of mark_ewma_e6: {}", percolator_prog::constants::HEADER_LEN + offset_of!(state::MarketConfig, mark_ewma_e6));
     println!("Offset of last_oracle_price: {}", offset_of!(RiskEngine, last_oracle_price));

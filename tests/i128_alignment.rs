@@ -26,11 +26,11 @@ use std::path::PathBuf;
 // SLAB_LEN for production BPF (MAX_ACCOUNTS=4096)
 // BPF-target SLAB_LEN, cfg-gated by deployment-size feature.
 #[cfg(all(feature = "small", not(feature = "medium")))]
-const SLAB_LEN: usize = 96664;
+const SLAB_LEN: usize = 96688;
 #[cfg(all(feature = "medium", not(feature = "small")))]
-const SLAB_LEN: usize = 382456;
+const SLAB_LEN: usize = 382480;
 #[cfg(not(any(feature = "small", feature = "medium")))]
-const SLAB_LEN: usize = 1525624;
+const SLAB_LEN: usize = 1525648;
 #[cfg(all(feature = "small", not(feature = "medium")))]
 const MAX_ACCOUNTS: usize = 256;
 #[cfg(all(feature = "medium", not(feature = "small")))]
@@ -397,9 +397,9 @@ fn encode_init_market(admin: &Pubkey, mint: &Pubkey, feed_id: &[u8; 32]) -> Vec<
     data.push(0u8); // invert
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6 (0 for non-Hyperp markets)
-    // Per-market admin limits (within engine bounds)
+    // v12.19: `min_oracle_price_cap_e2bps` field dropped; runtime cap moved to
+    // RiskParams as `max_price_move_bps_per_slot` (immutable init-time).
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
-    data.extend_from_slice(&1_000_000u64.to_le_bytes()); // min_oracle_price_cap_e2bps (resolvability invariant)
     // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min (warmup_period_slots)
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
@@ -408,22 +408,23 @@ fn encode_init_market(admin: &Pubkey, mint: &Pubkey, feed_id: &[u8; 32]) -> Vec<
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
-    data.extend_from_slice(&u64::MAX.to_le_bytes()); // max_crank_staleness_slots
+    data.extend_from_slice(&1800u64.to_le_bytes()); // max_crank_staleness_slots (< perm_resolve)
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
     data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
     data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&2u64.to_le_bytes()); // max_price_move_bps_per_slot (v12.19)
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
-    data.extend_from_slice(&0u64.to_le_bytes()); // permissionless_resolve_stale_slots
+    data.extend_from_slice(&10_000u64.to_le_bytes()); // permissionless_resolve_stale_slots (v12.19 invariant)
     data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
     data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot
     data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee
-    data.extend_from_slice(&0u64.to_le_bytes()); // force_close_delay_slots
+    data.extend_from_slice(&50u64.to_le_bytes()); // force_close_delay_slots (perm_resolve>0 ⇒ >0)
     data
 }
 
