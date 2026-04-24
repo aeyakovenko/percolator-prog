@@ -2193,7 +2193,7 @@ fn test_settle_account_blocked_on_resolved() {
     // Resolve the market at a fresh external price.
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.set_slot_and_price(300, 138_000_000);
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     assert!(env.is_market_resolved(), "Market must be resolved");
 
     // SettleAccount on a resolved market should fail.
@@ -2490,7 +2490,7 @@ fn test_convert_released_pnl_blocked_on_resolved() {
     // Resolve the market at a fresh external price.
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.set_slot_and_price(300, 138_000_000);
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     assert!(env.is_market_resolved(), "Market must be resolved");
 
     // ConvertReleasedPnl should fail on resolved market.
@@ -2542,7 +2542,7 @@ fn test_init_user_blocked_on_resolved() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     assert!(env.is_market_resolved());
 
     let user = Keypair::new();
@@ -2617,7 +2617,7 @@ fn test_init_lp_blocked_on_resolved() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     assert!(env.is_market_resolved());
 
     let lp = Keypair::new();
@@ -2721,7 +2721,7 @@ fn test_reclaim_blocked_on_resolved() {
     // Resolve the market at a fresh external price.
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.set_slot_and_price(200, 138_000_000);
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     assert!(env.is_market_resolved());
 
     let result = env.try_reclaim_empty_account(user_idx);

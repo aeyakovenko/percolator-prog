@@ -430,7 +430,7 @@ fn test_attack_admin_op_as_user() {
     );
 
     // ResolveMarket
-    let result = env.try_resolve_market(&attacker);
+    let result = env.try_resolve_market(&attacker, 0);
     assert!(
         result.is_err(),
         "ATTACK: Non-admin ResolveMarket should fail"
@@ -1094,7 +1094,7 @@ fn test_attack_deposit_after_resolution() {
 
     env.crank();
     // Resolve market
-    let result = env.try_resolve_market(&admin);
+    let result = env.try_resolve_market(&admin, 0);
     assert!(result.is_ok(), "Admin should resolve: {:?}", result);
 
     // Try to deposit after resolution
@@ -1120,7 +1120,7 @@ fn test_attack_init_user_after_resolution() {
     // Crank to establish real last_oracle_price before resolution
     env.crank();
     // Resolve market
-    let result = env.try_resolve_market(&admin);
+    let result = env.try_resolve_market(&admin, 0);
     assert!(result.is_ok(), "Admin should resolve: {:?}", result);
 
     // Try to create new user after resolution
@@ -2624,7 +2624,7 @@ fn test_attack_deposit_resolve_withdraw_sequence() {
     // Setup oracle and resolve
     // authority push removed.
     env.crank();
-    env.try_resolve_market(&admin)
+    env.try_resolve_market(&admin, 0)
         .expect("market resolution setup must succeed");
 
     // Can't deposit more
@@ -2910,7 +2910,7 @@ fn test_attack_init_lp_after_resolution() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     // authority push removed.
     env.crank();
-    env.try_resolve_market(&admin)
+    env.try_resolve_market(&admin, 0)
         .expect("market resolution setup must succeed");
 
     let resolved_before = env.is_market_resolved();
@@ -3234,7 +3234,7 @@ fn test_attack_hyperp_init_lp_after_resolution() {
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
 
     // Resolve market
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     let resolved_before = env.is_market_resolved();
     let used_before = env.read_num_used_accounts();
     let vault_before = env.vault_balance();
@@ -3599,11 +3599,11 @@ fn test_attack_double_resolve_market() {
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
 
     // First resolve
-    let result = env.try_resolve_market(&admin);
+    let result = env.try_resolve_market(&admin, 0);
     assert!(result.is_ok(), "First resolve should succeed");
 
     // Second resolve should fail
-    let result = env.try_resolve_market(&admin);
+    let result = env.try_resolve_market(&admin, 0);
     assert!(result.is_err(), "ATTACK: Double resolve succeeded!");
 }
 
@@ -6915,7 +6915,7 @@ fn test_attack_resolve_then_withdraw_capital() {
     env.crank();
 
     // Resolve market (no positions open)
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Withdrawals are blocked on resolved markets. Use CloseAccount instead.
     let user_cap = env.read_account_capital(user_idx);
@@ -7028,7 +7028,7 @@ fn test_attack_non_admin_resolve_rejected() {
     let spl_vault_before = env.vault_balance();
     let engine_vault_before = env.read_engine_vault();
 
-    let result = env.try_resolve_market(&attacker);
+    let result = env.try_resolve_market(&attacker, 0);
     assert!(
         result.is_err(),
         "ATTACK: Non-admin resolve should be rejected!"
@@ -9896,7 +9896,7 @@ fn test_attack_close_slab_clean_shutdown() {
     // Resolve market before CloseSlab (lifecycle requirement)
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     // authority push removed.
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Close slab should succeed
     let result = env.try_close_slab();
@@ -10803,7 +10803,7 @@ fn test_attack_update_config_after_resolution() {
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .unwrap();
     env.try_push_oracle_price(&admin, 140_000_000, 100).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     let insurance_before = env.read_insurance_balance();
     let spl_vault_before = env.vault_balance();
@@ -10860,7 +10860,7 @@ fn test_attack_push_oracle_after_resolution_rejected() {
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .unwrap();
     env.try_push_oracle_price(&admin, 140_000_000, 100).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Config offset for hyperp_mark_e6
     const AUTH_PRICE_OFF: usize = 312; // HEADER_LEN(72) + offset_of!(MarketConfig, hyperp_mark_e6)(176)
@@ -10902,7 +10902,7 @@ fn test_attack_set_oracle_authority_after_resolution_rejected() {
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .unwrap();
     env.try_push_oracle_price(&admin, 140_000_000, 100).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     const AUTHORITY_OFF: usize = 392;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;

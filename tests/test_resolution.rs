@@ -28,7 +28,7 @@ fn test_resolved_market_blocks_new_activity() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     // authority push removed — fresh Pyth is used directly.
     // Resolve market
-    let result = env.try_resolve_market(&admin);
+    let result = env.try_resolve_market(&admin, 0);
     assert!(result.is_ok(), "ResolveMarket should succeed");
     assert!(env.is_market_resolved(), "Market must be resolved after ResolveMarket");
 
@@ -89,7 +89,7 @@ fn test_resolved_market_allows_user_withdrawal() {
     assert!(capital_before > 0);
 
     // Resolve market
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     println!("Market resolved");
 
     // Crank to settle
@@ -138,7 +138,7 @@ fn test_attack_trade_after_market_resolved() {
     env.crank();
 
     // Resolve the market
-    let result = env.try_resolve_market(&admin);
+    let result = env.try_resolve_market(&admin, 0);
     assert!(
         result.is_ok(),
         "Admin should be able to resolve market: {:?}",
@@ -205,12 +205,12 @@ fn test_attack_double_resolution() {
     env.crank();
 
     // First resolution
-    let result = env.try_resolve_market(&admin);
+    let result = env.try_resolve_market(&admin, 0);
     assert!(result.is_ok(), "First resolve should succeed: {:?}", result);
     assert!(env.is_market_resolved(), "Market should be resolved");
 
     // Second resolution - should fail
-    let result = env.try_resolve_market(&admin);
+    let result = env.try_resolve_market(&admin, 0);
     assert!(result.is_err(), "ATTACK: Double resolution should fail");
 }
 
@@ -239,7 +239,7 @@ fn test_attack_withdraw_between_resolution_and_force_close() {
     env.crank();
 
     // Resolve market
-    let result = env.try_resolve_market(&admin);
+    let result = env.try_resolve_market(&admin, 0);
     assert!(result.is_ok(), "Should resolve: {:?}", result);
 
     // Withdrawals are blocked on resolved markets. Users must use CloseAccount.
@@ -269,7 +269,7 @@ fn test_attack_resolve_market_non_admin() {
     // Non-admin tries to resolve
     let attacker = Keypair::new();
     env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
-    let result = env.try_resolve_market(&attacker);
+    let result = env.try_resolve_market(&attacker, 0);
     assert!(
         result.is_err(),
         "ATTACK: Non-admin was able to resolve market!"
@@ -567,7 +567,7 @@ fn test_honest_participants_standard_market_full_lifecycle() {
     // Resolve market before CloseSlab (lifecycle requirement)
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     // authority push removed — fresh Pyth is used directly.
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Close slab (insurance=0, all accounts closed, market resolved)
     let result = env.try_close_slab();
@@ -593,7 +593,7 @@ fn test_liquidate_blocked_on_resolved_market() {
     env.set_slot(50);
     env.crank();
 
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Capture state before rejected operation
     let position_before = env.read_account_position(user_idx);
@@ -644,7 +644,7 @@ fn test_resolved_crank_dust_base_stays_zero_with_aligned_deposits() {
     env.close_account(&user, user_idx);
 
     // authority push removed — fresh Pyth is used directly.
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     env.set_slot(300);
     env.crank();
@@ -698,7 +698,7 @@ fn test_admin_force_close_admin_only() {
     env.deposit(&user, user_idx, 1_000_000_000);
 
     // Resolve the market
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     assert!(env.is_market_resolved());
 
     // Crank to settle
@@ -824,7 +824,7 @@ fn test_hyperp_full_lifecycle_init_to_close_slab() {
 
     // 8. ResolveMarket
     env.try_push_oracle_price(&admin, 115_000_000, 150).expect("settlement price");
-    env.try_resolve_market(&admin).expect("ResolveMarket");
+    env.try_resolve_market(&admin, 0).expect("ResolveMarket");
     assert!(env.is_market_resolved());
     println!("8. Market resolved at $115");
 
@@ -889,7 +889,7 @@ fn test_resolved_crank_is_idempotent() {
     env.crank();
 
     // Resolve
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     assert!(env.is_market_resolved());
 
     // Snapshot slab state after resolution
@@ -983,7 +983,7 @@ fn test_resolve_permissionless_already_admin_resolved() {
     // authority push removed — fresh Pyth is used directly.
     env.set_slot(100);
     env.crank();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     assert!(env.is_market_resolved());
 
     // Permissionless attempt on already-resolved market
@@ -1461,7 +1461,7 @@ fn test_force_close_resolved_basic() {
     env.set_slot(200);
     env.crank();
     // authority push removed — fresh Pyth is used directly.
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     assert!(env.is_market_resolved());
 
     // Crank resolved to settle
@@ -1512,7 +1512,7 @@ fn test_force_close_resolved_rejects_before_delay() {
     env.set_slot(200);
     env.crank();
     // authority push removed — fresh Pyth is used directly.
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Try immediately — too early (resolution at ~300, delay=500)
     env.set_slot(400);
@@ -1565,7 +1565,7 @@ fn test_resolve_market_passes_fresh_live_oracle_to_engine() {
 
     // Resolve at a fresh external oracle read.
     env.set_slot_and_price(200, 138_000_000);
-    let result = env.try_resolve_market(&admin);
+    let result = env.try_resolve_market(&admin, 0);
     assert!(result.is_ok(), "ResolveMarket with fresh oracle should succeed: {:?}", result);
     assert!(env.is_market_resolved(), "Market must be resolved");
 }
@@ -1586,7 +1586,7 @@ fn test_resolve_market_before_first_crank_with_fresh_oracle() {
     env.set_slot_and_price(100, 138_000_000);
     env.crank();
 
-    let result = env.try_resolve_market(&admin);
+    let result = env.try_resolve_market(&admin, 0);
     assert!(result.is_ok(),
         "ResolveMarket should succeed with fresh oracle: {:?}", result);
 }
@@ -2014,12 +2014,12 @@ fn test_admin_resolve_after_maturity_uses_degenerate_p_last() {
         ..Clock::default()
     });
 
-    // Admin ResolveMarket must succeed via the Degenerate branch —
-    // hyperp_mark_e6 == 0 (never pushed), so the old path would
-    // return InvalidAccountData, but the new Degenerate fast-path
-    // runs first and succeeds at engine.last_oracle_price.
-    env.try_resolve_market(&admin)
-        .expect("admin ResolveMarket past maturity must succeed via Degenerate arm");
+    // Past maturity Ordinary (mode=0) must reject — callers switch to
+    // Degenerate (mode=1) explicitly under the v12.19 mode split.
+    env.try_resolve_market(&admin, 0)
+        .expect_err("Ordinary ResolveMarket past maturity must reject");
+    env.try_resolve_market(&admin, 1)
+        .expect("Degenerate ResolveMarket past maturity must succeed");
     assert!(env.is_market_resolved(), "market resolved");
 
     // Settlement anchor: engine.last_oracle_price (seeded by crank at

@@ -731,7 +731,8 @@ fn encode_push_oracle_price(price_e6: u64, timestamp: i64) -> Vec<u8> {
 }
 
 fn encode_resolve_market() -> Vec<u8> {
-    vec![19u8]
+    // Ordinary mode (0); live oracle required.
+    vec![19u8, 0u8]
 }
 
 fn encode_withdraw_insurance() -> Vec<u8> {

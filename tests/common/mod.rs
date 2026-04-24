@@ -1745,8 +1745,10 @@ pub fn encode_close_slab() -> Vec<u8> {
     vec![13u8] // Instruction tag for CloseSlab
 }
 
-pub fn encode_resolve_market() -> Vec<u8> {
-    vec![19u8]
+pub fn encode_resolve_market(mode: u8) -> Vec<u8> {
+    let mut data = vec![19u8];
+    data.push(mode);
+    data
 }
 
 pub fn encode_resolve_permissionless() -> Vec<u8> {
@@ -3012,8 +3014,9 @@ impl TestEnv {
             .map_err(|e| format!("{:?}", e))
     }
 
-    /// Try ResolveMarket instruction (admin only)
-    pub fn try_resolve_market(&mut self, admin: &Keypair) -> Result<(), String> {
+    /// Try ResolveMarket instruction (admin only). `mode`: 0 = Ordinary,
+    /// 1 = Degenerate.
+    pub fn try_resolve_market(&mut self, admin: &Keypair, mode: u8) -> Result<(), String> {
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
@@ -3022,7 +3025,7 @@ impl TestEnv {
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
             ],
-            data: encode_resolve_market(),
+            data: encode_resolve_market(mode),
         };
         let tx = Transaction::new_signed_with_payer(
             &[cu_ix(), ix],
@@ -4137,7 +4140,7 @@ impl TradeCpiTestEnv {
             .map_err(|e| format!("{:?}", e))
     }
 
-    pub fn try_resolve_market(&mut self, admin: &Keypair) -> Result<(), String> {
+    pub fn try_resolve_market(&mut self, admin: &Keypair, mode: u8) -> Result<(), String> {
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
@@ -4146,7 +4149,7 @@ impl TradeCpiTestEnv {
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
             ],
-            data: encode_resolve_market(),
+            data: encode_resolve_market(mode),
         };
 
         let tx = Transaction::new_signed_with_payer(

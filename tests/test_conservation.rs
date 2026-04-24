@@ -285,7 +285,7 @@ fn test_attack_premarket_force_close_pnl_conservation() {
 
     // Resolve at different price to create PnL
     env.try_push_oracle_price(&admin, 1_500_000, 2000).unwrap(); // 50% up
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Force-close via crank (settles PnL only; positions require AdminForceCloseAccount)
     env.set_slot(300);
@@ -574,7 +574,7 @@ fn test_attack_premarket_partial_force_close_conservation() {
 
     // Resolve market
     env.try_push_oracle_price(&admin, 1_200_000, 2000).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Single crank: may only force-close a batch (64 accounts max)
     env.set_slot(200);
@@ -2355,7 +2355,7 @@ fn test_binary_market_complete_lifecycle_conservation() {
     // Resolve at $1.50 (user_a profits, user_b loses)
     env.try_push_oracle_price(&admin, 1_500_000, 2000)
         .expect("resolution oracle push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Settle PnL via crank (positions require explicit AdminForceCloseAccount)
     env.set_slot(200);

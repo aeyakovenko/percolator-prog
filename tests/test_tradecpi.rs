@@ -600,7 +600,7 @@ fn test_premarket_resolution_full_lifecycle() {
     println!("Admin pushed final price: 1e-6 (NO outcome)");
 
     // Step 2: Admin resolves market
-    let result = env.try_resolve_market(&admin);
+    let result = env.try_resolve_market(&admin, 0);
     assert!(result.is_ok(), "ResolveMarket should succeed: {:?}", result);
     println!("Market resolved");
 
@@ -695,7 +695,7 @@ fn test_withdraw_insurance_requires_positions_closed() {
     // Resolve market WITHOUT cranking to close positions
     env.try_push_oracle_price(&admin, 500_000, 2000)
         .expect("resolution oracle push must succeed"); // Price = 0.5
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     println!("Market resolved but positions not yet closed");
 
     // Try to withdraw insurance - should fail (positions still open)
@@ -805,7 +805,7 @@ fn test_premarket_paginated_force_close() {
     // Resolve market
     env.try_push_oracle_price(&admin, 500_000, 2000)
         .expect("resolution oracle push must succeed"); // Final price = 0.5
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     println!("Market resolved");
 
     // The resolved crank now only settles PnL (paginated, BATCH_SIZE=8 per crank).
@@ -905,7 +905,7 @@ fn test_premarket_binary_outcome_price_zero() {
     // Outcome: NO wins (price = 1e-6, essentially zero but nonzero for force-close)
     env.try_push_oracle_price(&admin, 1, 2000)
         .expect("resolution oracle push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     println!("Market resolved at price = 1e-6 (NO wins)");
 
     env.set_slot(200);
@@ -971,7 +971,7 @@ fn test_premarket_binary_outcome_price_one() {
     // Outcome: YES wins (price = 1.0 = 1_000_000 in e6)
     env.try_push_oracle_price(&admin, 1_000_000, 2000)
         .expect("resolution oracle push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     println!("Market resolved at price = 1.0 (YES wins)");
 
     env.set_slot(200);
@@ -1069,7 +1069,7 @@ fn test_premarket_force_close_cu_benchmark() {
     // Resolve market
     env.try_push_oracle_price(&admin, 500_000, 2000)
         .expect("resolution oracle push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     println!("Market resolved");
 
     // Run force-close crank and capture CU consumption
@@ -1255,7 +1255,7 @@ fn test_vulnerability_stale_pnl_pos_tot_after_force_close() {
     env.crank(); // fresh crank required before PushHyperpMark on hyperp
     env.try_push_oracle_price(&admin, 2_000_000, 200)
         .expect("resolution oracle push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     println!("Market resolved at price 2.0");
 
     // The resolved crank settles PnL via touch_account_full (uses set_pnl).
@@ -1682,7 +1682,7 @@ fn test_attack_trade_after_force_close() {
     env.crank(); // fresh crank required before PushHyperpMark on hyperp
     env.try_push_oracle_price(&admin, 1_000_000, 200)
         .expect("oracle price push must succeed");
-    env.try_resolve_market(&admin)
+    env.try_resolve_market(&admin, 0)
         .expect("market resolution setup must succeed");
     env.set_slot(300);
     env.crank();
@@ -1895,7 +1895,7 @@ fn test_attack_premarket_withdraw_before_force_close() {
 
     // Resolve market
     env.try_push_oracle_price(&admin, 1_000_000, 2000).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Try to withdraw all capital before force-close completes
     // This should either fail (margin check) or be limited
@@ -1945,7 +1945,7 @@ fn test_attack_premarket_extra_cranks_idempotent() {
 
     // Resolve and force-close
     env.try_push_oracle_price(&admin, 1_500_000, 2000).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     env.set_slot(200);
     env.crank();
@@ -2047,7 +2047,7 @@ fn test_attack_premarket_resolve_extreme_high_price() {
     }
 
     // Resolve at whatever price we reached
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Force-close: should handle extreme PnL without panicking
     env.set_slot(5000);
@@ -2090,7 +2090,7 @@ fn test_attack_withdraw_insurance_non_admin() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_000_000_000);
 
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     env.set_slot(100);
     env.crank();
 
@@ -2169,7 +2169,7 @@ fn test_attack_double_withdraw_insurance() {
 
     // Resolve and force-close
     env.try_push_oracle_price(&admin, 1_000_000, 2000).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     env.set_slot(200);
     env.crank();
 
@@ -2233,7 +2233,7 @@ fn test_attack_tradecpi_after_resolution() {
     env.crank();
 
     // Resolve market
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     let user_cap_before = env.read_account_capital(user_idx);
     let lp_cap_before = env.read_account_capital(lp_idx);
     let user_pos_before = env.read_account_position(user_idx);
@@ -2291,7 +2291,7 @@ fn test_attack_hyperp_deposit_after_resolution() {
     env.deposit(&user, user_idx, 1_000_000_000);
 
     // Resolve
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     let user_cap_before = env.read_account_capital(user_idx);
     let vault_before = env.read_vault();
     let used_before = env.read_num_used_accounts();
@@ -2499,7 +2499,7 @@ fn test_attack_lp_close_account_with_pnl_after_force_close() {
 
     // Resolve at different price (creates PnL)
     env.try_push_oracle_price(&admin, 1_500_000, 2000).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     env.set_slot(200);
     env.crank();
@@ -2717,7 +2717,7 @@ fn test_attack_close_slab_before_insurance_withdrawal() {
 
     // Resolve and force-close
     env.try_push_oracle_price(&admin, 1_000_000, 2000).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     env.set_slot(200);
     env.crank();
 
@@ -3154,7 +3154,7 @@ fn test_attack_premarket_paginated_force_close() {
 
     // Resolve at same price to minimize PnL complexity
     env.try_push_oracle_price(&admin, 1_000_000, 2000).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Settle PnL via multiple cranks (paginated)
     for slot in (200..=400).step_by(50) {
@@ -3224,7 +3224,7 @@ fn test_attack_force_close_pnl_accuracy() {
 
     // Resolve at 2x price
     env.try_push_oracle_price(&admin, 2_000_000, 2000).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Settle PnL via cranks
     for slot in (200..=500).step_by(50) {
@@ -3369,7 +3369,7 @@ fn test_attack_withdraw_insurance_before_force_close() {
     );
 
     // Resolve
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Try to withdraw insurance BEFORE force-closing positions
     env.set_slot(200);
@@ -3429,7 +3429,7 @@ fn test_binary_market_close_account_warmup_delay() {
     // Resolve at higher price (user profits)
     env.try_push_oracle_price(&admin, 1_500_000, 2000)
         .expect("resolution oracle push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Settle PnL via crank; positions require explicit AdminForceCloseAccount
     env.set_slot(200);
@@ -3510,7 +3510,7 @@ fn test_binary_market_negative_pnl_close_immediate() {
     // Resolve at LOWER price (user loses)
     env.try_push_oracle_price(&admin, 500_000, 2000)
         .expect("resolution oracle push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     env.set_slot(200);
     env.crank();
@@ -3589,7 +3589,7 @@ fn test_binary_market_force_close_pnl_correctness() {
     let settlement_price: u64 = 2_000_000;
     env.try_push_oracle_price(&admin, settlement_price, 3000)
         .expect("resolution oracle push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     env.set_slot(200);
     env.crank();
@@ -3654,7 +3654,7 @@ fn test_binary_market_force_close_zero_position_noop() {
     let pnl_before = env.read_account_pnl(user_idx);
 
     // Resolve and force-close
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     env.set_slot(200);
     env.crank();
 
@@ -3721,7 +3721,7 @@ fn test_admin_force_close_account_happy_path() {
     // Resolve market
     env.try_push_oracle_price(&admin, 1_000_000, 2000)
         .expect("resolution oracle push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Crank settles PnL; positions require explicit AdminForceCloseAccount
     env.set_slot(200);
@@ -3827,7 +3827,7 @@ fn test_admin_force_close_account_requires_admin() {
     env.deposit(&user, user_idx, 1_000_000_000);
 
     // Resolve
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     env.set_slot(200);
     env.crank();
 
@@ -3915,7 +3915,7 @@ fn test_admin_force_close_account_requires_zero_position() {
     // Resolve but do NOT crank (positions still open)
     env.try_push_oracle_price(&admin, 1_000_000, 2000)
         .expect("oracle price push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     let used_before = env.read_num_used_accounts();
 
@@ -3983,7 +3983,7 @@ fn test_admin_force_close_account_with_positive_pnl() {
     // Price goes up → user profits
     env.try_push_oracle_price(&admin, 2_000_000, 2000)
         .expect("oracle price push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     env.set_slot(200);
     env.crank();
@@ -4050,7 +4050,7 @@ fn test_admin_force_close_account_with_negative_pnl() {
     // Price drops → user loses
     env.try_push_oracle_price(&admin, 1_000_000, 2000)
         .expect("oracle price push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     env.set_slot(200);
     env.crank();
@@ -4124,7 +4124,7 @@ fn test_admin_force_close_account_enables_close_slab() {
     // Resolve and force-close positions
     env.try_push_oracle_price(&admin, 1_000_000, 2000)
         .expect("oracle price push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     env.set_slot(200);
     env.crank();
 
@@ -4206,7 +4206,7 @@ fn test_honest_user_close_after_force_close_positive_pnl() {
     // Price doubles → user profits
     env.try_push_oracle_price(&admin, 2_000_000, 2000)
         .expect("oracle price push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Force-close positions via crank
     env.set_slot(200);
@@ -4276,7 +4276,7 @@ fn test_honest_user_close_after_force_close_negative_pnl() {
     // Price drops to 1.0 → user loses
     env.try_push_oracle_price(&admin, 1_000_000, 2000)
         .expect("oracle price push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     env.set_slot(200);
     env.crank();
@@ -4343,7 +4343,7 @@ fn test_honest_participants_full_lifecycle() {
     // Resolve at same price — PnL should be ~0 for both
     env.try_push_oracle_price(&admin, 1_000_000, 2000)
         .expect("oracle price push must succeed");
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     env.set_slot(200);
     env.crank();
@@ -4544,7 +4544,7 @@ fn test_full_market_shutdown_lifecycle() {
 
     // Step 2: Resolve market
     env.try_push_oracle_price(&admin, 1_200_000, 2000).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Step 3: Crank to settle PnL at settlement price
     env.set_slot(200);
@@ -4604,7 +4604,7 @@ fn test_insurance_withdraw_resolved_requires_positions_closed() {
     assert_ne!(env.read_account_position(user_idx), 0);
 
     env.try_push_oracle_price(&admin, 1_000_000, 2000).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     let r = env.try_withdraw_insurance(&admin);
     assert!(r.is_err(), "Resolved withdrawal must fail with open positions");
@@ -4645,7 +4645,7 @@ fn test_resolved_close_settles_before_closing() {
     env.crank();
 
     // Resolve market at 2x price
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // Close account WITHOUT cranking the resolved market first.
     // Before the fix, this skipped touch_account_full, meaning ADL/mark
@@ -4802,7 +4802,7 @@ fn test_resolved_close_with_inline_touch() {
     env.crank();
 
     // Resolve at $2 — but do NOT run resolved crank
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
 
     // User closes directly — touch_account_full runs inline at settlement price.
     // This tests that touch succeeds even without prior resolved crank.
@@ -4843,7 +4843,7 @@ fn test_resolved_close_payout_with_and_without_crank() {
         env.set_slot(200);
         env.crank();
 
-        env.try_resolve_market(&admin).unwrap();
+        env.try_resolve_market(&admin, 0).unwrap();
 
         // Crank the resolved market FIRST
         env.set_slot(300);
@@ -4880,7 +4880,7 @@ fn test_resolved_close_payout_with_and_without_crank() {
         env.set_slot(200);
         env.crank();
 
-        env.try_resolve_market(&admin).unwrap();
+        env.try_resolve_market(&admin, 0).unwrap();
 
         // Do NOT crank — close directly (inline touch)
         let capital_before = env.read_account_capital(user_idx);

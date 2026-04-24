@@ -194,7 +194,7 @@ fn test_attack_withdraw_insurance_with_open_positions() {
     env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
 
     // Resolve market
-    let result = env.try_resolve_market(&admin);
+    let result = env.try_resolve_market(&admin, 0);
     assert!(result.is_ok(), "Should resolve: {:?}", result);
 
     let user_pos_before = env.read_account_position(user_idx);
@@ -300,7 +300,7 @@ fn test_attack_topup_insurance_after_resolution() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.set_slot(100);
     env.crank();
-    env.try_resolve_market(&admin)
+    env.try_resolve_market(&admin, 0)
         .expect("market resolution setup must succeed");
 
     let insurance_before = env.read_insurance_balance();
@@ -914,7 +914,7 @@ fn test_withdraw_insurance_decrements_engine_vault() {
 
     // Setup oracle authority and push price (required for ResolveMarket)
     // Resolve market (premarket resolution)
-    let result = env.try_resolve_market(&admin);
+    let result = env.try_resolve_market(&admin, 0);
     assert!(result.is_ok(), "Resolve should succeed: {:?}", result);
     assert!(env.is_market_resolved(), "Market should be resolved");
 
@@ -1064,7 +1064,7 @@ fn test_top_up_insurance_blocked_on_resolved() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
-    env.try_resolve_market(&admin).unwrap();
+    env.try_resolve_market(&admin, 0).unwrap();
     assert!(env.is_market_resolved());
 
     let payer = Keypair::new();
@@ -1599,7 +1599,7 @@ fn test_withdraw_limited_operator_cannot_call_tag_20() {
     // tag 20 would succeed for insurance_authority, but not for operator.
     env.set_slot_and_price(200, 1_000_000);
     env.crank();
-    env.try_resolve_market(&admin).expect("admin resolves");
+    env.try_resolve_market(&admin, 0).expect("admin resolves");
 
     // Operator attempts tag 20: must fail (auth mismatch).
     let bypass = env.try_withdraw_insurance(&operator);
@@ -1684,7 +1684,7 @@ fn test_withdraw_limited_resolved_market_rejects() {
 
     env.set_slot(100);
     env.crank();
-    env.try_resolve_market(&admin)
+    env.try_resolve_market(&admin, 0)
         .expect("admin can resolve live market");
 
     let result = send_withdraw_limited(&mut env, &admin, 100);

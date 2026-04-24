@@ -1358,8 +1358,13 @@ pub mod ix {
             timestamp: i64,
         },
         /// Resolve market: force-close all positions at admin oracle price, enter withdraw-only mode.
-        /// Admin only. Uses hyperp_mark_e6 as settlement price.
-        ResolveMarket,
+        /// Admin only. `mode` selects the §9.8 settlement arm explicitly:
+        ///   0 = Ordinary   (live inputs; rejected when the oracle is stale)
+        ///   1 = Degenerate (settle at engine.last_oracle_price, rate = 0;
+        ///                    wrapper's canonical dead-oracle terminal path).
+        ResolveMarket {
+            mode: u8,
+        },
         /// Withdraw insurance fund balance (UNBOUNDED). Gated by
         /// `header.insurance_authority`; requires market resolved +
         /// all accounts closed. For live, bounded extraction see
@@ -1717,7 +1722,15 @@ pub mod ix {
                         timestamp,
                     })
                 }
-                19 => Ok(Instruction::ResolveMarket),
+                19 => {
+                    // ResolveMarket { mode: u8 }
+                    //   mode = 0 → Ordinary, mode = 1 → Degenerate
+                    let mode = read_u8(&mut rest)?;
+                    if mode > 1 {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
+                    Ok(Instruction::ResolveMarket { mode })
+                }
                 20 => Ok(Instruction::WithdrawInsurance),
                 21 => {
                     let user_idx = read_u16(&mut rest)?;
@@ -7124,8 +7137,12 @@ pub mod processor {
                 state::write_config(&mut data, &config);
             }
 
-            Instruction::ResolveMarket => {
+            Instruction::ResolveMarket { mode } => {
                 // Resolve market: snapshot resolution slot, set RESOLVED flag.
+                // Caller picks the §9.8 settlement arm explicitly via `mode`
+                // (0 = Ordinary, 1 = Degenerate). The wrapper no longer
+                // silently promotes a stale Ordinary call to Degenerate —
+                // clients that want dead-oracle settlement must ask for it.
                 accounts::expect_len(accounts, 4)?;
                 let a_admin = &accounts[0];
                 let a_slab = &accounts[1];
@@ -7155,13 +7172,13 @@ pub mod processor {
                 // Anti-retroactivity: capture funding rate before any config mutation (§5.5)
                 let funding_rate_e9 = compute_current_funding_rate_e9(&config);
 
-                // Hard-timeout terminal path: once the market has been
-                // oracle-stale for >= permissionless_resolve_stale_slots,
-                // the market resolves at engine.last_oracle_price via
-                // the same Degenerate arm used by ResolvePermissionless.
-                // This unifies the settlement rule across both paths.
                 let clock_gate = Clock::from_account_info(a_clock)?;
-                if oracle::permissionless_stale_matured(&config, clock_gate.slot) {
+
+                // Explicit Degenerate branch: settle at engine.last_oracle_price
+                // with rate = 0. Used for dead-oracle markets (stale gate
+                // matured, or admin-observed deadness). Mirrors
+                // ResolvePermissionless's terminal settlement.
+                if mode == 1 {
                     let engine = zc::engine_mut(&mut data)?;
                     let p_last = engine.last_oracle_price;
                     if p_last == 0 {
@@ -7177,6 +7194,13 @@ pub mod processor {
                     config.hyperp_mark_e6 = p_last;
                     state::write_config(&mut data, &config);
                     return Ok(());
+                }
+
+                // Ordinary branch: require live oracle. If the stale gate has
+                // matured the caller must switch to Degenerate (mode = 1) —
+                // we don't quietly settle against a dead oracle.
+                if oracle::permissionless_stale_matured(&config, clock_gate.slot) {
+                    return Err(PercolatorError::OracleStale.into());
                 }
 
                 // Hyperp markets need their mark initialized to settle.
@@ -7254,23 +7278,12 @@ pub mod processor {
                             // §9.8 step 7 band with the canonical parameter.
                         }
                         Err(e) => {
-                            // Only skip guard if oracle is genuinely
-                            // unusable — OracleStale OR OracleConfTooWide.
-                            // Other errors (wrong account, bad data,
-                            // wrong feed) must propagate — otherwise
-                            // admin can bypass guard by passing a broken
-                            // oracle account. OracleConfTooWide matches
-                            // ResolvePermissionless's handling; admin
-                            // should be able to resolve when conf_filter
-                            // _bps rejects a live-but-wide feed.
-                            let stale_err: ProgramError =
-                                PercolatorError::OracleStale.into();
-                            let conf_err: ProgramError =
-                                PercolatorError::OracleConfTooWide.into();
-                            if e != stale_err && e != conf_err {
-                                return Err(e);
-                            }
-                            // Oracle is unusable, fall back to engine state
+                            // Mode = 0 (Ordinary) requires a live oracle.
+                            // All errors propagate; if the oracle is dead the
+                            // caller must switch to mode = 1 (Degenerate)
+                            // explicitly. This removes the prior silent
+                            // Ordinary→Degenerate fallback.
+                            return Err(e);
                         }
                     }
                 }
@@ -7356,28 +7369,20 @@ pub mod processor {
                     false
                 };
 
+                // Mode = 0 (Ordinary): require a live input. Hyperp with a
+                // stale mark must switch to mode = 1; we no longer silently
+                // promote to Degenerate.
                 let (live_oracle, rate_for_final_accrual, in_ordinary_arm): (u64, i128, bool) =
                     if let Some(fresh) = fresh_live_oracle {
-                        // ORDINARY: fresh non-Hyperp oracle reading
                         (fresh, funding_rate_e9, true)
                     } else if is_hyperp_local && !hyperp_stale {
-                        // ORDINARY: Hyperp uses the just-flushed index as its live
-                        // oracle; funding accrual uses the captured rate.
                         (config.last_effective_price_e6, funding_rate_e9, true)
-                    } else if (is_hyperp_local && hyperp_stale) || oracle_initialized {
-                        // DEGENERATE: non-Hyperp oracle is dead, OR Hyperp
-                        // mark has been stale long enough that the live
-                        // signal is gone. Resolve at P_last with zero
-                        // funding over the signal-free interval. Engine's
-                        // Degenerate arm bypasses accrue_market_to so no
-                        // envelope/catchup issue.
-                        (engine.last_oracle_price, 0i128, false)
                     } else {
-                        // Oracle never initialized and no fresh read — cannot settle
-                        // a live market from the init sentinel. Empty markets resolve
-                        // via ResolvePermissionless (OI=0 safety branch).
-                        return Err(PercolatorError::OracleInvalid.into());
+                        // Hyperp + stale, or oracle never initialized — caller
+                        // picked the wrong mode.
+                        return Err(PercolatorError::OracleStale.into());
                     };
+                let _ = oracle_initialized;
                 // Engine v12.18.5+: resolve_market_not_atomic takes an explicit
                 // ResolveMode selector (Goal 51). The wrapper tells the engine
                 // which arm to run; the engine enforces that Degenerate carries
