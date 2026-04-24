@@ -26,7 +26,7 @@ use percolator_prog::matcher_abi::{
     validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
 };
 use percolator_prog::oracle::{clamp_oracle_price, clamp_toward_with_dt, restart_detected};
-use percolator_prog::verify::{
+use percolator_prog::policy::{
     abi_ok,
     admin_ok,
     cpi_trade_size,
@@ -975,10 +975,10 @@ fn kani_decide_admin_universal() {
 
 // =============================================================================
 // U. VERIFY::ABI_OK EQUIVALENCE (1 proof)
-// Prove that verify::abi_ok is equivalent to validate_matcher_return
+// Prove that policy::abi_ok is equivalent to validate_matcher_return
 // =============================================================================
 
-/// Prove: verify::abi_ok returns true iff validate_matcher_return returns Ok
+/// Prove: policy::abi_ok returns true iff validate_matcher_return returns Ok
 /// This is a single strong equivalence proof - abi_ok calls the real validator.
 #[kani::proof]
 fn kani_abi_ok_equals_validate() {

@@ -3471,7 +3471,7 @@ fn test_instruction_decoder_removed_tags_rejected() {
 // ── Mark EWMA clamp-base tests ─────────────────────────────────────────
 
 use percolator_prog::oracle::clamp_oracle_price;
-use percolator_prog::verify::{ewma_update, mark_ewma_clamp_base};
+use percolator_prog::policy::{ewma_update, mark_ewma_clamp_base};
 
 /// Test 1.1: Single-slot max movement with index-clamped EWMA.
 /// Mark starts at index=100. Attacker fills at max-clamped price.

@@ -917,11 +917,6 @@ pub mod policy {
     }
 }
 
-#[cfg(not(target_arch = "bpf"))]
-pub mod verify {
-    pub use super::policy::*;
-}
-
 // 2. mod zc (Zero-Copy unsafe island)
 #[allow(unsafe_code)]
 pub mod zc {
@@ -7898,9 +7893,9 @@ pub mod processor {
                 // Hyperp: admin's pushed mark IS the price source;
                 // live_oracle = index, settlement_price = EWMA/mark.
                 // If the external oracle is genuinely dead (stale or
-                // conf-too-wide), fall through to the Degenerate arm
-                // at engine.last_oracle_price; other parse errors
-                // propagate (bad account, wrong feed).
+                // conf-too-wide), Ordinary rejects; callers must explicitly
+                // select mode = 1 for the gated Degenerate recovery arm.
+                // Other parse errors propagate (bad account, wrong feed).
                 let mut fresh_live_oracle: Option<u64> = None;
                 if !oracle::is_hyperp_mode(&config) {
                     let clock_tmp = Clock::from_account_info(a_clock)?;
@@ -7986,13 +7981,9 @@ pub mod processor {
                 // Detect stale Hyperp mark. If the Hyperp mark signal
                 // (max(mark_ewma_last_slot, last_mark_push_slot)) has
                 // been silent for longer than 3 × max_staleness_secs,
-                // the interval is signal-free and the admin-Ordinary
-                // path would fail (catchup + final accrue at
-                // last_effective_price_e6 exceeds
-                // CATCHUP_CHUNKS_MAX × max_dt). Route to Degenerate
-                // like ResolvePermissionless does — the market is
-                // effectively dead and should resolve at P_last with
-                // rate = 0 rather than get stuck.
+                // the interval is signal-free. Ordinary rejects and the
+                // caller must explicitly choose mode = 1, which is separately
+                // gated above before Degenerate settlement at P_last/rate=0.
                 let hyperp_stale = if is_hyperp_local {
                     let last_update = core::cmp::max(
                         config.mark_ewma_last_slot,

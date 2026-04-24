@@ -452,16 +452,25 @@ fn test_honest_user_standard_market_warmup_close() {
     env.trade(&user, &lp, lp_idx, user_idx, -size);
     assert_eq!(env.read_account_position(user_idx), 0);
 
-    // Under v12.18.1 admission: healthy markets (residual >= matured + fresh) skip
-    // warmup entirely via admit_h_min. This market has ample residual (100 SOL LP
-    // vs 12M PnL), so close succeeds instantly — the old warmup-gate test is
-    // superseded by admission semantics.
+    let early = env.try_close_account(&user, user_idx);
+    assert!(
+        early.is_err(),
+        "fresh positive PnL should not be extractable immediately when warmup is configured"
+    );
+
+    // Walk both the warmup clock and the external oracle target/effective
+    // state forward at the same real price. This preserves the extraction
+    // guard while proving the account can exit after the configured warmup.
+    env.set_slot_and_price(430, 150_000_000);
+    env.crank();
+
     let result = env.try_close_account(&user, user_idx);
     assert!(
         result.is_ok(),
-        "Healthy market admission admits fresh PnL instantly"
+        "Profitable user should close after warmup and oracle catch-up: {:?}",
+        result
     );
-    println!("CloseAccount succeeds via admission (healthy market)");
+    println!("CloseAccount succeeds after warmup and oracle catch-up");
 
     println!("HONEST USER STANDARD MARKET WARMUP CLOSE: PASSED");
 }
