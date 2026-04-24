@@ -66,8 +66,7 @@ struct AttackOutcome {
 
 impl AttackOutcome {
     fn attacker_delta(&self) -> i128 {
-        let combined_deposit =
-            self.attacker_a_deposit as i128 + self.attacker_b_deposit as i128;
+        let combined_deposit = self.attacker_a_deposit as i128 + self.attacker_b_deposit as i128;
         self.attacker_a_equity + self.attacker_b_equity - combined_deposit
     }
 
@@ -99,7 +98,9 @@ impl AttackOutcome {
         assert!(
             delta <= ROUNDING_TOLERANCE,
             "{}: attacker extracted {} (> rounding tolerance {}) — v12.19 A1 defense regressed",
-            label, delta, ROUNDING_TOLERANCE,
+            label,
+            delta,
+            ROUNDING_TOLERANCE,
         );
         // Insurance is allowed to ABSORB LP-side losses (shrink) if the
         // attacker's own capital is consumed. What it must NOT do is pay
@@ -120,7 +121,9 @@ impl AttackOutcome {
         assert!(
             ins_drop <= INSURANCE_DROP_TOLERANCE,
             "{}: insurance dropped by {} (> tolerance {}) — v12.19 A1 defense regressed",
-            label, ins_drop, INSURANCE_DROP_TOLERANCE,
+            label,
+            ins_drop,
+            INSURANCE_DROP_TOLERANCE,
         );
     }
 }

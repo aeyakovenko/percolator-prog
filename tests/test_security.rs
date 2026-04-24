@@ -413,7 +413,10 @@ fn test_attack_admin_op_as_user() {
 
     // UpdateAuthority { kind: AUTHORITY_ADMIN }
     let result = env.try_update_admin(&attacker, &attacker.pubkey());
-    assert!(result.is_err(), "ATTACK: Non-admin admin rotation should fail");
+    assert!(
+        result.is_err(),
+        "ATTACK: Non-admin admin rotation should fail"
+    );
 
     // UpdateConfig
     let result = env.try_update_config(&attacker);
@@ -479,10 +482,7 @@ fn test_attack_burned_admin_cannot_act() {
 
     // Burn admin by setting to zero address (spec §7 step [3])
     let result = env.try_update_admin(&admin, &zero_pubkey);
-    assert!(
-        result.is_ok(),
-        "admin burn should succeed"
-    );
+    assert!(result.is_ok(), "admin burn should succeed");
 
     // Admin instructions should now permanently fail
     let result = env.try_update_config(&admin);
@@ -603,10 +603,7 @@ fn test_attack_trade_risk_increase_when_gated() {
     // Fallback: try the value and if the trade still works, try adjacent offsets.
     const SIDE_MODE_LONG_OFF: usize = 536 + 552; // v12.18.x layout
     {
-        let original_slab = env
-            .svm
-            .get_account(&env.slab)
-            .expect("slab must exist");
+        let original_slab = env.svm.get_account(&env.slab).expect("slab must exist");
         let mut modified_slab = original_slab.clone();
         modified_slab.data[SIDE_MODE_LONG_OFF] = 1; // SideMode::DrainOnly = 1
         env.svm
@@ -991,7 +988,10 @@ fn test_attack_close_slab_with_insurance_remaining() {
     env.top_up_insurance(&payer, 1_000_000_000);
 
     let insurance_bal = env.read_insurance_balance();
-    assert_eq!(insurance_bal, 1_000_000_000, "Insurance should equal topped-up amount");
+    assert_eq!(
+        insurance_bal, 1_000_000_000,
+        "Insurance should equal topped-up amount"
+    );
 
     let insurance_before = env.read_insurance_balance();
     let spl_vault_before = env.vault_balance();
@@ -1026,9 +1026,6 @@ fn test_attack_close_slab_with_insurance_remaining() {
     );
 }
 
-
-
-
 /// ATTACK: Push oracle price when no oracle authority is configured.
 /// Expected: Fails because default authority is [0;32] (unset).
 #[test]
@@ -1037,13 +1034,19 @@ fn test_attack_push_oracle_without_authority_set() {
 
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    const HYPERP_MARK_OFF: usize = 312;            // HEADER_LEN(136) + hyperp_mark_e6(176)
-    const LAST_ORACLE_PUB_TS_OFF: usize = 320;     // HEADER_LEN(136) + last_oracle_publish_time(184)
+    const HYPERP_MARK_OFF: usize = 312; // HEADER_LEN(136) + hyperp_mark_e6(176)
+    const LAST_ORACLE_PUB_TS_OFF: usize = 320; // HEADER_LEN(136) + last_oracle_publish_time(184)
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
-    let mark_before =
-        u64::from_le_bytes(slab_before[HYPERP_MARK_OFF..HYPERP_MARK_OFF + 8].try_into().unwrap());
-    let pub_ts_before =
-        i64::from_le_bytes(slab_before[LAST_ORACLE_PUB_TS_OFF..LAST_ORACLE_PUB_TS_OFF + 8].try_into().unwrap());
+    let mark_before = u64::from_le_bytes(
+        slab_before[HYPERP_MARK_OFF..HYPERP_MARK_OFF + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let pub_ts_before = i64::from_le_bytes(
+        slab_before[LAST_ORACLE_PUB_TS_OFF..LAST_ORACLE_PUB_TS_OFF + 8]
+            .try_into()
+            .unwrap(),
+    );
     let used_before = env.read_num_used_accounts();
     let vault_before = env.vault_balance();
 
@@ -1056,14 +1059,23 @@ fn test_attack_push_oracle_without_authority_set() {
         "ATTACK: Push price without authority set should fail"
     );
     let slab_after = env.svm.get_account(&env.slab).unwrap().data;
-    let mark_after =
-        u64::from_le_bytes(slab_after[HYPERP_MARK_OFF..HYPERP_MARK_OFF + 8].try_into().unwrap());
-    let pub_ts_after =
-        i64::from_le_bytes(slab_after[LAST_ORACLE_PUB_TS_OFF..LAST_ORACLE_PUB_TS_OFF + 8].try_into().unwrap());
+    let mark_after = u64::from_le_bytes(
+        slab_after[HYPERP_MARK_OFF..HYPERP_MARK_OFF + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let pub_ts_after = i64::from_le_bytes(
+        slab_after[LAST_ORACLE_PUB_TS_OFF..LAST_ORACLE_PUB_TS_OFF + 8]
+            .try_into()
+            .unwrap(),
+    );
     let used_after = env.read_num_used_accounts();
     let vault_after = env.vault_balance();
 
-    assert_eq!(mark_before, 0, "Precondition: non-Hyperp markets have hyperp_mark_e6 == 0");
+    assert_eq!(
+        mark_before, 0,
+        "Precondition: non-Hyperp markets have hyperp_mark_e6 == 0"
+    );
     assert_eq!(
         mark_after, mark_before,
         "Rejected unauthorized push must not write hyperp_mark_e6"
@@ -1072,8 +1084,14 @@ fn test_attack_push_oracle_without_authority_set() {
         pub_ts_after, pub_ts_before,
         "Rejected unauthorized push must not advance last_oracle_publish_time"
     );
-    assert_eq!(used_after, used_before, "Rejected unauthorized push must not change num_used_accounts");
-    assert_eq!(vault_after, vault_before, "Rejected unauthorized push must not move vault funds");
+    assert_eq!(
+        used_after, used_before,
+        "Rejected unauthorized push must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected unauthorized push must not move vault funds"
+    );
 }
 
 /// ATTACK: Deposit after market is resolved.
@@ -1236,11 +1254,8 @@ fn test_attack_double_init_market() {
             AccountMeta::new(env.slab, false),
             AccountMeta::new_readonly(env.mint, false),
             AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new_readonly(sysvar::clock::ID, false),
-            AccountMeta::new_readonly(sysvar::rent::ID, false),
             AccountMeta::new_readonly(env.pyth_index, false),
-            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
         ],
         data: encode_init_market_with_invert(&admin.pubkey(), &env.mint, &TEST_FEED_ID, 0),
     };
@@ -1265,8 +1280,14 @@ fn test_attack_double_init_market() {
         &slab_before[..HEADER_CONFIG_LEN],
         "Rejected double InitMarket must not mutate slab header/config"
     );
-    assert_eq!(used_after, used_before, "Rejected double InitMarket must not change num_used_accounts");
-    assert_eq!(vault_after, vault_before, "Rejected double InitMarket must not move vault funds");
+    assert_eq!(
+        used_after, used_before,
+        "Rejected double InitMarket must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected double InitMarket must not move vault funds"
+    );
 }
 
 /// ATTACK: Accumulate dust through many sub-unit-scale deposits to extract value.
@@ -1716,7 +1737,10 @@ fn test_attack_unit_scale_zero_no_dust() {
     env.deposit(&user, user_idx, 12_345_678);
 
     let vault = env.vault_balance();
-    assert_eq!(vault, 12_345_778, "Full deposit with unit_scale=0 (includes 100 from init)");
+    assert_eq!(
+        vault, 12_345_778,
+        "Full deposit with unit_scale=0 (includes 100 from init)"
+    );
 
     // Withdrawal should work for odd amounts
     let result = env.try_withdraw(&user, user_idx, 1_234_567);
@@ -1874,11 +1898,26 @@ fn test_attack_deposit_then_trade_same_slot() {
 
     assert_eq!(user_pos_before, 0, "Precondition: user should start flat");
     assert_eq!(lp_pos_before, 0, "Precondition: LP should start flat");
-    assert_eq!(user_pos_after, 5_000_000, "Successful trade should open user long position");
-    assert_eq!(lp_pos_after, -5_000_000, "Successful trade should open LP short position");
-    assert_eq!(user_cap_after, user_cap_before, "Trade should not change user capital at entry");
-    assert_eq!(lp_cap_after, lp_cap_before, "Trade should not change LP capital at entry");
-    assert_eq!(vault_after, vault_before, "Trade should not move vault funds");
+    assert_eq!(
+        user_pos_after, 5_000_000,
+        "Successful trade should open user long position"
+    );
+    assert_eq!(
+        lp_pos_after, -5_000_000,
+        "Successful trade should open LP short position"
+    );
+    assert_eq!(
+        user_cap_after, user_cap_before,
+        "Trade should not change user capital at entry"
+    );
+    assert_eq!(
+        lp_cap_after, lp_cap_before,
+        "Trade should not change LP capital at entry"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Trade should not move vault funds"
+    );
 }
 
 /// ATTACK: Trade, then withdraw max in same slot.
@@ -1942,7 +1981,7 @@ fn test_attack_rapid_deposits_accounting() {
     let vault = env.vault_balance();
     assert_eq!(
         vault,
-        10 * amount_per_deposit + 100,  // +100 from init deposit
+        10 * amount_per_deposit + 100, // +100 from init deposit
         "Vault should have exactly 10 SOL after 10 deposits"
     );
 
@@ -1972,10 +2011,10 @@ fn test_attack_update_config_extreme_values() {
             AccountMeta::new_readonly(env.pyth_index, false),
         ],
         data: encode_update_config(
-            1,// funding_horizon_slots (minimum)
-            10000,// funding_k_bps (100%)
-            10000i64,// funding_max_premium_bps (max allowed)
-            10i64,// funding_max_e9_per_slot (fits per-market envelope = 10 bps/slot)
+            1,        // funding_horizon_slots (minimum)
+            10000,    // funding_k_bps (100%)
+            10000i64, // funding_max_premium_bps (max allowed)
+            10i64,    // funding_max_e9_per_slot (fits per-market envelope = 10 bps/slot)
         ),
     };
     let tx = Transaction::new_signed_with_payer(
@@ -2059,8 +2098,14 @@ fn test_attack_deposit_u64_max() {
         user_cap_after, user_cap_before,
         "Rejected over-deposit must not change user capital"
     );
-    assert_eq!(used_after, used_before, "Rejected over-deposit must not change num_used_accounts");
-    assert_eq!(vault_after, vault_before, "Rejected over-deposit must not move vault funds");
+    assert_eq!(
+        used_after, used_before,
+        "Rejected over-deposit must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected over-deposit must not move vault funds"
+    );
 }
 
 /// ATTACK: Trade with size = i128::MAX (overflow boundary).
@@ -2167,10 +2212,11 @@ fn test_attack_config_zero_funding_horizon() {
         cfg_after, cfg_before,
         "Rejected UpdateConfig must not mutate funding/threshold config"
     );
-    assert_eq!(vault_after, vault_before, "Rejected UpdateConfig must not move vault funds");
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected UpdateConfig must not move vault funds"
+    );
 }
-
-
 
 /// ATTACK: Attempt to deploy a non-Hyperp market with no resolve path.
 /// The legacy attack was: init with cap=0 + perm_resolve=0, then use the
@@ -2195,10 +2241,10 @@ fn test_attack_oracle_cap_zero_disables_clamping() {
         .expect_err("init must reject non-Hyperp + perm_resolve=0");
     assert!(
         err.contains("0x1a"),
-        "expected InvalidConfigParam, got: {}", err,
+        "expected InvalidConfigParam, got: {}",
+        err,
     );
 }
-
 
 /// ATTACK: LP account should never be garbage collected, even with zero state.
 /// Expected: GC skips LP accounts (they have is_lp = true).
@@ -2268,7 +2314,11 @@ fn test_attack_close_lp_account() {
     // Try to close LP account via CloseAccount instruction
     // CloseAccount does not check account kind — LP with no position can close
     let result = env.try_close_account(&lp, lp_idx);
-    assert!(result.is_ok(), "LP with no position should be closeable: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "LP with no position should be closeable: {:?}",
+        result
+    );
     let vault_after = env.vault_balance();
     assert!(
         vault_after < 10_000_000_000,
@@ -2393,9 +2443,18 @@ fn test_attack_set_maintenance_fee_non_admin() {
     let slab_after = env.svm.get_account(&env.slab).unwrap().data;
     let vault_after = env.vault_balance();
     let used_after = env.read_num_used_accounts();
-    assert_eq!(slab_after, slab_before, "Rejected non-admin fee update must not mutate slab");
-    assert_eq!(vault_after, vault_before, "Rejected non-admin fee update must not move vault funds");
-    assert_eq!(used_after, used_before, "Rejected non-admin fee update must not change num_used_accounts");
+    assert_eq!(
+        slab_after, slab_before,
+        "Rejected non-admin fee update must not mutate slab"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected non-admin fee update must not move vault funds"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected non-admin fee update must not change num_used_accounts"
+    );
 }
 
 /// ATTACK: Haircut ratio when all users are in loss (pnl_pos_tot = 0).
@@ -2506,8 +2565,14 @@ fn test_attack_truncated_instruction_data() {
         &slab_before[..HEADER_CONFIG_LEN],
         "Rejected truncated instruction must not mutate slab header/config"
     );
-    assert_eq!(used_after, used_before, "Rejected truncated instruction must not change num_used_accounts");
-    assert_eq!(vault_after, vault_before, "Rejected truncated instruction must not move vault funds");
+    assert_eq!(
+        used_after, used_before,
+        "Rejected truncated instruction must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected truncated instruction must not move vault funds"
+    );
 }
 
 /// ATTACK: Send unknown instruction tag (255).
@@ -2554,8 +2619,14 @@ fn test_attack_unknown_instruction_tag() {
         &slab_before[..HEADER_CONFIG_LEN],
         "Rejected unknown-tag instruction must not mutate slab header/config"
     );
-    assert_eq!(used_after, used_before, "Rejected unknown-tag instruction must not change num_used_accounts");
-    assert_eq!(vault_after, vault_before, "Rejected unknown-tag instruction must not move vault funds");
+    assert_eq!(
+        used_after, used_before,
+        "Rejected unknown-tag instruction must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected unknown-tag instruction must not move vault funds"
+    );
 }
 
 /// ATTACK: Empty instruction data (no tag byte).
@@ -2602,8 +2673,14 @@ fn test_attack_empty_instruction_data() {
         &slab_before[..HEADER_CONFIG_LEN],
         "Rejected empty-data instruction must not mutate slab header/config"
     );
-    assert_eq!(used_after, used_before, "Rejected empty-data instruction must not change num_used_accounts");
-    assert_eq!(vault_after, vault_before, "Rejected empty-data instruction must not move vault funds");
+    assert_eq!(
+        used_after, used_before,
+        "Rejected empty-data instruction must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected empty-data instruction must not move vault funds"
+    );
 }
 
 /// ATTACK: Deposit → Resolve → Withdraw sequence.
@@ -2629,7 +2706,10 @@ fn test_attack_deposit_resolve_withdraw_sequence() {
 
     // Can't deposit more
     let deposit_result = env.try_deposit(&user, user_idx, 1_000_000_000);
-    assert!(deposit_result.is_err(), "Deposit after resolution should fail");
+    assert!(
+        deposit_result.is_err(),
+        "Deposit after resolution should fail"
+    );
 
     // Withdrawals are blocked on resolved markets. Users must use CloseAccount.
     let withdraw_result = env.try_withdraw(&user, user_idx, 5_000_000_000);
@@ -2696,12 +2776,18 @@ fn test_attack_trade_user_as_lp() {
     let user1_pos_after = env.read_account_position(user1_idx);
     let lp_pos_after = env.read_account_position(lp_idx);
     assert_ne!(user2_pos_after, 0, "User2 should have position after trade");
-    assert_ne!(user1_pos_after, 0, "User1 should have opposite position after trade");
+    assert_ne!(
+        user1_pos_after, 0,
+        "User1 should have opposite position after trade"
+    );
     assert_eq!(lp_pos_after, lp_pos_before, "LP should be unaffected");
 
     // Vault balance unchanged (no tokens moved in/out during trade)
     let vault_after = env.vault_balance();
-    assert_eq!(vault_after, vault_before, "Vault balance must not change from trade");
+    assert_eq!(
+        vault_after, vault_before,
+        "Vault balance must not change from trade"
+    );
 }
 
 /// ATTACK: Deposit to an LP account using DepositCollateral.
@@ -2839,10 +2925,22 @@ fn test_attack_trade_out_of_bounds_index() {
     let lp_pos_after = env.read_account_position(lp_idx);
     let vault_after = env.vault_balance();
     let used_after = env.read_num_used_accounts();
-    assert_eq!(lp_cap_after, lp_cap_before, "Rejected out-of-bounds trade must not change LP capital");
-    assert_eq!(lp_pos_after, lp_pos_before, "Rejected out-of-bounds trade must not change LP position");
-    assert_eq!(vault_after, vault_before, "Rejected out-of-bounds trade must not move vault funds");
-    assert_eq!(used_after, used_before, "Rejected out-of-bounds trade must not change num_used_accounts");
+    assert_eq!(
+        lp_cap_after, lp_cap_before,
+        "Rejected out-of-bounds trade must not change LP capital"
+    );
+    assert_eq!(
+        lp_pos_after, lp_pos_before,
+        "Rejected out-of-bounds trade must not change LP position"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected out-of-bounds trade must not move vault funds"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected out-of-bounds trade must not change num_used_accounts"
+    );
 }
 
 /// ATTACK: Withdraw from out-of-bounds index.
@@ -2868,9 +2966,18 @@ fn test_attack_withdraw_out_of_bounds_index() {
     let slab_after = env.svm.get_account(&env.slab).unwrap().data;
     let vault_after = env.vault_balance();
     let used_after = env.read_num_used_accounts();
-    assert_eq!(slab_after, slab_before, "Rejected out-of-bounds withdraw must not mutate slab");
-    assert_eq!(vault_after, vault_before, "Rejected out-of-bounds withdraw must not move vault funds");
-    assert_eq!(used_after, used_before, "Rejected out-of-bounds withdraw must not change num_used_accounts");
+    assert_eq!(
+        slab_after, slab_before,
+        "Rejected out-of-bounds withdraw must not mutate slab"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected out-of-bounds withdraw must not move vault funds"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected out-of-bounds withdraw must not change num_used_accounts"
+    );
 }
 
 /// ATTACK: LiquidateAtOracle with out-of-bounds target index.
@@ -2893,9 +3000,18 @@ fn test_attack_liquidate_out_of_bounds_index() {
     let slab_after = env.svm.get_account(&env.slab).unwrap().data;
     let vault_after = env.vault_balance();
     let used_after = env.read_num_used_accounts();
-    assert_eq!(slab_after, slab_before, "Rejected out-of-bounds liquidation must not mutate slab");
-    assert_eq!(vault_after, vault_before, "Rejected out-of-bounds liquidation must not move vault funds");
-    assert_eq!(used_after, used_before, "Rejected out-of-bounds liquidation must not change num_used_accounts");
+    assert_eq!(
+        slab_after, slab_before,
+        "Rejected out-of-bounds liquidation must not mutate slab"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected out-of-bounds liquidation must not move vault funds"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected out-of-bounds liquidation must not change num_used_accounts"
+    );
 }
 
 /// ATTACK: InitLP after market resolution.
@@ -2928,9 +3044,18 @@ fn test_attack_init_lp_after_resolution() {
     let used_after = env.read_num_used_accounts();
     let vault_after = env.vault_balance();
     assert!(resolved_before, "Precondition: market should be resolved");
-    assert_eq!(resolved_after, resolved_before, "Rejected InitLP must not change resolved flag");
-    assert_eq!(used_after, used_before, "Rejected InitLP must not change num_used_accounts");
-    assert_eq!(vault_after, vault_before, "Rejected InitLP must not move vault funds");
+    assert_eq!(
+        resolved_after, resolved_before,
+        "Rejected InitLP must not change resolved flag"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected InitLP must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected InitLP must not move vault funds"
+    );
 }
 
 /// InitUser with min_initial_deposit (100 tokens) and verify clean initialization.
@@ -2947,15 +3072,15 @@ fn test_attack_init_user_zero_fee() {
     let user_idx = env.init_user(&user);
 
     let capital = env.read_account_capital(user_idx);
-    assert_eq!(capital, 100, "Account should have min_initial_deposit capital");
+    assert_eq!(
+        capital, 100,
+        "Account should have min_initial_deposit capital"
+    );
 
     // Should still be able to deposit more after init
     env.deposit(&user, user_idx, 1_000_000_000);
     let capital_after = env.read_account_capital(user_idx);
-    assert!(
-        capital_after > 100,
-        "Should be able to deposit after init"
-    );
+    assert!(capital_after > 100, "Should be able to deposit after init");
 }
 
 /// ATTACK: Two users both try to withdraw max capital in the same slot.
@@ -3056,8 +3181,16 @@ fn test_attack_cross_market_isolation() {
     env2.deposit(&user2, user2_idx, 5_000_000_000);
 
     // Verify independent vaults
-    assert_eq!(env1.vault_balance(), 10_000_000_100, "Market 1 vault (+ init)");
-    assert_eq!(env2.vault_balance(), 5_000_000_100, "Market 2 vault (+ init)");
+    assert_eq!(
+        env1.vault_balance(),
+        10_000_000_100,
+        "Market 1 vault (+ init)"
+    );
+    assert_eq!(
+        env2.vault_balance(),
+        5_000_000_100,
+        "Market 2 vault (+ init)"
+    );
 
     // Withdraw from market 1 doesn't affect market 2
     env1.try_withdraw(&user1, user1_idx, 5_000_000_000)
@@ -3113,7 +3246,11 @@ fn test_attack_wrong_slab_program_id() {
         .set_account(env.slab, original_slab)
         .expect("must restore original slab owner");
     let result = env.try_withdraw(&user, user_idx, 500_000_000);
-    assert!(result.is_ok(), "Withdraw should succeed after restoring slab owner: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Withdraw should succeed after restoring slab owner: {:?}",
+        result
+    );
     assert_eq!(
         env.vault_balance(),
         500_000_100,
@@ -3250,9 +3387,18 @@ fn test_attack_hyperp_init_lp_after_resolution() {
     let used_after = env.read_num_used_accounts();
     let vault_after = env.vault_balance();
     assert!(resolved_before, "Precondition: market should be resolved");
-    assert_eq!(resolved_after, resolved_before, "Rejected InitLP must not change resolved flag");
-    assert_eq!(used_after, used_before, "Rejected InitLP must not change num_used_accounts");
-    assert_eq!(vault_after, vault_before, "Rejected InitLP must not move vault");
+    assert_eq!(
+        resolved_after, resolved_before,
+        "Rejected InitLP must not change resolved flag"
+    );
+    assert_eq!(
+        used_after, used_before,
+        "Rejected InitLP must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected InitLP must not move vault"
+    );
 }
 
 /// ATTACK: Push oracle price with extreme u64 value.
@@ -3347,7 +3493,12 @@ fn test_attack_warmup_prevents_immediate_profit_withdrawal() {
     if result.is_ok() {
         // Profit already vested — verify conservation
         let vault = env.vault_balance();
-        assert!(vault <= total_deposited, "Conservation: vault={} deposits={}", vault, total_deposited);
+        assert!(
+            vault <= total_deposited,
+            "Conservation: vault={} deposits={}",
+            vault,
+            total_deposited
+        );
     }
     let vault_final = env.vault_balance();
     // Conservation: after profit withdrawal, vault must cover remaining c_tot + insurance.
@@ -3569,7 +3720,11 @@ fn test_attack_liquidate_healthy_account() {
 
     // Try to liquidate healthy account - should be a no-op
     let result = env.try_liquidate_target(user_idx);
-    assert!(result.is_ok(), "Liquidation of healthy account should return Ok (no-op): {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Liquidation of healthy account should return Ok (no-op): {:?}",
+        result
+    );
 
     // Position and capital should be unchanged
     let capital_after = env.read_account_capital(user_idx);
@@ -3786,10 +3941,18 @@ fn test_attack_funding_anti_retroactivity_zero_dt() {
 
     // Crank at same slot (dt=0, no funding accrued) - should still succeed
     let same_slot_crank_1 = env.try_crank();
-    assert!(same_slot_crank_1.is_ok(), "Same-slot crank should succeed: {:?}", same_slot_crank_1);
+    assert!(
+        same_slot_crank_1.is_ok(),
+        "Same-slot crank should succeed: {:?}",
+        same_slot_crank_1
+    );
     // Crank again same slot (dt=0 again)
     let same_slot_crank_2 = env.try_crank();
-    assert!(same_slot_crank_2.is_ok(), "Repeated same-slot crank should succeed: {:?}", same_slot_crank_2);
+    assert!(
+        same_slot_crank_2.is_ok(),
+        "Repeated same-slot crank should succeed: {:?}",
+        same_slot_crank_2
+    );
 
     // Advance slot and crank (now dt > 0, funding accrues)
     env.set_slot(100);
@@ -3869,8 +4032,14 @@ fn test_attack_withdrawal_with_warmup_settlement() {
         // Warmup correctly blocked — verify state unchanged
         let vault_after_early = env.vault_balance();
         let user_cap_after_early = env.read_account_capital(user_idx);
-        assert_eq!(vault_after_early, vault_before_withdraw, "Rejected withdrawal must leave vault unchanged");
-        assert_eq!(user_cap_after_early, user_cap_before_withdraw, "Rejected withdrawal must leave capital unchanged");
+        assert_eq!(
+            vault_after_early, vault_before_withdraw,
+            "Rejected withdrawal must leave vault unchanged"
+        );
+        assert_eq!(
+            user_cap_after_early, user_cap_before_withdraw,
+            "Rejected withdrawal must leave capital unchanged"
+        );
 
         // Settled principal should remain withdrawable despite warmup-locked profit.
         let vested_withdraw = env.try_withdraw(&user, user_idx, settled_cap_u64);
@@ -4046,7 +4215,11 @@ fn test_attack_liquidate_zero_position_account() {
     // Liquidation returns Ok (no-op) for zero-position accounts
     let capital_before = env.read_account_capital(user_idx);
     let result = env.try_liquidate_target(user_idx);
-    assert!(result.is_ok(), "Liquidation of zero-position should return Ok (no-op): {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Liquidation of zero-position should return Ok (no-op): {:?}",
+        result
+    );
 
     // Key assertion: capital should not change after liquidation attempt
     let capital_after = env.read_account_capital(user_idx);
@@ -4152,12 +4325,14 @@ fn test_attack_circuit_breaker_clamping_second_price() {
     assert!(
         clamped_price < 200_000_000,
         "Circuit breaker must clamp 10x price jump: got {} (expected near {})",
-        clamped_price, 138_000_000 + 1_380_000
+        clamped_price,
+        138_000_000 + 1_380_000
     );
     assert!(
         clamped_price > baseline,
         "Price should have moved up (clamped): baseline={} clamped={}",
-        baseline, clamped_price
+        baseline,
+        clamped_price
     );
 
     // Conservation: total capital should not exceed total deposits
@@ -4167,7 +4342,8 @@ fn test_attack_circuit_breaker_clamping_second_price() {
     assert!(
         user_cap + lp_cap <= 20_000_000_200,
         "ATTACK: Circuit breaker failed - capital increased! user={} lp={}",
-        user_cap, lp_cap
+        user_cap,
+        lp_cap
     );
 }
 
@@ -4354,7 +4530,10 @@ fn test_attack_max_unit_scale_operations() {
 
     // Capital should be in units: 100 from init + 5000 from deposit = 5100 units
     let user_cap = env.read_account_capital(user_idx);
-    assert_eq!(user_cap, 5100, "Capital should be 100 (init) + 5000 (deposit) units at scale=1000");
+    assert_eq!(
+        user_cap, 5100,
+        "Capital should be 100 (init) + 5000 (deposit) units at scale=1000"
+    );
 
     // Withdrawal must be aligned to unit_scale
     let bad_withdraw = env.try_withdraw(&user, user_idx, 500); // Not aligned (500 % 1000 != 0)
@@ -4533,7 +4712,10 @@ fn test_attack_c_tot_sync_after_deposits_and_trades() {
         let vault_data = env.svm.get_account(&env.vault).unwrap().data;
         TokenAccount::unpack(&vault_data).unwrap().amount
     };
-    assert_eq!(spl_vault, 28_000_000_300, "ATTACK: SPL vault changed! (includes 3 init deposits)");
+    assert_eq!(
+        spl_vault, 28_000_000_300,
+        "ATTACK: SPL vault changed! (includes 3 init deposits)"
+    );
 }
 
 /// ATTACK: Verify pnl_pos_tot tracks only positive PnL accounts.
@@ -5568,7 +5750,11 @@ fn test_attack_force_realize_closes_positions_safely() {
         "User position should remain open (no force-realize in v10.5): {}",
         user_pos
     );
-    assert_ne!(lp_pos, 0, "LP position should remain open (no force-realize in v10.5): {}", lp_pos);
+    assert_ne!(
+        lp_pos, 0,
+        "LP position should remain open (no force-realize in v10.5): {}",
+        lp_pos
+    );
 
     // SPL vault unchanged (crank doesn't move tokens)
     let vault_after = {
@@ -5911,10 +6097,10 @@ fn test_attack_funding_extreme_k_bps_capped() {
             AccountMeta::new_readonly(env.pyth_index, false),
         ],
         data: encode_update_config(
-            100,// funding_horizon_slots
-            100_000,// funding_k_bps (max allowed = 1000x)
-            100,// funding_max_premium_bps
-            10,// funding_max_e9_per_slot
+            100,     // funding_horizon_slots
+            100_000, // funding_k_bps (max allowed = 1000x)
+            100,     // funding_max_premium_bps
+            10,      // funding_max_e9_per_slot
         ),
     };
     let tx = Transaction::new_signed_with_payer(
@@ -5986,10 +6172,10 @@ fn test_attack_funding_extreme_max_premium_capped() {
             AccountMeta::new_readonly(env.pyth_index, false),
         ],
         data: encode_update_config(
-            100,// funding_horizon_slots
-            100,// funding_k_bps
-            i64::MAX,// funding_max_premium_bps (extreme!)
-            10,// funding_max_e9_per_slot
+            100,      // funding_horizon_slots
+            100,      // funding_k_bps
+            i64::MAX, // funding_max_premium_bps (extreme!)
+            10,       // funding_max_e9_per_slot
         ),
     };
     let tx = Transaction::new_signed_with_payer(
@@ -6061,10 +6247,10 @@ fn test_attack_funding_extreme_max_bps_per_slot() {
             AccountMeta::new_readonly(env.pyth_index, false),
         ],
         data: encode_update_config(
-            100,// funding_horizon_slots
-            100,// funding_k_bps
-            100,// funding_max_premium_bps
-            i64::MAX,// funding_max_e9_per_slot (extreme!)
+            100,      // funding_horizon_slots
+            100,      // funding_k_bps
+            100,      // funding_max_premium_bps
+            i64::MAX, // funding_max_e9_per_slot (extreme!)
         ),
     };
     let tx = Transaction::new_signed_with_payer(
@@ -6726,7 +6912,6 @@ fn test_attack_funding_accrue_huge_dt_capped() {
         spl_vault, 65_000_000_200,
         "ATTACK: SPL vault changed after huge dt funding!"
     );
-
 }
 
 /// ATTACK: Large unit scale - very large scaling factor.
@@ -7326,7 +7511,8 @@ fn test_attack_update_admin_old_admin_rejected() {
     env.svm.airdrop(&new_admin.pubkey(), 5_000_000_000).unwrap();
 
     // Transfer admin to new_admin (cross-Keypair: two-sig handover)
-    env.try_update_authority(&admin, AUTHORITY_ADMIN, Some(&new_admin)).unwrap();
+    env.try_update_authority(&admin, AUTHORITY_ADMIN, Some(&new_admin))
+        .unwrap();
 
     // Old admin tries admin operation - should fail
     let slab_before_old_admin_attempt = env.svm.get_account(&env.slab).unwrap().data;
@@ -7373,9 +7559,11 @@ fn test_attack_set_oracle_authority_to_zero_disables_push() {
     let zero = Pubkey::new_from_array([0u8; 32]);
     env.set_slot(2);
     let zero_result = env.try_set_oracle_authority(&admin, &zero);
-    assert!(zero_result.is_ok(),
+    assert!(
+        zero_result.is_ok(),
         "Hyperp with bootstrapped EWMA should accept zero authority: {:?}",
-        zero_result);
+        zero_result
+    );
 
     // Under the 4-way split, burning hyperp_authority is a
     // one-way operation — the zero slot has no current authority
@@ -7392,10 +7580,16 @@ fn test_attack_set_oracle_authority_to_zero_disables_push() {
     const AUTH_PRICE_OFF: usize = 312; // HEADER_LEN(72) + offset_of!(MarketConfig, hyperp_mark_e6)(176)
     const AUTH_TS_OFF: usize = 320;
     let slab_before = env.svm.get_account(&env.slab).unwrap().data;
-    let auth_price_before =
-        u64::from_le_bytes(slab_before[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8].try_into().unwrap());
-    let auth_ts_before =
-        i64::from_le_bytes(slab_before[AUTH_TS_OFF..AUTH_TS_OFF + 8].try_into().unwrap());
+    let auth_price_before = u64::from_le_bytes(
+        slab_before[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let auth_ts_before = i64::from_le_bytes(
+        slab_before[AUTH_TS_OFF..AUTH_TS_OFF + 8]
+            .try_into()
+            .unwrap(),
+    );
     let used_before = env.read_num_used_accounts();
     let spl_vault_before = env.vault_balance();
 
@@ -7407,8 +7601,11 @@ fn test_attack_set_oracle_authority_to_zero_disables_push() {
         "ATTACK: PushHyperpMark succeeded after authority cleared!"
     );
     let slab_after = env.svm.get_account(&env.slab).unwrap().data;
-    let auth_price_after =
-        u64::from_le_bytes(slab_after[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8].try_into().unwrap());
+    let auth_price_after = u64::from_le_bytes(
+        slab_after[AUTH_PRICE_OFF..AUTH_PRICE_OFF + 8]
+            .try_into()
+            .unwrap(),
+    );
     let auth_ts_after =
         i64::from_le_bytes(slab_after[AUTH_TS_OFF..AUTH_TS_OFF + 8].try_into().unwrap());
     let used_after = env.read_num_used_accounts();
@@ -7613,13 +7810,19 @@ fn test_attack_double_deposit_accumulation() {
     env.crank();
 
     let cap1 = env.read_account_capital(user_idx);
-    assert_eq!(cap1, 3_000_000_100, "First deposit amount (includes 100 from init)");
+    assert_eq!(
+        cap1, 3_000_000_100,
+        "First deposit amount (includes 100 from init)"
+    );
 
     // Second deposit (different slot to avoid collision)
     env.set_slot(2);
     env.deposit(&user, user_idx, 2_000_000_000);
     let cap2 = env.read_account_capital(user_idx);
-    assert_eq!(cap2, 5_000_000_100, "Second deposit should accumulate (includes init)");
+    assert_eq!(
+        cap2, 5_000_000_100,
+        "Second deposit should accumulate (includes init)"
+    );
 
     // Full withdrawal (5B deposit + 100 init)
     env.set_slot(3);
@@ -7718,7 +7921,6 @@ fn test_attack_multi_lp_max_position_tracking() {
         c_tot, sum
     );
 }
-
 
 /// ATTACK: Liquidate account that is solvent (positive equity).
 /// LiquidateAtOracle should reject attempts on solvent accounts.
@@ -7927,7 +8129,10 @@ fn test_attack_funding_across_position_size_change() {
     let cap_before_trade = env.read_account_capital(user_idx);
     env.trade(&user, &lp, lp_idx, user_idx, 500_000);
     let cap_after_trade = env.read_account_capital(user_idx);
-    assert_eq!(cap_after_trade, cap_before_trade, "Capital should not change from trade alone (no fee)");
+    assert_eq!(
+        cap_after_trade, cap_before_trade,
+        "Capital should not change from trade alone (no fee)"
+    );
 
     // Crank to accrue some funding
     env.set_slot(100);
@@ -8038,7 +8243,10 @@ fn test_attack_lp_multiple_deposits_then_trade() {
     env.set_slot(2);
     env.deposit(&lp, lp_idx, 5_000_000_000);
     let lp_cap = env.read_account_capital(lp_idx);
-    assert_eq!(lp_cap, 15_000_000_100, "LP capital should accumulate (includes 100 from init)");
+    assert_eq!(
+        lp_cap, 15_000_000_100,
+        "LP capital should accumulate (includes 100 from init)"
+    );
 
     // User trades against the well-funded LP
     let user = Keypair::new();
@@ -8702,13 +8910,10 @@ fn test_attack_init_market_admin_mismatch() {
             AccountMeta::new(slab, false),
             AccountMeta::new_readonly(mint, false),
             AccountMeta::new(vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new_readonly(sysvar::clock::ID, false),
-            AccountMeta::new_readonly(sysvar::rent::ID, false),
             // Admin-mismatch is checked before the oracle read, so the slot
             // can be any placeholder account — init rejects before reaching it.
             AccountMeta::new_readonly(dummy_ata, false),
-            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
         ],
         data, // admin in data = fake_admin != signer
     };
@@ -8818,13 +9023,10 @@ fn test_attack_init_market_mint_mismatch() {
             AccountMeta::new(slab, false),
             AccountMeta::new_readonly(real_mint, false), // Real mint != fake_mint in data
             AccountMeta::new(vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new_readonly(sysvar::clock::ID, false),
-            AccountMeta::new_readonly(sysvar::rent::ID, false),
             // Mint-mismatch is checked before the oracle read, so the slot
             // can be any placeholder account.
             AccountMeta::new_readonly(dummy_ata, false),
-            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
         ],
         data,
     };
@@ -9628,7 +9830,14 @@ fn test_attack_invert_price_zero_result() {
     env.set_slot_and_price(200, 10_000_000_000_000);
     let crank_result = env.try_crank();
     // Crank may fail (zero inverted price) or clamp via circuit breaker
-    println!("Crank with zero-invert price: {}", if crank_result.is_ok() { "ok (clamped)" } else { "rejected" });
+    println!(
+        "Crank with zero-invert price: {}",
+        if crank_result.is_ok() {
+            "ok (clamped)"
+        } else {
+            "rejected"
+        }
+    );
     // Conservation must hold regardless
     let vault = env.vault_balance();
     let engine_vault = env.read_engine_vault();
@@ -9709,7 +9918,14 @@ fn test_attack_invert_price_extreme_small_raw() {
     // Circuit breaker will cap the movement, but the inverted price is valid
     env.set_slot_and_price(200, 1);
     let crank_result = env.try_crank();
-    println!("Crank with extreme-small raw: {}", if crank_result.is_ok() { "ok (clamped)" } else { "rejected" });
+    println!(
+        "Crank with extreme-small raw: {}",
+        if crank_result.is_ok() {
+            "ok (clamped)"
+        } else {
+            "rejected"
+        }
+    );
 
     // Conservation must hold regardless
     let vault = env.vault_balance();
@@ -10620,8 +10836,7 @@ fn test_attack_deposit_after_liquidation_same_slot() {
         assert_eq!(
             capital_after_liq, capital_before_liq,
             "Failed liquidation should not change target capital: before={} after={}",
-            capital_before_liq,
-            capital_after_liq
+            capital_before_liq, capital_after_liq
         );
     }
 
@@ -11711,7 +11926,8 @@ fn test_attack_set_pnl_aggregate_rapid_flips() {
     assert!(
         pnl_after_crash < pnl_after_rise,
         "User PnL should decrease after price crash: before={} after={}",
-        pnl_after_rise, pnl_after_crash
+        pnl_after_rise,
+        pnl_after_crash
     );
 
     env.set_slot_and_price(600, 150_000_000); // Recovery
@@ -11720,7 +11936,8 @@ fn test_attack_set_pnl_aggregate_rapid_flips() {
     assert!(
         pnl_after_recovery > pnl_after_crash,
         "User PnL should increase after recovery: before={} after={}",
-        pnl_after_crash, pnl_after_recovery
+        pnl_after_crash,
+        pnl_after_recovery
     );
 
     // With instant warmup, pnl_pos_tot may have small residuals
@@ -12450,8 +12667,10 @@ fn test_attack_rapid_admin_transfers() {
     env.svm.airdrop(&admin3.pubkey(), 5_000_000_000).unwrap();
 
     // Chain: admin1 -> admin2 -> admin3 (cross-Keypair: two-sig handover)
-    env.try_update_authority(&admin1, AUTHORITY_ADMIN, Some(&admin2)).unwrap();
-    env.try_update_authority(&admin2, AUTHORITY_ADMIN, Some(&admin3)).unwrap();
+    env.try_update_authority(&admin1, AUTHORITY_ADMIN, Some(&admin2))
+        .unwrap();
+    env.try_update_authority(&admin2, AUTHORITY_ADMIN, Some(&admin3))
+        .unwrap();
 
     // Only admin3 should work now
     let r1 = env.try_update_admin(&admin1, &admin1.pubkey());
@@ -12542,8 +12761,16 @@ fn test_attack_trade_size_i128_min_overflow() {
 
     // State must be completely preserved
     assert_eq!(env.vault_balance(), vault_before, "Vault must be unchanged");
-    assert_eq!(env.read_account_position(user_idx), user_pos_before, "User pos unchanged");
-    assert_eq!(env.read_account_position(lp_idx), lp_pos_before, "LP pos unchanged");
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "User pos unchanged"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "LP pos unchanged"
+    );
 }
 
 /// Spec §10.5: TradeNoCpi is a bilateral primitive — any two accounts
@@ -12577,8 +12804,16 @@ fn test_trade_nocpi_user_bilateral_allowed_by_spec() {
     );
 
     // Positions must be set (bilateral trade created positions)
-    assert_ne!(env.read_account_position(user1_idx), 0, "user1 should have position");
-    assert_ne!(env.read_account_position(user2_idx), 0, "user2 should have opposite position");
+    assert_ne!(
+        env.read_account_position(user1_idx),
+        0,
+        "user1 should have position"
+    );
+    assert_ne!(
+        env.read_account_position(user2_idx),
+        0,
+        "user2 should have opposite position"
+    );
 
     // Conservation: vault unchanged (no token flow in trade)
     let vault = env.vault_balance();
@@ -12620,11 +12855,8 @@ fn test_attack_first_push_does_not_poison_baseline() {
             AccountMeta::new(env.slab, false),
             AccountMeta::new_readonly(env.mint, false),
             AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new_readonly(sysvar::clock::ID, false),
-            AccountMeta::new_readonly(sysvar::rent::ID, false),
             AccountMeta::new_readonly(env.pyth_index, false),
-            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
         ],
         data: encode_init_market_with_limits(
             &admin.pubkey(),
@@ -12680,12 +12912,10 @@ fn test_attack_first_push_does_not_poison_baseline() {
     assert!(
         auth_price <= upper,
         "Authority price must be clamped within cap of baseline: auth={} upper={}",
-        auth_price, upper
+        auth_price,
+        upper
     );
 }
-
-
-
 
 /// Gate: caller-shaped external errors (malformed account, wrong owner,
 /// wrong feed, bad data) must NOT trigger authority fallback. The gate
@@ -12798,7 +13028,7 @@ fn test_attack_position_flip_through_zero_with_pnl() {
         &env.mint,
         &common::TEST_FEED_ID,
         1_000_000_000,
-        0,  // no maintenance fee
+        0, // no maintenance fee
         0,
     );
     env.try_init_market_raw(data).expect("init_market");
@@ -12868,9 +13098,7 @@ fn test_attack_position_flip_through_zero_with_pnl() {
     let lp_pnl_delta: i128 = lp_pnl_post - lp_pnl_pre;
     let ins_delta: i128 = (ins_after_flip as i128) - (ins_pre_flip as i128);
 
-    let full_sum = alice_cap_delta + lp_cap_delta
-        + alice_pnl_delta + lp_pnl_delta
-        + ins_delta;
+    let full_sum = alice_cap_delta + lp_cap_delta + alice_pnl_delta + lp_pnl_delta + ins_delta;
     println!(
         "flip conservation: Alice(capΔ={alice_cap_delta}, pnlΔ={alice_pnl_delta}), \
          LP(capΔ={lp_cap_delta}, pnlΔ={lp_pnl_delta}), InsΔ={ins_delta}, \
@@ -12908,5 +13136,3 @@ fn test_attack_position_flip_through_zero_with_pnl() {
         "LP's total (capital + pnl) Δ = {lp_total}, expected ≈ -1_000_000",
     );
 }
-
-

@@ -187,14 +187,14 @@ pub fn make_pyth_data(
     // VerificationLevel::Full = 1-byte discriminant 0x01 at offset 40.
     data[40] = 1;
     // PriceFeedMessage starts at byte 41.
-    data[41..73].copy_from_slice(feed_id);                       // 32
-    data[73..81].copy_from_slice(&price.to_le_bytes());          //  8
-    data[81..89].copy_from_slice(&conf.to_le_bytes());           //  8
-    data[89..93].copy_from_slice(&expo.to_le_bytes());           //  4
-    data[93..101].copy_from_slice(&publish_time.to_le_bytes());  //  8
-    // prev_publish_time @ 101..109, ema_price @ 109..117, ema_conf @
-    // 117..125 are all zeroed — tests don't rely on them today.
-    // posted_slot @ 125..133, also zeroed.
+    data[41..73].copy_from_slice(feed_id); // 32
+    data[73..81].copy_from_slice(&price.to_le_bytes()); //  8
+    data[81..89].copy_from_slice(&conf.to_le_bytes()); //  8
+    data[89..93].copy_from_slice(&expo.to_le_bytes()); //  4
+    data[93..101].copy_from_slice(&publish_time.to_le_bytes()); //  8
+                                                                // prev_publish_time @ 101..109, ema_price @ 109..117, ema_conf @
+                                                                // 117..125 are all zeroed — tests don't rely on them today.
+                                                                // posted_slot @ 125..133, also zeroed.
     data
 }
 
@@ -221,8 +221,8 @@ fn append_default_extended_tail_for(data: &mut Vec<u8>, is_hyperp: bool) {
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps (default)
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps (default)
     data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot (default)
-    // Hyperp + perm_resolve>0 requires mark_min_fee>0 (F2 defense), but here
-    // Hyperp is paired with perm_resolve=0 so mark_min_fee=0 is fine.
+                                                     // Hyperp + perm_resolve>0 requires mark_min_fee>0 (F2 defense), but here
+                                                     // Hyperp is paired with perm_resolve=0 so mark_min_fee=0 is fine.
     data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee (disabled)
     let force_close: u64 = if is_hyperp { 0 } else { 50 };
     data.extend_from_slice(&force_close.to_le_bytes()); // force_close_delay_slots
@@ -247,7 +247,11 @@ pub fn encode_init_market_with_invert(
 }
 
 /// Encode InitMarket with initial_mark_price_e6 for Hyperp mode
-pub fn encode_init_market_hyperp(admin: &Pubkey, mint: &Pubkey, initial_mark_price_e6: u64) -> Vec<u8> {
+pub fn encode_init_market_hyperp(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    initial_mark_price_e6: u64,
+) -> Vec<u8> {
     // Hyperp mode: feed_id = [0; 32], invert = 0 (not inverted internally)
     encode_init_market_full_v2(admin, mint, &[0u8; 32], 0, initial_mark_price_e6, 0)
 }
@@ -273,7 +277,7 @@ pub fn encode_init_market_hyperp_with_stale(
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&initial_mark_price_e6.to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
-    // RiskParams
+                                                  // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
@@ -281,7 +285,7 @@ pub fn encode_init_market_hyperp_with_stale(
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
-    // max_crank_staleness: must be < perm_resolve
+                                                 // max_crank_staleness: must be < perm_resolve
     let max_crank = if permissionless_resolve_stale_slots > 0 {
         permissionless_resolve_stale_slots.saturating_sub(1).max(1)
     } else {
@@ -292,8 +296,8 @@ pub fn encode_init_market_hyperp_with_stale(
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
     data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
@@ -302,12 +306,20 @@ pub fn encode_init_market_hyperp_with_stale(
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
     data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot
-    // mark_min_fee must be > 0 when Hyperp + perm_resolve > 0 (F2
-    // defense against liveness spoofing via cheap self-trades).
-    let mark_min_fee = if permissionless_resolve_stale_slots > 0 { 1u64 } else { 0u64 };
+                                                     // mark_min_fee must be > 0 when Hyperp + perm_resolve > 0 (F2
+                                                     // defense against liveness spoofing via cheap self-trades).
+    let mark_min_fee = if permissionless_resolve_stale_slots > 0 {
+        1u64
+    } else {
+        0u64
+    };
     data.extend_from_slice(&mark_min_fee.to_le_bytes());
     // force_close_delay must be > 0 when perm_resolve > 0
-    let force_close = if permissionless_resolve_stale_slots > 0 { 50u64 } else { 0u64 };
+    let force_close = if permissionless_resolve_stale_slots > 0 {
+        50u64
+    } else {
+        0u64
+    };
     data.extend_from_slice(&force_close.to_le_bytes());
     data
 }
@@ -335,7 +347,7 @@ pub fn encode_init_market_hyperp_with_fees(
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&initial_mark_price_e6.to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
-    // RiskParams
+                                                  // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
@@ -348,10 +360,10 @@ pub fn encode_init_market_hyperp_with_fees(
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
     data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
-    // Extended tail
+                                                                             // Extended tail
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
     data.extend_from_slice(&0u64.to_le_bytes()); // permissionless_resolve_stale_slots
@@ -383,15 +395,18 @@ pub fn encode_init_market_with_conf_bps(
     data.push(invert); // invert flag
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&initial_mark_price_e6.to_le_bytes()); // initial_mark_price_e6
-    // Per-market admin limits (uncapped defaults for tests)
+                                                                  // Per-market admin limits (uncapped defaults for tests)
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
+    let is_hyperp = feed_id == &[0u8; 32];
     // RiskParams
     data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
-    data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+    // §12.19.6 F8 anti-spam (non-Hyperp default tail: perm_resolve=80).
+    let new_account_fee: u128 = if is_hyperp { 0 } else { 1 };
+    data.extend_from_slice(&new_account_fee.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&warmup_period_slots.max(1).to_le_bytes()); // h_max (must be >= h_min)
 
     data.extend_from_slice(&50u64.to_le_bytes()); // max_crank_staleness_slots (must be < perm_resolve=80 <= MAX_ACCRUAL_DT_SLOTS=100)
@@ -399,10 +414,9 @@ pub fn encode_init_market_with_conf_bps(
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
     data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
-    let is_hyperp = feed_id == &[0u8; 32];
     append_default_extended_tail_for(&mut data, is_hyperp);
     data
 }
@@ -424,13 +438,13 @@ pub fn encode_init_market_full_v2(
     data.push(invert); // invert flag
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&initial_mark_price_e6.to_le_bytes()); // initial_mark_price_e6
-    // Per-market admin limits (uncapped defaults for tests)
+                                                                  // Per-market admin limits (uncapped defaults for tests)
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled) (<= MAX_PROTOCOL_FEE_ABS)
-    // Resolvability invariant: non-Hyperp + cap=0 + perm_resolve=0 is
-    // rejected at init. Default tail uses perm_resolve=0, so non-Hyperp
-    // feeds need cap > 0. Hyperp (feed_id all-zero) is exempt and can
-    // carry cap=0 — the wrapper promotes to DEFAULT_HYPERP_PRICE_CAP
-    // at init.
+                                                  // Resolvability invariant: non-Hyperp + cap=0 + perm_resolve=0 is
+                                                  // rejected at init. Default tail uses perm_resolve=0, so non-Hyperp
+                                                  // feeds need cap > 0. Hyperp (feed_id all-zero) is exempt and can
+                                                  // carry cap=0 — the wrapper promotes to DEFAULT_HYPERP_PRICE_CAP
+                                                  // at init.
     let is_hyperp = feed_id == &[0u8; 32];
     // RiskParams
     data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
@@ -438,7 +452,11 @@ pub fn encode_init_market_full_v2(
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
-    data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+    // §12.19.6 F8: permissionless markets (non-Hyperp default tail sets
+    // perm_resolve=80) require anti-spam fee. Dust `new_account_fee=1`
+    // satisfies the invariant without perturbing per-slot accounting.
+    let new_account_fee: u128 = if is_hyperp { 0 } else { 1 };
+    data.extend_from_slice(&new_account_fee.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&warmup_period_slots.max(1).to_le_bytes()); // h_max (must be >= h_min)
 
     data.extend_from_slice(&50u64.to_le_bytes()); // max_crank_staleness_slots (must be < perm_resolve=80 <= MAX_ACCRUAL_DT_SLOTS=100)
@@ -446,10 +464,10 @@ pub fn encode_init_market_full_v2(
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
     data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
-    // Full extended tail (required — no partial tails allowed)
+                                                                             // Full extended tail (required — no partial tails allowed)
     append_default_extended_tail_for(&mut data, is_hyperp);
     data
 }
@@ -472,15 +490,21 @@ pub fn encode_init_market_with_cap(
     data.push(invert);
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6 (0 for non-Hyperp)
-    // Per-market admin limits
+                                                 // Per-market admin limits
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
-    // RiskParams
+                                                  // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
-    data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+    // §12.19.6 F8: permissionless markets require anti-spam fee.
+    let new_account_fee: u128 = if permissionless_resolve_stale_slots > 0 {
+        1
+    } else {
+        0
+    };
+    data.extend_from_slice(&new_account_fee.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
 
     // max_crank_staleness_slots: use bounded value when permissionless resolve is enabled
@@ -495,10 +519,10 @@ pub fn encode_init_market_with_cap(
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
     data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
-    // Full extended tail (82 bytes)
+                                                                             // Full extended tail (82 bytes)
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
 
@@ -508,8 +532,12 @@ pub fn encode_init_market_with_cap(
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps (default)
     data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot (default)
     data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee (disabled)
-    // force_close_delay must be > 0 when permissionless_resolve > 0
-    let force_close = if permissionless_resolve_stale_slots > 0 { 50u64 } else { 0u64 };
+                                                 // force_close_delay must be > 0 when permissionless_resolve > 0
+    let force_close = if permissionless_resolve_stale_slots > 0 {
+        50u64
+    } else {
+        0u64
+    };
     data.extend_from_slice(&force_close.to_le_bytes());
     data
 }
@@ -543,7 +571,11 @@ pub fn encode_init_market_with_funding(
     data.extend_from_slice(&funding_max_premium_bps.to_le_bytes());
     data.extend_from_slice(&funding_max_e9_per_slot.to_le_bytes());
     data.extend_from_slice(&0u64.to_le_bytes()); // mark_min_fee (disabled)
-    let fc = if permissionless_resolve_stale_slots > 0 { 50u64 } else { 0u64 };
+    let fc = if permissionless_resolve_stale_slots > 0 {
+        50u64
+    } else {
+        0u64
+    };
     data.extend_from_slice(&fc.to_le_bytes()); // force_close_delay_slots
     data
 }
@@ -562,15 +594,24 @@ pub fn encode_init_market_with_min_fee(
     mark_min_fee: u64,
 ) -> Vec<u8> {
     let mut data = encode_init_market_with_funding(
-        admin, mint, feed_id, invert,
+        admin,
+        mint,
+        feed_id,
+        invert,
         permissionless_resolve_stale_slots,
-        funding_horizon_slots, funding_k_bps,
-        funding_max_premium_bps, funding_max_e9_per_slot,
+        funding_horizon_slots,
+        funding_k_bps,
+        funding_max_premium_bps,
+        funding_max_e9_per_slot,
     );
     // Truncate default mark_min_fee + force_close_delay (16 bytes), replace with custom
     data.truncate(data.len() - 16);
     data.extend_from_slice(&mark_min_fee.to_le_bytes());
-    let fc = if permissionless_resolve_stale_slots > 0 { 50u64 } else { 0u64 };
+    let fc = if permissionless_resolve_stale_slots > 0 {
+        50u64
+    } else {
+        0u64
+    };
     data.extend_from_slice(&fc.to_le_bytes()); // force_close_delay_slots
     data
 }
@@ -595,13 +636,16 @@ pub fn encode_init_market_with_trading_fee(
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
-    // RiskParams
+                                                  // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&trading_fee_bps.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
-    data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+    // §12.19.6 F8 anti-spam: non-Hyperp default ships perm_resolve=80.
+    let is_hyperp = feed_id == &[0u8; 32];
+    let new_account_fee: u128 = if is_hyperp { 0 } else { 1 };
+    data.extend_from_slice(&new_account_fee.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
 
     data.extend_from_slice(&50u64.to_le_bytes()); // max_crank_staleness_slots (must be < perm_resolve=80 <= MAX_ACCRUAL_DT_SLOTS=100)
@@ -609,14 +653,13 @@ pub fn encode_init_market_with_trading_fee(
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
     data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
 
     // v12.19.6: perm_resolve <= MAX_ACCRUAL_DT_SLOTS (100). Pick 80.
-    let is_hyperp = feed_id == &[0u8; 32];
     let perm_resolve: u64 = if is_hyperp { 0 } else { 80 };
     data.extend_from_slice(&perm_resolve.to_le_bytes());
     // Custom funding params (required before mark_min_fee)
@@ -624,8 +667,8 @@ pub fn encode_init_market_with_trading_fee(
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
     data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot
-    // mark_min_fee (Hyperp + perm_resolve>0 would require mark_min_fee>0; we
-    // only set perm_resolve>0 for non-Hyperp so the passthrough is fine).
+                                                     // mark_min_fee (Hyperp + perm_resolve>0 would require mark_min_fee>0; we
+                                                     // only set perm_resolve>0 for non-Hyperp so the passthrough is fine).
     data.extend_from_slice(&mark_min_fee.to_le_bytes());
     let force_close: u64 = if is_hyperp { 0 } else { 50 };
     data.extend_from_slice(&force_close.to_le_bytes());
@@ -653,16 +696,24 @@ pub fn encode_init_market_with_maint_fee_bounded(
     data.push(0u8); // invert
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
-    // maintenance_fee_per_slot now passed through (engine v12.18.4 supports
-    // per-account fee accrual via sync_account_fee_to_slot_not_atomic).
+                                                 // maintenance_fee_per_slot now passed through (engine v12.18.4 supports
+                                                 // per-account fee accrual via sync_account_fee_to_slot_not_atomic).
     data.extend_from_slice(&maintenance_fee_per_slot.to_le_bytes());
+    let is_hyperp = feed_id == &[0u8; 32];
     // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
-    data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+    // §12.19.6 F8 anti-spam: non-Hyperp default tail sets perm_resolve=80.
+    // Skip dust fee when maintenance_fee already satisfies the invariant.
+    let new_account_fee: u128 = if is_hyperp || maintenance_fee_per_slot > 0 {
+        0
+    } else {
+        1
+    };
+    data.extend_from_slice(&new_account_fee.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
 
     data.extend_from_slice(&50u64.to_le_bytes()); // max_crank_staleness_slots (must be < perm_resolve=80 <= MAX_ACCRUAL_DT_SLOTS=100)
@@ -670,10 +721,9 @@ pub fn encode_init_market_with_maint_fee_bounded(
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
     data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
-    let is_hyperp = feed_id == &[0u8; 32];
     append_default_extended_tail_for(&mut data, is_hyperp);
     data
 }
@@ -687,9 +737,7 @@ pub fn encode_init_market_with_force_close(
 ) -> Vec<u8> {
     // Build base with cap + permissionless resolve (full 82-byte tail).
     // v12.19.6: perm_resolve <= MAX_ACCRUAL_DT_SLOTS (100). Use 80.
-    let mut data = encode_init_market_with_cap(
-        admin, mint, feed_id, 0, 80,
-    );
+    let mut data = encode_init_market_with_cap(admin, mint, feed_id, 0, 80);
     // Truncate default force_close_delay_slots (last 8 bytes), replace with custom
     data.truncate(data.len() - 8);
     data.extend_from_slice(&force_close_delay_slots.to_le_bytes());
@@ -890,11 +938,8 @@ impl TestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: encode_init_market_with_conf_bps(
                 &admin.pubkey(),
@@ -913,7 +958,9 @@ impl TestEnv {
             &[admin],
             self.svm.latest_blockhash(),
         );
-        self.svm.send_transaction(tx).expect("init_market_with_conf_bps failed");
+        self.svm
+            .send_transaction(tx)
+            .expect("init_market_with_conf_bps failed");
     }
 
     pub fn init_market_with_invert(&mut self, invert: u8) {
@@ -932,11 +979,7 @@ impl TestEnv {
     /// resolvability invariant admits the market. Callers that pass `0` will
     /// be rejected by the engine; use `encode_init_market_with_cap` directly
     /// if a test genuinely requires `perm_resolve == 0`.
-    pub fn init_market_with_cap(
-        &mut self,
-        invert: u8,
-        permissionless_resolve_stale_slots: u64,
-    ) {
+    pub fn init_market_with_cap(&mut self, invert: u8, permissionless_resolve_stale_slots: u64) {
         let admin = &self.payer;
         let dummy_ata = Pubkey::new_unique();
         self.svm
@@ -959,11 +1002,8 @@ impl TestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: encode_init_market_with_cap(
                 &admin.pubkey(),
@@ -1021,11 +1061,8 @@ impl TestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: encode_init_market_with_funding(
                 &admin.pubkey(),
@@ -1081,11 +1118,8 @@ impl TestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: encode_init_market_with_trading_fee(
                 &admin.pubkey(),
@@ -1109,11 +1143,7 @@ impl TestEnv {
     }
 
     /// Initialize a market with all params including mark_min_fee for fee-weighted EWMA.
-    pub fn init_market_with_min_fee(
-        &mut self,
-        invert: u8,
-        mark_min_fee: u64,
-    ) {
+    pub fn init_market_with_min_fee(&mut self, invert: u8, mark_min_fee: u64) {
         let admin = &self.payer;
         let dummy_ata = Pubkey::new_unique();
         self.svm
@@ -1136,11 +1166,8 @@ impl TestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: encode_init_market_with_min_fee(
                 &admin.pubkey(),
@@ -1148,7 +1175,10 @@ impl TestEnv {
                 &TEST_FEED_ID,
                 invert,
                 80, // v12.19.6: perm_resolve <= MAX_ACCRUAL_DT_SLOTS (100)
-                500, 100, 500, 5, // default funding params
+                500,
+                100,
+                500,
+                5, // default funding params
                 mark_min_fee,
             ),
         };
@@ -1188,11 +1218,8 @@ impl TestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: encode_init_market_hyperp(&admin.pubkey(), &self.mint, initial_mark_price_e6),
         };
@@ -1306,7 +1333,9 @@ impl TestEnv {
             &[owner],
             self.svm.latest_blockhash(),
         );
-        self.svm.send_transaction(tx).expect("init_lp_with_fee failed");
+        self.svm
+            .send_transaction(tx)
+            .expect("init_lp_with_fee failed");
         self.account_count += 1;
         idx
     }
@@ -1484,7 +1513,7 @@ impl TestEnv {
         let mut data = vec![5u8]; // Tag 5: KeeperCrank
         data.extend_from_slice(&caller_idx.to_le_bytes());
         data.push(1u8); // format_version = 1
-        // No candidates — sweep visits every used account via the bitmap.
+                        // No candidates — sweep visits every used account via the bitmap.
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
@@ -1557,29 +1586,50 @@ impl TestEnv {
     /// pass through unchanged so the engine still sees the intended
     /// single-shot move.
     pub fn set_slot_and_price(&mut self, slot: u64, price_e6: i64) {
-        const CHUNK: u64 = 50;
+        const BASE_CHUNK: u64 = 40;
         // Engine-side cap is `TEST_MAX_PRICE_MOVE_BPS_PER_SLOT`; stay well
         // below so linear interpolation passes the per-step check.
-        const SAFE_RATE_BPS_PER_SLOT: u128 =
-            TEST_MAX_PRICE_MOVE_BPS_PER_SLOT as u128;
-        let _ = SAFE_RATE_BPS_PER_SLOT; // keep the constant in scope for docs
+        const SAFE_RATE_BPS_PER_SLOT: u128 = TEST_MAX_PRICE_MOVE_BPS_PER_SLOT as u128;
         let target_effective_slot = slot + 100;
-        let cur_effective_slot = self.svm.get_sysvar::<Clock>().slot;
+        let cur_effective_slot = self
+            .svm
+            .get_sysvar::<Clock>()
+            .slot
+            .max(self.read_oracle_publish_time());
         let cur_price = self.read_oracle_price_e6();
+        let stale_window = {
+            let slab = self.svm.get_account(&self.slab).unwrap();
+            percolator_prog::state::read_config(&slab.data).permissionless_resolve_stale_slots
+        };
+        let chunk = if stale_window > 1 {
+            BASE_CHUNK.min(stale_window - 1)
+        } else {
+            BASE_CHUNK
+        };
         // Walk whenever we're advancing time past one envelope chunk. Walk
         // cranks are best-effort (try_crank_once); if the engine rejects an
         // intermediate step the final set_slot_and_price_raw still lands
         // the caller's target values, and the caller's own next try_crank
         // will surface the failure.
-        let should_walk = target_effective_slot > cur_effective_slot
-            && target_effective_slot - cur_effective_slot > CHUNK;
+        let total_slots = target_effective_slot.saturating_sub(cur_effective_slot);
+        let rate_fits_envelope =
+            if total_slots > 0 && cur_price > 0 && price_e6 > 0 && cur_price != price_e6 {
+                let base_price = (cur_price.min(price_e6)) as u128;
+                let abs_delta = (price_e6 as i128 - cur_price as i128).unsigned_abs();
+                abs_delta.saturating_mul(10_000)
+                    <= base_price
+                        .saturating_mul(SAFE_RATE_BPS_PER_SLOT)
+                        .saturating_mul(total_slots as u128)
+            } else {
+                true
+            };
+        let should_walk = total_slots > chunk && rate_fits_envelope;
 
         if should_walk {
-            let total_slots = target_effective_slot - cur_effective_slot;
             let total_dp = (price_e6 - cur_price) as i128;
             let mut s = cur_effective_slot;
-            while s + CHUNK < target_effective_slot {
-                s += CHUNK;
+            while s + chunk < target_effective_slot {
+                s += chunk;
                 let frac_num = (s - cur_effective_slot) as i128;
                 let frac_den = total_slots as i128;
                 let px = cur_price as i128 + total_dp * frac_num / frac_den;
@@ -1625,7 +1675,10 @@ impl TestEnv {
             &[&caller],
             self.svm.latest_blockhash(),
         );
-        self.svm.send_transaction(tx).map(|_| ()).map_err(|e| format!("{:?}", e))
+        self.svm
+            .send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
     }
 
     /// Try to close account, returns result
@@ -1644,7 +1697,6 @@ impl TestEnv {
                 AccountMeta::new_readonly(vault_pda, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(self.pyth_index, false),
             ],
             data: encode_close_account(user_idx),
         };
@@ -1682,7 +1734,6 @@ impl TestEnv {
                 AccountMeta::new_readonly(vault_pda, false), // 4: vault_pda
                 AccountMeta::new_readonly(spl_token::ID, false), // 5: token program
                 AccountMeta::new_readonly(sysvar::clock::ID, false), // 6: clock
-                AccountMeta::new_readonly(self.pyth_index, false), // 7: oracle
             ],
             data: encode_admin_force_close_account(user_idx),
         };
@@ -1730,12 +1781,10 @@ impl TestEnv {
 /// 3. Runs crank which computes funding rate using market price
 /// 4. If funding used raw price instead of market price, it would overflow or produce wrong values
 
-
 /// Test that a non-inverted market works correctly (control case).
 ///
 /// This serves as a control test to verify that non-inverted markets
 /// (where oracle price is used directly as market price) still work.
-
 
 // ============================================================================
 // Bug regression tests
@@ -1763,8 +1812,6 @@ pub fn encode_catchup_accrue() -> Vec<u8> {
 pub fn encode_withdraw_insurance() -> Vec<u8> {
     vec![20u8] // Instruction tag for WithdrawInsurance
 }
-
-
 
 pub fn encode_withdraw(user_idx: u16, amount: u64) -> Vec<u8> {
     let mut data = vec![4u8]; // Instruction tag for WithdrawCollateral
@@ -1803,18 +1850,33 @@ pub fn encode_init_market_full(
     data.push(invert);
     data.extend_from_slice(&unit_scale.to_le_bytes());
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6 (0 for non-Hyperp)
-    // Per-market admin limits (uncapped defaults for tests)
+                                                 // Per-market admin limits (uncapped defaults for tests)
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled) (<= MAX_PROTOCOL_FEE_ABS)
-    // min_oracle_price_cap_e2bps = 10_000 so hyperp_authority defaults
-    // to admin under the init-time invariant. Tests that specifically
-    // want cap=0 should use init_market_with_cap(..., 0, ...) directly.
-    // RiskParams
+                                                  // min_oracle_price_cap_e2bps = 10_000 so hyperp_authority defaults
+                                                  // to admin under the init-time invariant. Tests that specifically
+                                                  // want cap=0 should use init_market_with_cap(..., 0, ...) directly.
+                                                  // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
-    data.extend_from_slice(&new_account_fee.to_le_bytes());
+    // §12.19.6 F8 anti-spam: non-Hyperp default tail sets perm_resolve=80.
+    // Respect caller's explicit new_account_fee; only upgrade to minimum
+    // aligned dust when caller passed 0 on a non-Hyperp feed. With unit_scale
+    // the engine rejects fee % unit_scale != 0, so pick unit_scale itself
+    // (the smallest non-zero aligned value) in that case.
+    let is_hyperp_full = feed_id == &[0u8; 32];
+    let new_account_fee_enforced: u128 = if !is_hyperp_full && new_account_fee == 0 {
+        if unit_scale == 0 {
+            1
+        } else {
+            unit_scale as u128
+        }
+    } else {
+        new_account_fee
+    };
+    data.extend_from_slice(&new_account_fee_enforced.to_le_bytes());
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
 
     data.extend_from_slice(&50u64.to_le_bytes()); // max_crank_staleness_slots (must be < perm_resolve=80 <= MAX_ACCRUAL_DT_SLOTS=100)
@@ -1822,10 +1884,10 @@ pub fn encode_init_market_full(
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
     data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
-    append_default_extended_tail_for(&mut data, feed_id == &[0u8; 32]);
+    append_default_extended_tail_for(&mut data, is_hyperp_full);
     data
 }
 
@@ -1846,19 +1908,22 @@ pub fn encode_init_market_with_warmup(
     data.push(invert);
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale = 0 (no scaling)
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6 (0 for non-Hyperp)
-    // Per-market admin limits (uncapped defaults for tests)
+                                                 // Per-market admin limits (uncapped defaults for tests)
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled) (<= MAX_PROTOCOL_FEE_ABS)
-    // Resolvability invariant: non-Hyperp + cap=0 + perm_resolve=0 is
-    // rejected at init. Default tail has perm_resolve=0, so ship max
-    // cap to satisfy the invariant without restricting test oracle
-    // moves.
+                                                  // Resolvability invariant: non-Hyperp + cap=0 + perm_resolve=0 is
+                                                  // rejected at init. Default tail has perm_resolve=0, so ship max
+                                                  // cap to satisfy the invariant without restricting test oracle
+                                                  // moves.
+    let is_hyperp = feed_id == &[0u8; 32];
     // RiskParams
     data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps (5%)
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps (10%)
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
-    data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+    // §12.19.6 F8 anti-spam (non-Hyperp gets perm_resolve > 0 below).
+    let new_account_fee: u128 = if is_hyperp { 0 } else { 1 };
+    data.extend_from_slice(&new_account_fee.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&warmup_period_slots.max(1).to_le_bytes()); // h_max (must be >= h_min)
 
     data.extend_from_slice(&50u64.to_le_bytes()); // max_crank_staleness_slots (must be < perm_resolve=80 <= MAX_ACCRUAL_DT_SLOTS=100)
@@ -1866,17 +1931,16 @@ pub fn encode_init_market_with_warmup(
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
     data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
-    // Extended tail: scale perm_resolve so h_max <= perm_resolve (§14.1).
-    let is_hyperp = feed_id == &[0u8; 32];
+                                                                             // Extended tail: scale perm_resolve so h_max <= perm_resolve (§14.1).
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
-    // v12.19.6: perm_resolve must satisfy `perm_resolve > h_max` AND
-    // `perm_resolve > max_crank_staleness(50)` AND `perm_resolve <= 100`.
-    // For tests that pass warmup >= 100 there's no valid value — the
-    // caller should use a shorter warmup.
+                                                 // v12.19.6: perm_resolve must satisfy `perm_resolve > h_max` AND
+                                                 // `perm_resolve > max_crank_staleness(50)` AND `perm_resolve <= 100`.
+                                                 // For tests that pass warmup >= 100 there's no valid value — the
+                                                 // caller should use a shorter warmup.
     let perm_resolve: u64 = if is_hyperp {
         0
     } else {
@@ -1918,11 +1982,8 @@ impl TestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: encode_init_market_full(
                 &admin.pubkey(),
@@ -1967,11 +2028,8 @@ impl TestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: encode_init_market_with_warmup(
                 &admin.pubkey(),
@@ -2051,6 +2109,11 @@ impl TestEnv {
         percolator_prog::state::read_config(&d).last_effective_price_e6
     }
 
+    pub fn read_oracle_target_price(&self) -> u64 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        percolator_prog::state::read_config(&d).oracle_target_price_e6
+    }
+
     /// Read mark_ewma_e6 from config
     pub fn read_mark_ewma(&self) -> u64 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
@@ -2061,15 +2124,28 @@ impl TestEnv {
     /// (v12.19 init-immutable). Standard bps (100 = 1%).
     pub fn read_oracle_price_cap(&self) -> u64 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        percolator_prog::zc::engine_ref(&d).unwrap().params.max_price_move_bps_per_slot
+        // SBF-written RiskEngine bytes must be read with SBF offsets, not by
+        // casting to the host RiskEngine layout. RiskEngine.params starts at
+        // engine+32; RiskParams.max_price_move_bps_per_slot is at params+168.
+        const MAX_PRICE_MOVE_BPS_OFFSET: usize = 520 + 32 + 168;
+        u64::from_le_bytes(
+            d[MAX_PRICE_MOVE_BPS_OFFSET..MAX_PRICE_MOVE_BPS_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        )
     }
 
     /// Read `engine.last_market_slot` — the slot stamped at the last
     /// `accrue_market_to` call. Used by fee-sync + accrual tests that
-    /// need to verify forward-progress without hand-rolling offsets.
+    /// need to verify forward progress through the SBF-written slab.
     pub fn read_last_market_slot(&self) -> u64 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        percolator_prog::zc::engine_ref(&d).unwrap().last_market_slot
+        const LAST_MARKET_SLOT_OFFSET: usize = 520 + 664;
+        u64::from_le_bytes(
+            d[LAST_MARKET_SLOT_OFFSET..LAST_MARKET_SLOT_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        )
     }
 
     /// Read funding_rate_bps_per_slot_last from engine
@@ -2159,8 +2235,8 @@ impl TestEnv {
         pub const ENGINE: usize = 520;
         pub const ACCOUNTS_OFFSET: usize = ENGINE + ENGINE_ACCOUNTS_OFFSET;
         pub const ACCOUNT_SIZE: usize = 360;
-        pub const PBQ: usize = 56;       // position_basis_q: i128 (16 bytes)
-        pub const A_BASIS: usize = 72;   // adl_a_basis: u128 (16 bytes)
+        pub const PBQ: usize = 56; // position_basis_q: i128 (16 bytes)
+        pub const A_BASIS: usize = 72; // adl_a_basis: u128 (16 bytes)
         pub const EPOCH_SNAP: usize = 120; // adl_epoch_snap: u64 (8 bytes)
         pub const ADL_MULT_LONG: usize = ENGINE + 384;
         pub const ADL_MULT_SHORT: usize = ENGINE + 400;
@@ -2168,28 +2244,44 @@ impl TestEnv {
         pub const ADL_EPOCH_SHORT: usize = ENGINE + 456;
 
         let acc_off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE;
-        if d.len() < acc_off + ACCOUNT_SIZE { return 0; }
+        if d.len() < acc_off + ACCOUNT_SIZE {
+            return 0;
+        }
 
         // position_basis_q is now i128 (16 bytes)
-        let basis = i128::from_le_bytes(d[acc_off+PBQ..acc_off+PBQ+16].try_into().unwrap());
-        if basis == 0 { return 0; }
+        let basis = i128::from_le_bytes(d[acc_off + PBQ..acc_off + PBQ + 16].try_into().unwrap());
+        if basis == 0 {
+            return 0;
+        }
 
-        let a_basis = u128::from_le_bytes(d[acc_off+A_BASIS..acc_off+A_BASIS+16].try_into().unwrap());
-        let epoch_snap = u64::from_le_bytes(d[acc_off+EPOCH_SNAP..acc_off+EPOCH_SNAP+8].try_into().unwrap());
-        if a_basis == 0 { return 0; }
+        let a_basis = u128::from_le_bytes(
+            d[acc_off + A_BASIS..acc_off + A_BASIS + 16]
+                .try_into()
+                .unwrap(),
+        );
+        let epoch_snap = u64::from_le_bytes(
+            d[acc_off + EPOCH_SNAP..acc_off + EPOCH_SNAP + 8]
+                .try_into()
+                .unwrap(),
+        );
+        if a_basis == 0 {
+            return 0;
+        }
 
         // Read A_side and epoch based on sign
         let (a_side, epoch_side) = if basis > 0 {
-            let a = u128::from_le_bytes(d[ADL_MULT_LONG..ADL_MULT_LONG+16].try_into().unwrap());
-            let e = u64::from_le_bytes(d[ADL_EPOCH_LONG..ADL_EPOCH_LONG+8].try_into().unwrap());
+            let a = u128::from_le_bytes(d[ADL_MULT_LONG..ADL_MULT_LONG + 16].try_into().unwrap());
+            let e = u64::from_le_bytes(d[ADL_EPOCH_LONG..ADL_EPOCH_LONG + 8].try_into().unwrap());
             (a, e)
         } else {
-            let a = u128::from_le_bytes(d[ADL_MULT_SHORT..ADL_MULT_SHORT+16].try_into().unwrap());
-            let e = u64::from_le_bytes(d[ADL_EPOCH_SHORT..ADL_EPOCH_SHORT+8].try_into().unwrap());
+            let a = u128::from_le_bytes(d[ADL_MULT_SHORT..ADL_MULT_SHORT + 16].try_into().unwrap());
+            let e = u64::from_le_bytes(d[ADL_EPOCH_SHORT..ADL_EPOCH_SHORT + 8].try_into().unwrap());
             (a, e)
         };
 
-        if epoch_snap != epoch_side { return 0; }
+        if epoch_snap != epoch_side {
+            return 0;
+        }
 
         // effective = |basis| * A_side / a_basis
         let abs_basis = basis.unsigned_abs();
@@ -2199,7 +2291,11 @@ impl TestEnv {
             // mul_div_floor: abs_basis * a_side / a_basis
             ((abs_basis as u128) * a_side) / a_basis.max(1)
         };
-        if basis < 0 { -(effective as i128) } else { effective as i128 }
+        if basis < 0 {
+            -(effective as i128)
+        } else {
+            effective as i128
+        }
     }
 
     /// Snapshot config fields relevant to UpdateConfig validation tests.
@@ -2360,13 +2456,11 @@ impl TestEnv {
 /// Bug: CloseSlab only checks engine.vault and engine.insurance_fund.balance,
 /// but not dust_base which can hold residual base tokens.
 
-
 // ============================================================================
 // Misaligned withdrawal rejection test (related to unit_scale)
 // ============================================================================
 
 /// Test that withdrawals with amounts not divisible by unit_scale are rejected.
-
 
 // ============================================================================
 // Bug #4: InitUser/InitLP should not trap fee overpayments
@@ -2376,7 +2470,6 @@ impl TestEnv {
 ///
 /// Bug: If fee_payment > new_account_fee, the excess is deposited to vault
 /// but only new_account_fee is accounted in engine.vault/insurance.
-
 
 // Bug #6 (Threshold EWMA slow ramp), Bug #7 (Pending epoch wraparound),
 // Bug #8 (LP entry price on flip) — documented in MEMORY.md.
@@ -2389,7 +2482,6 @@ impl TestEnv {
 /// The original test used invert=1, which inverts $138 to ~$7.25, resulting in
 /// position notional of only ~0.5 SOL instead of 10 SOL. This test verifies
 /// that initial_margin_bps is correctly enforced for risk-increasing trades.
-
 
 // ============================================================================
 // Zombie PnL Bug: Crank-driven warmup conversion for idle accounts
@@ -2413,13 +2505,11 @@ impl TestEnv {
 /// Without the fix: User's PnL would never convert, close_account fails
 /// With the fix: Crank converts PnL to capital, close_account succeeds
 
-
 /// Test that zombie accounts don't indefinitely poison the haircut ratio.
 ///
 /// This is a simpler test that verifies the basic mechanism:
 /// - Idle account with capital and no position can be closed
 /// - Even without PnL, crank processes the account correctly
-
 
 // ============================================================================
 // HYPERP MODE SECURITY TESTS
@@ -2431,13 +2521,11 @@ impl TestEnv {
 /// the market would have no valid price and trades would fail with OracleInvalid.
 /// This test verifies the validation in InitMarket rejects this configuration.
 
-
 // Hyperp security stubs (TradeNoCpi disabled, exec_price clamping,
 // default oracle_price_cap, index smoothing) — documented in MEMORY.md.
 // Verified by code inspection + Kani proofs for clamp_toward_with_dt.
 
 /// Test: Hyperp mode InitMarket succeeds with valid initial_mark_price
-
 
 /// Test: Hyperp mode with inverted market (e.g., SOL/USD perp)
 ///
@@ -2449,7 +2537,6 @@ impl TestEnv {
 /// - initial_mark_price_e6 provided as raw price (e.g., 138_000_000)
 /// - InitMarket applies inversion internally
 /// - Stored mark/index are in inverted form (~7246)
-
 
 // ============================================================================
 // Matcher Context Initialization Tests
@@ -2539,15 +2626,11 @@ pub fn read_matcher_return(data: &[u8]) -> (u32, u32, u64, i128, u64) {
 
 /// Test that the matcher context can be initialized with Passive mode
 
-
 /// Test that the matcher can execute a call after initialization
-
 
 /// Test that double initialization is rejected
 
-
 /// Test vAMM mode with impact pricing
-
 
 // ============================================================================
 // Comprehensive Feature Tests
@@ -2555,7 +2638,12 @@ pub fn read_matcher_return(data: &[u8]) -> (u32, u32, u64, i128, u64) {
 
 impl TestEnv {
     /// Try to withdraw, returns result
-    pub fn try_withdraw(&mut self, owner: &Keypair, user_idx: u16, amount: u64) -> Result<(), String> {
+    pub fn try_withdraw(
+        &mut self,
+        owner: &Keypair,
+        user_idx: u16,
+        amount: u64,
+    ) -> Result<(), String> {
         let ata = self.create_ata(&owner.pubkey(), 0);
         let (vault_pda, _) =
             Pubkey::find_program_address(&[b"vault", self.slab.as_ref()], &self.program_id);
@@ -2716,36 +2804,25 @@ impl TestEnv {
 /// Test 1: Full trading lifecycle - open, price move, close
 /// Verifies: deposit, trade open, crank with price change, trade close
 
-
 /// Test 2: Liquidation attempt when user position goes underwater
-
 
 /// Test 3: Withdrawal limits - can't withdraw beyond margin requirements
 
-
 /// Test 4: Unauthorized access - wrong signer can't operate on account
-
 
 /// Test 5: Position flip - user goes from long to short
 
-
 /// Test 6: Multiple participants - all trades succeed with single LP
-
 
 /// Test 7: Oracle price impact - crank succeeds at different prices
 
-
 /// Test 8: Insurance fund top-up succeeds
-
 
 /// Test 9: Trading at margin limits
 
-
 /// Test 10: Funding accrual - multiple cranks succeed over time
 
-
 /// Test 11: Close account returns correct capital
-
 
 // ============================================================================
 // CRITICAL SECURITY TESTS - L7 DEEP DIVE
@@ -2993,7 +3070,11 @@ impl TestEnv {
     }
 
     /// Try SetMaintenanceFee instruction
-    pub fn try_set_maintenance_fee(&mut self, signer: &Keypair, new_fee: u128) -> Result<(), String> {
+    pub fn try_set_maintenance_fee(
+        &mut self,
+        signer: &Keypair,
+        new_fee: u128,
+    ) -> Result<(), String> {
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
@@ -3061,7 +3142,10 @@ impl TestEnv {
             &[&caller],
             self.svm.latest_blockhash(),
         );
-        self.svm.send_transaction(tx).map(|_| ()).map_err(|e| format!("{:?}", e))
+        self.svm
+            .send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
     }
 
     /// Convenience helper: advance the clock past
@@ -3102,7 +3186,10 @@ impl TestEnv {
             &[&caller],
             self.svm.latest_blockhash(),
         );
-        self.svm.send_transaction(tx).map(|_| ()).map_err(|e| format!("{:?}", e))
+        self.svm
+            .send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
     }
 
     /// Try ForceCloseResolved instruction (permissionless, requires resolved + delay)
@@ -3188,7 +3275,7 @@ impl TestEnv {
         // u64 sitting after current_slot(u64)+market_mode(u8)+7B pad, i.e. engine+224.
         let d = self.svm.get_account(&self.slab).unwrap().data;
         let off = 520 + 224;
-        let rp = u64::from_le_bytes(d[off..off+8].try_into().unwrap());
+        let rp = u64::from_le_bytes(d[off..off + 8].try_into().unwrap());
         rp > 0
     }
 
@@ -3247,10 +3334,10 @@ impl TestEnv {
                 AccountMeta::new_readonly(self.pyth_index, false),
             ],
             data: encode_update_config(
-                3600,// funding_horizon_slots
-                100,// funding_k_bps
-                100i64,// funding_max_premium_bps (i64)
-                10i64,// funding_max_e9_per_slot (i64)
+                3600,   // funding_horizon_slots
+                100,    // funding_k_bps
+                100i64, // funding_max_premium_bps (i64)
+                10i64,  // funding_max_e9_per_slot (i64)
             ),
         };
         let tx = Transaction::new_signed_with_payer(
@@ -3290,7 +3377,12 @@ pub fn encode_trade_cpi(lp_idx: u16, user_idx: u16, size: i128) -> Vec<u8> {
     data
 }
 
-pub fn encode_trade_cpi_with_limit(lp_idx: u16, user_idx: u16, size: i128, limit_price_e6: u64) -> Vec<u8> {
+pub fn encode_trade_cpi_with_limit(
+    lp_idx: u16,
+    user_idx: u16,
+    size: i128,
+    limit_price_e6: u64,
+) -> Vec<u8> {
     let mut data = vec![10u8]; // TradeCpi instruction tag
     data.extend_from_slice(&lp_idx.to_le_bytes());
     data.extend_from_slice(&user_idx.to_le_bytes());
@@ -3441,11 +3533,8 @@ impl TradeCpiTestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: encode_init_market_with_invert(&admin.pubkey(), &self.mint, &TEST_FEED_ID, 0),
         };
@@ -3478,7 +3567,11 @@ impl TradeCpiTestEnv {
 
     /// Initialize LP with specific matcher program and context
     /// Returns (lp_idx, matcher_context_pubkey)
-    pub fn init_lp_with_matcher(&mut self, owner: &Keypair, matcher_prog: &Pubkey) -> (u16, Pubkey) {
+    pub fn init_lp_with_matcher(
+        &mut self,
+        owner: &Keypair,
+        matcher_prog: &Pubkey,
+    ) -> (u16, Pubkey) {
         let idx = self.account_count;
         self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
         let ata = self.create_ata(&owner.pubkey(), 100);
@@ -3852,11 +3945,8 @@ impl TradeCpiTestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: encode_init_market_hyperp(&admin.pubkey(), &self.mint, initial_mark_price_e6),
         };
@@ -3903,11 +3993,8 @@ impl TradeCpiTestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: encode_init_market_hyperp_with_stale(
                 &admin.pubkey(),
@@ -4228,7 +4315,7 @@ impl TradeCpiTestEnv {
     pub fn is_market_resolved(&self) -> bool {
         let d = self.svm.get_account(&self.slab).unwrap().data;
         let off = 520 + 224; // ENGINE_OFF + resolved_price offset (BPF, v12.19)
-        let rp = u64::from_le_bytes(d[off..off+8].try_into().unwrap());
+        let rp = u64::from_le_bytes(d[off..off + 8].try_into().unwrap());
         rp > 0
     }
 
@@ -4260,32 +4347,63 @@ impl TradeCpiTestEnv {
         pub const ADL_EPOCH_SHORT: usize = ENGINE + 456;
 
         let acc_off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE;
-        if d.len() < acc_off + ACCOUNT_SIZE { return 0; }
+        if d.len() < acc_off + ACCOUNT_SIZE {
+            return 0;
+        }
 
-        let basis = i128::from_le_bytes(d[acc_off+PBQ..acc_off+PBQ+16].try_into().unwrap());
-        if basis == 0 { return 0; }
+        let basis = i128::from_le_bytes(d[acc_off + PBQ..acc_off + PBQ + 16].try_into().unwrap());
+        if basis == 0 {
+            return 0;
+        }
 
-        let a_basis = u128::from_le_bytes(d[acc_off+A_BASIS..acc_off+A_BASIS+16].try_into().unwrap());
-        let epoch_snap = u64::from_le_bytes(d[acc_off+EPOCH_SNAP..acc_off+EPOCH_SNAP+8].try_into().unwrap());
-        if a_basis == 0 { return 0; }
+        let a_basis = u128::from_le_bytes(
+            d[acc_off + A_BASIS..acc_off + A_BASIS + 16]
+                .try_into()
+                .unwrap(),
+        );
+        let epoch_snap = u64::from_le_bytes(
+            d[acc_off + EPOCH_SNAP..acc_off + EPOCH_SNAP + 8]
+                .try_into()
+                .unwrap(),
+        );
+        if a_basis == 0 {
+            return 0;
+        }
 
         let (a_side, epoch_side) = if basis > 0 {
-            (u128::from_le_bytes(d[ADL_MULT_LONG..ADL_MULT_LONG+16].try_into().unwrap()),
-             u64::from_le_bytes(d[ADL_EPOCH_LONG..ADL_EPOCH_LONG+8].try_into().unwrap()))
+            (
+                u128::from_le_bytes(d[ADL_MULT_LONG..ADL_MULT_LONG + 16].try_into().unwrap()),
+                u64::from_le_bytes(d[ADL_EPOCH_LONG..ADL_EPOCH_LONG + 8].try_into().unwrap()),
+            )
         } else {
-            (u128::from_le_bytes(d[ADL_MULT_SHORT..ADL_MULT_SHORT+16].try_into().unwrap()),
-             u64::from_le_bytes(d[ADL_EPOCH_SHORT..ADL_EPOCH_SHORT+8].try_into().unwrap()))
+            (
+                u128::from_le_bytes(d[ADL_MULT_SHORT..ADL_MULT_SHORT + 16].try_into().unwrap()),
+                u64::from_le_bytes(d[ADL_EPOCH_SHORT..ADL_EPOCH_SHORT + 8].try_into().unwrap()),
+            )
         };
-        if epoch_snap != epoch_side { return 0; }
+        if epoch_snap != epoch_side {
+            return 0;
+        }
 
         let abs_basis = basis.unsigned_abs();
-        let effective = if a_side == a_basis { abs_basis } else {
+        let effective = if a_side == a_basis {
+            abs_basis
+        } else {
             (abs_basis * a_side) / a_basis.max(1)
         };
-        if basis < 0 { -(effective as i128) } else { effective as i128 }
+        if basis < 0 {
+            -(effective as i128)
+        } else {
+            effective as i128
+        }
     }
 
-    pub fn try_withdraw(&mut self, owner: &Keypair, user_idx: u16, amount: u64) -> Result<(), String> {
+    pub fn try_withdraw(
+        &mut self,
+        owner: &Keypair,
+        user_idx: u16,
+        amount: u64,
+    ) -> Result<(), String> {
         let ata = self.create_ata(&owner.pubkey(), 0);
         let (vault_pda, _) =
             Pubkey::find_program_address(&[b"vault", self.slab.as_ref()], &self.program_id);
@@ -4522,11 +4640,8 @@ impl TradeCpiTestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: encode_init_market_full_v2(
                 &admin.pubkey(),
@@ -4567,7 +4682,6 @@ impl TradeCpiTestEnv {
         let vault_account = TokenAccount::unpack(&vault_data).unwrap();
         vault_account.amount
     }
-
 }
 
 // ============================================================================
@@ -4587,7 +4701,6 @@ impl TradeCpiTestEnv {
 /// - Matcher enforces its own rules (spread, fees, limits)
 /// - LP PDA signature proves the CPI comes from percolator for this LP
 
-
 // ============================================================================
 // Test: TradeCpi rejects PDA with wrong shape (non-system-owned)
 // ============================================================================
@@ -4601,14 +4714,11 @@ impl TradeCpiTestEnv {
 ///
 /// This prevents an attacker from creating an account at the PDA address.
 
-
 /// ATTACK: Configure LP with matcher_program = percolator program (self-CPI recursion vector).
 /// TradeCpi must reject and leave accounting unchanged.
 
-
 /// ATTACK: Alias matcher context to slab account in TradeCpi account list.
 /// Must be rejected (shape/ownership mismatch) with no state mutation.
-
 
 // ============================================================================
 // Test: Multiple LPs have independent matcher bindings
@@ -4618,7 +4728,6 @@ impl TradeCpiTestEnv {
 ///
 /// LP1 with Matcher A cannot be traded via Matcher B, and vice versa.
 /// This ensures LP isolation.
-
 
 // ============================================================================
 // Insurance Fund Trapped Funds Test
@@ -4635,7 +4744,6 @@ impl TradeCpiTestEnv {
 /// Security Impact: Medium - Admin cannot reclaim insurance fund deposits
 /// even after all users have closed their accounts.
 
-
 // ============================================================================
 // Test: Extreme Price Movement with Large Position
 // ============================================================================
@@ -4648,7 +4756,6 @@ impl TradeCpiTestEnv {
 /// 3. PnL write-off mechanism works (spec §6.1)
 /// 4. No overflow or underflow with extreme values
 
-
 // ============================================================================
 // Test: Minimum margin edge case
 // ============================================================================
@@ -4658,13 +4765,10 @@ impl TradeCpiTestEnv {
 /// Verifies that trades at exactly the margin boundary work correctly
 /// and that trades just below the boundary are rejected.
 
-
 /// Test rapid position flips within the same slot.
 /// This verifies that margin checks are applied correctly on each flip.
 
-
 /// Test position flip with minimal equity (edge case at liquidation boundary).
-
 
 // =============================================================================
 // HYPERP INDEX SMOOTHING SECURITY TESTS
@@ -4681,7 +4785,6 @@ impl TradeCpiTestEnv {
 /// 3. Second crank: dt = 0, clamp_toward_with_dt returns index (no movement)
 ///
 /// Bug #9 fix: When dt=0, index stays unchanged instead of jumping to mark.
-
 
 // ============================================================================
 // Test: Maintenance Fees Drain Dead Accounts to Dust for GC
@@ -4710,45 +4813,21 @@ impl TradeCpiTestEnv {
 /// 6. Users withdraw their funds
 /// 7. Admin closes slab
 
-
 /// Test that resolved markets block new activity
-
 
 /// Test that users can withdraw after resolution
 
-
 /// Test insurance withdrawal requires all positions closed
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// Verify admin can always use Tag 20 (WithdrawInsurance) to drain all insurance,
 /// even after a limited policy (Tag 22) is configured with a delegated authority.
 /// This is by design: admin retains ultimate authority over the insurance fund.
 
-
 /// Test paginated force-close with many accounts (simulates 4096 worst case)
-
 
 /// Test binary outcome: price = 1e-6 (NO wins)
 
-
 /// Test binary outcome: price = 1e6 (YES wins)
-
 
 /// Benchmark test: verify force-close CU consumption is bounded
 ///
@@ -4761,7 +4840,6 @@ impl TradeCpiTestEnv {
 ///
 /// This test verifies that 64 force-closes stay well under compute budget.
 /// For 4096 accounts, we need 64 cranks, each under ~22k CUs to stay under 1.4M total.
-
 
 // ============================================================================
 // VULNERABILITY TEST: Stale pnl_pos_tot after force-close
@@ -4777,7 +4855,6 @@ impl TradeCpiTestEnv {
 ///
 /// This test demonstrates the bug by checking that pnl_pos_tot is stale after
 /// force-close settles positions to a price that generates positive PnL.
-
 
 // ============================================================================
 // PEN TEST SUITE: Exhaustive Security Attack Tests
@@ -4868,7 +4945,12 @@ impl TestEnv {
     }
 
     /// Try deposit, returns result
-    pub fn try_deposit(&mut self, owner: &Keypair, user_idx: u16, amount: u64) -> Result<(), String> {
+    pub fn try_deposit(
+        &mut self,
+        owner: &Keypair,
+        user_idx: u16,
+        amount: u64,
+    ) -> Result<(), String> {
         let ata = self.create_ata(&owner.pubkey(), amount);
 
         let ix = Instruction {
@@ -4904,18 +4986,14 @@ impl TestEnv {
 /// ATTACK: Try to withdraw more tokens than deposited capital.
 /// Expected: Transaction fails due to margin/balance check.
 
-
 /// ATTACK: After incurring a PnL loss, try to withdraw the full original deposit.
 /// Expected: Fails because MTM equity is reduced by loss, margin check rejects.
-
 
 /// ATTACK: Withdraw an amount not aligned to unit_scale.
 /// Expected: Transaction rejected for misaligned amount.
 
-
 /// ATTACK: When vault is undercollateralized (haircut < 1.0), withdraw should
 /// return reduced equity, not allow full withdrawal that exceeds the haircutted equity.
-
 
 /// ATTACK: Withdraw without settling accrued fee debt.
 /// Expected: Withdraw checks include fee debt in equity calculation.
@@ -4926,27 +5004,21 @@ impl TestEnv {
 /// ATTACK: Attacker deposits to an account they don't own.
 /// Expected: Owner check fails - signer must match account's registered owner.
 
-
 /// ATTACK: Attacker withdraws from an account they don't own.
 /// Expected: Owner check rejects - signer must match account's registered owner.
 
-
 /// ATTACK: Close someone else's account to steal their capital.
 /// Expected: Owner check rejects.
-
 
 /// ATTACK: Non-admin tries admin operations (UpdateAuthority { AUTHORITY_ADMIN },
 /// UpdateConfig, SetMaintenanceFee, ResolveMarket).
 /// Expected: All admin operations fail for non-admin.
 
-
 /// UpdateAuthority burn: zero address permanently removes admin.
 /// After burning, all admin instructions must fail.
 
-
 /// ATTACK: Push oracle price with wrong signer (not the oracle authority).
 /// Expected: Transaction fails with authorization error.
-
 
 // ============================================================================
 // 3. Trade Manipulation
@@ -4954,7 +5026,6 @@ impl TestEnv {
 
 /// ATTACK: Open a position larger than initial margin allows.
 /// Expected: Margin check rejects the trade.
-
 
 /// ATTACK: OI-increasing trade when long side is in DrainOnly mode (spec §9.6).
 /// Expected: Trade rejected with SideBlocked → EngineRiskReductionOnlyMode (0x16).
@@ -4967,18 +5038,14 @@ impl TestEnv {
 /// Instead, this test directly sets side_mode_long = DrainOnly (1) via raw byte
 /// manipulation of the slab, then verifies the gating and error code mapping.
 
-
 /// ATTACK: Execute TradeNoCpi in Hyperp mode (should be blocked).
 /// Expected: Program rejects TradeNoCpi for Hyperp markets.
-
 
 /// ATTACK: Trade after market is resolved.
 /// Expected: No new trades on resolved markets.
 
-
 /// ATTACK: Position flip (long->short) should use initial_margin_bps, not
 /// maintenance_margin_bps. This is Finding L regression test.
-
 
 // ============================================================================
 // 4. TradeCpi / Matcher Attacks
@@ -4987,22 +5054,17 @@ impl TestEnv {
 /// ATTACK: Substitute a malicious matcher program in TradeCpi.
 /// Expected: Matcher program must match what was registered at InitLP.
 
-
 /// ATTACK: Provide wrong matcher context account.
 /// Expected: Context must be owned by registered matcher program.
-
 
 /// ATTACK: Supply a fabricated LP PDA that doesn't match the derivation.
 /// Expected: PDA derivation check fails.
 
-
 /// ATTACK: Provide a PDA that has lamports (non-system shape).
 /// Expected: PDA shape validation rejects accounts with lamports/data.
 
-
 /// ATTACK: LP A's matcher tries to trade for LP B.
 /// Expected: Matcher context must match the LP's registered context.
-
 
 // ============================================================================
 // 5. Liquidation Attacks
@@ -5011,14 +5073,11 @@ impl TestEnv {
 /// ATTACK: Liquidate a solvent account (positive equity above maintenance margin).
 /// Expected: Liquidation rejected for healthy accounts.
 
-
 /// ATTACK: Self-liquidation to extract value (liquidation fee goes to insurance).
 /// Expected: Self-liquidation doesn't create profit for the attacker.
 
-
 /// ATTACK: Price recovers before liquidation executes - account is now solvent.
 /// Expected: Liquidation rejected when account recovers above maintenance margin.
-
 
 // ============================================================================
 // 6. Insurance Fund Attacks
@@ -5027,14 +5086,11 @@ impl TestEnv {
 /// ATTACK: Withdraw insurance on an active (non-resolved) market.
 /// Expected: WithdrawInsurance only works on resolved markets.
 
-
 /// ATTACK: Withdraw insurance when positions are still open.
 /// Expected: WithdrawInsurance requires all positions closed.
 
-
 /// ATTACK: Close slab while insurance fund has remaining balance.
 /// Expected: CloseSlab requires insurance_fund.balance == 0.
-
 
 // ============================================================================
 // 7. Oracle Manipulation
@@ -5043,18 +5099,14 @@ impl TestEnv {
 /// ATTACK: Circuit breaker should cap price movement per slot.
 /// Expected: Price cannot jump more than allowed by circuit breaker.
 
-
 /// ATTACK: Use a stale oracle price for margin-dependent operations.
 /// Expected: Stale oracle rejected by staleness check.
-
 
 /// ATTACK: Push zero price via oracle authority.
 /// Expected: Zero price rejected.
 
-
 /// ATTACK: Push oracle price when no oracle authority is configured.
 /// Expected: Fails because default authority is [0;32] (unset).
-
 
 // ============================================================================
 // 8. Premarket Resolution Attacks
@@ -5063,18 +5115,14 @@ impl TestEnv {
 /// ATTACK: Resolve market without oracle authority price being set.
 /// Expected: Resolution requires authority price to be set first.
 
-
 /// ATTACK: Deposit after market is resolved.
 /// Expected: No new deposits on resolved markets.
-
 
 /// ATTACK: Init new user after market is resolved.
 /// Expected: No new accounts on resolved markets.
 
-
 /// ATTACK: Resolve an already-resolved market.
 /// Expected: Double resolution rejected.
-
 
 // ============================================================================
 // 9. Account Lifecycle Attacks
@@ -5083,14 +5131,11 @@ impl TestEnv {
 /// ATTACK: Close account while still holding an open position.
 /// Expected: CloseAccount rejects when position_size != 0.
 
-
 /// ATTACK: Close account when PnL is outstanding (non-zero).
 /// Expected: CloseAccount requires PnL == 0.
 
-
 /// ATTACK: Initialize a market twice on the same slab.
 /// Expected: Second InitMarket fails because slab already initialized.
-
 
 // ============================================================================
 // 10. Economic / Value Extraction
@@ -5099,19 +5144,15 @@ impl TestEnv {
 /// ATTACK: Accumulate dust through many sub-unit-scale deposits to extract value.
 /// Expected: Dust is tracked and cannot be extracted (swept to insurance).
 
-
 /// ATTACK: Micro-trade cannot extract value even with minimum position size.
 /// Note: Market has trading_fee_bps=0 (default). This tests conservation,
 /// not fee ceiling division. Fee ceiling division is tested at the engine level.
 
-
 /// ATTACK: Deposit/withdraw cycle to manipulate haircut or extract extra tokens.
 /// Expected: Vault token balance is always consistent - no tokens created from nothing.
 
-
 /// ATTACK: Verify no value is created or destroyed through trading operations.
 /// Expected: Total vault token balance equals total deposits minus total withdrawals.
-
 
 // ============================================================================
 // PEN TEST SUITE ROUND 2: Deep Crank, Funding, Warmup, GC, and Race Attacks
@@ -5143,7 +5184,11 @@ pub fn encode_crank_self(caller_idx: u16) -> Vec<u8> {
 
 impl TestEnv {
     /// Try crank with custom allow_panic flag
-    pub fn try_crank_with_panic(&mut self, signer: &Keypair, allow_panic: u8) -> Result<(), String> {
+    pub fn try_crank_with_panic(
+        &mut self,
+        signer: &Keypair,
+        allow_panic: u8,
+    ) -> Result<(), String> {
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
@@ -5216,16 +5261,17 @@ impl TestEnv {
         data.push(0u8); // invert
         data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
         data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
-        // Per-market admin limits (uncapped defaults for tests)
+                                                     // Per-market admin limits (uncapped defaults for tests)
         data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled) (<= MAX_PROTOCOL_FEE_ABS)
-        // Resolvability invariant: ship max cap (default tail has perm_resolve=0).
-            // RiskParams
+                                                      // Resolvability invariant: ship max cap (default tail has perm_resolve=0).
+                                                      // RiskParams
         data.extend_from_slice(&0u64.to_le_bytes()); // h_min
         data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
         data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
         data.extend_from_slice(&trading_fee_bps.to_le_bytes()); // trading_fee_bps
         data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
-        data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+        // §12.19.6 F8 anti-spam: perm_resolve=80 below requires dust fee.
+        data.extend_from_slice(&1u128.to_le_bytes()); // new_account_fee
         data.extend_from_slice(&1u64.to_le_bytes()); // h_max
 
         data.extend_from_slice(&50u64.to_le_bytes()); // max_crank_staleness_slots (must be < perm_resolve=80 <= MAX_ACCRUAL_DT_SLOTS=100)
@@ -5233,11 +5279,11 @@ impl TestEnv {
         data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
         data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
         data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
-        // v12.19.6 extended tail: non-Hyperp needs perm_resolve > 0, and
-        // perm_resolve <= MAX_ACCRUAL_DT_SLOTS (100). Pick 80.
+        data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+        data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
+        data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
+                                                                                 // v12.19.6 extended tail: non-Hyperp needs perm_resolve > 0, and
+                                                                                 // perm_resolve <= MAX_ACCRUAL_DT_SLOTS (100). Pick 80.
         data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
         data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
         data.extend_from_slice(&80u64.to_le_bytes()); // permissionless_resolve_stale_slots
@@ -5255,11 +5301,8 @@ impl TestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data,
         };
@@ -5308,13 +5351,14 @@ impl TestEnv {
         data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
         data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
         data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
-        // Resolvability invariant: ship max cap (default tail has perm_resolve=0).
-            data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
+                                                      // Resolvability invariant: ship max cap (default tail has perm_resolve=0).
+        data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
         data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
         data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
         data.extend_from_slice(&trading_fee_bps.to_le_bytes()); // trading_fee_bps
         data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
-        data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+        // §12.19.6 F8 anti-spam (non-Hyperp default tail: perm_resolve=80).
+        data.extend_from_slice(&1u128.to_le_bytes()); // new_account_fee (dust)
         data.extend_from_slice(&warmup_period_slots.max(1).to_le_bytes()); // h_max (must be >= h_min)
 
         data.extend_from_slice(&50u64.to_le_bytes()); // max_crank_staleness_slots (must be < perm_resolve=80 <= MAX_ACCRUAL_DT_SLOTS=100)
@@ -5322,8 +5366,8 @@ impl TestEnv {
         data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
         data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
         data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-        data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-        data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+        data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+        data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
         data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
         append_default_extended_tail_for(&mut data, false);
 
@@ -5334,11 +5378,8 @@ impl TestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data,
         };
@@ -5369,9 +5410,9 @@ impl TestEnv {
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
-                AccountMeta::new(self.slab, false),        // 0: slab (writable)
+                AccountMeta::new(self.slab, false), // 0: slab (writable)
                 AccountMeta::new_readonly(sysvar::clock::ID, false), // 1: clock
-                AccountMeta::new_readonly(self.pyth_index, false),   // 2: oracle
+                AccountMeta::new_readonly(self.pyth_index, false), // 2: oracle
             ],
             data,
         };
@@ -5435,10 +5476,10 @@ impl TestEnv {
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
-                AccountMeta::new(owner.pubkey(), true),   // 0: user (signer)
-                AccountMeta::new(self.slab, false),       // 1: slab
-                AccountMeta::new(ata, false),             // 2: user_ata
-                AccountMeta::new(self.vault, false),      // 3: vault
+                AccountMeta::new(owner.pubkey(), true), // 0: user (signer)
+                AccountMeta::new(self.slab, false),     // 1: slab
+                AccountMeta::new(ata, false),           // 2: user_ata
+                AccountMeta::new(self.vault, false),    // 3: vault
                 AccountMeta::new_readonly(spl_token::ID, false), // 4: token_program
                 AccountMeta::new_readonly(sysvar::clock::ID, false), // 5: clock
             ],
@@ -5471,10 +5512,10 @@ impl TestEnv {
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
-                AccountMeta::new(owner.pubkey(), true),  // 0: user (signer)
-                AccountMeta::new(self.slab, false),      // 1: slab
+                AccountMeta::new(owner.pubkey(), true), // 0: user (signer)
+                AccountMeta::new(self.slab, false),     // 1: slab
                 AccountMeta::new_readonly(sysvar::clock::ID, false), // 2: clock
-                AccountMeta::new_readonly(self.pyth_index, false),   // 3: oracle
+                AccountMeta::new_readonly(self.pyth_index, false), // 3: oracle
             ],
             data,
         };
@@ -5490,7 +5531,6 @@ impl TestEnv {
             .map(|_| ())
             .map_err(|e| format!("{:?}", e))
     }
-
 
     // ------------------------------------------------------------------
     // Account field readers for fee_credits and fees_earned_total
@@ -5629,7 +5669,13 @@ impl TestEnv {
     }
 
     /// Try to init LP with correct 8-account layout, returns Result.
-    pub fn try_init_lp_proper(&mut self, owner: &Keypair, matcher: &Pubkey, ctx: &Pubkey, fee: u64) -> Result<u16, String> {
+    pub fn try_init_lp_proper(
+        &mut self,
+        owner: &Keypair,
+        matcher: &Pubkey,
+        ctx: &Pubkey,
+        fee: u64,
+    ) -> Result<u16, String> {
         let idx = self.account_count;
         self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
         let ata = self.create_ata(&owner.pubkey(), fee);
@@ -5699,18 +5745,14 @@ impl TestEnv {
 /// allow_panic field is read and discarded for wire compatibility.
 /// Both admin and non-admin cranks succeed regardless of the flag value.
 
-
 /// ATTACK: Call crank twice in the same slot to cascade liquidations.
 /// Expected: Second crank is a no-op (require_fresh_crank gate).
-
 
 /// ATTACK: Self-crank with wrong owner (caller_idx points to someone else's account).
 /// Expected: Owner check rejects because signer doesn't match account owner.
 
-
 /// ATTACK: Rapid crank across many slots to compound funding drain.
 /// Expected: Funding rate is capped at max_bps_per_slot; no runaway drain.
-
 
 // ============================================================================
 // 12. Funding Calculation Edge Cases
@@ -5719,10 +5761,8 @@ impl TestEnv {
 /// ATTACK: Crank 3 times in same slot to bypass index smoothing (Bug #9 regression).
 /// Expected: dt=0 returns no index movement (fix verified).
 
-
 /// ATTACK: Large time gap between cranks (dt overflow).
 /// Expected: dt is capped and funding doesn't overflow.
-
 
 // ============================================================================
 // 13. Warmup Period Edge Cases
@@ -5731,10 +5771,8 @@ impl TestEnv {
 /// ATTACK: Warmup with period=0 (instant conversion).
 /// Expected: Profit converts to capital immediately.
 
-
 /// ATTACK: Warmup period long (1M slots), attempt to withdraw before conversion.
 /// Expected: Unrealized PnL in warmup cannot be withdrawn as capital.
-
 
 // ============================================================================
 // 14. Dust & Unit Scale Edge Cases
@@ -5743,10 +5781,8 @@ impl TestEnv {
 /// ATTACK: Unit scale = 0 (no scaling) - verify dust handling is safe.
 /// Expected: With unit_scale=0, no dust accumulation, clean behavior.
 
-
 /// ATTACK: High unit_scale to test dust sweep boundary conditions.
 /// Expected: Dust correctly tracked and not exploitable.
-
 
 // ============================================================================
 // 15. Trading Fee Edge Cases
@@ -5755,10 +5791,8 @@ impl TestEnv {
 /// ATTACK: Verify trading fees accrue to insurance fund and can't be evaded.
 /// Expected: Fee is charged on every trade, goes to insurance.
 
-
 /// ATTACK: Open and immediately close to avoid holding fees.
 /// Expected: Trading fee charged on both legs, not profitable to churn.
-
 
 // ============================================================================
 // 16. Premarket Resolution Deep Edge Cases
@@ -5767,10 +5801,8 @@ impl TestEnv {
 /// ATTACK: Withdraw after resolution but before force-close.
 /// Expected: User can still withdraw capital from resolved market.
 
-
 /// ATTACK: Force-close via crank then attempt to re-open trade.
 /// Expected: No new trades after resolution.
-
 
 // ============================================================================
 // 17. GC (Garbage Collection) Edge Cases
@@ -5781,7 +5813,6 @@ impl TestEnv {
 /// ATTACK: Try to use GC'd account slot for new account creation.
 /// Expected: After GC, slot is marked unused and can be reused.
 
-
 // ============================================================================
 // 18. Multi-Operation Race Conditions
 // ============================================================================
@@ -5789,14 +5820,11 @@ impl TestEnv {
 /// ATTACK: Deposit then immediately trade in same slot to use uncranked capital.
 /// Expected: Deposit is available immediately for trading (no crank needed).
 
-
 /// ATTACK: Trade, then withdraw max in same slot.
 /// Expected: Margin check accounts for newly opened position.
 
-
 /// ATTACK: Multiple deposits in rapid succession.
 /// Expected: All deposits correctly credited, no accounting errors.
-
 
 // ============================================================================
 // 19. Config Manipulation Attacks
@@ -5805,7 +5833,6 @@ impl TestEnv {
 /// ATTACK: UpdateConfig with extreme parameter values.
 /// Expected: Engine-level guards prevent dangerous configurations.
 
-
 // ============================================================================
 // 20. Integer Boundary Tests
 // ============================================================================
@@ -5813,14 +5840,11 @@ impl TestEnv {
 /// ATTACK: Deposit more than ATA balance (overflow attempt).
 /// Expected: Rejected by token program (insufficient funds).
 
-
 /// ATTACK: Trade with size = i128::MAX (overflow boundary).
 /// Expected: Rejected by margin check (impossible notional value).
 
-
 /// ATTACK: Trade with size = 0 (no-op trade attempt).
 /// Expected: Zero-size trade is rejected and must not mutate state.
-
 
 // ============================================================================
 // PEN TEST SUITE ROUND 3: Config Validation, TopUpInsurance, LP, Settlement,
@@ -5877,9 +5901,9 @@ impl TestEnv {
             ],
             data: encode_update_config(
                 funding_horizon_slots,
-                100,// funding_k_bps
-                100i64,// funding_max_premium_bps
-                10i64,// funding_max_e9_per_slot
+                100,    // funding_k_bps
+                100i64, // funding_max_premium_bps
+                10i64,  // funding_max_e9_per_slot
             ),
         };
         let tx = Transaction::new_signed_with_payer(
@@ -5902,14 +5926,11 @@ impl TestEnv {
 /// ATTACK: UpdateConfig with funding_horizon_slots = 0 (division by zero risk).
 /// Expected: Rejected with InvalidConfigParam.
 
-
 /// ATTACK: UpdateConfig with thresh_alpha_bps > 10000 (over 100%).
 /// Expected: Rejected with InvalidConfigParam.
 
-
 /// ATTACK: UpdateConfig with thresh_min > thresh_max (inverted bounds).
 /// Expected: Rejected with InvalidConfigParam.
-
 
 // ============================================================================
 // 22. TopUpInsurance Attacks
@@ -5918,14 +5939,11 @@ impl TestEnv {
 /// ATTACK: TopUpInsurance on a resolved market.
 /// Expected: Rejected (InvalidAccountData).
 
-
 /// ATTACK: TopUpInsurance with insufficient ATA balance.
 /// Expected: Token program rejects transfer.
 
-
 /// ATTACK: TopUpInsurance accumulates correctly in vault and engine.
 /// Expected: Insurance balance increases by correct amount, vault has the tokens.
-
 
 // ============================================================================
 // 23. Oracle Authority Lifecycle
@@ -5934,10 +5952,8 @@ impl TestEnv {
 /// ATTACK: burning hyperp_authority disables PushHyperpMark.
 /// Expected: After zeroing the authority, PushHyperpMark fails.
 
-
 /// ATTACK: Oracle authority change mid-flight (while positions open).
 /// Expected: Changing authority doesn't affect existing positions, just future price pushing.
-
 
 // ============================================================================
 // 24. Oracle Price Cap Deep Tests
@@ -5946,10 +5962,8 @@ impl TestEnv {
 /// ATTACK: Set oracle price cap to 0 (disables capping), verify uncapped price accepted.
 /// Expected: With cap=0, any price jump is accepted.
 
-
 /// ATTACK: Set oracle price cap to 1 (ultra-restrictive), push any change.
 /// Expected: Price clamped to essentially no movement (1 e2bps = 0.01%).
-
 
 // ============================================================================
 // 25. LP-Specific Attacks
@@ -5958,14 +5972,11 @@ impl TestEnv {
 /// ATTACK: LP account should never be garbage collected, even with zero state.
 /// Expected: GC skips LP accounts (they have is_lp = true).
 
-
 /// ATTACK: User account with zero state SHOULD be GC'd.
 /// Expected: GC reclaims user accounts with zero position/capital/pnl.
 
-
 /// ATTACK: LP takes position, then try to close as if user (kind mismatch).
 /// Expected: LP account cannot be closed via CloseAccount (only users can close).
-
 
 // ============================================================================
 // 26. CloseSlab Deep Tests
@@ -5974,10 +5985,8 @@ impl TestEnv {
 /// ATTACK: CloseSlab when vault has tokens remaining.
 /// Expected: Rejected (vault must be empty).
 
-
 /// ATTACK: CloseSlab on uninitialized slab.
 /// Expected: Rejected (not initialized).
-
 
 // ============================================================================
 // 27. SetMaintenanceFee Deep Tests
@@ -5988,14 +5997,12 @@ impl TestEnv {
 /// ATTACK: SetMaintenanceFee as non-admin.
 /// Expected: Rejected (admin auth check).
 
-
 // ============================================================================
 // 28. Settlement Pipeline Attacks
 // ============================================================================
 
 /// ATTACK: Multiple users settle in same crank - verify no double-counting.
 /// Expected: Conservation holds: vault = total deposits always.
-
 
 // ============================================================================
 // 29. Instruction Truncation / Malformed Data
@@ -6004,14 +6011,11 @@ impl TestEnv {
 /// ATTACK: Send instruction with truncated data (too short for the tag).
 /// Expected: Rejected with InvalidInstructionData.
 
-
 /// ATTACK: Send unknown instruction tag (255).
 /// Expected: Rejected with InvalidInstructionData.
 
-
 /// ATTACK: Empty instruction data (no tag byte).
 /// Expected: Rejected with InvalidInstructionData.
-
 
 // ============================================================================
 // 30. Cross-Operation Composition Attacks
@@ -6020,10 +6024,8 @@ impl TestEnv {
 /// ATTACK: Deposit → Resolve → Withdraw sequence.
 /// Expected: Can't deposit after resolve, but can withdraw existing capital.
 
-
 /// ATTACK: Trade → Price crash → Trade reverse → Crank. Does the vault balance stay correct?
 /// Expected: Conservation holds through the entire sequence.
-
 
 // ============================================================================
 // PEN TEST SUITE ROUND 4: Account Type Confusion, Capacity Limits,
@@ -6098,7 +6100,12 @@ impl TestEnv {
     }
 
     /// Try deposit to a specific index with specific amount (for testing out-of-bounds)
-    pub fn try_deposit_to_idx(&mut self, owner: &Keypair, idx: u16, amount: u64) -> Result<(), String> {
+    pub fn try_deposit_to_idx(
+        &mut self,
+        owner: &Keypair,
+        idx: u16,
+        amount: u64,
+    ) -> Result<(), String> {
         let ata = self.create_ata(&owner.pubkey(), amount);
 
         let ix = Instruction {
@@ -6135,14 +6142,11 @@ impl TestEnv {
 /// Using a User account in the LP slot of a trade is valid (spec v10.5).
 /// The engine does not enforce account kind for trades — only authorization matters.
 
-
 /// ATTACK: Deposit to an LP account using DepositCollateral.
 /// Expected: Should succeed (LP accounts can receive deposits like users).
 
-
 /// ATTACK: LiquidateAtOracle targeting an LP account.
 /// Expected: LP liquidation may be handled differently (LP has position from trading).
-
 
 // ============================================================================
 // 32. Index Bounds Attacks
@@ -6151,18 +6155,14 @@ impl TestEnv {
 /// ATTACK: Deposit to an out-of-bounds account index.
 /// Expected: Rejected by check_idx (index >= max_accounts).
 
-
 /// ATTACK: Trade with out-of-bounds user_idx.
 /// Expected: Rejected by check_idx.
-
 
 /// ATTACK: Withdraw from out-of-bounds index.
 /// Expected: Rejected by check_idx.
 
-
 /// ATTACK: LiquidateAtOracle with out-of-bounds target index.
 /// Expected: Rejected by check_idx.
-
 
 // ============================================================================
 // 33. InitLP/InitUser Edge Cases
@@ -6171,10 +6171,8 @@ impl TestEnv {
 /// ATTACK: InitLP after market resolution.
 /// Expected: Rejected (no new LPs on resolved markets).
 
-
 /// ATTACK: InitUser with zero fee_payment and verify clean initialization.
 /// Expected: Account created with zero capital (fee_payment=0 is valid).
-
 
 // ============================================================================
 // 34. Multi-User Withdrawal Race
@@ -6183,10 +6181,8 @@ impl TestEnv {
 /// ATTACK: Two users both try to withdraw max capital in the same slot.
 /// Expected: Both succeed (vault has enough), conservation holds.
 
-
 /// ATTACK: Double withdrawal from same account in same slot.
 /// Expected: Second withdrawal fails (insufficient capital).
-
 
 // ============================================================================
 // 35. Cross-Market Isolation
@@ -6195,14 +6191,12 @@ impl TestEnv {
 /// ATTACK: Verify two separate markets (slabs) don't interfere.
 /// Expected: Each market has independent state and vault.
 
-
 // ============================================================================
 // 36. Slab Guard & Account Validation
 // ============================================================================
 
 /// ATTACK: Send instruction to wrong program_id's slab.
 /// Expected: Slab guard rejects (program_id embedded in slab header).
-
 
 // ============================================================================
 // 37. Liquidation with No Position
@@ -6211,7 +6205,6 @@ impl TestEnv {
 /// ATTACK: Liquidate account that has capital but no position.
 /// Expected: No-op (nothing to liquidate).
 
-
 // ============================================================================
 // 38. Trade Self-Trading Prevention
 // ============================================================================
@@ -6219,10 +6212,8 @@ impl TestEnv {
 /// ATTACK: LP tries to trade against itself (user_idx == lp_idx).
 /// Expected: Rejected or no-op (can't trade against yourself).
 
-
 /// ATTACK: Conservation through complete lifecycle (init → trade → crank → close).
 /// Expected: After all accounts closed, vault should have only insurance fees.
-
 
 // ============================================================================
 // ROUND 5: Hyperp mode, premarket resolution, multi-LP, sandwich attacks
@@ -6232,88 +6223,67 @@ impl TestEnv {
 /// An attacker could try rapid trades to push mark far from index to extract
 /// value via favorable PnL. Circuit breaker should limit mark movement.
 
-
 /// ATTACK: In Hyperp mode, index lags behind mark due to rate limiting.
 /// Attacker could try to profit by trading when mark diverges from index,
 /// then cranking to move index toward mark. This test verifies conservation.
 
-
 /// ATTACK: Force-close during premarket resolution should maintain PnL conservation.
 /// Sum of all PnL changes after force-close should be zero (zero-sum).
-
 
 /// ATTACK: Try to withdraw all capital before force-close in a resolved market.
 /// User might try to extract capital while still having an open position.
 
-
 /// ATTACK: Extra cranks after all positions are force-closed should be idempotent.
 /// No state corruption from redundant resolution cranks.
-
 
 /// ATTACK: Resolve market at extreme price (near u64::MAX).
 /// Test that force-close handles extreme PnL without overflow.
 
-
 /// ATTACK: Non-admin tries to withdraw insurance after resolution.
 /// Only admin should be able to withdraw insurance funds.
-
 
 /// ATTACK: Try to withdraw insurance twice to drain vault.
 /// Second withdrawal should find zero insurance and be a no-op.
 
-
 /// ATTACK: TradeCpi in a resolved market should fail.
 /// After resolution, no new trades should be possible.
-
 
 /// ATTACK: Try to deposit after market resolution.
 /// Deposits should be blocked on resolved markets.
 
-
 /// ATTACK: Multi-LP conservation. Trade against 2 different LPs and verify
 /// no value is created or destroyed. Total vault must remain constant.
-
 
 /// ATTACK: Sandwich attack. Deposit large amount before a trade to change
 /// haircut ratio, then withdraw after. Should not extract value.
 /// Attacker can only withdraw at most what they deposited.
 
-
 /// ATTACK: Push oracle price to zero in Hyperp mode.
 /// Zero price should be rejected since it would break all calculations.
-
 
 /// ATTACK: In Hyperp mode, crank at same slot should not move index (Bug #9 fix).
 /// Verify that dt=0 returns index unchanged, preventing smoothing bypass.
 
-
 /// ATTACK: Non-admin tries to resolve market.
 /// Only the admin should be able to resolve.
-
 
 /// ATTACK: LP tries to close account while it still has a position from force-close PnL.
 /// After force-close, LP may have PnL that prevents account closure.
 
-
 /// ATTACK: Try to init new LP after Hyperp market resolution.
 /// Resolved Hyperp markets should block InitLP.
-
 
 /// ATTACK: Push oracle price with extreme u64 value.
 /// Circuit breaker should clamp price movement.
 
-
 /// ATTACK: Hyperp funding rate extraction. Create position, crank many times
 /// to accumulate premium funding, then check that funding doesn't create value.
-
 
 /// ATTACK: Change oracle authority during active Hyperp positions.
 /// Old authority must be rejected, new authority must be accepted.
 
-
 /// ATTACK: Close slab without withdrawing insurance first.
 /// CloseSlab requires insurance_fund.balance == 0.
-
 
 // ============================================================================
 // ROUND 6: Fee debt, warmup, position limits, conservation, nonce, dust
@@ -6325,62 +6295,47 @@ impl TestEnv {
 /// ATTACK: Warmup period prevents immediate profit withdrawal.
 /// User with positive PnL should not be able to withdraw profit before warmup completes.
 
-
 /// ATTACK: Try to trade with position size near i128::MAX.
 /// Saturating arithmetic should prevent overflow without panicking.
 
-
 /// ATTACK: Try to trade with i128::MIN position size (negative extreme).
-
 
 /// ATTACK: Conservation invariant through trade + price movement + settlement.
 /// vault_balance must equal internal vault tracking at every step.
 
-
 /// ATTACK: Premarket partial force-close conservation.
 /// After force-closing only some accounts, internal state must still be consistent.
-
 
 /// ATTACK: Two sequential TradeCpi calls with the same parameters.
 /// The nonce advances automatically between calls, so both are valid (not replays).
 /// Verifies vault conservation after multiple trades.
 
-
 /// ATTACK: Multiple deposits in same transaction should not create extra capital.
 /// Total capital should equal total deposited amount.
-
 
 /// ATTACK: User tries to withdraw more than their capital.
 /// Should fail with insufficient balance.
 
-
 /// ATTACK: Withdraw from another user's account.
 /// Account owner verification should prevent this.
-
 
 /// ATTACK: Deposit to another user's account.
 /// Account owner verification should prevent this.
 
-
 /// ATTACK: Close account owned by someone else.
 /// Must verify account ownership.
-
 
 /// ATTACK: LiquidateAtOracle on a healthy account should be a no-op.
 /// Healthy accounts must not be liquidated.
 
-
 /// ATTACK: Double resolve market attempt.
 /// Second resolve should fail.
-
 
 /// ATTACK: Rapid open/close trades to extract value from rounding.
 /// Many tiny trades should not accumulate rounding profit.
 
-
 /// ATTACK: UpdateAuthority { AUTHORITY_ADMIN } to zero is rejected when the lifecycle guard fails.
 /// Verify that the zero-admin foot-gun guard prevents the lockout.
-
 
 // ============================================================================
 // ROUND 7: Advanced Attack Tests - Dust sweep, LP max tracking, entry price,
@@ -6392,39 +6347,31 @@ impl TestEnv {
 /// correctly sweeps dust to insurance fund. Attacker cannot prevent dust sweep.
 /// Non-vacuous: asserts insurance increases by swept dust units.
 
-
 /// ATTACK: LP risk gating with conservative max_abs tracking.
 /// After LP shrinks from max position, risk check uses old max (conservative).
 /// Verify that risk-increasing trades are correctly blocked when gate is active.
-
 
 /// ATTACK: Entry price tracking through position flip (long → short).
 /// After flipping, the entry_price should be updated via settle_mark_to_oracle.
 /// Verify PnL calculation is correct after flip.
 
-
 /// ATTACK: Funding anti-retroactivity - rate changes at zero-DT crank
 /// should use the OLD rate for the elapsed interval, not the new one.
 /// Test: crank twice at same slot (sets rate), then crank at later slot.
 
-
 /// ATTACK: Withdrawal with warmup settlement interaction.
 /// If user has unwarmed PnL, withdrawal should still respect margin after settlement.
 
-
 /// ATTACK: GC removes account after force-realize closes position.
 /// Verify that value doesn't leak when GC removes accounts with zero capital.
-
 
 /// ATTACK: Account slot reuse after close - verify new account has clean state.
 /// After closing an account, a new account created should have no
 /// residual position/PnL state. Also verifies freelist integrity.
 
-
 /// ATTACK: Multiple cranks with funding accumulation verify conservation.
 /// Run many cranks across different slots with positions and verify
 /// total value (vault) is conserved (funding is zero-sum between accounts).
-
 
 /// ATTACK: Deposit to LP account with outstanding fee debt.
 /// Deposit should pay fee debt first, then add remainder to capital.
@@ -6432,12 +6379,10 @@ impl TestEnv {
 /// ATTACK: UpdateConfig should preserve conservation invariant.
 /// Changing risk parameters should not alter vault/capital/insurance totals.
 
-
 /// ATTACK: Verify trades work with u64::MAX crank staleness.
 /// Note: This market uses max_crank_staleness_slots=u64::MAX (always fresh),
 /// so it only tests that large slot gaps don't break the system.
 /// Stale-crank rejection is not tested here (would need finite staleness config).
-
 
 /// ATTACK: Insurance fund receives both dust sweep and fee accrual in same crank.
 /// Verify both sources of insurance top-up are correctly accounted for.
@@ -6445,20 +6390,16 @@ impl TestEnv {
 /// User opens position, closes it, then closes account.
 /// Verify capital is correctly returned and no value is left behind.
 
-
 /// ATTACK: Liquidation of already-zero-position account should fail.
 /// An attacker tries to liquidate an account that already has no position.
-
 
 /// ATTACK: Trade must not decrease insurance fund or change vault.
 /// Note: Market uses default trading_fee_bps=0. For non-zero fee testing,
 /// see test_attack_new_account_fee_goes_to_insurance which tests fee→insurance.
 
-
 /// ATTACK: Premarket force-close with multiple crank batches.
 /// Verify that force-close across multiple crank calls (paginated)
 /// correctly settles all positions and maintains conservation.
-
 
 // ===================================================================
 // ROUND 8: Arithmetic Boundary & State Machine Attack Tests
@@ -6468,11 +6409,9 @@ impl TestEnv {
 /// When last_effective_price_e6 == 0 (first price), circuit breaker should
 /// accept any raw price unclamped. Verify no panic/overflow on extreme price.
 
-
 /// ATTACK: Circuit breaker clamping after second price.
 /// After initial price is set, subsequent extreme prices should be clamped.
 /// Verify clamping prevents exploitation via price manipulation.
-
 
 /// ATTACK: Fee debt exceeds capital during crank.
 /// Create a scenario where maintenance fees accumulate to exceed capital.
@@ -6481,17 +6420,14 @@ impl TestEnv {
 /// Execute many trades with alternating prices to accumulate rounding errors.
 /// Verify total value is conserved across repeated operations.
 
-
 /// ATTACK: Multiple accounts compete for insurance fund during liquidation.
 /// Create two undercollateralized accounts and liquidate both.
 /// Verify insurance fund is not double-counted.
-
 
 // test_attack_deposit_zero_amount_noop: removed (duplicate of test_attack_deposit_zero_amount_no_state_change which uses try_deposit)
 
 /// ATTACK: Withdraw exactly all capital (no position).
 /// Verify withdrawing exact capital amount works and leaves account with 0.
-
 
 /// ATTACK: Threshold EWMA convergence across many cranks.
 /// Set a risk threshold and verify it converges toward target via EWMA
@@ -6500,35 +6436,28 @@ impl TestEnv {
 /// Open a position that requires exactly initial_margin_bps of capital.
 /// Then try to open slightly more - should fail margin check.
 
-
 /// ATTACK: Multiple deposits followed by single large withdrawal.
 /// Verify conservation across many small deposits then one withdrawal.
-
 
 /// ATTACK: Risk gate activation with insurance at exact threshold boundary.
 /// Verify behavior when insurance_fund.balance == risk_reduction_threshold exactly.
 /// ATTACK: Unit scale boundary - init market with MAX_UNIT_SCALE.
 /// Verify that operations work correctly at the maximum unit scale.
 
-
 /// ATTACK: Close account after opening and closing position at same price.
 /// PnL is zero after round-trip. Verifies capital returned and slot freed.
 /// Note: Despite the name, this test creates zero PnL (no price change).
-
 
 /// ATTACK: Rapid open/close in same slot shouldn't bypass timing guards.
 /// Verify that opening and closing a position in the same slot works
 /// but doesn't allow exploiting stale prices or settlement.
 
-
 /// ATTACK: Force-close (premarket resolution) with settlement at different price.
 /// Verify PnL is calculated correctly when resolution price differs from entry.
-
 
 /// ATTACK: Hyperp mode mark price clamping prevents extreme manipulation.
 /// In Hyperp mode, mark price from trades is clamped against index.
 /// Verify attacker can't push mark price arbitrarily far from index.
-
 
 // ===================================================================
 // ROUND 9: Aggregate Desync, Warmup, & State Machine Attack Tests
@@ -6537,23 +6466,18 @@ impl TestEnv {
 /// ATTACK: Verify c_tot aggregate stays in sync after multiple deposits and trades.
 /// Multiple users deposit and trade, then verify c_tot == sum of individual capitals.
 
-
 /// ATTACK: Verify pnl_pos_tot tracks only positive PnL accounts.
 /// After trades and cranks, pnl_pos_tot should be sum of max(0, pnl) for each account.
-
 
 /// ATTACK: Warmup with zero period should convert PnL instantly.
 /// Init market with warmup_period_slots=0, verify profit converts immediately.
 
-
 /// ATTACK: Open and close multiple positions - verify c_tot stays consistent.
 /// Trade long, close, trade short, close - c_tot == sum of capitals at each step.
-
 
 /// ATTACK: Multiple sequential account inits have clean independent state.
 /// Create several accounts, verify each starts with zero position/PnL.
 /// Then trade with one and verify the others are not affected.
-
 
 /// ATTACK: Insurance fund growth from fees doesn't inflate haircut.
 /// Haircut = min(residual, pnl_pos_tot) / pnl_pos_tot where residual = vault - c_tot - insurance.
@@ -6562,32 +6486,24 @@ impl TestEnv {
 /// Verify that withdrawing more than available capital is rejected.
 /// Also verify that withdrawal with position leaves at least margin.
 
-
 /// ATTACK: Permissionless crank doesn't extract value.
 /// Any user can call crank with caller_idx=u16::MAX. Verify no value extraction.
-
 
 /// ATTACK: Multiple close-account calls on same index should fail.
 /// After closing once, the slot is freed. Closing again should error.
 
-
 /// ATTACK: Deposit after close should fail if account is freed.
 /// After closing an account, depositing to that index should fail.
-
 
 /// ATTACK: Trade to closed account index should fail.
 /// After closing, trying to use the freed slot as counterparty should error.
 
-
 /// ATTACK: rotate admin, then attempt old admin operations.
 /// After admin transfer, old admin should be unable to perform admin operations.
-
-
 
 /// ATTACK: Verify conservation after complex multi-user lifecycle.
 /// Multiple users open positions, some profitable, some losing, then all close.
 /// Total withdrawn should equal total deposited.
-
 
 // ============================================================================
 // ROUND 10: Config Boundaries, Funding Timing, Multi-LP, & Token Validation
@@ -6596,37 +6512,29 @@ impl TestEnv {
 /// ATTACK: UpdateConfig with extreme funding parameters.
 /// Set funding_max_e9_per_slot to max i64, verify crank doesn't overflow.
 
-
 /// ATTACK: Zero-slot crank loops shouldn't compound funding.
 /// Crank multiple times at the same slot - funding should accrue only once.
-
 
 /// ATTACK: Multiple LPs trading with same user - verify all positions tracked correctly.
 /// Each LP independently takes opposite side of user trades.
 
-
 /// ATTACK: Trade as LP-kind account in user slot (kind mismatch).
 /// LP accounts can only be in lp_idx position, users in user_idx.
-
 
 // test_attack_withdraw_exact_capital_zero_position: removed (duplicate of test_attack_withdraw_exact_capital_no_position)
 
 /// ATTACK: Deposit zero amount should be harmless.
 /// Depositing 0 tokens should either fail or be a no-op.
 
-
 /// ATTACK: Withdraw zero amount should be harmless.
 /// Withdrawing 0 tokens should either fail or be a no-op.
-
 
 /// ATTACK: Trade with zero size should be harmless.
 /// Trading 0 contracts should either fail or be a no-op.
 
-
 /// In spec v10.5, there is no force-realize mode. Low insurance does NOT
 /// trigger position force-close. Positions remain open regardless of
 /// insurance level. The crank only processes funding/settlement.
-
 
 /// ATTACK: Deposit after setting large maintenance fee.
 /// Verify fee settlement during deposit doesn't extract extra value.
@@ -6635,14 +6543,11 @@ impl TestEnv {
 /// ATTACK: Liquidate account that becomes insolvent from price move.
 /// After price crash, undercollateralized account should be liquidatable.
 
-
 /// ATTACK: Insurance grows correctly from new account fees.
 /// InitUser/InitLP pays a new_account_fee that goes to insurance.
 
-
 /// ATTACK: Conservation invariant across large slot jumps.
 /// Advance many slots, verify conservation holds despite funding/fee accrual.
-
 
 // ============================================================================
 // ROUND 11: Warmup, Funding Edge Cases, Liquidation Budgets, Token Validation
@@ -6651,68 +6556,52 @@ impl TestEnv {
 /// ATTACK: Warmup period settlement - profit only vests after warmup.
 /// With warmup_period > 0, PnL profit should vest gradually, not instantly.
 
-
 /// ATTACK: Warmup period=0 means instant settlement.
 /// With warmup=0, all PnL should vest immediately.
-
 
 /// ATTACK: Same-slot triple crank converges.
 /// Multiple cranks at same slot should eventually stabilize (lazy settlement).
 /// Second crank may settle fees, but third should be fully idempotent.
 
-
 /// ATTACK: Funding rate with extreme k_bps.
 /// Set funding_k_bps to maximum, verify funding rate is capped at ±10,000 bps/slot.
-
 
 /// ATTACK: Funding with extreme max_premium_bps.
 /// Set funding_max_premium_bps to extreme negative, verify capping works.
 
-
 /// ATTACK: Funding with extreme max_bps_per_slot.
 /// Set funding_max_e9_per_slot to extreme value, verify engine caps at ±10,000.
-
 
 /// ATTACK: Deposit with wrong mint token account.
 /// Attempt to deposit from an ATA with a different mint.
 
-
 /// ATTACK: Withdraw to wrong owner's ATA.
 /// Attempt to withdraw to an ATA owned by a different user.
-
 
 /// ATTACK: Multiple price changes between cranks.
 /// Push oracle price multiple times before cranking, verify only latest applies.
 
-
 /// ATTACK: Trade immediately after deposit, same slot.
 /// Deposit and trade in rapid succession without crank between.
-
 
 /// ATTACK: Rapid long→short→long position reversals.
 /// Multiple position flips in succession to test aggregate tracking.
 
-
 /// ATTACK: Crank with no accounts (empty market).
 /// KeeperCrank on a market with no users/LPs should be a no-op.
-
 
 /// ATTACK: Smallest possible trade (1 contract) creates correct position.
 /// Note: Market uses trading_fee_bps=0, so ceiling division is not tested here.
 /// Fee ceiling division is enforced at the engine level and tested in unit proofs.
 
-
 /// ATTACK: Multiple withdrawals in same slot draining capital.
 /// Rapid withdrawals in same slot should correctly update capital each time.
-
 
 /// ATTACK: Deposit and withdraw same slot - should be atomic operations.
 /// Rapid deposit+withdraw cycle shouldn't create or destroy value.
 
-
 /// ATTACK: Accrue funding with huge dt (10-year equivalent slot jump).
 /// Funding accrual caps dt at ~1 year. Verify no overflow.
-
 
 // ============================================================================
 // ROUND 12: Unit Scale, Invert Mode, Multi-Account, Resolve Sequences
@@ -6721,53 +6610,41 @@ impl TestEnv {
 /// ATTACK: Unit scale market - trade, crank, conservation.
 /// Markets with unit_scale > 0 use scaled prices. Verify conservation.
 
-
 /// ATTACK: Large unit scale - very large scaling factor.
 /// unit_scale=1_000_000 (1M). Verify no overflow in price scaling.
-
 
 /// ATTACK: Inverted market (invert=1) trade and conservation.
 /// Inverted markets use 1e12/oracle_price. Verify conservation.
 
-
 /// ATTACK: Inverted market with price approaching zero.
 /// When oracle price → large (inverted price → 0), verify no division issues.
-
 
 /// ATTACK: Same owner creates multiple user accounts.
 /// Protocol should allow it, but each account must be independent.
 
-
 /// ATTACK: Resolve hyperp market then withdraw capital (no position).
 /// After resolution, users should be able to withdraw their deposited capital.
 
-
 /// ATTACK: TradeNoCpi on hyperp market should always be blocked.
 /// Hyperp mode blocks TradeNoCpi (requires TradeCpi from matcher).
-
 
 // test_attack_double_resolve_rejected: removed (duplicate of test_attack_double_resolve_market)
 
 /// ATTACK: Non-admin tries to resolve market.
 /// Only admin should be able to resolve.
 
-
 /// ATTACK: Withdraw insurance before all positions force-closed.
 /// WithdrawInsurance should fail while positions are still open post-resolve.
-
 
 /// ATTACK: Inverted market with unit_scale > 0 (double transformation).
 /// Both inversion and scaling applied. Verify conservation.
 
-
 /// ATTACK: Crank multiple times across many slots with position open.
 /// Verify funding accrual is correct and consistent across many intervals.
-
 
 /// ATTACK: Inverted market PnL direction and conservation after price move.
 /// Long on inverted market should lose when oracle rises (inverted mark falls).
 /// Verify PnL eventually settles into capital and conservation holds.
-
 
 // ============================================================================
 // ROUND 13: Admin ops, CloseAccount edge cases, GC, multi-LP, oracle lifecycle,
@@ -6778,58 +6655,43 @@ impl TestEnv {
 /// CloseAccount should forgive remaining fee debt after paying what's possible.
 /// Verify returned capital = capital - min(fee_debt, capital).
 
-
 /// ATTACK: CloseSlab with dormant account (zero everything but not GC'd).
 /// CloseSlab requires num_used_accounts == 0, so dormant accounts block it.
 
-
 /// ATTACK: admin rotated; old admin tries operation.
 /// After the rotation the previous admin should be unauthorized.
-
-
 
 /// ATTACK: Set maintenance fee to extreme value, accrue fees.
 /// Verify fee debt accumulates but doesn't cause overflow or negative capital.
 /// ATTACK: burning hyperp_authority disables PushHyperpMark.
 /// Oracle authority cleared means stored price is cleared and push fails.
 
-
 /// ATTACK: Multi-LP trading - trade against two different LPs.
 /// Verify each LP's position is tracked independently and conservation holds.
-
 
 /// ATTACK: Close account after round-trip trade with PnL.
 /// Protocol requires position=0 and PnL=0 for close.
 
-
 /// ATTACK: UpdateAuthority { AUTHORITY_ADMIN } to same address (no-op).
 /// Should succeed without side effects.
-
-
 
 /// ATTACK: Double deposit then withdraw full amount.
 /// Verify deposits accumulate correctly and full withdrawal returns sum.
 
-
 /// ATTACK: Withdraw exactly the user's entire capital.
 /// Edge case: withdraw == capital leaves zero, should succeed.
-
 
 /// ATTACK: Multiple LPs with different sizes - verify LP max position tracking.
 /// LP positions should be independently bounded by their own limits.
 
-
 /// ATTACK: Push oracle price with decreasing timestamps.
 /// Verify that stale timestamps are handled correctly.
-
 
 /// ATTACK: Liquidate account that is solvent (positive equity).
 /// LiquidateAtOracle should reject attempts on solvent accounts.
 
-
 /// ATTACK: Close account, GC via crank, verify num_used_accounts decrements.
 /// Full lifecycle: init → deposit → close → crank(GC) → verify count.
-
 
 // ============================================================================
 // ROUND 14: Warmup+haircut, size=1 trades, entry price, fee paths, funding,
@@ -6840,68 +6702,52 @@ impl TestEnv {
 /// ATTACK: Trade with position size = 1 (smallest non-zero).
 /// Verify conservation holds even with minimal position.
 
-
 /// ATTACK: Trade size = -1 (smallest short position).
 /// Verify negative position of size 1 conserves.
-
 
 /// ATTACK: Position reversal (long→short) requires initial_margin_bps.
 /// When crossing zero, the margin check uses the stricter initial margin.
 
-
 /// ATTACK: Close account path settles fees correctly.
 /// Compare: crank(settle fees) → close vs. close(settles fees internally).
-
 
 /// ATTACK: Funding accumulation across position size changes.
 /// Open position, crank to accrue funding, change position size, crank again.
 /// Verify funding uses stored index (anti-retroactivity).
 
-
 /// ATTACK: Partial position close then full close then CloseAccount.
 /// Full lifecycle: open → partial close → full close → account close.
-
 
 /// ATTACK: Multiple deposits to LP then user trades against it.
 /// Verify LP capital accumulates correctly and trades work.
 
-
 /// ATTACK: Withdraw then immediately re-deposit.
 /// Verify no value created or lost in the cycle.
-
 
 /// ATTACK: Warmup-period market - trade and settle across warmup slots.
 /// Profit from trade should vest over warmup_period_slots.
 /// Verify conservation through the vesting process.
 
-
 /// ATTACK: Force-realize disabled when insurance > threshold.
 /// Top up insurance to disable force-realize, verify positions persist.
-
 
 /// ATTACK: Sequential deposit → trade → crank → withdraw → close lifecycle.
 /// Full account lifecycle with all operations in sequence.
 
-
 /// ATTACK: GC account that just had position closed.
 /// Close position → crank → crank again → verify GC happens.
-
 
 /// ATTACK: Large position then price crash - verify conservation through liquidation.
 /// Even in liquidation, c_tot must equal sum of capitals.
 
-
 /// ATTACK: Trade at max price (circuit breaker limit).
 /// Oracle at extreme high price, crank, verify no overflow.
-
 
 /// ATTACK: Trade at extreme low oracle price (near zero).
 /// Verify no division by zero or overflow.
 
-
 /// ATTACK: Rapid open/close/open cycle - same position size, different slots.
 /// Tests that entry_price resets correctly on each open.
-
 
 // ============================================================================
 // ROUND 15: Input validation, invalid instruction paths, slab guards,
@@ -6911,74 +6757,56 @@ impl TestEnv {
 /// ATTACK: Send instruction with tag=24 (just above max valid tag=23).
 /// Should fail gracefully.
 
-
 /// ATTACK: Deposit with wrong slab account (different program_id slab).
 /// Slab owned by wrong program should be rejected by slab_guard.
-
 
 /// ATTACK: Deposit without signer (user not signing).
 /// All operations require the user to sign.
 
-
 /// ATTACK: Four user accounts trading against same LP.
 /// Verify conservation holds across many accounts.
-
 
 /// ATTACK: Withdraw from LP account (LP should still be able to withdraw).
 /// Verify LP withdraw works the same as user withdraw.
 
-
 /// ATTACK: Trade at maximum position size boundary.
 /// Open a position that uses nearly all margin, then try adding more.
-
 
 /// ATTACK: InitMarket with admin field in data mismatching signer.
 /// Code validates admin in instruction data matches signer pubkey.
 
-
 /// ATTACK: InitMarket with mint field in data mismatching mint account.
 /// Code validates collateral_mint in data matches the mint account provided.
-
 
 /// ATTACK: Withdraw with wrong vault PDA (correct PDA but from different slab).
 /// Code checks vault PDA derivation matches slab.
 
-
 /// ATTACK: CloseAccount with wrong vault PDA.
 /// Code checks vault PDA derivation matches slab in CloseAccount path.
-
 
 /// ATTACK: TopUpInsurance with wrong vault account.
 /// Code validates vault matches stored vault_pubkey.
 
-
 /// ATTACK: Liquidate permissionless caller not signer.
 /// Verify liquidation requires a valid signer even though it's permissionless.
-
 
 /// ATTACK: Deposit with wrong oracle price account.
 /// Verifies oracle account validation rejects wrong price feed.
 
-
 /// ATTACK: InitUser with new_account_fee.
 /// Verify fee goes to insurance fund and conservation holds.
-
 
 /// ATTACK: Crank with wrong oracle account on standard market.
 /// Trade/crank oracle validation should reject mismatched feed.
 
-
 /// ATTACK: Withdraw with wrong SPL token program account.
 /// Substituting a fake token program should be rejected.
-
 
 /// ATTACK: Alias user_ata with vault in WithdrawCollateral.
 /// Must reject duplicate-role account substitution.
 
-
 /// ATTACK: Alias user_ata with vault in CloseAccount.
 /// Must reject duplicate-role account substitution.
-
 
 // ============================================================================
 // Round 16: Numeric Boundary + Code Path Tests
@@ -6988,72 +6816,56 @@ impl TestEnv {
 /// Oracle price $138 (138_000_000 e6), unit_scale=200_000_000.
 /// scale_price_e6(138M, 200M) = 0 → None → trade should be rejected.
 
-
 /// ATTACK: Inverted market with very high raw price so inverted result is zero.
 /// invert_price_e6 with raw near u64::MAX: INVERSION_CONSTANT / raw → 0.
 /// INVERSION_CONSTANT = 10^12, so raw > 10^12 gives inverted < 1 → 0 → None.
-
 
 /// ATTACK: Inverted market with raw price = 1 (smallest non-zero).
 /// invert_price_e6(1, 1) = 10^12 / 1 = 10^12 → within u64 range.
 /// Verify the market handles extreme inverted prices.
 
-
 /// ATTACK: Multi-instruction atomic transaction (deposit + trade in same tx).
 /// Verify protocol handles multiple instructions in single transaction correctly.
-
 
 /// ATTACK: Withdraw amount = unit_scale - 1 (largest misaligned amount).
 /// Should be rejected by alignment check when unit_scale > 1.
 
-
 /// ATTACK: Close slab after all accounts closed and insurance is zero.
 /// Tests the clean shutdown path: LP deposits, withdraws, closes, then slab closes.
-
 
 /// ATTACK: Liquidation at exact equity zero boundary.
 /// Position PnL + capital = 0 exactly. Should be liquidatable.
 
-
 /// ATTACK: Deposit and immediate crank in same slot.
 /// Tests that deposit + crank in same slot doesn't create exploitable state.
-
 
 /// ATTACK: Trade then immediate crank then withdraw in rapid sequence.
 /// Tests state consistency across rapid operation sequence.
 
-
 /// ATTACK: Multiple price changes between cranks (large gap).
 /// Only the price at crank time should matter, not intermediate prices.
 
-
 /// ATTACK: Deposit to account, trade, then deposit again (incremental deposits).
 /// Verify capital is correct after multiple deposits with position open.
-
 
 /// ATTACK: Warmup + funding interaction.
 /// Open position, warmup is accruing, funding is also accruing.
 /// Both should settle correctly without double-counting.
 
-
 /// ATTACK: LP position tracking after multiple users trade and close.
 /// Verify LP position aggregates are correct after complex trading.
-
 
 /// ATTACK: Price at exact circuit breaker boundary.
 /// Move price by exactly oracle_price_cap_bps per slot.
 /// Verify mark tracks correctly at the boundary.
 
-
 /// ATTACK: Trade with exactly initial_margin_bps worth of capital.
 /// At the exact margin boundary, the trade should just barely succeed.
-
 
 /// ATTACK: Maintenance fee settlement when capital is very small.
 /// With large maintenance_fee_per_slot and small capital, fee should not go negative.
 /// ATTACK: Mark precision with very small price increments.
 /// Multiple tiny price changes and cranks should maintain conservation.
-
 
 // ============================================================================
 // Round 17: Instruction Handler Edge Cases + State Interactions
@@ -7062,27 +6874,21 @@ impl TestEnv {
 /// ATTACK: UpdateConfig while positions are open and funding accruing.
 /// Changing funding parameters mid-flight should not cause retroactive errors.
 
-
 /// ATTACK: PushHyperpMark with same price as last effective price.
 /// When price doesn't change, circuit breaker should produce stable state.
-
 
 /// ATTACK: Liquidate with target_idx = u16::MAX (65535, CRANK_NO_CALLER sentinel).
 /// Should not confuse liquidation with permissionless crank sentinel.
 
-
 /// ATTACK: Deposit after liquidation in same slot.
 /// User gets liquidated, then immediately deposits. Conservation must hold.
-
 
 /// ATTACK: InitLP with matcher_program = Percolator program itself.
 /// InitLP stores the matcher pubkey but doesn't CPI, so it may succeed at init.
 /// Verify no value extraction and conservation holds regardless of outcome.
 
-
 /// ATTACK: Funding rate sign flip when LP position crosses zero.
 /// LP net position goes from short to long in a single trade.
-
 
 // REMOVED: test_attack_gc_exact_threshold_account - duplicate of
 // test_attack_user_gc_when_empty (round 5, line 9260)
@@ -7090,45 +6896,35 @@ impl TestEnv {
 /// ATTACK: TopUpInsurance with unit_scale dust edge case.
 /// Insurance topup amount that doesn't align with unit_scale.
 
-
 /// ATTACK: Resolve hyperp market then attempt UpdateConfig.
 /// Admin config changes should be blocked after market resolution.
-
 
 /// ATTACK: PushHyperpMark after resolution.
 /// Settlement parameters must be frozen once market is resolved.
 
-
 /// ATTACK: UpdateAuthority { AUTHORITY_HYPERP_MARK } after resolution.
 /// Oracle authority must remain frozen once market is resolved.
 
-
 /// ATTACK: SetOraclePriceCap after resolution.
 /// Price-cap settings must be frozen after market resolution.
-
 
 /// ATTACK: Multiple trades filling LP position in alternating directions.
 /// LP position oscillates: +5M, +2M (net -3M), -1M (net +4M), etc.
 /// Verify LP position tracking remains accurate through oscillations.
 
-
 /// ATTACK: SetOraclePriceCap to u64::MAX.
 /// Effectively disables circuit breaker. Verify large price moves are accepted.
 
-
 /// ATTACK: User deposits, withdraws everything, gets GC'd, new user takes slot.
 /// Tests slot reuse and state cleanliness after GC in multi-user scenario.
-
 
 /// ATTACK: LP tries to withdraw when haircut is active (vault < c_tot + insurance).
 /// After a user takes a large loss, LP capital might be haircutted - can LP
 /// withdraw more than their haircutted equity?
 
-
 /// ATTACK: Open position during warmup period, partially close before warmup expires.
 /// Tests interaction between warmup slope and partial position close.
 /// Profit from partial close must be subject to warmup vesting.
-
 
 // ============================================================================
 // Round 18: Arithmetic Boundaries, Settlement Ordering, Multi-Account
@@ -7137,10 +6933,8 @@ impl TestEnv {
 /// ATTACK: Minimal position size (1 unit) with 1e-6 price precision.
 /// Tests mark_pnl truncation at the smallest meaningful scale.
 
-
 /// ATTACK: Haircut with zero pnl_pos_tot (no positive PnL accounts).
 /// When denominator is 0, haircut should be harmless (no division by zero).
-
 
 // REMOVED: test_attack_funding_zero_dt_no_accrual - duplicate of
 // test_attack_funding_same_slot_three_cranks_dt_zero (line 8020)
@@ -7148,28 +6942,22 @@ impl TestEnv {
 /// ATTACK: Many users (40) trading against single LP, then crank.
 /// Tests that crank handles many accounts efficiently and conserves funds.
 
-
 /// ATTACK: Position flip from long to short at exact maintenance margin.
 /// Verify initial_margin_bps is used (not maintenance) for the flip.
-
 
 /// ATTACK: Large maintenance fee with huge dt gap (thousands of slots).
 /// Tests saturating arithmetic in fee accrual over long periods.
 /// ATTACK: Trade with different sizes in rapid succession (consecutive slots).
 /// Position accumulation should be correct across rapid trades.
 
-
 /// ATTACK: Three LPs with different positions, user trades against all.
 /// Tests LP aggregate tracking with multiple LPs.
-
 
 /// ATTACK: Projected haircut during trade vs realized haircut after crank.
 /// Verify consistency between margin check haircut and settlement haircut.
 
-
 /// ATTACK: set_pnl aggregate consistency - rapid PnL changes from trades.
 /// Multiple trades that flip PnL sign should maintain pnl_pos_tot correctly.
-
 
 // REMOVED: test_attack_deposit_withdraw_same_slot_no_extraction - duplicate of
 // test_attack_deposit_withdraw_same_slot_atomicity (line 15845)
@@ -7179,7 +6967,6 @@ impl TestEnv {
 
 /// ATTACK: LP partial close (reduce LP position) and verify aggregates.
 /// Trade that reduces LP's exposure should update net_lp_pos correctly.
-
 
 // REMOVED: test_attack_warmup_instant_period_zero - duplicate of
 // test_attack_warmup_zero_period_instant (line 8110)
@@ -7192,22 +6979,17 @@ impl TestEnv {
 /// ATTACK: Inverted market (invert=1) with large price swing.
 /// Tests conservation in inverted market with significant movement.
 
-
 /// ATTACK: Two users with opposing positions, price returns to start.
 /// Both users should have approximately zero PnL (minus fees).
-
 
 /// ATTACK: Withdraw exactly all capital from user with open position.
 /// Should fail because margin check requires capital > 0 for positions.
 
-
 /// ATTACK: Insurance topup from non-admin account.
 /// Anyone can top up insurance (it's a deposit, not withdrawal).
 
-
 /// ATTACK: Price moves 50% down then liquidation followed by conservation check.
 /// Tests that large price movements + liquidation maintain fund conservation.
-
 
 // ============================================================================
 // Round 19: Instruction Data, Account Ordering, Admin Transitions, LP Edge Cases
@@ -7216,42 +6998,32 @@ impl TestEnv {
 /// ATTACK: Instruction data with extra trailing bytes appended.
 /// Tests that decoder rejects or ignores trailing garbage after valid data.
 
-
 /// ATTACK: Trade with size = i128::MIN + 1 (extreme negative).
 /// Tests that extreme negative trade sizes are handled safely.
-
 
 /// ATTACK: Withdraw all capital then re-deposit in same slot.
 /// Tests that withdraw+deposit cycle doesn't corrupt state.
 
-
 /// ATTACK: LP tries to close account while users have matched positions.
 /// LP with outstanding position should not be closeable.
-
 
 /// ATTACK: Trade long then short same size - net zero position.
 /// Position should cancel out to zero, conservation must hold.
 
-
 /// ATTACK: LP matched by multiple users in rapid succession.
 /// Tests LP position aggregate correctness under rapid multi-user trading.
-
 
 /// ATTACK: Deposit after full withdrawal in same slot - cycle should not extract value.
 /// Tests that rapid deposit-withdraw-deposit cycles don't corrupt aggregates.
 
-
 /// ATTACK: Open max-margin position, crank with price at liquidation boundary.
 /// Tests that liquidation trigger is precise and doesn't miss by 1.
-
 
 /// ATTACK: Push oracle with timestamp = 0 then try to use it.
 /// Tests that extreme timestamp doesn't corrupt oracle state or cause panic.
 
-
 /// ATTACK: Push oracle with timestamp = i64::MAX.
 /// Tests that far-future timestamps don't cause overflow or panic.
-
 
 /// ATTACK: LP deposit with pending fee debt.
 /// LP depositing should settle fees first, then add remaining to capital.
@@ -7260,19 +7032,14 @@ impl TestEnv {
 /// ATTACK: Multiple admin changes in rapid succession.
 /// Tests that admin state is correctly updated through multiple transfers.
 
-
-
 /// ATTACK: Deposit to LP account from non-owner.
 /// Tests authorization on LP deposits.
-
 
 /// ATTACK: Two users try to withdraw their full equity simultaneously.
 /// Vault should never go below total obligations.
 
-
 /// ATTACK: Multiple users with opposing positions - conservation after price swing.
 /// Tests that PnL redistribution between longs/shorts conserves total value.
-
 
 // ============================================================================
 // Property-Based Fuzzing: State Machine Tests
@@ -7660,7 +7427,6 @@ impl IntegrationFuzzer {
 ///
 /// 50 seeds × 100 steps = 5,000 operations with invariant checks after each.
 
-
 /// PROPERTY TEST: Authorization - every instruction rejects wrong signer.
 ///
 /// Subsumes the following classes of individual tests:
@@ -7673,8 +7439,6 @@ impl IntegrationFuzzer {
 ///   A1. Wrong owner is rejected
 ///   A2. Wrong admin is rejected
 ///   A3. State is unchanged after rejection
-
-
 
 /// PROPERTY TEST: Account lifecycle invariants across create/use/close/GC cycles.
 ///
@@ -7690,7 +7454,6 @@ impl IntegrationFuzzer {
 ///   L3. Account reuse after GC works correctly
 ///   L4. Close requires zero position and zero PnL
 
-
 // ============================================================================
 // Binary Market (Premarket Resolution) Verification Tests
 // ============================================================================
@@ -7699,23 +7462,18 @@ impl IntegrationFuzzer {
 /// trade → resolve → force-close → withdraw insurance → close accounts
 /// Checks that vault SPL balance accounts for all user capital at every step.
 
-
 /// Verify that with warmup_period > 0, profitable users after force-close
 /// need two CloseAccount calls with a waiting period between them.
 /// First call updates warmup slope; second call converts PnL to capital.
 
-
 /// Verify that users with negative PnL from force-close can close immediately.
 /// Losses are settled to capital immediately (no warmup delay).
-
 
 /// Verify that the force-close PnL calculation is correct by comparing
 /// expected PnL from position * (settlement - entry) / 1e6 with actual PnL.
 
-
 /// Verify that force-close handles zero-position accounts correctly
 /// (skips them without modifying state).
-
 
 // ============================================================================
 // AdminForceCloseAccount tests
@@ -7723,36 +7481,26 @@ impl IntegrationFuzzer {
 
 /// Happy path: resolve → force-close positions → admin force-close account
 
-
 /// AdminForceCloseAccount requires RESOLVED flag
-
 
 /// AdminForceCloseAccount requires admin signer
 
-
 /// AdminForceCloseAccount requires zero position
-
 
 /// AdminForceCloseAccount with positive PnL applies haircut
 
-
 /// AdminForceCloseAccount with negative PnL reduces capital
 
-
 /// Full lifecycle: resolve → force-close positions → admin force-close all accounts → withdraw insurance → close slab
-
 
 /// Test: Honest user with positive PnL can close account after force-close + warmup.
 /// Force-close crank initializes warmup slope so settle_warmup_to_capital can convert
 /// PnL to capital over the warmup period.
 
-
 /// Test: Honest user with negative PnL can close account immediately after force-close.
 /// Negative PnL is settled immediately (deducted from capital), no warmup needed.
 
-
 /// Test: Both LP and user can close after force-close (full lifecycle for honest participants)
-
 
 // ============================================================================
 // Honest user lifecycle tests for all market types
@@ -7761,24 +7509,18 @@ impl IntegrationFuzzer {
 /// Standard Pyth market: user deposits, trades (long), price goes up, flattens, closes account.
 /// h_min=0 so PnL converts instantly.
 
-
 /// Standard Pyth market: user deposits, trades (long), price drops, flattens, closes.
 /// User loses money but can still close and get remaining capital.
-
 
 /// Standard market with warmup: profitable user must wait for warmup before closing.
 /// Uses a larger position (1M) to generate meaningful PnL that takes time to vest.
 
-
 /// Inverted Pyth market: user can close account after trading.
-
 
 /// TradeCpi hyperp market (non-resolution): user trades via CPI, flattens, closes.
 
-
 /// Full lifecycle test: both LP and user close on standard market, then close slab.
 /// No insurance is topped up, and no crank runs between trades (avoiding force-realize mode).
-
 
 /// Regression test for PR #1: WithdrawInsurance must decrement engine.vault.
 ///
@@ -7786,7 +7528,6 @@ impl IntegrationFuzzer {
 /// SPL tokens out of the vault, but does NOT decrement engine.vault. This leaves
 /// engine.vault non-zero after all capital is withdrawn, causing CloseSlab to fail
 /// (it requires engine.vault.is_zero()).
-
 
 // ============================================================================
 // Per-Market Admin Limits Tests
@@ -7808,15 +7549,18 @@ pub fn encode_init_market_with_limits(
     data.push(0u8); // invert
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
-    // maintenance_fee_per_slot is disabled at init.
+                                                 // maintenance_fee_per_slot is disabled at init.
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (disabled)
+    let is_hyperp = feed_id == &[0u8; 32];
     // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
-    data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+    // §12.19.6 F8 anti-spam.
+    let new_account_fee: u128 = if is_hyperp { 0 } else { 1 };
+    data.extend_from_slice(&new_account_fee.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
 
     data.extend_from_slice(&50u64.to_le_bytes()); // max_crank_staleness_slots (must be < perm_resolve=80 <= MAX_ACCRUAL_DT_SLOTS=100)
@@ -7824,10 +7568,10 @@ pub fn encode_init_market_with_limits(
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
     data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
-    append_default_extended_tail_for(&mut data, feed_id == &[0u8; 32]);
+    append_default_extended_tail_for(&mut data, is_hyperp);
     data
 }
 
@@ -7853,23 +7597,30 @@ pub fn encode_init_market_with_maintenance_fee(
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
     data.extend_from_slice(&maintenance_fee_per_slot.to_le_bytes()); // maintenance_fee_per_slot
+    let is_hyperp = feed_id == &[0u8; 32];
     // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
-    data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+    // §12.19.6 F8 anti-spam: need dust fee unless Hyperp or maintenance fee > 0.
+    let new_account_fee: u128 = if is_hyperp || maintenance_fee_per_slot > 0 {
+        0
+    } else {
+        1
+    };
+    data.extend_from_slice(&new_account_fee.to_le_bytes()); // new_account_fee
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
     data.extend_from_slice(&50u64.to_le_bytes()); // max_crank_staleness_slots (must be < perm_resolve=80 <= MAX_ACCRUAL_DT_SLOTS=100)
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
     data.extend_from_slice(&TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
-    append_default_extended_tail_for(&mut data, feed_id == &[0u8; 32]);
+    append_default_extended_tail_for(&mut data, is_hyperp);
     data
 }
 
@@ -7914,11 +7665,8 @@ impl TestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data,
         };

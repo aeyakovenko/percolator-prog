@@ -2,9 +2,7 @@ mod common;
 #[allow(unused_imports)]
 use common::*;
 
-use solana_sdk::{
-    signature::{Keypair, Signer},
-};
+use solana_sdk::signature::{Keypair, Signer};
 
 // ============================================================================
 // A. Buffer populated by trades
@@ -38,13 +36,21 @@ fn test_trade_inserts_both_accounts_into_buffer() {
 
     // After trade: exactly both should be in buffer
     let buf = env.read_risk_buffer();
-    assert_eq!(buf.count, 2, "Buffer must contain exactly both trade participants: count={}", buf.count);
+    assert_eq!(
+        buf.count, 2,
+        "Buffer must contain exactly both trade participants: count={}",
+        buf.count
+    );
     assert!(buf.find(user_idx).is_some(), "User must be in buffer");
     assert!(buf.find(lp_idx).is_some(), "LP must be in buffer");
 
     // Verify the entries have nonzero notional
     for i in 0..buf.count as usize {
-        assert!(buf.entries[i].notional > 0, "Entry {} must have nonzero notional", i);
+        assert!(
+            buf.entries[i].notional > 0,
+            "Entry {} must have nonzero notional",
+            i
+        );
     }
 }
 
@@ -77,9 +83,15 @@ fn test_trade_close_removes_from_buffer() {
 
     let buf = env.read_risk_buffer();
     // Both positions are zero now — both must be removed
-    assert_eq!(buf.count, 0,
-        "Buffer must be empty after closing all positions: count={}", buf.count);
-    assert!(buf.find(user_idx).is_none(), "User must be removed from buffer");
+    assert_eq!(
+        buf.count, 0,
+        "Buffer must be empty after closing all positions: count={}",
+        buf.count
+    );
+    assert!(
+        buf.find(user_idx).is_none(),
+        "User must be removed from buffer"
+    );
     assert!(buf.find(lp_idx).is_none(), "LP must be removed from buffer");
 }
 
@@ -115,13 +127,18 @@ fn test_buffer_survives_empty_crank() {
     env.crank();
 
     let buf_after = env.read_risk_buffer();
-    assert_eq!(buf_after.count, buf_before.count,
-        "Buffer must persist through empty-candidate crank");
+    assert_eq!(
+        buf_after.count, buf_before.count,
+        "Buffer must persist through empty-candidate crank"
+    );
 
     // Scan cursor must advance
-    assert!(buf_after.scan_cursor > buf_before.scan_cursor,
+    assert!(
+        buf_after.scan_cursor > buf_before.scan_cursor,
         "Scan cursor must advance: before={} after={}",
-        buf_before.scan_cursor, buf_after.scan_cursor);
+        buf_before.scan_cursor,
+        buf_after.scan_cursor
+    );
 }
 
 // ============================================================================
@@ -169,8 +186,8 @@ fn test_scan_cursor_wraps() {
 /// E2: New entry evicts smallest when buffer is full.
 #[test]
 fn test_buffer_eviction() {
-    use percolator_prog::risk_buffer::RiskBuffer;
     use bytemuck::Zeroable;
+    use percolator_prog::risk_buffer::RiskBuffer;
 
     let mut buf = RiskBuffer::zeroed();
 
@@ -205,8 +222,8 @@ fn test_buffer_eviction() {
 /// E4: Update-in-place does not trigger eviction.
 #[test]
 fn test_buffer_update_in_place() {
-    use percolator_prog::risk_buffer::RiskBuffer;
     use bytemuck::Zeroable;
+    use percolator_prog::risk_buffer::RiskBuffer;
 
     let mut buf = RiskBuffer::zeroed();
     buf.upsert(0, 500);
@@ -270,11 +287,16 @@ fn test_close_account_removes_from_buffer() {
     // CloseAccount
     env.set_slot(500);
     let result = env.try_close_account(&user, user_idx);
-    assert!(result.is_ok(),
-        "CloseAccount must succeed after closing position: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "CloseAccount must succeed after closing position: {:?}",
+        result
+    );
     let buf = env.read_risk_buffer();
-    assert!(buf.find(user_idx).is_none(),
-        "Closed account must be removed from buffer");
+    assert!(
+        buf.find(user_idx).is_none(),
+        "Closed account must be removed from buffer"
+    );
 }
 
 // ============================================================================
@@ -330,15 +352,21 @@ fn test_liquidation_removes_from_buffer() {
     env.trade(&user, &lp, lp_idx, user_idx, 100_000_000);
 
     let buf = env.read_risk_buffer();
-    assert!(buf.find(user_idx).is_some(), "User must be in buffer after trade");
+    assert!(
+        buf.find(user_idx).is_some(),
+        "User must be in buffer after trade"
+    );
 
     // Price drop → liquidate
     env.set_slot_and_price(2000, 90_000_000);
-    env.try_liquidate(user_idx).expect("Liquidation must succeed");
+    env.try_liquidate(user_idx)
+        .expect("Liquidation must succeed");
 
     let buf = env.read_risk_buffer();
-    assert!(buf.find(user_idx).is_none(),
-        "Liquidated account must be removed from buffer");
+    assert!(
+        buf.find(user_idx).is_none(),
+        "Liquidated account must be removed from buffer"
+    );
 }
 
 // ============================================================================
@@ -366,7 +394,9 @@ fn test_position_flip_updates_buffer() {
     // Go long 1M
     env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
     let buf = env.read_risk_buffer();
-    let slot = buf.find(user_idx).expect("User must be in buffer after long");
+    let slot = buf
+        .find(user_idx)
+        .expect("User must be in buffer after long");
     let long_notional = buf.entries[slot].notional;
 
     // Flip to short: net = +1M - 3M = -2M
@@ -374,13 +404,18 @@ fn test_position_flip_updates_buffer() {
     env.trade(&user, &lp, lp_idx, user_idx, -3_000_000);
 
     let buf = env.read_risk_buffer();
-    let slot = buf.find(user_idx).expect("User must be in buffer after flip");
+    let slot = buf
+        .find(user_idx)
+        .expect("User must be in buffer after flip");
     let short_notional = buf.entries[slot].notional;
 
     // Net short 2M > original long 1M → notional must increase
-    assert!(short_notional > long_notional,
+    assert!(
+        short_notional > long_notional,
         "Notional must increase after flip to larger position: long={} short={}",
-        long_notional, short_notional);
+        long_notional,
+        short_notional
+    );
 }
 
 // ============================================================================
@@ -413,10 +448,16 @@ fn test_buffer_entries_persist_across_cranks() {
         env.crank();
 
         let buf = env.read_risk_buffer();
-        assert!(buf.find(user_idx).is_some(),
-            "User must persist in buffer after crank {}", i);
-        assert!(buf.find(lp_idx).is_some(),
-            "LP must persist in buffer after crank {}", i);
+        assert!(
+            buf.find(user_idx).is_some(),
+            "User must persist in buffer after crank {}",
+            i
+        );
+        assert!(
+            buf.find(lp_idx).is_some(),
+            "LP must persist in buffer after crank {}",
+            i
+        );
     }
 }
 
@@ -454,12 +495,17 @@ fn test_buffer_notional_refreshed_on_price_change() {
     env.crank();
 
     let buf = env.read_risk_buffer();
-    let slot = buf.find(user_idx).expect("User in buffer after price change");
+    let slot = buf
+        .find(user_idx)
+        .expect("User in buffer after price change");
     let notional_up = buf.entries[slot].notional;
 
-    assert!(notional_up > notional_138,
+    assert!(
+        notional_up > notional_138,
         "Notional must increase with price: before={} after={}",
-        notional_138, notional_up);
+        notional_138,
+        notional_up
+    );
     // Don't pin the ratio — the engine clamps the price per slot, so the
     // achieved ratio tracks the per-slot cap * crank count, not the raw
     // target ratio. Any strictly-greater notional validates the refresh.
@@ -498,15 +544,22 @@ fn test_buffer_correct_after_many_cranks() {
     let lp_pos = env.read_account_position(lp_idx);
 
     if user_pos != 0 {
-        assert!(buf.find(user_idx).is_some(),
-            "User with position must remain in buffer after 20 cranks");
+        assert!(
+            buf.find(user_idx).is_some(),
+            "User with position must remain in buffer after 20 cranks"
+        );
     }
     if lp_pos != 0 {
-        assert!(buf.find(lp_idx).is_some(),
-            "LP with position must remain in buffer after 20 cranks");
+        assert!(
+            buf.find(lp_idx).is_some(),
+            "LP with position must remain in buffer after 20 cranks"
+        );
     }
-    assert!(buf.scan_cursor > 0,
-        "Scan cursor must advance after 20 cranks: cursor={}", buf.scan_cursor);
+    assert!(
+        buf.scan_cursor > 0,
+        "Scan cursor must advance after 20 cranks: cursor={}",
+        buf.scan_cursor
+    );
 }
 
 // ============================================================================
@@ -535,7 +588,10 @@ fn test_new_position_between_cranks_enters_buffer() {
     env.trade(&user1, &lp, lp_idx, user1_idx, 1_000_000);
 
     let buf = env.read_risk_buffer();
-    assert!(buf.find(user1_idx).is_some(), "user1 must be in buffer after trade");
+    assert!(
+        buf.find(user1_idx).is_some(),
+        "user1 must be in buffer after trade"
+    );
 
     // Crank a few times — user1 and LP persist
     env.set_slot(200);
@@ -551,29 +607,41 @@ fn test_new_position_between_cranks_enters_buffer() {
 
     // Trade handler should immediately insert user2
     let buf = env.read_risk_buffer();
-    assert!(buf.find(user2_idx).is_some(),
-        "user2 must be in buffer immediately after trade (no crank needed)");
+    assert!(
+        buf.find(user2_idx).is_some(),
+        "user2 must be in buffer immediately after trade (no crank needed)"
+    );
 
     // user2's notional should be larger than user1's (5x position)
     let s1 = buf.find(user1_idx).unwrap();
     let s2 = buf.find(user2_idx).unwrap();
-    assert!(buf.entries[s2].notional > buf.entries[s1].notional,
-        "user2 (5M) must have higher notional than user1 (1M)");
+    assert!(
+        buf.entries[s2].notional > buf.entries[s1].notional,
+        "user2 (5M) must have higher notional than user1 (1M)"
+    );
 
     // Phase 3: crank refreshes — both still present with correct relative order
     env.set_slot(400);
     env.crank();
 
     let buf = env.read_risk_buffer();
-    assert!(buf.find(user1_idx).is_some(), "user1 must persist after crank");
-    assert!(buf.find(user2_idx).is_some(), "user2 must persist after crank");
+    assert!(
+        buf.find(user1_idx).is_some(),
+        "user1 must persist after crank"
+    );
+    assert!(
+        buf.find(user2_idx).is_some(),
+        "user2 must persist after crank"
+    );
     assert!(buf.find(lp_idx).is_some(), "LP must persist after crank");
 
     // After crank refresh, notionals are recalculated at current oracle price
     let s1 = buf.find(user1_idx).unwrap();
     let s2 = buf.find(user2_idx).unwrap();
-    assert!(buf.entries[s2].notional > buf.entries[s1].notional,
-        "Relative order must be preserved after crank refresh");
+    assert!(
+        buf.entries[s2].notional > buf.entries[s1].notional,
+        "Relative order must be preserved after crank refresh"
+    );
 }
 
 /// An evicted account re-enters the buffer when its position grows via new trade.
@@ -601,8 +669,10 @@ fn test_evicted_account_reenters_on_larger_trade() {
         users.push((u, idx));
     }
 
-    assert!(env.read_risk_buffer().find(users[0].1).is_none(),
-        "user1 (1M) must be evicted from full buffer");
+    assert!(
+        env.read_risk_buffer().find(users[0].1).is_none(),
+        "user1 (1M) must be evicted from full buffer"
+    );
 
     // Crank to advance state
     env.set_slot(200);
@@ -612,20 +682,26 @@ fn test_evicted_account_reenters_on_larger_trade() {
     env.trade(&users[0].0, &lp, lp_idx, users[0].1, 9_000_000);
 
     let buf = env.read_risk_buffer();
-    assert!(buf.find(users[0].1).is_some(),
-        "user1 (now 10M) must re-enter buffer after growing position");
+    assert!(
+        buf.find(users[0].1).is_some(),
+        "user1 (now 10M) must re-enter buffer after growing position"
+    );
 
     // user2 (2M) should now be evicted (smallest in buffer)
-    assert!(buf.find(users[1].1).is_none(),
-        "user2 (2M) must be evicted when user1 re-enters at 10M");
+    assert!(
+        buf.find(users[1].1).is_none(),
+        "user2 (2M) must be evicted when user1 re-enters at 10M"
+    );
 
     // Verify after crank — re-entry persists
     env.set_slot(300);
     env.crank();
 
     let buf = env.read_risk_buffer();
-    assert!(buf.find(users[0].1).is_some(),
-        "user1 must persist in buffer after crank");
+    assert!(
+        buf.find(users[0].1).is_some(),
+        "user1 must persist in buffer after crank"
+    );
 }
 
 // ============================================================================
@@ -658,7 +734,10 @@ fn test_buffer_with_five_accounts_evicts_smallest() {
     }
 
     let buf = env.read_risk_buffer();
-    assert_eq!(buf.count, 4, "Buffer must hold exactly RISK_BUF_CAP=4 entries");
+    assert_eq!(
+        buf.count, 4,
+        "Buffer must hold exactly RISK_BUF_CAP=4 entries"
+    );
 
     // LP (|15M| short) is the largest — must be in buffer
     assert!(buf.find(lp_idx).is_some(), "LP (largest) must be in buffer");
@@ -703,7 +782,10 @@ fn test_crank_liquidates_undercollateralized_buffer_entry() {
     env.trade(&user, &lp, lp_idx, user_idx, 100_000_000);
 
     let buf = env.read_risk_buffer();
-    assert!(buf.find(user_idx).is_some(), "User must be in buffer after trade");
+    assert!(
+        buf.find(user_idx).is_some(),
+        "User must be in buffer after trade"
+    );
 
     // Price drop → user undercollateralized
     env.set_slot_and_price(2000, 90_000_000);
@@ -712,11 +794,16 @@ fn test_crank_liquidates_undercollateralized_buffer_entry() {
     env.crank();
 
     let pos = env.read_account_position(user_idx);
-    assert_eq!(pos, 0, "Undercollateralized user must be liquidated by crank");
+    assert_eq!(
+        pos, 0,
+        "Undercollateralized user must be liquidated by crank"
+    );
 
     let buf = env.read_risk_buffer();
-    assert!(buf.find(user_idx).is_none(),
-        "Liquidated user must be removed from buffer");
+    assert!(
+        buf.find(user_idx).is_none(),
+        "Liquidated user must be removed from buffer"
+    );
 }
 
 // ============================================================================
@@ -729,7 +816,7 @@ fn test_crank_liquidates_undercollateralized_buffer_entry() {
 /// liquidations.
 #[test]
 fn test_buffer_only_liquidation_no_external_candidates() {
-    use solana_sdk::instruction::{Instruction, AccountMeta};
+    use solana_sdk::instruction::{AccountMeta, Instruction};
     use solana_sdk::sysvar;
 
     program_path();
@@ -754,7 +841,10 @@ fn test_buffer_only_liquidation_no_external_candidates() {
     // Near-max leverage trade → user enters buffer
     env.trade(&user, &lp, lp_idx, user_idx, 100_000_000);
     let buf = env.read_risk_buffer();
-    assert!(buf.find(user_idx).is_some(), "User must be in buffer after trade");
+    assert!(
+        buf.find(user_idx).is_some(),
+        "User must be in buffer after trade"
+    );
 
     // Price drop → user undercollateralized
     env.set_slot_and_price(2000, 90_000_000);
@@ -778,16 +868,22 @@ fn test_buffer_only_liquidation_no_external_candidates() {
         &[&caller],
         env.svm.latest_blockhash(),
     );
-    env.svm.send_transaction(tx).expect("buffer-only crank failed");
+    env.svm
+        .send_transaction(tx)
+        .expect("buffer-only crank failed");
 
     // The buffer entry should have caused the liquidation
     let pos = env.read_account_position(user_idx);
-    assert_eq!(pos, 0,
-        "Buffer-only crank must liquidate undercollateralized user (no external candidates)");
+    assert_eq!(
+        pos, 0,
+        "Buffer-only crank must liquidate undercollateralized user (no external candidates)"
+    );
 
     let buf = env.read_risk_buffer();
-    assert!(buf.find(user_idx).is_none(),
-        "Liquidated user must be removed from buffer");
+    assert!(
+        buf.find(user_idx).is_none(),
+        "Liquidated user must be removed from buffer"
+    );
 }
 
 // ============================================================================
@@ -798,7 +894,6 @@ fn test_buffer_only_liquidation_no_external_candidates() {
 //          test_fee_zero_no_fees_ever_charged,
 //          test_deposit_does_not_settle_pending_maintenance_fee
 // ============================================================================
-
 
 #[test]
 fn test_calibrate_bpf_offsets() {
@@ -815,27 +910,31 @@ fn test_calibrate_bpf_offsets() {
     env.top_up_insurance(&admin, 1_000_000_000);
     env.crank();
     env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
-    
+
     let d = env.svm.get_account(&env.slab).unwrap().data;
     let eng = 472usize; // ENGINE_OFF
 
     // Find num_used=2 + free_head=2
     for off in 0..2000 {
-        let nu = u16::from_le_bytes(d[eng+off..eng+off+2].try_into().unwrap());
-        let fh = u16::from_le_bytes(d[eng+off+2..eng+off+4].try_into().unwrap());
-        if nu == 2 && fh == 2 { println!("NUM_USED: ENGINE+{}", off); }
+        let nu = u16::from_le_bytes(d[eng + off..eng + off + 2].try_into().unwrap());
+        let fh = u16::from_le_bytes(d[eng + off + 2..eng + off + 4].try_into().unwrap());
+        if nu == 2 && fh == 2 {
+            println!("NUM_USED: ENGINE+{}", off);
+        }
     }
     // Find ADL_ONE=1_000_000 as u128 in engine fixed region
     let adl_one = 1_000_000u128.to_le_bytes();
     for off in 0..1500 {
-        if eng+off+16 <= d.len() && d[eng+off..eng+off+16] == adl_one {
+        if eng + off + 16 <= d.len() && d[eng + off..eng + off + 16] == adl_one {
             println!("ADL_ONE: ENGINE+{}", off);
         }
     }
     // Find c_tot near 110B
     for off in (0..500).step_by(8) {
-        if eng+off+16 > d.len() { break; }
-        let v = u128::from_le_bytes(d[eng+off..eng+off+16].try_into().unwrap());
+        if eng + off + 16 > d.len() {
+            break;
+        }
+        let v = u128::from_le_bytes(d[eng + off..eng + off + 16].try_into().unwrap());
         if v > 100_000_000_000 && v < 120_000_000_000 {
             println!("C_TOT candidate: ENGINE+{} = {}", off, v);
         }
@@ -843,7 +942,7 @@ fn test_calibrate_bpf_offsets() {
     // Find insurance=1B
     let ins = 1_000_000_000u128.to_le_bytes();
     for off in 0..100 {
-        if eng+off+16 <= d.len() && d[eng+off..eng+off+16] == ins {
+        if eng + off + 16 <= d.len() && d[eng + off..eng + off + 16] == ins {
             println!("INSURANCE: ENGINE+{}", off);
         }
     }
@@ -864,22 +963,24 @@ fn test_find_adl_offsets() {
     env.top_up_insurance(&admin, 1_000_000_000);
     // Don't trade — ADL mults should be ADL_ONE = 1_000_000
     env.crank(); // just crank
-    
+
     let d = env.svm.get_account(&env.slab).unwrap().data;
     let eng = 472usize;
     let adl_one = 1_000_000u128.to_le_bytes();
     println!("=== ADL_ONE scan (400-700) ===");
     for off in (400..700).step_by(8) {
-        if eng+off+16 <= d.len() && d[eng+off..eng+off+16] == adl_one {
+        if eng + off + 16 <= d.len() && d[eng + off..eng + off + 16] == adl_one {
             println!("ADL_ONE at ENGINE+{}", off);
         }
     }
     // Also find epoch values (small u64s)
     println!("=== Small u64 scan (470-550) ===");
     for off in (470..550).step_by(8) {
-        if eng+off+8 <= d.len() {
-            let v = u64::from_le_bytes(d[eng+off..eng+off+8].try_into().unwrap());
-            if v > 0 && v < 10 { println!("u64={} at ENGINE+{}", v, off); }
+        if eng + off + 8 <= d.len() {
+            let v = u64::from_le_bytes(d[eng + off..eng + off + 8].try_into().unwrap());
+            if v > 0 && v < 10 {
+                println!("u64={} at ENGINE+{}", v, off);
+            }
         }
     }
 }
@@ -898,12 +999,12 @@ fn test_find_adl_correct_value() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.top_up_insurance(&admin, 1_000_000_000);
     env.crank();
-    
+
     let d = env.svm.get_account(&env.slab).unwrap().data;
     let eng = 472usize;
     let adl_one = 1_000_000_000_000_000u128.to_le_bytes();
     for off in (300..700).step_by(8) {
-        if eng+off+16 <= d.len() && d[eng+off..eng+off+16] == adl_one {
+        if eng + off + 16 <= d.len() && d[eng + off..eng + off + 16] == adl_one {
             println!("ADL_ONE(10^15) at ENGINE+{}", off);
         }
     }
@@ -912,7 +1013,7 @@ fn test_find_adl_correct_value() {
     for idx in 0..3u16 {
         let acc = accts_off + (idx as usize) * 352;
         for off in (60..100).step_by(8) {
-            if acc+off+16 <= d.len() && d[acc+off..acc+off+16] == adl_one {
+            if acc + off + 16 <= d.len() && d[acc + off..acc + off + 16] == adl_one {
                 println!("a_basis ADL_ONE at ACCT[{}]+{}", idx, off);
             }
         }
@@ -927,9 +1028,12 @@ fn test_find_adl_bytes() {
     // No LP, no user — just init market and check engine defaults
     let d = env.svm.get_account(&env.slab).unwrap().data;
     let eng = 472usize;
-    let target = [0x00u8, 0x80, 0xC6, 0xA4, 0x7E, 0x8D, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let target = [
+        0x00u8, 0x80, 0xC6, 0xA4, 0x7E, 0x8D, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00,
+    ];
     for off in 0..2000 {
-        if eng+off+16 <= d.len() && d[eng+off..eng+off+16] == target {
+        if eng + off + 16 <= d.len() && d[eng + off..eng + off + 16] == target {
             println!("ADL_ONE bytes at ENGINE+{}", off);
         }
     }

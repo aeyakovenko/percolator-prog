@@ -12,6 +12,72 @@ use solana_sdk::{
     sysvar,
     transaction::Transaction,
 };
+
+#[test]
+fn test_external_oracle_target_staircase_blocks_extraction_until_caught_up() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_cap(0, 80);
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.crank();
+
+    let baseline = env.read_last_effective_price();
+    let target = 200_000_000u64;
+    let next_slot = env.read_last_market_slot() + 40;
+    env.set_slot_and_price_raw_no_walk(next_slot, target as i64);
+    env.crank();
+
+    assert_eq!(
+        env.read_oracle_target_price(),
+        target,
+        "wrapper must persist the raw oracle target separately"
+    );
+    let effective = env.read_last_effective_price();
+    assert!(
+        effective > baseline && effective < target,
+        "effective price must move by the dt-capped staircase, got {effective}"
+    );
+    env.try_withdraw(&user, user_idx, 1)
+        .expect_err("extraction must reject while oracle target is still pending");
+
+    for _ in 0..64 {
+        if env.read_last_effective_price() == target {
+            break;
+        }
+        let step_slot = env.read_last_market_slot() + 40;
+        env.set_slot_and_price_raw_no_walk(step_slot, target as i64);
+        env.crank();
+    }
+
+    assert_eq!(
+        env.read_last_effective_price(),
+        target,
+        "keeper catch-up must eventually walk effective price to the target"
+    );
+    env.try_withdraw(&user, user_idx, 1)
+        .expect("withdraw should succeed after target and P_last are synchronized");
+}
+
+#[test]
+fn test_zero_oi_no_oracle_topup_can_cross_accrual_envelope() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_hyperp(138_000_000);
+    env.crank();
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let stale_slot = env.read_last_market_slot() + 1_000;
+    env.svm.set_sysvar(&Clock {
+        slot: stale_slot,
+        unix_timestamp: stale_slot as i64,
+        ..Clock::default()
+    });
+
+    env.try_top_up_insurance(&admin, 1_000)
+        .expect("zero-OI no-oracle paths may fast-forward without requiring catchup");
+}
 /// Test that an inverted market can successfully run crank operations.
 ///
 /// This verifies the funding calculation uses market price (inverted) correctly.
@@ -59,10 +125,22 @@ fn test_inverted_market_crank_succeeds() {
     env.crank();
 
     // Vault SPL balance must not change (funding is internal accounting)
-    assert_eq!(env.vault_balance(), vault_before, "Vault must be conserved through cranks");
+    assert_eq!(
+        env.vault_balance(),
+        vault_before,
+        "Vault must be conserved through cranks"
+    );
     // Positions must still exist
-    assert_ne!(env.read_account_position(user_idx), 0, "User position must persist");
-    assert_ne!(env.read_account_position(lp_idx), 0, "LP position must persist");
+    assert_ne!(
+        env.read_account_position(user_idx),
+        0,
+        "User position must persist"
+    );
+    assert_ne!(
+        env.read_account_position(lp_idx),
+        0,
+        "LP position must persist"
+    );
 }
 
 /// Test that a non-inverted market works correctly (control case).
@@ -101,10 +179,22 @@ fn test_non_inverted_market_crank_succeeds() {
     env.crank();
 
     // Vault SPL balance must not change (funding is internal accounting)
-    assert_eq!(env.vault_balance(), vault_before, "Vault must be conserved through cranks");
+    assert_eq!(
+        env.vault_balance(),
+        vault_before,
+        "Vault must be conserved through cranks"
+    );
     // Positions must still exist
-    assert_ne!(env.read_account_position(user_idx), 0, "User position must persist");
-    assert_ne!(env.read_account_position(lp_idx), 0, "LP position must persist");
+    assert_ne!(
+        env.read_account_position(user_idx),
+        0,
+        "User position must persist"
+    );
+    assert_ne!(
+        env.read_account_position(lp_idx),
+        0,
+        "LP position must persist"
+    );
 }
 
 /// Test that CloseSlab fails when there is residual dust in the vault.
@@ -363,13 +453,13 @@ fn test_zombie_pnl_crank_driven_warmup_conversion() {
     println!("Step 1: User opened long position at $138");
 
     // Advance slot and move oracle price UP (favorable for long user)
-    // Oracle: $138 -> $150 (user profits)
-    env.set_slot_and_price(10, 150_000_000);
+    // Oracle: $138 -> $140 over a cap-respecting 50-slot move (user profits).
+    env.set_slot_and_price(50, 140_000_000);
 
     // Run crank to settle mark-to-market (converts unrealized to realized PnL)
     env.crank();
 
-    println!("Step 2: Oracle moved to $150, crank settled mark-to-market");
+    println!("Step 2: Oracle moved to $140, crank settled mark-to-market");
     println!("        User should now have positive realized PnL");
 
     // Close user's position at new price (realizes the profit)
@@ -403,8 +493,8 @@ fn test_zombie_pnl_crank_driven_warmup_conversion() {
     // Advance past warmup period (100 slots) with periodic cranks
     // Each crank should call settle_warmup_to_capital_for_crank
     for i in 0..12 {
-        let slot = 20 + i * 10; // slots: 20, 30, 40, ... 130
-        env.set_slot_and_price(slot, 150_000_000);
+        let slot = 70 + i * 20; // monotonic slots after the initial price move
+        env.set_slot_and_price(slot, 140_000_000);
         env.crank();
     }
 
@@ -471,8 +561,15 @@ fn test_idle_account_can_close_after_crank() {
     let pos_after = env.read_account_position(user_idx);
     let vault_after = env.vault_balance();
 
-    assert!(capital_before > 0, "Precondition: idle user should have capital to close");
-    assert_eq!(used_after, used_before - 1, "CloseAccount should decrement num_used_accounts");
+    assert!(
+        capital_before > 0,
+        "Precondition: idle user should have capital to close"
+    );
+    assert_eq!(
+        used_after,
+        used_before - 1,
+        "CloseAccount should decrement num_used_accounts"
+    );
     assert_eq!(capital_after, 0, "Closed account capital should be zeroed");
     assert_eq!(pos_after, 0, "Closed account position should remain zero");
     assert!(
@@ -861,19 +958,30 @@ fn test_comprehensive_trading_lifecycle_with_pnl() {
     // Open long position at $138
     let size: i128 = 10_000_000;
     env.trade(&user, &lp, lp_idx, user_idx, size);
-    assert_eq!(env.read_account_position(user_idx), size, "User must be long after trade");
+    assert_eq!(
+        env.read_account_position(user_idx),
+        size,
+        "User must be long after trade"
+    );
 
-    // Move price up to $150, crank to settle
-    env.set_slot_and_price(200, 150_000_000);
+    // Move price up to $150 over enough slots for the engine price envelope.
+    env.set_slot_and_price(250, 150_000_000);
     env.crank();
 
     // Close position
     env.trade(&user, &lp, lp_idx, user_idx, -size);
-    assert_eq!(env.read_account_position(user_idx), 0, "User position must be zero after flatten");
+    assert_eq!(
+        env.read_account_position(user_idx),
+        0,
+        "User position must be zero after flatten"
+    );
 
     // Vault balance must be conserved (no SPL tokens created or destroyed)
     let vault_after = env.vault_balance();
-    assert_eq!(vault_after, vault_after_deposit, "Vault must be conserved through lifecycle");
+    assert_eq!(
+        vault_after, vault_after_deposit,
+        "Vault must be conserved through lifecycle"
+    );
 }
 
 /// Test 2: Liquidation attempt when user position goes underwater
@@ -896,22 +1004,20 @@ fn test_comprehensive_liquidation_underwater_user() {
     // Open leveraged position
     let size: i128 = 8_000_000;
     env.trade(&user, &lp, lp_idx, user_idx, size);
-    assert_eq!(env.read_account_position(user_idx), size, "User must have position");
+    assert_eq!(
+        env.read_account_position(user_idx),
+        size,
+        "User must have position"
+    );
 
-    // Move price down significantly
-    env.set_slot_and_price(200, 100_000_000);
+    // Move price down significantly through a cap-respecting oracle path.
+    env.set_slot_and_price(1400, 100_000_000);
     env.crank();
 
     // v10.5 spec: force-realize no longer exists. The crank may haircut PnL but
     // the position remains open until explicitly closed (liquidated or force-closed).
     // With insurance=0, haircut applies to positive PnL, but positions stay open.
     let pos = env.read_account_position(user_idx);
-    // Position may or may not be zero depending on liquidation; just verify state is consistent.
-    let cap = env.read_account_capital(user_idx);
-    println!(
-        "After underwater crank: position={} capital={}",
-        pos, cap
-    );
     // The position should remain at original size (no force-realize in v10.5)
     assert_eq!(
         pos, size,
@@ -1015,17 +1121,23 @@ fn test_comprehensive_position_flip_long_to_short() {
     // Open long
     let long_size: i128 = 5_000_000;
     env.trade(&user, &lp, lp_idx, user_idx, long_size);
-    assert_eq!(env.read_account_position(user_idx), long_size, "User must be long");
+    assert_eq!(
+        env.read_account_position(user_idx),
+        long_size,
+        "User must be long"
+    );
 
     // Flip to short (trade more than current position in opposite direction)
     let flip_size: i128 = -10_000_000; // -10M, net = -5M (short)
     env.trade(&user, &lp, lp_idx, user_idx, flip_size);
     assert_eq!(
-        env.read_account_position(user_idx), -5_000_000,
+        env.read_account_position(user_idx),
+        -5_000_000,
         "User must be short after flip"
     );
     assert_eq!(
-        env.read_account_position(lp_idx), 5_000_000,
+        env.read_account_position(lp_idx),
+        5_000_000,
         "LP must be long (opposite of user)"
     );
 }
@@ -1069,12 +1181,19 @@ fn test_comprehensive_multiple_participants() {
     assert_eq!(env.read_account_position(user3_idx), -2_000_000);
 
     // Net user position: +5M + 3M - 2M = +6M (LP takes opposite = -6M)
-    assert_eq!(env.read_account_position(lp_idx), -6_000_000, "LP must hold net opposite");
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        -6_000_000,
+        "LP must hold net opposite"
+    );
 
     // Vault conservation (deposits + 100 per init: 1 LP + 3 users = 400)
     let vault_after = env.vault_balance();
     let expected_vault = 100_000_000_000u64 + 3 * 10_000_000_000 + 4 * 100;
-    assert_eq!(vault_after, expected_vault, "Vault must equal total deposits + init amounts");
+    assert_eq!(
+        vault_after, expected_vault,
+        "Vault must equal total deposits + init amounts"
+    );
 }
 
 /// Test 9: Trading at margin limits
@@ -1142,10 +1261,22 @@ fn test_comprehensive_funding_accrual() {
     }
 
     // Vault must be conserved (funding is internal accounting, no SPL transfers)
-    assert_eq!(env.vault_balance(), vault_before, "Vault must be conserved through funding cranks");
+    assert_eq!(
+        env.vault_balance(),
+        vault_before,
+        "Vault must be conserved through funding cranks"
+    );
     // Positions must still exist
-    assert_ne!(env.read_account_position(user_idx), 0, "User position must persist");
-    assert_ne!(env.read_account_position(lp_idx), 0, "LP position must persist");
+    assert_ne!(
+        env.read_account_position(user_idx),
+        0,
+        "User position must persist"
+    );
+    assert_ne!(
+        env.read_account_position(lp_idx),
+        0,
+        "LP position must persist"
+    );
 
     // Note: Market uses default funding params (all zero), so funding PnL = 0.
     // With oracle price unchanged at $138, mark-to-market PnL is also 0.
@@ -1189,8 +1320,13 @@ fn test_comprehensive_close_account_returns_capital() {
     let returned = vault_before - vault_after;
     println!("Returned to user: {}", returned);
 
-    // No trades, no fees — should return deposit + the 100 from init
-    assert_eq!(returned, deposit_amount + 100, "User should receive deposit + init amount back");
+    // No trades, no recurring fees. In a permissionless non-Hyperp market,
+    // materialization pays 1 unit to insurance and credits the remaining 99.
+    assert_eq!(
+        returned,
+        deposit_amount + 99,
+        "User should receive deposit + credited init amount back"
+    );
 }
 
 /// Test that sell trades (negative size) work correctly
@@ -1256,10 +1392,13 @@ fn test_extreme_price_movement_with_large_position() {
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 15_000_000_000); // 15 SOL margin
-    env.try_top_up_insurance(&admin, 1_000_000_000).unwrap();
+                                                  // The path below is a live, cap-respecting oracle path rather than a
+                                                  // synthetic one-step crash. Keep enough insurance funded for interim
+                                                  // accrual before liquidation realizes the stressed account.
+    env.try_top_up_insurance(&admin, 100_000_000_000).unwrap();
 
     // Open large long position
-    let size: i128 = 100_000_000; // 100 SOL position
+    let size: i128 = 1_000_000_000; // near max leverage under 15 SOL capital
     let result = env.try_trade(&user, &lp, lp_idx, user_idx, size);
     assert!(
         result.is_ok(),
@@ -1271,7 +1410,7 @@ fn test_extreme_price_movement_with_large_position() {
     // Move price down by 15% (more than maintenance margin can handle)
     // New price: $138 * 0.85 = $117.3
     // Loss: 100 * ($138 - $117.3) / 1e6 = $20.7 worth
-    env.set_slot_and_price(200, 117_300_000);
+    env.set_slot_and_price(500, 117_300_000);
     env.crank();
     println!("Step 2: Price dropped 15% to $117.30");
 
@@ -1292,16 +1431,17 @@ fn test_extreme_price_movement_with_large_position() {
     );
 
     // If liquidation succeeded or failed, verify accounting
-    env.set_slot_and_price(300, 117_300_000);
+    env.set_slot_and_price(650, 117_300_000);
     env.crank();
 
-    // Move price further down to stress test haircut ratio
-    env.set_slot_and_price(400, 80_000_000); // $80
+    // Move price further down through enough slots for the 4 bps/slot
+    // envelope to admit the observation without synthetic catchup.
+    env.set_slot_and_price(2000, 80_000_000); // $80
     env.crank();
     println!("Step 4: Price dropped to $80 (42% down from entry)");
 
     // Final crank
-    env.set_slot_and_price(500, 80_000_000);
+    env.set_slot_and_price(2150, 80_000_000);
     env.crank();
     println!("Step 5: Final settlement at extreme price");
 
@@ -1399,7 +1539,8 @@ fn test_minimum_margin_boundary() {
         result2
     );
     assert_eq!(
-        env.read_account_position(user2_idx), 0,
+        env.read_account_position(user2_idx),
+        0,
         "Rejected trade must leave position at zero"
     );
 }
@@ -1614,7 +1755,10 @@ fn test_liquidation_reduces_position_and_charges_fee() {
     // The instruction uses liquidate_at_oracle(..., FullClose) which calls
     // attach_effective_position(idx, 0).
     let pos_after = env.read_account_position(user_idx);
-    assert_eq!(pos_after, 0, "Liquidated position must be zero after FullClose");
+    assert_eq!(
+        pos_after, 0,
+        "Liquidated position must be zero after FullClose"
+    );
 
     // The liquidation fee mechanism: charge_fee_to_insurance deducts fee from
     // user capital (or adds fee debt if capital insufficient) and credits insurance.
@@ -1665,19 +1809,19 @@ fn test_withdrawal_under_haircut_conditions() {
     env.trade(&loser, &lp, lp_idx, loser_idx, -1_000_000);
 
     // Price rises -- winner profits, loser loses
-    env.set_slot_and_price(200, 200_000_000); // $138 -> $200
+    env.set_slot_and_price(1700, 200_000_000); // $138 -> $200, cap-respecting
     env.crank();
 
     // Loser may be liquidated (large loss), reducing vault
     let _ = env.try_liquidate(loser_idx);
 
-    env.set_slot(300);
+    env.set_slot(1800);
     env.crank();
 
     // Check that winner can still close account (haircut applies)
     // Flatten position first
     env.trade(&winner, &lp, lp_idx, winner_idx, -1_000_000);
-    env.set_slot(400);
+    env.set_slot(1900);
     env.crank();
 
     // Record vault balance before close to verify conservation
@@ -1789,7 +1933,11 @@ fn test_keeper_crank_format_v1_full_close() {
     // Open near-max-leverage long: 100M units at $138 = 13.8 SOL notional.
     // IM req (10%) = 1.38 SOL < 1.5 SOL capital -> passes.
     env.trade(&user, &lp, lp_idx, user_idx, 100_000_000);
-    assert_ne!(env.read_account_position(user_idx), 0, "precondition: user has position");
+    assert_ne!(
+        env.read_account_position(user_idx),
+        0,
+        "precondition: user has position"
+    );
 
     // Drive oracle adversarially over enough slots for the per-slot
     // price-move cap to compound to a price-deep-enough for liquidation
@@ -1803,10 +1951,10 @@ fn test_keeper_crank_format_v1_full_close() {
     let mut data = vec![5u8]; // KeeperCrank tag
     data.extend_from_slice(&u16::MAX.to_le_bytes()); // caller_idx = permissionless
     data.push(1u8); // format_version = 1
-    // Candidate: user_idx with FullClose policy (tag 0)
+                    // Candidate: user_idx with FullClose policy (tag 0)
     data.extend_from_slice(&user_idx.to_le_bytes());
     data.push(0u8); // policy_tag = FullClose
-    // Also include LP as touch-only (tag 0xFF)
+                    // Also include LP as touch-only (tag 0xFF)
     data.extend_from_slice(&lp_idx.to_le_bytes());
     data.push(0xFFu8); // policy_tag = touch-only
 
@@ -1883,10 +2031,10 @@ fn test_keeper_crank_format_v1_touch_only() {
     let mut data = vec![5u8]; // KeeperCrank tag
     data.extend_from_slice(&u16::MAX.to_le_bytes()); // caller_idx = permissionless
     data.push(1u8); // format_version = 1
-    // Candidate: user_idx with touch-only policy (tag 0xFF)
+                    // Candidate: user_idx with touch-only policy (tag 0xFF)
     data.extend_from_slice(&user_idx.to_le_bytes());
     data.push(0xFFu8); // policy_tag = touch-only
-    // Also include LP as touch-only
+                       // Also include LP as touch-only
     data.extend_from_slice(&lp_idx.to_le_bytes());
     data.push(0xFFu8);
 
@@ -1953,10 +2101,11 @@ fn test_reclaim_empty_account() {
 
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
-    // init_user deposits min_initial_deposit (100). Withdraw it to
-    // make the account truly empty for reclaim.
+    // init_user pays 100; v12.19.6 anti-spam routes 1 to insurance and
+    // credits 99 as capital. Withdraw credited capital to make the account
+    // truly empty for reclaim.
     env.crank();
-    env.try_withdraw(&user, user_idx, 100).unwrap();
+    env.try_withdraw(&user, user_idx, 99).unwrap();
 
     let used_before = env.read_num_used_accounts();
 
@@ -1989,11 +2138,7 @@ fn test_reclaim_empty_account() {
     );
 
     let used_after = env.read_num_used_accounts();
-    assert_eq!(
-        used_after,
-        used_before - 1,
-        "Account slot should be freed"
-    );
+    assert_eq!(used_after, used_before - 1, "Account slot should be freed");
 }
 
 /// Spec v12.0.2: Funding rate transfers PnL between longs and shorts based on
@@ -2011,7 +2156,8 @@ fn test_funding_rate_transfers_pnl_on_premium() {
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let mp = env.matcher_program_id;
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .unwrap();
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
     // Per-slot price-move cap is init-immutable in v12.19; no runtime widening.
 
@@ -2030,8 +2176,16 @@ fn test_funding_rate_transfers_pnl_on_premium() {
     env.crank();
 
     // Open long position — user goes long, LP absorbs short
-    env.try_trade_cpi(&user, &lp.pubkey(), lp_idx, user_idx, 1_000_000,
-        &mp, &matcher_ctx).unwrap();
+    env.try_trade_cpi(
+        &user,
+        &lp.pubkey(),
+        lp_idx,
+        user_idx,
+        1_000_000,
+        &mp,
+        &matcher_ctx,
+    )
+    .unwrap();
 
     let user_cap_before = env.read_account_capital(user_idx);
     let lp_cap_before = env.read_account_capital(lp_idx);
@@ -2040,7 +2194,8 @@ fn test_funding_rate_transfers_pnl_on_premium() {
     // Index will chase mark but never catch up fully due to rate limiting.
     // Each crank applies funding from the previous rate (anti-retroactivity).
     for slot in (100..5000).step_by(100) {
-        env.try_push_oracle_price(&admin, 1_500_000, slot as i64).unwrap();
+        env.try_push_oracle_price(&admin, 1_500_000, slot as i64)
+            .unwrap();
         env.set_slot(slot as u64);
         env.crank();
     }
@@ -2054,10 +2209,14 @@ fn test_funding_rate_transfers_pnl_on_premium() {
     let user_pnl = env.read_account_pnl(user_idx);
     let lp_pnl = env.read_account_pnl(lp_idx);
 
-    println!("Funding: user_cap before={} after={} pnl={}",
-        user_cap_before, user_cap_after, user_pnl);
-    println!("Funding: lp_cap before={} after={} pnl={}",
-        lp_cap_before, lp_cap_after, lp_pnl);
+    println!(
+        "Funding: user_cap before={} after={} pnl={}",
+        user_cap_before, user_cap_after, user_pnl
+    );
+    println!(
+        "Funding: lp_cap before={} after={} pnl={}",
+        lp_cap_before, lp_cap_after, lp_pnl
+    );
 
     // With mark > index, longs pay funding to shorts (LP).
     // The user (long) should have LESS PnL than pure MTM would give.
@@ -2068,7 +2227,10 @@ fn test_funding_rate_transfers_pnl_on_premium() {
 
     // The long (user) should have non-zero PnL delta (MTM + funding combined).
     let long_delta = (user_cap_after as i128 - user_cap_before as i128) + user_pnl as i128;
-    assert_ne!(long_delta, 0, "long should have non-zero PnL (MTM + funding)");
+    assert_ne!(
+        long_delta, 0,
+        "long should have non-zero PnL (MTM + funding)"
+    );
 
     // Vault conservation: vault balance must not change through internal accounting
     // (funding and mark-to-market are purely between accounts, no value enters/exits the vault).
@@ -2110,9 +2272,9 @@ fn test_settle_account_updates_lazy_state() {
     let pnl_before = env.read_account_pnl(user_idx);
     let cap_before = env.read_account_capital(user_idx);
 
-    // Move oracle price significantly and advance slot.
-    // Price goes from $138 to $150 -- user (long) should profit.
-    env.set_slot_and_price(400, 150_000_000);
+    // Move oracle price significantly and advance enough slots to respect the
+    // engine price envelope. Price goes from $138 to $150, so the long profits.
+    env.set_slot_and_price(450, 150_000_000);
 
     // Call SettleAccount (tag 26) instead of a full crank.
     let result = env.try_settle_account(user_idx);
@@ -2158,7 +2320,9 @@ fn test_settle_account_is_permissionless() {
 
     // A completely unrelated signer calls SettleAccount on the user's account.
     let random_signer = Keypair::new();
-    env.svm.airdrop(&random_signer.pubkey(), 1_000_000_000).unwrap();
+    env.svm
+        .airdrop(&random_signer.pubkey(), 1_000_000_000)
+        .unwrap();
 
     env.set_slot(300);
     let result = env.try_settle_account_with_signer(&random_signer, user_idx);
@@ -2237,7 +2401,10 @@ fn test_deposit_fee_credits_reduces_debt() {
     env.crank();
 
     let fee_credits_after_trade = env.read_account_fee_credits(user_idx);
-    println!("Fee credits after trade + crank: {}", fee_credits_after_trade);
+    println!(
+        "Fee credits after trade + crank: {}",
+        fee_credits_after_trade
+    );
 
     // fee_credits should be negative (debt) or zero.
     // If the trading_fee generated debt, fee_credits < 0.
@@ -2259,7 +2426,8 @@ fn test_deposit_fee_credits_reduces_debt() {
             fee_credits_after_repay > fee_credits_after_trade,
             "Fee credits must increase (debt reduced) after DepositFeeCredits. \
              Before: {}, After: {}",
-            fee_credits_after_trade, fee_credits_after_repay
+            fee_credits_after_trade,
+            fee_credits_after_repay
         );
     } else {
         // No debt was generated (possible if fee is tiny or settled to capital).
@@ -2310,7 +2478,8 @@ fn test_deposit_fee_credits_rejects_overpayment() {
         assert!(
             result.is_err(),
             "DepositFeeCredits must reject overpayment (amount {} > debt {})",
-            overpayment, debt,
+            overpayment,
+            debt,
         );
 
         // Verify exact debt payment is accepted
@@ -2349,7 +2518,10 @@ fn test_deposit_fee_credits_rejects_zero_debt() {
     env.deposit(&user, user_idx, 5_000_000_000);
 
     let fee_credits = env.read_account_fee_credits(user_idx);
-    assert!(fee_credits >= 0, "Should have no debt with zero trading fee");
+    assert!(
+        fee_credits >= 0,
+        "Should have no debt with zero trading fee"
+    );
 
     // Any deposit with zero debt must be rejected
     let result = env.try_deposit_fee_credits(&user, user_idx, 100);
@@ -2417,14 +2589,14 @@ fn test_convert_released_pnl_with_open_position() {
     // Open a long position at $138.
     env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
 
-    // Move price up to generate positive PnL.
-    env.set_slot_and_price(10, 150_000_000);
+    // Move price up to generate positive PnL through the engine envelope.
+    env.set_slot_and_price(50, 140_000_000);
     env.crank();
 
     // Advance well past warmup period (50 slots).
     // Keep cranking to let warmup slope release PnL.
-    for s in (20..200).step_by(20) {
-        env.set_slot_and_price(s, 150_000_000);
+    for s in (70..250).step_by(20) {
+        env.set_slot_and_price(s, 140_000_000);
         env.crank();
     }
 
@@ -2435,7 +2607,7 @@ fn test_convert_released_pnl_with_open_position() {
     // Try to convert some released PnL. Use a small amount.
     // The call may succeed (if there is released PnL) or fail (if the crank
     // already converted everything). Both outcomes are informative.
-    env.set_slot_and_price(300, 150_000_000);
+    env.set_slot_and_price(260, 140_000_000);
     let result = env.try_convert_released_pnl(&user, user_idx, 1_000_000);
 
     let cap_after = env.read_account_capital(user_idx);
@@ -2446,7 +2618,8 @@ fn test_convert_released_pnl_with_open_position() {
         assert!(
             cap_after > cap_before,
             "ConvertReleasedPnl success must increase capital. Before: {}, After: {}",
-            cap_before, cap_after
+            cap_before,
+            cap_after
         );
         println!(
             "ConvertReleasedPnl succeeded: capital {} -> {}, pnl {} -> {}",
@@ -2526,9 +2699,11 @@ fn test_init_user_charges_new_account_fee() {
 
     let insurance_after = env.read_insurance_balance();
     assert_eq!(
-        insurance_after - insurance_before, 500,
+        insurance_after - insurance_before,
+        500,
         "Insurance must increase by exactly new_account_fee (500). Before={}, after={}",
-        insurance_before, insurance_after
+        insurance_before,
+        insurance_after
     );
 }
 
@@ -2540,7 +2715,8 @@ fn test_init_user_blocked_on_resolved() {
     env.init_market_hyperp(1_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .unwrap();
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
     env.try_resolve_market(&admin, 0).unwrap();
     assert!(env.is_market_resolved());
@@ -2583,26 +2759,30 @@ fn test_init_lp_sets_matcher_fields() {
         )
         .unwrap();
 
-    let lp_idx = env.try_init_lp_proper(&lp, &matcher, &ctx, 100)
+    let lp_idx = env
+        .try_init_lp_proper(&lp, &matcher, &ctx, 100)
         .expect("InitLP should succeed");
 
     // Verify kind == LP (1)
     assert_eq!(
-        env.read_account_kind(lp_idx), 1,
+        env.read_account_kind(lp_idx),
+        1,
         "Account kind must be LP (1) after InitLP"
     );
 
     // Verify matcher_program matches what was passed
     let stored_matcher = env.read_account_matcher_program(lp_idx);
     assert_eq!(
-        stored_matcher, matcher.to_bytes(),
+        stored_matcher,
+        matcher.to_bytes(),
         "matcher_program must match the program provided at InitLP"
     );
 
     // Verify matcher_context matches what was passed
     let stored_ctx = env.read_account_matcher_context(lp_idx);
     assert_eq!(
-        stored_ctx, ctx.to_bytes(),
+        stored_ctx,
+        ctx.to_bytes(),
         "matcher_context must match the context provided at InitLP"
     );
 }
@@ -2615,7 +2795,8 @@ fn test_init_lp_blocked_on_resolved() {
     env.init_market_hyperp(1_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.try_set_oracle_authority(&admin, &admin.pubkey()).unwrap();
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .unwrap();
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
     env.try_resolve_market(&admin, 0).unwrap();
     assert!(env.is_market_resolved());
@@ -2666,7 +2847,10 @@ fn test_reclaim_rejects_account_with_capital() {
     env.deposit(&user, user_idx, 1_000_000_000);
 
     let capital = env.read_account_capital(user_idx);
-    assert!(capital >= 100, "Precondition: capital must be >= min_initial_deposit");
+    assert!(
+        capital >= 100,
+        "Precondition: capital must be >= min_initial_deposit"
+    );
 
     let result = env.try_reclaim_empty_account(user_idx);
     assert!(
@@ -2692,7 +2876,11 @@ fn test_reclaim_rejects_account_with_position() {
 
     // Open a position
     env.trade(&user, &lp, lp_idx, user_idx, 100_000);
-    assert_ne!(env.read_account_position(user_idx), 0, "Precondition: user has position");
+    assert_ne!(
+        env.read_account_position(user_idx),
+        0,
+        "Precondition: user has position"
+    );
 
     let result = env.try_reclaim_empty_account(user_idx);
     assert!(
@@ -2714,9 +2902,9 @@ fn test_reclaim_blocked_on_resolved() {
 
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
-    // Withdraw to make account empty for reclaim
+    // Withdraw credited init capital to make account empty for reclaim.
     env.crank();
-    env.try_withdraw(&user, user_idx, 100).unwrap();
+    env.try_withdraw(&user, user_idx, 99).unwrap();
 
     // Resolve the market at a fresh external price.
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
@@ -2746,15 +2934,13 @@ fn test_init_user_survives_stale_oracle() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    // Advance clock past max_crank_staleness_slots (1_800) so that any
-    // oracle read from InitUser would fail, but stay inside
-    // permissionless_resolve_stale_slots (= 10_000 in the default
-    // TestEnv fixture) so the terminal hard-timeout gate hasn't fired.
-    // Under the correct InitUser (no oracle read), the account must
-    // still materialize.
+    // Make the Pyth observation stale by wallclock time, while keeping the
+    // slot inside both the permissionless-resolve hard-timeout window and the
+    // no-accrual envelope. InitUser must not read the oracle, but it must still
+    // respect the liveness envelope.
     env.svm.set_sysvar(&solana_sdk::clock::Clock {
-        slot: 9_000,
-        unix_timestamp: 9_000,
+        slot: 150,
+        unix_timestamp: 90_000,
         ..Default::default()
     });
 
@@ -2773,8 +2959,8 @@ fn test_init_user_survives_stale_oracle() {
     // state.
     env.deposit(&user, user_idx, 100);
     assert!(
-        env.read_account_capital(user_idx) >= 200,
-        "account must carry both the init fee_payment and the follow-up deposit"
+        env.read_account_capital(user_idx) >= 199,
+        "account must carry credited init capital plus the follow-up deposit"
     );
 }
 
@@ -2786,11 +2972,10 @@ fn test_init_lp_survives_stale_oracle() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    // Stay inside permissionless_resolve_stale_slots (= 10_000) — see
-    // test_init_user_survives_stale_oracle for the reasoning.
+    // Same shape as InitUser: stale by wallclock, still live by slot envelope.
     env.svm.set_sysvar(&solana_sdk::clock::Clock {
-        slot: 9_000,
-        unix_timestamp: 9_000,
+        slot: 150,
+        unix_timestamp: 90_000,
         ..Default::default()
     });
 
@@ -2801,8 +2986,8 @@ fn test_init_lp_survives_stale_oracle() {
     // InitUser above).
     env.deposit(&lp, lp_idx, 100);
     assert!(
-        env.read_account_capital(lp_idx) >= 200,
-        "LP account must carry both the init fee_payment and the follow-up deposit"
+        env.read_account_capital(lp_idx) >= 199,
+        "LP account must carry credited init capital plus the follow-up deposit"
     );
 }
 
@@ -2849,7 +3034,8 @@ fn test_reclaim_survives_current_slot_above_last_market_slot() {
             !e.contains("0x12"),
             "reclaim must not fail on monotonicity (EngineOverflow, 0x12). \
              An eligibility rejection (Undercollateralized, 0xe) is fine. \
-             Got: {}", e,
+             Got: {}",
+            e,
         ),
     }
 }
@@ -2937,7 +3123,7 @@ fn test_inverted_market_full_lifecycle() {
     let vault_with_insurance = env.vault_balance();
 
     // Price change and crank (funding accrual in inverted space)
-    env.set_slot_and_price(200, 150_000_000); // oracle $150, inverted ~6667
+    env.set_slot_and_price(250, 150_000_000); // oracle $150, inverted ~6667
     env.crank();
     assert_eq!(
         env.vault_balance(),
@@ -2945,8 +3131,9 @@ fn test_inverted_market_full_lifecycle() {
         "conservation: crank must not change vault"
     );
 
-    // Another price move and crank
-    env.set_slot_and_price(300, 120_000_000); // oracle $120, inverted ~8333
+    // Another price move and crank, again over enough slots for the inverted
+    // engine price move to satisfy the envelope.
+    env.set_slot_and_price(1000, 120_000_000); // oracle $120, inverted ~8333
     env.crank();
     assert_eq!(
         env.vault_balance(),
@@ -2956,7 +3143,7 @@ fn test_inverted_market_full_lifecycle() {
 
     // Close position by trading back
     env.trade(&user, &lp, lp_idx, user_idx, -1_000_000);
-    env.set_slot(400);
+    env.set_slot(1100);
     env.crank();
     assert_eq!(
         env.vault_balance(),
@@ -3143,7 +3330,7 @@ fn test_keeper_crank_format_v2_rejected() {
     let mut data = vec![5u8]; // KeeperCrank tag
     data.extend_from_slice(&u16::MAX.to_le_bytes()); // caller_idx = permissionless
     data.push(2u8); // format_version = 2 (invalid)
-    // Some candidate bytes (doesn't matter, should fail at decode)
+                    // Some candidate bytes (doesn't matter, should fail at decode)
     data.extend_from_slice(&lp_idx.to_le_bytes());
 
     let ix = Instruction {
@@ -3283,8 +3470,8 @@ fn test_instruction_decoder_removed_tags_rejected() {
 
 // ── Mark EWMA clamp-base tests ─────────────────────────────────────────
 
-use percolator_prog::verify::{ewma_update, mark_ewma_clamp_base};
 use percolator_prog::oracle::clamp_oracle_price;
+use percolator_prog::verify::{ewma_update, mark_ewma_clamp_base};
 
 /// Test 1.1: Single-slot max movement with index-clamped EWMA.
 /// Mark starts at index=100. Attacker fills at max-clamped price.
@@ -3296,9 +3483,7 @@ fn test_ewma_single_slot_max_movement() {
     let halflife: u64 = 100;
 
     // Attacker exec price: as far from index as circuit breaker allows
-    let clamped = clamp_oracle_price(
-        mark_ewma_clamp_base(index), 200_000_000, cap,
-    );
+    let clamped = clamp_oracle_price(mark_ewma_clamp_base(index), 200_000_000, cap);
     // Should be index + 1% = 101_000_000
     assert_eq!(clamped, 101_000_000);
 
@@ -3307,7 +3492,11 @@ fn test_ewma_single_slot_max_movement() {
     // alpha(1) = 1 / (1 + 100) ≈ 0.0099
     // delta = 101M - 100M = 1M. Movement = 1M * 0.0099 ≈ 9_900
     let movement = new_mark - index;
-    assert!(movement < 100_000, "Single slot movement {} should be < 0.1%", movement);
+    assert!(
+        movement < 100_000,
+        "Single slot movement {} should be < 0.1%",
+        movement
+    );
     assert!(movement > 0, "Should move up at all");
 }
 
@@ -3330,7 +3519,9 @@ fn test_ewma_walkup_clamp_against_mark_vulnerable() {
     assert!(
         mark > index + index / 50, // > 2% above index (beyond 1 cap-width)
         "Mark-clamped walk should diverge beyond cap: mark={} index={} gap={}bps",
-        mark, index, (mark - index) * 10_000 / index
+        mark,
+        index,
+        (mark - index) * 10_000 / index
     );
 }
 
@@ -3355,7 +3546,9 @@ fn test_ewma_walkup_clamp_against_index_bounded() {
     assert!(
         (mark as u128) <= index as u128 + max_gap,
         "Index-clamped walk must be bounded: mark={} index={} max_gap={}",
-        mark, index, max_gap
+        mark,
+        index,
+        max_gap
     );
 }
 
@@ -3386,7 +3579,9 @@ fn test_ewma_tracks_moving_index() {
     assert!(
         gap_pct <= 5,
         "Mark should track index: mark={} index={} gap={}%",
-        mark, index, gap_pct
+        mark,
+        index,
+        gap_pct
     );
 }
 
@@ -3408,7 +3603,9 @@ fn test_ewma_walkdown_clamp_against_index_bounded() {
     assert!(
         mark as u128 >= index as u128 - max_gap,
         "Downward walk must be bounded: mark={} index={} max_gap={}",
-        mark, index, max_gap
+        mark,
+        index,
+        max_gap
     );
 }
 
@@ -3427,7 +3624,10 @@ fn test_ewma_full_fee_matches_original() {
     // Disabled weighting (min_fee=0): always full alpha regardless of fee
     let disabled = ewma_update(old, price, halflife, 0, 50, 1, 0);
     // Both should produce the same result (full unweighted alpha)
-    assert_eq!(at_threshold, disabled, "At-threshold must equal disabled-weighting");
+    assert_eq!(
+        at_threshold, disabled,
+        "At-threshold must equal disabled-weighting"
+    );
     // Sanity: result must actually differ from old (alpha applied a delta)
     assert_ne!(at_threshold, old, "EWMA must move from old toward price");
 }
@@ -3440,7 +3640,10 @@ fn test_ewma_above_fee_capped_at_one() {
     let halflife = 100u64;
     let at_threshold = ewma_update(old, price, halflife, 0, 50, 10_000, 10_000);
     let above = ewma_update(old, price, halflife, 0, 50, 50_000, 10_000);
-    assert_eq!(at_threshold, above, "Above-threshold fee must not get extra weight");
+    assert_eq!(
+        at_threshold, above,
+        "Above-threshold fee must not get extra weight"
+    );
 }
 
 /// Half-fee trade gets half the alpha → half the mark movement.
@@ -3498,7 +3701,10 @@ fn test_ewma_zero_min_fee_full_alpha() {
     // When mark_min_fee=0, all trades get full weight regardless of fee
     let with_dust = ewma_update(old, price, halflife, 0, 50, 1, 0);
     let with_full = ewma_update(old, price, halflife, 0, 50, 999_999, 0);
-    assert_eq!(with_dust, with_full, "mark_min_fee=0 → all trades equal weight");
+    assert_eq!(
+        with_dust, with_full,
+        "mark_min_fee=0 → all trades equal weight"
+    );
 }
 
 /// Zero fee (zero-fill or insolvent) cannot move mark.
@@ -3588,7 +3794,8 @@ fn test_ewma_mixed_dust_and_real_fees() {
     assert!(
         final_drift <= dust_drift,
         "Real-fee trade must push mark back: dust_drift={}, final_drift={}",
-        dust_drift, final_drift
+        dust_drift,
+        final_drift
     );
 }
 
@@ -3619,7 +3826,8 @@ fn test_ewma_attack_cost_scales_with_min_fee() {
     assert!(
         drift_low > drift_high,
         "Higher min_fee must reduce impact: drift_low={} drift_high={}",
-        drift_low, drift_high
+        drift_low,
+        drift_high
     );
 }
 
@@ -3633,7 +3841,10 @@ fn test_ewma_fee_shortfall_zero_weight() {
     let min_fee = 1_000u64;
     // fee_paid = 0 (all fee went to fee_credits shortfall, nothing reached I)
     let result = ewma_update(old, price, 100, 0, 100, 0, min_fee);
-    assert_eq!(result, old, "Insolvent wash trader (fee_paid=0) cannot move mark");
+    assert_eq!(
+        result, old,
+        "Insolvent wash trader (fee_paid=0) cannot move mark"
+    );
 }
 
 /// Bilateral fee sum: both sides' paid fees contribute to weight.
@@ -3650,7 +3861,8 @@ fn test_ewma_bilateral_fee_sum() {
     assert!(
         result_sum.abs_diff(old) > result_half.abs_diff(old),
         "Bilateral sum must produce more movement: sum_delta={} half_delta={}",
-        result_sum.abs_diff(old), result_half.abs_diff(old)
+        result_sum.abs_diff(old),
+        result_half.abs_diff(old)
     );
 }
 
@@ -3686,7 +3898,11 @@ fn test_ewma_first_update_respects_fee_weight() {
     let min_fee = 1_000u64;
     // Dust trade with zero fee should NOT seed the EWMA
     let result = ewma_update(old, price, 100, 0, 100, 0, min_fee);
-    assert_eq!(result, 0, "First update with zero fee must not seed EWMA, got {}", result);
+    assert_eq!(
+        result, 0,
+        "First update with zero fee must not seed EWMA, got {}",
+        result
+    );
 }
 
 /// First EWMA update with sufficient fee should still bootstrap normally.
@@ -3696,7 +3912,10 @@ fn test_ewma_first_update_with_fee_seeds_normally() {
     let price = 138_000_000u64;
     let min_fee = 1_000u64;
     let result = ewma_update(old, price, 100, 0, 100, 1_000, min_fee);
-    assert_eq!(result, price, "First update with sufficient fee must seed to price");
+    assert_eq!(
+        result, price,
+        "First update with sufficient fee must seed to price"
+    );
 }
 
 /// First EWMA update with mark_min_fee=0 (disabled) seeds normally regardless of fee.
@@ -3722,7 +3941,11 @@ fn test_funding_bootstrap_ewma_seeded_on_first_trade() {
     env.init_market_with_cap(0, 80);
 
     // Before any trade, EWMA should be 0
-    assert_eq!(env.read_mark_ewma(), 0, "EWMA must be zero before any trade");
+    assert_eq!(
+        env.read_mark_ewma(),
+        0,
+        "EWMA must be zero before any trade"
+    );
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -3735,7 +3958,11 @@ fn test_funding_bootstrap_ewma_seeded_on_first_trade() {
     // First trade seeds the EWMA (ewma_update returns price when old=0)
     env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
     let ewma = env.read_mark_ewma();
-    assert!(ewma > 0, "EWMA must be seeded after first trade, got {}", ewma);
+    assert!(
+        ewma > 0,
+        "EWMA must be seeded after first trade, got {}",
+        ewma
+    );
 }
 
 /// After trades establish mark EWMA, funding rate should be stamped in the engine.
@@ -3765,21 +3992,30 @@ fn test_funding_bootstrap_rate_stamped_after_trade() {
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.top_up_insurance(&admin, 1_000_000_000);
     for i in 1..=20u64 {
-        env.set_slot_and_price(100 + i * 10, 200_000_000); // oracle at $200
-        let _ = env.try_trade(&user, &lp, lp_idx, user_idx, if i % 2 == 0 { 1_000 } else { -1_000 });
+        env.set_slot_and_price(100 + i * 10, 140_000_000); // cap-respecting move from $138
+        let trade_size = if i % 2 == 0 {
+            1_000 + i as i128
+        } else {
+            -(1_000 + i as i128)
+        };
+        env.try_trade(&user, &lp, lp_idx, user_idx, trade_size)
+            .expect("EWMA bootstrap trade must stay inside the price envelope");
     }
 
     let ewma_after = env.read_mark_ewma();
     let index = env.read_last_effective_price();
-
-    println!("Rate test: ewma={} index={}", ewma_after, index);
 
     // After 20 trades at capped prices, EWMA should have moved toward $200
     // while index tracks the oracle at $200.
     assert!(ewma_after > 0, "EWMA updated");
     assert!(index > 0, "Index updated");
     // Key: the funding plumbing works — EWMA moved from its seed value.
-    assert!(ewma_after != ewma_seed, "EWMA must have moved from seed: seed={} after={}", ewma_seed, ewma_after);
+    assert!(
+        ewma_after != ewma_seed,
+        "EWMA must have moved from seed: seed={} after={}",
+        ewma_seed,
+        ewma_after
+    );
 }
 
 /// Inverted market funding bootstrap: same mechanism works with invert=1.
@@ -3802,11 +4038,19 @@ fn test_funding_bootstrap_inverted_market() {
     // Trade on inverted market
     env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
     let ewma = env.read_mark_ewma();
-    assert!(ewma > 0, "Inverted market EWMA must be seeded, got {}", ewma);
+    assert!(
+        ewma > 0,
+        "Inverted market EWMA must be seeded, got {}",
+        ewma
+    );
 
     // For inverted oracle: raw=138_000_000 → inverted=~7246
     // The EWMA should be in the inverted price space
-    assert!(ewma < 100_000, "Inverted price should be small (not raw), got {}", ewma);
+    assert!(
+        ewma < 100_000,
+        "Inverted price should be small (not raw), got {}",
+        ewma
+    );
 }
 
 // test_funding_no_cap_means_no_ewma deleted:
@@ -3844,7 +4088,12 @@ fn test_funding_bootstrap_multiple_trades_and_crank() {
     env.set_slot_and_price(200, 140_000_000); // price moves from 138 to 140
     env.trade(&user, &lp, lp_idx, user_idx, 500_000);
     let ewma2 = env.read_mark_ewma();
-    assert!(ewma2 > ewma1, "EWMA must move toward higher price: ewma1={} ewma2={}", ewma1, ewma2);
+    assert!(
+        ewma2 > ewma1,
+        "EWMA must move toward higher price: ewma1={} ewma2={}",
+        ewma1,
+        ewma2
+    );
 
     // Crank to accrue funding
     env.set_slot(300);
@@ -3854,7 +4103,11 @@ fn test_funding_bootstrap_multiple_trades_and_crank() {
     // Since mark ~= index (both from oracle), funding should be ~0
     let rate = env.read_funding_rate();
     // Rate could be 0 or very small rounding artifact
-    assert!(rate.abs() <= 1, "Rate should be ~0 when mark ≈ index, got {}", rate);
+    assert!(
+        rate.abs() <= 1,
+        "Rate should be ~0 when mark ≈ index, got {}",
+        rate
+    );
 }
 
 /// Verify that default funding parameters are set at InitMarket for non-Hyperp.
@@ -3868,8 +4121,11 @@ fn test_funding_bootstrap_default_params() {
     let cap = env.read_oracle_price_cap();
 
     assert_eq!(horizon, 500, "Default funding_horizon_slots should be 500");
-    assert_eq!(cap, common::TEST_MAX_PRICE_MOVE_BPS_PER_SLOT,
-        "Cap should match engine's max_price_move_bps_per_slot");
+    assert_eq!(
+        cap,
+        common::TEST_MAX_PRICE_MOVE_BPS_PER_SLOT,
+        "Cap should match engine's max_price_move_bps_per_slot"
+    );
 }
 
 // ============================================================================
@@ -3883,7 +4139,11 @@ fn test_init_market_custom_funding_horizon() {
     let mut env = TestEnv::new();
     // Custom horizon=1000, k=100 (default), max_premium=500 (default), max_per_slot=5 (default)
     env.init_market_with_funding(0, 80, 1000, 100, 500, 5);
-    assert_eq!(env.read_funding_horizon(), 1000, "Custom horizon must be stored");
+    assert_eq!(
+        env.read_funding_horizon(),
+        1000,
+        "Custom horizon must be stored"
+    );
 }
 
 /// InitMarket with custom funding_k_bps overrides the default (100).
@@ -3945,8 +4205,16 @@ fn test_init_market_no_funding_params_uses_defaults() {
     env.init_market_with_cap(0, 80);
     assert_eq!(env.read_funding_horizon(), 500, "Default horizon");
     assert_eq!(env.read_funding_k_bps(), 100, "Default k_bps");
-    assert_eq!(env.read_funding_max_premium_bps(), 500, "Default max_premium");
-    assert_eq!(env.read_funding_max_e9_per_slot(), 1_000, "Default max_per_slot");
+    assert_eq!(
+        env.read_funding_max_premium_bps(),
+        500,
+        "Default max_premium"
+    );
+    assert_eq!(
+        env.read_funding_max_e9_per_slot(),
+        1_000,
+        "Default max_per_slot"
+    );
 }
 
 // ============================================================================
@@ -3959,10 +4227,15 @@ fn test_init_market_rejects_zero_funding_horizon() {
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_funding(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
-        0, 80,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
+        0,
+        80,
         0, // funding_horizon_slots = 0 (invalid)
-        100, 500, 5,
+        100,
+        500,
+        5,
     );
     let result = env.try_init_market_raw(data);
     assert!(result.is_err(), "funding_horizon_slots=0 must be rejected");
@@ -3974,11 +4247,15 @@ fn test_init_market_rejects_excessive_funding_k() {
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_funding(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
-        0, 80,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
+        0,
+        80,
         500,
         100_001, // k > 100_000 (invalid)
-        500, 5,
+        500,
+        5,
     );
     let result = env.try_init_market_raw(data);
     assert!(result.is_err(), "funding_k_bps > 100_000 must be rejected");
@@ -3990,14 +4267,21 @@ fn test_init_market_rejects_negative_max_premium() {
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_funding(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
-        0, 80,
-        500, 100,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
+        0,
+        80,
+        500,
+        100,
         -1, // negative (invalid)
         5,
     );
     let result = env.try_init_market_raw(data);
-    assert!(result.is_err(), "negative funding_max_premium_bps must be rejected");
+    assert!(
+        result.is_err(),
+        "negative funding_max_premium_bps must be rejected"
+    );
 }
 
 /// InitMarket with negative funding_max_e9_per_slot must be rejected.
@@ -4006,13 +4290,21 @@ fn test_init_market_rejects_negative_max_per_slot() {
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_funding(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
-        0, 80,
-        500, 100, 500,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
+        0,
+        80,
+        500,
+        100,
+        500,
         -1, // negative (invalid)
     );
     let result = env.try_init_market_raw(data);
-    assert!(result.is_err(), "negative funding_max_e9_per_slot must be rejected");
+    assert!(
+        result.is_err(),
+        "negative funding_max_e9_per_slot must be rejected"
+    );
 }
 
 /// InitMarket cap check for mark_min_fee is against MAX_PROTOCOL_FEE_ABS
@@ -4027,9 +4319,15 @@ fn test_init_market_mark_min_fee_sanity_cap_admits_full_u64() {
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_min_fee(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
-        0, 80,
-        500, 100, 500, 5,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
+        0,
+        80,
+        500,
+        100,
+        500,
+        5,
         u64::MAX, // below MAX_PROTOCOL_FEE_ABS (10^36) — accepted
     );
     let result = env.try_init_market_raw(data);
@@ -4050,13 +4348,19 @@ fn test_init_market_maintenance_fee_nonzero_accepted() {
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_maint_fee_bounded(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
         1000, // max_maintenance_fee_per_slot
         100,  // maintenance_fee_per_slot
         0,    // min_oracle_price_cap
     );
     let result = env.try_init_market_raw(data);
-    assert!(result.is_ok(), "Nonzero maintenance fee within bound must be accepted: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Nonzero maintenance fee within bound must be accepted: {:?}",
+        result
+    );
 }
 
 /// InitMarket with maintenance_fee_per_slot = 0 still accepted (backward compat).
@@ -4065,11 +4369,19 @@ fn test_init_market_maintenance_fee_zero_still_accepted() {
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_maint_fee_bounded(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
-        1000, 0, 0,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
+        1000,
+        0,
+        0,
     );
     let result = env.try_init_market_raw(data);
-    assert!(result.is_ok(), "Zero maintenance fee must still be accepted: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Zero maintenance fee must still be accepted: {:?}",
+        result
+    );
 }
 
 // ============================================================================
@@ -4102,7 +4414,7 @@ fn test_trading_fee_exact_amounts() {
 
     // Trade: 100_000 units at oracle ~$138. The engine computes fee as
     // ceil(notional * fee_bps / 10_000) where notional = abs(size) * exec_price / POS_SCALE.
-    env.trade(&user, &lp, lp_idx, user_idx, 100_000);
+    env.trade(&user, &lp, lp_idx, user_idx, 140_000_000);
 
     let user_cap_after = env.read_account_capital(user_idx);
     let lp_cap_after = env.read_account_capital(lp_idx);
@@ -4126,7 +4438,8 @@ fn test_trading_fee_exact_amounts() {
 
     // Insurance should increase by both fees combined
     assert_eq!(
-        ins_increase, user_fee + lp_fee,
+        ins_increase,
+        user_fee + lp_fee,
         "Insurance must increase by total fees collected"
     );
 
@@ -4153,7 +4466,9 @@ fn test_liquidation_fee_goes_to_insurance() {
 
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
-    env.deposit(&user, user_idx, 1_500_000_000); // thin margin
+    // Keep the account solvent after the price drop but below maintenance, so
+    // this test isolates the liquidation-fee credit to insurance.
+    env.deposit(&user, user_idx, 5_000_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.top_up_insurance(&admin, 1_000_000_000);
@@ -4180,20 +4495,11 @@ fn test_liquidation_fee_goes_to_insurance() {
     // Position must be zeroed
     assert_eq!(user_pos, 0, "Position must be liquidated");
 
-    // Insurance changes from liquidation: fee goes IN, deficit absorption goes OUT.
-    // Net change depends on whether the fee exceeds the deficit.
-    // In a deep bankruptcy (user loss > capital), insurance absorbs the deficit,
-    // so insurance can DECREASE even though the liq fee went in.
-    // The key assertion: insurance was USED (it changed), proving the fee mechanism works.
     assert!(
-        ins_after != ins_before,
-        "Insurance must change from liquidation (fee + deficit): before={} after={}",
-        ins_before, ins_after
-    );
-    println!(
-        "Liquidation fee test: ins_before={} ins_after={} net_change={}",
-        ins_before, ins_after,
-        ins_after as i128 - ins_before as i128
+        ins_after > ins_before,
+        "Solvent liquidation must credit the liquidation fee to insurance: before={} after={}",
+        ins_before,
+        ins_after
     );
 }
 
@@ -4207,13 +4513,15 @@ fn test_insurance_absorbs_bankruptcy_loss() {
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
-    env.deposit(&lp, lp_idx, 50_000_000_000);
+    env.deposit(&lp, lp_idx, 15_000_000_000);
 
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
-    env.deposit(&user, user_idx, 2_000_000_000); // deliberately small
+    env.deposit(&user, user_idx, 15_000_000_000);
 
-    env.trade(&user, &lp, lp_idx, user_idx, 100_000);
+    // User goes long, so the LP takes the short side. A large cap-respecting
+    // price rally bankrupts the LP and leaves a deficit for insurance.
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000_000);
 
     // Large insurance to absorb the deficit
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
@@ -4222,16 +4530,33 @@ fn test_insurance_absorbs_bankruptcy_loss() {
     let ins_before = env.read_insurance_balance();
     let vault_before = env.vault_balance();
 
-    // Massive price crash → user's loss exceeds capital → deficit
-    env.set_slot_and_price(200, 50_000_000); // $138 → $50 (-64%)
-    env.crank(); // liquidates user, deficit absorbed by insurance
+    // Price rally: LP's short loss exceeds capital and leaves a deficit. Use
+    // real intermediate oracle observations rather than the helper's crank walk,
+    // because this test must leave liquidation to the explicit call below.
+    for step in 1..=30u64 {
+        let slot = 100 + step * 50;
+        let price = 138_000_000i64 + (207_000_000i64 - 138_000_000i64) * step as i64 / 30;
+        env.set_slot_and_price_raw_no_walk(slot, price);
+        env.try_catchup_accrue()
+            .expect("price path must stay inside the engine envelope");
+    }
+    let result = env.try_liquidate(lp_idx);
+    assert!(
+        result.is_ok(),
+        "Bankrupt liquidation should succeed: {:?}",
+        result
+    );
 
     let ins_after = env.read_insurance_balance();
     let vault_after = env.vault_balance();
+    let lp_pos = env.read_account_position(lp_idx);
 
-    println!(
-        "Bankruptcy: ins_before={} ins_after={} vault_before={} vault_after={}",
-        ins_before, ins_after, vault_before, vault_after
+    assert_eq!(lp_pos, 0, "Bankrupt account position must be liquidated");
+    assert!(
+        ins_after < ins_before,
+        "Bankrupt liquidation must consume insurance net of fees: before={} after={}",
+        ins_before,
+        ins_after
     );
 
     // Vault SPL balance must not change (losses are internal accounting)
@@ -4240,18 +4565,15 @@ fn test_insurance_absorbs_bankruptcy_loss() {
         "Vault SPL balance must be conserved through bankruptcy"
     );
 
-    // Insurance decreases (absorbed the deficit) minus fee increases
-    // The net effect depends on: deficit absorbed - fees collected.
-    // With a large crash, the deficit should dominate.
-    // But insurance also receives liquidation fees, so it might increase or decrease.
-    // The key assertion: conservation holds.
     let engine_vault = env.read_engine_vault();
     let c_tot = env.read_c_tot();
     let insurance = env.read_insurance_balance();
     assert!(
         engine_vault >= c_tot + insurance,
         "Conservation: vault({}) >= c_tot({}) + ins({})",
-        engine_vault, c_tot, insurance
+        engine_vault,
+        c_tot,
+        insurance
     );
 }
 
@@ -4374,7 +4696,8 @@ fn test_trade_nocpi_full_size_moves_mark() {
     assert!(
         ewma_after_big > ewma_after_seed,
         "Large trade must move mark toward new price: seed={} after={}",
-        ewma_after_seed, ewma_after_big
+        ewma_after_seed,
+        ewma_after_big
     );
 }
 
@@ -4406,7 +4729,8 @@ fn test_trade_nocpi_zero_min_fee_allows_all() {
     assert!(
         ewma_after > ewma_seed,
         "Dust trade must move mark when min_fee=0: seed={} after={}",
-        ewma_seed, ewma_after,
+        ewma_seed,
+        ewma_after,
     );
 }
 
@@ -4449,13 +4773,13 @@ fn test_governance_free_inverted_sol_lifecycle_with_fee_weighted_ewma() {
         data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
         data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6
         data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
-        // RiskParams with 10 bps trading fee
+                                                      // RiskParams with 10 bps trading fee
         data.extend_from_slice(&0u64.to_le_bytes()); // h_min (warmup floor)
         data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
         data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
         data.extend_from_slice(&10u64.to_le_bytes()); // trading_fee_bps = 10 (0.1%)
         data.extend_from_slice(&(percolator::MAX_ACCOUNTS as u64).to_le_bytes());
-        data.extend_from_slice(&0u128.to_le_bytes()); // new_acct_fee
+        data.extend_from_slice(&1u128.to_le_bytes()); // new_acct_fee (permissionless anti-spam)
         data.extend_from_slice(&1u64.to_le_bytes()); // h_max
         let max_crank = 99u64; // permissionless > max_crank
         data.extend_from_slice(&max_crank.to_le_bytes()); // max_crank_staleness_slots
@@ -4463,22 +4787,22 @@ fn test_governance_free_inverted_sol_lifecycle_with_fee_weighted_ewma() {
         data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liq_fee_cap
         data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
         data.extend_from_slice(&0u128.to_le_bytes()); // min_liq_abs
-        data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-        data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+        data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+        data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
         data.extend_from_slice(&common::TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot (v12.19)
         data.extend_from_slice(&0u16.to_le_bytes()); // ins_withdraw_max_bps
         data.extend_from_slice(&0u64.to_le_bytes()); // ins_withdraw_cooldown
-        // v12.19.6: perm_resolve <= MAX_ACCRUAL_DT_SLOTS (100). Pick 100 —
-        // the upper bound. The test's 60+ slot dust-wash sequence must
-        // now fit within this window (the test may need to tighten its
-        // own cadence).
+                                                     // v12.19.6: perm_resolve <= MAX_ACCRUAL_DT_SLOTS (100). Pick 100 —
+                                                     // the upper bound. The test's 60+ slot dust-wash sequence must
+                                                     // now fit within this window (the test may need to tighten its
+                                                     // own cadence).
         data.extend_from_slice(&100u64.to_le_bytes()); // permissionless_resolve = 100
-        // Custom funding params
+                                                       // Custom funding params
         data.extend_from_slice(&200u64.to_le_bytes()); // funding_horizon
         data.extend_from_slice(&200u64.to_le_bytes()); // funding_k_bps (2x)
         data.extend_from_slice(&1000i64.to_le_bytes()); // max_premium
         data.extend_from_slice(&10i64.to_le_bytes()); // max_per_slot
-        // mark_min_fee (in engine units — must be below seed trade fee ~16)
+                                                      // mark_min_fee (in engine units — must be below seed trade fee ~16)
         data.extend_from_slice(&10u64.to_le_bytes());
         data.extend_from_slice(&50u64.to_le_bytes()); // force_close_delay_slots (required when permissionless_resolve > 0)
 
@@ -4489,11 +4813,8 @@ fn test_governance_free_inverted_sol_lifecycle_with_fee_weighted_ewma() {
                 AccountMeta::new(env.slab, false),
                 AccountMeta::new_readonly(env.mint, false),
                 AccountMeta::new(env.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(env.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data,
         };
@@ -4530,7 +4851,11 @@ fn test_governance_free_inverted_sol_lifecycle_with_fee_weighted_ewma() {
     // First trade seeds EWMA in inverted price space
     env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
     let ewma_seed = env.read_mark_ewma();
-    assert!(ewma_seed > 0 && ewma_seed < 100_000, "Inverted EWMA: {}", ewma_seed);
+    assert!(
+        ewma_seed > 0 && ewma_seed < 100_000,
+        "Inverted EWMA: {}",
+        ewma_seed
+    );
 
     // Dust wash attack: 50 size-1 trades at different slots with price change
     let admin_kp = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
@@ -4552,7 +4877,9 @@ fn test_governance_free_inverted_sol_lifecycle_with_fee_weighted_ewma() {
         env.crank();
     }
     let ewma_after_dust_attack = env.read_mark_ewma();
-    let dust_drift_bps = ((ewma_after_dust_attack as i128 - ewma_seed as i128).unsigned_abs() * 10_000) / ewma_seed as u128;
+    let dust_drift_bps = ((ewma_after_dust_attack as i128 - ewma_seed as i128).unsigned_abs()
+        * 10_000)
+        / ewma_seed as u128;
     assert!(
         dust_drift_bps < 100, // less than 1%
         "20 dust trades should barely move mark: drift={} bps",
@@ -4578,7 +4905,11 @@ fn test_governance_free_inverted_sol_lifecycle_with_fee_weighted_ewma() {
     assert!(env.is_market_resolved());
 
     let settlement = env.read_authority_price();
-    assert!(settlement > 0 && settlement < 100_000, "Inverted settlement: {}", settlement);
+    assert!(
+        settlement > 0 && settlement < 100_000,
+        "Inverted settlement: {}",
+        settlement
+    );
 }
 
 // ============================================================================
@@ -4609,8 +4940,8 @@ fn test_haircut_new_mm_capital_protected_non_inverted() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 15_000_000_000);
 
-    // Max leverage: 1M units at $138
-    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
+    // Near max leverage at $138: large enough that a +50% move bankrupts the LP.
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000_000);
 
     // Tiny insurance — won't cover LP's bankruptcy deficit
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
@@ -4618,11 +4949,11 @@ fn test_haircut_new_mm_capital_protected_non_inverted() {
 
     // Price moves +50%: LP loses ~$69B on $138B notional, capital only 15B.
     // LP should be liquidated with deficit ~54B, insurance can cover ~0.
-    env.set_slot_and_price(200, 207_000_000); // $138 → $207 (+50%)
+    env.set_slot_and_price(1500, 207_000_000); // $138 -> $207 (+50%), cap-respecting
     env.crank(); // liquidates LP
 
     // Further cranks to settle
-    env.set_slot_and_price(300, 207_000_000);
+    env.set_slot_and_price(1600, 207_000_000);
     env.crank();
 
     let vault = env.read_engine_vault();
@@ -4654,17 +4985,20 @@ fn test_haircut_new_mm_capital_protected_non_inverted() {
     env.deposit(&new_mm, new_mm_idx, mm_deposit);
 
     let mm_cap_before = env.read_account_capital(new_mm_idx);
-    assert_eq!(mm_cap_before as u64, mm_deposit + 100, // deposit + init fee
-        "MM capital must equal deposit");
+    assert_eq!(
+        mm_cap_before as u64,
+        mm_deposit + 99, // deposit + credited init capital
+        "MM capital must equal deposit"
+    );
 
     // New MM takes the opposite side of user's position to help close it.
     // MM goes short (takes user's long off the book).
     // The trade is at oracle price — MM makes no slippage profit/loss.
-    env.set_slot(400);
-    env.trade(&user, &new_mm, new_mm_idx, user_idx, -50_000); // user reduces long by 50K
+    env.set_slot(1700);
+    env.trade(&user, &new_mm, new_mm_idx, user_idx, -50_000_000); // user reduces long by 5%
 
     // Crank to settle
-    env.set_slot(500);
+    env.set_slot(1800);
     env.crank();
 
     // KEY ASSERTION: New MM's capital is protected.
@@ -4690,7 +5024,9 @@ fn test_haircut_new_mm_capital_protected_non_inverted() {
     assert!(
         loss_bps < 100, // less than 1% loss from fees
         "New MM capital must be protected (not haircutted): deposit={} after={} loss={}bps",
-        mm_deposit_u128, mm_cap_after, loss_bps
+        mm_deposit_u128,
+        mm_cap_after,
+        loss_bps
     );
 
     // User's profit withdrawal should be haircutted (h < 1)
@@ -4730,7 +5066,11 @@ fn test_haircut_new_mm_capital_protected_inverted() {
     env.crank();
 
     let user_pnl = env.read_account_pnl(user_idx);
-    assert!(user_pnl > 0, "User must profit on inverted market: {}", user_pnl);
+    assert!(
+        user_pnl > 0,
+        "User must profit on inverted market: {}",
+        user_pnl
+    );
 
     // New MM enters distressed inverted market
     let new_mm = Keypair::new();
@@ -4741,10 +5081,10 @@ fn test_haircut_new_mm_capital_protected_inverted() {
     let mm_cap_before = env.read_account_capital(new_mm_idx);
 
     // MM provides liquidity for user to reduce position
-    env.set_slot(300);
+    env.set_slot(2100);
     env.trade(&user, &new_mm, new_mm_idx, user_idx, -50_000);
 
-    env.set_slot(400);
+    env.set_slot(2200);
     env.crank();
 
     let mm_cap_after = env.read_account_capital(new_mm_idx);
@@ -4763,7 +5103,9 @@ fn test_haircut_new_mm_capital_protected_inverted() {
     assert!(
         loss_bps < 100,
         "Inverted market: MM capital must be protected: deposit={} after={} loss={}bps",
-        mm_cap_before, mm_cap_after, loss_bps
+        mm_cap_before,
+        mm_cap_after,
+        loss_bps
     );
 }
 
@@ -4784,17 +5126,17 @@ fn test_haircut_profitable_account_actually_haircutted() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 20_000_000_000);
 
-    env.trade(&user, &lp, lp_idx, user_idx, 50_000);
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000_000);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     env.top_up_insurance(&admin, 100_000_000);
 
     // Big price move to create significant PnL and haircut
-    env.set_slot_and_price(200, 250_000_000); // $138 → $250
+    env.set_slot_and_price(2200, 250_000_000); // $138 -> $250, cap-respecting
     env.crank();
 
     // Advance past warmup to mature the PnL
-    env.set_slot_and_price(1000, 250_000_000);
+    env.set_slot_and_price(2350, 250_000_000);
     env.crank();
 
     let vault = env.read_engine_vault();
@@ -4807,8 +5149,13 @@ fn test_haircut_profitable_account_actually_haircutted() {
 
     println!(
         "Haircut check: vault={} c_tot={} ins={} pnl_pos_tot={} residual={} h={}/{}",
-        vault, c_tot, insurance, pnl_pos_tot, residual,
-        core::cmp::min(residual, pnl_pos_tot), pnl_pos_tot
+        vault,
+        c_tot,
+        insurance,
+        pnl_pos_tot,
+        residual,
+        core::cmp::min(residual, pnl_pos_tot),
+        pnl_pos_tot
     );
 
     // If h < 1 (residual < pnl_pos_tot), the user's effective payout is reduced
@@ -4827,8 +5174,11 @@ fn test_haircut_profitable_account_actually_haircutted() {
 
         // The key economic property: haircut reduces profit claims,
         // creating room for new capital to enter and clear positions.
-        println!("User raw PnL: {} (effective payout ≈ {})", user_pnl,
-            (user_pnl as u128) * residual / pnl_pos_tot);
+        println!(
+            "User raw PnL: {} (effective payout ≈ {})",
+            user_pnl,
+            (user_pnl as u128) * residual / pnl_pos_tot
+        );
     } else {
         println!("No haircut in this scenario (h >= 1), test is informational");
     }
@@ -4860,7 +5210,11 @@ fn test_trade_nocpi_allows_user_user_bilateral() {
 
     // User-user bilateral trade — allowed by spec
     let result = env.try_trade(&user1, &user2, user2_idx, user1_idx, 1_000);
-    assert!(result.is_ok(), "User-user bilateral trade must be allowed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "User-user bilateral trade must be allowed: {:?}",
+        result
+    );
 }
 
 // ============================================================================
@@ -4880,11 +5234,11 @@ fn test_init_market_rejects_huge_funding_max_e9_per_slot_without_wrap() {
         // 1 bps/slot is safely within the envelope (fits 1e6 e9/slot);
         // i64::MAX would overflow the envelope by ~17 orders of magnitude.
         env.init_market_with_funding(
-            0,     // invert
-            80, // permissionless_resolve_stale_slots (v12.19.6: <= MAX_ACCRUAL_DT_SLOTS=100)
-            200,   // funding_horizon_slots
-            200,   // funding_k_bps
-            1_000, // funding_max_premium_bps
+            0,        // invert
+            80,       // permissionless_resolve_stale_slots (v12.19.6: <= MAX_ACCRUAL_DT_SLOTS=100)
+            200,      // funding_horizon_slots
+            200,      // funding_k_bps
+            1_000,    // funding_max_premium_bps
             i64::MAX, // funding_max_e9_per_slot — MUST be rejected
         );
     }));
@@ -4913,7 +5267,9 @@ fn test_per_account_maintenance_fee_not_back_charged_to_new_user() {
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_maint_fee_bounded(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
         1_000_000_000, // max_maintenance_fee_per_slot (sufficient ceiling)
         1_000,         // maintenance_fee_per_slot (base units / slot)
         0,             // min_oracle_price_cap
@@ -4974,8 +5330,12 @@ fn test_fee_sync_does_not_erase_market_accrual_interval() {
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_maint_fee_bounded(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
-        1_000_000_000, 1_000, 0,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
+        1_000_000_000,
+        1_000,
+        0,
     );
     env.try_init_market_raw(data).expect("init_market");
 
@@ -4993,9 +5353,7 @@ fn test_fee_sync_does_not_erase_market_accrual_interval() {
     // Use TestEnv accessor rather than a hand-rolled offset — the
     // engine layout shifts with v12.19 schema updates and hand-rolled
     // offsets drift silently.
-    let read_last_market_slot = |e: &TestEnv| -> u64 {
-        e.read_last_market_slot()
-    };
+    let read_last_market_slot = |e: &TestEnv| -> u64 { e.read_last_market_slot() };
     let before = read_last_market_slot(&env);
     assert_eq!(before, 100, "seeded last_market_slot at 100");
 
@@ -5032,8 +5390,12 @@ fn test_fee_sync_anchor_accepts_future_now_slot_for_every_path() {
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_maint_fee_bounded(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
-        1_000_000_000, 1_000, 0,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
+        1_000_000_000,
+        1_000,
+        0,
     );
     env.try_init_market_raw(data).expect("init_market");
 
@@ -5093,7 +5455,9 @@ fn test_fee_markets_survive_one_slot_gap_on_every_accrue_path() {
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_maint_fee_bounded(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
         1_000_000_000, // max_maintenance_fee_per_slot
         1_000,         // maintenance_fee_per_slot > 0 — fees ON
         0,             // min_oracle_price_cap
@@ -5166,7 +5530,9 @@ fn test_keeper_crank_reward_pays_half_of_swept_fees_to_non_permissionless_caller
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_maint_fee_bounded(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
         1_000_000_000, // max_maintenance_fee_per_slot
         1_000,         // maintenance_fee_per_slot
         0,             // min_oracle_price_cap
@@ -5189,10 +5555,10 @@ fn test_keeper_crank_reward_pays_half_of_swept_fees_to_non_permissionless_caller
     let u3_idx = env.init_user(&u3);
     env.deposit(&u3, u3_idx, 10_000_000_000);
 
-    // v12.19.6: perm_resolve <= MAX_ACCRUAL_DT_SLOTS=100. Advance via
-    // env.set_slot (preserves the oracle publish_time offset) and stay
-    // inside the 80-slot perm-resolve window.
-    env.set_slot(50);
+    // Advance inside the 80-slot hard-timeout window without using the
+    // auto-cranking slot helper; the crank below is the operation whose fee
+    // sweep and reward split this test is measuring.
+    env.set_slot_and_price_raw_no_walk(150, 138_000_000);
 
     let cranker_cap_before = env.read_account_capital(cranker_idx);
     let ins_before = env.read_insurance_balance();
@@ -5202,8 +5568,7 @@ fn test_keeper_crank_reward_pays_half_of_swept_fees_to_non_permissionless_caller
     let cranker_cap_after = env.read_account_capital(cranker_idx);
     let ins_after = env.read_insurance_balance();
 
-    let cranker_delta: i128 =
-        (cranker_cap_after as i128) - (cranker_cap_before as i128);
+    let cranker_delta: i128 = (cranker_cap_after as i128) - (cranker_cap_before as i128);
     let ins_delta: i128 = (ins_after as i128) - (ins_before as i128);
 
     // Core property: some sweep happened (insurance grew) and the cranker
@@ -5232,7 +5597,9 @@ fn test_keeper_crank_reward_pays_on_second_crank_with_populated_risk_buffer() {
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_maint_fee_bounded(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
         1_000_000_000, // max_maintenance_fee_per_slot
         1_000,         // maintenance_fee_per_slot
         0,             // min_oracle_price_cap
@@ -5331,19 +5698,21 @@ fn test_init_user_rejects_when_mat_counter_would_overflow() {
     // RESERVED_OFF = 48 (see percolator.rs), counter lives at +8..+16.
     const RESERVED_OFF: usize = 48;
     let mut acct = env.svm.get_account(&env.slab).unwrap();
-    acct.data[RESERVED_OFF + 8..RESERVED_OFF + 16]
-        .copy_from_slice(&u64::MAX.to_le_bytes());
+    acct.data[RESERVED_OFF + 8..RESERVED_OFF + 16].copy_from_slice(&u64::MAX.to_le_bytes());
     env.svm.set_account(env.slab, acct).unwrap();
 
     // Sanity: confirm the poke took hold.
     let counter = {
         let a = env.svm.get_account(&env.slab).unwrap();
         u64::from_le_bytes(
-            a.data[RESERVED_OFF + 8..RESERVED_OFF + 16].try_into().unwrap()
+            a.data[RESERVED_OFF + 8..RESERVED_OFF + 16]
+                .try_into()
+                .unwrap(),
         )
     };
     assert_eq!(
-        counter, u64::MAX,
+        counter,
+        u64::MAX,
         "setup failure: mat_counter poke did not persist"
     );
 
@@ -5355,13 +5724,11 @@ fn test_init_user_rejects_when_mat_counter_would_overflow() {
     // remains after the fee split — otherwise InitUser rejects early with
     // EngineInsufficientBalance and we never reach next_mat_counter.
     let user = Keypair::new();
-    let err = env
-        .try_init_user_with_fee(&user, 2000)
-        .expect_err(
-            "InitUser must fail with overflow when mat_counter is at u64::MAX. \
+    let err = env.try_init_user_with_fee(&user, 2000).expect_err(
+        "InitUser must fail with overflow when mat_counter is at u64::MAX. \
              If this succeeds, next_mat_counter wraps silently and new accounts \
              inherit generation=0 — the TradeCpi sentinel that blocks trading.",
-        );
+    );
     // 0x12 = PercolatorError::EngineOverflow (18th variant in declaration order).
     // The engine-Overflow mapping routes RiskError::Overflow here too; either
     // the next_mat_counter branch or the engine check can fire — both are
@@ -5378,7 +5745,9 @@ fn test_keeper_crank_permissionless_pays_no_reward() {
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_maint_fee_bounded(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
         1_000_000_000, // max_maintenance_fee_per_slot
         10_000,        // maintenance_fee_per_slot (10x to compensate for tighter window)
         0,             // min_oracle_price_cap
@@ -5392,11 +5761,10 @@ fn test_keeper_crank_permissionless_pays_no_reward() {
     let u1_idx = env.init_user(&u1);
     env.deposit(&u1, u1_idx, 10_000_000_000);
 
-    // v12.19.6: perm_resolve <= MAX_ACCRUAL_DT_SLOTS=100. Advance via
-    // env.set_slot which uses the harness's init offset (preserves the
-    // oracle publish_time relationship). We keep the advance well inside
-    // the 80-slot perm-resolve window.
-    env.set_slot(50);
+    // Advance inside the 80-slot hard-timeout window without using the
+    // auto-cranking slot helper; permissionless crank below must do the
+    // actual maintenance sweep being asserted.
+    env.set_slot_and_price_raw_no_walk(150, 138_000_000);
 
     let ins_before = env.read_insurance_balance();
     env.crank(); // permissionless (caller_idx = u16::MAX)
@@ -5409,9 +5777,6 @@ fn test_keeper_crank_permissionless_pays_no_reward() {
         "permissionless crank: 100% of sweep → insurance, expected > 0, got {ins_delta}"
     );
 }
-
-
-
 
 /// InitMarket must reject `new_account_fee` not aligned to `unit_scale`.
 /// The InitUser/InitLP split divides `fee_payment` into (fee, capital);
@@ -5488,7 +5853,9 @@ fn test_dust_account_drained_and_gc_by_crank_alone() {
     // Maintenance fee = 1 unit per slot. Tight enough to drain a
     // 100-unit dust account in ~100 slots without a long-running test.
     let data = encode_init_market_with_maint_fee_bounded(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
         1000, // max_maintenance_fee_per_slot (vestigial arg, ignored)
         1,    // maintenance_fee_per_slot
         0,    // min_oracle_price_cap (helper auto-promotes to MAX)
@@ -5499,7 +5866,8 @@ fn test_dust_account_drained_and_gc_by_crank_alone() {
     let attacker = Keypair::new();
     let attacker_idx = env.init_user_with_fee(&attacker, 100);
     assert_eq!(
-        env.read_num_used_accounts(), 1,
+        env.read_num_used_accounts(),
+        1,
         "precondition: attacker account materialized",
     );
     let cap_after_init = env.read_account_capital(attacker_idx);
@@ -5530,7 +5898,8 @@ fn test_dust_account_drained_and_gc_by_crank_alone() {
     env.crank();
 
     assert_eq!(
-        env.read_num_used_accounts(), 0,
+        env.read_num_used_accounts(),
+        0,
         "GC must free the dust account slot — slot exhaustion is \
          impossible when maintenance_fee_per_slot > 0",
     );
@@ -5553,9 +5922,11 @@ fn test_dust_position_account_eventually_liquidated_and_gc_by_crank() {
     // each set_slot_and_price advancing the slot by 5, ~30 cranks
     // drain capital and the position becomes liquidatable.
     let data = encode_init_market_with_maint_fee_bounded(
-        &env.payer.pubkey(), &env.mint, &TEST_FEED_ID,
-        1_000_000_000,                  // max_maintenance_fee (vestigial arg)
-        1_000_000,                      // maintenance_fee_per_slot
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
+        1_000_000_000, // max_maintenance_fee (vestigial arg)
+        1_000_000,     // maintenance_fee_per_slot
         0,
     );
     env.try_init_market_raw(data).expect("init");
@@ -5696,7 +6067,8 @@ fn test_dust_trade_must_not_advance_mark_ewma_last_slot() {
         clock_after_full > clock_after_dust,
         "full-weight trade must advance mark_ewma_last_slot: \
          before={} after={}",
-        clock_after_dust, clock_after_full,
+        clock_after_dust,
+        clock_after_full,
     );
 }
 
@@ -5784,7 +6156,7 @@ fn test_init_hyperp_with_perm_resolve_accepts_nonzero_mark_min_fee() {
     payload.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     payload.extend_from_slice(&1_000_000u64.to_le_bytes()); // initial_mark
     payload.extend_from_slice(&1u128.to_le_bytes()); // maintenance_fee_per_slot=1 (F3 gate)
-    // RiskParams
+                                                     // RiskParams
     payload.extend_from_slice(&0u64.to_le_bytes()); // h_min
     payload.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     payload.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
@@ -5797,10 +6169,10 @@ fn test_init_hyperp_with_perm_resolve_accepts_nonzero_mark_min_fee() {
     payload.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     payload.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     payload.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    payload.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    payload.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    payload.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+    payload.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
     payload.extend_from_slice(&common::TEST_MAX_PRICE_MOVE_BPS_PER_SLOT.to_le_bytes()); // max_price_move_bps_per_slot
-    // Extended tail
+                                                                                        // Extended tail
     payload.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     payload.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
     payload.extend_from_slice(&80u64.to_le_bytes()); // permissionless_resolve_stale_slots (<= MAX_ACCRUAL_DT_SLOTS=100)

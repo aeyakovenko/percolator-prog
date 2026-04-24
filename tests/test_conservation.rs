@@ -2144,7 +2144,8 @@ fn test_property_authorization_exhaustive() {
     // current and new keys sign. Use try_update_authority directly.
     let new_admin = Keypair::new();
     env.svm.airdrop(&new_admin.pubkey(), 5_000_000_000).unwrap();
-    env.try_update_authority(&admin, AUTHORITY_ADMIN, Some(&new_admin)).unwrap();
+    env.try_update_authority(&admin, AUTHORITY_ADMIN, Some(&new_admin))
+        .unwrap();
 
     let r = env.try_update_admin(&admin, &admin.pubkey());
     assert!(
@@ -2165,7 +2166,10 @@ fn test_property_authorization_exhaustive() {
 
     // Admin must be locked out after burn
     let r = env.try_update_admin(&new_admin, &new_admin.pubkey());
-    assert!(r.is_err(), "A8: Admin operations must fail after admin burn");
+    assert!(
+        r.is_err(),
+        "A8: Admin operations must fail after admin burn"
+    );
 }
 
 /// PROPERTY TEST: Account lifecycle invariants across create/use/close/GC cycles.
@@ -2399,7 +2403,8 @@ fn test_binary_market_complete_lifecycle_conservation() {
 
     // After AdminForceCloseAccount: all accounts are freed
     assert_eq!(
-        env.read_num_used_accounts(), 0,
+        env.read_num_used_accounts(),
+        0,
         "All accounts should be freed after AdminForceCloseAccount"
     );
 
@@ -2466,8 +2471,8 @@ fn test_adl_conservation_after_liquidation() {
     let vault_after_setup = env.vault_balance();
 
     // Open positions
-    env.trade(&user_a, &lp, lp_idx, user_a_idx, 5_000_000);  // long
-    env.trade(&user_b, &lp, lp_idx, user_b_idx, 3_000_000);  // long
+    env.trade(&user_a, &lp, lp_idx, user_a_idx, 5_000_000); // long
+    env.trade(&user_b, &lp, lp_idx, user_b_idx, 3_000_000); // long
     env.trade(&user_c, &lp, lp_idx, user_c_idx, -4_000_000); // short
 
     // Trading is internal: vault unchanged
@@ -2536,4 +2541,3 @@ fn test_adl_conservation_after_liquidation() {
         );
     }
 }
-

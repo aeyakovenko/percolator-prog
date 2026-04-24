@@ -28,8 +28,6 @@ use percolator_prog::matcher_abi::{
 use percolator_prog::oracle::{clamp_oracle_price, clamp_toward_with_dt, restart_detected};
 use percolator_prog::verify::{
     abi_ok,
-    // Fee-weighted EWMA
-    ewma_update,
     admin_ok,
     cpi_trade_size,
     decide_admin_op,
@@ -41,6 +39,8 @@ use percolator_prog::verify::{
     decide_trade_cpi_from_ret,
     decide_trade_nocpi,
     decision_nonce,
+    // Fee-weighted EWMA
+    ewma_update,
     // New: InitMarket scale validation
     init_market_scale_ok,
     // New: Oracle inversion math
@@ -444,10 +444,12 @@ fn kani_nonce_advances_on_success() {
             "nonce must advance by 1 on success"
         );
     } else {
-        assert_eq!(new_nonce, None, "nonce_on_success must return None at u64::MAX");
+        assert_eq!(
+            new_nonce, None,
+            "nonce_on_success must return None at u64::MAX"
+        );
     }
 }
-
 
 // =============================================================================
 // H. CPI USES EXEC_SIZE (1 proof) - CRITICAL
@@ -519,28 +521,48 @@ fn kani_decide_trade_cpi_universal() {
     let lp_key_ok: bool = kani::any();
 
     let decision = decide_trade_cpi(
-        old_nonce, shape, identity_ok, pda_ok, abi_ok,
-        user_auth_ok, lp_key_ok, exec_size,
+        old_nonce,
+        shape,
+        identity_ok,
+        pda_ok,
+        abi_ok,
+        user_auth_ok,
+        lp_key_ok,
+        exec_size,
     );
 
     let should_accept = matcher_shape_ok(shape)
-        && identity_ok && pda_ok && abi_ok
-        && user_auth_ok && lp_key_ok
+        && identity_ok
+        && pda_ok
+        && abi_ok
+        && user_auth_ok
+        && lp_key_ok
         && old_nonce < u64::MAX; // nonce overflow gate
 
     if should_accept {
         match decision {
-            TradeCpiDecision::Accept { new_nonce, chosen_size } => {
-                assert_eq!(Some(new_nonce), nonce_on_success(old_nonce),
-                    "accept nonce must be nonce_on_success(old_nonce)");
-                assert_eq!(chosen_size, exec_size,
-                    "accept chosen_size must equal exec_size");
+            TradeCpiDecision::Accept {
+                new_nonce,
+                chosen_size,
+            } => {
+                assert_eq!(
+                    Some(new_nonce),
+                    nonce_on_success(old_nonce),
+                    "accept nonce must be nonce_on_success(old_nonce)"
+                );
+                assert_eq!(
+                    chosen_size, exec_size,
+                    "accept chosen_size must equal exec_size"
+                );
             }
             _ => panic!("all gates pass but got Reject"),
         }
     } else {
-        assert_eq!(decision, TradeCpiDecision::Reject,
-            "any gate failure (or nonce overflow) must produce Reject");
+        assert_eq!(
+            decision,
+            TradeCpiDecision::Reject,
+            "any gate failure (or nonce overflow) must produce Reject"
+        );
     }
 }
 
@@ -559,9 +581,7 @@ fn kani_tradecpi_reject_nonce_unchanged() {
     };
     kani::assume(!matcher_shape_ok(shape));
 
-    let decision = decide_trade_cpi(
-        old_nonce, shape, true, true, true, true, true, exec_size,
-    );
+    let decision = decide_trade_cpi(old_nonce, shape, true, true, true, true, true, exec_size);
 
     assert_eq!(
         decision,
@@ -596,16 +616,7 @@ fn kani_tradecpi_accept_increments_nonce() {
     // Exclude the overflow boundary; covered by the universal proof above.
     kani::assume(old_nonce < u64::MAX);
 
-    let decision = decide_trade_cpi(
-        old_nonce,
-        shape,
-        true,
-        true,
-        true,
-        true,
-        true,
-        exec_size,
-    );
+    let decision = decide_trade_cpi(old_nonce, shape, true, true, true, true, true, exec_size);
 
     assert_eq!(
         decision,
@@ -663,9 +674,17 @@ fn kani_tradenocpi_universal_characterization() {
     // Full characterization: accept iff all auth passes
     let should_accept = user_auth_ok && lp_auth_ok;
     if should_accept {
-        assert_eq!(decision, TradeNoCpiDecision::Accept, "must accept when all conditions pass");
+        assert_eq!(
+            decision,
+            TradeNoCpiDecision::Accept,
+            "must accept when all conditions pass"
+        );
     } else {
-        assert_eq!(decision, TradeNoCpiDecision::Reject, "must reject when any condition fails");
+        assert_eq!(
+            decision,
+            TradeNoCpiDecision::Reject,
+            "must reject when any condition fails"
+        );
     }
 }
 
@@ -890,8 +909,11 @@ fn kani_slab_shape_universal() {
         correct_len: correct_len,
     };
     let expected = owned && correct_len;
-    assert_eq!(slab_shape_ok(shape), expected,
-        "slab_shape_ok must equal (owned && correct_len)");
+    assert_eq!(
+        slab_shape_ok(shape),
+        expected,
+        "slab_shape_ok must equal (owned && correct_len)"
+    );
 }
 
 // =============================================================================
@@ -943,7 +965,11 @@ fn kani_decide_admin_universal() {
     if should_accept {
         assert_eq!(decision, SimpleDecision::Accept, "valid admin must accept");
     } else {
-        assert_eq!(decision, SimpleDecision::Reject, "invalid admin must reject");
+        assert_eq!(
+            decision,
+            SimpleDecision::Reject,
+            "invalid admin must reject"
+        );
     }
 }
 
@@ -1078,7 +1104,16 @@ fn kani_tradecpi_from_ret_any_accept_increments_nonce() {
             reserved: 0,
         };
         let d = decide_trade_cpi_from_ret(
-            42, valid_shape(), true, true, true, true, valid_ret, 1, 50_000_000, 100,
+            42,
+            valid_shape(),
+            true,
+            true,
+            true,
+            true,
+            valid_ret,
+            1,
+            50_000_000,
+            100,
         );
         assert!(
             matches!(d, TradeCpiDecision::Accept { .. }),
@@ -1344,14 +1379,14 @@ fn kani_decide_keeper_crank_universal() {
     let idx_exists: bool = kani::any();
     let stored_owner: [u8; 32] = kani::any();
 
-    let decision = decide_keeper_crank(
-        permissionless, idx_exists, stored_owner, signer,
-    );
+    let decision = decide_keeper_crank(permissionless, idx_exists, stored_owner, signer);
 
     let expected = decide_crank(permissionless, idx_exists, stored_owner, signer);
 
-    assert_eq!(decision, expected,
-        "decide_keeper_crank must equal decide_crank");
+    assert_eq!(
+        decision, expected,
+        "decide_keeper_crank must equal decide_crank"
+    );
 }
 
 // =============================================================================
@@ -1465,8 +1500,14 @@ fn kani_invert_monotonic() {
     let inv2 = invert_price_e6(raw2, 1);
 
     // Bounded domain guarantees successful inversion for both values.
-    assert!(inv1.is_some(), "raw1 in bounded domain must invert successfully");
-    assert!(inv2.is_some(), "raw2 in bounded domain must invert successfully");
+    assert!(
+        inv1.is_some(),
+        "raw1 in bounded domain must invert successfully"
+    );
+    assert!(
+        inv2.is_some(),
+        "raw2 in bounded domain must invert successfully"
+    );
     let i1 = inv1.unwrap();
     let i2 = inv2.unwrap();
     assert!(i1 <= i2, "inversion must be monotonically decreasing");
@@ -1872,8 +1913,7 @@ fn kani_tradecpi_from_ret_req_id_is_nonce_plus_one() {
     // Force the accept path — exclude the nonce-overflow boundary so req_id is
     // well-defined and Accept is reachable.
     kani::assume(old_nonce < u64::MAX);
-    let expected_req_id =
-        nonce_on_success(old_nonce).expect("old_nonce < u64::MAX assumed");
+    let expected_req_id = nonce_on_success(old_nonce).expect("old_nonce < u64::MAX assumed");
 
     // Constrain ret to be ABI-valid for this req_id
     let mut ret = any_matcher_return_fields();
@@ -1892,10 +1932,10 @@ fn kani_tradecpi_from_ret_req_id_is_nonce_plus_one() {
     let decision = decide_trade_cpi_from_ret(
         old_nonce,
         shape,
-        true,  // identity_ok
-        true,  // pda_ok
-        true,  // user_auth_ok
-        true,  // lp_auth_ok
+        true, // identity_ok
+        true, // pda_ok
+        true, // user_auth_ok
+        true, // lp_auth_ok
         ret,
         lp_account_id,
         oracle_price_e6,
@@ -1948,8 +1988,7 @@ fn kani_tradecpi_from_ret_forced_acceptance() {
     // Force the accept path — exclude the nonce-overflow boundary.
     kani::assume(old_nonce < u64::MAX);
     // Construct ABI-valid ret
-    let expected_req_id =
-        nonce_on_success(old_nonce).expect("old_nonce < u64::MAX assumed");
+    let expected_req_id = nonce_on_success(old_nonce).expect("old_nonce < u64::MAX assumed");
     let mut ret = any_matcher_return_fields();
     ret.abi_version = MATCHER_ABI_VERSION;
     ret.flags = FLAG_VALID | FLAG_PARTIAL_OK;
@@ -1966,10 +2005,10 @@ fn kani_tradecpi_from_ret_forced_acceptance() {
     let decision = decide_trade_cpi_from_ret(
         old_nonce,
         shape,
-        true,  // identity_ok
-        true,  // pda_ok
-        true,  // user_auth_ok
-        true,  // lp_auth_ok
+        true, // identity_ok
+        true, // pda_ok
+        true, // user_auth_ok
+        true, // lp_auth_ok
         ret,
         lp_account_id,
         oracle_price_e6,
@@ -2347,7 +2386,7 @@ fn kani_clamp_toward_movement_bounded_concrete() {
     let dt_raw: u8 = kani::any();
     let mark: u64 = kani::any();
 
-    kani::assume(index_raw >= 10);   // exclude index=0 bootstrap
+    kani::assume(index_raw >= 10); // exclude index=0 bootstrap
     kani::assume(cap_steps_raw >= 1);
     kani::assume(cap_steps_raw <= 20); // 1%..20% cap
     kani::assume(dt_raw >= 1);
@@ -2503,7 +2542,10 @@ fn kani_clamp_toward_saturation_paths() {
         let result = clamp_toward_with_dt(index, 0, cap_e2bps, dt_slots);
         // max_delta_u128 = (MAX/2) * 1_000_000 * 100 / 1_000_000 = (MAX/2)*100 >> u64::MAX
         // so max_delta = u64::MAX, lo = saturating_sub = 0
-        assert_eq!(result, 0, "witness: mark=0 with saturated max_delta clamps to lo=0");
+        assert_eq!(
+            result, 0,
+            "witness: mark=0 with saturated max_delta clamps to lo=0"
+        );
     }
 
     // Non-vacuity witness 2: hi saturates to u64::MAX
@@ -2513,7 +2555,11 @@ fn kani_clamp_toward_saturation_paths() {
         let dt_slots = 1;
         let result = clamp_toward_with_dt(index, u64::MAX, cap_e2bps, dt_slots);
         // max_delta = (MAX-10) * 10_000 / 1_000_000 ≈ MAX/100, hi = saturating_add = u64::MAX
-        assert_eq!(result, u64::MAX, "witness: mark=MAX with hi=MAX clamps to MAX");
+        assert_eq!(
+            result,
+            u64::MAX,
+            "witness: mark=MAX with hi=MAX clamps to MAX"
+        );
     }
 
     // Symbolic proof: large index with symbolic mark exercises saturation
@@ -2540,10 +2586,15 @@ fn kani_clamp_toward_saturation_paths() {
     let lo = index.saturating_sub(max_delta);
     let hi = index.saturating_add(max_delta);
 
-    assert!(result >= lo && result <= hi,
-        "result must stay within saturated bounds");
-    assert_eq!(result, mark.clamp(lo, hi),
-        "result must equal mark.clamp(lo, hi)");
+    assert!(
+        result >= lo && result <= hi,
+        "result must stay within saturated bounds"
+    );
+    assert_eq!(
+        result,
+        mark.clamp(lo, hi),
+        "result must equal mark.clamp(lo, hi)"
+    );
 }
 
 // =========================================================================
@@ -2578,7 +2629,10 @@ fn inductive_clamp_within_bounds() {
 
     let result = mark.clamp(lo, hi);
 
-    assert!(result >= lo && result <= hi, "clamp must stay within [lo, hi]");
+    assert!(
+        result >= lo && result <= hi,
+        "clamp must stay within [lo, hi]"
+    );
 }
 
 // =============================================================================
@@ -2672,12 +2726,8 @@ fn kani_decide_trade_cpi_from_ret_universal() {
     let abi_valid = abi_ok(ret, lp_account_id, oracle_price_e6, req_size, req_id);
 
     // The should_accept specification matches the production gate order exactly.
-    let should_accept = matcher_shape_ok(shape)
-        && pda_ok
-        && user_auth_ok
-        && lp_auth_ok
-        && identity_ok
-        && abi_valid;
+    let should_accept =
+        matcher_shape_ok(shape) && pda_ok && user_auth_ok && lp_auth_ok && identity_ok && abi_valid;
 
     let decision = decide_trade_cpi_from_ret(
         old_nonce,
@@ -2786,8 +2836,8 @@ fn kani_clamp_oracle_price_universal() {
     let cap_raw: u8 = kani::any();
     let raw_price: u64 = kani::any();
 
-    kani::assume(last_raw > 0);  // non-zero: enter clamping branch
-    kani::assume(cap_raw > 0);   // non-zero: enter clamping branch
+    kani::assume(last_raw > 0); // non-zero: enter clamping branch
+    kani::assume(cap_raw > 0); // non-zero: enter clamping branch
 
     let last = last_raw as u64;
     let max_change_e2bps = (cap_raw as u64) * 10_000; // 1%..2550% in e2bps
@@ -2845,8 +2895,10 @@ fn proof_ewma_weighted_result_bounded() {
     let result = ewma_update(old, price, halflife, last_slot, now_slot, fee_paid, min_fee);
     let lo = core::cmp::min(old, price);
     let hi = core::cmp::max(old, price);
-    assert!(result >= lo && result <= hi,
-        "EWMA result must be in [min(old,price), max(old,price)]");
+    assert!(
+        result >= lo && result <= hi,
+        "EWMA result must be in [min(old,price), max(old,price)]"
+    );
 }
 
 /// Monotone in fee: larger fee moves mark more toward price (never less).
@@ -2878,9 +2930,15 @@ fn proof_ewma_weighted_monotone_in_fee() {
     let result_b = ewma_update(old, price, halflife, last_slot, now_slot, fee_b, min_fee);
 
     if price > old {
-        assert!(result_a <= result_b, "Higher fee must move mark more toward higher price");
+        assert!(
+            result_a <= result_b,
+            "Higher fee must move mark more toward higher price"
+        );
     } else if price < old {
-        assert!(result_a >= result_b, "Higher fee must move mark more toward lower price");
+        assert!(
+            result_a >= result_b,
+            "Higher fee must move mark more toward lower price"
+        );
     }
     // price == old: both results equal old, trivially monotone
 }
@@ -2934,10 +2992,11 @@ fn proof_ewma_weight_at_threshold_equals_unweighted() {
     // Disabled weighting: also uses full alpha (min_fee=0 skips scaling)
     // Pass fee_paid to satisfy the old==0 bootstrap check too
     let disabled = ewma_update(old, price, halflife, last_slot, now_slot, fee_paid, 0);
-    assert_eq!(weighted, disabled,
-        "At-or-above threshold must equal disabled-weighting result");
+    assert_eq!(
+        weighted, disabled,
+        "At-or-above threshold must equal disabled-weighting result"
+    );
 }
-
 
 // =============================================================================
 // V. CLUSTER RESTART DETECTION (1 proof)

@@ -128,31 +128,31 @@ fn encode_init_market_with_params(
     data.push(0u8); // invert (0 = no inversion)
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale (0 = no scaling)
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6 (0 for non-Hyperp markets)
-    // maintenance_fee_per_slot (0 = disabled). The v12.19 wire format dropped
-    // the standalone `min_oracle_price_cap_e2bps` field in favour of a
-    // RiskParams entry (see max_price_move_bps_per_slot below).
+                                                 // maintenance_fee_per_slot (0 = disabled). The v12.19 wire format dropped
+                                                 // the standalone `min_oracle_price_cap_e2bps` field in favour of a
+                                                 // RiskParams entry (see max_price_move_bps_per_slot below).
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot
-    // RiskParams
+                                                  // RiskParams
     data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_min
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps (5%)
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps (10%)
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
-    data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+    data.extend_from_slice(&1u128.to_le_bytes()); // new_account_fee (anti-spam floor)
     data.extend_from_slice(&warmup_period_slots.to_le_bytes()); // h_max (must be >= h_min)
     data.extend_from_slice(&50u64.to_le_bytes()); // max_crank_staleness_slots (< perm_resolve <= MAX_ACCRUAL_DT_SLOTS)
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&1000u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
-    // v12.19 solvency envelope: 2 bps/slot * 100 = 200, funding 10_000 e9/slot *
-    // 100 * 10_000 / 1e9 = 10, liq_fee 50 — sum 260 <= maintenance_margin 500 OK.
+    data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
+                                                   // v12.19 solvency envelope: 2 bps/slot * 100 = 200, funding 10_000 e9/slot *
+                                                   // 100 * 10_000 / 1e9 = 10, liq_fee 50 — sum 260 <= maintenance_margin 500 OK.
     data.extend_from_slice(&2u64.to_le_bytes()); // max_price_move_bps_per_slot
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
-    // v12.19.6: perm_resolve must be > max_crank_staleness (50) AND <= MAX_ACCRUAL_DT_SLOTS (100).
+                                                 // v12.19.6: perm_resolve must be > max_crank_staleness (50) AND <= MAX_ACCRUAL_DT_SLOTS (100).
     data.extend_from_slice(&80u64.to_le_bytes()); // permissionless_resolve_stale_slots
     data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
@@ -353,11 +353,8 @@ impl TestEnv {
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(self.mint, false),
                 AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(sysvar::rent::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: encode_init_market_with_params(
                 &admin.pubkey(),
@@ -744,7 +741,6 @@ fn encode_admin_force_close_account(user_idx: u16) -> Vec<u8> {
     data.extend_from_slice(&user_idx.to_le_bytes());
     data
 }
-
 
 fn create_users(env: &mut TestEnv, count: usize, deposit_amount: u64) -> Vec<Keypair> {
     let mut users = Vec::with_capacity(count);
@@ -1706,20 +1702,21 @@ fn benchmark_all_instructions() {
     env.crank();
 
     // Helper: send instruction, return CU consumed
-    let measure = |svm: &mut LiteSVM, ix: Instruction, signers: &[&Keypair]| -> Result<u64, String> {
-        let budget = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
-        let payer = signers[0];
-        let tx = Transaction::new_signed_with_payer(
-            &[budget, ix],
-            Some(&payer.pubkey()),
-            signers,
-            svm.latest_blockhash(),
-        );
-        match svm.send_transaction(tx) {
-            Ok(r) => Ok(r.compute_units_consumed),
-            Err(e) => Err(format!("{:?}", e)),
-        }
-    };
+    let measure =
+        |svm: &mut LiteSVM, ix: Instruction, signers: &[&Keypair]| -> Result<u64, String> {
+            let budget = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+            let payer = signers[0];
+            let tx = Transaction::new_signed_with_payer(
+                &[budget, ix],
+                Some(&payer.pubkey()),
+                signers,
+                svm.latest_blockhash(),
+            );
+            match svm.send_transaction(tx) {
+                Ok(r) => Ok(r.compute_units_consumed),
+                Err(e) => Err(format!("{:?}", e)),
+            }
+        };
 
     let (vault_pda, _) =
         Pubkey::find_program_address(&[b"vault", env.slab.as_ref()], &env.program_id);
@@ -1775,7 +1772,6 @@ fn benchmark_all_instructions() {
                 AccountMeta::new_readonly(vault_pda, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
-                AccountMeta::new_readonly(env.pyth_index, false),
             ],
             data: encode_withdraw(user_idx, 100_000),
         };
@@ -1824,10 +1820,10 @@ fn benchmark_all_instructions() {
                 AccountMeta::new_readonly(env.pyth_index, false),
             ],
             data: encode_update_config(
-                3600,   // funding_horizon_slots
-                100,    // funding_k_bps
-                500,    // funding_max_premium_bps
-                5,      // funding_max_e9_per_slot
+                3600, // funding_horizon_slots
+                100,  // funding_k_bps
+                500,  // funding_max_premium_bps
+                5,    // funding_max_e9_per_slot
             ),
         };
         let cu = measure(&mut env.svm, ix, &[&admin]).unwrap();
@@ -1858,7 +1854,6 @@ fn benchmark_all_instructions() {
         let ix = Instruction {
             program_id: env.program_id,
             accounts: vec![
-                AccountMeta::new(caller.pubkey(), true),
                 AccountMeta::new(env.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
                 AccountMeta::new_readonly(env.pyth_index, false),

@@ -283,10 +283,7 @@ fn test_account_struct_alignment() {
         account.capital.get(),
         0x1234_5678_9ABC_DEF0_FEDC_BA98_7654_3210
     );
-    assert_eq!(
-        account.pnl,
-        -0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10i128
-    );
+    assert_eq!(account.pnl, -0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10i128);
     assert_eq!(account.reserved_pnl, 0xDEAD_BEEF_CAFE_BABEu128);
     assert_eq!(account.position_basis_q, -1_000_000_000_000i128);
     assert_eq!(account.fee_credits.get(), -999);
@@ -397,24 +394,24 @@ fn encode_init_market(admin: &Pubkey, mint: &Pubkey, feed_id: &[u8; 32]) -> Vec<
     data.push(0u8); // invert
     data.extend_from_slice(&0u32.to_le_bytes()); // unit_scale
     data.extend_from_slice(&0u64.to_le_bytes()); // initial_mark_price_e6 (0 for non-Hyperp markets)
-    // v12.19: `min_oracle_price_cap_e2bps` field dropped; runtime cap moved to
-    // RiskParams as `max_price_move_bps_per_slot` (immutable init-time).
+                                                 // v12.19: `min_oracle_price_cap_e2bps` field dropped; runtime cap moved to
+                                                 // RiskParams as `max_price_move_bps_per_slot` (immutable init-time).
     data.extend_from_slice(&0u128.to_le_bytes()); // maintenance_fee_per_slot (0 = disabled)
-    // RiskParams
+                                                  // RiskParams
     data.extend_from_slice(&0u64.to_le_bytes()); // h_min (warmup_period_slots)
     data.extend_from_slice(&500u64.to_le_bytes()); // maintenance_margin_bps
     data.extend_from_slice(&1000u64.to_le_bytes()); // initial_margin_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // trading_fee_bps
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
-    data.extend_from_slice(&0u128.to_le_bytes()); // new_account_fee
+    data.extend_from_slice(&1u128.to_le_bytes()); // new_account_fee (anti-spam floor)
     data.extend_from_slice(&1u64.to_le_bytes()); // h_max
     data.extend_from_slice(&50u64.to_le_bytes()); // max_crank_staleness_slots (< perm_resolve <= MAX_ACCRUAL_DT_SLOTS)
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&100u64.to_le_bytes()); // resolve_price_deviation_bps
     data.extend_from_slice(&0u128.to_le_bytes()); // min_liquidation_abs
-    data.extend_from_slice(&1u128.to_le_bytes()); // min_nonzero_mm_req
-    data.extend_from_slice(&2u128.to_le_bytes()); // min_nonzero_im_req
+    data.extend_from_slice(&21u128.to_le_bytes()); // min_nonzero_mm_req
+    data.extend_from_slice(&22u128.to_le_bytes()); // min_nonzero_im_req
     data.extend_from_slice(&2u64.to_le_bytes()); // max_price_move_bps_per_slot (v12.19)
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
@@ -587,20 +584,16 @@ fn test_bpf_i128_alignment() {
             AccountMeta::new(slab, false),
             AccountMeta::new_readonly(mint, false),
             AccountMeta::new(vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new_readonly(sysvar::clock::ID, false),
-            AccountMeta::new_readonly(sysvar::rent::ID, false),
             AccountMeta::new_readonly(pyth_index, false),
-            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
         ],
         data: encode_init_market(&payer.pubkey(), &mint, &TEST_FEED_ID),
     };
     // InitMarket now reads the oracle at genesis (§2.7, no sentinel), which
     // pushes it past the default 200K CU budget. Request 1.4M like the rest
     // of the test suite.
-    let cu_ix = solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(
-        1_400_000,
-    );
+    let cu_ix =
+        solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
     let tx = Transaction::new_signed_with_payer(
         &[cu_ix, ix],
         Some(&payer.pubkey()),

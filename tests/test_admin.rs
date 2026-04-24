@@ -185,11 +185,8 @@ fn test_critical_init_market_rejects_double_init() {
             AccountMeta::new(env.slab, false),
             AccountMeta::new_readonly(env.mint, false),
             AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new_readonly(sysvar::clock::ID, false),
-            AccountMeta::new_readonly(sysvar::rent::ID, false),
             AccountMeta::new_readonly(env.pyth_index, false),
-            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
         ],
         data: encode_init_market_with_invert(&admin.pubkey(), &env.mint, &TEST_FEED_ID, 0),
     };
@@ -219,8 +216,14 @@ fn test_critical_init_market_rejects_double_init() {
         &slab_before[..HEADER_CONFIG_LEN],
         "Rejected second InitMarket must not mutate slab header/config"
     );
-    assert_eq!(used_after, used_before, "Rejected second InitMarket must not change num_used_accounts");
-    assert_eq!(vault_after, vault_before, "Rejected second InitMarket must not move vault funds");
+    assert_eq!(
+        used_after, used_before,
+        "Rejected second InitMarket must not change num_used_accounts"
+    );
+    assert_eq!(
+        vault_after, vault_before,
+        "Rejected second InitMarket must not move vault funds"
+    );
     println!("Second InitMarket: REJECTED (correct)");
 
     println!("CRITICAL TEST PASSED: Double initialization rejection verified");
@@ -317,7 +320,8 @@ fn test_init_rejects_non_hyperp_with_no_resolve_path() {
         .expect_err("init must reject non-Hyperp + perm_resolve=0");
     assert!(
         err.contains("0x1a"),
-        "expected InvalidConfigParam, got: {}", err,
+        "expected InvalidConfigParam, got: {}",
+        err,
     );
 }
 
@@ -338,7 +342,7 @@ fn test_init_accepts_non_hyperp_cap_zero_with_perm_resolve() {
         &env.payer.pubkey(),
         &env.mint,
         &common::TEST_FEED_ID,
-        0,      // invert (non-Hyperp)
+        0, // invert (non-Hyperp)
         perm_resolve,
     );
     env.try_init_market_raw(data)
@@ -357,7 +361,6 @@ fn test_init_accepts_non_hyperp_cap_zero_with_perm_resolve() {
         .expect("ResolvePermissionless must succeed on cap=0+perm_resolve>0 market");
     assert!(env.is_market_resolved(), "market must flip to Resolved");
 }
-
 
 // test_set_oracle_price_cap_rejects_zero_when_floor_nonzero deleted:
 // SetOraclePriceCap (tag 18) was removed in v12.19. The per-slot price-move
@@ -383,34 +386,52 @@ fn test_init_market_rejects_vault_with_delegate() {
     let vault = Pubkey::new_unique();
     let attacker = Pubkey::new_unique();
 
-    svm.set_account(slab, Account {
-        lamports: 1_000_000_000,
-        data: vec![0u8; 1156736],
-        owner: program_id,
-        executable: false,
-        rent_epoch: 0,
-    }).unwrap();
-    svm.set_account(mint, Account {
-        lamports: 1_000_000,
-        data: {
-            let mut d = vec![0u8; spl_token::state::Mint::LEN];
-            use spl_token::state::Mint;
-            let m = Mint { mint_authority: solana_sdk::program_option::COption::None, supply: 0, decimals: 6, is_initialized: true, freeze_authority: solana_sdk::program_option::COption::None };
-            spl_token::state::Mint::pack(m, &mut d).unwrap();
-            d
+    svm.set_account(
+        slab,
+        Account {
+            lamports: 1_000_000_000,
+            data: vec![0u8; 1156736],
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
         },
-        owner: spl_token::ID,
-        executable: false,
-        rent_epoch: 0,
-    }).unwrap();
+    )
+    .unwrap();
+    svm.set_account(
+        mint,
+        Account {
+            lamports: 1_000_000,
+            data: {
+                let mut d = vec![0u8; spl_token::state::Mint::LEN];
+                use spl_token::state::Mint;
+                let m = Mint {
+                    mint_authority: solana_sdk::program_option::COption::None,
+                    supply: 0,
+                    decimals: 6,
+                    is_initialized: true,
+                    freeze_authority: solana_sdk::program_option::COption::None,
+                };
+                spl_token::state::Mint::pack(m, &mut d).unwrap();
+                d
+            },
+            owner: spl_token::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
     // Vault with delegate set — should be rejected
-    svm.set_account(vault, Account {
-        lamports: 1_000_000,
-        data: make_token_account_with_delegate(&mint, &vault_pda, 0, &attacker, 1_000_000_000),
-        owner: spl_token::ID,
-        executable: false,
-        rent_epoch: 0,
-    }).unwrap();
+    svm.set_account(
+        vault,
+        Account {
+            lamports: 1_000_000,
+            data: make_token_account_with_delegate(&mint, &vault_pda, 0, &attacker, 1_000_000_000),
+            owner: spl_token::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
 
     let ix = Instruction {
         program_id,
@@ -419,19 +440,22 @@ fn test_init_market_rejects_vault_with_delegate() {
             AccountMeta::new(slab, false),
             AccountMeta::new_readonly(mint, false),
             AccountMeta::new(vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new_readonly(sysvar::clock::ID, false),
-            AccountMeta::new_readonly(sysvar::rent::ID, false),
             AccountMeta::new_readonly(Pubkey::new_unique(), false),
-            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
         ],
         data: encode_init_market_full_v2(&payer.pubkey(), &mint, &[0xABu8; 32], 0, 0, 0),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[cu_ix(), ix], Some(&payer.pubkey()), &[&payer], svm.latest_blockhash(),
+        &[cu_ix(), ix],
+        Some(&payer.pubkey()),
+        &[&payer],
+        svm.latest_blockhash(),
     );
     let result = svm.send_transaction(tx);
-    assert!(result.is_err(), "InitMarket must reject vault with delegate");
+    assert!(
+        result.is_err(),
+        "InitMarket must reject vault with delegate"
+    );
 
     // Slab header must remain all-zeros (uninitialized) after rejected InitMarket
     let slab_after = svm.get_account(&slab).unwrap();
@@ -457,33 +481,51 @@ fn test_init_market_rejects_vault_with_close_authority() {
     let vault = Pubkey::new_unique();
     let attacker = Pubkey::new_unique();
 
-    svm.set_account(slab, Account {
-        lamports: 1_000_000_000,
-        data: vec![0u8; 1156736],
-        owner: program_id,
-        executable: false,
-        rent_epoch: 0,
-    }).unwrap();
-    svm.set_account(mint, Account {
-        lamports: 1_000_000,
-        data: {
-            let mut d = vec![0u8; spl_token::state::Mint::LEN];
-            use spl_token::state::Mint;
-            let m = Mint { mint_authority: solana_sdk::program_option::COption::None, supply: 0, decimals: 6, is_initialized: true, freeze_authority: solana_sdk::program_option::COption::None };
-            spl_token::state::Mint::pack(m, &mut d).unwrap();
-            d
+    svm.set_account(
+        slab,
+        Account {
+            lamports: 1_000_000_000,
+            data: vec![0u8; 1156736],
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
         },
-        owner: spl_token::ID,
-        executable: false,
-        rent_epoch: 0,
-    }).unwrap();
-    svm.set_account(vault, Account {
-        lamports: 1_000_000,
-        data: make_token_account_with_close_authority(&mint, &vault_pda, 0, &attacker),
-        owner: spl_token::ID,
-        executable: false,
-        rent_epoch: 0,
-    }).unwrap();
+    )
+    .unwrap();
+    svm.set_account(
+        mint,
+        Account {
+            lamports: 1_000_000,
+            data: {
+                let mut d = vec![0u8; spl_token::state::Mint::LEN];
+                use spl_token::state::Mint;
+                let m = Mint {
+                    mint_authority: solana_sdk::program_option::COption::None,
+                    supply: 0,
+                    decimals: 6,
+                    is_initialized: true,
+                    freeze_authority: solana_sdk::program_option::COption::None,
+                };
+                spl_token::state::Mint::pack(m, &mut d).unwrap();
+                d
+            },
+            owner: spl_token::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    svm.set_account(
+        vault,
+        Account {
+            lamports: 1_000_000,
+            data: make_token_account_with_close_authority(&mint, &vault_pda, 0, &attacker),
+            owner: spl_token::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
 
     let ix = Instruction {
         program_id,
@@ -492,19 +534,22 @@ fn test_init_market_rejects_vault_with_close_authority() {
             AccountMeta::new(slab, false),
             AccountMeta::new_readonly(mint, false),
             AccountMeta::new(vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new_readonly(sysvar::clock::ID, false),
-            AccountMeta::new_readonly(sysvar::rent::ID, false),
             AccountMeta::new_readonly(Pubkey::new_unique(), false),
-            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
         ],
         data: encode_init_market_full_v2(&payer.pubkey(), &mint, &[0xABu8; 32], 0, 0, 0),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[cu_ix(), ix], Some(&payer.pubkey()), &[&payer], svm.latest_blockhash(),
+        &[cu_ix(), ix],
+        Some(&payer.pubkey()),
+        &[&payer],
+        svm.latest_blockhash(),
     );
     let result = svm.send_transaction(tx);
-    assert!(result.is_err(), "InitMarket must reject vault with close_authority");
+    assert!(
+        result.is_err(),
+        "InitMarket must reject vault with close_authority"
+    );
 
     // Slab header must remain all-zeros (uninitialized) after rejected InitMarket
     let slab_after = svm.get_account(&slab).unwrap();
@@ -533,19 +578,28 @@ fn test_update_config_rejects_negative_funding_max_premium() {
             AccountMeta::new_readonly(sysvar::clock::ID, false),
         ],
         data: encode_update_config(
-            3600, 100,
-            -100i64,  // negative funding_max_premium_bps — must be rejected
+            3600, 100, -100i64, // negative funding_max_premium_bps — must be rejected
             10i64,
         ),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[cu_ix(), ix], Some(&admin.pubkey()), &[&admin], env.svm.latest_blockhash(),
+        &[cu_ix(), ix],
+        Some(&admin.pubkey()),
+        &[&admin],
+        env.svm.latest_blockhash(),
     );
     let result = env.svm.send_transaction(tx);
-    assert!(result.is_err(), "Negative funding_max_premium_bps must be rejected");
+    assert!(
+        result.is_err(),
+        "Negative funding_max_premium_bps must be rejected"
+    );
 
     // Config must be unchanged after rejection
-    assert_eq!(env.read_update_config_snapshot(), config_before, "config must be preserved after rejected UpdateConfig");
+    assert_eq!(
+        env.read_update_config_snapshot(),
+        config_before,
+        "config must be preserved after rejected UpdateConfig"
+    );
 }
 
 /// UpdateConfig must reject negative funding_max_e9_per_slot.
@@ -567,19 +621,27 @@ fn test_update_config_rejects_negative_funding_max_e9_per_slot() {
             AccountMeta::new_readonly(sysvar::clock::ID, false),
         ],
         data: encode_update_config(
-            3600, 100,
-            100i64,
-            -5i64,  // negative funding_max_e9_per_slot — must be rejected
+            3600, 100, 100i64, -5i64, // negative funding_max_e9_per_slot — must be rejected
         ),
     };
     let tx = Transaction::new_signed_with_payer(
-        &[cu_ix(), ix], Some(&admin.pubkey()), &[&admin], env.svm.latest_blockhash(),
+        &[cu_ix(), ix],
+        Some(&admin.pubkey()),
+        &[&admin],
+        env.svm.latest_blockhash(),
     );
     let result = env.svm.send_transaction(tx);
-    assert!(result.is_err(), "Negative funding_max_e9_per_slot must be rejected");
+    assert!(
+        result.is_err(),
+        "Negative funding_max_e9_per_slot must be rejected"
+    );
 
     // Config must be unchanged after rejection
-    assert_eq!(env.read_update_config_snapshot(), config_before, "config must be preserved after rejected UpdateConfig");
+    assert_eq!(
+        env.read_update_config_snapshot(),
+        config_before,
+        "config must be preserved after rejected UpdateConfig"
+    );
 }
 
 /// InitMarket must reject a vault that already holds tokens.
@@ -630,11 +692,8 @@ fn test_init_market_rejects_nonempty_vault() {
             AccountMeta::new(env.slab, false),
             AccountMeta::new_readonly(env.mint, false),
             AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new_readonly(sysvar::clock::ID, false),
-            AccountMeta::new_readonly(sysvar::rent::ID, false),
             AccountMeta::new_readonly(env.pyth_index, false),
-            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
         ],
         data: encode_init_market_full_v2(&admin.pubkey(), &env.mint, &TEST_FEED_ID, 0, 0, 0),
     };
@@ -698,10 +757,7 @@ fn test_update_config_admin_only() {
     env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
 
     let result = env.try_update_config_with_params(&attacker, 3600);
-    assert!(
-        result.is_err(),
-        "UpdateConfig must reject non-admin signer"
-    );
+    assert!(result.is_err(), "UpdateConfig must reject non-admin signer");
 }
 
 // ============================================================================
@@ -878,7 +934,9 @@ fn test_update_authority_insurance_survives_admin_burn() {
 
     // Before admin burn: delegate insurance_authority to a dedicated key.
     let ins_authority = Keypair::new();
-    env.svm.airdrop(&ins_authority.pubkey(), 1_000_000_000).unwrap();
+    env.svm
+        .airdrop(&ins_authority.pubkey(), 1_000_000_000)
+        .unwrap();
     env.try_update_authority(&admin, AUTHORITY_INSURANCE, Some(&ins_authority))
         .expect("delegate insurance_authority");
 
@@ -895,5 +953,3 @@ fn test_update_authority_insurance_survives_admin_burn() {
     env.try_update_authority(&ins_authority, AUTHORITY_INSURANCE, Some(&new_ins))
         .expect("insurance_authority survives admin burn");
 }
-
-
