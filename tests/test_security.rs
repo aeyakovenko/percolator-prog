@@ -13841,3 +13841,662 @@ fn test_attack_fee_credits_mass_forgiveness_insurance_drain() {
     );
 }
 
+// ===== Session 5 — vip-ultr / Claude Code (2026-04-24) — fee/ADL/dust surfaces =====
+
+/// SURFACE 1 — maintenance-fee bulk liquidation drain.
+///
+/// Prior sessions all used maintenance_fee_per_slot = 0. This test uses a
+/// non-zero fee rate, creates N accounts with tiny positions, advances slots
+/// to drain their capital via fee accrual, then liquidates them all.
+///
+/// EXPLOIT if: sum(insurance_delta from liquidations) > sum(fees paid in).
+/// I.e. the protocol paid out more than the attackers paid in.
+#[test]
+fn test_attack_maintenance_fee_bulk_liquidation_drain() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    let data = common::encode_init_market_with_maint_fee_bounded(
+        &env.payer.pubkey(),
+        &env.mint,
+        &common::TEST_FEED_ID,
+        1_000_000_000,
+        10_000, // high fee per slot to accelerate drain
+        0,
+    );
+    env.try_init_market_raw(data).expect("init_market");
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 5_000_000_000);
+    let ins_initial = env.read_insurance_balance();
+    let vault_initial = env.vault_balance();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    // Create N=8 user accounts with minimum capital, all long positions.
+    // Choose capital = 2_000_000 (2x min_nonzero_im) + small buffer.
+    const N_USERS: usize = 8;
+    let mut users: Vec<Keypair> = Vec::with_capacity(N_USERS);
+    let mut user_idxs: Vec<u16> = Vec::with_capacity(N_USERS);
+    let user_deposit: u64 = 5_000_000;
+
+    env.set_slot_and_price(100, 1_000_000);
+    env.crank();
+
+    for _ in 0..N_USERS {
+        let u = Keypair::new();
+        let idx = env.init_user(&u);
+        env.deposit(&u, idx, user_deposit);
+        // Tiny position, barely passes IM
+        let _ = env.try_trade(&u, &lp, lp_idx, idx, 1_000_000);
+        users.push(u);
+        user_idxs.push(idx);
+    }
+
+    let ins_after_open = env.read_insurance_balance();
+    println!(
+        "after {} opens: ins_delta={}, vault={}",
+        N_USERS,
+        ins_after_open as i128 - ins_initial as i128,
+        env.vault_balance()
+    );
+
+    // Advance slots so fees accumulate and drive accounts below MM.
+    // 10_000 fee_per_slot × 500 slots = 5M fee per account, well exceeding
+    // 5M capital.
+    let mut slot = 110u64;
+    for _ in 0..60u64 {
+        slot += 10;
+        env.set_slot_and_price(slot, 1_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.try_crank();
+    }
+
+    let ins_after_fees = env.read_insurance_balance();
+    println!(
+        "after fee drain: ins_delta={} (fees collected), \
+         first_user_cap={} fc={}",
+        ins_after_fees as i128 - ins_initial as i128,
+        env.read_account_capital(user_idxs[0]),
+        env.read_account_fee_credits(user_idxs[0])
+    );
+
+    // Now liquidate each user in sequence.
+    let mut liq_count = 0;
+    for &idx in &user_idxs {
+        let ins_pre = env.read_insurance_balance();
+        let r = env.try_liquidate(idx);
+        let ins_post = env.read_insurance_balance();
+        if r.is_ok() {
+            liq_count += 1;
+            println!(
+                "liq {}: ok={} ins_delta={}",
+                idx, r.is_ok(), ins_post as i128 - ins_pre as i128
+            );
+        }
+    }
+
+    let ins_final = env.read_insurance_balance();
+    let vault_final = env.vault_balance();
+    let insurance_delta: i128 = ins_final as i128 - ins_initial as i128;
+    let fees_paid_to_ins: i128 = ins_after_fees as i128 - ins_initial as i128;
+    let drain_from_liq: i128 = ins_final as i128 - ins_after_fees as i128;
+
+    println!(
+        "FINAL: liq_count={} ins_delta={} fees_to_ins={} drain_from_liq={} \
+         vault_delta={}",
+        liq_count, insurance_delta, fees_paid_to_ins, drain_from_liq,
+        vault_final as i128 - vault_initial as i128
+    );
+
+    // EXPLOIT: liquidation drained more than fees paid in.
+    // insurance_delta should be >= 0 (fees went IN, liquidations at most
+    // gave back some for deficit coverage — which is fine only if
+    // deficit < fees paid).
+    assert!(
+        insurance_delta >= 0,
+        "EXPLOIT: insurance net dropped by {} across {} liquidations; \
+         fees_paid={}, drain_from_liq={}",
+        -insurance_delta, liq_count, fees_paid_to_ins, drain_from_liq
+    );
+    // Additional: vault must be conserved with engine bookkeeping.
+    assert_eq!(
+        env.read_engine_vault() as u64, vault_final,
+        "EXPLOIT: engine/spl vault drift after bulk liq"
+    );
+}
+
+/// SURFACE 3 — concurrent multi-account phantom dust accumulation.
+///
+/// Session 3 V2 tested single-account repeated re-attachment. This test
+/// uses many accounts simultaneously each triggering re-attachment, to
+/// stress the aggregate OI-sweep gate at schedule_end_of_instruction_resets
+/// (engine 2686).
+#[test]
+fn test_attack_phantom_dust_concurrent_max_accounts() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 5_000_000_000);
+    let ins_initial = env.read_insurance_balance();
+    let vault_initial = env.vault_balance();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 500_000_000_000);
+
+    env.set_slot_and_price(100, 100_000_000);
+    env.crank();
+
+    // Create a modest set of user accounts (LiteSVM overhead makes 200 too
+    // heavy; 30 still stresses concurrent re-attach) and trigger
+    // re-attachments on each.
+    const N: usize = 30;
+    let mut users = Vec::with_capacity(N);
+    let mut idxs = Vec::with_capacity(N);
+    for _ in 0..N {
+        let u = Keypair::new();
+        let ix = env.init_user(&u);
+        env.deposit(&u, ix, 500_000_000);
+        users.push(u);
+        idxs.push(ix);
+    }
+
+    // Prime each with a position.
+    let mut slot = 110u64;
+    for (u, &ix) in users.iter().zip(idxs.iter()) {
+        slot += 1;
+        env.set_slot_and_price(slot, 100_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.try_trade(u, &lp, lp_idx, ix, 100_000);
+    }
+
+    // Now drive re-attachment via tiny flip-flops on each, with price
+    // jitter between rounds.
+    for round in 0..3u64 {
+        let price = 100_000_000 + ((round as i64 % 3) - 1) * 500_000;
+        for (i, (u, &ix)) in users.iter().zip(idxs.iter()).enumerate() {
+            slot += 1;
+            env.set_slot_and_price(slot, price);
+            env.svm.expire_blockhash();
+            let sz: i128 = if (round + i as u64) % 2 == 0 { -50_000 } else { 50_000 };
+            let _ = env.try_trade(u, &lp, lp_idx, ix, sz);
+        }
+        let ev = env.read_engine_vault() as u64;
+        let sv = env.vault_balance();
+        assert_eq!(
+            ev, sv,
+            "EXPLOIT: vault drift at round {}: engine={} spl={}",
+            round, ev, sv
+        );
+    }
+
+    // Force a full-sweep crank with large slot jump to exercise the
+    // schedule_end_of_instruction_resets gate in aggregate.
+    slot += 10_000;
+    env.set_slot_and_price(slot, 100_000_000);
+    env.svm.expire_blockhash();
+    let _ = env.try_crank();
+
+    let ins_final = env.read_insurance_balance();
+    let vault_final = env.vault_balance();
+    println!(
+        "SURFACE-3 final: ins_delta={} vault_delta={} engine_vault={} spl={}",
+        ins_final as i128 - ins_initial as i128,
+        vault_final as i128 - vault_initial as i128,
+        env.read_engine_vault(), vault_final
+    );
+
+    assert_eq!(
+        env.read_engine_vault() as u64, vault_final,
+        "EXPLOIT: terminal engine/spl vault drift after concurrent re-attach"
+    );
+    // Trading fees are 0 on default market, so insurance should not drop;
+    // it may be exactly equal or slightly up from any fee flows.
+    assert!(
+        ins_final >= ins_initial,
+        "EXPLOIT: insurance dropped during concurrent phantom-dust churn: \
+         before={} after={}",
+        ins_initial, ins_final
+    );
+}
+
+// ===== Session 6 — vip-ultr / Claude Code (2026-04-24) =====
+// Live params first time tested: maint_fee=265, MM/IM=1000/2000,
+// new_account_fee=57_000_000, trading_fee_bps=10, funding_k_bps=100,
+// funding_horizon_slots=7200.
+//
+// Sessions 1-5 all ran with maint_fee=0 and MM/IM=500/1000. Mainnet target
+// 5ZamUkAiXtvYQijNiRcuGaea66TVbbTPusHfwMX1kTqB has different params; this
+// session probes whether the IM-MM gap (10% of notional) plus 265-lamport-
+// per-slot fee drain creates an extractable insurance payout under adverse
+// oracle moves.
+
+/// Build an InitMarket payload with EXACT live mainnet params.
+fn encode_init_market_live_params(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    feed_id: &[u8; 32],
+) -> Vec<u8> {
+    let mut data = vec![0u8]; // discriminator
+    data.extend_from_slice(admin.as_ref());
+    data.extend_from_slice(mint.as_ref());
+    data.extend_from_slice(feed_id);
+    data.extend_from_slice(&86400u64.to_le_bytes());      // max_staleness_secs
+    data.extend_from_slice(&500u16.to_le_bytes());        // conf_filter_bps
+    data.push(0u8);                                       // invert
+    data.extend_from_slice(&0u32.to_le_bytes());          // unit_scale
+    data.extend_from_slice(&0u64.to_le_bytes());          // initial_mark_price_e6 (non-Hyperp)
+    data.extend_from_slice(&265u128.to_le_bytes());       // maintenance_fee_per_slot ✱ LIVE
+    data.extend_from_slice(&1_000_000u64.to_le_bytes());  // min_oracle_price_cap_e2bps (uncapped)
+    // RiskParams
+    data.extend_from_slice(&0u64.to_le_bytes());          // h_min
+    data.extend_from_slice(&1000u64.to_le_bytes());       // maintenance_margin_bps ✱ LIVE
+    data.extend_from_slice(&2000u64.to_le_bytes());       // initial_margin_bps ✱ LIVE
+    data.extend_from_slice(&10u64.to_le_bytes());         // trading_fee_bps ✱ LIVE
+    data.extend_from_slice(&(common::MAX_ACCOUNTS as u64).to_le_bytes());
+    data.extend_from_slice(&57_000_000u128.to_le_bytes()); // new_account_fee ✱ LIVE
+    data.extend_from_slice(&1u64.to_le_bytes());          // h_max
+    data.extend_from_slice(&1800u64.to_le_bytes());       // max_crank_staleness_slots
+    data.extend_from_slice(&100u64.to_le_bytes());        // liquidation_fee_bps (live=100)
+    data.extend_from_slice(&11_500_000_000u128.to_le_bytes()); // liquidation_fee_cap (live)
+    data.extend_from_slice(&100u64.to_le_bytes());        // resolve_price_deviation_bps
+    data.extend_from_slice(&11_500_000u128.to_le_bytes()); // min_liquidation_abs (live)
+    data.extend_from_slice(&1u128.to_le_bytes());         // min_nonzero_mm_req
+    data.extend_from_slice(&2u128.to_le_bytes());         // min_nonzero_im_req
+    // Extended tail (live params)
+    data.extend_from_slice(&0u16.to_le_bytes());          // insurance_withdraw_max_bps
+    data.extend_from_slice(&0u64.to_le_bytes());          // insurance_withdraw_cooldown_slots
+    data.extend_from_slice(&432_000u64.to_le_bytes());    // permissionless_resolve_stale_slots ✱ LIVE
+    data.extend_from_slice(&7200u64.to_le_bytes());       // funding_horizon_slots ✱ LIVE
+    data.extend_from_slice(&100u64.to_le_bytes());        // funding_k_bps ✱ LIVE
+    data.extend_from_slice(&500i64.to_le_bytes());        // funding_max_premium_bps ✱ LIVE
+    data.extend_from_slice(&10_000i64.to_le_bytes());     // funding_max_e9_per_slot ✱ LIVE
+    data.extend_from_slice(&0u64.to_le_bytes());          // mark_min_fee
+    data.extend_from_slice(&432_000u64.to_le_bytes());    // force_close_delay_slots ✱ LIVE
+    data
+}
+
+/// Run a single live-params fee-drain liquidation scenario at a chosen
+/// oracle move. Returns (paid_in, received, ins_delta_signed).
+fn run_live_params_scenario(label: &str, oracle_move_pct: i64) -> (i128, i128, i128) {
+    let mut env = TestEnv::new();
+    let init_data = encode_init_market_live_params(
+        &env.payer.pubkey(),
+        &env.mint,
+        &common::TEST_FEED_ID,
+    );
+    env.try_init_market_raw(init_data).expect("init_market live params");
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    // Match mainnet insurance balance (~6.68 SOL).
+    env.top_up_insurance(&admin, 6_680_518_000);
+    let ins_initial = env.read_insurance_balance();
+    let vault_initial = env.vault_balance();
+
+    // Provide a deep LP so the trade matches without LP-side admission failing.
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp_with_fee(&lp, 57_001_000);
+    let lp_deposit: u64 = 100_000_000_000; // 100 SOL — well-funded, doesn't drift below MM
+    env.deposit(&lp, lp_idx, lp_deposit);
+
+    // Anchor at price 1e6 (= 1.0 in e6).
+    let price0: i64 = 1_000_000;
+    env.set_slot_and_price(100, price0);
+    env.crank();
+
+    // Attacker user.
+    let user = Keypair::new();
+    let user_idx = env.init_user_with_fee(&user, 57_001_000);
+    // Capital sized to be just above IM after new_account_fee deduction.
+    // Position size = 1_000_000 units; at price=1e6, notional ≈ 1_000_000.
+    // IM = 20% of notional = 200_000. Use a 2x buffer so trade succeeds.
+    // Capital deposited to engine = deposit - new_account_fee_already_paid.
+    // new_account_fee is taken at init_user; deposit puts capital separately.
+    let user_deposit: u64 = 1_000_000;
+    env.deposit(&user, user_idx, user_deposit);
+
+    let cap_before_open = env.read_account_capital(user_idx);
+    let pos_size: i128 = 1_000_000; // long
+    let trade_r = env.try_trade(&user, &lp, lp_idx, user_idx, pos_size);
+    let cap_after_open = env.read_account_capital(user_idx);
+    let pos_after = env.read_account_position(user_idx);
+
+    println!(
+        "[{}] open trade: ok={:?} cap_before={} cap_after={} pos={}",
+        label, trade_r.is_ok(), cap_before_open, cap_after_open, pos_after
+    );
+
+    // Apply oracle move.
+    let new_price: i64 = if oracle_move_pct == 0 {
+        price0
+    } else {
+        price0 + (price0 * oracle_move_pct) / 100
+    };
+
+    // Drain fees in incremental chunks so the per-account fee sweep
+    // actually processes the user. (One-shot multi-million-slot jumps
+    // outrun the keeper's max_syncs budget on a single crank.)
+    let mut slot = 110u64;
+    for _ in 0..30u64 {
+        slot += 200_000; // 30 × 200_000 = 6M slots; fee/cycle = 265 × 200_000 = 53M
+        env.set_slot_and_price(slot, new_price);
+        env.svm.expire_blockhash();
+        let _ = env.try_crank();
+    }
+
+    let cap_after_drain = env.read_account_capital(user_idx);
+    let fc_after_drain = env.read_account_fee_credits(user_idx);
+    let ins_after_drain = env.read_insurance_balance();
+    println!(
+        "[{}] post-drain: slot={} price={} cap={} fc={} ins_delta={}",
+        label, slot, new_price, cap_after_drain, fc_after_drain,
+        ins_after_drain as i128 - ins_initial as i128
+    );
+
+    // Liquidate.
+    let liq_r = env.try_liquidate(user_idx);
+    let cap_after_liq = env.read_account_capital(user_idx);
+    let pnl_after_liq = env.read_account_pnl(user_idx);
+    let ins_after_liq = env.read_insurance_balance();
+    println!(
+        "[{}] post-liq: ok={:?} cap={} pnl={} ins_delta={}",
+        label, liq_r.is_ok(), cap_after_liq, pnl_after_liq,
+        ins_after_liq as i128 - ins_initial as i128
+    );
+
+    // Attacker withdraws everything that's withdrawable.
+    let withdraw_amount = cap_after_liq.min(u64::MAX as u128) as u64;
+    let mut withdrawn: u64 = 0;
+    if withdraw_amount > 0 {
+        if env.try_withdraw(&user, user_idx, withdraw_amount).is_ok() {
+            withdrawn = withdraw_amount;
+        }
+    }
+
+    let ins_final = env.read_insurance_balance();
+    let vault_final = env.vault_balance();
+
+    // Accounting (in lamports, signed for safety):
+    //   paid_in    = user_deposit (covers new_account_fee + capital)
+    //   received   = withdrawn + any residual claim
+    //   ins_delta  = ins_final - ins_initial
+    let paid_in: i128 = (user_deposit as i128) + 57_000_000i128; // deposit + new_account_fee
+    let received: i128 = withdrawn as i128 + cap_after_liq as i128;
+    let ins_delta: i128 = ins_final as i128 - ins_initial as i128;
+
+    println!(
+        "[{}] FINAL: paid_in={} withdrawn={} residual_cap={} ins_delta={} \
+         vault_delta={} net={}",
+        label, paid_in, withdrawn, cap_after_liq, ins_delta,
+        vault_final as i128 - vault_initial as i128,
+        received - paid_in,
+    );
+
+    // Vault parity invariant.
+    assert_eq!(
+        env.read_engine_vault() as u64, vault_final,
+        "[{}] EXPLOIT: engine/spl vault drift", label
+    );
+
+    (paid_in, received, ins_delta)
+}
+
+#[test]
+fn test_attack_live_params_fee_drain_liquidation_economics() {
+    program_path();
+
+    println!("=== Session 6 Test 1A — flat oracle (pure fee drain) ===");
+    let (paid_a, recv_a, ins_a) = run_live_params_scenario("1A flat", 0);
+    let net_a = recv_a - paid_a;
+    println!(
+        ">>> 1A: oracle=0%, paid={}, received={}, ins_delta={}, net={}",
+        paid_a, recv_a, ins_a, net_a
+    );
+    // PASS_SAFE assertion: attacker cannot net-extract while insurance also
+    // dropped. The attack requires BOTH: profit AND insurance contributed
+    // to that profit.
+    assert!(
+        !(net_a > 0 && ins_a < 0),
+        "EXPLOIT (1A): net profit {} with ins drained {}", net_a, -ins_a
+    );
+
+    println!("=== Session 6 Test 1B — oracle down 10% ===");
+    let (paid_b, recv_b, ins_b) = run_live_params_scenario("1B -10%", -10);
+    let net_b = recv_b - paid_b;
+    println!(
+        ">>> 1B: oracle=-10%, paid={}, received={}, ins_delta={}, net={}",
+        paid_b, recv_b, ins_b, net_b
+    );
+    assert!(
+        !(net_b > 0 && ins_b < 0),
+        "EXPLOIT (1B): net profit {} with ins drained {}", net_b, -ins_b
+    );
+
+    println!("=== Session 6 Test 1C — oracle down 20% ===");
+    let (paid_c, recv_c, ins_c) = run_live_params_scenario("1C -20%", -20);
+    let net_c = recv_c - paid_c;
+    println!(
+        ">>> 1C: oracle=-20%, paid={}, received={}, ins_delta={}, net={}",
+        paid_c, recv_c, ins_c, net_c
+    );
+    assert!(
+        !(net_c > 0 && ins_c < 0),
+        "EXPLOIT (1C): net profit {} with ins drained {}", net_c, -ins_c
+    );
+}
+
+#[test]
+fn test_attack_live_params_bulk_fee_drain_simultaneous() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    let init_data = encode_init_market_live_params(
+        &env.payer.pubkey(), &env.mint, &common::TEST_FEED_ID,
+    );
+    env.try_init_market_raw(init_data).expect("init_market live params");
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 6_680_518_000);
+    let ins_initial = env.read_insurance_balance();
+    let vault_initial = env.vault_balance();
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp_with_fee(&lp, 57_001_000);
+    env.deposit(&lp, lp_idx, 200_000_000_000);
+
+    env.set_slot_and_price(100, 1_000_000);
+    env.crank();
+
+    const N: usize = 10;
+    let mut users = Vec::with_capacity(N);
+    let mut idxs = Vec::with_capacity(N);
+    let user_deposit: u64 = 1_000_000;
+    let mut total_paid_in: i128 = 0;
+
+    for _ in 0..N {
+        let u = Keypair::new();
+        let ix = env.init_user_with_fee(&u, 57_001_000);
+        env.deposit(&u, ix, user_deposit);
+        let _ = env.try_trade(&u, &lp, lp_idx, ix, 1_000_000);
+        total_paid_in += (user_deposit as i128) + 57_000_000i128;
+        users.push(u);
+        idxs.push(ix);
+    }
+
+    let ins_after_open = env.read_insurance_balance();
+    println!(
+        "Test 2 — after {} opens: ins_delta={} (new_account_fees + trading_fees flow IN)",
+        N, ins_after_open as i128 - ins_initial as i128
+    );
+
+    // Drain fees in increments while applying a 10% oracle drop.
+    let new_price: i64 = 900_000;
+    let mut slot = 100u64;
+    for _ in 0..30u64 {
+        slot += 200_000;
+        env.set_slot_and_price(slot, new_price);
+        env.svm.expire_blockhash();
+        let _ = env.try_crank();
+    }
+
+    let ins_after_drain = env.read_insurance_balance();
+    println!(
+        "Test 2 — post-drain (slot={}, price={}): ins_delta={}",
+        slot, new_price, ins_after_drain as i128 - ins_initial as i128
+    );
+
+    // Liquidate all in sequence (same crank window).
+    let mut liq_count = 0;
+    let mut total_residual_cap: i128 = 0;
+    for &ix in &idxs {
+        let _ = env.try_liquidate(ix);
+        let cap = env.read_account_capital(ix);
+        total_residual_cap += cap as i128;
+        if cap < user_deposit as u128 { liq_count += 1; }
+    }
+
+    // Withdraw whatever's left to attacker (single owner).
+    let mut total_withdrawn: i128 = 0;
+    for (u, &ix) in users.iter().zip(idxs.iter()) {
+        let cap = env.read_account_capital(ix);
+        if cap > 0 {
+            let amt = cap.min(u64::MAX as u128) as u64;
+            if env.try_withdraw(u, ix, amt).is_ok() {
+                total_withdrawn += amt as i128;
+            }
+        }
+    }
+
+    let ins_final = env.read_insurance_balance();
+    let vault_final = env.vault_balance();
+    let total_received = total_withdrawn;
+    let net_total = total_received - total_paid_in;
+    let ins_delta_total: i128 = ins_final as i128 - ins_initial as i128;
+
+    println!(
+        ">>> Test 2 FINAL: N={} liq_count={} paid_in_total={} withdrawn_total={} \
+         residual_total={} ins_delta={} vault_delta={} net={}",
+        N, liq_count, total_paid_in, total_withdrawn, total_residual_cap,
+        ins_delta_total, vault_final as i128 - vault_initial as i128, net_total
+    );
+
+    assert_eq!(
+        env.read_engine_vault() as u64, vault_final,
+        "EXPLOIT (2): engine/spl vault drift in bulk"
+    );
+    assert!(
+        !(net_total > 0 && ins_delta_total < 0),
+        "EXPLOIT (2): bulk net profit {} with ins drained {}",
+        net_total, -ins_delta_total
+    );
+}
+
+#[test]
+fn test_attack_live_params_lp_fee_drain_bankruptcy() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    let init_data = encode_init_market_live_params(
+        &env.payer.pubkey(), &env.mint, &common::TEST_FEED_ID,
+    );
+    env.try_init_market_raw(init_data).expect("init_market live params");
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 6_680_518_000);
+    let ins_initial = env.read_insurance_balance();
+    let vault_initial = env.vault_balance();
+
+    // Single attacker controls BOTH the LP and the user account.
+    // LP gets minimal capital (just enough to clear IM at the trade size).
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp_with_fee(&lp, 57_001_000);
+    let lp_deposit: u64 = 1_000_000;
+    env.deposit(&lp, lp_idx, lp_deposit);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user_with_fee(&user, 57_001_000);
+    let user_deposit: u64 = 5_000_000;
+    env.deposit(&user, user_idx, user_deposit);
+
+    env.set_slot_and_price(100, 1_000_000);
+    env.crank();
+
+    // Attacker opens user-long vs. LP-short.
+    let pos: i128 = 500_000;
+    let trade_r = env.try_trade(&user, &lp, lp_idx, user_idx, pos);
+    println!(
+        "Test 3 — open: ok={:?} lp_cap={} user_cap={} ins_delta_open={}",
+        trade_r.is_ok(),
+        env.read_account_capital(lp_idx),
+        env.read_account_capital(user_idx),
+        env.read_insurance_balance() as i128 - ins_initial as i128
+    );
+
+    // Drain LP via fees + adverse-to-LP oracle (oracle UP — LP is short).
+    let up_price: i64 = 1_100_000;
+    let mut slot = 100u64;
+    for _ in 0..30u64 {
+        slot += 200_000;
+        env.set_slot_and_price(slot, up_price);
+        env.svm.expire_blockhash();
+        let _ = env.try_crank();
+    }
+
+    println!(
+        "Test 3 — post-drain: lp_cap={} user_cap={} user_pnl={} ins_delta={}",
+        env.read_account_capital(lp_idx),
+        env.read_account_capital(user_idx),
+        env.read_account_pnl(user_idx),
+        env.read_insurance_balance() as i128 - ins_initial as i128
+    );
+
+    // Liquidate LP (insurance pays LP deficit, user gains counterparty PnL).
+    let liq_r = env.try_liquidate(lp_idx);
+    println!(
+        "Test 3 — LP liq: ok={:?} lp_cap_post={} user_pnl_post={} ins_delta={}",
+        liq_r.is_ok(),
+        env.read_account_capital(lp_idx),
+        env.read_account_pnl(user_idx),
+        env.read_insurance_balance() as i128 - ins_initial as i128
+    );
+
+    // Attacker withdraws everything from both accounts.
+    let mut total_withdrawn: i128 = 0;
+    for (k, ix) in [(&lp, lp_idx), (&user, user_idx)] {
+        let cap = env.read_account_capital(ix);
+        if cap > 0 {
+            let amt = cap.min(u64::MAX as u128) as u64;
+            if env.try_withdraw(k, ix, amt).is_ok() {
+                total_withdrawn += amt as i128;
+            }
+        }
+    }
+
+    let ins_final = env.read_insurance_balance();
+    let vault_final = env.vault_balance();
+    let total_paid_in: i128 = lp_deposit as i128 + user_deposit as i128 + 2 * 57_000_000i128;
+    let net = total_withdrawn - total_paid_in;
+    let ins_delta = ins_final as i128 - ins_initial as i128;
+
+    println!(
+        ">>> Test 3 FINAL: paid_in={} withdrawn={} ins_delta={} \
+         vault_delta={} net={}",
+        total_paid_in, total_withdrawn, ins_delta,
+        vault_final as i128 - vault_initial as i128, net
+    );
+
+    assert_eq!(
+        env.read_engine_vault() as u64, vault_final,
+        "EXPLOIT (3): engine/spl vault drift LP bankruptcy"
+    );
+    assert!(
+        !(net > 0 && ins_delta < 0),
+        "EXPLOIT (3): LP-bankruptcy net profit {} with ins drained {}",
+        net, -ins_delta
+    );
+}

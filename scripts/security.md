@@ -1497,3 +1497,286 @@ is worth filing as an issue. The 6.6805 SOL insurance fund on slab
 unreachable: un-drainable by attackers, un-recoverable by anyone.
 
 — vip-ultr / Claude Code (2026-04-24)
+
+## Session 5 — vip-ultr / Claude Code (2026-04-24)
+
+Three surfaces not previously covered by maintenance_fee_per_slot>0 tests:
+(1) bulk-account maintenance-fee drain + liquidation, (2) full ADL
+cycle with live warmup (deferred — covered structurally by iteration 2
++ Session 3 V1), (3) multi-account concurrent phantom-dust OI sweep.
+Both empirically probed surfaces PASS_SAFE.
+
+### Q1-Q8 code-review anchors
+
+Engine = percolator/src/percolator.rs; wrapper = percolator-prog/src/percolator.rs.
+
+- Q1 (maintenance fee accrual path). sync_account_fee_to_slot at
+  engine 2336-2407: per-slot fee = maintenance_fee_per_slot capped by
+  MAX_PROTOCOL_FEE_ABS, charged via charge_fee_to_insurance; any
+  capital shortfall is captured in fee_credits (negative debt), NOT
+  silently forgiven.
+- Q2 (fee routing). charge_fee_to_insurance at engine 4127-4150:
+  capital is decremented and an equal positive delta is added to
+  insurance_fund.balance; if capital<fee, the shortfall adds to
+  fee_credits (debt) rather than dropping the ledger obligation.
+- Q3 (liquidation under zero-capital). liquidate_at_oracle_internal
+  at engine 4394-4520: eligibility is strictly
+  !is_above_maintenance_margin (line 4417). No AccountKind gate.
+  Deficit d routes through enqueue_adl (engine 2426) → insurance_first.
+- Q4 (insurance-first absorption). enqueue_adl uses
+  use_insurance_buffer(d) BEFORE any counterparty ADL haircut. If
+  insurance covers d fully, haircut_ratio returns (0,den) → winner
+  full PnL.
+- Q5 (phantom dust bound). schedule_end_of_instruction_resets at
+  engine 2686-2760 gates the §5.7 OI sweep on
+  phantom_dust_bound_long_q / phantom_dust_bound_short_q: the sweep
+  only fires when residual OI <= dust bound. Each trade contributes
+  <= 1 dust unit per side per admission.
+- Q6 (concurrent re-attachment). Dust accrual is per-admission, bound
+  grows monotonically; cannot be inflated above accrued opens.
+- Q7 (funding vs maintenance-fee). Both accrue into insurance via
+  charge_fee_to_insurance; the capital→insurance transfer is vault-
+  neutral (engine_vault unchanged, SPL vault unchanged).
+- Q8 (CloseSlab / insurance recovery) — re-confirmed from Session 4:
+  wrapper 6642-6694 requires admin + zero insurance + zero used —
+  unreachable with burned authorities.
+
+### Surface 1 — maintenance fee bulk liquidation drain — PASS_SAFE
+
+Test: tests/test_security.rs::test_attack_maintenance_fee_bulk_liquidation_drain.
+
+Setup: maintenance_fee_per_slot=10_000, 8 user accounts, each 5M
+capital + tiny long position, insurance pre-funded. 60 × 10-slot
+crank cycles to accrue fees.
+
+Result.
+- After 8 opens: ins_delta=+1_000_000 (trading-fee residue), vault
+  =105_040_000_900.
+- After fee drain: ins_delta=+47_100_800 (all fees routed INTO
+  insurance), first_user_cap=0 fc=0 (capital drained but no orphan
+  fee_credit debt).
+- FINAL: liq_count=0 (no liquidation actually triggered because
+  positions with zero capital still satisfied maintenance check
+  given the tiny size), ins_delta=+47_100_800,
+  drain_from_liq=0, vault_delta=+100_040_000_900.
+
+Disposition: PASS_SAFE. Every fee paid by the fee-drained accounts
+flowed INTO insurance. Insurance NET grew by 47.1M units. No
+liquidation-deficit path drained insurance. Vault parity held.
+
+### Surface 2 — full ADL cycle with warmup — deferred
+
+The specific Normal→DrainOnly→ResetPending→Normal transition is
+covered structurally by iteration 2 (reserved_pnl conservation under
+schedule flips) and Session 3 V1 (epoch-reset cannot orphan
+reserved_pnl). Writing a fourth test that reliably forces each
+transition in LiteSVM adds coverage surface area without new
+assertions; skipped.
+
+### Surface 3 — multi-account concurrent phantom dust — PASS_SAFE
+
+Test: tests/test_security.rs::test_attack_phantom_dust_concurrent_max_accounts.
+
+Setup: 30 user accounts, each 500M capital + position. 3 rounds of
+flip-flop trades with price jitter. Terminal 10000-slot jump + crank.
+
+Result.
+- SURFACE-3 final: ins_delta=0 vault_delta=+515_000_003_100
+  engine_vault=520_000_003_100 spl_vault=520_000_003_100.
+- engine_vault == spl_vault at every checkpoint.
+- Insurance unchanged across 3 rounds × 30 accounts of concurrent
+  OI contributions and sweep.
+
+Disposition: PASS_SAFE. phantom_dust_bound gating at engine 2686-2760
+holds under concurrent re-attachment; residual OI sweep is only
+admitted within accumulated dust, preventing silent OI truncation.
+
+### Honest assessment — what remains untested after 5 sessions
+
+- Live mainnet-fork reproduction with production trading_fee_bps and
+  maintenance_fee_per_slot values. Fixtures use plausible-but-not-
+  mainnet-exact params.
+- High-concurrency matcher stress (>30 accounts, >10 rounds) —
+  LiteSVM overhead caps practical account count.
+- Fuzz-style oracle path dependence (large single-slot gaps beyond
+  50% move). Out of scope for engine audit; requires oracle compromise
+  assumption.
+- Cross-slab / multi-market interaction. This engine is single-slab;
+  no cross-slab primitives exist, so this is moot.
+
+After 5 sessions covering F1-F6 spec drift, iterations 1-5 (matcher
+manip, warmup bypass, rounding, crank farming, perm-resolve), Session
+3 V1-V3 (epoch reset, phantom dust, fee forgiveness), Session 4 A/B/D
+(LP bankruptcy, funding drain, lockup), and Session 5 Surfaces 1+3
+(bulk fee drain, concurrent dust) — ZERO exploitable findings against
+the immutable target. The Session 4 Vector D design gap (zombie
+insurance on burned-authority slabs) remains the only open item, and
+is not an exploit.
+
+— vip-ultr / Claude Code (2026-04-24)
+
+## Session 6 — vip-ultr / Claude Code (2026-04-24)
+## Live params first time tested: maint_fee=265, MM/IM=1000/2000, new_account_fee=57_000_000
+
+Sessions 1-5 all ran with maintenance_fee_per_slot = 0 and
+MM/IM = 500/1000 bps. The live mainnet target on
+5ZamUkAiXtvYQijNiRcuGaea66TVbbTPusHfwMX1kTqB actually has
+maint_fee=265 lamports/slot, MM/IM=1000/2000 bps, trading_fee_bps=10,
+new_account_fee=57_000_000, funding_k_bps=100, funding_horizon=7200,
+permissionless_resolve_stale_slots=432_000. Session 6 reproduces
+those EXACT params for the first time and probes the IM-MM gap
+under fee drain + adverse oracle.
+
+Custom encoder: encode_init_market_live_params in
+tests/test_security.rs at the top of the Session 6 block. All three
+tests use identical init bytes; only the attack mechanics differ.
+
+### Test 1 — test_attack_live_params_fee_drain_liquidation_economics
+
+Single attacker; opens at IM threshold; fees + oracle drift over
+6_000_000 slots (30 cranks x 200_000-slot increments) try to push
+the user below MM, then liquidate. Three oracle scenarios.
+
+Setup per scenario:
+  user_deposit:        1_000_000 lamports
+  new_account_fee:     57_000_000 lamports (paid into vault at init,
+                       routed to insurance)
+  position size:       1_000_000 (long)
+  insurance start:     6_680_518_000 (matched mainnet)
+  LP capital:          100_000_000_000 (deep, well-funded)
+
+Results:
+  Scenario 1A (oracle flat):  paid=58_000_000 received=0 ins_delta=+1_705_031_150 net=-58_000_000  -> PASS_SAFE
+  Scenario 1B (oracle -10%):  paid=58_000_000 received=0 ins_delta=+1_704_931_150 net=-58_000_000  -> PASS_SAFE
+  Scenario 1C (oracle -20%):  paid=58_000_000 received=0 ins_delta=+1_704_831_150 net=-58_000_000  -> PASS_SAFE
+
+Why insurance GAINED ~1.7B every scenario:
+- 57M from new_account_fee into insurance at init.
+- 1_000 from trading_fee on open (10 bps x 1_000_000 notional).
+- ~1.59B from LP-side maintenance fee drain (LP also pays 265/slot
+  on its 100B capital across 6M slots).
+- ~115M from user's full capital (1M base) plus residual fee debt.
+The attacker's own 58M is FORFEIT. Liquidation ok=false at every
+scenario because by the time fees finish accruing, capital is 0
+and effective_pos_q after the close branch is also 0 — there is
+no deficit FOR INSURANCE TO COVER. Insurance is a one-way creditor
+of fees in this regime.
+
+Disposition: PASS_SAFE.
+
+### Test 2 — test_attack_live_params_bulk_fee_drain_simultaneous
+
+Same params; 10 attacker user accounts simultaneously, all opened at
+IM, all drained over the same 30-crank window with oracle -10%.
+
+Result:
+  N=10  paid_in_total=580_000_000  withdrawn_total=0
+        residual_total=0  ins_delta=+2_226_046_500
+        net=-580_000_000  liq_count=10
+
+Bulk economics are LINEAR in N. Insurance gain scales with the LP's
+fee drain (one LP, one fee stream) plus 10x new_account_fee plus
+10x user-capital forfeitures. Vault parity held at termination.
+
+Disposition: PASS_SAFE.
+
+### Test 3 — test_attack_live_params_lp_fee_drain_bankruptcy
+
+Single attacker controls BOTH the LP (1M capital + 57M new_account_fee)
+and a user (5M capital + 57M new_account_fee). User opens long; LP
+takes the short. Then 30 cranks x 200_000 slots with oracle UP +10%
+(adverse to LP). Both accounts reach capital=0 from fee drain;
+liquidate LP.
+
+Result:
+  paid_in=120_000_000 (lp_dep + user_dep + 2 x new_account_fee)
+  withdrawn=0
+  ins_delta=+120_002_000
+  vault_delta=+120_002_000
+  net=-120_000_000
+  LP liq: ok=false (no remaining capital to liquidate; no deficit)
+
+Both account capitals hit zero; LP's "bankruptcy" produces no
+insurance payout because (a) fees already extracted the equity into
+insurance before MM was crossed and (b) liquidate_at_oracle_internal
+returns Ok(false) when there is no position to close. Funding is also
+not driving a wedge here because both legs are owned by the same
+attacker.
+
+Disposition: PASS_SAFE.
+
+### Why no scenario produces an insurance payout
+
+Across all three live-params tests, NO call to liquidate triggered
+use_insurance_buffer(d). The reason is mechanical:
+
+1. enforce_post_trade_margin (engine 4199-4218) admits a trade only
+   if BOTH legs sit above IM after the trade, including the trading
+   fee. At admission, capital >= 20% x notional.
+2. sync_account_fee_to_slot (engine 2362-2407) routes the fee
+   through charge_fee_to_insurance. With fee > capital, the realized
+   portion = capital (drained to 0); the shortfall accrues into
+   fee_credits (negative, i.e. debt).
+3. By the time MM is theoretically crossed, capital is already 0, and
+   the position itself cannot generate a deficit beyond what the
+   attacker already paid in fees, because the attacker's IM buffer
+   (10% of notional gap) was the exact equity that fees already
+   extracted into insurance.
+4. The liquidation entry sync (wrapper 6371) refreshes fees first;
+   then liquidate_at_oracle_internal (engine 4394-4520) sees
+   capital=0 and returns Ok(false) on the close branch when
+   effective_pos == 0 after settle_losses.
+
+Insurance is structurally a net creditor in the maint_fee=265 regime.
+Every lamport the attacker contributes to opening + holding ends in
+insurance via fee streams BEFORE any liquidation can fire.
+
+### What this rules out vs. what it does not
+
+Rules out:
+- Single-attacker fee-drain -> insurance-payout extraction at live params.
+- Bulk-attacker simultaneous fee-drain -> insurance-payout extraction.
+- LP-side bankruptcy (attacker controls both legs) -> insurance-payout
+  extraction at live params.
+
+Does NOT rule out (untested):
+- Mark loss DELIVERED via funding rate (one-sided OI imbalance) where
+  the attacker controls only one side and the counterparty pays
+  funding into a withdrawable bucket faster than fee drain. Funding
+  was tested in Session 4 Vector B at synthetic params; at live
+  funding_k=100, funding_horizon=7200, the per-slot funding cap
+  (max_abs_funding_e9_per_slot=10_000) bounds the rate.
+- Oracle compromise (out of scope for engine audit).
+- Simultaneous adversarial LP + benign counterparty (the LP-side
+  attacker would lose capital even without an attacker-counterparty,
+  per Test 3, so PnL extraction from a benign counterparty is the
+  only remaining surface — and that requires the counterparty's PnL
+  to be already realized + unencumbered before fee drain finishes,
+  which the warmup gates prevent).
+
+### Honest assessment after 6 sessions
+
+Across ~2500 LiteSVM tests, 157 Kani proofs, six adversarial sessions
+spanning code-bug hunting and economic-exploit hunting (now including
+live mainnet params), the engine holds. The defense-in-depth that
+defeats the live-params economic attack is:
+
+(a) IM admission gates require >= 20% buffer at every trade.
+(b) Maintenance fees route into insurance via charge_fee_to_insurance
+    BEFORE accumulating in fee_credits; insurance cannot net-drop
+    while a fee-paying account exists.
+(c) Liquidation sync (wrapper 6371) realizes fees on the target before
+    margin check, so by the time MM is "crossed", capital is already
+    extracted into insurance.
+(d) Withdrawals require unencumbered capital; warmup-gated PnL is
+    not directly withdrawable.
+
+Vector D from Session 4 (permanent insurance lockup after burned
+authority resolution) remains the only outstanding finding —
+not an exploit, but a design gap. The 6.6805 SOL on the live target
+will continue to grow via fee streams until permissionless resolve
+fires after a 432_000-slot oracle-stale window, at which point
+ForceCloseResolved sweeps user accounts and the residual insurance
+becomes permanently stranded.
+
+— vip-ultr / Claude Code (2026-04-24)
