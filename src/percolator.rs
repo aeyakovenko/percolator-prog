@@ -185,6 +185,10 @@ pub mod constants {
     pub const MIN_FUNDING_LIFETIME_SLOTS: u64 = 10_000_000;
     pub const MATCHER_ABI_VERSION: u32 = 2;
     pub const MATCHER_CONTEXT_LEN: usize = 320;
+    /// Maximum variadic accounts forwarded by TradeCpi to the matcher.
+    /// Transaction account limits are an outer bound; this protocol cap keeps
+    /// wrapper heap/CU and matcher ABI expectations explicit.
+    pub const MAX_MATCHER_TAIL_ACCOUNTS: usize = 32;
     pub const MATCHER_CALL_TAG: u8 = 0;
     pub const MATCHER_CALL_LEN: usize = 67;
 
@@ -1956,9 +1960,6 @@ pub mod ix {
             min_funding_lifetime_slots: crate::constants::MIN_FUNDING_LIFETIME_SLOTS,
             max_price_move_bps_per_slot,
         };
-        if percolator::RiskEngine::try_validate_params(&params).is_err() {
-            return Err(crate::error::PercolatorError::InvalidConfigParam.into());
-        }
         Ok((params, new_account_fee))
     }
 }
@@ -2503,6 +2504,9 @@ pub mod oracle {
     /// discriminator. The wrapper rejects Partial upstream; offset 41
     /// is correct for every price-message the wrapper ever deserializes.
     const OFF_PRICE_FEED_MESSAGE: usize = 41;
+    /// Anchor discriminator for `PriceUpdateV2`: sha256("account:PriceUpdateV2")[0..8].
+    const PYTH_PRICE_UPDATE_V2_DISCRIMINATOR: [u8; 8] =
+        [0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd];
     /// Pyth VerificationLevel::Full — enum tag value the Anchor
     /// serializer emits for the Full variant. Anchor writes the
     /// variant discriminant as one u8 followed by the variant payload
@@ -2561,6 +2565,9 @@ pub mod oracle {
         let data = price_ai.try_borrow_data()?;
         if data.len() < PRICE_UPDATE_V2_MIN_LEN {
             return Err(ProgramError::InvalidAccountData);
+        }
+        if data[..8] != PYTH_PRICE_UPDATE_V2_DISCRIMINATOR {
+            return Err(PercolatorError::OracleInvalid.into());
         }
 
         // Reject partially verified Pyth updates (only Full is safe).
@@ -3189,7 +3196,7 @@ pub mod processor {
         constants::{
             DEFAULT_FUNDING_HORIZON_SLOTS, DEFAULT_FUNDING_K_BPS, DEFAULT_FUNDING_MAX_E9_PER_SLOT,
             DEFAULT_FUNDING_MAX_PREMIUM_BPS, DEFAULT_MARK_EWMA_HALFLIFE_SLOTS, MAGIC,
-            MATCHER_CALL_LEN, MATCHER_CALL_TAG, SLAB_LEN,
+            MATCHER_CALL_LEN, MATCHER_CALL_TAG, MAX_MATCHER_TAIL_ACCOUNTS, SLAB_LEN,
         },
         error::{map_risk_error, PercolatorError},
         ix::Instruction,
@@ -3394,19 +3401,16 @@ pub mod processor {
         if config.maintenance_fee_per_slot == 0 {
             return Ok(());
         }
-        // Anchor: upper-bound by last_market_slot (no accrue in this
-        // path) but floor at current_slot so sync_account_fee_to_slot_
-        // not_atomic's monotonicity guard (now_slot >= current_slot)
-        // holds even in the transient state where a no-oracle path
-        // (InitUser/deposit) has advanced current_slot past last_market
-        // _slot. In that state the account's last_fee_slot was seeded at
-        // current_slot, so the anchor == current_slot case is a harmless
-        // dt=0 no-op; the real fee realization happens on the next
-        // oracle-backed op via ensure_market_accrued_to_now.
-        let anchor = core::cmp::max(
-            core::cmp::min(wallclock_slot, engine.last_market_slot),
-            engine.current_slot,
-        );
+        check_idx(engine, idx)?;
+        let anchor = core::cmp::min(wallclock_slot, engine.last_market_slot);
+        // No-oracle paths must not move fee time beyond the market's
+        // accrued slot. If engine.current_slot or this account's fee
+        // cursor is already past that boundary, there is nothing safe
+        // to realize here; the next oracle-backed op will accrue the
+        // market and cover the tail.
+        if anchor < engine.current_slot || anchor < engine.accounts[idx as usize].last_fee_slot {
+            return Ok(());
+        }
         engine
             .sync_account_fee_to_slot_not_atomic(idx, anchor, config.maintenance_fee_per_slot)
             .map_err(map_risk_error)
@@ -3506,6 +3510,32 @@ pub mod processor {
             price as u128,
             percolator::POS_SCALE,
         )
+    }
+
+    fn current_trade_fee_paid_cap(
+        size: i128,
+        exec_price: u64,
+        trading_fee_bps: u64,
+    ) -> Result<u128, ProgramError> {
+        if trading_fee_bps == 0 || size == 0 {
+            return Ok(0);
+        }
+        let notional = percolator::wide_math::mul_div_floor_u128(
+            size.unsigned_abs(),
+            exec_price as u128,
+            percolator::POS_SCALE,
+        );
+        if notional == 0 {
+            return Ok(0);
+        }
+        let one_side_fee = percolator::wide_math::mul_div_ceil_u128(
+            notional,
+            trading_fee_bps as u128,
+            10_000,
+        );
+        one_side_fee
+            .checked_mul(2)
+            .ok_or_else(|| PercolatorError::EngineOverflow.into())
     }
 
     fn reject_stuck_target_accrual(
@@ -3818,7 +3848,7 @@ pub mod processor {
                 let bit = bits.trailing_zeros() as usize;
                 bits &= bits - 1;
                 let idx = word_cursor * 64 + bit;
-                if idx >= percolator::MAX_ACCOUNTS {
+                if !idx_within_market_capacity(engine, idx) {
                     continue;
                 }
                 engine
@@ -4041,8 +4071,18 @@ pub mod processor {
         Ok(())
     }
 
+    #[inline]
+    fn idx_within_market_capacity(engine: &RiskEngine, idx: usize) -> bool {
+        idx < MAX_ACCOUNTS && (idx as u64) < engine.params.max_accounts
+    }
+
+    #[inline]
+    fn idx_used_in_market(engine: &RiskEngine, idx: usize) -> bool {
+        idx_within_market_capacity(engine, idx) && engine.is_used(idx)
+    }
+
     fn check_idx(engine: &RiskEngine, idx: u16) -> Result<(), ProgramError> {
-        if (idx as usize) >= MAX_ACCOUNTS || !engine.is_used(idx as usize) {
+        if !idx_used_in_market(engine, idx as usize) {
             return Err(PercolatorError::EngineAccountNotFound.into());
         }
         Ok(())
@@ -4469,10 +4509,9 @@ pub mod processor {
                     return Err(ProgramError::InvalidInstructionData);
                 }
 
-                // Per-slot price-move cap and exact solvency envelope are
-                // decoded and prevalidated by read_risk_params. InitMarket
-                // returns a ProgramError on bad config; it must not rely on
-                // an engine-side panic for public input validation.
+                // Cheap wrapper policy checks happen here; exact RiskParams
+                // validation is left to engine.init_in_place so InitMarket
+                // does not run the heavy envelope verifier twice.
                 // Liveness: if permissionless resolution is enabled, force_close must
                 // also be enabled. Otherwise abandoned accounts on resolved markets
                 // with burned admin have no cleanup path.
@@ -4959,6 +4998,9 @@ pub mod processor {
                 accounts::expect_signer(a_user)?;
                 accounts::expect_writable(a_slab)?;
                 verify_token_program(a_token)?;
+                if matcher_program == Pubkey::default() || matcher_context == Pubkey::default() {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
 
                 let mut data = state::slab_data_mut(a_slab)?;
                 slab_guard(program_id, a_slab, &data)?;
@@ -5604,10 +5646,7 @@ pub mod processor {
                             break;
                         }
                         let i = idx as usize;
-                        if i >= percolator::MAX_ACCOUNTS {
-                            continue;
-                        }
-                        if !engine.is_used(i) {
+                        if !idx_used_in_market(engine, i) {
                             continue;
                         }
                         attempts += 1;
@@ -5680,7 +5719,7 @@ pub mod processor {
                 if !permissionless
                     && config.maintenance_fee_per_slot > 0
                     && sweep_delta > 0
-                    && engine.is_used(caller_idx as usize)
+                    && idx_used_in_market(engine, caller_idx as usize)
                 {
                     // 50 / 50 split: half to caller, half stays in insurance.
                     let mut reward =
@@ -5741,7 +5780,9 @@ pub mod processor {
                             continue;
                         }
                         let eidx = buf.entries[i].idx as usize;
-                        if !engine.is_used(eidx) || effective_pos_q_checked(engine, eidx)? == 0 {
+                        if !idx_used_in_market(engine, eidx)
+                            || effective_pos_q_checked(engine, eidx)? == 0
+                        {
                             buf.remove(buf.entries[i].idx);
                         }
                     }
@@ -5771,7 +5812,7 @@ pub mod processor {
                     let scan_start = (buf.scan_cursor as usize) % scan_mod;
                     for offset in 0..crate::constants::RISK_SCAN_WINDOW {
                         let idx = (scan_start + offset) % scan_mod;
-                        if !engine.is_used(idx) {
+                        if !idx_used_in_market(engine, idx) {
                             continue;
                         }
                         let eff = effective_pos_q_checked(engine, idx)?;
@@ -5787,7 +5828,7 @@ pub mod processor {
                     // Phase D: ingest caller-supplied candidates
                     for &(cidx, _) in candidates.iter() {
                         let ci = cidx as usize;
-                        if ci >= percolator::MAX_ACCOUNTS || !engine.is_used(ci) {
+                        if !idx_used_in_market(engine, ci) {
                             continue;
                         }
                         let eff = effective_pos_q_checked(engine, ci)?;
@@ -5924,6 +5965,8 @@ pub mod processor {
                 // delta undercounts the actual fee. This is the conservative direction:
                 // mark is stickier during volatile loss-absorption events, never
                 // more manipulable. A future engine API could expose fee_paid directly.
+                let current_fee_paid_cap =
+                    current_trade_fee_paid_cap(size, price, engine.params.trading_fee_bps)?;
                 let ins_before = engine.insurance_fund.balance.get();
 
                 #[cfg(feature = "cu-audit")]
@@ -5965,7 +6008,9 @@ pub mod processor {
                     // This is exact: no overestimate from pre-trade capital snapshot.
                     let fee_paid_nocpi = if config.mark_min_fee > 0 {
                         let ins_after = engine.insurance_fund.balance.get();
-                        let delta = ins_after.saturating_sub(ins_before);
+                        let delta = ins_after
+                            .saturating_sub(ins_before)
+                            .min(current_fee_paid_cap);
                         core::cmp::min(delta, u64::MAX as u128) as u64
                     } else {
                         0u64
@@ -6090,6 +6135,9 @@ pub mod processor {
                 let a_matcher_ctx = &accounts[6];
                 let a_lp_pda = &accounts[7];
                 let a_tail = &accounts[8..];
+                if a_tail.len() > MAX_MATCHER_TAIL_ACCOUNTS {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
 
                 accounts::expect_signer(a_user)?;
                 // Reject zero-size requests at entry — zero-fill path should only
@@ -6097,6 +6145,9 @@ pub mod processor {
                 // Also reject i128::MIN before oracle/CPI work; it has no positive
                 // counterpart and the engine would reject it later.
                 if size == 0 || size == i128::MIN {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+                if lp_idx == user_idx {
                     return Err(ProgramError::InvalidInstructionData);
                 }
                 // Note: a_lp_owner does NOT need to be a signer for TradeCpi.
@@ -6529,6 +6580,11 @@ pub mod processor {
                     }
 
                     let trade_size = crate::policy::cpi_trade_size(ret.exec_size, size);
+                    let current_fee_paid_cap = current_trade_fee_paid_cap(
+                        trade_size,
+                        exec_price,
+                        engine.params.trading_fee_bps,
+                    )?;
 
                     // Snapshot insurance for fee-weighted EWMA (delta approach).
                     // delta now captures ONLY trading_fees - losses_absorbed
@@ -6586,7 +6642,9 @@ pub mod processor {
                         // fee_paid = actual fee collected into insurance (post - pre).
                         let fee_paid_cpi = if config.mark_min_fee > 0 {
                             let ins_after_cpi = engine.insurance_fund.balance.get();
-                            let delta = ins_after_cpi.saturating_sub(ins_before_cpi);
+                            let delta = ins_after_cpi
+                                .saturating_sub(ins_before_cpi)
+                                .min(current_fee_paid_cap);
                             core::cmp::min(delta, u64::MAX as u128) as u64
                         } else {
                             0u64
@@ -6649,7 +6707,9 @@ pub mod processor {
                         // binding is in the cap>0 branch's scope.
                         let fee_paid_hyperp = if config.mark_min_fee > 0 {
                             let ins_after_cpi = engine.insurance_fund.balance.get();
-                            let delta = ins_after_cpi.saturating_sub(ins_before_cpi);
+                            let delta = ins_after_cpi
+                                .saturating_sub(ins_before_cpi)
+                                .min(current_fee_paid_cap);
                             core::cmp::min(delta, u64::MAX as u128) as u64
                         } else {
                             0u64
@@ -7088,6 +7148,7 @@ pub mod processor {
                 let a_token = &accounts[5];
 
                 accounts::expect_signer(a_dest)?;
+                accounts::expect_writable(a_dest)?;
                 accounts::expect_writable(a_slab)?;
                 verify_token_program(a_token)?;
 
@@ -7121,6 +7182,7 @@ pub mod processor {
                         &mint,
                         &Pubkey::new_from_array(config.vault_pubkey),
                     )?;
+                    accounts::expect_key(a_vault_auth, &auth)?;
 
                     let engine = zc::engine_ref(&data)?;
                     if !engine.vault.is_zero() {
@@ -7144,19 +7206,6 @@ pub mod processor {
                     if stranded > 0 {
                         // Validate admin's token account before drain
                         verify_token_account(a_dest_ata, a_dest.key, &mint)?;
-                        // Verify vault authority PDA
-                        let expected_auth = Pubkey::create_program_address(
-                            &[
-                                b"vault",
-                                a_slab.key.as_ref(),
-                                &[config.vault_authority_bump],
-                            ],
-                            program_id,
-                        )
-                        .map_err(|_| ProgramError::InvalidSeeds)?;
-                        if a_vault_auth.key != &expected_auth {
-                            return Err(ProgramError::InvalidSeeds);
-                        }
 
                         let seed1: &[u8] = b"vault";
                         let seed2: &[u8] = a_slab.key.as_ref();
@@ -8581,7 +8630,7 @@ pub mod processor {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
                 let clock = Clock::from_account_info(a_clock)?;
-                if clock.slot < resolved_slot.saturating_add(config.force_close_delay_slots) {
+                if clock.slot.saturating_sub(resolved_slot) < config.force_close_delay_slots {
                     return Err(ProgramError::InvalidAccountData);
                 }
 

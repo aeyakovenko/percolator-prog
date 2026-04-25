@@ -99,6 +99,7 @@ fn make_pyth_data(
     publish_time: i64,
 ) -> Vec<u8> {
     let mut data = vec![0u8; 134];
+    data[0..8].copy_from_slice(&[0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd]);
     // VerificationLevel::Full = 1-byte discriminant 0x01 at offset 40.
     // PriceFeedMessage begins at byte 41 (Borsh enum variants are
     // variable-size; Full has no payload).

@@ -110,6 +110,7 @@ const PYTH_RECEIVER_BYTES: [u8; 32] = [
 /// PriceFeedMessage begins at byte 41.
 fn make_pyth(feed_id: &[u8; 32], price: i64, expo: i32, conf: u64, publish_time: i64) -> Vec<u8> {
     let mut data = vec![0u8; 134];
+    data[0..8].copy_from_slice(&[0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd]);
     // verification_level = Full (discriminant 0x01) at offset 40
     data[40] = 1;
     // feed_id at offset 41

@@ -2293,16 +2293,16 @@ fn kani_scale_price_e6_concrete_example() {
 /// - index == 0: the bootstrap branch returns `mark`, which is DIFFERENT behavior
 ///   but is also correct — bootstrap always initializes to `mark` regardless of `dt`.
 ///
-/// The assumption `index > 0 && cap_e2bps > 0` was previously used here, which
+/// The assumption `index > 0 && cap_bps > 0` was previously used here, which
 /// excluded the bootstrap branch. This proof is now fully symbolic on `index`.
 #[kani::proof]
 fn kani_clamp_toward_no_movement_when_dt_zero() {
     let index: u64 = kani::any();
     let mark: u64 = kani::any();
-    let cap_e2bps: u64 = kani::any();
+    let cap_bps: u64 = kani::any();
 
     // dt_slots = 0 (same slot)
-    let result = clamp_toward_with_dt(index, mark, cap_e2bps, 0);
+    let result = clamp_toward_with_dt(index, mark, cap_bps, 0);
 
     if index == 0 {
         // Bootstrap branch: always returns mark regardless of dt or cap
@@ -2319,7 +2319,7 @@ fn kani_clamp_toward_no_movement_when_dt_zero() {
     }
 }
 
-/// Prove: When cap_e2bps == 0, index is returned unchanged (rate limiting disabled).
+/// Prove: When cap_bps == 0, index is returned unchanged (rate limiting disabled).
 ///
 /// Covers BOTH cases:
 /// - index > 0: the cap=0 early-return path returns `index` unchanged.
@@ -2334,7 +2334,7 @@ fn kani_clamp_toward_no_movement_when_cap_zero() {
     let mark: u64 = kani::any();
     let dt_slots: u64 = kani::any();
 
-    // cap_e2bps = 0 (rate limiting disabled)
+    // cap_bps = 0 (rate limiting disabled)
     let result = clamp_toward_with_dt(index, mark, 0, dt_slots);
 
     if index == 0 {
@@ -2347,7 +2347,7 @@ fn kani_clamp_toward_no_movement_when_cap_zero() {
         // cap=0 means rate limiting disabled: return index unchanged
         assert_eq!(
             result, index,
-            "clamp_toward_with_dt must return index unchanged when cap_e2bps=0 and index>0"
+            "clamp_toward_with_dt must return index unchanged when cap_bps=0 and index>0"
         );
     }
 }
@@ -2356,11 +2356,11 @@ fn kani_clamp_toward_no_movement_when_cap_zero() {
 #[kani::proof]
 fn kani_clamp_toward_bootstrap_when_index_zero() {
     let mark: u64 = kani::any();
-    let cap_e2bps: u64 = kani::any();
+    let cap_bps: u64 = kani::any();
     let dt_slots: u64 = kani::any();
 
     // index = 0 is the bootstrap/initialization case
-    let result = clamp_toward_with_dt(0, mark, cap_e2bps, dt_slots);
+    let result = clamp_toward_with_dt(0, mark, cap_bps, dt_slots);
 
     assert_eq!(
         result, mark,
@@ -2373,7 +2373,7 @@ fn kani_clamp_toward_bootstrap_when_index_zero() {
 /// Companion: kani_clamp_toward_saturation_paths covers large u64 values.
 ///
 /// SAT tractability bound: the proved property (movement bound: result in [lo, hi]
-/// where max_delta = index * cap * dt / 1_000_000) holds for all valid inputs.
+/// where max_delta = index * cap_bps * dt / 10_000) holds for all valid inputs.
 /// The u8 domain (index 10..255, cap 1..20 steps, dt 1..16) is required to keep
 /// the triple-multiplication chain tractable for the CBMC solver. Coverage of
 /// large index values is provided by `kani_clamp_toward_saturation_paths`.
@@ -2391,12 +2391,12 @@ fn kani_clamp_toward_movement_bounded_concrete() {
     kani::assume(dt_raw <= 16);
 
     let index = index_raw as u64;
-    let cap_e2bps = (cap_steps_raw as u64) * 10_000;
+    let cap_bps = (cap_steps_raw as u64) * 100;
     let dt_slots = dt_raw as u64;
 
-    let result = clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots);
+    let result = clamp_toward_with_dt(index, mark, cap_bps, dt_slots);
 
-    let max_delta = ((index as u128 * cap_e2bps as u128 * dt_slots as u128) / 1_000_000u128) as u64;
+    let max_delta = ((index as u128 * cap_bps as u128 * dt_slots as u128) / 10_000u128) as u64;
     let lo = index.saturating_sub(max_delta);
     let hi = index.saturating_add(max_delta);
 
@@ -2410,7 +2410,7 @@ fn kani_clamp_toward_movement_bounded_concrete() {
 /// Bounds widened to u16 index/mark while keeping triple-multiply SAT tractable.
 fn any_clamp_formula_inputs() -> (u64, u64, u64, u64, u64, u64) {
     let index_raw: u16 = kani::any();
-    let cap_steps_raw: u8 = kani::any(); // 1 step = 10_000 e2bps (1.00%)
+    let cap_steps_raw: u8 = kani::any(); // 1 step = 100 bps (1.00%)
     let dt_slots_raw: u8 = kani::any();
     let mark_raw: u16 = kani::any();
 
@@ -2423,12 +2423,12 @@ fn any_clamp_formula_inputs() -> (u64, u64, u64, u64, u64, u64) {
     kani::assume(mark_raw <= 2000);
 
     let index_u32 = index_raw as u32;
-    let cap_u32 = (cap_steps_raw as u32) * 10_000u32;
+    let cap_u32 = (cap_steps_raw as u32) * 100u32;
     let dt_u32 = dt_slots_raw as u32;
 
     // With the bounds above, this product fits in u32 without overflow.
-    // max: 1000 * 50000 * 20 = 1_000_000_000 < u32::MAX
-    let max_delta = (index_u32 * cap_u32 * dt_u32 / 1_000_000u32) as u64;
+    // max: 1000 * 500 * 20 = 10_000_000 < u32::MAX
+    let max_delta = (index_u32 * cap_u32 * dt_u32 / 10_000u32) as u64;
     let index = index_u32 as u64;
     kani::assume(max_delta > 0); // Non-trivial clamping regime
     kani::assume(max_delta <= index); // Prevent underflow in index - max_delta
@@ -2453,23 +2453,23 @@ fn kani_clamp_toward_formula_concrete() {
     // Non-vacuity witness: below-band branch is reachable.
     {
         let index = 2_000u64;
-        let cap_e2bps = 20_000u64;
+        let cap_bps = 100u64;
         let dt_slots = 10u64;
-        let max_delta = (index * cap_e2bps * dt_slots) / 1_000_000u64;
+        let max_delta = (index * cap_bps * dt_slots) / 10_000u64;
         let lo = index - max_delta;
         let mark = 1_000u64;
         assert!(mark < lo, "witness must exercise mark < lo branch");
         assert_eq!(
-            clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots),
+            clamp_toward_with_dt(index, mark, cap_bps, dt_slots),
             lo,
             "non-vacuity witness: mark below lo clamps to lo"
         );
     }
 
-    let (index, mark, cap_e2bps, dt_slots, lo, _) = any_clamp_formula_inputs();
+    let (index, mark, cap_bps, dt_slots, lo, _) = any_clamp_formula_inputs();
     kani::assume(mark < lo);
 
-    let result = clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots);
+    let result = clamp_toward_with_dt(index, mark, cap_bps, dt_slots);
     assert_eq!(result, lo, "mark below lo must clamp to lo");
 }
 
@@ -2479,25 +2479,25 @@ fn kani_clamp_toward_formula_within_bounds() {
     // Non-vacuity witness: within-band branch is reachable.
     {
         let index = 2_000u64;
-        let cap_e2bps = 20_000u64;
+        let cap_bps = 100u64;
         let dt_slots = 10u64;
-        let max_delta = (index * cap_e2bps * dt_slots) / 1_000_000u64;
+        let max_delta = (index * cap_bps * dt_slots) / 10_000u64;
         let lo = index - max_delta;
         let hi = index + max_delta;
         let mark = 2_000u64;
         assert!(mark >= lo && mark <= hi, "witness must be inside [lo, hi]");
         assert_eq!(
-            clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots),
+            clamp_toward_with_dt(index, mark, cap_bps, dt_slots),
             mark,
             "non-vacuity witness: mark inside [lo, hi] remains unchanged"
         );
     }
 
-    let (index, mark, cap_e2bps, dt_slots, lo, hi) = any_clamp_formula_inputs();
+    let (index, mark, cap_bps, dt_slots, lo, hi) = any_clamp_formula_inputs();
     kani::assume(mark >= lo);
     kani::assume(mark <= hi);
 
-    let result = clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots);
+    let result = clamp_toward_with_dt(index, mark, cap_bps, dt_slots);
     assert_eq!(result, mark, "mark inside [lo, hi] must remain unchanged");
 }
 
@@ -2507,23 +2507,23 @@ fn kani_clamp_toward_formula_above_hi() {
     // Non-vacuity witness: above-band branch is reachable.
     {
         let index = 2_000u64;
-        let cap_e2bps = 20_000u64;
+        let cap_bps = 100u64;
         let dt_slots = 10u64;
-        let max_delta = (index * cap_e2bps * dt_slots) / 1_000_000u64;
+        let max_delta = (index * cap_bps * dt_slots) / 10_000u64;
         let hi = index + max_delta;
         let mark = 3_000u64;
         assert!(mark > hi, "witness must exercise mark > hi branch");
         assert_eq!(
-            clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots),
+            clamp_toward_with_dt(index, mark, cap_bps, dt_slots),
             hi,
             "non-vacuity witness: mark above hi clamps to hi"
         );
     }
 
-    let (index, mark, cap_e2bps, dt_slots, _, hi) = any_clamp_formula_inputs();
+    let (index, mark, cap_bps, dt_slots, _, hi) = any_clamp_formula_inputs();
     kani::assume(mark > hi);
 
-    let result = clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots);
+    let result = clamp_toward_with_dt(index, mark, cap_bps, dt_slots);
     assert_eq!(result, hi, "mark above hi must clamp to hi");
 }
 
@@ -2535,10 +2535,10 @@ fn kani_clamp_toward_saturation_paths() {
     // Non-vacuity witness 1: max_delta saturates to u64::MAX, lo=0, hi=u64::MAX
     {
         let index = u64::MAX / 2;
-        let cap_e2bps = 1_000_000; // 100%
+        let cap_bps = 10_000; // 100%
         let dt_slots = 100;
-        let result = clamp_toward_with_dt(index, 0, cap_e2bps, dt_slots);
-        // max_delta_u128 = (MAX/2) * 1_000_000 * 100 / 1_000_000 = (MAX/2)*100 >> u64::MAX
+        let result = clamp_toward_with_dt(index, 0, cap_bps, dt_slots);
+        // max_delta_u128 = (MAX/2) * 10_000 * 100 / 10_000 = (MAX/2)*100 >> u64::MAX
         // so max_delta = u64::MAX, lo = saturating_sub = 0
         assert_eq!(
             result, 0,
@@ -2549,10 +2549,10 @@ fn kani_clamp_toward_saturation_paths() {
     // Non-vacuity witness 2: hi saturates to u64::MAX
     {
         let index = u64::MAX - 10;
-        let cap_e2bps = 10_000; // 1%
+        let cap_bps = 100; // 1%
         let dt_slots = 1;
-        let result = clamp_toward_with_dt(index, u64::MAX, cap_e2bps, dt_slots);
-        // max_delta = (MAX-10) * 10_000 / 1_000_000 ≈ MAX/100, hi = saturating_add = u64::MAX
+        let result = clamp_toward_with_dt(index, u64::MAX, cap_bps, dt_slots);
+        // max_delta = (MAX-10) * 100 / 10_000 ≈ MAX/100, hi = saturating_add = u64::MAX
         assert_eq!(
             result,
             u64::MAX,
@@ -2570,16 +2570,16 @@ fn kani_clamp_toward_saturation_paths() {
     kani::assume(dt_raw >= 1);
 
     let index = (u64::MAX / 2).saturating_add(index_offset as u64);
-    let cap_e2bps = (cap_steps as u64) * 100_000; // 10%..2550% (forces large delta)
+    let cap_bps = (cap_steps as u64) * 1_000; // 10%..2550% (forces large delta)
     let dt_slots = dt_raw as u64;
 
-    let result = clamp_toward_with_dt(index, mark, cap_e2bps, dt_slots);
+    let result = clamp_toward_with_dt(index, mark, cap_bps, dt_slots);
 
     // Recompute expected bounds (mirrors production code)
     let max_delta_u128 = (index as u128)
-        .saturating_mul(cap_e2bps as u128)
+        .saturating_mul(cap_bps as u128)
         .saturating_mul(dt_slots as u128)
-        / 1_000_000u128;
+        / 10_000u128;
     let max_delta = core::cmp::min(max_delta_u128, u64::MAX as u128) as u64;
     let lo = index.saturating_sub(max_delta);
     let hi = index.saturating_add(max_delta);
@@ -2777,16 +2777,16 @@ fn kani_decide_trade_cpi_from_ret_universal() {
 /// Universal characterization of clamp_oracle_price: all 3 branches proved.
 ///
 /// Proves three disjoint cases:
-/// (a) max_change_e2bps == 0 => circuit breaker disabled, result == raw_price
+/// (a) max_change_bps == 0 => circuit breaker disabled, result == raw_price
 /// (b) last_price == 0 => first time (no history), result == raw_price
 /// (c) both non-zero => result is clamped to [lo, hi] where
-///     max_delta = last_price * max_change_e2bps / 1_000_000 (saturating)
+///     max_delta = last_price * max_change_bps / 10_000 (saturating)
 ///     lo = last_price.saturating_sub(max_delta)
 ///     hi = last_price.saturating_add(max_delta)
 ///
 /// Cases (a) and (b) are proved with fully symbolic inputs (trivial fast paths).
 /// Case (c) requires bounding `last_price` to a u16 range because the
-/// u128 multiplication `last_price * max_change_e2bps` is symbolic×symbolic and
+/// u128 multiplication `last_price * max_change_bps` is symbolic×symbolic and
 /// exceeds CBMC SAT tractability for full u64×u64 inputs. The bound covers the
 /// structural clamping logic; the inductive_clamp_within_bounds proof establishes
 /// that `x.clamp(lo, hi)` is always in [lo, hi] for all u64 inputs.
@@ -2798,26 +2798,26 @@ fn kani_clamp_oracle_price_universal() {
     // Cases (a) and (b): fully symbolic — trivially return raw_price
     {
         let raw_price: u64 = kani::any();
-        let max_change_e2bps: u64 = kani::any();
+        let max_change_bps: u64 = kani::any();
 
         // (a) disabled
         let result_a = clamp_oracle_price(0, raw_price, 0);
         assert_eq!(
             result_a, raw_price,
-            "max_change_e2bps=0 must return raw_price unchanged (disabled)"
+            "max_change_bps=0 must return raw_price unchanged (disabled)"
         );
 
-        // Also: any last_price with max_change_e2bps=0 => disabled
+        // Also: any last_price with max_change_bps=0 => disabled
         let last_price_a: u64 = kani::any();
         let result_a2 = clamp_oracle_price(last_price_a, raw_price, 0);
         assert_eq!(
             result_a2, raw_price,
-            "max_change_e2bps=0 must return raw_price unchanged for any last_price"
+            "max_change_bps=0 must return raw_price unchanged for any last_price"
         );
 
         // (b) first-time
-        let max_change_e2bps_b: u64 = kani::any();
-        let result_b = clamp_oracle_price(0, raw_price, max_change_e2bps_b);
+        let max_change_bps_b: u64 = kani::any();
+        let result_b = clamp_oracle_price(0, raw_price, max_change_bps_b);
         assert_eq!(
             result_b, raw_price,
             "last_price=0 must return raw_price unchanged (first time)"
@@ -2825,7 +2825,7 @@ fn kani_clamp_oracle_price_universal() {
     }
 
     // Case (c): normal clamping — bound both inputs to u8 for SAT tractability.
-    // SAT tractability bound: the 128-bit multiplication `last_price * max_change_e2bps`
+    // SAT tractability bound: the 128-bit multiplication `last_price * max_change_bps`
     // is symbolic×symbolic and intractable at full u64 range. Bounding both to u8
     // keeps CBMC tractable while fully exercising the clamping branch logic.
     // The `inductive_clamp_within_bounds` proof (unbounded) establishes that
@@ -2838,11 +2838,11 @@ fn kani_clamp_oracle_price_universal() {
     kani::assume(cap_raw > 0); // non-zero: enter clamping branch
 
     let last = last_raw as u64;
-    let max_change_e2bps = (cap_raw as u64) * 10_000; // 1%..2550% in e2bps
-    let result = clamp_oracle_price(last, raw_price, max_change_e2bps);
+    let max_change_bps = cap_raw as u64; // 1..255 bps
+    let result = clamp_oracle_price(last, raw_price, max_change_bps);
 
     // Mirror the production formula exactly
-    let max_delta = ((last as u128) * (max_change_e2bps as u128) / 1_000_000) as u64;
+    let max_delta = ((last as u128) * (max_change_bps as u128) / 10_000) as u64;
     let lo = last.saturating_sub(max_delta);
     let hi = last.saturating_add(max_delta);
 

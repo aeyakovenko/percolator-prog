@@ -197,6 +197,94 @@ fn test_a1_external_pyth_siphon_defended() {
     outcome.assert_defended("A1a external-Pyth");
 }
 
+/// A1a gap variant: the oracle jumps between keeper turns.
+///
+/// This models the speed requirement directly: the attacker opens a
+/// near-margin matched pair, then publishes a raw 25% adverse oracle move
+/// at a later slot without walking the intermediate slots or giving the
+/// keeper a crank in between. The market is configured with the maximum
+/// currently-allowed non-Hyperp permissionless-stale window (100 slots),
+/// so a 99-slot gap is live but still bounded by the init-time
+/// `max_price_move_bps_per_slot * dt` cap.
+#[test]
+fn test_a1_external_pyth_raw_gap_move_defended() {
+    let mut env = TestEnv::new();
+    env.init_market_with_cap(0, 100);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 5_000_000_000);
+
+    // Put the market at a known fresh baseline before creating exposure.
+    // This helper may walk/crank, but there are no open positions yet.
+    env.set_slot_and_price(100, 138_000_000);
+    env.crank();
+
+    let attacker_a = Keypair::new();
+    let a_idx = env.init_user(&attacker_a);
+    let deposit_a: u64 = 16_000_000_000;
+    env.deposit(&attacker_a, a_idx, deposit_a);
+
+    let attacker_b = Keypair::new();
+    let b_idx = env.init_lp(&attacker_b);
+    let deposit_b: u64 = 20_000_000_000;
+    env.deposit(&attacker_b, b_idx, deposit_b);
+
+    env.crank();
+    let insurance_before = env.read_insurance_balance();
+
+    // At 138.0 e6, this is near initial margin for attacker_a but
+    // still admitted. A raw 25% target move would be far worse than
+    // maintenance if it could land in one step.
+    let pair_size: i128 = 1_000_000_000;
+    env.trade(&attacker_a, &attacker_b, b_idx, a_idx, pair_size);
+
+    let base_slot = env.svm.get_sysvar::<Clock>().slot;
+    let gap_slot = base_slot + 99;
+    let adverse_px: i64 = 103_500_000; // 138M * 0.75
+
+    // Critical adversarial step: no price walking and no crank between
+    // base_slot and gap_slot.
+    env.set_slot_and_price_raw_no_walk(gap_slot, adverse_px);
+
+    let mut ok_cranks = 0u64;
+    let mut rejected_cranks = 0u64;
+    for step in 0..10u64 {
+        // After the initial gap, keep publishing the adverse target as
+        // cranks resume. A vulnerable wrapper would have let the first
+        // post-gap crank realize the full target and overpay the LP from
+        // insurance. The defended path only feeds capped effective prices.
+        env.set_slot_and_price_raw_no_walk(gap_slot + step, adverse_px);
+        match env.try_crank() {
+            Ok(()) => ok_cranks += 1,
+            Err(err) => {
+                rejected_cranks += 1;
+                println!("post-gap crank step {} rejected: {}", step, err);
+            }
+        }
+    }
+    assert!(
+        ok_cranks > 0,
+        "expected at least one live post-gap crank; rejected={}",
+        rejected_cranks
+    );
+
+    let cap_a = env.read_account_capital(a_idx);
+    let cap_b = env.read_account_capital(b_idx);
+    let pnl_a = env.read_account_pnl(a_idx);
+    let pnl_b = env.read_account_pnl(b_idx);
+    let insurance_after = env.read_insurance_balance();
+
+    let outcome = AttackOutcome {
+        attacker_a_deposit: deposit_a as u128,
+        attacker_b_deposit: deposit_b as u128,
+        attacker_a_equity: cap_a as i128 + pnl_a,
+        attacker_b_equity: cap_b as i128 + pnl_b,
+        insurance_before,
+        insurance_after,
+    };
+    outcome.assert_defended("A1a external-Pyth raw no-walk gap");
+}
+
 /// A1b: Hyperp (internal mark) market.
 ///
 /// On a Hyperp market, `TradeNoCpi` is explicitly disabled

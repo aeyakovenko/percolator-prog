@@ -6193,6 +6193,131 @@ fn test_hyperp_same_price_trades_refresh_liveness_and_market_stays_live() {
     );
 }
 
+fn init_hyperp_with_fee_weighting(
+    env: &mut TradeCpiTestEnv,
+    initial_mark_price_e6: u64,
+    trading_fee_bps: u64,
+    mark_min_fee: u64,
+) {
+    let admin = &env.payer;
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(env.pyth_index, false),
+        ],
+        data: encode_init_market_hyperp_with_fees(
+            &admin.pubkey(),
+            &env.mint,
+            initial_mark_price_e6,
+            100,
+            trading_fee_bps,
+            mark_min_fee,
+        ),
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&admin.pubkey()),
+        &[admin],
+        env.svm.latest_blockhash(),
+    );
+    env.svm
+        .send_transaction(tx)
+        .expect("init hyperp fee-weighted market failed");
+}
+
+fn read_hyperp_liveness_slots(env: &TradeCpiTestEnv) -> (u64, u64) {
+    let slab = env.svm.get_account(&env.slab).unwrap().data;
+    let config = percolator_prog::state::read_config(&slab);
+    (config.mark_ewma_last_slot, config.last_mark_push_slot as u64)
+}
+
+fn write_tradecpi_account_fee_credits(env: &mut TradeCpiTestEnv, idx: u16, value: i128) {
+    const ACCOUNT_SIZE: usize = 360;
+    const FEE_CREDITS_OFFSET: usize = 224;
+    let mut slab = env.svm.get_account(&env.slab).unwrap();
+    let off = ENGINE_OFFSET
+        + ENGINE_ACCOUNTS_OFFSET
+        + (idx as usize) * ACCOUNT_SIZE
+        + FEE_CREDITS_OFFSET;
+    slab.data[off..off + 16].copy_from_slice(&value.to_le_bytes());
+    env.svm.set_account(env.slab, slab).unwrap();
+}
+
+fn read_tradecpi_account_fee_credits(env: &TradeCpiTestEnv, idx: u16) -> i128 {
+    const ACCOUNT_SIZE: usize = 360;
+    const FEE_CREDITS_OFFSET: usize = 224;
+    let slab = env.svm.get_account(&env.slab).unwrap();
+    let off = ENGINE_OFFSET
+        + ENGINE_ACCOUNTS_OFFSET
+        + (idx as usize) * ACCOUNT_SIZE
+        + FEE_CREDITS_OFFSET;
+    i128::from_le_bytes(slab.data[off..off + 16].try_into().unwrap())
+}
+
+/// Regression for issue #50.
+///
+/// A low-fee TradeCpi must not become a full-weight Hyperp observation just
+/// because old fee debt is swept into insurance during the same successful
+/// engine finalization. The liveness clock is supposed to reflect the current
+/// trade's fee, not unrelated historical debt recovery.
+#[test]
+fn test_tradecpi_fee_debt_sweep_must_not_refresh_hyperp_liveness() {
+    let mut env = TradeCpiTestEnv::new();
+    let mark_min_fee = 10_000u64;
+    init_hyperp_with_fee_weighting(&mut env, 1_000_000, 1, mark_min_fee);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let matcher_prog = env.matcher_program_id;
+
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+
+    env.try_push_oracle_price(&admin, 1_000_000, 100)
+        .expect("initial Hyperp mark push");
+    let before = read_hyperp_liveness_slots(&env);
+
+    // Current trade fee at size=1_000_000, price=1_000_000, fee=1 bps is
+    // about 100 units, far below mark_min_fee. The seeded old fee debt is
+    // large enough to cross the threshold if the implementation incorrectly
+    // uses insurance_delta as the fee-paid signal.
+    write_tradecpi_account_fee_credits(&mut env, user_idx, -(mark_min_fee as i128));
+    assert_eq!(
+        read_tradecpi_account_fee_credits(&env, user_idx),
+        -(mark_min_fee as i128)
+    );
+
+    env.set_slot(10);
+    env.try_trade_cpi(
+        &user,
+        &lp.pubkey(),
+        lp_idx,
+        user_idx,
+        1_000_000,
+        &matcher_prog,
+        &matcher_ctx,
+    )
+    .expect("sub-threshold TradeCpi must still execute");
+
+    let after = read_hyperp_liveness_slots(&env);
+    assert_eq!(
+        after, before,
+        "old fee-debt recovery must not make a sub-threshold current trade \
+         refresh Hyperp liveness: before={:?} after={:?}",
+        before, after
+    );
+}
+
 // ============================================================================
 // Hyperp perm_resolve terminal-behavior invariants (audit follow-up)
 //
@@ -6427,6 +6552,169 @@ fn test_tradecpi_forwards_variadic_tail_to_matcher() {
         &tail,
     )
     .expect("TradeCpi with 2-account variadic tail must succeed");
+}
+
+/// ATTACK: provide an oversized variadic matcher tail to force
+/// unbounded wrapper allocation / CPI account forwarding.
+///
+/// Expected: wrapper rejects before invoking the matcher, and all
+/// economic state plus matcher context remain unchanged.
+#[test]
+fn test_attack_tradecpi_oversized_tail_rejected_before_cpi() {
+    let mut env = TradeCpiTestEnv::new();
+    env.init_market_hyperp(1_000_000);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.try_push_oracle_price(&admin, 1_000_000, 10).unwrap();
+
+    let matcher_prog = env.matcher_program_id;
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &matcher_prog);
+    env.deposit(&lp, lp_idx, 1_000_000_000);
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let vault_before = env.vault_balance();
+    let engine_vault_before = env.read_vault();
+    let matcher_ctx_before = env.svm.get_account(&matcher_ctx).unwrap().data;
+
+    let mut tail = Vec::new();
+    for _ in 0..=percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS {
+        let key = Pubkey::new_unique();
+        env.svm.set_account(
+            key,
+            Account {
+                lamports: 1_000_000,
+                data: vec![],
+                owner: solana_sdk::system_program::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        );
+        tail.push(AccountMeta::new_readonly(key, false));
+    }
+
+    env.set_slot(10);
+    let result = env.try_trade_cpi_with_tail(
+        &user,
+        &lp.pubkey(),
+        lp_idx,
+        user_idx,
+        1_000_000,
+        &matcher_prog,
+        &matcher_ctx,
+        &tail,
+    );
+
+    assert!(
+        result.is_err(),
+        "oversized matcher tail must be rejected before CPI"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "rejected oversized-tail TradeCpi must preserve user position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "rejected oversized-tail TradeCpi must preserve LP position"
+    );
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "rejected oversized-tail TradeCpi must preserve user capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "rejected oversized-tail TradeCpi must preserve LP capital"
+    );
+    assert_eq!(
+        env.vault_balance(),
+        vault_before,
+        "rejected oversized-tail TradeCpi must preserve SPL vault"
+    );
+    assert_eq!(
+        env.read_vault(),
+        engine_vault_before,
+        "rejected oversized-tail TradeCpi must preserve engine vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&matcher_ctx).unwrap().data,
+        matcher_ctx_before,
+        "oversized-tail rejection must happen before matcher context mutation"
+    );
+}
+
+/// ATTACK: register an LP with a zero matcher program/context so the
+/// default pubkey can act as a sentinel that later bypasses identity
+/// binding or creates an unusable account slot.
+///
+/// Expected: InitLP rejects before SPL transfer or account materialization.
+#[test]
+fn test_attack_init_lp_zero_matcher_identity_rejected() {
+    let mut env = TradeCpiTestEnv::new();
+    env.init_market_hyperp(1_000_000);
+
+    for (matcher_prog, matcher_ctx) in [
+        (Pubkey::default(), Pubkey::new_unique()),
+        (env.matcher_program_id, Pubkey::default()),
+    ] {
+        let lp = Keypair::new();
+        env.svm.airdrop(&lp.pubkey(), 1_000_000_000).unwrap();
+        let ata = env.create_ata(&lp.pubkey(), DEFAULT_INIT_PAYMENT);
+        let used_before = env.read_num_used_accounts();
+        let vault_before = env.vault_balance();
+        let engine_vault_before = env.read_vault();
+
+        let ix = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_init_lp(&matcher_prog, &matcher_ctx, DEFAULT_INIT_PAYMENT),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_ix(), ix],
+            Some(&lp.pubkey()),
+            &[&lp],
+            env.svm.latest_blockhash(),
+        );
+        let result = env.svm.send_transaction(tx);
+
+        assert!(
+            result.is_err(),
+            "InitLP with zero matcher identity must reject: prog={}, ctx={}",
+            matcher_prog,
+            matcher_ctx
+        );
+        assert_eq!(
+            env.read_num_used_accounts(),
+            used_before,
+            "rejected zero-matcher InitLP must not allocate an account"
+        );
+        assert_eq!(
+            env.vault_balance(),
+            vault_before,
+            "rejected zero-matcher InitLP must not transfer SPL tokens"
+        );
+        assert_eq!(
+            env.read_vault(),
+            engine_vault_before,
+            "rejected zero-matcher InitLP must not credit engine vault"
+        );
+    }
 }
 
 /// Companion: a trade with ZERO tail (the canonical 8-account form)

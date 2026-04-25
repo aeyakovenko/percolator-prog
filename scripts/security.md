@@ -966,3 +966,235 @@ if acc.capital.is_zero()
 
 Existing dust-reclaim regression coverage
 (`test_dust_account_drained_and_gc_by_crank_alone`) still passes.
+
+---
+
+## Third pass — 2026-04-25 current-BPF replay + loop stop
+
+Re-ran the historical finding set after the v12.19.13 wrapper churn.
+Important harness note: LiteSVM integration tests load
+`target/deploy/percolator_prog.so`, not the host-compiled Rust crate.
+The first oversized-tail probe falsely looked unsafe until the BPF
+was rebuilt with `cargo build-sbf`; after rebuild the probe matched
+current source behavior. Future security loops should rebuild SBF
+before treating LiteSVM results as authoritative.
+
+### Historical findings replayed
+
+- **F1 CatchupAccrue partial timestamp rollback** — PASS_SAFE.
+  Current partial rollback preserves `last_oracle_publish_time`,
+  `oracle_target_price_e6`, and `oracle_target_publish_time` along
+  with `last_good_oracle_slot`.
+- **F2 Hyperp cheap-trade liveness spoof** — PASS_SAFE. Current
+  InitMarket rejects Hyperp + permissionless resolution when
+  `mark_min_fee == 0`.
+- **F3 zero account-fee + zero maintenance-fee slot exhaustion** —
+  PASS_SAFE under current wrapper policy. InitMarket now rejects the
+  both-zero configuration.
+- **F4 ForceCloseResolved canonical-ATA doc drift** — PASS_SAFE.
+  The instruction doc now states that any SPL token account owned by
+  the stored owner and matching the collateral mint is accepted.
+- **F5 KeeperCrank reward base captured too late** — PASS_SAFE.
+  Reward base is captured before candidate sync and bitmap sweep;
+  second-crank reward regression passes.
+- **F6 ignored `_not_atomic` reclaim error in sweep** — PASS_SAFE.
+  Sweep now pre-checks `fee_credits != i128::MIN` and propagates the
+  reclaim result.
+
+### Fresh loop iterations
+
+1. **Target:** TradeCpi variadic matcher tail.
+   **Attacker model:** caller controls the outer transaction account
+   list and supplies more tail accounts than the matcher ABI budget,
+   aiming to force unbounded wrapper allocation/CPI forwarding or
+   matcher-side state mutation before rejection.
+   **Probe:** `tests/test_tradecpi.rs::
+   test_attack_tradecpi_oversized_tail_rejected_before_cpi`.
+   **Disposition:** PASS_SAFE. With freshly rebuilt BPF, the wrapper
+   rejects oversized tails before matcher CPI; user/LP positions,
+   capitals, SPL vault, engine vault, and matcher context are
+   unchanged. Regression kept because it covers the protocol cap.
+
+2. **Target:** InitLP matcher identity sentinel values.
+   **Attacker model:** LP owner controls InitLP data and tries to
+   register `Pubkey::default()` as matcher program or context,
+   creating an unusable slot or a default-key sentinel that could
+   confuse later matcher identity checks.
+   **Probe:** `tests/test_tradecpi.rs::
+   test_attack_init_lp_zero_matcher_identity_rejected`.
+   **Disposition:** PASS_SAFE. InitLP rejects before SPL transfer or
+   account materialization; `num_used_accounts`, SPL vault, and
+   engine vault remain unchanged. Regression kept because it guards a
+   sentinel identity invariant.
+
+Stop condition fired after two consecutive PASS_SAFE iterations on
+different targets. No new F-series finding from this pass.
+
+### Commands run
+
+```text
+cargo build-sbf
+RUSTFLAGS='-Awarnings' cargo test --release --test test_tradecpi \
+  test_attack_tradecpi_oversized_tail_rejected_before_cpi -- --exact --nocapture
+RUSTFLAGS='-Awarnings' cargo test --release --test test_tradecpi \
+  test_attack_init_lp_zero_matcher_identity_rejected -- --exact --nocapture
+RUSTFLAGS='-Awarnings' cargo test -q
+cargo kani --tests -j --output-format=terse
+```
+
+Results:
+- Full Rust/LiteSVM/CU test suite: PASS.
+- Kani: 82 successfully verified harnesses, 0 failures.
+
+---
+
+## Fourth pass — 2026-04-25 raw gap-move liquidation/siphon loop
+
+### Fresh loop iteration
+
+1. **Target:** A1-style matched-pair insurance siphon with a raw
+   oracle gap between keeper cranks.
+   **Attacker model:** attacker controls both the user and LP
+   keypairs and can publish a fresh external oracle observation.
+   They open a near-margin matched pair, then jump the oracle from
+   the no-liquidation regime toward a 25% adverse target without any
+   intermediate crank, trying to make the first post-gap crank
+   realize insolvency and pay LP-side profit from insurance.
+   **Probe:** `tests/test_a1_siphon_regression.rs::
+   test_a1_external_pyth_raw_gap_move_defended`.
+   **Disposition:** PASS_SAFE. The test configures the maximum
+   currently allowed non-Hyperp stale window (`100` slots), performs
+   a live `99`-slot raw no-walk gap, then resumes cranking. The
+   wrapper feeds capped effective prices rather than the raw 25%
+   target: attacker combined delta was `189` units on `36B`
+   deposited, and insurance did not drop. Regression kept because it
+   directly covers the "move between cranks" speed requirement.
+
+No new F-series finding from this pass.
+
+### Commands run
+
+```text
+cargo fmt -- tests/test_a1_siphon_regression.rs
+cargo build-sbf
+RUSTFLAGS='-Awarnings' cargo test --release --test test_a1_siphon_regression \
+  test_a1_external_pyth_raw_gap_move_defended -- --exact --nocapture
+RUSTFLAGS='-Awarnings' cargo test --release --test test_a1_siphon_regression -- --nocapture
+RUSTFLAGS='-Awarnings' cargo test -q
+```
+
+Results:
+- New raw gap probe: PASS.
+- Full A1 siphon regression file: PASS (`4` tests).
+- Full Rust/LiteSVM/CU test suite: PASS.
+
+---
+
+## Fifth pass — 2026-04-25 DEX/perp incident-pattern probes
+
+### Fresh loop iterations
+
+1. **Target:** dYdX/YFI-style profit recycling.
+   **Attacker model:** attacker controls both sides of a matched
+   trade, pushes the long into profit, repeatedly converts released
+   PnL into capital, withdraws that capital while the losing short
+   leg remains open, and treats every withdrawal as external wealth
+   that could be redeployed into fresh accounts.
+   **Probe:** `tests/test_economic_attack_vectors.rs::
+   test_attack_yfi_style_profit_recycling_no_net_extraction`.
+   **Disposition:** PASS_SAFE. The probe exercised the withdrawal
+   leg (`9` successful withdrawals, `2.25B` withdrawn externally) and
+   one explicit conversion. Combined attacker wealth
+   (`withdrawn_external + user_equity + lp_equity`) stayed below the
+   initial deposits, and insurance was unchanged.
+
+2. **Target:** Mars/JELLY-style self-liquidation into the backstop.
+   **Attacker model:** attacker controls a weak long and strong LP
+   short, creates near-margin exposure, pushes the oracle toward a
+   price that would bankrupt the long if it landed immediately, then
+   relies on crank/liquidation processing to forgive the toxic leg
+   while the LP keeps the gain.
+   **Probe:** `tests/test_economic_attack_vectors.rs::
+   test_attack_self_liquidation_backstop_no_insurance_siphon`.
+   **Disposition:** PASS_SAFE. The weak leg was fully risk-reduced
+   (`position 1_000_000_000 -> 0`), combined attacker wealth stayed
+   below deposits, engine/SPL vaults stayed synchronized, and
+   insurance increased (`5_000_000_002 -> 5_636_333_337`) rather than
+   being drained.
+
+Stop condition fired after two consecutive PASS_SAFE iterations on
+different economic targets. No new F-series finding from this pass.
+
+### Commands run
+
+```text
+cargo fmt -- tests/test_economic_attack_vectors.rs
+RUSTFLAGS='-Awarnings' cargo test --release --test test_economic_attack_vectors \
+  test_attack_yfi_style_profit_recycling_no_net_extraction -- --exact --nocapture
+RUSTFLAGS='-Awarnings' cargo test --release --test test_economic_attack_vectors \
+  test_attack_self_liquidation_backstop_no_insurance_siphon -- --exact --nocapture
+RUSTFLAGS='-Awarnings' cargo test --release --test test_economic_attack_vectors -- --nocapture
+RUSTFLAGS='-Awarnings' cargo test -q
+```
+
+Results:
+- YFI-style profit recycling probe: PASS.
+- Self-liquidation/backstop probe: PASS.
+- New economic-attack regression file: PASS (`2` tests).
+- Full Rust/LiteSVM/CU test suite: PASS.
+
+---
+
+## Sixth pass — 2026-04-25 10x economic PASS_SAFE streak
+
+User requested continuing until `10` consecutive `PASS_SAFE`
+results. Expanded `tests/test_economic_attack_vectors.rs` to cover
+10 distinct DEX/perp incident-pattern probes:
+
+1. **dYdX/YFI-style profit recycling** — PASS_SAFE.
+   Winning user converted/withdrew released PnL (`2.25B` external
+   withdrawals) while losing LP leg stayed open; combined attacker
+   wealth stayed below deposits, insurance unchanged.
+2. **Mars/JELLY-style self-liquidation into backstop** — PASS_SAFE.
+   Toxic long was flattened (`1_000_000_000 -> 0`) without net
+   attacker extraction; insurance increased rather than drained.
+3. **LP-side profit recycling mirror** — PASS_SAFE.
+   Winning LP-side withdrawals were exercised; combined attacker
+   wealth stayed below deposits and insurance increased, not drained.
+4. **Target/effective-lag withdrawal** — PASS_SAFE.
+   Withdrawal during raw-target/effective-price divergence rejected
+   atomically; capital, position, SPL vault, and engine vault stayed
+   unchanged.
+5. **Target/effective-lag trade** — PASS_SAFE.
+   Risk-increasing trade during target lag rejected atomically;
+   positions, capitals, and vault stayed unchanged.
+6. **Whipsaw profit recycling** — PASS_SAFE.
+   Attacker withdrew during an up-move, then price reversed; withdrawn
+   amount remained offset by controlled-account losses.
+7. **Zero-insurance self-liquidation / force-realize stress** —
+   PASS_SAFE. No meaningful insurance buffer; attacker still could not
+   externalize net gains and vaults stayed synchronized.
+8. **Minimum-position whipsaw rounding** — PASS_SAFE.
+   One-unit position through extreme price oscillation did not mint
+   rounding wealth or drain insurance.
+9. **Fee-cycling wash trades** — PASS_SAFE.
+   Repeated alternating trades with 1% fee burned value into insurance
+   instead of creating rebate-like extraction.
+10. **Many one-unit trades** — PASS_SAFE.
+    100 alternating one-unit trades did not accumulate sub-unit
+    rounding into net attacker wealth.
+
+Stop condition reached: `10` consecutive `PASS_SAFE`; no new F-series
+finding from this scan.
+
+### Commands run
+
+```text
+cargo fmt -- tests/test_economic_attack_vectors.rs
+RUSTFLAGS='-Awarnings' cargo test --release --test test_economic_attack_vectors -- --nocapture
+RUSTFLAGS='-Awarnings' cargo test -q
+```
+
+Results:
+- Economic-attack regression file: PASS (`10` tests).
+- Full Rust/LiteSVM/CU test suite: PASS.
