@@ -1849,6 +1849,74 @@ fn test_withdraw_limited_deposit_only_tracks_topups_and_withdrawals() {
     assert_eq!(read_withdraw_deposit_remaining_raw(&env), 0);
 }
 
+/// 10ba. Failed or out-of-order withdrawals must not consume the deposited-
+///       principal budget. Later TopUpInsurance calls should still add to the
+///       exact remaining principal.
+#[test]
+fn test_withdraw_limited_deposit_only_failed_withdrawals_preserve_budget() {
+    program_path();
+    let mut env = TestEnv::new();
+    setup_bounded_withdrawal(&mut env, 0, 10_000, 1);
+    set_withdraw_deposits_only_raw(&mut env, 1);
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+
+    let empty_withdraw = send_withdraw_limited(&mut env, &admin, 1);
+    assert!(
+        empty_withdraw.is_err(),
+        "withdrawal before any topup must fail"
+    );
+    assert_eq!(env.read_insurance_balance(), 0);
+    assert_eq!(
+        read_withdraw_deposit_remaining_raw(&env),
+        0,
+        "failed pre-topup withdrawal must not create or consume budget"
+    );
+
+    let insurance_payer = Keypair::new();
+    env.svm
+        .airdrop(&insurance_payer.pubkey(), 10_000_000_000)
+        .unwrap();
+    env.top_up_insurance(&insurance_payer, 1_000);
+    assert_eq!(env.read_insurance_balance(), 1_000);
+    assert_eq!(read_withdraw_deposit_remaining_raw(&env), 1_000);
+
+    send_withdraw_limited(&mut env, &admin, 400)
+        .expect("partial principal withdrawal must succeed");
+    assert_eq!(env.read_insurance_balance(), 600);
+    assert_eq!(read_withdraw_deposit_remaining_raw(&env), 600);
+
+    env.set_slot(2);
+    let over_budget = send_withdraw_limited(&mut env, &admin, 601);
+    assert!(
+        over_budget.is_err(),
+        "withdrawal above remaining deposited principal must fail"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        600,
+        "failed over-budget withdrawal must preserve insurance"
+    );
+    assert_eq!(
+        read_withdraw_deposit_remaining_raw(&env),
+        600,
+        "failed over-budget withdrawal must preserve remaining budget"
+    );
+
+    env.top_up_insurance(&insurance_payer, 500);
+    assert_eq!(env.read_insurance_balance(), 1_100);
+    assert_eq!(
+        read_withdraw_deposit_remaining_raw(&env),
+        1_100,
+        "later topup must add to the preserved remaining budget"
+    );
+
+    env.set_slot(4);
+    send_withdraw_limited(&mut env, &admin, 1_100)
+        .expect("operator may withdraw the exact remaining deposited principal");
+    assert_eq!(env.read_insurance_balance(), 0);
+    assert_eq!(read_withdraw_deposit_remaining_raw(&env), 0);
+}
+
 /// 10bb. Optionality at the public ABI: the deposit-only boolean is encoded in
 ///       InitMarket's insurance-withdraw field, and defaults off unless that
 ///       flag is present.
