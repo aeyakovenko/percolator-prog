@@ -34,6 +34,30 @@ fn assert_no_net_extraction(
     );
 }
 
+fn residual(env: &TestEnv) -> u128 {
+    let senior = env
+        .read_c_tot()
+        .checked_add(env.read_insurance_balance())
+        .expect("senior accounting overflow in test");
+    env.read_engine_vault().saturating_sub(senior)
+}
+
+fn withdraw_chunked(
+    env: &mut TestEnv,
+    owner: &Keypair,
+    idx: u16,
+    chunk: u64,
+    rounds: usize,
+) -> u64 {
+    let mut withdrawn = 0u64;
+    for _ in 0..rounds {
+        if env.try_withdraw(owner, idx, chunk).is_ok() {
+            withdrawn = withdrawn.saturating_add(chunk);
+        }
+    }
+    withdrawn
+}
+
 /// dYdX/YFI-style profit recycling.
 ///
 /// Attack model: the attacker controls both sides of a matched trade. They
@@ -613,5 +637,153 @@ fn test_attack_many_one_unit_trades_no_rounding_accumulation() {
         initial_deposits,
     );
     assert!(env.read_insurance_balance() >= insurance_before);
+    assert_eq!(env.read_engine_vault() as u64, env.vault_balance());
+}
+
+/// Fee revenue must not become trader-claimable residual.
+///
+/// Attack model: attacker controls both sides of repeated wash trades and pays
+/// fees hoping the implementation lowers `c_tot` without increasing insurance,
+/// creating residual that can later back positive PnL withdrawals.
+///
+/// Success criterion would be residual growth from fees alone.
+#[test]
+fn test_attack_fee_revenue_not_trader_residual() {
+    let mut env = TestEnv::new();
+    env.init_market_with_trading_fee(100); // 1%
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 20_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 20_000_000_000);
+
+    assert_eq!(residual(&env), 0, "fresh market should have no residual");
+    let insurance_before = env.read_insurance_balance();
+
+    for round in 0..24u64 {
+        let size = if round % 2 == 0 {
+            20_000_000
+        } else {
+            -20_000_000
+        };
+        let _ = env.try_trade(&user, &lp, lp_idx, user_idx, size);
+        env.set_slot_and_price(100 + round * 3, 138_000_000);
+        let _ = env.try_crank();
+
+        assert_eq!(
+            residual(&env),
+            0,
+            "fees must route to insurance, not residual, after round {}",
+            round
+        );
+    }
+
+    assert!(
+        env.read_insurance_balance() > insurance_before,
+        "probe must actually collect fees into insurance"
+    );
+    assert_eq!(env.read_engine_vault() as u64, env.vault_balance());
+}
+
+/// One winner exits, then the market reverses and the old losing side becomes
+/// profitable. Both exits together must remain bounded by controlled deposits;
+/// the second winner cannot withdraw against already-consumed residual.
+#[test]
+fn test_attack_sequential_winner_exits_after_whipsaw_no_double_spend() {
+    let mut env = TestEnv::new();
+    env.init_market_with_trading_fee_and_warmup(0, 1);
+
+    let short_owner = Keypair::new();
+    let short_idx = env.init_lp(&short_owner);
+    let short_deposit: u64 = 40_000_000_000;
+    env.deposit(&short_owner, short_idx, short_deposit);
+
+    let first_long = Keypair::new();
+    let first_long_idx = env.init_user(&first_long);
+    let first_deposit: u64 = 6_000_000_000;
+    env.deposit(&first_long, first_long_idx, first_deposit);
+
+    let second_long = Keypair::new();
+    let second_long_idx = env.init_lp(&second_long);
+    let second_deposit: u64 = 40_000_000_000;
+    env.deposit(&second_long, second_long_idx, second_deposit);
+
+    let initial_deposits = short_deposit as i128 + first_deposit as i128 + second_deposit as i128;
+    let insurance_before = env.read_insurance_balance();
+    let size: i128 = 100_000_000;
+
+    // First long opens against the original short.
+    env.trade(&first_long, &short_owner, short_idx, first_long_idx, size);
+
+    // Price rises: first long wins, original short loses. Settle the losing
+    // short first to create real residual backing.
+    env.set_slot_and_price(200, 170_000_000);
+    env.try_settle_account(short_idx)
+        .expect("settle original short loss");
+    env.set_slot_and_price(202, 170_000_000);
+    env.try_settle_account(first_long_idx)
+        .expect("settle first long profit");
+
+    // First long exits to a fresh long-side account, leaving the original
+    // short open. Then withdraw whatever backed profit is actually available.
+    env.set_slot_and_price(205, 170_000_000);
+    env.trade(
+        &first_long,
+        &second_long,
+        second_long_idx,
+        first_long_idx,
+        -size,
+    );
+    env.set_slot_and_price(207, 170_000_000);
+    let _ = env.try_convert_released_pnl(&first_long, first_long_idx, 500_000_000);
+    let first_external = withdraw_chunked(&mut env, &first_long, first_long_idx, 500_000_000, 20);
+
+    // Price reverses: the old short is now the winner and the fresh long is
+    // the loser. Close them against each other and try to withdraw the second
+    // winner's profit too.
+    env.set_slot_and_price(400, 110_000_000);
+    env.try_settle_account(second_long_idx)
+        .expect("settle second long loss");
+    env.set_slot_and_price(402, 110_000_000);
+    env.try_settle_account(short_idx)
+        .expect("settle original short profit");
+    env.set_slot_and_price(405, 110_000_000);
+    env.trade(
+        &second_long,
+        &short_owner,
+        short_idx,
+        second_long_idx,
+        -size,
+    );
+    env.set_slot_and_price(407, 110_000_000);
+    let _ = env.try_convert_released_pnl(&short_owner, short_idx, 500_000_000);
+    let second_external = withdraw_chunked(&mut env, &short_owner, short_idx, 500_000_000, 20);
+
+    let total_external = first_external as i128 + second_external as i128;
+    let attacker_wealth = total_external
+        + attacker_account_equity(&env, short_idx)
+        + attacker_account_equity(&env, first_long_idx)
+        + attacker_account_equity(&env, second_long_idx);
+    assert!(
+        attacker_wealth <= initial_deposits + 10_000,
+        "sequential winner exits double-spent residual: wealth={} deposits={} external={} first_external={} second_external={} short_eq={} first_eq={} second_eq={}",
+        attacker_wealth,
+        initial_deposits,
+        total_external,
+        first_external,
+        second_external,
+        attacker_account_equity(&env, short_idx),
+        attacker_account_equity(&env, first_long_idx),
+        attacker_account_equity(&env, second_long_idx),
+    );
+    assert!(
+        insurance_before.saturating_sub(env.read_insurance_balance()) <= 10_000,
+        "sequential winner exits must not drain insurance: before={} after={}",
+        insurance_before,
+        env.read_insurance_balance()
+    );
     assert_eq!(env.read_engine_vault() as u64, env.vault_balance());
 }
