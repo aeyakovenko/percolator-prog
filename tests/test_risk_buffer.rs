@@ -4,6 +4,114 @@ use common::*;
 
 use solana_sdk::signature::{Keypair, Signer};
 
+fn write_risk_buffer_for_test(env: &mut TestEnv, buf: &percolator_prog::risk_buffer::RiskBuffer) {
+    let mut slab = env.svm.get_account(&env.slab).unwrap();
+    let buf_size = core::mem::size_of::<percolator_prog::risk_buffer::RiskBuffer>();
+    let gen_table_size = MAX_ACCOUNTS * 8;
+    let buf_off = SLAB_LEN - gen_table_size - buf_size;
+    slab.data[buf_off..buf_off + buf_size].copy_from_slice(bytemuck::bytes_of(buf));
+    env.svm.set_account(env.slab, slab).unwrap();
+}
+
+fn set_risk_buffer_scan_cursor_for_test(env: &mut TestEnv, cursor: u16) {
+    let mut buf = env.read_risk_buffer();
+    buf.scan_cursor = cursor;
+    write_risk_buffer_for_test(env, &buf);
+}
+
+fn crank_with_candidates_for_test(env: &mut TestEnv, candidates: &[u16]) {
+    let caller = Keypair::new();
+    env.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(caller.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(env.pyth_index, false),
+        ],
+        data: encode_crank_with_candidates(candidates),
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&caller.pubkey()),
+        &[&caller],
+        env.svm.latest_blockhash(),
+    );
+    env.svm
+        .send_transaction(tx)
+        .expect("candidate crank failed");
+}
+
+fn setup_risk_buffer_refill_market() -> (TestEnv, u16, Vec<u16>, Vec<u16>) {
+    program_path();
+    let mut env = TestEnv::new();
+    let data = encode_init_market_with_maint_fee_bounded(
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
+        1_000_000_000,
+        40_000_000,
+        0,
+    );
+    env.try_init_market_raw(data)
+        .expect("init market with maintenance fee");
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 1_000_000_000_000);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&admin, 100_000_000_000);
+
+    let risky_sizes: [i128; 3] = [100_000_000, 90_000_000, 80_000_000];
+    let survivor_sizes: [i128; 3] = [7_000_000, 6_000_000, 5_000_000];
+    let mut risky = Vec::new();
+    let mut survivors = Vec::new();
+
+    // These accounts are large and thinly margined. They should be in the
+    // initial top-4 buffer and be fully liquidated after one fee-bearing crank.
+    for &size in &risky_sizes {
+        let user = Keypair::new();
+        let idx = env.init_user(&user);
+        env.deposit(&user, idx, 1_500_000_000);
+        env.trade(&user, &lp, lp_idx, idx, size);
+        risky.push(idx);
+    }
+
+    // These accounts have smaller notional, so they start outside the full
+    // buffer, but have enough capital to survive the same fee interval.
+    for &size in &survivor_sizes {
+        let user = Keypair::new();
+        let idx = env.init_user(&user);
+        env.deposit(&user, idx, 10_000_000_000);
+        env.trade(&user, &lp, lp_idx, idx, size);
+        survivors.push(idx);
+    }
+
+    let buf = env.read_risk_buffer();
+    assert_eq!(buf.count, 4, "setup must start with a full risk buffer");
+    assert!(
+        buf.find(lp_idx).is_some(),
+        "LP must be the largest buffer entry"
+    );
+    for &idx in &risky {
+        assert!(
+            buf.find(idx).is_some(),
+            "risky account {idx} must start in buffer"
+        );
+    }
+    for &idx in &survivors {
+        assert!(
+            buf.find(idx).is_none(),
+            "survivor account {idx} must start outside the full buffer"
+        );
+    }
+
+    (env, lp_idx, risky, survivors)
+}
+
 // ============================================================================
 // A. Buffer populated by trades
 // ============================================================================
@@ -750,6 +858,154 @@ fn test_buffer_with_five_accounts_evicts_smallest() {
     // Smallest two evicted
     assert!(buf.find(idxs[0]).is_none(), "user1 (1M) must be evicted");
     assert!(buf.find(idxs[1]).is_none(), "user2 (2M) must be evicted");
+}
+
+// ============================================================================
+// E (integration). Refill after crank clears buffered entries
+// ============================================================================
+
+/// When a crank liquidates buffered accounts and the progressive scan window
+/// covers lower-ranked live positions, Phase C refills the holes in the same
+/// crank.
+#[test]
+fn test_crank_scan_refills_after_buffer_entries_are_liquidated() {
+    let (mut env, lp_idx, risky, survivors) = setup_risk_buffer_refill_market();
+
+    // Default scan_cursor is 0, so the post-liquidation scan visits all account
+    // indices created by the setup.
+    let buf = env.read_risk_buffer();
+    assert_eq!(buf.scan_cursor, 0, "setup should not have cranked yet");
+    env.set_slot_and_price_raw_no_walk(149, 138_000_000);
+    crank_with_candidates_for_test(&mut env, &[]);
+
+    for &idx in &risky {
+        assert_eq!(
+            env.read_account_position(idx),
+            0,
+            "risky account {idx} should be liquidated by the crank"
+        );
+    }
+    for &idx in &survivors {
+        assert_ne!(
+            env.read_account_position(idx),
+            0,
+            "survivor account {idx} should keep its position"
+        );
+    }
+
+    let buf = env.read_risk_buffer();
+    assert_eq!(buf.count, 4, "scan refill should restore the full buffer");
+    assert!(buf.find(lp_idx).is_some(), "LP should remain in buffer");
+    for &idx in &risky {
+        assert!(
+            buf.find(idx).is_none(),
+            "liquidated account {idx} must be removed from buffer"
+        );
+    }
+    for &idx in &survivors {
+        assert!(
+            buf.find(idx).is_some(),
+            "scan should refill survivor account {idx}"
+        );
+    }
+}
+
+/// If the scan window misses lower-ranked live positions, honest keeper
+/// candidates still refill holes in Phase D after Phase A removes liquidated
+/// buffer entries.
+#[test]
+fn test_crank_candidate_refills_when_scan_window_misses() {
+    let (mut env, lp_idx, risky, survivors) = setup_risk_buffer_refill_market();
+
+    // Force the progressive scan to miss the low-index survivor accounts.
+    // The candidate list below is the only same-crank refill source.
+    set_risk_buffer_scan_cursor_for_test(&mut env, 32);
+
+    env.set_slot_and_price_raw_no_walk(149, 138_000_000);
+    crank_with_candidates_for_test(&mut env, &survivors);
+
+    for &idx in &risky {
+        assert_eq!(
+            env.read_account_position(idx),
+            0,
+            "risky account {idx} should be liquidated by the crank"
+        );
+    }
+
+    let buf = env.read_risk_buffer();
+    assert_eq!(
+        buf.count, 4,
+        "candidate refill should restore the full buffer"
+    );
+    assert!(buf.find(lp_idx).is_some(), "LP should remain in buffer");
+    for &idx in &survivors {
+        assert!(
+            buf.find(idx).is_some(),
+            "candidate Phase D should refill survivor account {idx}"
+        );
+    }
+}
+
+/// If both the scan window and caller candidates miss lower-ranked live
+/// positions, the buffer may remain temporarily underfull; once the scan cursor
+/// reaches those accounts, the next crank refills it.
+#[test]
+fn test_crank_refill_is_progressive_when_scan_and_candidates_miss() {
+    let (mut env, lp_idx, risky, survivors) = setup_risk_buffer_refill_market();
+
+    // Model the "scan cursor is elsewhere" corner case without spending 128
+    // cranks to wrap a 4096-account market in the test harness.
+    set_risk_buffer_scan_cursor_for_test(&mut env, 32);
+
+    env.set_slot_and_price_raw_no_walk(149, 138_000_000);
+    crank_with_candidates_for_test(&mut env, &[]);
+
+    for &idx in &risky {
+        assert_eq!(
+            env.read_account_position(idx),
+            0,
+            "risky account {idx} should be liquidated by the crank"
+        );
+    }
+
+    let buf_after_miss = env.read_risk_buffer();
+    assert!(
+        buf_after_miss.count < 4,
+        "buffer should remain underfull when both scan and candidates miss: count={}",
+        buf_after_miss.count
+    );
+    assert!(
+        buf_after_miss.find(lp_idx).is_some(),
+        "LP should remain in the partially cleared buffer"
+    );
+    for &idx in &survivors {
+        assert!(
+            buf_after_miss.find(idx).is_none(),
+            "survivor account {idx} should not be refilled until scanned or supplied"
+        );
+    }
+
+    // Model eventual cursor wrap to the low-index accounts and verify the
+    // normal scan path refills the buffer.
+    set_risk_buffer_scan_cursor_for_test(&mut env, 0);
+    env.set_slot_and_price_raw_no_walk(150, 138_000_000);
+    crank_with_candidates_for_test(&mut env, &[]);
+
+    let buf_after_refill = env.read_risk_buffer();
+    assert_eq!(
+        buf_after_refill.count, 4,
+        "later scan should restore the full buffer"
+    );
+    assert!(
+        buf_after_refill.find(lp_idx).is_some(),
+        "LP should remain in buffer"
+    );
+    for &idx in &survivors {
+        assert!(
+            buf_after_refill.find(idx).is_some(),
+            "later scan should refill survivor account {idx}"
+        );
+    }
 }
 
 // ============================================================================
