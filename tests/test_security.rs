@@ -13097,3 +13097,817 @@ fn test_attack_position_flip_through_zero_with_pnl() {
         "pnl_pos_tot must match positive account PnL after cross-zero trade"
     );
 }
+
+const MAX_RISK_P0_E6: u64 = 200_000_000;
+const MAX_RISK_ATTACK_START_SLOT: u64 = 100;
+const MAX_RISK_ATTACK_SLOTS: usize = 8;
+const MAX_RISK_CAPITAL_PER_USER: u64 = 1_000_000_000;
+const MAX_RISK_LP_CAPITAL: u64 = 100_000_000_000;
+const MAX_RISK_INSURANCE: u64 = 1_000_000_000;
+const MAX_RISK_LEVERAGE_MILLI: u128 = 19_900;
+const MAX_RISK_CLAMP_BPS: u64 = 49;
+
+#[derive(Debug, Clone, Copy)]
+enum MaxRiskCrankSchedule {
+    HonestEverySlot,
+    EmptyEverySlotThenFull,
+    GapThenFull,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MaxRiskEdgeSchedule {
+    OracleThenFullEverySlot,
+    FullThenOracleEverySlot,
+    OracleThenEmptyEverySlotThenFull,
+    OracleThenFullEveryOtherSlot,
+    OracleThenFullAtMidAndEnd,
+    GapThenFull,
+}
+
+struct MaxRiskActor {
+    keypair: Keypair,
+    idx: u16,
+    direction: i8,
+}
+
+fn encode_init_market_bounty_sol_20x_max(admin: &Pubkey, mint: &Pubkey) -> Vec<u8> {
+    let mut data = vec![0u8];
+    data.extend_from_slice(admin.as_ref());
+    data.extend_from_slice(mint.as_ref());
+    data.extend_from_slice(&TEST_FEED_ID);
+    data.extend_from_slice(&600u64.to_le_bytes());
+    data.extend_from_slice(&500u16.to_le_bytes());
+    data.push(0);
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes());
+    data.extend_from_slice(&0u128.to_le_bytes());
+
+    // RiskParams wire fields. This mirrors ../percolator-stress/max_risk.md's
+    // 20x SOL bounty market with h_min = 0 enabled as a product feature.
+    data.extend_from_slice(&0u64.to_le_bytes());
+    data.extend_from_slice(&500u64.to_le_bytes());
+    data.extend_from_slice(&500u64.to_le_bytes());
+    data.extend_from_slice(&1u64.to_le_bytes());
+    data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
+    data.extend_from_slice(&1u128.to_le_bytes());
+    data.extend_from_slice(&10u64.to_le_bytes());
+    data.extend_from_slice(&9u64.to_le_bytes());
+    data.extend_from_slice(&5u64.to_le_bytes());
+    data.extend_from_slice(&50_000_000_000u128.to_le_bytes());
+    data.extend_from_slice(&1_000u64.to_le_bytes());
+    data.extend_from_slice(&0u128.to_le_bytes());
+    data.extend_from_slice(&500u128.to_le_bytes());
+    data.extend_from_slice(&600u128.to_le_bytes());
+    data.extend_from_slice(&MAX_RISK_CLAMP_BPS.to_le_bytes());
+
+    data.extend_from_slice(&0u16.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes());
+    data.extend_from_slice(&10u64.to_le_bytes());
+    data.extend_from_slice(&500u64.to_le_bytes());
+    data.extend_from_slice(&100u64.to_le_bytes());
+    data.extend_from_slice(&500i64.to_le_bytes());
+    data.extend_from_slice(&1_000i64.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes());
+    data.extend_from_slice(&10u64.to_le_bytes());
+    data
+}
+
+fn try_crank_with_candidate_indices(env: &mut TestEnv, candidates: &[u16]) -> Result<(), String> {
+    let caller = Keypair::new();
+    env.svm
+        .airdrop(&caller.pubkey(), 10_000_000)
+        .map_err(|e| format!("{e:?}"))?;
+
+    let data = encode_crank_with_candidates(candidates);
+    let accounts = vec![
+        AccountMeta::new_readonly(caller.pubkey(), true),
+        AccountMeta::new(env.slab, false),
+        AccountMeta::new_readonly(sysvar::clock::id(), false),
+        AccountMeta::new_readonly(env.pyth_index, false),
+    ];
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts,
+        data,
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&caller.pubkey()),
+        &[&caller],
+        env.svm.latest_blockhash(),
+    );
+    env.svm
+        .send_transaction(tx)
+        .map(|_| ())
+        .map_err(|e| format!("{e:?}"))
+}
+
+fn try_empty_crank(env: &mut TestEnv) -> Result<(), String> {
+    let caller = Keypair::new();
+    env.svm
+        .airdrop(&caller.pubkey(), 10_000_000)
+        .map_err(|e| format!("{e:?}"))?;
+
+    let mut data = Vec::new();
+    data.push(5);
+    data.extend_from_slice(&percolator_prog::constants::CRANK_NO_CALLER.to_le_bytes());
+    data.push(1);
+
+    let accounts = vec![
+        AccountMeta::new_readonly(caller.pubkey(), true),
+        AccountMeta::new(env.slab, false),
+        AccountMeta::new_readonly(sysvar::clock::id(), false),
+        AccountMeta::new_readonly(env.pyth_index, false),
+    ];
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts,
+        data,
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&caller.pubkey()),
+        &[&caller],
+        env.svm.latest_blockhash(),
+    );
+    env.svm
+        .send_transaction(tx)
+        .map(|_| ())
+        .map_err(|e| format!("{e:?}"))
+}
+
+fn max_risk_next_clamped_price(price_e6: u64, direction: i8, dt_slots: u64) -> u64 {
+    let delta = (price_e6 as u128)
+        .saturating_mul(MAX_RISK_CLAMP_BPS as u128)
+        .saturating_mul(dt_slots as u128)
+        / 10_000;
+    if direction < 0 {
+        price_e6.saturating_sub(delta as u64)
+    } else {
+        price_e6.saturating_add(delta as u64)
+    }
+}
+
+fn max_risk_next_price_signed_bps(price_e6: u64, signed_bps: i16) -> u64 {
+    let abs_bps = signed_bps.unsigned_abs() as u64;
+    assert!(
+        abs_bps <= MAX_RISK_CLAMP_BPS,
+        "edge sweep only uses oracle deltas inside the wrapper cap"
+    );
+    let delta = (price_e6 as u128).saturating_mul(abs_bps as u128) / 10_000;
+    if signed_bps < 0 {
+        price_e6.saturating_sub(delta as u64)
+    } else {
+        price_e6.saturating_add(delta as u64)
+    }
+}
+
+fn max_risk_gap_price_from_path(path: &[i8]) -> u64 {
+    let net: i64 = path.iter().map(|dir| *dir as i64).sum();
+    if net == 0 {
+        return MAX_RISK_P0_E6;
+    }
+    max_risk_next_clamped_price(MAX_RISK_P0_E6, net.signum() as i8, net.unsigned_abs())
+}
+
+fn max_risk_gap_price_from_signed_bps_path(path: &[i16]) -> u64 {
+    let net_bps: i64 = path.iter().map(|bps| *bps as i64).sum();
+    if net_bps == 0 {
+        return MAX_RISK_P0_E6;
+    }
+    let max_gap_bps = (MAX_RISK_CLAMP_BPS as i64).saturating_mul(path.len() as i64);
+    let bounded_net_bps = net_bps.clamp(-max_gap_bps, max_gap_bps);
+    let delta =
+        (MAX_RISK_P0_E6 as u128).saturating_mul(bounded_net_bps.unsigned_abs() as u128) / 10_000;
+    if bounded_net_bps < 0 {
+        MAX_RISK_P0_E6.saturating_sub(delta as u64)
+    } else {
+        MAX_RISK_P0_E6.saturating_add(delta as u64)
+    }
+}
+
+fn max_risk_position_size(capital: u64, price_e6: u64) -> i128 {
+    let notional = (capital as u128) * MAX_RISK_LEVERAGE_MILLI / 1_000;
+    let q = notional
+        .saturating_mul(percolator::POS_SCALE)
+        .checked_div(price_e6 as u128)
+        .expect("nonzero price");
+    q as i128
+}
+
+fn setup_max_risk_probe(
+    num_longs: usize,
+    num_shorts: usize,
+) -> (TestEnv, Keypair, u16, Vec<MaxRiskActor>) {
+    let mut env = TestEnv::new();
+    env.set_slot_and_price_raw_no_walk(MAX_RISK_ATTACK_START_SLOT, MAX_RISK_P0_E6 as i64);
+
+    let admin = env.payer.pubkey();
+    let mint = env.mint;
+    let data = encode_init_market_bounty_sol_20x_max(&admin, &mint);
+    env.try_init_market_raw(data)
+        .expect("max-risk InitMarket should pass wrapper validation");
+
+    let payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&payer, MAX_RISK_INSURANCE);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, MAX_RISK_LP_CAPITAL);
+
+    let size = max_risk_position_size(MAX_RISK_CAPITAL_PER_USER, MAX_RISK_P0_E6);
+    let mut actors = Vec::with_capacity(num_longs + num_shorts);
+    for _ in 0..num_longs {
+        let user = Keypair::new();
+        let user_idx = env.init_user(&user);
+        env.deposit(&user, user_idx, MAX_RISK_CAPITAL_PER_USER);
+        env.try_trade(&user, &lp, lp_idx, user_idx, size)
+            .expect("open max-risk long");
+        actors.push(MaxRiskActor {
+            keypair: user,
+            idx: user_idx,
+            direction: 1,
+        });
+    }
+    for _ in 0..num_shorts {
+        let user = Keypair::new();
+        let user_idx = env.init_user(&user);
+        env.deposit(&user, user_idx, MAX_RISK_CAPITAL_PER_USER);
+        env.try_trade(&user, &lp, lp_idx, user_idx, -size)
+            .expect("open max-risk short");
+        actors.push(MaxRiskActor {
+            keypair: user,
+            idx: user_idx,
+            direction: -1,
+        });
+    }
+
+    (env, lp, lp_idx, actors)
+}
+
+fn max_risk_candidate_indices(lp_idx: u16, actors: &[MaxRiskActor]) -> Vec<u16> {
+    let mut candidates = Vec::with_capacity(actors.len() + 1);
+    candidates.push(lp_idx);
+    candidates.extend(actors.iter().map(|a| a.idx));
+    candidates
+}
+
+fn crank_candidate_sweep_and_track_min(
+    env: &mut TestEnv,
+    candidates: &[u16],
+    mut min_insurance: u128,
+) -> u128 {
+    for chunk in candidates.chunks(32) {
+        try_crank_with_candidate_indices(env, chunk)
+            .expect("candidate chunk crank should not reject");
+        min_insurance = min_insurance.min(env.read_insurance_balance());
+    }
+    min_insurance
+}
+
+fn run_max_risk_edge_price_probe(
+    label: &str,
+    path: [i16; MAX_RISK_ATTACK_SLOTS],
+    schedule: MaxRiskEdgeSchedule,
+    num_longs: usize,
+    num_shorts: usize,
+) -> (u128, u128, u128) {
+    let (mut env, _lp, lp_idx, actors) = setup_max_risk_probe(num_longs, num_shorts);
+    let candidates = max_risk_candidate_indices(lp_idx, &actors);
+    let insurance_start = env.read_insurance_balance();
+    let mut min_insurance = insurance_start;
+    let mut price = MAX_RISK_P0_E6;
+
+    match schedule {
+        MaxRiskEdgeSchedule::OracleThenFullEverySlot => {
+            for (step, signed_bps) in path.iter().enumerate() {
+                price = max_risk_next_price_signed_bps(price, *signed_bps);
+                env.set_slot_and_price_raw_no_walk(
+                    MAX_RISK_ATTACK_START_SLOT + step as u64 + 1,
+                    price as i64,
+                );
+                min_insurance =
+                    crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+            }
+        }
+        MaxRiskEdgeSchedule::FullThenOracleEverySlot => {
+            for (step, signed_bps) in path.iter().enumerate() {
+                env.set_slot_and_price_raw_no_walk(
+                    MAX_RISK_ATTACK_START_SLOT + step as u64 + 1,
+                    price as i64,
+                );
+                min_insurance =
+                    crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+                price = max_risk_next_price_signed_bps(price, *signed_bps);
+                env.set_slot_and_price_raw_no_walk(
+                    MAX_RISK_ATTACK_START_SLOT + step as u64 + 1,
+                    price as i64,
+                );
+            }
+            env.set_slot_and_price_raw_no_walk(
+                MAX_RISK_ATTACK_START_SLOT + MAX_RISK_ATTACK_SLOTS as u64 + 1,
+                price as i64,
+            );
+            min_insurance =
+                crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+        }
+        MaxRiskEdgeSchedule::OracleThenEmptyEverySlotThenFull => {
+            for (step, signed_bps) in path.iter().enumerate() {
+                price = max_risk_next_price_signed_bps(price, *signed_bps);
+                env.set_slot_and_price_raw_no_walk(
+                    MAX_RISK_ATTACK_START_SLOT + step as u64 + 1,
+                    price as i64,
+                );
+                try_empty_crank(&mut env).expect("empty crank should not reject");
+                min_insurance = min_insurance.min(env.read_insurance_balance());
+            }
+            min_insurance =
+                crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+        }
+        MaxRiskEdgeSchedule::OracleThenFullEveryOtherSlot => {
+            for (step, signed_bps) in path.iter().enumerate() {
+                price = max_risk_next_price_signed_bps(price, *signed_bps);
+                env.set_slot_and_price_raw_no_walk(
+                    MAX_RISK_ATTACK_START_SLOT + step as u64 + 1,
+                    price as i64,
+                );
+                if step % 2 == 1 {
+                    min_insurance =
+                        crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+                }
+            }
+            min_insurance =
+                crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+        }
+        MaxRiskEdgeSchedule::OracleThenFullAtMidAndEnd => {
+            for (step, signed_bps) in path.iter().enumerate() {
+                price = max_risk_next_price_signed_bps(price, *signed_bps);
+                env.set_slot_and_price_raw_no_walk(
+                    MAX_RISK_ATTACK_START_SLOT + step as u64 + 1,
+                    price as i64,
+                );
+                if step == 3 || step == 7 {
+                    min_insurance =
+                        crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+                }
+            }
+        }
+        MaxRiskEdgeSchedule::GapThenFull => {
+            price = max_risk_gap_price_from_signed_bps_path(&path);
+            env.set_slot_and_price_raw_no_walk(
+                MAX_RISK_ATTACK_START_SLOT + MAX_RISK_ATTACK_SLOTS as u64,
+                price as i64,
+            );
+            min_insurance =
+                crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+        }
+    }
+
+    for _ in 0..2 {
+        min_insurance = crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+    }
+
+    let insurance_end = env.read_insurance_balance();
+    let _ = (label, schedule, price);
+    (insurance_start, min_insurance, insurance_end)
+}
+
+fn run_max_risk_price_probe(
+    label: &str,
+    path: [i8; MAX_RISK_ATTACK_SLOTS],
+    schedule: MaxRiskCrankSchedule,
+    num_longs: usize,
+    num_shorts: usize,
+) -> (u128, u128, u128) {
+    let (mut env, _lp, lp_idx, actors) = setup_max_risk_probe(num_longs, num_shorts);
+    let candidates = max_risk_candidate_indices(lp_idx, &actors);
+    let insurance_start = env.read_insurance_balance();
+    let mut min_insurance = insurance_start;
+    let mut price = MAX_RISK_P0_E6;
+
+    match schedule {
+        MaxRiskCrankSchedule::HonestEverySlot => {
+            for (step, dir) in path.iter().enumerate() {
+                price = max_risk_next_clamped_price(price, *dir, 1);
+                env.set_slot_and_price_raw_no_walk(
+                    MAX_RISK_ATTACK_START_SLOT + step as u64 + 1,
+                    price as i64,
+                );
+                min_insurance =
+                    crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+            }
+        }
+        MaxRiskCrankSchedule::EmptyEverySlotThenFull => {
+            for (step, dir) in path.iter().enumerate() {
+                price = max_risk_next_clamped_price(price, *dir, 1);
+                env.set_slot_and_price_raw_no_walk(
+                    MAX_RISK_ATTACK_START_SLOT + step as u64 + 1,
+                    price as i64,
+                );
+                try_empty_crank(&mut env).expect("empty crank should not reject");
+                min_insurance = min_insurance.min(env.read_insurance_balance());
+            }
+            min_insurance =
+                crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+        }
+        MaxRiskCrankSchedule::GapThenFull => {
+            price = max_risk_gap_price_from_path(&path);
+            env.set_slot_and_price_raw_no_walk(
+                MAX_RISK_ATTACK_START_SLOT + MAX_RISK_ATTACK_SLOTS as u64,
+                price as i64,
+            );
+            min_insurance =
+                crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+        }
+    }
+
+    for _ in 0..4 {
+        min_insurance = crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+    }
+
+    let insurance_end = env.read_insurance_balance();
+    println!(
+        "max-risk probe {label:?} {schedule:?}: insurance start={insurance_start}, min={min_insurance}, end={insurance_end}, final_price={price}",
+    );
+    (insurance_start, min_insurance, insurance_end)
+}
+
+fn close_profitable_side_and_withdraw(
+    env: &mut TestEnv,
+    lp: &Keypair,
+    lp_idx: u16,
+    actors: &[MaxRiskActor],
+    profitable_direction: i8,
+) {
+    for actor in actors
+        .iter()
+        .filter(|a| a.direction == profitable_direction)
+    {
+        let pos = env.read_account_position(actor.idx);
+        if pos == 0 {
+            continue;
+        }
+        env.try_trade(&actor.keypair, lp, lp_idx, actor.idx, -pos)
+            .expect("profitable side should be able to close");
+        let cap = env.read_account_capital(actor.idx);
+        if cap > 0 {
+            env.try_withdraw(&actor.keypair, actor.idx, cap as u64)
+                .expect("profitable side should be able to withdraw realized capital");
+        }
+    }
+}
+
+#[test]
+fn test_attack_max_risk_edge_sweep_no_insurance_drain() {
+    program_path();
+
+    let schedules = [
+        MaxRiskEdgeSchedule::OracleThenFullEverySlot,
+        MaxRiskEdgeSchedule::FullThenOracleEverySlot,
+        MaxRiskEdgeSchedule::OracleThenEmptyEverySlotThenFull,
+        MaxRiskEdgeSchedule::OracleThenFullEveryOtherSlot,
+        MaxRiskEdgeSchedule::OracleThenFullAtMidAndEnd,
+        MaxRiskEdgeSchedule::GapThenFull,
+    ];
+    let mut cases_run = 0usize;
+    let mut closest_margin = u128::MAX;
+
+    // Exhaust all max-step signs. This is the sharpest liquidation/cascade
+    // surface: every slot moves by the maximum allowed amount, but the keeper
+    // schedule varies from perfectly honest to stale-by-one-slot and sparse.
+    for mask in 0u16..(1u16 << MAX_RISK_ATTACK_SLOTS) {
+        let mut path = [0i16; MAX_RISK_ATTACK_SLOTS];
+        for (step, slot_bps) in path.iter_mut().enumerate() {
+            *slot_bps = if ((mask >> step) & 1) == 0 {
+                -(MAX_RISK_CLAMP_BPS as i16)
+            } else {
+                MAX_RISK_CLAMP_BPS as i16
+            };
+        }
+        for schedule in schedules {
+            let label = "all_signs_at_max_bps";
+            let (start, min, end) = run_max_risk_edge_price_probe(label, path, schedule, 4, 4);
+            cases_run += 1;
+            closest_margin = closest_margin.min(min.saturating_sub(start));
+            assert!(
+                min >= start,
+                "EXPLOIT: edge sweep mask={mask:#04x} {schedule:?} drained insurance below start: path={path:?} start={start}, min={min}, end={end}"
+            );
+        }
+    }
+
+    // Boundary magnitudes around rounding and threshold behavior. These are
+    // deliberately not exhaustive over 50^8; they hit zero movement, one bps,
+    // just-below-cap, cap, half-cap, and concentrated first/last-slot shocks.
+    let boundary_paths: [(&str, [i16; MAX_RISK_ATTACK_SLOTS]); 18] = [
+        ("zero", [0, 0, 0, 0, 0, 0, 0, 0]),
+        ("all_down_1", [-1, -1, -1, -1, -1, -1, -1, -1]),
+        ("all_up_1", [1, 1, 1, 1, 1, 1, 1, 1]),
+        ("all_down_24", [-24, -24, -24, -24, -24, -24, -24, -24]),
+        ("all_up_24", [24, 24, 24, 24, 24, 24, 24, 24]),
+        ("all_down_48", [-48, -48, -48, -48, -48, -48, -48, -48]),
+        ("all_up_48", [48, 48, 48, 48, 48, 48, 48, 48]),
+        ("first_down_max", [-49, 0, 0, 0, 0, 0, 0, 0]),
+        ("last_down_max", [0, 0, 0, 0, 0, 0, 0, -49]),
+        ("first_up_max", [49, 0, 0, 0, 0, 0, 0, 0]),
+        ("last_up_max", [0, 0, 0, 0, 0, 0, 0, 49]),
+        ("down_spike_revert", [-49, 49, 0, 0, 0, 0, 0, 0]),
+        ("up_spike_revert", [49, -49, 0, 0, 0, 0, 0, 0]),
+        ("late_down_spike_revert", [0, 0, 0, 0, 0, 0, -49, 49]),
+        ("late_up_spike_revert", [0, 0, 0, 0, 0, 0, 49, -49]),
+        ("alternating_small", [-1, 1, -1, 1, -1, 1, -1, 1]),
+        ("alternating_48", [-48, 48, -48, 48, -48, 48, -48, 48]),
+        ("mixed_threshold", [-49, -48, -24, -1, 1, 24, 48, 49]),
+    ];
+    for (label, path) in boundary_paths {
+        for schedule in schedules {
+            let (start, min, end) = run_max_risk_edge_price_probe(label, path, schedule, 8, 8);
+            cases_run += 1;
+            closest_margin = closest_margin.min(min.saturating_sub(start));
+            assert!(
+                min >= start,
+                "EXPLOIT: edge boundary {label} {schedule:?} drained insurance below start: path={path:?} start={start}, min={min}, end={end}"
+            );
+        }
+    }
+
+    println!(
+        "max-risk edge sweep PASS_SAFE: cases={cases_run}, closest_min_minus_start={closest_margin}"
+    );
+}
+
+fn run_max_risk_pingpong_probe(label: &str, first_direction: i8) -> (u128, u128, u128) {
+    let (mut env, lp, lp_idx, actors) = setup_max_risk_probe(4, 4);
+    let candidates = max_risk_candidate_indices(lp_idx, &actors);
+    let insurance_start = env.read_insurance_balance();
+    let mut min_insurance = insurance_start;
+    let mut price = MAX_RISK_P0_E6;
+
+    for step in 0..4 {
+        price = max_risk_next_clamped_price(price, first_direction, 1);
+        env.set_slot_and_price_raw_no_walk(MAX_RISK_ATTACK_START_SLOT + step + 1, price as i64);
+        min_insurance = crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+    }
+    let first_profitable = if first_direction < 0 { -1 } else { 1 };
+    close_profitable_side_and_withdraw(&mut env, &lp, lp_idx, &actors, first_profitable);
+    min_insurance = min_insurance.min(env.read_insurance_balance());
+
+    for step in 4..8 {
+        price = max_risk_next_clamped_price(price, -first_direction, 1);
+        env.set_slot_and_price_raw_no_walk(MAX_RISK_ATTACK_START_SLOT + step + 1, price as i64);
+        min_insurance = crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+    }
+    let second_profitable = if first_direction < 0 { 1 } else { -1 };
+    close_profitable_side_and_withdraw(&mut env, &lp, lp_idx, &actors, second_profitable);
+    min_insurance = crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+
+    let insurance_end = env.read_insurance_balance();
+    println!(
+        "max-risk pingpong {label:?}: insurance start={insurance_start}, min={min_insurance}, end={insurance_end}, final_price={price}",
+    );
+    (insurance_start, min_insurance, insurance_end)
+}
+
+fn run_max_risk_full_window_profit_take_probe(
+    label: &str,
+    direction: i8,
+    schedule: MaxRiskCrankSchedule,
+) -> (u128, u128, u128) {
+    let (mut env, lp, lp_idx, actors) = setup_max_risk_probe(16, 16);
+    let candidates = max_risk_candidate_indices(lp_idx, &actors);
+    let insurance_start = env.read_insurance_balance();
+    let mut min_insurance = insurance_start;
+    let mut price = MAX_RISK_P0_E6;
+
+    match schedule {
+        MaxRiskCrankSchedule::HonestEverySlot => {
+            for step in 0..MAX_RISK_ATTACK_SLOTS {
+                price = max_risk_next_clamped_price(price, direction, 1);
+                env.set_slot_and_price_raw_no_walk(
+                    MAX_RISK_ATTACK_START_SLOT + step as u64 + 1,
+                    price as i64,
+                );
+                min_insurance =
+                    crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+            }
+        }
+        MaxRiskCrankSchedule::EmptyEverySlotThenFull => {
+            for step in 0..MAX_RISK_ATTACK_SLOTS {
+                price = max_risk_next_clamped_price(price, direction, 1);
+                env.set_slot_and_price_raw_no_walk(
+                    MAX_RISK_ATTACK_START_SLOT + step as u64 + 1,
+                    price as i64,
+                );
+                try_empty_crank(&mut env).expect("empty crank should not reject");
+                min_insurance = min_insurance.min(env.read_insurance_balance());
+            }
+        }
+        MaxRiskCrankSchedule::GapThenFull => {
+            price = max_risk_next_clamped_price(
+                MAX_RISK_P0_E6,
+                direction,
+                MAX_RISK_ATTACK_SLOTS as u64,
+            );
+            env.set_slot_and_price_raw_no_walk(
+                MAX_RISK_ATTACK_START_SLOT + MAX_RISK_ATTACK_SLOTS as u64,
+                price as i64,
+            );
+        }
+    }
+
+    let profitable_side = if direction < 0 { -1 } else { 1 };
+    close_profitable_side_and_withdraw(&mut env, &lp, lp_idx, &actors, profitable_side);
+    min_insurance = min_insurance.min(env.read_insurance_balance());
+
+    for _ in 0..4 {
+        min_insurance = crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+    }
+
+    let insurance_end = env.read_insurance_balance();
+    println!(
+        "max-risk profit-take {label:?} {schedule:?}: insurance start={insurance_start}, min={min_insurance}, end={insurance_end}, final_price={price}",
+    );
+    (insurance_start, min_insurance, insurance_end)
+}
+
+fn run_max_risk_profit_take_probe_steps(
+    label: &str,
+    direction: i8,
+    steps: usize,
+    schedule: MaxRiskCrankSchedule,
+) -> (u128, u128, u128) {
+    let (mut env, lp, lp_idx, actors) = setup_max_risk_probe(16, 16);
+    let candidates = max_risk_candidate_indices(lp_idx, &actors);
+    let insurance_start = env.read_insurance_balance();
+    let mut min_insurance = insurance_start;
+    let mut price = MAX_RISK_P0_E6;
+
+    match schedule {
+        MaxRiskCrankSchedule::HonestEverySlot => {
+            for step in 0..steps {
+                price = max_risk_next_clamped_price(price, direction, 1);
+                env.set_slot_and_price_raw_no_walk(
+                    MAX_RISK_ATTACK_START_SLOT + step as u64 + 1,
+                    price as i64,
+                );
+                min_insurance =
+                    crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+            }
+        }
+        MaxRiskCrankSchedule::EmptyEverySlotThenFull => {
+            for step in 0..steps {
+                price = max_risk_next_clamped_price(price, direction, 1);
+                env.set_slot_and_price_raw_no_walk(
+                    MAX_RISK_ATTACK_START_SLOT + step as u64 + 1,
+                    price as i64,
+                );
+                try_empty_crank(&mut env).expect("empty crank should not reject");
+                min_insurance = min_insurance.min(env.read_insurance_balance());
+            }
+        }
+        MaxRiskCrankSchedule::GapThenFull => {
+            price = max_risk_next_clamped_price(MAX_RISK_P0_E6, direction, steps as u64);
+            env.set_slot_and_price_raw_no_walk(
+                MAX_RISK_ATTACK_START_SLOT + steps as u64,
+                price as i64,
+            );
+        }
+    }
+
+    let profitable_side = if direction < 0 { -1 } else { 1 };
+    close_profitable_side_and_withdraw(&mut env, &lp, lp_idx, &actors, profitable_side);
+    min_insurance = min_insurance.min(env.read_insurance_balance());
+
+    for _ in 0..4 {
+        min_insurance = crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
+    }
+
+    let insurance_end = env.read_insurance_balance();
+    println!(
+        "max-risk {steps}-slot profit-take {label:?} {schedule:?}: insurance start={insurance_start}, min={min_insurance}, end={insurance_end}, final_price={price}",
+    );
+    (insurance_start, min_insurance, insurance_end)
+}
+
+#[test]
+fn test_attack_max_risk_8_slot_oracle_crank_orderings_do_not_drain_insurance() {
+    program_path();
+
+    let paths: [(&str, [i8; MAX_RISK_ATTACK_SLOTS]); 8] = [
+        ("all_down", [-1, -1, -1, -1, -1, -1, -1, -1]),
+        ("all_up", [1, 1, 1, 1, 1, 1, 1, 1]),
+        ("down_then_up", [-1, -1, -1, -1, 1, 1, 1, 1]),
+        ("up_then_down", [1, 1, 1, 1, -1, -1, -1, -1]),
+        ("alternating_down_first", [-1, 1, -1, 1, -1, 1, -1, 1]),
+        ("alternating_up_first", [1, -1, 1, -1, 1, -1, 1, -1]),
+        ("two_down_two_up", [-1, -1, 1, 1, -1, -1, 1, 1]),
+        ("two_up_two_down", [1, 1, -1, -1, 1, 1, -1, -1]),
+    ];
+    let schedules = [
+        MaxRiskCrankSchedule::HonestEverySlot,
+        MaxRiskCrankSchedule::EmptyEverySlotThenFull,
+        MaxRiskCrankSchedule::GapThenFull,
+    ];
+
+    for (label, path) in paths {
+        for schedule in schedules {
+            let (start, min, end) = run_max_risk_price_probe(label, path, schedule, 16, 16);
+            assert!(
+                min >= start,
+                "EXPLOIT: {label} {schedule:?} drained insurance below start: start={start}, min={min}, end={end}"
+            );
+        }
+    }
+
+    let cascade_cases = [
+        (
+            "cascade_longs_gap_down",
+            [-1, -1, -1, -1, -1, -1, -1, -1],
+            MaxRiskCrankSchedule::GapThenFull,
+            80,
+            0,
+        ),
+        (
+            "cascade_shorts_gap_up",
+            [1, 1, 1, 1, 1, 1, 1, 1],
+            MaxRiskCrankSchedule::GapThenFull,
+            0,
+            80,
+        ),
+        (
+            "cascade_longs_empty_down",
+            [-1, -1, -1, -1, -1, -1, -1, -1],
+            MaxRiskCrankSchedule::EmptyEverySlotThenFull,
+            80,
+            0,
+        ),
+        (
+            "cascade_shorts_empty_up",
+            [1, 1, 1, 1, 1, 1, 1, 1],
+            MaxRiskCrankSchedule::EmptyEverySlotThenFull,
+            0,
+            80,
+        ),
+    ];
+    for (label, path, schedule, longs, shorts) in cascade_cases {
+        let (start, min, end) = run_max_risk_price_probe(label, path, schedule, longs, shorts);
+        assert!(
+            min >= start,
+            "EXPLOIT: {label} {schedule:?} drained insurance below start: start={start}, min={min}, end={end}"
+        );
+    }
+
+    for (label, dir) in [
+        ("shorts_close_then_longs", -1),
+        ("longs_close_then_shorts", 1),
+    ] {
+        let (start, min, end) = run_max_risk_pingpong_probe(label, dir);
+        assert!(
+            min >= start,
+            "EXPLOIT: pingpong {label} drained insurance below start: start={start}, min={min}, end={end}"
+        );
+    }
+
+    for (label, dir) in [
+        ("shorts_take_profit_after_down", -1),
+        ("longs_take_profit_after_up", 1),
+    ] {
+        for schedule in schedules {
+            let (start, min, end) =
+                run_max_risk_full_window_profit_take_probe(label, dir, schedule);
+            assert!(
+                min >= start,
+                "EXPLOIT: profit-take {label} {schedule:?} drained insurance below start: start={start}, min={min}, end={end}"
+            );
+        }
+    }
+
+    for (label, dir) in [
+        ("boundary_shorts_take_profit_after_down", -1),
+        ("boundary_longs_take_profit_after_up", 1),
+    ] {
+        for schedule in [
+            MaxRiskCrankSchedule::HonestEverySlot,
+            MaxRiskCrankSchedule::EmptyEverySlotThenFull,
+        ] {
+            let (start, min, end) = run_max_risk_profit_take_probe_steps(label, dir, 10, schedule);
+            assert!(
+                min >= start,
+                "EXPLOIT: 10-slot profit-take {label} {schedule:?} drained insurance below start: start={start}, min={min}, end={end}"
+            );
+        }
+
+        // A no-crank gap of exactly 10 slots is already terminally stale for
+        // this probe config (`permissionless_resolve_stale_slots = 10`, and
+        // the stale check is inclusive). Probe the last admissible no-crank
+        // value-moving path at 9 slots; the 10-slot gap rejects before the
+        // profitable side can close, which is a safe outcome rather than an
+        // insurance-drain path.
+        let (start, min, end) =
+            run_max_risk_profit_take_probe_steps(label, dir, 9, MaxRiskCrankSchedule::GapThenFull);
+        assert!(
+            min >= start,
+            "EXPLOIT: 9-slot gap profit-take {label} drained insurance below start: start={start}, min={min}, end={end}"
+        );
+    }
+}

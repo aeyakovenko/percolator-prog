@@ -6234,17 +6234,18 @@ fn init_hyperp_with_fee_weighting(
 fn read_hyperp_liveness_slots(env: &TradeCpiTestEnv) -> (u64, u64) {
     let slab = env.svm.get_account(&env.slab).unwrap().data;
     let config = percolator_prog::state::read_config(&slab);
-    (config.mark_ewma_last_slot, config.last_mark_push_slot as u64)
+    (
+        config.mark_ewma_last_slot,
+        config.last_mark_push_slot as u64,
+    )
 }
 
 fn write_tradecpi_account_fee_credits(env: &mut TradeCpiTestEnv, idx: u16, value: i128) {
     const ACCOUNT_SIZE: usize = 360;
     const FEE_CREDITS_OFFSET: usize = 224;
     let mut slab = env.svm.get_account(&env.slab).unwrap();
-    let off = ENGINE_OFFSET
-        + ENGINE_ACCOUNTS_OFFSET
-        + (idx as usize) * ACCOUNT_SIZE
-        + FEE_CREDITS_OFFSET;
+    let off =
+        ENGINE_OFFSET + ENGINE_ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + FEE_CREDITS_OFFSET;
     slab.data[off..off + 16].copy_from_slice(&value.to_le_bytes());
     env.svm.set_account(env.slab, slab).unwrap();
 }
@@ -6253,10 +6254,8 @@ fn read_tradecpi_account_fee_credits(env: &TradeCpiTestEnv, idx: u16) -> i128 {
     const ACCOUNT_SIZE: usize = 360;
     const FEE_CREDITS_OFFSET: usize = 224;
     let slab = env.svm.get_account(&env.slab).unwrap();
-    let off = ENGINE_OFFSET
-        + ENGINE_ACCOUNTS_OFFSET
-        + (idx as usize) * ACCOUNT_SIZE
-        + FEE_CREDITS_OFFSET;
+    let off =
+        ENGINE_OFFSET + ENGINE_ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + FEE_CREDITS_OFFSET;
     i128::from_le_bytes(slab.data[off..off + 16].try_into().unwrap())
 }
 

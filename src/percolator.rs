@@ -112,14 +112,17 @@ pub mod constants {
     ///     + liquidation_fee_bps
     ///     <= maintenance_margin_bps
     ///
-    /// For a deployment with maintenance=500, liq=50, max_price_move=2
+    /// For a deployment with maintenance=500, liq=5, max_price_move=49
     /// bps/slot, max_abs_funding_e9_per_slot=10_000 the envelope
-    /// collapses to max_accrual_dt_slots <= ~216 (= (500 - 50) / 2.09
-    /// ignoring floor). The wrapper picks 100 so both idle and price-
-    /// moving / funding-active markets have an ~40 sec per-crank window
-    /// at 400 ms slots. Catchup loops up to `CATCHUP_CHUNKS_MAX × 100`
-    /// = 2000 slots in one instruction before `CatchupRequired`.
-    pub const MAX_ACCRUAL_DT_SLOTS: u64 = 100;
+    /// admits a 10-slot max accrual window:
+    ///
+    ///   49 * 10 + floor(10_000 * 10 * 10_000 / FUNDING_DEN) + 5 <= 500
+    ///
+    /// This keeps the maximum price move over one max-dt crank window close
+    /// to 1 / leverage for a 20x market. Catchup loops up to
+    /// `CATCHUP_CHUNKS_MAX × 10` = 200 slots in one instruction before
+    /// `CatchupRequired`.
+    pub const MAX_ACCRUAL_DT_SLOTS: u64 = 10;
     /// Max |funding_rate_e9_per_slot| the engine will accrue (spec §1.4).
     /// Matches the engine-crate GLOBAL ceiling. Realistic perp funding is
     /// 3-5 orders of magnitude below this (see compute_current_funding_rate_e9
@@ -226,7 +229,7 @@ pub mod constants {
     /// Default slot-based oracle staleness window before anyone may resolve.
     /// Disabled by default (0 == opt-out): v12.19.6 restores the invariant
     /// `permissionless_resolve_stale_slots <= max_accrual_dt_slots`, and the
-    /// engine's `MAX_ACCRUAL_DT_SLOTS = 100` is far too tight for any
+    /// engine's `MAX_ACCRUAL_DT_SLOTS = 10` is far too tight for any
     /// meaningful public staleness window. Markets that need permissionless
     /// resolution MUST set this explicitly on the extended InitMarket tail
     /// to a value in `1..=max_accrual_dt_slots`. The non-Hyperp resolvability
@@ -1945,7 +1948,7 @@ pub mod ix {
         // §1.4 requires `cfg_max_price_move_bps_per_slot > 0`. Reject before
         // any engine call so the error surfaces as `InvalidConfigParam`
         // rather than an engine-side panic.
-        if h_min == 0 || h_max < h_min || max_price_move_bps_per_slot == 0 {
+        if h_max == 0 || h_max < h_min || max_price_move_bps_per_slot == 0 {
             return Err(crate::error::PercolatorError::InvalidConfigParam.into());
         }
 
@@ -4481,10 +4484,7 @@ pub mod processor {
                 if risk_params.initial_margin_bps < risk_params.maintenance_margin_bps {
                     return Err(ProgramError::InvalidInstructionData);
                 }
-                // Public live markets must have a nonzero warmup floor.
-                // A stress threshold is additive; it is not a substitute
-                // for h_min on untrusted oracle/execution PnL.
-                if risk_params.h_min == 0 || risk_params.h_max < risk_params.h_min {
+                if risk_params.h_max == 0 || risk_params.h_max < risk_params.h_min {
                     return Err(PercolatorError::InvalidConfigParam.into());
                 }
                 let insurance_withdraw_deposits_only = (insurance_withdraw_max_bps
@@ -4763,7 +4763,7 @@ pub mod processor {
                     {
                         return Err(ProgramError::InvalidInstructionData);
                     }
-                    if p.h_min == 0 || p.h_max < p.h_min {
+                    if p.h_max == 0 || p.h_max < p.h_min {
                         return Err(ProgramError::InvalidInstructionData);
                     }
                     // Settlement deviation band: 0 <= bps <= MAX per spec
