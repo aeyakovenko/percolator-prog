@@ -2839,6 +2839,7 @@ dependencies = [
  "solana-program-error",
  "solana-program-log",
  "solana-sdk",
+ "solana-sysvar",
  "tokio",
  "wincode",
 ]

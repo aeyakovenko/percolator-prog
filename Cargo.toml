@@ -39,6 +39,11 @@ pinocchio = { version = "0.11", default-features = false, features = ["copy"] }
 pinocchio-system = "0.6"
 solana-program-error = "3.0"
 solana-program-log = "1.1"
+# Provides `LastRestartSlot::get()` (SIMD-0047 sysvar) — used by the
+# matured-market check in oracle::permissionless_stale_matured. Pinocchio
+# 0.11 exposes only Clock/Rent/SlotHashes; this fills in the gap until
+# upstream catches up.
+solana-sysvar = { version = "3.1", default-features = false }
 wincode = { version = "0.5", features = ["derive"] }
 bytemuck = { version = "1.14", features = ["derive", "min_const_generics"] }
 # pythnet-sdk (no default features) exposes the canonical

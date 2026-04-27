@@ -1,11 +1,13 @@
 //! Compile-time constants. Ported from the legacy `mod constants`.
 //!
-//! Anchor v2 prepends an 8-byte account discriminator to the slab account
-//! data. To keep the slab BODY layout byte-identical to the legacy native
-//! program (so the `percolator::RiskEngine` embedded inside the slab keeps
-//! its existing offset structure), every body-relative offset is anchored
-//! at `BODY_OFF = DISC_LEN`. Helpers in `state.rs` always slice through the
-//! full account data including the 8-byte disc.
+//! **R1 resolution:** the slab is wrapped as `Account<SlabHeader>`, so
+//! Anchor v2 prepends an 8-byte account discriminator. The body
+//! follows verbatim from legacy starting at `BODY_OFF = DISC_LEN = 8`.
+//! All `*_OFF` constants and the body byte-window helpers in
+//! `state.rs` operate on the FULL account-data slice (disc + body).
+//! This is a deliberate ABI change versus the legacy native program;
+//! test fixtures must prepend the SHA256("account:SlabHeader")[..8]
+//! disc bytes when pre-allocating a slab via `set_account`.
 
 use crate::risk_buffer::RiskBuffer;
 use crate::state::{MarketConfig, SlabHeader};
@@ -29,8 +31,8 @@ pub const fn align_up(x: usize, a: usize) -> usize {
     (x + (a - 1)) & !(a - 1)
 }
 
-/// Slab account-data offsets (relative to the FULL account-data buffer, i.e.
-/// after the 8-byte discriminator).
+/// Slab account-data offsets (relative to the FULL account-data buffer,
+/// i.e. *after* Anchor v2's 8-byte disc prefix).
 pub const HEADER_OFF: usize = BODY_OFF;
 pub const CONFIG_OFF: usize = HEADER_OFF + HEADER_LEN;
 pub const ENGINE_OFF: usize = align_up(CONFIG_OFF + CONFIG_LEN, ENGINE_ALIGN);
@@ -43,7 +45,7 @@ pub const RISK_BUF_LEN: usize = size_of::<RiskBuffer>();
 /// Per-account materialization generation table (u64 per slot).
 pub const GEN_TABLE_OFF: usize = RISK_BUF_OFF + RISK_BUF_LEN;
 pub const GEN_TABLE_LEN: usize = percolator::MAX_ACCOUNTS * 8;
-/// Total slab account size, INCLUDING the 8-byte Anchor discriminator.
+/// Total slab account size — INCLUDES the 8-byte Anchor v2 disc prefix.
 pub const SLAB_LEN: usize = GEN_TABLE_OFF + GEN_TABLE_LEN;
 
 // ── Wrapper budgets (unchanged from legacy) ─────────────────────────────────

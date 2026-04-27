@@ -1,22 +1,26 @@
 //! On-chain account types + raw byte-window accessors for the slab body.
 //!
-//! Ported from the legacy `mod state`, with two adjustments for Anchor v2:
+//! `SlabHeader` is declared via `#[account]` so the slab is wrapped as
+//! Anchor v2's `Account<SlabHeader>`, which validates the account
+//! discriminator + program owner at handler entry. The legacy
+//! `magic` / `version` / `bump` fields stay inside the body and are
+//! still verified by `guards::require_initialized` for cross-deployment
+//! compatibility against off-chain readers that learned the body
+//! layout.
 //!
-//! 1. `SlabHeader` is declared via `#[account]` so the macro emits the
-//!    8-byte account discriminator and `Pod`/`Zeroable` glue. The legacy
-//!    `magic`/`version`/`bump` fields stay inside the body and continue
-//!    to be validated by the wrapper code.
-//!
-//! 2. Every `read_*` / `write_*` helper takes the FULL account-data slice
-//!    (including the 8-byte disc). All offsets are sourced from
-//!    `crate::constants::*_OFF`, which already account for `BODY_OFF = 8`.
+//! `slab_data` / `slab_data_mut` derive a `&[u8]` / `&mut [u8]` over the
+//! full account-data buffer (disc + body) by walking back from the
+//! header pointer Anchor maintains internally — same pattern Anchor
+//! v2's own `Slab<H>` uses. Callers MUST run `slab_shape_guard` first
+//! to confirm `data_len == SLAB_LEN`; the helper assumes that length.
 //!
 //! `MarketConfig`, `RiskBuffer`, the embedded `RiskEngine`, and the
-//! generation table remain plain `#[repr(C)]` Pod regions reached by raw
-//! byte-window access (matches the legacy native-program layout exactly).
+//! generation table remain plain `#[repr(C)]` Pod regions reached by
+//! offset arithmetic into that slice.
 
 use crate::constants::{
-    CONFIG_LEN, CONFIG_OFF, GEN_TABLE_OFF, HEADER_LEN, HEADER_OFF, RISK_BUF_LEN, RISK_BUF_OFF,
+    CONFIG_LEN, CONFIG_OFF, DISC_LEN, GEN_TABLE_OFF, HEADER_LEN, HEADER_OFF, RISK_BUF_LEN,
+    RISK_BUF_OFF, SLAB_LEN,
 };
 use anchor_lang_v2::prelude::*;
 use bytemuck::{Pod, Zeroable};
@@ -233,16 +237,57 @@ pub fn write_account_generation(data: &mut [u8], idx: u16, generation: u64) {
     data[off..off + 8].copy_from_slice(&generation.to_le_bytes());
 }
 
+/// First 8 bytes of `sha256("account:SlabHeader")` — Anchor v2's
+/// account discriminator for `SlabHeader`. Exposed so test fixtures
+/// (and any off-chain client that pre-allocates a slab via
+/// `set_account` / `system_program::create_account`) can prefix the
+/// slab buffer correctly without taking a direct dependency on
+/// `anchor_lang_v2`.
+pub fn slab_header_discriminator() -> &'static [u8] {
+    <SlabHeader as Discriminator>::DISCRIMINATOR
+}
+
+// ── Slab data accessors (raw byte-window over the full account data) ────────
+//
+// Both helpers derive the data slice from the header pointer Anchor's
+// `Account<SlabHeader>` maintains internally: header sits at offset
+// `DISC_LEN = 8` of the data buffer, so subtracting that lands at
+// the start of the buffer. SLAB_LEN is the assumed full length —
+// `slab_shape_guard` MUST run first.
+//
+// Solana's runtime guarantees the data buffer's address + capacity are
+// valid for the entire instruction lifetime; Anchor v2's internal
+// `Slab::guard_bytes_mut` uses the same pattern (see
+// `anchor-v2-ref/lang-v2/src/accounts/slab.rs`).
+
+/// Mutable view of the full slab data buffer (disc + body).
+///
+/// SAFETY: requires `slab_shape_guard` has confirmed `data_len ==
+/// SLAB_LEN`. Reading past `SLAB_LEN` would be UB.
+pub fn slab_data_mut<'a>(slab: &'a mut Account<SlabHeader>) -> &'a mut [u8] {
+    let header: &mut SlabHeader = slab;
+    let header_ptr = header as *mut SlabHeader as *mut u8;
+    let data_ptr = unsafe { header_ptr.sub(DISC_LEN) };
+    unsafe { core::slice::from_raw_parts_mut(data_ptr, SLAB_LEN) }
+}
+
+/// Read-only view of the full slab data buffer (disc + body).
+pub fn slab_data<'a>(slab: &'a Account<SlabHeader>) -> &'a [u8] {
+    let header: &SlabHeader = slab;
+    let header_ptr = header as *const SlabHeader as *const u8;
+    let data_ptr = unsafe { header_ptr.sub(DISC_LEN) };
+    unsafe { core::slice::from_raw_parts(data_ptr, SLAB_LEN) }
+}
+
 // ── Compile-time layout invariants ──────────────────────────────────────────
 //
-// Guards the migration's R1 contract: the slab BODY is byte-identical to
-// the legacy native-program layout, with the 8-byte Anchor v2 account
-// discriminator prepended. Numeric sizes are derived (not asserted) so a
-// future field addition doesn't have to update two places — only the
-// disc-prefix relationship and the reserved-window position are
-// load-bearing for migration correctness.
+// Guards the disc-prefix relationship and `_reserved` position; numeric
+// sizes are derived from the field definitions.
 
-const _: () = assert!(HEADER_OFF == 8, "HEADER_OFF must equal Anchor v2 disc length");
+const _: () = assert!(
+    HEADER_OFF == DISC_LEN,
+    "HEADER_OFF must equal Anchor v2 disc length (8)",
+);
 const _: () = assert!(
     CONFIG_OFF == HEADER_OFF + HEADER_LEN,
     "CONFIG_OFF must immediately follow SlabHeader",
