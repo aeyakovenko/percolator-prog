@@ -3828,10 +3828,9 @@ pub mod processor {
     /// idle interval "should have" been (which is unknowable).
     ///
     /// If the gap exceeds `CATCHUP_CHUNKS_MAX × max_dt`, returns `Err`
-    /// with `CatchupRequired` so the caller can surface "run KeeperCrank
-    /// first" instead of silently returning Ok and letting the subsequent
-    /// main engine call Overflow-and-rollback (which would discard the
-    /// catchup progress too, making the market unrecoverable in-line).
+    /// with `CatchupRequired` for user/admin operations. KeeperCrank uses a
+    /// separate partial-progress wrapper so the crank itself can commit a
+    /// bounded chunk instead of rolling back.
     ///
     /// No-op when the gap is already within the envelope, or when
     /// `max_dt == 0` (misconfiguration guard), or when the engine has never
@@ -3926,6 +3925,60 @@ pub mod processor {
             }
         }
         Ok(())
+    }
+
+    fn oversized_catchup_target(
+        engine: &RiskEngine,
+        now_slot: u64,
+        price: u64,
+        funding_rate_e9: i128,
+    ) -> Result<Option<u64>, ProgramError> {
+        let max_dt = engine.params.max_accrual_dt_slots;
+        if max_dt == 0 || now_slot <= engine.last_market_slot || engine.last_oracle_price == 0 {
+            return Ok(None);
+        }
+
+        let gap = now_slot
+            .checked_sub(engine.last_market_slot)
+            .ok_or(PercolatorError::EngineOverflow)?;
+        let max_step = max_dt.saturating_mul(CATCHUP_CHUNKS_MAX as u64);
+        if max_step == 0 || gap <= max_step {
+            return Ok(None);
+        }
+
+        let oi_any = engine.oi_eff_long_q != 0 || engine.oi_eff_short_q != 0;
+        let funding_active = funding_rate_e9 != 0
+            && engine.oi_eff_long_q != 0
+            && engine.oi_eff_short_q != 0
+            && engine.fund_px_last > 0;
+        let price_move_active =
+            engine.last_oracle_price > 0 && price != engine.last_oracle_price && oi_any;
+        if !funding_active && !price_move_active {
+            return Ok(None);
+        }
+
+        engine
+            .last_market_slot
+            .checked_add(max_step)
+            .map(Some)
+            .ok_or(PercolatorError::EngineOverflow.into())
+    }
+
+    fn partial_crank_config_to_write(
+        before_read: MarketConfig,
+        after_read_and_sweep: MarketConfig,
+    ) -> MarketConfig {
+        let mut restored = before_read;
+        // Preserve external-oracle target and liveness data learned by this
+        // crank, but do not persist effective/index fields that would apply a
+        // post-observation price to pre-observation engine time.
+        restored.last_good_oracle_slot = after_read_and_sweep.last_good_oracle_slot;
+        restored.last_oracle_publish_time = after_read_and_sweep.last_oracle_publish_time;
+        restored.oracle_target_price_e6 = after_read_and_sweep.oracle_target_price_e6;
+        restored.oracle_target_publish_time = after_read_and_sweep.oracle_target_publish_time;
+        restored.fee_sweep_cursor_word = after_read_and_sweep.fee_sweep_cursor_word;
+        restored.fee_sweep_cursor_bit = after_read_and_sweep.fee_sweep_cursor_bit;
+        restored
     }
 
     /// Fully advance the engine's market clock to `now_slot` before any
@@ -5677,7 +5730,8 @@ pub mod processor {
                     return Ok(());
                 }
 
-                let mut config = state::read_config(&data);
+                let config_pre_read = state::read_config(&data);
+                let mut config = config_pre_read;
 
                 let clock = Clock::from_account_info(a_clock)?;
 
@@ -5720,9 +5774,6 @@ pub mod processor {
                         &mut data,
                     )?
                 };
-
-                state::write_config(&mut data, &config);
-                // FLAG_ORACLE_INITIALIZED now set inside read_price_and_stamp/get_engine_oracle_price_e6
 
                 // Read risk buffer BEFORE engine borrow (disjoint regions,
                 // but borrow checker can't see that).
@@ -5801,17 +5852,35 @@ pub mod processor {
                 // after leaves the crank's risk decisions on pre-reward state,
                 // and a caller who got liquidated inside the crank (slot no
                 // longer used) simply doesn't collect the reward.
-                // Fully accrue market to clock.slot BEFORE sweeping fees.
-                // Explicit ordering so sweep_maintenance_fees + keeper_crank
-                // run on a fully-accrued market. keeper_crank_not_atomic's
-                // internal accrue then no-ops on dt=0+same-price.
-                ensure_market_accrued_to_now_with_policy(
-                    engine,
-                    &config,
-                    clock.slot,
-                    price,
-                    funding_rate_e9_pre,
-                )?;
+                // Fully accrue market to clock.slot when the full gap fits
+                // the per-instruction budget. If the market is farther
+                // behind, KeeperCrank is the durable progress path: advance
+                // one bounded chunk at stored P_last, touch accounts at that
+                // partial slot, and commit. Repeated cranks, even if several
+                // submitted attempts land in the same wall-clock slot, keep
+                // reducing the gap instead of returning CatchupRequired.
+                let partial_target =
+                    oversized_catchup_target(engine, clock.slot, price, funding_rate_e9_pre)?;
+                let (crank_slot, crank_price, partial_catchup) =
+                    if let Some(target_slot) = partial_target {
+                        let stored_p_last = engine.last_oracle_price;
+                        catchup_accrue(engine, target_slot, stored_p_last, funding_rate_e9_pre)?;
+                        if target_slot > engine.last_market_slot {
+                            engine
+                                .accrue_market_to(target_slot, stored_p_last, funding_rate_e9_pre)
+                                .map_err(map_risk_error)?;
+                        }
+                        (target_slot, stored_p_last, true)
+                    } else {
+                        ensure_market_accrued_to_now_with_policy(
+                            engine,
+                            &config,
+                            clock.slot,
+                            price,
+                            funding_rate_e9_pre,
+                        )?;
+                        (clock.slot, price, false)
+                    };
 
                 // Shared per-instruction fee-sync budget (audit #2).
                 // Candidate syncs run FIRST so the engine's crank sees
@@ -5909,7 +5978,7 @@ pub mod processor {
                         engine
                             .sync_account_fee_to_slot_not_atomic(
                                 idx,
-                                clock.slot,
+                                crank_slot,
                                 config.maintenance_fee_per_slot,
                             )
                             .map_err(map_risk_error)?;
@@ -5921,7 +5990,7 @@ pub mod processor {
 
                 let remaining_budget =
                     crate::constants::FEE_SWEEP_BUDGET.saturating_sub(candidate_syncs);
-                sweep_maintenance_fees(engine, &mut config, clock.slot, remaining_budget)?;
+                sweep_maintenance_fees(engine, &mut config, crank_slot, remaining_budget)?;
                 let sweep_delta = engine
                     .insurance_fund
                     .balance
@@ -5933,8 +6002,8 @@ pub mod processor {
                 let admit_threshold = Some(engine.params.maintenance_margin_bps as u128);
                 let _outcome = engine
                     .keeper_crank_not_atomic(
-                        clock.slot,
-                        price,
+                        crank_slot,
+                        crank_price,
                         &combined,
                         crate::constants::LIQ_BUDGET_PER_CRANK,
                         funding_rate_e9_pre,
@@ -5978,7 +6047,7 @@ pub mod processor {
                     if reward > 0 {
                         engine
                             .credit_account_from_insurance_not_atomic(
-                                caller_idx, reward, clock.slot,
+                                caller_idx, reward, crank_slot,
                             )
                             .map_err(map_risk_error)?;
                     }
@@ -6012,8 +6081,16 @@ pub mod processor {
                     state::set_oracle_initialized(&mut data);
                 }
 
-                // Write updated config (fee charge slot may have changed)
-                state::write_config(&mut data, &config);
+                // Write updated config. On partial catchup, preserve the
+                // oracle target/liveness and fee cursor, but roll back
+                // effective/index fields that correspond to the wall-clock
+                // observation the engine has not reached yet.
+                let config_to_write = if partial_catchup {
+                    partial_crank_config_to_write(config_pre_read, config)
+                } else {
+                    config
+                };
+                state::write_config(&mut data, &config_to_write);
 
                 // ── RiskBuffer maintenance (engine borrow dropped) ──
                 {
@@ -6037,7 +6114,7 @@ pub mod processor {
                     for i in 0..buf.count as usize {
                         let eidx = buf.entries[i].idx as usize;
                         let eff = effective_pos_q_checked(engine, eidx)?;
-                        let notional = risk_notional_ceil(eff, price);
+                        let notional = risk_notional_ceil(eff, crank_price);
                         buf.entries[i].notional = notional;
                     }
                     buf.recompute_min();
@@ -6107,7 +6184,7 @@ pub mod processor {
                                 if eff == 0 {
                                     buf.remove(idx as u16);
                                 } else {
-                                    let notional = risk_notional_ceil(eff, price);
+                                    let notional = risk_notional_ceil(eff, crank_price);
                                     buf.upsert(idx as u16, notional);
                                 }
                                 next_cursor = (idx + 1) % scan_mod;
@@ -6138,7 +6215,7 @@ pub mod processor {
                         if eff == 0 {
                             buf.remove(cidx);
                         } else {
-                            let notional = risk_notional_ceil(eff, price);
+                            let notional = risk_notional_ceil(eff, crank_price);
                             buf.upsert(cidx, notional);
                         }
                     }

@@ -206,6 +206,66 @@ fn test_trade_nocpi_can_advance_exposed_price_progress_without_crank() {
 }
 
 #[test]
+fn test_keeper_crank_auto_commits_partial_catchup_when_gap_exceeds_inline_budget() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_cap(0, 1_000);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
+
+    let slot_before = env.read_last_market_slot();
+    let p_last = read_engine_last_oracle_price(&env);
+    let target = p_last.saturating_add(1);
+    let inline_budget = percolator_prog::constants::MAX_ACCRUAL_DT_SLOTS * 20;
+    let far_slot = slot_before + inline_budget + 50;
+    env.set_slot_and_price_raw_no_walk(far_slot, target as i64);
+
+    env.try_crank_once()
+        .expect("first crank should commit a partial catchup chunk");
+    assert_eq!(
+        env.read_last_market_slot(),
+        slot_before + inline_budget,
+        "first crank should commit the largest safe partial catchup chunk"
+    );
+    assert_eq!(
+        read_engine_last_oracle_price(&env),
+        p_last,
+        "partial catchup must use stored P_last, not time-travel the fresh target"
+    );
+    assert_eq!(
+        env.read_oracle_target_price(),
+        target,
+        "partial catchup should preserve the observed target for later cranks"
+    );
+    assert_eq!(
+        env.read_last_effective_price(),
+        p_last,
+        "partial catchup should not persist an effective price the engine has not reached"
+    );
+
+    env.try_crank_once()
+        .expect("second crank should finish the remaining gap");
+    assert_eq!(
+        env.read_last_market_slot(),
+        far_slot,
+        "second crank in the same wall-clock slot should finish the remaining gap"
+    );
+    assert_eq!(
+        read_engine_last_oracle_price(&env),
+        target,
+        "final catchup should install the target once the residual gap fits"
+    );
+}
+
+#[test]
 fn test_catchup_accrue_flat_same_slot_syncs_engine_price() {
     program_path();
 
