@@ -45,7 +45,7 @@ use solana_program_error::ProgramError;
 /// prevents price-taking instructions (Trade, Withdraw, Crank,
 /// Settle, Convert, Catchup) from reviving a terminally dead market
 /// — they must route to ResolvePermissionless instead.
-fn read_price_and_stamp(
+pub fn read_price_and_stamp(
     config: &mut crate::state::MarketConfig,
     a_oracle: &AccountView,
     clock_unix_ts: i64,
@@ -191,7 +191,7 @@ impl MatchingEngine for CpiMatcher {
 /// `current_slot > last_market_slot` split that later breaks the
 /// accrual envelope: the next oracle-backed instruction will see an
 /// inflated `clock.slot - last_market_slot` dt and fail Overflow.
-fn sync_account_fee(
+pub fn sync_account_fee(
     engine: &mut RiskEngine,
     config: &MarketConfig,
     idx: u16,
@@ -217,7 +217,7 @@ fn sync_account_fee(
 /// Correctness is preserved because the engine's per-account
 /// `last_fee_slot` still advances monotonically to the
 /// already-accrued boundary; subsequent sync calls cover the rest.
-fn sync_account_fee_bounded_to_market(
+pub fn sync_account_fee_bounded_to_market(
     engine: &mut RiskEngine,
     config: &MarketConfig,
     idx: u16,
@@ -241,7 +241,7 @@ fn sync_account_fee_bounded_to_market(
         .map_err(map_risk_error)
 }
 
-fn check_no_oracle_live_envelope(
+pub fn check_no_oracle_live_envelope(
     engine: &RiskEngine,
     wallclock_slot: u64,
 ) -> Result<(), ProgramError> {
@@ -255,7 +255,7 @@ fn check_no_oracle_live_envelope(
     Ok(())
 }
 
-fn price_move_residual_dt(
+pub fn price_move_residual_dt(
     engine: &RiskEngine,
     wallclock_slot: u64,
 ) -> Result<u64, ProgramError> {
@@ -266,7 +266,7 @@ fn price_move_residual_dt(
     )
 }
 
-fn price_move_residual_dt_from_parts(
+pub fn price_move_residual_dt_from_parts(
     last_market_slot: u64,
     max_dt: u64,
     wallclock_slot: u64,
@@ -281,13 +281,13 @@ fn price_move_residual_dt_from_parts(
     Ok(if rem == 0 { max_dt } else { rem })
 }
 
-fn external_oracle_target_pending(config: &MarketConfig, engine: &RiskEngine) -> bool {
+pub fn external_oracle_target_pending(config: &MarketConfig, engine: &RiskEngine) -> bool {
     !oracle::is_hyperp_mode(config)
         && config.oracle_target_price_e6 != 0
         && config.oracle_target_price_e6 != engine.last_oracle_price
 }
 
-fn hyperp_target_price(config: &MarketConfig) -> u64 {
+pub fn hyperp_target_price(config: &MarketConfig) -> u64 {
     if config.mark_ewma_e6 > 0 {
         config.mark_ewma_e6
     } else {
@@ -295,7 +295,7 @@ fn hyperp_target_price(config: &MarketConfig) -> u64 {
     }
 }
 
-fn oracle_target_pending(config: &MarketConfig, engine: &RiskEngine) -> bool {
+pub fn oracle_target_pending(config: &MarketConfig, engine: &RiskEngine) -> bool {
     if oracle::is_hyperp_mode(config) {
         let target = hyperp_target_price(config);
         target != 0 && target != engine.last_oracle_price
@@ -304,7 +304,7 @@ fn oracle_target_pending(config: &MarketConfig, engine: &RiskEngine) -> bool {
     }
 }
 
-fn reject_any_target_lag(
+pub fn reject_any_target_lag(
     config: &MarketConfig,
     engine: &RiskEngine,
 ) -> Result<(), ProgramError> {
@@ -314,7 +314,7 @@ fn reject_any_target_lag(
     Ok(())
 }
 
-fn target_lag_after_read(config: &MarketConfig, effective_price: u64) -> bool {
+pub fn target_lag_after_read(config: &MarketConfig, effective_price: u64) -> bool {
     if oracle::is_hyperp_mode(config) {
         let target = hyperp_target_price(config);
         target != 0 && target != effective_price
@@ -323,13 +323,13 @@ fn target_lag_after_read(config: &MarketConfig, effective_price: u64) -> bool {
     }
 }
 
-fn effective_pos_q_checked(engine: &RiskEngine, idx: usize) -> Result<i128, ProgramError> {
+pub fn effective_pos_q_checked(engine: &RiskEngine, idx: usize) -> Result<i128, ProgramError> {
     engine
         .try_effective_pos_q(idx)
         .map_err(|_| PercolatorError::EngineCorruptState.into())
 }
 
-fn risk_notional_ceil(eff: i128, price: u64) -> u128 {
+pub fn risk_notional_ceil(eff: i128, price: u64) -> u128 {
     percolator::wide_math::mul_div_ceil_u128(
         eff.unsigned_abs(),
         price as u128,
@@ -337,7 +337,7 @@ fn risk_notional_ceil(eff: i128, price: u64) -> u128 {
     )
 }
 
-fn current_trade_fee_paid_cap(
+pub fn current_trade_fee_paid_cap(
     size: i128,
     exec_price: u64,
     trading_fee_bps: u64,
@@ -360,7 +360,7 @@ fn current_trade_fee_paid_cap(
         .ok_or_else(|| PercolatorError::EngineOverflow.into())
 }
 
-fn reject_stuck_target_accrual(
+pub fn reject_stuck_target_accrual(
     config: &MarketConfig,
     engine: &RiskEngine,
     now_slot: u64,
@@ -380,7 +380,7 @@ fn reject_stuck_target_accrual(
     Ok(())
 }
 
-fn prepare_lazy_free_head(engine: &mut RiskEngine) -> Result<u16, ProgramError> {
+pub fn prepare_lazy_free_head(engine: &mut RiskEngine) -> Result<u16, ProgramError> {
     let max_accounts = core::cmp::min(
         engine.params.max_accounts as usize,
         percolator::MAX_ACCOUNTS,
@@ -461,7 +461,7 @@ const CATCHUP_CHUNKS_MAX: u32 = 20;
 /// `max_dt == 0` (misconfiguration guard), or when the engine has never
 /// seen a real oracle observation (`last_oracle_price == 0`; the
 /// caller's own `_not_atomic` call will seed it).
-fn catchup_accrue(
+pub fn catchup_accrue(
     engine: &mut RiskEngine,
     now_slot: u64,
     price: u64,
@@ -577,7 +577,7 @@ fn catchup_accrue(
 /// No-op when the engine has no oracle observation yet (price=0
 /// catchup is unsafe). Same-slot price replacement is allowed only
 /// for flat markets; live OI still requires elapsed slot budget.
-fn ensure_market_accrued_to_now(
+pub fn ensure_market_accrued_to_now(
     engine: &mut RiskEngine,
     now_slot: u64,
     price: u64,
@@ -597,7 +597,7 @@ fn ensure_market_accrued_to_now(
     Ok(())
 }
 
-fn ensure_market_accrued_to_now_with_policy(
+pub fn ensure_market_accrued_to_now_with_policy(
     engine: &mut RiskEngine,
     config: &MarketConfig,
     now_slot: u64,
@@ -627,7 +627,7 @@ fn ensure_market_accrued_to_now_with_policy(
 /// thanks to the bit cursor), plus O(BITMAP_WORDS) word reads. Constant
 /// in `max_accounts`, so a 4096-slot market is handled the same as a
 /// 64-slot market.
-fn sweep_maintenance_fees(
+pub fn sweep_maintenance_fees(
     engine: &mut RiskEngine,
     config: &mut MarketConfig,
     now_slot: u64,
@@ -738,7 +738,7 @@ fn sweep_maintenance_fees(
     Ok(())
 }
 
-fn compute_current_funding_rate_e9(config: &MarketConfig) -> Result<i128, ProgramError> {
+pub fn compute_current_funding_rate_e9(config: &MarketConfig) -> Result<i128, ProgramError> {
     if config.funding_max_premium_bps < 0 || config.funding_max_e9_per_slot < 0 {
         return Err(PercolatorError::InvalidConfigParam.into());
     }
@@ -768,7 +768,7 @@ fn compute_current_funding_rate_e9(config: &MarketConfig) -> Result<i128, Progra
     Ok(per_slot.clamp(-max_rate_e9, max_rate_e9))
 }
 
-fn execute_trade_with_matcher<M: MatchingEngine>(
+pub fn execute_trade_with_matcher<M: MatchingEngine>(
     engine: &mut RiskEngine,
     matcher: &M,
     lp_idx: u16,
@@ -829,16 +829,16 @@ fn execute_trade_with_matcher<M: MatchingEngine>(
 // Legacy `use solana_program::instruction::{...}` dropped — matcher
 // CPI plumbing belongs in Phase 3 `cpi.rs`.
 #[inline]
-fn idx_within_market_capacity(engine: &RiskEngine, idx: usize) -> bool {
+pub fn idx_within_market_capacity(engine: &RiskEngine, idx: usize) -> bool {
     idx < MAX_ACCOUNTS && (idx as u64) < engine.params.max_accounts
 }
 
 #[inline]
-fn idx_used_in_market(engine: &RiskEngine, idx: usize) -> bool {
+pub fn idx_used_in_market(engine: &RiskEngine, idx: usize) -> bool {
     idx_within_market_capacity(engine, idx) && engine.is_used(idx)
 }
 
-fn check_idx(engine: &RiskEngine, idx: u16) -> Result<(), ProgramError> {
+pub fn check_idx(engine: &RiskEngine, idx: u16) -> Result<(), ProgramError> {
     if !idx_used_in_market(engine, idx as usize) {
         return Err(PercolatorError::EngineAccountNotFound.into());
     }
@@ -846,7 +846,7 @@ fn check_idx(engine: &RiskEngine, idx: u16) -> Result<(), ProgramError> {
 }
 
 #[inline]
-fn insurance_withdraw_deposits_only(config: &MarketConfig) -> Result<bool, ProgramError> {
+pub fn insurance_withdraw_deposits_only(config: &MarketConfig) -> Result<bool, ProgramError> {
     match config.insurance_withdraw_deposits_only {
         0 => Ok(false),
         1 => Ok(true),

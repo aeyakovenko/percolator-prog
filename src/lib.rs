@@ -27,11 +27,13 @@ pub mod state;
 pub mod units;
 pub mod zc;
 
-use instructions::UpdateAuthority;
+use instructions::{PushHyperpMark, UpdateAuthority};
 // The `#[program]` macro looks for each Accounts struct's auto-generated
 // `__client_accounts_<name>` module at `super::` (= the crate root). Our
 // Accounts structs live in submodules under `instructions/`, so re-export
 // each one at the crate root.
+#[doc(hidden)]
+pub use instructions::push_hyperp_mark::__client_accounts_pushhyperpmark;
 #[doc(hidden)]
 pub use instructions::update_authority::__client_accounts_updateauthority;
 
@@ -45,6 +47,17 @@ pub mod percolator {
     #[discrim = 254]
     pub fn ping(_ctx: &mut Context<Ping>) -> Result<()> {
         Ok(())
+    }
+
+    /// Tag 17 — Hyperp-only mark-push.
+    /// See `instructions/push_hyperp_mark.rs`.
+    #[discrim = 17]
+    pub fn push_hyperp_mark(
+        ctx: &mut Context<PushHyperpMark>,
+        price_e6: u64,
+        timestamp: i64,
+    ) -> Result<()> {
+        instructions::push_hyperp_mark::handler(ctx, price_e6, timestamp)
     }
 
     /// Tag 32 — rotate or burn one of four scoped authority pubkeys.
