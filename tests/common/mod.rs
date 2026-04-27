@@ -1588,7 +1588,7 @@ impl TestEnv {
     /// between steps. Tests that need an intentionally invalid one-shot move
     /// should call `set_slot_and_price_raw_no_walk`.
     pub fn set_slot_and_price(&mut self, slot: u64, price_e6: i64) {
-        const BASE_CHUNK: u64 = 40;
+        const BASE_CHUNK: u64 = percolator_prog::constants::MAX_ACCRUAL_DT_SLOTS;
         let requested_effective_slot = slot.saturating_add(100);
         let cur_effective_slot = self
             .svm

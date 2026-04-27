@@ -114,11 +114,12 @@ fn test_external_oracle_target_staircase_blocks_extraction_until_caught_up() {
         "Ordinary ResolveMarket must not settle at a known-lag effective price",
     );
 
-    for _ in 0..64 {
+    for _ in 0..512 {
         if env.read_last_effective_price() == target {
             break;
         }
-        let step_slot = env.read_last_market_slot() + 40;
+        let step_slot =
+            env.read_last_market_slot() + percolator_prog::constants::MAX_ACCRUAL_DT_SLOTS;
         env.set_slot_and_price_raw_no_walk(step_slot, target as i64);
         env.crank();
     }
@@ -247,7 +248,7 @@ fn test_zero_oi_no_oracle_topup_can_cross_accrual_envelope() {
 }
 
 #[test]
-fn test_init_market_rejects_zero_public_warmup() {
+fn test_init_market_accepts_zero_public_warmup() {
     program_path();
 
     let mut env = TestEnv::new();
@@ -255,14 +256,8 @@ fn test_init_market_rejects_zero_public_warmup() {
         encode_init_market_with_cap(&env.payer.pubkey(), &env.mint, &TEST_FEED_ID, 0, 80);
     put_u64(&mut data, INIT_H_MIN_OFFSET, 0);
 
-    let err = env
-        .try_init_market_raw(data)
-        .expect_err("public wrapper must reject h_min=0");
-    assert_custom_error(
-        &err,
-        "0x1a",
-        "InitMarket must enforce nonzero public live warmup",
-    );
+    env.try_init_market_raw(data)
+        .expect("h_min=0 is an allowed product mode");
 }
 
 #[test]
@@ -5929,14 +5924,14 @@ fn test_keeper_crank_reward_pays_on_second_crank_with_populated_risk_buffer() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    // v12.19.6: keep slot advances inside the 80-slot perm-resolve window.
-    // Use env.set_slot so the harness-managed oracle publish_time stays in
-    // sync with clock.unix_timestamp (prevents Pyth staleness false-positives).
-    env.set_slot(20);
+    // Use raw slot/price updates here so this test owns the crank cadence.
+    // The shared set_slot helper may run internal catchup cranks, which would
+    // consume the maintenance sweep before the explicit reward assertion.
+    env.set_slot_and_price_raw_no_walk(120, 138_000_000);
     env.trade(&user, &lp, lp_idx, user_idx, 100_000_000);
 
     // Crank #1: empty risk buffer, sweep pays reward. Phase C populates.
-    env.set_slot(40);
+    env.set_slot_and_price_raw_no_walk(140, 138_000_000);
     env.crank_as(&user, user_idx);
     env.svm.expire_blockhash();
 
@@ -5944,7 +5939,7 @@ fn test_keeper_crank_reward_pays_on_second_crank_with_populated_risk_buffer() {
     // realizes fees before ins_before → sweep_delta == 0 → reward gate
     // fails. With the fix, ins_before is captured pre-candidate-sync so
     // the reward credits correctly.
-    env.set_slot(70);
+    env.set_slot_and_price_raw_no_walk(170, 138_000_000);
     let cap_before = env.read_account_capital(user_idx);
     let ins_before = env.read_insurance_balance();
     env.crank_as(&user, user_idx);
