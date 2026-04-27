@@ -30,7 +30,8 @@ pub mod zc;
 
 use instructions::{
     CatchupAccrue, LiquidateAtOracle, PushHyperpMark, ReclaimEmptyAccount, ResolveMarket,
-    ResolvePermissionless, SettleAccount, TopUpInsurance, TradeNoCpi, UpdateAuthority, UpdateConfig,
+    ResolvePermissionless, SettleAccount, TopUpInsurance, TradeNoCpi, UpdateAuthority,
+    UpdateConfig, WithdrawInsurance, WithdrawInsuranceLimited,
 };
 // The `#[program]` macro looks for each Accounts struct's auto-generated
 // `__client_accounts_<name>` module at `super::` (= the crate root). Our
@@ -58,6 +59,10 @@ pub use instructions::trade_no_cpi::__client_accounts_tradenocpi;
 pub use instructions::update_authority::__client_accounts_updateauthority;
 #[doc(hidden)]
 pub use instructions::update_config::__client_accounts_updateconfig;
+#[doc(hidden)]
+pub use instructions::withdraw_insurance::__client_accounts_withdrawinsurance;
+#[doc(hidden)]
+pub use instructions::withdraw_insurance_limited::__client_accounts_withdrawinsurancelimited;
 
 #[cfg(not(feature = "no-entrypoint"))]
 #[program]
@@ -137,6 +142,23 @@ pub mod percolator {
     #[discrim = 19]
     pub fn resolve_market(ctx: &mut Context<ResolveMarket>, mode: u8) -> Result<()> {
         instructions::resolve_market::handler(ctx, mode)
+    }
+
+    /// Tag 20 — unbounded insurance withdrawal (resolved markets only).
+    /// See `instructions/withdraw_insurance.rs`.
+    #[discrim = 20]
+    pub fn withdraw_insurance(ctx: &mut Context<WithdrawInsurance>) -> Result<()> {
+        instructions::withdraw_insurance::handler(ctx)
+    }
+
+    /// Tag 23 — bounded live insurance withdrawal.
+    /// See `instructions/withdraw_insurance_limited.rs`.
+    #[discrim = 23]
+    pub fn withdraw_insurance_limited(
+        ctx: &mut Context<WithdrawInsuranceLimited>,
+        amount: u64,
+    ) -> Result<()> {
+        instructions::withdraw_insurance_limited::handler(ctx, amount)
     }
 
     /// Tag 29 — permissionless degenerate resolve after the hard-timeout

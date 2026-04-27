@@ -30,6 +30,8 @@ const LIQUIDATE_AT_ORACLE: u8 = 7;
 const TOP_UP_INSURANCE: u8 = 9;
 const UPDATE_CONFIG: u8 = 14;
 const RESOLVE_MARKET: u8 = 19;
+const WITHDRAW_INSURANCE: u8 = 20;
+const WITHDRAW_INSURANCE_LIMITED: u8 = 23;
 const RECLAIM_EMPTY_ACCOUNT: u8 = 25;
 const SETTLE_ACCOUNT: u8 = 26;
 const RESOLVE_PERMISSIONLESS: u8 = 29;
@@ -253,6 +255,45 @@ fn top_up_insurance_rejects_zero_amount() {
             AccountMeta::new(Pubkey::new_unique(), false), // user_ata placeholder
             AccountMeta::new(Pubkey::new_unique(), false), // vault placeholder
             AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+        ],
+        data,
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn withdraw_insurance_rejects_uninitialized() {
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new(Pubkey::new_unique(), false), // admin_ata
+            AccountMeta::new(Pubkey::new_unique(), false), // vault
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // vault_pda
+        ],
+        data: vec![WITHDRAW_INSURANCE], // payload-less
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn withdraw_insurance_limited_rejects_uninitialized() {
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let mut data = vec![WITHDRAW_INSURANCE_LIMITED];
+    data.extend_from_slice(&100u64.to_le_bytes());
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new(Pubkey::new_unique(), false), // operator_ata
+            AccountMeta::new(Pubkey::new_unique(), false), // vault
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // vault_pda
             AccountMeta::new_readonly(CLOCK_SYSVAR, false),
         ],
         data,

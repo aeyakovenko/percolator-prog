@@ -14,6 +14,8 @@ pub mod top_up_insurance;
 pub mod trade_no_cpi;
 pub mod update_authority;
 pub mod update_config;
+pub mod withdraw_insurance;
+pub mod withdraw_insurance_limited;
 
 // Re-export only the `#[derive(Accounts)]` types so `crate::lib`'s
 // `#[program]` block can refer to them without an `instructions::*`
@@ -30,3 +32,5 @@ pub use top_up_insurance::TopUpInsurance;
 pub use trade_no_cpi::TradeNoCpi;
 pub use update_authority::UpdateAuthority;
 pub use update_config::UpdateConfig;
+pub use withdraw_insurance::WithdrawInsurance;
+pub use withdraw_insurance_limited::WithdrawInsuranceLimited;
