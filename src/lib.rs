@@ -15,6 +15,7 @@ use anchor_lang_v2::prelude::*;
 declare_id!("Perco1ator111111111111111111111111111111111");
 
 pub mod constants;
+pub mod cpi;
 pub mod errors;
 pub mod guards;
 pub mod instructions;
@@ -29,7 +30,7 @@ pub mod zc;
 
 use instructions::{
     CatchupAccrue, LiquidateAtOracle, PushHyperpMark, ReclaimEmptyAccount, ResolveMarket,
-    ResolvePermissionless, SettleAccount, TradeNoCpi, UpdateAuthority, UpdateConfig,
+    ResolvePermissionless, SettleAccount, TopUpInsurance, TradeNoCpi, UpdateAuthority, UpdateConfig,
 };
 // The `#[program]` macro looks for each Accounts struct's auto-generated
 // `__client_accounts_<name>` module at `super::` (= the crate root). Our
@@ -50,6 +51,8 @@ pub use instructions::resolve_permissionless::__client_accounts_resolvepermissio
 #[doc(hidden)]
 pub use instructions::settle_account::__client_accounts_settleaccount;
 #[doc(hidden)]
+pub use instructions::top_up_insurance::__client_accounts_topupinsurance;
+#[doc(hidden)]
 pub use instructions::trade_no_cpi::__client_accounts_tradenocpi;
 #[doc(hidden)]
 pub use instructions::update_authority::__client_accounts_updateauthority;
@@ -66,6 +69,13 @@ pub mod percolator {
     #[discrim = 254]
     pub fn ping(_ctx: &mut Context<Ping>) -> Result<()> {
         Ok(())
+    }
+
+    /// Tag 9 — user tops up the insurance fund.
+    /// See `instructions/top_up_insurance.rs`.
+    #[discrim = 9]
+    pub fn top_up_insurance(ctx: &mut Context<TopUpInsurance>, amount: u64) -> Result<()> {
+        instructions::top_up_insurance::handler(ctx, amount)
     }
 
     /// Tag 14 — admin tunes funding params + TVL/insurance cap.

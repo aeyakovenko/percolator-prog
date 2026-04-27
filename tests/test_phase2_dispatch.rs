@@ -27,6 +27,7 @@ const CLOCK_SYSVAR: Pubkey = solana_sdk::sysvar::clock::ID;
 
 const TRADE_NO_CPI: u8 = 6;
 const LIQUIDATE_AT_ORACLE: u8 = 7;
+const TOP_UP_INSURANCE: u8 = 9;
 const UPDATE_CONFIG: u8 = 14;
 const RESOLVE_MARKET: u8 = 19;
 const RECLAIM_EMPTY_ACCOUNT: u8 = 25;
@@ -227,6 +228,36 @@ fn trade_no_cpi_rejects_zero_size() {
         svm.latest_blockhash(),
     );
     assert!(svm.send_transaction(tx).is_err());
+}
+
+/// SPL Token program ID — `pinocchio_token::ID`. Hardcoded here so
+/// the test crate doesn't need a direct pinocchio-token dep.
+const TOKEN_PROGRAM: Pubkey =
+    solana_sdk::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+
+#[test]
+fn top_up_insurance_rejects_zero_amount() {
+    // The handler runs `verify_token_program` first and the
+    // `amount == 0` gate second; either bails before any state
+    // mutation. Either way, this test confirms #[discrim = 9]
+    // dispatch + Borsh u64 decoder fire correctly — we just care
+    // the tx returns Err on a fresh slab.
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let mut data = vec![TOP_UP_INSURANCE];
+    data.extend_from_slice(&0u64.to_le_bytes());
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new(Pubkey::new_unique(), false), // user_ata placeholder
+            AccountMeta::new(Pubkey::new_unique(), false), // vault placeholder
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+        ],
+        data,
+    };
+    assert!(submit(&mut svm, &payer, ix));
 }
 
 #[test]

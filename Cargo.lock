@@ -2828,6 +2828,7 @@ dependencies = [
  "percolator",
  "pinocchio",
  "pinocchio-system",
+ "pinocchio-token",
  "proptest",
  "pythnet-sdk",
  "rand 0.8.5",
@@ -2877,6 +2878,18 @@ checksum = "f3ae2ee67b42e2ac797dd88312da473c895660e270d8093e0ba2749b885b5778"
 dependencies = [
  "pinocchio",
  "solana-address 2.6.0",
+]
+
+[[package]]
+name = "pinocchio-token"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "825f59c8348e5c2d3fd56432ef927f5819542b3b05fae4f5b6869801113e775e"
+dependencies = [
+ "solana-account-view",
+ "solana-address 2.6.0",
+ "solana-instruction-view",
+ "solana-program-error",
 ]
 
 [[package]]

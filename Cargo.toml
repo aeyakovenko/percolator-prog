@@ -35,8 +35,12 @@ anchor-lang-v2 = { path = "../anchor-v2-ref/lang-v2" }
 # v2's `#[program]` macro emits references to these crates as if they
 # were direct deps of the user crate (mirrors how tests-v2 programs
 # declare them). Keep versions aligned with anchor-lang-v2's pins.
-pinocchio = { version = "0.11", default-features = false, features = ["copy"] }
+pinocchio = { version = "0.11", default-features = false, features = ["copy", "cpi"] }
 pinocchio-system = "0.6"
+# SPL Token instruction builders + state decoders. Used by `cpi.rs`
+# (deposit / withdraw transfers) and the token-account verifiers
+# (vault / user_ata shape checks).
+pinocchio-token = "0.6"
 solana-program-error = "3.0"
 solana-program-log = "1.1"
 # Provides `LastRestartSlot::get()` (SIMD-0047 sysvar) — used by the
