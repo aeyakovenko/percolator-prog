@@ -6,8 +6,11 @@
 pub mod catchup_accrue;
 pub mod push_hyperp_mark;
 pub mod reclaim_empty_account;
+pub mod resolve_market;
+pub mod resolve_permissionless;
 pub mod settle_account;
 pub mod update_authority;
+pub mod update_config;
 
 // Re-export only the `#[derive(Accounts)]` types so `crate::lib`'s
 // `#[program]` block can refer to them without an `instructions::*`
@@ -16,5 +19,8 @@ pub mod update_authority;
 pub use catchup_accrue::CatchupAccrue;
 pub use push_hyperp_mark::PushHyperpMark;
 pub use reclaim_empty_account::ReclaimEmptyAccount;
+pub use resolve_market::ResolveMarket;
+pub use resolve_permissionless::ResolvePermissionless;
 pub use settle_account::SettleAccount;
 pub use update_authority::UpdateAuthority;
+pub use update_config::UpdateConfig;

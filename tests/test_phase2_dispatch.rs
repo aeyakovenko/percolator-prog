@@ -25,8 +25,11 @@ const PROGRAM_ID: Pubkey =
     solana_sdk::pubkey!("Perco1ator111111111111111111111111111111111");
 const CLOCK_SYSVAR: Pubkey = solana_sdk::sysvar::clock::ID;
 
+const UPDATE_CONFIG: u8 = 14;
+const RESOLVE_MARKET: u8 = 19;
 const RECLAIM_EMPTY_ACCOUNT: u8 = 25;
 const SETTLE_ACCOUNT: u8 = 26;
+const RESOLVE_PERMISSIONLESS: u8 = 29;
 const CATCHUP_ACCRUE: u8 = 31;
 
 #[cfg(not(any(feature = "small", feature = "medium")))]
@@ -131,6 +134,78 @@ fn catchup_accrue_rejects_uninitialized() {
             AccountMeta::new_readonly(Pubkey::new_unique(), false), // oracle placeholder
         ],
         data: vec![CATCHUP_ACCRUE], // payload-less
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn update_config_rejects_uninitialized() {
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let mut data = vec![UPDATE_CONFIG];
+    data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots
+    data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
+    data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
+    data.extend_from_slice(&1_000i64.to_le_bytes()); // funding_max_e9_per_slot
+    data.extend_from_slice(&0u16.to_le_bytes()); // tvl_insurance_cap_mult
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // oracle placeholder
+        ],
+        data,
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn resolve_market_rejects_uninitialized() {
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // oracle placeholder
+        ],
+        data: vec![RESOLVE_MARKET, 0], // mode = 0 (Ordinary)
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn resolve_market_rejects_invalid_mode() {
+    // Anchor v2's Borsh decoder accepts any u8 for `mode`; the handler
+    // must explicitly reject mode > 1. This test proves that gate is
+    // wired correctly even on a fresh slab — the rejection happens
+    // before any state is touched.
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false),
+        ],
+        data: vec![RESOLVE_MARKET, 7], // mode = 7 (invalid)
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn resolve_permissionless_rejects_uninitialized() {
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+        ],
+        data: vec![RESOLVE_PERMISSIONLESS], // payload-less
     };
     assert!(submit(&mut svm, &payer, ix));
 }

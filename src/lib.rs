@@ -28,7 +28,8 @@ pub mod units;
 pub mod zc;
 
 use instructions::{
-    CatchupAccrue, PushHyperpMark, ReclaimEmptyAccount, SettleAccount, UpdateAuthority,
+    CatchupAccrue, PushHyperpMark, ReclaimEmptyAccount, ResolveMarket, ResolvePermissionless,
+    SettleAccount, UpdateAuthority, UpdateConfig,
 };
 // The `#[program]` macro looks for each Accounts struct's auto-generated
 // `__client_accounts_<name>` module at `super::` (= the crate root). Our
@@ -41,9 +42,15 @@ pub use instructions::push_hyperp_mark::__client_accounts_pushhyperpmark;
 #[doc(hidden)]
 pub use instructions::reclaim_empty_account::__client_accounts_reclaimemptyaccount;
 #[doc(hidden)]
+pub use instructions::resolve_market::__client_accounts_resolvemarket;
+#[doc(hidden)]
+pub use instructions::resolve_permissionless::__client_accounts_resolvepermissionless;
+#[doc(hidden)]
 pub use instructions::settle_account::__client_accounts_settleaccount;
 #[doc(hidden)]
 pub use instructions::update_authority::__client_accounts_updateauthority;
+#[doc(hidden)]
+pub use instructions::update_config::__client_accounts_updateconfig;
 
 #[cfg(not(feature = "no-entrypoint"))]
 #[program]
@@ -57,6 +64,27 @@ pub mod percolator {
         Ok(())
     }
 
+    /// Tag 14 — admin tunes funding params + TVL/insurance cap.
+    /// See `instructions/update_config.rs`.
+    #[discrim = 14]
+    pub fn update_config(
+        ctx: &mut Context<UpdateConfig>,
+        funding_horizon_slots: u64,
+        funding_k_bps: u64,
+        funding_max_premium_bps: i64,
+        funding_max_e9_per_slot: i64,
+        tvl_insurance_cap_mult: u16,
+    ) -> Result<()> {
+        instructions::update_config::handler(
+            ctx,
+            funding_horizon_slots,
+            funding_k_bps,
+            funding_max_premium_bps,
+            funding_max_e9_per_slot,
+            tvl_insurance_cap_mult,
+        )
+    }
+
     /// Tag 17 — Hyperp-only mark-push.
     /// See `instructions/push_hyperp_mark.rs`.
     #[discrim = 17]
@@ -66,6 +94,21 @@ pub mod percolator {
         timestamp: i64,
     ) -> Result<()> {
         instructions::push_hyperp_mark::handler(ctx, price_e6, timestamp)
+    }
+
+    /// Tag 19 — admin resolves a live market (Ordinary or Degenerate).
+    /// See `instructions/resolve_market.rs`.
+    #[discrim = 19]
+    pub fn resolve_market(ctx: &mut Context<ResolveMarket>, mode: u8) -> Result<()> {
+        instructions::resolve_market::handler(ctx, mode)
+    }
+
+    /// Tag 29 — permissionless degenerate resolve after the hard-timeout
+    /// staleness window matures. Payload-less.
+    /// See `instructions/resolve_permissionless.rs`.
+    #[discrim = 29]
+    pub fn resolve_permissionless(ctx: &mut Context<ResolvePermissionless>) -> Result<()> {
+        instructions::resolve_permissionless::handler(ctx)
     }
 
     /// Tag 25 — permissionless flat-account reclaim.
