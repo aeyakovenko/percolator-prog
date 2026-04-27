@@ -39,7 +39,7 @@ fn assert_custom_error(err: &str, code_hex: &str, context: &str) {
 
 fn read_engine_last_oracle_price(env: &TestEnv) -> u64 {
     let d = env.svm.get_account(&env.slab).unwrap().data;
-    const LAST_ORACLE_PRICE_OFFSET: usize = ENGINE_OFFSET + 624;
+    const LAST_ORACLE_PRICE_OFFSET: usize = ENGINE_OFFSET + 648;
     u64::from_le_bytes(
         d[LAST_ORACLE_PRICE_OFFSET..LAST_ORACLE_PRICE_OFFSET + 8]
             .try_into()
@@ -150,20 +150,6 @@ fn test_external_oracle_stuck_target_does_not_advance_slot_last() {
     env.try_init_market_raw(data).expect("init scaled market");
     env.crank();
 
-    let lp = Keypair::new();
-    let lp_idx = env.init_lp_with_fee(&lp, 2_000_000);
-    env.deposit(&lp, lp_idx, 10_000_000_000);
-
-    let user = Keypair::new();
-    let user_idx = env.init_user_with_fee(&user, 2_000_000);
-    env.deposit(&user, user_idx, 10_000_000_000);
-    env.trade(&user, &lp, lp_idx, user_idx, 10_000_000);
-    assert_ne!(
-        env.read_account_position(user_idx),
-        0,
-        "test setup must create live OI"
-    );
-
     let slot_before = env.read_last_market_slot();
     let p_last = env.read_last_effective_price();
     assert_eq!(p_last, 138, "scaled setup should seed P_last=138");
@@ -171,16 +157,51 @@ fn test_external_oracle_stuck_target_does_not_advance_slot_last() {
     env.set_slot_and_price_raw_no_walk(slot_before + 1, 139_000_000);
     let err = env
         .try_catchup_accrue()
-        .expect_err("dt-capped max_delta=0 with live OI must require catchup/recovery");
-    assert_custom_error(
-        &err,
-        "0x1d",
-        "CatchupAccrue must reject unchanged effective price while raw target is pending",
+        .expect_err("retired CatchupAccrue tag must reject");
+    assert!(
+        err.contains("InvalidInstructionData") || err.contains("invalid instruction data"),
+        "retired CatchupAccrue must reject with InvalidInstructionData, got: {err}",
     );
     assert_eq!(
         env.read_last_market_slot(),
         slot_before,
         "slot_last must not advance by feeding unchanged P_last while target catch-up is stuck",
+    );
+}
+
+#[test]
+fn test_trade_nocpi_can_advance_exposed_price_progress_without_crank() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_cap(0, 80);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
+    assert_ne!(
+        env.read_account_position(user_idx),
+        0,
+        "test setup must create exposed OI",
+    );
+
+    let slot_before = env.read_last_market_slot();
+    let next_slot = slot_before + percolator_prog::constants::MAX_ACCRUAL_DT_SLOTS + 1;
+    let target = (env.read_last_effective_price() + 1) as i64;
+    env.set_slot_and_price_raw_no_walk(next_slot, target);
+
+    env.try_trade(&user, &lp, lp_idx, user_idx, -1_000)
+        .expect("nonzero TradeNoCpi must not require a prior keeper crank");
+    assert_eq!(
+        env.read_last_market_slot(),
+        next_slot,
+        "nonzero trade should accrue the exposed market before touching counterparties",
     );
 }
 
@@ -193,10 +214,10 @@ fn test_catchup_accrue_flat_same_slot_syncs_engine_price() {
 
     let slot = env.read_last_market_slot();
     let old_price = read_engine_last_oracle_price(&env);
-    let target = old_price.saturating_add(1_000_000);
+    let target = old_price.saturating_add(1);
     let publish_time = slot as i64 + 1;
     env.svm.set_sysvar(&Clock {
-        slot,
+        slot: slot + 1,
         unix_timestamp: publish_time,
         ..Clock::default()
     });
@@ -216,15 +237,14 @@ fn test_catchup_accrue_flat_same_slot_syncs_engine_price() {
             .unwrap();
     }
 
-    env.try_catchup_accrue()
-        .expect("flat same-slot CatchupAccrue should adopt the fresh target");
+    env.crank();
 
     assert_eq!(env.read_oracle_target_price(), target);
     assert_eq!(env.read_last_effective_price(), target);
     assert_eq!(
         read_engine_last_oracle_price(&env),
         target,
-        "CatchupAccrue complete mode must install the flat same-slot target into engine P_last"
+        "KeeperCrank must install the flat same-slot target into engine P_last"
     );
 }
 
@@ -4836,9 +4856,8 @@ fn test_account_touching_crank_prevents_bankruptcy_insurance_loss() {
     let vault_before = env.vault_balance();
 
     // Price rally: LP's short loss exceeds capital and leaves a deficit. Walk
-    // through the account-touching crank path; account-free CatchupAccrue is
-    // intentionally not allowed to move exposed markets through equity-active
-    // price changes.
+    // through the account-touching crank path; retired account-free catchup is
+    // intentionally not available for exposed equity-active price changes.
     env.set_slot_and_price(1_500, 207_000_000);
     env.crank();
 

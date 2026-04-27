@@ -29,6 +29,7 @@ use percolator_prog::oracle::{clamp_oracle_price, clamp_toward_with_dt, restart_
 use percolator_prog::policy::{
     abi_ok,
     account_free_catchup_allows_accrual,
+    account_limited_op_allows_accrual,
     admin_ok,
     cpi_trade_size,
     decide_admin_op,
@@ -3107,6 +3108,41 @@ fn kani_account_free_catchup_allows_flat_or_exposed_noop() {
     assert!(
         account_free_catchup_allows_accrual(oi_long, oi_short, p_last, p_last, 0, fund_px_last),
         "exposed account-free catchup is allowed when price and funding are no-op"
+    );
+}
+
+/// Prove: non-crank account-limited operations reject exactly exposed
+/// equity-active market progress. Trades touch their counterparties, but not
+/// unrelated open accounts, so exposed price/funding progress must route
+/// through KeeperCrank.
+#[kani::proof]
+fn kani_account_limited_ops_reject_exposed_market_progress() {
+    let oi_long: u128 = kani::any();
+    let oi_short: u128 = kani::any();
+    let p_last: u64 = kani::any();
+    let fresh_price: u64 = kani::any();
+    let funding_rate: i128 = kani::any();
+    let fund_px_last: u64 = kani::any();
+    let dt_slots: u64 = kani::any();
+
+    let exposed = oi_long != 0 || oi_short != 0;
+    let price_move_active = p_last > 0 && fresh_price != p_last;
+    let funding_active =
+        dt_slots != 0 && funding_rate != 0 && oi_long != 0 && oi_short != 0 && fund_px_last > 0;
+    let expected = !(exposed && (price_move_active || funding_active));
+
+    assert_eq!(
+        account_limited_op_allows_accrual(
+            oi_long,
+            oi_short,
+            p_last,
+            fresh_price,
+            funding_rate,
+            fund_px_last,
+            dt_slots,
+        ),
+        expected,
+        "account-limited paths must reject exposed price/funding progress"
     );
 }
 

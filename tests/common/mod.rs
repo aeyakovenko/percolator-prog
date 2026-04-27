@@ -25,17 +25,17 @@ pub use std::path::PathBuf;
 // --features medium` for MAX_ACCOUNTS=1024, or no flag for the
 // default MAX_ACCOUNTS=4096.
 #[cfg(all(feature = "small", not(feature = "medium")))]
-pub const SLAB_LEN: usize = 96664;
+pub const SLAB_LEN: usize = 96688;
 #[cfg(all(feature = "small", not(feature = "medium")))]
 pub const MAX_ACCOUNTS: usize = 256;
 
 #[cfg(all(feature = "medium", not(feature = "small")))]
-pub const SLAB_LEN: usize = 382456;
+pub const SLAB_LEN: usize = 382480;
 #[cfg(all(feature = "medium", not(feature = "small")))]
 pub const MAX_ACCOUNTS: usize = 1024;
 
 #[cfg(not(any(feature = "small", feature = "medium")))]
-pub const SLAB_LEN: usize = 1525624;
+pub const SLAB_LEN: usize = 1525648;
 #[cfg(not(any(feature = "small", feature = "medium")))]
 pub const MAX_ACCOUNTS: usize = 4096;
 
@@ -65,22 +65,22 @@ pub const DEFAULT_INIT_CAPITAL: u64 = DEFAULT_INIT_PAYMENT - DEFAULT_NEW_ACCOUNT
 // SBF-target RiskEngine offsets. These are not derived from native
 // `size_of` because host u128 alignment differs from SBF.
 pub const ENGINE_OFFSET: usize = 520;
-pub const ENGINE_BITMAP_OFFSET: usize = 712;
+pub const ENGINE_BITMAP_OFFSET: usize = 736;
 
 #[cfg(all(feature = "small", not(feature = "medium")))]
-pub const ENGINE_NUM_USED_OFFSET: usize = 744;
+pub const ENGINE_NUM_USED_OFFSET: usize = 768;
 #[cfg(all(feature = "small", not(feature = "medium")))]
-pub const ENGINE_ACCOUNTS_OFFSET: usize = 1776;
+pub const ENGINE_ACCOUNTS_OFFSET: usize = 1800;
 
 #[cfg(all(feature = "medium", not(feature = "small")))]
-pub const ENGINE_NUM_USED_OFFSET: usize = 840;
+pub const ENGINE_NUM_USED_OFFSET: usize = 864;
 #[cfg(all(feature = "medium", not(feature = "small")))]
-pub const ENGINE_ACCOUNTS_OFFSET: usize = 4944;
+pub const ENGINE_ACCOUNTS_OFFSET: usize = 4968;
 
 #[cfg(not(any(feature = "small", feature = "medium")))]
-pub const ENGINE_NUM_USED_OFFSET: usize = 1224;
+pub const ENGINE_NUM_USED_OFFSET: usize = 1248;
 #[cfg(not(any(feature = "small", feature = "medium")))]
-pub const ENGINE_ACCOUNTS_OFFSET: usize = 17616;
+pub const ENGINE_ACCOUNTS_OFFSET: usize = 17640;
 
 // Pyth Receiver program ID
 pub const PYTH_RECEIVER_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
@@ -1800,7 +1800,7 @@ pub fn encode_resolve_permissionless() -> Vec<u8> {
     vec![29u8]
 }
 
-/// Tag 31: CatchupAccrue — permissionless partial market-clock advance.
+/// Tag 31: retired CatchupAccrue. Kept for negative tests.
 pub fn encode_catchup_accrue() -> Vec<u8> {
     vec![31u8]
 }
@@ -2136,7 +2136,7 @@ impl TestEnv {
     /// need to verify forward progress through the SBF-written slab.
     pub fn read_last_market_slot(&self) -> u64 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        const LAST_MARKET_SLOT_OFFSET: usize = ENGINE_OFFSET + 640;
+        const LAST_MARKET_SLOT_OFFSET: usize = ENGINE_OFFSET + 664;
         u64::from_le_bytes(
             d[LAST_MARKET_SLOT_OFFSET..LAST_MARKET_SLOT_OFFSET + 8]
                 .try_into()
@@ -3159,10 +3159,8 @@ impl TestEnv {
         self.try_resolve_permissionless_once()
     }
 
-    /// Tag 31: permissionless CatchupAccrue. Commits up to
-    /// CATCHUP_CHUNKS_MAX chunks of market-clock advancement. Requires
-    /// a live oracle (proves market is live; dead oracles must use
-    /// ResolvePermissionless instead).
+    /// Tag 31: retired CatchupAccrue. Kept as a negative-test helper; public
+    /// market-clock progress is routed through KeeperCrank.
     pub fn try_catchup_accrue(&mut self) -> Result<(), String> {
         let caller = Keypair::new();
         self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
@@ -4037,7 +4035,7 @@ impl TradeCpiTestEnv {
     pub fn try_catchup_accrue(&mut self) -> Result<(), String> {
         let caller = Keypair::new();
         self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
-        // CatchupAccrue takes [slab, clock, oracle] — no caller account.
+        // Retired CatchupAccrue takes [slab, clock, oracle] — no caller account.
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![

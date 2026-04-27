@@ -1062,7 +1062,7 @@ fn test_funding_boundary_anti_retroactivity_update_config() {
     // Helper: send UpdateConfig with a specific funding_k_bps.
     // Uses short horizon (100 slots) so the per-slot rate is non-zero
     // even with moderate premiums. k multiplier adjusts sensitivity.
-    let admin_send_config = |env: &mut TradeCpiTestEnv, k_bps: u64| {
+    let admin_try_config = |env: &mut TradeCpiTestEnv, k_bps: u64| -> Result<(), String> {
         let kp = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
         let ix = Instruction {
             program_id: env.program_id,
@@ -1084,7 +1084,13 @@ fn test_funding_boundary_anti_retroactivity_update_config() {
             &[&kp],
             env.svm.latest_blockhash(),
         );
-        env.svm.send_transaction(tx).expect("UpdateConfig failed");
+        env.svm
+            .send_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
+    };
+    let admin_send_config = |env: &mut TradeCpiTestEnv, k_bps: u64| {
+        admin_try_config(env, k_bps).expect("UpdateConfig failed");
     };
 
     // Initial funding config: k=1000 (10x multiplier), horizon=100 slots
@@ -1127,7 +1133,8 @@ fn test_funding_boundary_anti_retroactivity_update_config() {
 
     // The trade updated mark to exec_price (which may differ from index).
     // Push mark above current index to widen the premium, then let it persist.
-    env.set_slot(11);
+    // Keep this in the same market slot: PushHyperpMark is not the exposed
+    // market catchup path, so it must not accrue a live OI interval.
     env.try_push_oracle_price(&admin, 2_000_000, 111).unwrap();
     // Do NOT crank -- we want mark != index so the stored rate is non-zero.
     // The push already recomputes and stores the funding rate.
@@ -1163,12 +1170,24 @@ fn test_funding_boundary_anti_retroactivity_update_config() {
     env.set_slot(11 + idle_dt);
     println!("5. Advanced {} slots without cranking", idle_dt);
 
-    // UpdateConfig: change k from 1000 to 2000
-    // This MUST: (a) call accrue_market_to at OLD funding rate, (b) write NEW config
-    // Anti-retroactivity: wrapper computes funding_rate from CURRENT config BEFORE
-    // updating params, so the idle interval is priced at the old k=1000 rate.
+    // UpdateConfig is not the keeper progress path. With live OI, a pending
+    // funding interval must be realized by KeeperCrank first, so the attempted
+    // config change rolls back instead of retroactively changing the old-rate
+    // interval.
+    let stale_update = admin_try_config(&mut env, 1999)
+        .expect_err("UpdateConfig must not be the exposed funding catchup path");
+    assert!(
+        stale_update.contains("0x1d"),
+        "UpdateConfig should surface CatchupRequired before keeper progress, got: {stale_update}",
+    );
+
+    // KeeperCrank realizes the idle interval under the old k=1000 config.
+    env.crank();
+
+    // UpdateConfig can now change k from 1000 to 2000 without doing additional
+    // exposed market progress.
     admin_send_config(&mut env, 2000);
-    println!("6. UpdateConfig: k changed 1000 -> 2000 (succeeded = accrual didn't fail)");
+    println!("6. KeeperCrank realized old-rate interval; UpdateConfig changed k 1000 -> 2000");
 
     // Verify new config took effect
     let config_after = {
@@ -1184,11 +1203,9 @@ fn test_funding_boundary_anti_retroactivity_update_config() {
         config_after.funding_k_bps
     );
 
-    // The fact that UpdateConfig succeeded with 50 idle slots and a premium proves
-    // accrue_market_to was called (it must sync slot monotonicity). The wrapper's
-    // code path explicitly accrues at OLD config before writing new params:
-    //   "Accrue to boundary using engine's already-stored rate.
-    //    Do NOT overwrite funding_rate_bps_per_slot_last before accrual"
+    // The rejected pre-crank update plus successful post-crank update proves
+    // config mutation cannot be used to price an exposed historical interval
+    // under new funding parameters.
 
     // Post-UpdateConfig crank should use new rate (k=2000)
     env.set_slot(11 + idle_dt + 10);

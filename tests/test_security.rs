@@ -13386,10 +13386,10 @@ fn test_attack_issue33_account_free_catchup_cannot_move_exposed_market() {
 
     let err = env
         .try_catchup_accrue()
-        .expect_err("account-free catchup must reject exposed price movement");
+        .expect_err("retired account-free catchup tag must reject");
     assert!(
-        err.contains("0x1d"),
-        "expected CatchupRequired for exposed account-free catchup, got: {err}",
+        err.contains("InvalidInstructionData") || err.contains("invalid instruction data"),
+        "expected InvalidInstructionData for retired account-free catchup tag, got: {err}",
     );
     assert_eq!(
         env.read_last_market_slot(),

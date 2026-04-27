@@ -32,11 +32,11 @@ use std::path::PathBuf;
 // tests) has been removed; integration tests go through the BPF binary.
 // BPF-target SLAB_LEN, cfg-gated by deployment-size feature.
 #[cfg(all(feature = "small", not(feature = "medium")))]
-const SLAB_LEN: usize = 96664;
+const SLAB_LEN: usize = 96688;
 #[cfg(all(feature = "medium", not(feature = "small")))]
-const SLAB_LEN: usize = 382456;
+const SLAB_LEN: usize = 382480;
 #[cfg(not(any(feature = "small", feature = "medium")))]
-const SLAB_LEN: usize = 1525624;
+const SLAB_LEN: usize = 1525648;
 const MAX_ACCOUNTS: usize = 2048;
 const TEST_MAX_STALENESS_SECS: u64 = percolator_prog::constants::MAX_ORACLE_STALENESS_SECS;
 

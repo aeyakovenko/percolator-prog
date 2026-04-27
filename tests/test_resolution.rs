@@ -1936,9 +1936,10 @@ fn test_keeper_crank_rejects_after_hard_timeout_and_resolves_degenerate() {
     assert!(env.is_market_resolved());
 }
 
-/// CatchupAccrue is not a stale-oracle escape hatch. A caller cannot jump a
-/// non-Hyperp permissionless market past its hard timeout, publish a new oracle
-/// account at the jumped slot, and use CatchupAccrue to keep the market live.
+/// The retired CatchupAccrue tag is not a stale-oracle escape hatch. A caller
+/// cannot jump a non-Hyperp permissionless market past its hard timeout, publish
+/// a new oracle account at the jumped slot, and use standalone catchup to keep
+/// the market live.
 #[test]
 fn test_catchup_accrue_rejects_after_hard_timeout() {
     program_path();
@@ -1950,7 +1951,7 @@ fn test_catchup_accrue_rejects_after_hard_timeout() {
     let result = env.try_catchup_accrue();
     assert!(
         result.is_err(),
-        "CatchupAccrue must require a live market and reject after hard timeout"
+        "retired CatchupAccrue tag must reject after hard timeout"
     );
 }
 

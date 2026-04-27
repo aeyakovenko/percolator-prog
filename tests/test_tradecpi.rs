@@ -5736,6 +5736,65 @@ fn test_tradecpi_zero_fill_does_not_walk_index() {
 /// `last_market_slot` from the slab after a zero-fill. The integration
 /// account stores the SBF layout, so this must use the SBF offset rather
 /// than `zc::engine_ref`, whose native alignment differs.
+fn init_zero_fill_lp(env: &mut TradeCpiTestEnv, owner: &Keypair) -> (u16, Pubkey) {
+    let idx = env.account_count;
+    let matcher_program = env.matcher_program_id;
+    env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+    let ata = env.create_ata(&owner.pubkey(), 100);
+    let lp_bytes = idx.to_le_bytes();
+    let (lp_pda, _) =
+        Pubkey::find_program_address(&[b"lp", env.slab.as_ref(), &lp_bytes], &env.program_id);
+    let ctx = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 10_000_000,
+                data: vec![0u8; MATCHER_CONTEXT_LEN],
+                owner: matcher_program,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let init_ix = Instruction {
+        program_id: matcher_program,
+        accounts: vec![
+            AccountMeta::new_readonly(lp_pda, false),
+            AccountMeta::new(ctx, false),
+        ],
+        data: encode_init_vamm(MatcherMode::Passive, 5, 10, 200, 0, 0, 0, 0),
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), init_ix],
+        Some(&owner.pubkey()),
+        &[owner],
+        env.svm.latest_blockhash(),
+    );
+    env.svm.send_transaction(tx).expect("init matcher");
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new(ata, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+        ],
+        data: encode_init_lp(&matcher_program, &ctx, 100),
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&owner.pubkey()),
+        &[owner],
+        env.svm.latest_blockhash(),
+    );
+    env.svm.send_transaction(tx).expect("init_lp");
+    env.account_count += 1;
+    (idx, ctx)
+}
+
 #[test]
 fn test_tradecpi_zero_fill_advances_engine_time() {
     // Layout-stable accessor: reads through `zc::engine_ref` rather than
@@ -5743,7 +5802,7 @@ fn test_tradecpi_zero_fill_advances_engine_time() {
     // engine struct changes.
     let read_last_market_slot = |env: &TradeCpiTestEnv| -> u64 {
         let data = env.svm.get_account(&env.slab).unwrap().data;
-        let off = ENGINE_OFFSET + 640;
+        let off = ENGINE_OFFSET + 664;
         u64::from_le_bytes(data[off..off + 8].try_into().unwrap())
     };
 
@@ -5756,65 +5815,8 @@ fn test_tradecpi_zero_fill_advances_engine_time() {
         .unwrap();
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
 
-    // Zero-fill LP (max_fill_abs=0).
     let lp = Keypair::new();
-    let lp_idx = {
-        let idx = env.account_count;
-        env.svm.airdrop(&lp.pubkey(), 1_000_000_000).unwrap();
-        let ata = env.create_ata(&lp.pubkey(), 100);
-        let lp_bytes = idx.to_le_bytes();
-        let (lp_pda, _) =
-            Pubkey::find_program_address(&[b"lp", env.slab.as_ref(), &lp_bytes], &env.program_id);
-        let ctx = Pubkey::new_unique();
-        env.svm
-            .set_account(
-                ctx,
-                Account {
-                    lamports: 10_000_000,
-                    data: vec![0u8; MATCHER_CONTEXT_LEN],
-                    owner: mp,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
-        let init_ix = Instruction {
-            program_id: mp,
-            accounts: vec![
-                AccountMeta::new_readonly(lp_pda, false),
-                AccountMeta::new(ctx, false),
-            ],
-            data: encode_init_vamm(MatcherMode::Passive, 5, 10, 200, 0, 0, 0, 0),
-        };
-        let tx = Transaction::new_signed_with_payer(
-            &[cu_ix(), init_ix],
-            Some(&lp.pubkey()),
-            &[&lp],
-            env.svm.latest_blockhash(),
-        );
-        env.svm.send_transaction(tx).expect("init matcher");
-        let ix = Instruction {
-            program_id: env.program_id,
-            accounts: vec![
-                AccountMeta::new(lp.pubkey(), true),
-                AccountMeta::new(env.slab, false),
-                AccountMeta::new(ata, false),
-                AccountMeta::new(env.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-                AccountMeta::new_readonly(sysvar::clock::ID, false),
-            ],
-            data: encode_init_lp(&mp, &ctx, 100),
-        };
-        let tx = Transaction::new_signed_with_payer(
-            &[cu_ix(), ix],
-            Some(&lp.pubkey()),
-            &[&lp],
-            env.svm.latest_blockhash(),
-        );
-        env.svm.send_transaction(tx).expect("init_lp");
-        env.account_count += 1;
-        (idx, ctx)
-    };
+    let lp_idx = init_zero_fill_lp(&mut env, &lp);
 
     env.deposit(&lp, lp_idx.0, 10_000_000_000);
 
@@ -5881,6 +5883,183 @@ fn test_tradecpi_zero_fill_advances_engine_time() {
         "follow-up crank must advance last_market_slot by the small \
          post-zero-fill delta only, proving the zero-fill's accrue \
          already committed and subsequent accrue is incremental",
+    );
+}
+
+#[test]
+fn test_tradecpi_zero_fill_rejects_exposed_price_progress() {
+    let read_last_market_slot = |env: &TradeCpiTestEnv| -> u64 {
+        let data = env.svm.get_account(&env.slab).unwrap().data;
+        let off = ENGINE_OFFSET + 664;
+        u64::from_le_bytes(data[off..off + 8].try_into().unwrap())
+    };
+
+    let mut env = TradeCpiTestEnv::new();
+    env.init_market();
+    let mp = env.matcher_program_id;
+
+    let maker = Keypair::new();
+    let (maker_idx, maker_ctx) = env.init_lp_with_matcher(&maker, &mp);
+    env.deposit(&maker, maker_idx, 10_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+
+    env.set_slot(50);
+    env.crank();
+    env.try_trade_cpi(
+        &user,
+        &maker.pubkey(),
+        maker_idx,
+        user_idx,
+        100_000,
+        &mp,
+        &maker_ctx,
+    )
+    .expect("opening TradeCpi should succeed");
+    assert_ne!(
+        env.read_account_position(user_idx),
+        0,
+        "test setup must create exposed OI",
+    );
+
+    let zero_lp = Keypair::new();
+    let (zero_lp_idx, zero_ctx) = init_zero_fill_lp(&mut env, &zero_lp);
+    let zero_user = Keypair::new();
+    let zero_user_idx = env.init_user(&zero_user);
+    env.deposit(&zero_user, zero_user_idx, 1_000_000);
+
+    let slot_before = read_last_market_slot(&env);
+    let target = {
+        let d = env.svm.get_account(&env.slab).unwrap().data;
+        (percolator_prog::state::read_config(&d).last_effective_price_e6 + 1) as i64
+    };
+    let next_slot = slot_before + percolator_prog::constants::MAX_ACCRUAL_DT_SLOTS + 1;
+    let publish_time = next_slot as i64;
+    env.svm.set_sysvar(&Clock {
+        slot: next_slot,
+        unix_timestamp: publish_time,
+        ..Clock::default()
+    });
+    let pyth_data = make_pyth_data(&TEST_FEED_ID, target, -6, 1, publish_time);
+    for oracle in [env.pyth_index, env.pyth_col] {
+        env.svm
+            .set_account(
+                oracle,
+                Account {
+                    lamports: 1_000_000,
+                    data: pyth_data.clone(),
+                    owner: PYTH_RECEIVER_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    let err = env
+        .try_trade_cpi(
+            &zero_user,
+            &zero_lp.pubkey(),
+            zero_lp_idx,
+            zero_user_idx,
+            100_000,
+            &mp,
+            &zero_ctx,
+        )
+        .expect_err("zero-fill must not advance exposed price progress");
+    assert!(
+        err.contains("0x1d"),
+        "zero-fill exposed progress must surface CatchupRequired, got: {err}",
+    );
+    assert_eq!(
+        read_last_market_slot(&env),
+        slot_before,
+        "failed zero-fill must not advance engine market time",
+    );
+}
+
+#[test]
+fn test_tradecpi_nonzero_fill_can_advance_exposed_price_progress() {
+    let read_last_market_slot = |env: &TradeCpiTestEnv| -> u64 {
+        let data = env.svm.get_account(&env.slab).unwrap().data;
+        let off = ENGINE_OFFSET + 664;
+        u64::from_le_bytes(data[off..off + 8].try_into().unwrap())
+    };
+
+    let mut env = TradeCpiTestEnv::new();
+    env.init_market();
+    let mp = env.matcher_program_id;
+
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) = env.init_lp_with_matcher(&lp, &mp);
+    env.deposit(&lp, lp_idx, 10_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000);
+
+    env.set_slot(50);
+    env.crank();
+    env.try_trade_cpi(
+        &user,
+        &lp.pubkey(),
+        lp_idx,
+        user_idx,
+        100_000,
+        &mp,
+        &matcher_ctx,
+    )
+    .expect("opening TradeCpi should succeed");
+    assert_ne!(
+        env.read_account_position(user_idx),
+        0,
+        "test setup must create exposed OI",
+    );
+
+    let slot_before = read_last_market_slot(&env);
+    let target = {
+        let d = env.svm.get_account(&env.slab).unwrap().data;
+        (percolator_prog::state::read_config(&d).last_effective_price_e6 + 1) as i64
+    };
+    let next_slot = slot_before + percolator_prog::constants::MAX_ACCRUAL_DT_SLOTS + 1;
+    let publish_time = next_slot as i64;
+    env.svm.set_sysvar(&Clock {
+        slot: next_slot,
+        unix_timestamp: publish_time,
+        ..Clock::default()
+    });
+    let pyth_data = make_pyth_data(&TEST_FEED_ID, target, -6, 1, publish_time);
+    for oracle in [env.pyth_index, env.pyth_col] {
+        env.svm
+            .set_account(
+                oracle,
+                Account {
+                    lamports: 1_000_000,
+                    data: pyth_data.clone(),
+                    owner: PYTH_RECEIVER_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    env.try_trade_cpi(
+        &user,
+        &lp.pubkey(),
+        lp_idx,
+        user_idx,
+        -1_000,
+        &mp,
+        &matcher_ctx,
+    )
+    .expect("nonzero TradeCpi must not require a prior keeper crank");
+    assert_eq!(
+        read_last_market_slot(&env),
+        next_slot,
+        "nonzero trade should accrue the exposed market before touching counterparties",
     );
 }
 
@@ -6324,7 +6503,7 @@ fn test_tradecpi_fee_debt_sweep_must_not_refresh_hyperp_liveness() {
 //
 //   1. POST-MATURITY TERMINAL. Once clock.slot - last_live_slot >=
 //      permissionless_resolve_stale_slots, the market is resolve-only:
-//      PushHyperpMark and CatchupAccrue reject with OracleStale;
+//      PushHyperpMark rejects with OracleStale and retired CatchupAccrue rejects;
 //      ResolvePermissionless succeeds.
 //
 //   2. NO PRE-MATURITY UNRECOVERABLE WINDOW. Just before maturity a
@@ -6405,14 +6584,14 @@ fn test_hyperp_after_stale_maturity_is_resolve_only() {
         err,
     );
 
-    // CatchupAccrue must also reject — it routes through
-    // get_engine_oracle_price_e6 which honors the hard-timeout gate.
+    // CatchupAccrue is retired; standalone account-free catchup is no longer
+    // an exposed path.
     let err = env
         .try_catchup_accrue()
-        .expect_err("CatchupAccrue must reject past perm_resolve maturity");
+        .expect_err("retired CatchupAccrue tag must reject");
     assert!(
-        err.contains("0x6"),
-        "CatchupAccrue past maturity must surface OracleStale (0x6), got: {}",
+        err.contains("InvalidInstructionData") || err.contains("invalid instruction data"),
+        "retired CatchupAccrue must reject with InvalidInstructionData, got: {}",
         err,
     );
 
