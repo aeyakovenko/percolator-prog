@@ -1,3 +1,4 @@
+#![cfg(feature = "legacy-tests")]
 //! A1 self-dealing insurance-siphon regression tests.
 //!
 //! # Attack

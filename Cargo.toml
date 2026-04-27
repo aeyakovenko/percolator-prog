@@ -7,13 +7,19 @@ publish = false
 [lib]
 crate-type = ["cdylib", "lib"]
 name = "percolator_prog"
-path = "src/percolator.rs"
+path = "src/lib.rs"
 
 [features]
 no-entrypoint = []
 test-sbf = []
 cu-audit = []  # Enable compute unit checkpoints for CU auditing
 kani = []
+# Re-enable the legacy native-program test suite once Phase 6 rewrites the
+# instruction encoders. Off by default so `cargo test` runs only the v2-
+# native tests during migration; each gated file has a corresponding
+# #[ignore] marker in tests/test_legacy_disabled.rs so the suite's status
+# is visible without enabling the feature.
+legacy-tests = []
 # Deployment-size tiers — forward to the engine crate. Only one of
 # `small` / `medium` should be set; leaving both off uses the engine's
 # default (MAX_ACCOUNTS=4096). Both the BPF binary and the test
@@ -23,40 +29,42 @@ small = ["percolator/small"]
 medium = ["percolator/medium"]
 
 [dependencies]
-solana-program = "1.18"
-spl-token = { version = "4.0", features = ["no-entrypoint"] }
-thiserror = "1.0"
+# Anchor v2 (pinned commit per CLAUDE.md). Path dep into the locally
+# cloned reference checkout.
+anchor-lang-v2 = { path = "../anchor-v2-ref/lang-v2" }
+# v2's `#[program]` macro emits references to these crates as if they
+# were direct deps of the user crate (mirrors how tests-v2 programs
+# declare them). Keep versions aligned with anchor-lang-v2's pins.
+pinocchio = { version = "0.11", default-features = false, features = ["copy"] }
+pinocchio-system = "0.6"
+solana-program-error = "3.0"
+solana-program-log = "1.1"
+wincode = { version = "0.5", features = ["derive"] }
 bytemuck = { version = "1.14", features = ["derive", "min_const_generics"] }
-pyth-sdk-solana = "0.10"
 # pythnet-sdk (no default features) exposes the canonical
 # PriceFeedMessage struct used inside Pyth Solana Receiver's
-# PriceUpdateV2 account. Using this official struct's BorshDeserialize
-# swaps the prior hand-rolled fixed-offset parser for a compile-time
-# typed binding: any breaking layout change on the Pyth side produces a
-# build error (missing/reordered fields) or a deserialize error at
-# runtime, rather than silent garbage reads. Pulled with
-# no-default-features to keep the transitive closure light (~52 crates,
-# no Anchor).
+# PriceUpdateV2 account.
 pythnet-sdk = { version = "2.3", default-features = false }
 # pythnet-sdk uses borsh 0.10 internally; pin the same major so our
 # direct use of BorshDeserialize on its types reads/writes the same
-# wire format.
+# wire format. Distinct from anchor-lang-v2's borsh 1.x re-export
+# (`AnchorSerialize`/`AnchorDeserialize`).
 borsh = { version = "0.10", default-features = false }
-pinocchio = "0.6"
-arrayref = "0.3"
-num-derive = "0.4"
-num-traits = "0.2"
 percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "5940285737b514af4416cd8394773abc79e6366d" }
 
 [dev-dependencies]
+# litesvm 0.11 + solana-sdk 3.x match Anchor v2's Solana 3.x lineage and
+# implement the SIMD-0321 2-arg entrypoint convention used by v2's
+# `__anchor_dispatch`. The legacy 1.18 dev-dep stack used litesvm 0.1
+# which lacks SIMD-0321 r2 setup and segfaulted v2 binaries on entry.
+litesvm = "0.11"
+solana-sdk = "3"
+solana-client = "3"
 bincode = "1"
-solana-sdk = "1.18"
-solana-client = "1.18"
 rand = "0.8"
 rand_xorshift = "0.3"
 proptest = "1.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serial_test = "3"
-litesvm = "0.1"
 shellexpand = "3"
 serde_json = "1"

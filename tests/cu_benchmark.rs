@@ -1,3 +1,4 @@
+#![cfg(feature = "legacy-tests")]
 //! BPF Compute Unit benchmark using LiteSVM
 //!
 //! Tests worst-case CU scenarios for keeper crank:

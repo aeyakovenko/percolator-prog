@@ -1,3 +1,4 @@
+#![cfg(feature = "legacy-tests")]
 mod common;
 #[allow(unused_imports)]
 use common::*;
