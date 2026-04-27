@@ -27,13 +27,21 @@ pub mod state;
 pub mod units;
 pub mod zc;
 
-use instructions::{PushHyperpMark, UpdateAuthority};
+use instructions::{
+    CatchupAccrue, PushHyperpMark, ReclaimEmptyAccount, SettleAccount, UpdateAuthority,
+};
 // The `#[program]` macro looks for each Accounts struct's auto-generated
 // `__client_accounts_<name>` module at `super::` (= the crate root). Our
 // Accounts structs live in submodules under `instructions/`, so re-export
 // each one at the crate root.
 #[doc(hidden)]
+pub use instructions::catchup_accrue::__client_accounts_catchupaccrue;
+#[doc(hidden)]
 pub use instructions::push_hyperp_mark::__client_accounts_pushhyperpmark;
+#[doc(hidden)]
+pub use instructions::reclaim_empty_account::__client_accounts_reclaimemptyaccount;
+#[doc(hidden)]
+pub use instructions::settle_account::__client_accounts_settleaccount;
 #[doc(hidden)]
 pub use instructions::update_authority::__client_accounts_updateauthority;
 
@@ -58,6 +66,30 @@ pub mod percolator {
         timestamp: i64,
     ) -> Result<()> {
         instructions::push_hyperp_mark::handler(ctx, price_e6, timestamp)
+    }
+
+    /// Tag 25 — permissionless flat-account reclaim.
+    /// See `instructions/reclaim_empty_account.rs`.
+    #[discrim = 25]
+    pub fn reclaim_empty_account(
+        ctx: &mut Context<ReclaimEmptyAccount>,
+        user_idx: u16,
+    ) -> Result<()> {
+        instructions::reclaim_empty_account::handler(ctx, user_idx)
+    }
+
+    /// Tag 26 — permissionless single-account settlement.
+    /// See `instructions/settle_account.rs`.
+    #[discrim = 26]
+    pub fn settle_account(ctx: &mut Context<SettleAccount>, user_idx: u16) -> Result<()> {
+        instructions::settle_account::handler(ctx, user_idx)
+    }
+
+    /// Tag 31 — permissionless market-clock catchup. Payload-less.
+    /// See `instructions/catchup_accrue.rs`.
+    #[discrim = 31]
+    pub fn catchup_accrue(ctx: &mut Context<CatchupAccrue>) -> Result<()> {
+        instructions::catchup_accrue::handler(ctx)
     }
 
     /// Tag 32 — rotate or burn one of four scoped authority pubkeys.

@@ -424,7 +424,7 @@ pub fn prepare_lazy_free_head(engine: &mut RiskEngine) -> Result<u16, ProgramErr
 /// 20 × max_dt = 20 × 100 = 2_000 slots per single instruction. Larger
 /// gaps require multiple CatchupAccrue calls — that's the design
 /// contract, not a misconfig.
-const CATCHUP_CHUNKS_MAX: u32 = 20;
+pub const CATCHUP_CHUNKS_MAX: u32 = 20;
 
 /// Pre-chunk market-clock advancement when the gap since the last
 /// engine *accrue* exceeds `params.max_accrual_dt_slots`. The engine
