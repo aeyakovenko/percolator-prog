@@ -21,6 +21,7 @@ pub mod instructions;
 pub mod matcher_abi;
 pub mod oracle;
 pub mod policy;
+pub mod processor;
 pub mod risk_buffer;
 pub mod state;
 pub mod units;
