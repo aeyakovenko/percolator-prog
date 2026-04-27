@@ -28,8 +28,8 @@ pub mod units;
 pub mod zc;
 
 use instructions::{
-    CatchupAccrue, PushHyperpMark, ReclaimEmptyAccount, ResolveMarket, ResolvePermissionless,
-    SettleAccount, UpdateAuthority, UpdateConfig,
+    CatchupAccrue, LiquidateAtOracle, PushHyperpMark, ReclaimEmptyAccount, ResolveMarket,
+    ResolvePermissionless, SettleAccount, TradeNoCpi, UpdateAuthority, UpdateConfig,
 };
 // The `#[program]` macro looks for each Accounts struct's auto-generated
 // `__client_accounts_<name>` module at `super::` (= the crate root). Our
@@ -37,6 +37,8 @@ use instructions::{
 // each one at the crate root.
 #[doc(hidden)]
 pub use instructions::catchup_accrue::__client_accounts_catchupaccrue;
+#[doc(hidden)]
+pub use instructions::liquidate_at_oracle::__client_accounts_liquidateatoracle;
 #[doc(hidden)]
 pub use instructions::push_hyperp_mark::__client_accounts_pushhyperpmark;
 #[doc(hidden)]
@@ -47,6 +49,8 @@ pub use instructions::resolve_market::__client_accounts_resolvemarket;
 pub use instructions::resolve_permissionless::__client_accounts_resolvepermissionless;
 #[doc(hidden)]
 pub use instructions::settle_account::__client_accounts_settleaccount;
+#[doc(hidden)]
+pub use instructions::trade_no_cpi::__client_accounts_tradenocpi;
 #[doc(hidden)]
 pub use instructions::update_authority::__client_accounts_updateauthority;
 #[doc(hidden)]
@@ -83,6 +87,28 @@ pub mod percolator {
             funding_max_e9_per_slot,
             tvl_insurance_cap_mult,
         )
+    }
+
+    /// Tag 6 — bilateral on-chain trade (no matcher CPI).
+    /// See `instructions/trade_no_cpi.rs`.
+    #[discrim = 6]
+    pub fn trade_no_cpi(
+        ctx: &mut Context<TradeNoCpi>,
+        lp_idx: u16,
+        user_idx: u16,
+        size: i128,
+    ) -> Result<()> {
+        instructions::trade_no_cpi::handler(ctx, lp_idx, user_idx, size)
+    }
+
+    /// Tag 7 — permissionless full-close liquidation at the live price.
+    /// See `instructions/liquidate_at_oracle.rs`.
+    #[discrim = 7]
+    pub fn liquidate_at_oracle(
+        ctx: &mut Context<LiquidateAtOracle>,
+        target_idx: u16,
+    ) -> Result<()> {
+        instructions::liquidate_at_oracle::handler(ctx, target_idx)
     }
 
     /// Tag 17 — Hyperp-only mark-push.

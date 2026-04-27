@@ -25,6 +25,8 @@ const PROGRAM_ID: Pubkey =
     solana_sdk::pubkey!("Perco1ator111111111111111111111111111111111");
 const CLOCK_SYSVAR: Pubkey = solana_sdk::sysvar::clock::ID;
 
+const TRADE_NO_CPI: u8 = 6;
+const LIQUIDATE_AT_ORACLE: u8 = 7;
 const UPDATE_CONFIG: u8 = 14;
 const RESOLVE_MARKET: u8 = 19;
 const RECLAIM_EMPTY_ACCOUNT: u8 = 25;
@@ -192,6 +194,54 @@ fn resolve_market_rejects_invalid_mode() {
             AccountMeta::new_readonly(Pubkey::new_unique(), false),
         ],
         data: vec![RESOLVE_MARKET, 7], // mode = 7 (invalid)
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn trade_no_cpi_rejects_zero_size() {
+    // size = 0 is rejected at the wire-format gate before any state
+    // is touched. Confirms #[discrim = 6] dispatch + Borsh decoder.
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let lp = Keypair::new();
+    svm.airdrop(&lp.pubkey(), 100_000_000).unwrap();
+    let mut data = vec![TRADE_NO_CPI];
+    data.extend_from_slice(&0u16.to_le_bytes()); // lp_idx
+    data.extend_from_slice(&0u16.to_le_bytes()); // user_idx
+    data.extend_from_slice(&0i128.to_le_bytes()); // size = 0 → reject
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true), // user
+            AccountMeta::new_readonly(lp.pubkey(), true),
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false),
+        ],
+        data,
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&payer.pubkey()),
+        &[&payer, &lp],
+        svm.latest_blockhash(),
+    );
+    assert!(svm.send_transaction(tx).is_err());
+}
+
+#[test]
+fn liquidate_at_oracle_rejects_uninitialized() {
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let mut data = vec![LIQUIDATE_AT_ORACLE];
+    data.extend_from_slice(&0u16.to_le_bytes()); // target_idx
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false),
+        ],
+        data,
     };
     assert!(submit(&mut svm, &payer, ix));
 }
