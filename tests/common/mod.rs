@@ -733,6 +733,18 @@ pub fn encode_init_market_with_maint_fee_bounded(
     encode_init_market(&o)
 }
 
+pub fn encode_init_market_with_force_close(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    feed_id: &[u8; 32],
+    force_close_delay_slots: u64,
+) -> Vec<u8> {
+    let mut o = InitOpts::default_for(*admin, *mint, *feed_id);
+    o.permissionless_resolve_stale_slots = 80;
+    o.force_close_delay_slots = force_close_delay_slots;
+    encode_init_market(&o)
+}
+
 pub fn encode_init_market_hyperp(initial_mark_price_e6: u64) -> Vec<u8> {
     let admin = Pubkey::new_unique();
     let mint = Pubkey::new_unique();
@@ -952,8 +964,13 @@ impl TestEnv {
         self.init_market_with_opts(o);
     }
 
+    /// 6-arg variant matching the legacy signature: `(invert,
+    /// permissionless_resolve_stale_slots, funding_horizon_slots,
+    /// funding_k_bps, funding_max_premium_bps, funding_max_e9_per_slot)`.
     pub fn init_market_with_funding(
         &mut self,
+        invert: u8,
+        permissionless_resolve_stale_slots: u64,
         funding_horizon_slots: u64,
         funding_k_bps: u64,
         funding_max_premium_bps: i64,
@@ -961,6 +978,11 @@ impl TestEnv {
     ) {
         let mut o =
             InitOpts::default_for(self.payer.pubkey(), self.mint, TEST_FEED_ID);
+        o.invert = invert;
+        o.permissionless_resolve_stale_slots = permissionless_resolve_stale_slots;
+        if permissionless_resolve_stale_slots > 0 {
+            o.force_close_delay_slots = 50;
+        }
         o.funding_horizon_slots = Some(funding_horizon_slots);
         o.funding_k_bps = Some(funding_k_bps);
         o.funding_max_premium_bps = Some(funding_max_premium_bps);
@@ -1474,6 +1496,103 @@ impl TestEnv {
         let mut buf = percolator_prog::risk_buffer::RiskBuffer::zeroed();
         bytemuck::bytes_of_mut(&mut buf).copy_from_slice(&d[buf_off..buf_off + buf_size]);
         buf
+    }
+
+    pub fn close_account(&mut self, owner: &Keypair, user_idx: u16) {
+        self.try_close_account(owner, user_idx)
+            .expect("close_account failed");
+    }
+
+    pub fn try_force_close_resolved(
+        &mut self,
+        user_idx: u16,
+        owner: &Pubkey,
+    ) -> Result<(), String> {
+        let owner_ata = self.create_ata(owner, 0);
+        let vault_pda = self.vault_pda();
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new(owner_ata, false),
+                AccountMeta::new_readonly(vault_pda, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_force_close_resolved(user_idx),
+        };
+        let caller = Keypair::new();
+        self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+        self.try_send_ix(ix, &[&caller])
+    }
+
+    pub fn try_catchup_accrue(&mut self) -> Result<(), String> {
+        let caller = Keypair::new();
+        self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_catchup_accrue(),
+        };
+        self.try_send_ix(ix, &[&caller])
+    }
+
+    pub fn read_authority_price(&self) -> u64 {
+        // Hyperp: returns config.hyperp_mark_e6 (the authority-pushed mark).
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        percolator_prog::state::read_config(&d).hyperp_mark_e6
+    }
+
+    pub fn read_last_effective_price(&self) -> u64 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        percolator_prog::state::read_config(&d).last_effective_price_e6
+    }
+
+    pub fn read_mark_ewma(&self) -> u64 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        percolator_prog::state::read_config(&d).mark_ewma_e6
+    }
+
+    pub fn read_oracle_target_price(&self) -> u64 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        percolator_prog::state::read_config(&d).oracle_target_price_e6
+    }
+
+    pub fn read_last_market_slot(&self) -> u64 {
+        // engine.last_market_slot — engine-relative offset 248 in BPF.
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        const OFF: usize = ENGINE_OFFSET + 248;
+        u64::from_le_bytes(d[OFF..OFF + 8].try_into().unwrap())
+    }
+
+    pub fn read_funding_horizon(&self) -> u64 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        percolator_prog::state::read_config(&d).funding_horizon_slots
+    }
+
+    pub fn read_funding_k_bps(&self) -> u64 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        percolator_prog::state::read_config(&d).funding_k_bps
+    }
+
+    pub fn read_funding_max_premium_bps(&self) -> i64 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        percolator_prog::state::read_config(&d).funding_max_premium_bps
+    }
+
+    pub fn read_funding_max_e9_per_slot(&self) -> i64 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        percolator_prog::state::read_config(&d).funding_max_e9_per_slot
+    }
+
+    pub fn read_mark_min_fee(&self) -> u64 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        percolator_prog::state::read_config(&d).mark_min_fee
     }
 
     pub fn try_close_account(

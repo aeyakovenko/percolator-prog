@@ -1,4 +1,5 @@
 #![cfg(feature = "legacy-tests")]
+
 mod common;
 #[allow(unused_imports)]
 use common::*;
@@ -24,7 +25,7 @@ fn test_resolved_market_blocks_new_activity() {
     let mut env = TestEnv::new();
     env.init_market_hyperp(1_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     // authority push removed — fresh Pyth is used directly.
     // Resolve market
     let result = env.try_resolve_market(&admin, 0);
@@ -79,7 +80,7 @@ fn test_resolved_market_allows_user_withdrawal() {
     let mut env = TestEnv::new();
     env.init_market_hyperp(1_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     // authority push removed — fresh Pyth is used directly.
     // Create user with deposit
     let user = Keypair::new();
@@ -123,7 +124,7 @@ fn test_attack_trade_after_market_resolved() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Set oracle authority and push price so resolve can work
     // authority push removed — fresh Pyth is used directly.
@@ -200,7 +201,7 @@ fn test_attack_double_resolution() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     // authority push removed — fresh Pyth is used directly.
     env.set_slot(100);
     env.crank();
@@ -224,7 +225,7 @@ fn test_attack_withdraw_between_resolution_and_force_close() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     // authority push removed — fresh Pyth is used directly.
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -265,7 +266,7 @@ fn test_attack_resolve_market_non_admin() {
     let mut env = TestEnv::new();
     env.init_market_hyperp(1_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .unwrap();
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
@@ -294,7 +295,7 @@ fn test_honest_user_standard_market_profitable_close() {
     env.init_market_with_invert(0);
 
     // Top up insurance to prevent force-realize mode (insurance=0 <= threshold=0 triggers it)
-    let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let ins_payer = env.payer.insecure_clone();
     env.top_up_insurance(&ins_payer, 1);
 
     let lp = Keypair::new();
@@ -365,7 +366,7 @@ fn test_honest_user_standard_market_losing_close() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let ins_payer = env.payer.insecure_clone();
     env.top_up_insurance(&ins_payer, 1);
 
     let lp = Keypair::new();
@@ -429,7 +430,7 @@ fn test_honest_user_standard_market_warmup_close() {
     // v12.19.6: warmup (h_max) capped at perm_resolve ≤ 100.
     env.init_market_with_warmup(0, 50);
 
-    let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let ins_payer = env.payer.insecure_clone();
     env.top_up_insurance(&ins_payer, 1);
 
     let lp = Keypair::new();
@@ -484,7 +485,7 @@ fn test_honest_user_inverted_market_close() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(1);
 
-    let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let ins_payer = env.payer.insecure_clone();
     env.top_up_insurance(&ins_payer, 1);
 
     let lp = Keypair::new();
@@ -560,7 +561,7 @@ fn test_honest_participants_standard_market_full_lifecycle() {
     assert_eq!(env.read_num_used_accounts(), 0, "All accounts closed");
 
     // Resolve market before CloseSlab (lifecycle requirement)
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     // authority push removed — fresh Pyth is used directly.
     env.try_resolve_market(&admin, 0).unwrap();
 
@@ -593,7 +594,7 @@ fn test_liquidate_blocked_on_resolved_market() {
     let mut env = TestEnv::new();
     env.init_market_hyperp(1_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     // authority push removed — fresh Pyth is used directly.
 
     let user = Keypair::new();
@@ -640,7 +641,7 @@ fn test_resolved_crank_dust_base_stays_zero_with_aligned_deposits() {
     // Misaligned deposits now rejected → dust_base stays 0 through lifecycle.
     env.init_market_full(0, 1000, 0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let user = Keypair::new();
     let user_idx = env.init_user_with_fee(&user, 100_000);
@@ -696,7 +697,7 @@ fn test_admin_force_close_requires_resolved() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Market is NOT resolved; force-close should fail.
     assert!(
@@ -717,7 +718,7 @@ fn test_admin_force_close_admin_only() {
     let mut env = TestEnv::new();
     env.init_market_hyperp(1_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     // authority push removed — fresh Pyth is used directly.
 
     let user = Keypair::new();
@@ -765,7 +766,7 @@ fn test_hyperp_full_lifecycle_init_to_close_slab() {
     env.init_market_hyperp(100_000_000);
     println!("1. Hyperp market initialized (mark=$100)");
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // 2. Set oracle authority
     env.try_set_oracle_authority(&admin, &admin.pubkey())
@@ -908,7 +909,7 @@ fn test_resolved_crank_is_idempotent() {
     let mut env = TestEnv::new();
     env.init_market_hyperp(1_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     // authority push removed — fresh Pyth is used directly.
 
     // Create a few users so the slab is non-trivial
@@ -1022,7 +1023,7 @@ fn test_resolve_permissionless_already_admin_resolved() {
     }
 
     // Admin resolves first
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     // authority push removed — fresh Pyth is used directly.
     env.set_slot(100);
     env.crank();
@@ -1199,7 +1200,7 @@ fn test_governance_free_full_lifecycle() {
     assert_ne!(env.read_account_position(lp_idx), 0, "LP has position");
 
     // Step 4: Top up insurance, advance, crank to accrue funding
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
 
     env.set_slot(200);
@@ -1271,7 +1272,7 @@ fn test_governance_free_full_lifecycle_inverted() {
         ewma
     );
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
 
     env.set_slot(200);
@@ -1423,7 +1424,7 @@ fn test_resolve_permissionless_inverted_with_positions() {
     );
 
     // Top up insurance
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
 
     // Advance, crank, then make oracle die
@@ -1529,7 +1530,7 @@ fn test_force_close_resolved_basic() {
 
     env.trade(&user, &lp, lp_idx, user_idx, 1_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
 
     // Crank, then resolve
@@ -1585,7 +1586,7 @@ fn test_force_close_resolved_rejects_before_delay() {
     env.deposit(&user, user_idx, 1_000_000_000);
     env.trade(&user, &lp, lp_idx, user_idx, 1_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
     env.set_slot(200);
     env.crank();
@@ -1634,7 +1635,7 @@ fn test_resolve_market_passes_fresh_live_oracle_to_engine() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Crank at oracle price 138_000_000 (sets engine.last_oracle_price)
     env.set_slot_and_price(100, 138_000_000);
@@ -1661,7 +1662,7 @@ fn test_resolve_market_before_first_crank_with_fresh_oracle() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Fresh external Pyth update; crank to set engine.last_oracle_price.
     env.set_slot_and_price(100, 138_000_000);
@@ -2072,7 +2073,7 @@ fn test_admin_resolve_after_maturity_uses_degenerate_p_last() {
     // the engine struct starts at ENGINE_OFF = 472 and last_oracle_price
     // is an early field. We only need the value shape; read it via the
     // hyperp_mark_e6 post-resolve assertion indirectly.
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Warp clock far past the maturity window.
     env.svm.set_sysvar(&Clock {
@@ -2106,7 +2107,7 @@ fn test_admin_degenerate_resolve_rejects_live_oracle() {
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 80);
     env.crank();
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     env.try_resolve_market(&admin, 1)
         .expect_err("Degenerate admin resolve is a recovery path, not a live-oracle bypass");
