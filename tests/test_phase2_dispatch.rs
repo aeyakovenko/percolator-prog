@@ -30,7 +30,9 @@ const INIT_USER: u8 = 1;
 const INIT_LP: u8 = 2;
 const DEPOSIT_COLLATERAL: u8 = 3;
 const WITHDRAW_COLLATERAL: u8 = 4;
+const KEEPER_CRANK: u8 = 5;
 const TRADE_NO_CPI: u8 = 6;
+const TRADE_CPI: u8 = 10;
 const LIQUIDATE_AT_ORACLE: u8 = 7;
 const CLOSE_ACCOUNT: u8 = 8;
 const TOP_UP_INSURANCE: u8 = 9;
@@ -580,6 +582,53 @@ fn resolve_permissionless_rejects_uninitialized() {
             AccountMeta::new_readonly(CLOCK_SYSVAR, false),
         ],
         data: vec![RESOLVE_PERMISSIONLESS], // payload-less
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn keeper_crank_rejects_uninitialized() {
+    // [5u8] [caller_idx u16 = u16::MAX (permissionless)]
+    //       [Vec<WireLiquidationCandidate> length=0u32]
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let mut data = vec![KEEPER_CRANK];
+    data.extend_from_slice(&u16::MAX.to_le_bytes()); // caller_idx
+    data.extend_from_slice(&0u32.to_le_bytes());      // empty Vec (wincode/Borsh u32 LE length)
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // caller (permissionless: any key)
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false),  // oracle placeholder
+        ],
+        data,
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn trade_cpi_rejects_zero_size() {
+    // [10u8] [lp_idx u16] [user_idx u16] [size i128 = 0] [limit_price u64]
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let mut data = vec![TRADE_CPI];
+    data.extend_from_slice(&0u16.to_le_bytes()); // lp_idx
+    data.extend_from_slice(&1u16.to_le_bytes()); // user_idx
+    data.extend_from_slice(&0i128.to_le_bytes()); // size = 0 → reject
+    data.extend_from_slice(&0u64.to_le_bytes());  // limit_price_e6
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true), // user
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // lp_owner (non-signer)
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // oracle
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // matcher_program
+            AccountMeta::new(Pubkey::new_unique(), false),          // matcher_ctx
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // lp_pda
+        ],
+        data,
     };
     assert!(submit(&mut svm, &payer, ix));
 }

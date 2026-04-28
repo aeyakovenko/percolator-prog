@@ -138,9 +138,9 @@ impl MatchingEngine for NoOpMatcher {
     }
 }
 
-struct CpiMatcher {
-    exec_price: u64,
-    exec_size: i128,
+pub struct CpiMatcher {
+    pub exec_price: u64,
+    pub exec_size: i128,
 }
 
 impl MatchingEngine for CpiMatcher {

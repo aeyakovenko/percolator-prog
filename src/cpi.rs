@@ -12,9 +12,12 @@
 //! length on `from_account_view` and exposes typed accessors for
 //! mint/owner/amount/state.
 //!
-//! The matcher-forward CPI helper (`forward_matcher`) is intentionally
-//! parked at the bottom — TradeCpi's call site wires it up in a later
-//! commit.
+//! `forward_matcher` is the matcher-forward CPI used by TradeCpi.
+//! Builds an `InstructionView` whose accounts are
+//! `[lp_pda (signer), matcher_ctx (writable), …tail]` mirroring the
+//! signer/writable flags from the outer transaction, signs over the
+//! `b"lp"` PDA seeds, and dispatches via
+//! `pinocchio::cpi::invoke_signed_with_slice`.
 
 #![allow(dead_code)]
 
@@ -220,4 +223,70 @@ pub fn withdraw(
     }
     .invoke_signed(core::slice::from_ref(&signer))
     .map_err(Into::into)
+}
+
+// ── Matcher forward CPI ─────────────────────────────────────────────────────
+
+/// Forward the trade request to the LP-pinned matcher program. The
+/// caller passes the fixed `[lp_pda, matcher_ctx]` plus the variadic
+/// tail; this helper builds an `InstructionView` whose account-meta
+/// flags mirror the outer transaction (so the matcher receives the
+/// same signer/writable view the caller submitted), signs over the
+/// `[b"lp", slab_key, lp_idx_le, &[bump]]` PDA seeds, and invokes via
+/// `pinocchio::cpi::invoke_signed_with_slice`.
+///
+/// `signer_seeds` is the full LP-PDA seed bundle including the bump
+/// byte at the tail. `tail` may be empty.
+pub fn forward_matcher(
+    matcher_program: &AccountView,
+    matcher_ctx: &AccountView,
+    lp_pda: &AccountView,
+    tail: &[AccountView],
+    data: &[u8],
+    signer_seeds: &[&[u8]],
+) -> Result<()> {
+    use pinocchio::cpi;
+    use pinocchio::instruction::{InstructionAccount, InstructionView};
+
+    if tail.len() > crate::constants::MAX_MATCHER_TAIL_ACCOUNTS {
+        return Err(ProgramError::InvalidInstructionData.into());
+    }
+
+    // Account-meta vector for the InstructionView. Order must mirror
+    // the AccountView slice passed to invoke_signed_with_slice.
+    let total_metas = 2 + tail.len();
+    let mut metas: alloc::vec::Vec<InstructionAccount> = alloc::vec::Vec::with_capacity(total_metas);
+    // [0] lp_pda — signer, read-only.
+    metas.push(InstructionAccount::new(lp_pda.address(), false, true));
+    // [1] matcher_ctx — writable, non-signer (matcher writes the return).
+    metas.push(InstructionAccount::new(matcher_ctx.address(), true, false));
+    // [2..] tail — flags mirror the outer transaction.
+    for ai in tail.iter() {
+        metas.push(InstructionAccount::new(
+            ai.address(),
+            ai.is_writable(),
+            ai.is_signer(),
+        ));
+    }
+
+    let ix = InstructionView {
+        program_id: matcher_program.address(),
+        accounts: &metas,
+        data,
+    };
+
+    // AccountView slice in the same order as `metas`.
+    let mut views: alloc::vec::Vec<&AccountView> = alloc::vec::Vec::with_capacity(total_metas);
+    views.push(lp_pda);
+    views.push(matcher_ctx);
+    for ai in tail.iter() {
+        views.push(ai);
+    }
+
+    let seeds: alloc::vec::Vec<cpi::Seed> =
+        signer_seeds.iter().map(|b| cpi::Seed::from(*b)).collect();
+    let signer = cpi::Signer::from(seeds.as_slice());
+
+    cpi::invoke_signed_with_slice(&ix, &views, core::slice::from_ref(&signer))
+        .map_err(Into::into)
 }

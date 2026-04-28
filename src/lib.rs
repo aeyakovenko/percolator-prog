@@ -31,9 +31,10 @@ pub mod zc;
 use instructions::{
     AdminForceCloseAccount, CatchupAccrue, CloseAccount, CloseSlab, ConvertReleasedPnl,
     DepositCollateral, DepositFeeCredits, ForceCloseResolved, InitLp, InitMarket, InitMarketArgs,
-    InitUser, LiquidateAtOracle, PushHyperpMark, ReclaimEmptyAccount, ResolveMarket,
-    ResolvePermissionless, SettleAccount, TopUpInsurance, TradeNoCpi, UpdateAuthority,
-    UpdateConfig, WithdrawCollateral, WithdrawInsurance, WithdrawInsuranceLimited,
+    InitUser, KeeperCrank, LiquidateAtOracle, PushHyperpMark, ReclaimEmptyAccount, ResolveMarket,
+    ResolvePermissionless, SettleAccount, TopUpInsurance, TradeCpi, TradeNoCpi, UpdateAuthority,
+    UpdateConfig, WireLiquidationCandidate, WithdrawCollateral, WithdrawInsurance,
+    WithdrawInsuranceLimited,
 };
 // The `#[program]` macro looks for each Accounts struct's auto-generated
 // `__client_accounts_<name>` module at `super::` (= the crate root). Our
@@ -62,6 +63,8 @@ pub use instructions::init_market::__client_accounts_initmarket;
 #[doc(hidden)]
 pub use instructions::init_user::__client_accounts_inituser;
 #[doc(hidden)]
+pub use instructions::keeper_crank::__client_accounts_keepercrank;
+#[doc(hidden)]
 pub use instructions::liquidate_at_oracle::__client_accounts_liquidateatoracle;
 #[doc(hidden)]
 pub use instructions::push_hyperp_mark::__client_accounts_pushhyperpmark;
@@ -75,6 +78,8 @@ pub use instructions::resolve_permissionless::__client_accounts_resolvepermissio
 pub use instructions::settle_account::__client_accounts_settleaccount;
 #[doc(hidden)]
 pub use instructions::top_up_insurance::__client_accounts_topupinsurance;
+#[doc(hidden)]
+pub use instructions::trade_cpi::__client_accounts_tradecpi;
 #[doc(hidden)]
 pub use instructions::trade_no_cpi::__client_accounts_tradenocpi;
 #[doc(hidden)]
@@ -145,6 +150,30 @@ pub mod percolator {
         size: i128,
     ) -> Result<()> {
         instructions::trade_no_cpi::handler(ctx, lp_idx, user_idx, size)
+    }
+
+    /// Tag 5 — KeeperCrank. Two-phase liquidation + RR sweep.
+    /// See `instructions/keeper_crank.rs`.
+    #[discrim = 5]
+    pub fn keeper_crank(
+        ctx: &mut Context<KeeperCrank>,
+        caller_idx: u16,
+        candidates: alloc::vec::Vec<WireLiquidationCandidate>,
+    ) -> Result<()> {
+        instructions::keeper_crank::handler(ctx, caller_idx, candidates)
+    }
+
+    /// Tag 10 — matcher-mediated trade.
+    /// See `instructions/trade_cpi.rs`.
+    #[discrim = 10]
+    pub fn trade_cpi(
+        ctx: &mut Context<TradeCpi>,
+        lp_idx: u16,
+        user_idx: u16,
+        size: i128,
+        limit_price_e6: u64,
+    ) -> Result<()> {
+        instructions::trade_cpi::handler(ctx, lp_idx, user_idx, size, limit_price_e6)
     }
 
     /// Tag 0 — InitMarket. Admin materializes a fresh market.
