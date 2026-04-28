@@ -179,7 +179,7 @@ fn test_attack_self_liquidation_backstop_no_insurance_siphon() {
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 100);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 5_000_000_000);
 
     let lp = Keypair::new();
