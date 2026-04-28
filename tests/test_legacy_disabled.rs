@@ -54,10 +54,6 @@ disabled!(
     "v2-migration: resolution ix encoders pending Phase 6"
 );
 disabled!(
-    test_risk_buffer,
-    "v2-migration: KeeperCrank Vec<u32> length-prefix change requires fixture rewrite in Phase 6"
-);
-disabled!(
     test_security,
     "v2-migration: cross-cutting ix encoders pending Phase 6"
 );

@@ -76,26 +76,28 @@ pub const SLAB_LEN: usize = 1_525_632;
 #[cfg(not(any(feature = "small", feature = "medium")))]
 pub const MAX_ACCOUNTS: usize = 4096;
 
-/// All v2 BPF offsets shift +8 vs the legacy native layout (Anchor v2 disc
-/// prefix). Body-relative offsets inside SlabHeader / MarketConfig are
-/// unchanged; data-relative offsets gain +8.
+/// Slab-relative offset to the engine region: legacy 520 shifts +8 in
+/// v2 due to the Anchor disc prefix. The engine's internal layout is
+/// unchanged from legacy, so engine-relative offsets below stay
+/// identical to the legacy table.
 pub const ENGINE_OFFSET: usize = 528; // legacy 520 + DISC_LEN(8)
-pub const ENGINE_BITMAP_OFFSET: usize = 720; // 528 + 192
+/// Engine-relative offset to the bitmap (tier-independent).
+pub const ENGINE_BITMAP_OFFSET: usize = 712;
 
 #[cfg(all(feature = "small", not(feature = "medium")))]
-pub const ENGINE_NUM_USED_OFFSET: usize = 752;
+pub const ENGINE_NUM_USED_OFFSET: usize = 744;
 #[cfg(all(feature = "small", not(feature = "medium")))]
-pub const ENGINE_ACCOUNTS_OFFSET: usize = 1784;
+pub const ENGINE_ACCOUNTS_OFFSET: usize = 1776;
 
 #[cfg(all(feature = "medium", not(feature = "small")))]
-pub const ENGINE_NUM_USED_OFFSET: usize = 848;
+pub const ENGINE_NUM_USED_OFFSET: usize = 840;
 #[cfg(all(feature = "medium", not(feature = "small")))]
-pub const ENGINE_ACCOUNTS_OFFSET: usize = 4952;
+pub const ENGINE_ACCOUNTS_OFFSET: usize = 4944;
 
 #[cfg(not(any(feature = "small", feature = "medium")))]
-pub const ENGINE_NUM_USED_OFFSET: usize = 1232;
+pub const ENGINE_NUM_USED_OFFSET: usize = 1224;
 #[cfg(not(any(feature = "small", feature = "medium")))]
-pub const ENGINE_ACCOUNTS_OFFSET: usize = 17624;
+pub const ENGINE_ACCOUNTS_OFFSET: usize = 17616;
 
 // ── Tunables ────────────────────────────────────────────────────────────────
 
@@ -576,6 +578,22 @@ pub fn encode_init_market_with_cap(
     o.permissionless_resolve_stale_slots = permissionless_resolve_stale_slots;
     if permissionless_resolve_stale_slots > 0 {
         o.force_close_delay_slots = 50;
+    }
+    encode_init_market(&o)
+}
+
+pub fn encode_init_market_with_maint_fee_bounded(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    feed_id: &[u8; 32],
+    _max_maintenance_fee_per_slot: u128,
+    maintenance_fee_per_slot: u128,
+    _min_oracle_price_cap_e2bps: u64,
+) -> Vec<u8> {
+    let mut o = InitOpts::default_for(*admin, *mint, *feed_id);
+    o.maintenance_fee_per_slot = maintenance_fee_per_slot;
+    if maintenance_fee_per_slot > 0 {
+        o.new_account_fee = 0;
     }
     encode_init_market(&o)
 }
@@ -1171,7 +1189,7 @@ impl TestEnv {
     const ACCOUNT_SIZE: usize = 360;
 
     fn account_offset(idx: u16) -> usize {
-        ENGINE_ACCOUNTS_OFFSET + (idx as usize) * Self::ACCOUNT_SIZE
+        ENGINE_OFFSET + ENGINE_ACCOUNTS_OFFSET + (idx as usize) * Self::ACCOUNT_SIZE
     }
 
     pub fn read_account_capital(&self, idx: u16) -> u128 {
@@ -1206,9 +1224,10 @@ impl TestEnv {
 
     /// Engine-side vault balance (`engine.vault.balance`, u128). Not the
     /// SPL vault token-account balance — that's `vault_balance()`.
+    /// Vault is the first U128 field in RiskEngine; engine-relative offset 0.
     pub fn read_engine_vault(&self) -> u128 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        const VAULT_OFF: usize = ENGINE_OFFSET + 720; // engine.vault.balance offset
+        const VAULT_OFF: usize = ENGINE_OFFSET;
         u128::from_le_bytes(d[VAULT_OFF..VAULT_OFF + 16].try_into().unwrap())
     }
 
@@ -1299,6 +1318,72 @@ impl TestEnv {
         }
     }
 
+    pub fn set_slot(&mut self, slot: u64) {
+        // Delegates to set_slot_and_price holding the current oracle price
+        // constant. v12.19 large clock jumps must interleave cranks to
+        // respect the per-slot price-move envelope.
+        let px = self.read_oracle_price_e6();
+        let px = if px == 0 { 138_000_000 } else { px };
+        self.set_slot_and_price(slot, px);
+    }
+
+    /// Read the RiskBuffer from the slab via the program's typed
+    /// accessor. Mirrors the legacy helper: offset = SLAB_LEN -
+    /// GEN_TABLE_LEN - RISK_BUF_LEN.
+    pub fn read_risk_buffer(&self) -> percolator_prog::risk_buffer::RiskBuffer {
+        use bytemuck::Zeroable;
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let buf_size = core::mem::size_of::<percolator_prog::risk_buffer::RiskBuffer>();
+        let gen_table_size = MAX_ACCOUNTS * 8;
+        let buf_off = SLAB_LEN - gen_table_size - buf_size;
+        let mut buf = percolator_prog::risk_buffer::RiskBuffer::zeroed();
+        bytemuck::bytes_of_mut(&mut buf).copy_from_slice(&d[buf_off..buf_off + buf_size]);
+        buf
+    }
+
+    pub fn try_close_account(
+        &mut self,
+        owner: &Keypair,
+        user_idx: u16,
+    ) -> Result<(), String> {
+        let ata = self.create_ata(&owner.pubkey(), 0);
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new_readonly(self.vault_pda(), false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_close_account(user_idx),
+        };
+        self.try_send_ix(ix, &[owner])
+    }
+
+    /// Send an InitMarket instruction with caller-supplied raw payload
+    /// bytes. Used by adversarial tests that need to send a malformed
+    /// args payload.
+    pub fn try_init_market_raw(&mut self, data: Vec<u8>) -> Result<(), String> {
+        let admin = self.payer.insecure_clone();
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(self.mint, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data,
+        };
+        self.try_send_ix(ix, &[&admin])
+    }
+
     pub fn try_convert_released_pnl(
         &mut self,
         owner: &Keypair,
@@ -1340,17 +1425,15 @@ impl TestEnv {
 
     pub fn read_insurance_balance(&self) -> u128 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        // RiskEngine.insurance_fund.balance is 16 bytes of u128 at a known
-        // body offset. The legacy file's offset table tracks this; for now
-        // expose it via a conservative `engine.balance` lookup using a
-        // recorded BPF offset.
-        const INSURANCE_OFF: usize = ENGINE_OFFSET + 736; // legacy offset
+        // RiskEngine layout: vault(U128=16) at offset 0, insurance_fund.balance
+        // (U128=16) at offset 16 within the engine.
+        const INSURANCE_OFF: usize = ENGINE_OFFSET + 16;
         u128::from_le_bytes(d[INSURANCE_OFF..INSURANCE_OFF + 16].try_into().unwrap())
     }
 
     pub fn is_market_resolved(&self) -> bool {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        // RiskEngine.resolved flag offset (BPF) — legacy used 600.
+        // RiskEngine.resolved flag offset (BPF, engine-relative 600).
         const RESOLVED_OFF: usize = ENGINE_OFFSET + 600;
         d[RESOLVED_OFF] != 0
     }

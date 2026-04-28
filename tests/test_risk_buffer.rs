@@ -1,4 +1,3 @@
-#![cfg(feature = "legacy-tests")]
 mod common;
 #[allow(unused_imports)]
 use common::*;
@@ -63,7 +62,7 @@ fn setup_risk_buffer_refill_market() -> (TestEnv, u16, Vec<u16>, Vec<u16>) {
     let lp_idx = env.init_lp(&lp);
     env.deposit(&lp, lp_idx, 1_000_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 100_000_000_000);
 
     let risky_sizes: [i128; 3] = [100_000_000, 90_000_000, 80_000_000];
@@ -133,7 +132,7 @@ fn test_trade_inserts_both_accounts_into_buffer() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
 
     // Before trade: buffer should be empty
@@ -178,7 +177,7 @@ fn test_trade_close_removes_from_buffer() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
 
     // Open position
@@ -223,7 +222,7 @@ fn test_buffer_survives_empty_crank() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
 
     // Trade to populate buffer
@@ -269,7 +268,7 @@ fn test_scan_cursor_wraps() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
     env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
 
@@ -374,7 +373,7 @@ fn test_close_account_removes_from_buffer() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
 
     // Trade to populate buffer
@@ -452,7 +451,7 @@ fn test_liquidation_removes_from_buffer() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_500_000_000); // thin margin
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
     env.set_slot(50);
     env.crank();
@@ -497,7 +496,7 @@ fn test_position_flip_updates_buffer() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
 
     // Go long 1M
@@ -546,7 +545,7 @@ fn test_buffer_entries_persist_across_cranks() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
 
     env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
@@ -589,7 +588,7 @@ fn test_buffer_notional_refreshed_on_price_change() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
 
     env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
@@ -639,7 +638,7 @@ fn test_buffer_correct_after_many_cranks() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
     env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
 
@@ -687,7 +686,7 @@ fn test_new_position_between_cranks_enters_buffer() {
     let lp_idx = env.init_lp(&lp);
     env.deposit(&lp, lp_idx, 100_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 10_000_000_000);
 
     // Phase 1: user1 trades, enters buffer
@@ -764,7 +763,7 @@ fn test_evicted_account_reenters_on_larger_trade() {
     let lp_idx = env.init_lp(&lp);
     env.deposit(&lp, lp_idx, 100_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 10_000_000_000);
 
     // Create 5 users — user1 (smallest) gets evicted
@@ -828,7 +827,7 @@ fn test_buffer_with_five_accounts_evicts_smallest() {
     let lp_idx = env.init_lp(&lp);
     env.deposit(&lp, lp_idx, 100_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 10_000_000_000);
 
     // Create 5 users with increasing position sizes
@@ -1029,7 +1028,7 @@ fn test_crank_liquidates_undercollateralized_buffer_entry() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_500_000_000); // thin margin
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 10_000_000_000);
 
     env.set_slot(50);
@@ -1088,7 +1087,7 @@ fn test_buffer_only_liquidation_no_external_candidates() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 1_500_000_000); // thin margin
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 10_000_000_000);
 
     // Baseline crank to establish state
@@ -1163,7 +1162,7 @@ fn test_calibrate_bpf_offsets() {
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
     env.crank();
     env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
@@ -1216,7 +1215,7 @@ fn test_find_adl_offsets() {
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
     // Don't trade — ADL mults should be ADL_ONE = 1_000_000
     env.crank(); // just crank
@@ -1253,7 +1252,7 @@ fn test_find_adl_correct_value() {
     let user = Keypair::new();
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
     env.crank();
 
