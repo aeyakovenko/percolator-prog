@@ -34,10 +34,6 @@ disabled!(
     "v2-migration: SPL token CPI + slab encoders pending Phase 6"
 );
 disabled!(
-    test_resolution,
-    "v2-migration: resolution ix encoders pending Phase 6"
-);
-disabled!(
     test_security,
     "v2-migration: cross-cutting ix encoders pending Phase 6"
 );
