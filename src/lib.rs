@@ -29,9 +29,10 @@ pub mod units;
 pub mod zc;
 
 use instructions::{
-    CatchupAccrue, LiquidateAtOracle, PushHyperpMark, ReclaimEmptyAccount, ResolveMarket,
-    ResolvePermissionless, SettleAccount, TopUpInsurance, TradeNoCpi, UpdateAuthority,
-    UpdateConfig, WithdrawInsurance, WithdrawInsuranceLimited,
+    CatchupAccrue, CloseAccount, ConvertReleasedPnl, LiquidateAtOracle, PushHyperpMark,
+    ReclaimEmptyAccount, ResolveMarket, ResolvePermissionless, SettleAccount, TopUpInsurance,
+    TradeNoCpi, UpdateAuthority, UpdateConfig, WithdrawCollateral, WithdrawInsurance,
+    WithdrawInsuranceLimited,
 };
 // The `#[program]` macro looks for each Accounts struct's auto-generated
 // `__client_accounts_<name>` module at `super::` (= the crate root). Our
@@ -39,6 +40,10 @@ use instructions::{
 // each one at the crate root.
 #[doc(hidden)]
 pub use instructions::catchup_accrue::__client_accounts_catchupaccrue;
+#[doc(hidden)]
+pub use instructions::close_account::__client_accounts_closeaccount;
+#[doc(hidden)]
+pub use instructions::convert_released_pnl::__client_accounts_convertreleasedpnl;
 #[doc(hidden)]
 pub use instructions::liquidate_at_oracle::__client_accounts_liquidateatoracle;
 #[doc(hidden)]
@@ -59,6 +64,8 @@ pub use instructions::trade_no_cpi::__client_accounts_tradenocpi;
 pub use instructions::update_authority::__client_accounts_updateauthority;
 #[doc(hidden)]
 pub use instructions::update_config::__client_accounts_updateconfig;
+#[doc(hidden)]
+pub use instructions::withdraw_collateral::__client_accounts_withdrawcollateral;
 #[doc(hidden)]
 pub use instructions::withdraw_insurance::__client_accounts_withdrawinsurance;
 #[doc(hidden)]
@@ -116,6 +123,17 @@ pub mod percolator {
         instructions::trade_no_cpi::handler(ctx, lp_idx, user_idx, size)
     }
 
+    /// Tag 4 — owner withdraws collateral to their SPL token ATA.
+    /// See `instructions/withdraw_collateral.rs`.
+    #[discrim = 4]
+    pub fn withdraw_collateral(
+        ctx: &mut Context<WithdrawCollateral>,
+        user_idx: u16,
+        amount: u64,
+    ) -> Result<()> {
+        instructions::withdraw_collateral::handler(ctx, user_idx, amount)
+    }
+
     /// Tag 7 — permissionless full-close liquidation at the live price.
     /// See `instructions/liquidate_at_oracle.rs`.
     #[discrim = 7]
@@ -124,6 +142,13 @@ pub mod percolator {
         target_idx: u16,
     ) -> Result<()> {
         instructions::liquidate_at_oracle::handler(ctx, target_idx)
+    }
+
+    /// Tag 8 — owner closes their account (live or resolved markets).
+    /// See `instructions/close_account.rs`.
+    #[discrim = 8]
+    pub fn close_account(ctx: &mut Context<CloseAccount>, user_idx: u16) -> Result<()> {
+        instructions::close_account::handler(ctx, user_idx)
     }
 
     /// Tag 17 — Hyperp-only mark-push.
@@ -184,6 +209,17 @@ pub mod percolator {
     #[discrim = 26]
     pub fn settle_account(ctx: &mut Context<SettleAccount>, user_idx: u16) -> Result<()> {
         instructions::settle_account::handler(ctx, user_idx)
+    }
+
+    /// Tag 28 — voluntary in-engine PnL conversion (no SPL CPI).
+    /// See `instructions/convert_released_pnl.rs`.
+    #[discrim = 28]
+    pub fn convert_released_pnl(
+        ctx: &mut Context<ConvertReleasedPnl>,
+        user_idx: u16,
+        amount: u64,
+    ) -> Result<()> {
+        instructions::convert_released_pnl::handler(ctx, user_idx, amount)
     }
 
     /// Tag 31 — permissionless market-clock catchup. Payload-less.

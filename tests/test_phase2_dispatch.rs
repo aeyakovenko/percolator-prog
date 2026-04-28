@@ -25,9 +25,12 @@ const PROGRAM_ID: Pubkey =
     solana_sdk::pubkey!("Perco1ator111111111111111111111111111111111");
 const CLOCK_SYSVAR: Pubkey = solana_sdk::sysvar::clock::ID;
 
+const WITHDRAW_COLLATERAL: u8 = 4;
 const TRADE_NO_CPI: u8 = 6;
 const LIQUIDATE_AT_ORACLE: u8 = 7;
+const CLOSE_ACCOUNT: u8 = 8;
 const TOP_UP_INSURANCE: u8 = 9;
+const CONVERT_RELEASED_PNL: u8 = 28;
 const UPDATE_CONFIG: u8 = 14;
 const RESOLVE_MARKET: u8 = 19;
 const WITHDRAW_INSURANCE: u8 = 20;
@@ -295,6 +298,70 @@ fn withdraw_insurance_limited_rejects_uninitialized() {
             AccountMeta::new_readonly(TOKEN_PROGRAM, false),
             AccountMeta::new_readonly(Pubkey::new_unique(), false), // vault_pda
             AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+        ],
+        data,
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn withdraw_collateral_rejects_zero_amount() {
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let mut data = vec![WITHDRAW_COLLATERAL];
+    data.extend_from_slice(&0u16.to_le_bytes()); // user_idx
+    data.extend_from_slice(&0u64.to_le_bytes()); // amount = 0 → reject
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new(Pubkey::new_unique(), false), // vault
+            AccountMeta::new(Pubkey::new_unique(), false), // user_ata
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // vault_pda
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // oracle
+        ],
+        data,
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn close_account_rejects_uninitialized() {
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let mut data = vec![CLOSE_ACCOUNT];
+    data.extend_from_slice(&0u16.to_le_bytes()); // user_idx
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new(Pubkey::new_unique(), false), // vault
+            AccountMeta::new(Pubkey::new_unique(), false), // user_ata
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // vault_pda
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // oracle
+        ],
+        data,
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn convert_released_pnl_rejects_uninitialized() {
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let mut data = vec![CONVERT_RELEASED_PNL];
+    data.extend_from_slice(&0u16.to_le_bytes()); // user_idx
+    data.extend_from_slice(&100u64.to_le_bytes()); // amount
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // oracle
         ],
         data,
     };
