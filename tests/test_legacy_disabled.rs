@@ -34,10 +34,6 @@ disabled!(
     "v2-migration: SPL token CPI + slab encoders pending Phase 6"
 );
 disabled!(
-    test_insurance,
-    "v2-migration: insurance-flow ix encoders pending Phase 6"
-);
-disabled!(
     test_resolution,
     "v2-migration: resolution ix encoders pending Phase 6"
 );
