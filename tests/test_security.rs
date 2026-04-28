@@ -567,7 +567,6 @@ fn test_attack_trade_without_margin() {
 /// Instead, this test directly sets side_mode_long = DrainOnly (1) via raw byte
 /// manipulation of the slab, then verifies the gating and error code mapping.
 #[test]
-#[ignore = "layout drift: BPF offset of side_mode_long moved with engine v12.19 struct reorg; needs empirical relocation"]
 fn test_attack_trade_risk_increase_when_gated() {
     program_path();
 
@@ -582,26 +581,17 @@ fn test_attack_trade_risk_increase_when_gated() {
     let user_idx = env.init_user(&user);
     env.deposit(&user, user_idx, 10_000_000_000);
 
-    // Directly set side_mode_long = DrainOnly (1) in the slab raw bytes.
-    // SBF uses 8-byte u128 alignment (unlike x86-64 which uses 16-byte).
-    // ENGINE_OFF = 440.  Within RiskEngine (SBF layout):
-    //   oi_eff_long_q:  U256 (32 bytes) at engine offset 472, ends at 504
-    //   oi_eff_short_q: U256 (32 bytes) at engine offset 504, ends at 536
-    //   side_mode_long: u8 at engine offset 424 (BPF, native 128-bit)
-    // => slab absolute offset = 536 + 488 = 864
-    // BPF layout: ENGINE_OFF=472, side_mode_long at engine offset
-    // from BPF build. Compute: OI fields (oi_eff_long/short) are the last u128
-    // pair before side_mode_long. Search for the pattern.
-    // BPF accounts at engine+9376, native at engine+9408, diff=32.
-    // side_mode_long is immediately after oi_eff_short_q (u128).
-    // BPF oi fields pack tighter. Use BPF ACCOUNTS_OFFSET pattern:
-    // native side_mode_long=512, native accounts=9408, BPF accounts=9376 (diff 32).
-    // But the diff is not uniform. Use the read_num_used helper's ENGINE offset (472)
-    // and compute empirically. The oi_eff_long/short pair (32 bytes) precedes side_mode.
-    // From code analysis: BPF side_mode_long at engine offset ~488.
-    // Slab absolute = 536 + 960 = 960.
-    // Fallback: try the value and if the trade still works, try adjacent offsets.
-    const SIDE_MODE_LONG_OFF: usize = 536 + 552; // v12.18.x layout
+    env.crank();
+    env.trade(&user, &lp, lp_idx, user_idx, 1_000_000);
+    assert!(
+        env.read_account_position(user_idx) > 0,
+        "precondition: user must have live long OI before DrainOnly is meaningful"
+    );
+
+    // Directly set side_mode_long = DrainOnly (1). This is an SBF-layout
+    // absolute slab offset; native `offset_of!(RiskEngine, side_mode_long)`
+    // differs because host u128 alignment is wider than SBF.
+    const SIDE_MODE_LONG_OFF: usize = ENGINE_OFFSET + 504;
     {
         let original_slab = env.svm.get_account(&env.slab).expect("slab must exist");
         let mut modified_slab = original_slab.clone();
@@ -3991,118 +3981,6 @@ fn test_attack_funding_anti_retroactivity_zero_dt() {
     // Engine vault should still be correct
     let engine_vault = env.read_engine_vault();
     assert!(engine_vault > 0, "Engine vault should be positive");
-}
-
-/// ATTACK: Withdrawal with warmup settlement interaction.
-/// If user has unwarmed PnL, withdrawal should still respect margin after settlement.
-///
-/// v12.18.1: Under admission-based warmup, healthy markets admit fresh PnL
-/// instantly via admit_h_min=0, so this test's assumption that PnL stays
-/// unwarmed no longer holds. Test is superseded by admission semantics.
-#[test]
-#[ignore = "v12.18.1 admission: healthy markets bypass warmup; test semantics obsolete"]
-fn test_attack_withdrawal_with_warmup_settlement() {
-    program_path();
-
-    let mut env = TestEnv::new();
-    env.init_market_with_warmup(0, 1000); // 1000 slot warmup
-
-    let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
-    env.deposit(&lp, lp_idx, 10_000_000_000);
-
-    let user = Keypair::new();
-    let user_idx = env.init_user(&user);
-    env.deposit(&user, user_idx, 10_000_000_000);
-
-    // Open and close a profitable position so profit enters warmup-locked PnL.
-    env.crank();
-    env.trade(&user, &lp, lp_idx, user_idx, 5_000_000);
-    env.set_slot_and_price(100, 100_000_000);
-    env.crank();
-    env.set_slot_and_price(200, 200_000_000);
-    env.crank();
-    env.trade(&user, &lp, lp_idx, user_idx, -5_000_000);
-    env.set_slot_and_price(300, 200_000_000);
-    env.crank();
-
-    // Before warmup vests enough PnL, only settled capital is withdrawable.
-    let vault_before_withdraw = env.vault_balance();
-    let user_cap_before_withdraw = env.read_account_capital(user_idx);
-    assert!(
-        user_cap_before_withdraw <= 10_000_000_000,
-        "Settled capital should not exceed principal before warmup conversion: {}",
-        user_cap_before_withdraw
-    );
-    let settled_cap_u64 = u64::try_from(user_cap_before_withdraw)
-        .expect("settled capital should fit in u64 for withdrawal amount");
-    assert!(
-        settled_cap_u64 > 0,
-        "Precondition: settled capital should be positive before withdrawal test"
-    );
-    let overdraw_amount = settled_cap_u64.saturating_add(1);
-    let early_withdraw = env.try_withdraw(&user, user_idx, overdraw_amount);
-    // In ADL engine (v10.5), K-coefficient settlement via settle_warmup_to_capital
-    // can vest all warmup-locked PnL at once when now_slot (passed as oracle_price
-    // due to arg swap) is very large. The overdraw may therefore succeed.
-    if early_withdraw.is_err() {
-        // Warmup correctly blocked — verify state unchanged
-        let vault_after_early = env.vault_balance();
-        let user_cap_after_early = env.read_account_capital(user_idx);
-        assert_eq!(
-            vault_after_early, vault_before_withdraw,
-            "Rejected withdrawal must leave vault unchanged"
-        );
-        assert_eq!(
-            user_cap_after_early, user_cap_before_withdraw,
-            "Rejected withdrawal must leave capital unchanged"
-        );
-
-        // Settled principal should remain withdrawable despite warmup-locked profit.
-        let vested_withdraw = env.try_withdraw(&user, user_idx, settled_cap_u64);
-        let vault_after_vested = env.vault_balance();
-        let user_cap_after_vested = env.read_account_capital(user_idx);
-        assert!(
-            vested_withdraw.is_ok(),
-            "Settled-capital withdrawal should succeed even when profit is warmup-locked: {:?}",
-            vested_withdraw
-        );
-        assert_eq!(
-            vault_after_vested,
-            vault_before_withdraw - settled_cap_u64,
-            "Successful vested withdrawal must reduce vault by exact amount"
-        );
-        assert!(
-            user_cap_after_vested < user_cap_before_withdraw,
-            "Successful vested withdrawal should reduce user capital: before={} after={}",
-            user_cap_before_withdraw,
-            user_cap_after_vested
-        );
-        assert!(
-            user_cap_after_vested <= 10_000_000_000,
-            "ATTACK: User capital exceeds original deposit after vested withdrawal!"
-        );
-    }
-    // If early_withdraw succeeded, all capital + vested profit was already withdrawn —
-    // the subsequent vested_withdraw step is skipped since capital is already gone.
-
-    let spl_vault = {
-        let vault_data = env.svm.get_account(&env.vault).unwrap().data;
-        let vault_account = TokenAccount::unpack(&vault_data).unwrap();
-        vault_account.amount
-    };
-    let engine_vault = {
-        let slab = env.svm.get_account(&env.slab).unwrap();
-        u128::from_le_bytes(slab.data[584..600].try_into().unwrap())
-    };
-
-    // Key assertion: SPL vault == engine vault always (conservation)
-    assert!(
-        spl_vault as u128 >= engine_vault,
-        "ATTACK: Warmup withdrawal broke SPL/engine vault conservation! SPL={} engine={}",
-        spl_vault,
-        engine_vault
-    );
 }
 
 /// ATTACK: Account slot reuse after close - verify new account has clean state.
