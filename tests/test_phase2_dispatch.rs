@@ -36,10 +36,12 @@ const CONVERT_RELEASED_PNL: u8 = 28;
 const UPDATE_CONFIG: u8 = 14;
 const RESOLVE_MARKET: u8 = 19;
 const WITHDRAW_INSURANCE: u8 = 20;
+const ADMIN_FORCE_CLOSE_ACCOUNT: u8 = 21;
 const WITHDRAW_INSURANCE_LIMITED: u8 = 23;
 const RECLAIM_EMPTY_ACCOUNT: u8 = 25;
 const SETTLE_ACCOUNT: u8 = 26;
 const RESOLVE_PERMISSIONLESS: u8 = 29;
+const FORCE_CLOSE_RESOLVED: u8 = 30;
 const CATCHUP_ACCRUE: u8 = 31;
 
 #[cfg(not(any(feature = "small", feature = "medium")))]
@@ -268,6 +270,47 @@ fn top_up_insurance_rejects_zero_amount() {
 }
 
 #[test]
+fn admin_force_close_account_rejects_uninitialized() {
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let mut data = vec![ADMIN_FORCE_CLOSE_ACCOUNT];
+    data.extend_from_slice(&0u16.to_le_bytes()); // user_idx
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true), // admin
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new(Pubkey::new_unique(), false),    // vault
+            AccountMeta::new(Pubkey::new_unique(), false),    // owner_ata
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // vault_pda
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+        ],
+        data,
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn force_close_resolved_rejects_uninitialized() {
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let mut data = vec![FORCE_CLOSE_RESOLVED];
+    data.extend_from_slice(&0u16.to_le_bytes()); // user_idx
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new(Pubkey::new_unique(), false), // vault
+            AccountMeta::new(Pubkey::new_unique(), false), // owner_ata
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // vault_pda
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+        ],
+        data,
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
 fn withdraw_insurance_rejects_uninitialized() {
     let (mut svm, slab_pk, payer) = fresh_svm();
     let ix = Instruction {
@@ -441,4 +484,28 @@ fn resolve_permissionless_rejects_uninitialized() {
         data: vec![RESOLVE_PERMISSIONLESS], // payload-less
     };
     assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn admin_force_close_account_rejects_bogus_clock() {
+    // Confirm the `_clock: Sysvar<Clock>` field still validates the
+    // sysvar address despite the underscore prefix on the field name.
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let mut data = vec![ADMIN_FORCE_CLOSE_ACCOUNT];
+    data.extend_from_slice(&0u16.to_le_bytes());
+    let bogus_clock = Pubkey::new_unique();
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new(Pubkey::new_unique(), false),
+            AccountMeta::new(Pubkey::new_unique(), false),
+            AccountMeta::new_readonly(Pubkey::new_unique(), false),
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+            AccountMeta::new_readonly(bogus_clock, false),
+        ],
+        data,
+    };
+    assert!(submit(&mut svm, &payer, ix), "non-clock sysvar must reject");
 }

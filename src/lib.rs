@@ -29,15 +29,18 @@ pub mod units;
 pub mod zc;
 
 use instructions::{
-    CatchupAccrue, CloseAccount, ConvertReleasedPnl, DepositCollateral, DepositFeeCredits,
-    LiquidateAtOracle, PushHyperpMark, ReclaimEmptyAccount, ResolveMarket, ResolvePermissionless,
-    SettleAccount, TopUpInsurance, TradeNoCpi, UpdateAuthority, UpdateConfig, WithdrawCollateral,
-    WithdrawInsurance, WithdrawInsuranceLimited,
+    AdminForceCloseAccount, CatchupAccrue, CloseAccount, ConvertReleasedPnl, DepositCollateral,
+    DepositFeeCredits, ForceCloseResolved, LiquidateAtOracle, PushHyperpMark, ReclaimEmptyAccount,
+    ResolveMarket, ResolvePermissionless, SettleAccount, TopUpInsurance, TradeNoCpi,
+    UpdateAuthority, UpdateConfig, WithdrawCollateral, WithdrawInsurance,
+    WithdrawInsuranceLimited,
 };
 // The `#[program]` macro looks for each Accounts struct's auto-generated
 // `__client_accounts_<name>` module at `super::` (= the crate root). Our
 // Accounts structs live in submodules under `instructions/`, so re-export
 // each one at the crate root.
+#[doc(hidden)]
+pub use instructions::admin_force_close_account::__client_accounts_adminforcecloseaccount;
 #[doc(hidden)]
 pub use instructions::catchup_accrue::__client_accounts_catchupaccrue;
 #[doc(hidden)]
@@ -48,6 +51,8 @@ pub use instructions::convert_released_pnl::__client_accounts_convertreleasedpnl
 pub use instructions::deposit_collateral::__client_accounts_depositcollateral;
 #[doc(hidden)]
 pub use instructions::deposit_fee_credits::__client_accounts_depositfeecredits;
+#[doc(hidden)]
+pub use instructions::force_close_resolved::__client_accounts_forcecloseresolved;
 #[doc(hidden)]
 pub use instructions::liquidate_at_oracle::__client_accounts_liquidateatoracle;
 #[doc(hidden)]
@@ -191,6 +196,16 @@ pub mod percolator {
         instructions::withdraw_insurance::handler(ctx)
     }
 
+    /// Tag 21 — admin force-close on resolved markets.
+    /// See `instructions/admin_force_close_account.rs`.
+    #[discrim = 21]
+    pub fn admin_force_close_account(
+        ctx: &mut Context<AdminForceCloseAccount>,
+        user_idx: u16,
+    ) -> Result<()> {
+        instructions::admin_force_close_account::handler(ctx, user_idx)
+    }
+
     /// Tag 23 — bounded live insurance withdrawal.
     /// See `instructions/withdraw_insurance_limited.rs`.
     #[discrim = 23]
@@ -246,6 +261,17 @@ pub mod percolator {
         amount: u64,
     ) -> Result<()> {
         instructions::convert_released_pnl::handler(ctx, user_idx, amount)
+    }
+
+    /// Tag 30 — permissionless force-close on resolved markets after
+    /// `force_close_delay_slots` cooldown.
+    /// See `instructions/force_close_resolved.rs`.
+    #[discrim = 30]
+    pub fn force_close_resolved(
+        ctx: &mut Context<ForceCloseResolved>,
+        user_idx: u16,
+    ) -> Result<()> {
+        instructions::force_close_resolved::handler(ctx, user_idx)
     }
 
     /// Tag 31 — permissionless market-clock catchup. Payload-less.

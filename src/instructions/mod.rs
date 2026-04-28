@@ -3,11 +3,13 @@
 //! struct named after the instruction. The `#[program]` block in
 //! `crate::lib` binds each handler to its `#[discrim = N]`.
 
+pub mod admin_force_close_account;
 pub mod catchup_accrue;
 pub mod close_account;
 pub mod convert_released_pnl;
 pub mod deposit_collateral;
 pub mod deposit_fee_credits;
+pub mod force_close_resolved;
 pub mod liquidate_at_oracle;
 pub mod push_hyperp_mark;
 pub mod reclaim_empty_account;
@@ -26,11 +28,13 @@ pub mod withdraw_insurance_limited;
 // `#[program]` block can refer to them without an `instructions::*`
 // glob (which would pollute the crate root with each handler's
 // `handler` fn). Bring more types in as the rest of the 28 land.
+pub use admin_force_close_account::AdminForceCloseAccount;
 pub use catchup_accrue::CatchupAccrue;
 pub use close_account::CloseAccount;
 pub use convert_released_pnl::ConvertReleasedPnl;
 pub use deposit_collateral::DepositCollateral;
 pub use deposit_fee_credits::DepositFeeCredits;
+pub use force_close_resolved::ForceCloseResolved;
 pub use liquidate_at_oracle::LiquidateAtOracle;
 pub use push_hyperp_mark::PushHyperpMark;
 pub use reclaim_empty_account::ReclaimEmptyAccount;
