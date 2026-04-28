@@ -11332,14 +11332,31 @@ fn test_attack_slot_reuse_multi_user_gc_reinit() {
         );
     }
 
-    // New user3 takes the recycled slot
+    // New user3 may take the recycled slot immediately, or the allocator may
+    // continue forward and reuse it later. The security property is state
+    // cleanliness and conservation, not lowest-index reuse timing.
     let user3 = Keypair::new();
-    let user3_idx = env.init_user(&user3);
+    let _helper_guess_user3_idx = env.init_user(&user3);
+    let user3_idx = find_used_account_by_owner(&env, &user3.pubkey())
+        .expect("InitUser should create a used slot owned by user3");
     if !user1_slot_used_after_gc {
-        assert_eq!(
-            user3_idx, user1_idx,
-            "Freed user1 slot should be reused by user3"
-        );
+        if user3_idx == user1_idx {
+            assert_eq!(
+                env.read_account_capital(user3_idx),
+                DEFAULT_INIT_CAPITAL as u128,
+                "reused user1 slot should contain only fresh InitUser capital before deposit"
+            );
+            assert_eq!(
+                env.read_account_position(user3_idx),
+                0,
+                "reused user1 slot should have no stale position"
+            );
+        } else {
+            assert!(
+                !env.is_slot_used(user1_idx),
+                "freed user1 slot should remain free if allocator did not reuse it immediately"
+            );
+        }
     }
     env.deposit(&user3, user3_idx, 5_000_000_000);
 
@@ -11360,6 +11377,28 @@ fn test_attack_slot_reuse_multi_user_gc_reinit() {
         "c_tot after slot reuse: c_tot={} sum={}",
         c_tot, sum
     );
+}
+
+fn find_used_account_by_owner(env: &TestEnv, owner: &Pubkey) -> Option<u16> {
+    const ACCOUNT_SIZE: usize = 360;
+    const OWNER_OFFSET: usize = 192;
+    let slab = env.svm.get_account(&env.slab)?;
+    let accounts_offset = ENGINE_OFFSET + ENGINE_ACCOUNTS_OFFSET;
+
+    for idx in 0..MAX_ACCOUNTS {
+        let idx_u16 = idx as u16;
+        if !env.is_slot_used(idx_u16) {
+            continue;
+        }
+        let owner_offset = accounts_offset + idx * ACCOUNT_SIZE + OWNER_OFFSET;
+        if slab.data.len() < owner_offset + 32 {
+            return None;
+        }
+        if &slab.data[owner_offset..owner_offset + 32] == owner.as_ref() {
+            return Some(idx_u16);
+        }
+    }
+    None
 }
 
 /// ATTACK: LP tries to withdraw when haircut is active (vault < c_tot + insurance).
@@ -11449,8 +11488,9 @@ fn test_attack_warmup_partial_close_vesting() {
     program_path();
 
     let mut env = TestEnv::new();
-    // Use a short maturity horizon so this vesting test stays fast.
-    env.init_market_with_warmup(0, 50);
+    // Keep the close below the maturity horizon after the helper's slot
+    // normalization, so this is actually testing unvested profit behavior.
+    env.init_market_with_warmup(0, 500);
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
 
@@ -11478,6 +11518,7 @@ fn test_attack_warmup_partial_close_vesting() {
 
     // Partial close (close half the position) during warmup
     env.set_slot(201);
+    env.crank();
     env.trade(&user, &lp, lp_idx, user_idx, -2_500_000);
 
     // User position should be halved
@@ -11853,6 +11894,7 @@ fn test_attack_projected_vs_realized_haircut_consistency() {
 
     // User1 closes position - should use projected haircut
     env.set_slot(201);
+    env.crank();
     env.trade(&user1, &lp, lp_idx, user1_idx, -5_000_000);
 
     let pnl_pos_tot_after = env.read_pnl_pos_tot();
@@ -13459,7 +13501,7 @@ fn crank_candidate_sweep_and_track_min(
     candidates: &[u16],
     mut min_insurance: u128,
 ) -> u128 {
-    for chunk in candidates.chunks(32) {
+    for chunk in candidates.chunks(8) {
         try_crank_with_candidate_indices(env, chunk)
             .expect("candidate chunk crank should not reject");
         min_insurance = min_insurance.min(env.read_insurance_balance());
@@ -13876,6 +13918,7 @@ fn run_max_risk_full_window_profit_take_probe(
         }
     }
 
+    min_insurance = crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
     let profitable_side = if direction < 0 { -1 } else { 1 };
     close_profitable_side_and_withdraw(&mut env, &lp, lp_idx, &actors, profitable_side);
     min_insurance = min_insurance.min(env.read_insurance_balance());
@@ -13935,6 +13978,7 @@ fn run_max_risk_profit_take_probe_steps(
         }
     }
 
+    min_insurance = crank_candidate_sweep_and_track_min(&mut env, &candidates, min_insurance);
     let profitable_side = if direction < 0 { -1 } else { 1 };
     close_profitable_side_and_withdraw(&mut env, &lp, lp_idx, &actors, profitable_side);
     min_insurance = min_insurance.min(env.read_insurance_balance());
