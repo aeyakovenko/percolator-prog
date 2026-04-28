@@ -1164,6 +1164,180 @@ impl TestEnv {
 
     // ── Read helpers ────────────────────────────────────────────────────────
 
+    // ── Engine-account layout (BPF-target, Account size = 360, fields at
+    //     offsets matching the percolator engine's Account struct). ──
+
+    /// Per-`engine.accounts[idx]` slot size on BPF.
+    const ACCOUNT_SIZE: usize = 360;
+
+    fn account_offset(idx: u16) -> usize {
+        ENGINE_ACCOUNTS_OFFSET + (idx as usize) * Self::ACCOUNT_SIZE
+    }
+
+    pub fn read_account_capital(&self, idx: u16) -> u128 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let off = Self::account_offset(idx); // capital is field 0
+        u128::from_le_bytes(d[off..off + 16].try_into().unwrap())
+    }
+
+    pub fn read_account_pnl(&self, idx: u16) -> i128 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let off = Self::account_offset(idx) + 24; // capital(16) + kind(1) + pad(7)
+        i128::from_le_bytes(d[off..off + 16].try_into().unwrap())
+    }
+
+    pub fn read_account_reserved_pnl(&self, idx: u16) -> u128 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let off = Self::account_offset(idx) + 40;
+        u128::from_le_bytes(d[off..off + 16].try_into().unwrap())
+    }
+
+    pub fn read_account_position(&self, idx: u16) -> i128 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let off = Self::account_offset(idx) + 56; // position_basis_q
+        i128::from_le_bytes(d[off..off + 16].try_into().unwrap())
+    }
+
+    pub fn read_account_fee_credits(&self, idx: u16) -> i128 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let off = Self::account_offset(idx) + 224; // fee_credits offset within Account
+        i128::from_le_bytes(d[off..off + 16].try_into().unwrap())
+    }
+
+    /// Engine-side vault balance (`engine.vault.balance`, u128). Not the
+    /// SPL vault token-account balance — that's `vault_balance()`.
+    pub fn read_engine_vault(&self) -> u128 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        const VAULT_OFF: usize = ENGINE_OFFSET + 720; // engine.vault.balance offset
+        u128::from_le_bytes(d[VAULT_OFF..VAULT_OFF + 16].try_into().unwrap())
+    }
+
+    pub fn vault_balance(&self) -> u64 {
+        let d = self.svm.get_account(&self.vault).unwrap().data;
+        u64::from_le_bytes(d[64..72].try_into().unwrap())
+    }
+
+    fn read_oracle_publish_time(&self) -> u64 {
+        let d = self.svm.get_account(&self.pyth_index).unwrap().data;
+        let pt = i64::from_le_bytes(d[93..101].try_into().unwrap());
+        pt.max(0) as u64
+    }
+
+    fn read_oracle_price_e6(&self) -> i64 {
+        let d = self.svm.get_account(&self.pyth_index).unwrap().data;
+        i64::from_le_bytes(d[73..81].try_into().unwrap())
+    }
+
+    fn set_slot_and_price_raw(&mut self, effective_slot: u64, price_e6: i64) {
+        self.set_slot_and_price_raw_no_walk(effective_slot, price_e6);
+    }
+
+    fn price_move_slots_required(cur_price: i64, target_price: i64) -> u64 {
+        if cur_price <= 0 || target_price <= 0 || cur_price == target_price {
+            return 0;
+        }
+        let base = cur_price.min(target_price) as u128;
+        let delta = (target_price as i128 - cur_price as i128).unsigned_abs();
+        let denom = base.saturating_mul(TEST_MAX_PRICE_MOVE_BPS_PER_SLOT as u128);
+        if denom == 0 {
+            return 0;
+        }
+        let numerator = delta.saturating_mul(10_000);
+        let slots = numerator.saturating_add(denom - 1) / denom;
+        slots.min(u64::MAX as u128) as u64
+    }
+
+    pub fn try_crank_once(&mut self) -> Result<(), String> {
+        self.try_crank()
+    }
+
+    /// Walking variant: advances Clock + oracle to (slot+100, price) with
+    /// best-effort intermediate cranks so the engine's per-slot
+    /// price-move cap is respected. Mirrors the legacy helper.
+    pub fn set_slot_and_price(&mut self, slot: u64, price_e6: i64) {
+        const BASE_CHUNK: u64 = 40;
+        let requested_effective_slot = slot.saturating_add(100);
+        let cur_effective_slot = self
+            .svm
+            .get_sysvar::<Clock>()
+            .slot
+            .max(self.read_oracle_publish_time());
+        let cur_price = self.read_oracle_price_e6();
+        let min_move_slots = match Self::price_move_slots_required(cur_price, price_e6) {
+            0 => 0,
+            slots => slots.saturating_add(1),
+        };
+        let target_effective_slot = requested_effective_slot
+            .max(cur_effective_slot.saturating_add(min_move_slots))
+            .max(cur_effective_slot);
+        let stale_window = {
+            let slab = self.svm.get_account(&self.slab).unwrap();
+            percolator_prog::state::read_config(&slab.data).permissionless_resolve_stale_slots
+        };
+        let chunk = if stale_window > 1 {
+            BASE_CHUNK.min(stale_window - 1)
+        } else {
+            BASE_CHUNK
+        };
+        let total_slots = target_effective_slot.saturating_sub(cur_effective_slot);
+        let should_walk = total_slots > chunk;
+        if should_walk {
+            let total_dp = (price_e6 - cur_price) as i128;
+            let mut s = cur_effective_slot;
+            while s + chunk < target_effective_slot {
+                s += chunk;
+                let frac_num = (s - cur_effective_slot) as i128;
+                let frac_den = total_slots as i128;
+                let px = cur_price as i128 + total_dp * frac_num / frac_den;
+                self.set_slot_and_price_raw(s, px as i64);
+                let _ = self.try_crank_once();
+            }
+        }
+        self.set_slot_and_price_raw(target_effective_slot, price_e6);
+        if should_walk {
+            let _ = self.try_crank_once();
+        }
+    }
+
+    pub fn try_convert_released_pnl(
+        &mut self,
+        owner: &Keypair,
+        user_idx: u16,
+        amount: u64,
+    ) -> Result<(), String> {
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_convert_released_pnl(user_idx, amount),
+        };
+        self.try_send_ix(ix, &[owner])
+    }
+
+    pub fn init_market_with_trading_fee(&mut self, trading_fee_bps: u64) {
+        let mut o =
+            InitOpts::default_for(self.payer.pubkey(), self.mint, TEST_FEED_ID);
+        o.trading_fee_bps = trading_fee_bps;
+        self.init_market_with_opts(o);
+    }
+
+    pub fn init_market_with_trading_fee_and_warmup(
+        &mut self,
+        trading_fee_bps: u64,
+        warmup_slots: u64,
+    ) {
+        let mut o =
+            InitOpts::default_for(self.payer.pubkey(), self.mint, TEST_FEED_ID);
+        o.trading_fee_bps = trading_fee_bps;
+        o.h_min = warmup_slots.max(1);
+        o.h_max = warmup_slots.max(1);
+        self.init_market_with_opts(o);
+    }
+
     pub fn read_insurance_balance(&self) -> u128 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
         // RiskEngine.insurance_fund.balance is 16 bytes of u128 at a known
