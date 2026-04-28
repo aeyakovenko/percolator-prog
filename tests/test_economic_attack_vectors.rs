@@ -1,4 +1,3 @@
-#![cfg(feature = "legacy-tests")]
 //! Focused economic-attack probes inspired by public DEX/perp incidents.
 
 mod common;

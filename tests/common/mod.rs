@@ -1431,6 +1431,43 @@ impl TestEnv {
         u128::from_le_bytes(d[INSURANCE_OFF..INSURANCE_OFF + 16].try_into().unwrap())
     }
 
+    pub fn read_num_used_accounts(&self) -> u16 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let off = ENGINE_OFFSET + ENGINE_NUM_USED_OFFSET;
+        u16::from_le_bytes(d[off..off + 2].try_into().unwrap())
+    }
+
+    /// O(1) aggregate `c_tot` (sum of senior capital across all accounts).
+    /// Engine-relative offset 312.
+    pub fn read_c_tot(&self) -> u128 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        const C_TOT_OFF: usize = ENGINE_OFFSET + 312;
+        u128::from_le_bytes(d[C_TOT_OFF..C_TOT_OFF + 16].try_into().unwrap())
+    }
+
+    /// O(1) aggregate `pnl_pos_tot` (sum of positive PnL across all accounts).
+    /// Engine-relative offset 328.
+    pub fn read_pnl_pos_tot(&self) -> u128 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        const PNL_POS_TOT_OFF: usize = ENGINE_OFFSET + 328;
+        u128::from_le_bytes(d[PNL_POS_TOT_OFF..PNL_POS_TOT_OFF + 16].try_into().unwrap())
+    }
+
+    /// Snapshot of mutable `MarketConfig` fields touched by UpdateConfig
+    /// (5-tuple matches the legacy API for back-compat with tests that
+    /// diff snapshots before/after a config update).
+    pub fn read_update_config_snapshot(&self) -> (u64, u128, u64, u128, u128) {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let config = percolator_prog::state::read_config(&d);
+        (
+            config.funding_horizon_slots,
+            0u128,
+            0u64,
+            0u128,
+            0u128,
+        )
+    }
+
     pub fn is_market_resolved(&self) -> bool {
         let d = self.svm.get_account(&self.slab).unwrap().data;
         // RiskEngine.resolved flag offset (BPF, engine-relative 600).

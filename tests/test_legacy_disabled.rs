@@ -38,10 +38,6 @@ disabled!(
     "v2-migration: SPL token CPI + slab encoders pending Phase 6"
 );
 disabled!(
-    test_economic_attack_vectors,
-    "v2-migration: slab fixture + tag encoders pending Phase 6"
-);
-disabled!(
     test_insurance,
     "v2-migration: insurance-flow ix encoders pending Phase 6"
 );
