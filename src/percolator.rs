@@ -5745,15 +5745,14 @@ pub mod processor {
                 let withdraw_slot = clock.slot;
                 let admit_h_min = engine.params.h_min;
                 let admit_h_max = engine.params.h_max;
-                // Fully accrue the market to clock.slot BEFORE syncing fees.
-                // Explicit ordering — the engine already handles this via
-                // withdraw_not_atomic's internal accrue (which uses
-                // last_market_slot, not current_slot, for dt), but making
-                // the accrue→sync→op order explicit in the wrapper removes
-                // all ambiguity and aligns with the auditor-requested
-                // pattern. The main op's internal accrue then no-ops
-                // (same slot + same price, engine §5.4 early return).
-                ensure_market_accrued_to_now_with_policy(
+                // Withdraw is account-limited: it only touches this user, so
+                // it must not become a hidden market-progress path while
+                // unrelated OI is exposed. If price/funding progress is
+                // equity-active, KeeperCrank must do the account-touching
+                // cascade first. When the strict gate allows progress, accrue
+                // before fee sync and withdraw so the engine's internal
+                // accrue no-ops at the same slot/price.
+                ensure_market_accrued_to_now_for_account_limited_op(
                     engine,
                     &config,
                     clock.slot,

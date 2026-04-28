@@ -13407,6 +13407,46 @@ fn test_attack_issue33_account_free_catchup_cannot_move_exposed_market() {
     );
 }
 
+#[test]
+fn test_attack_withdraw_decoy_cannot_walk_exposed_market() {
+    program_path();
+
+    let (mut env, _lp, lp_idx, actors) = setup_max_risk_probe(1, 1);
+    let candidates = max_risk_candidate_indices(lp_idx, &actors);
+
+    let decoy = Keypair::new();
+    let decoy_idx = env.init_user(&decoy);
+    env.deposit(&decoy, decoy_idx, 100_000_000);
+
+    let slot_before = env.read_last_market_slot();
+    let insurance_before = env.read_insurance_balance();
+    let mut price = MAX_RISK_P0_E6;
+    price = max_risk_next_price_signed_bps(price, -45);
+    env.set_slot_and_price_raw_no_walk(slot_before + 10, price as i64);
+
+    let walk = env.try_withdraw(&decoy, decoy_idx, 1);
+    assert!(
+        walk.is_err(),
+        "EXPLOIT: decoy WithdrawCollateral advanced exposed market state without the crank cascade",
+    );
+    assert_eq!(
+        env.read_last_market_slot(),
+        slot_before,
+        "rejected decoy withdrawal must not advance market clock",
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        insurance_before,
+        "rejected decoy withdrawal must not mutate insurance",
+    );
+
+    crank_candidate_sweep_and_track_min(&mut env, &candidates, insurance_before);
+    assert!(
+        env.read_insurance_balance() >= insurance_before,
+        "crank after rejected decoy walk must not drain insurance",
+    );
+}
+
 fn max_risk_candidate_indices(lp_idx: u16, actors: &[MaxRiskActor]) -> Vec<u16> {
     let mut candidates = Vec::with_capacity(actors.len() + 1);
     candidates.push(lp_idx);
