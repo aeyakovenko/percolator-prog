@@ -1,4 +1,5 @@
 #![cfg(feature = "legacy-tests")]
+
 mod common;
 #[allow(unused_imports)]
 use common::*;
@@ -141,7 +142,7 @@ fn test_attack_withdraw_insurance_before_resolution() {
     env.svm.airdrop(&payer.pubkey(), 10_000_000_000).unwrap();
     env.top_up_insurance(&payer, 1_000_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let insurance_before = env.read_insurance_balance();
     let spl_vault_before = env.vault_balance();
     let engine_vault_before = env.read_engine_vault();
@@ -184,7 +185,7 @@ fn test_attack_withdraw_insurance_with_open_positions() {
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 80);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Set oracle authority and push price
     let lp = Keypair::new();
@@ -302,7 +303,7 @@ fn test_attack_topup_insurance_after_resolution() {
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 80);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.set_slot(100);
     env.crank();
     env.try_resolve_market(&admin, 0)
@@ -506,7 +507,7 @@ fn test_attack_multiple_liquidations_insurance_drain() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -688,7 +689,7 @@ fn test_attack_insurance_topup_disables_force_realize() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -726,7 +727,7 @@ fn test_attack_topup_insurance_wrong_vault() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Create a fake vault account
     let fake_vault = Pubkey::new_unique();
@@ -806,7 +807,7 @@ fn test_attack_topup_insurance_unit_scale_dust() {
     let mut env = TestEnv::new();
     env.init_market_full(0, 1000, 0); // unit_scale = 1000
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Top up insurance with amount not aligned to unit_scale
     let result = env.try_top_up_insurance(&admin, 999); // Not aligned to 1000
@@ -1028,7 +1029,7 @@ fn test_init_market_insurance_withdraw_max_bps_bounded() {
     program_path();
     let mut env = TestEnv::new();
     // init_market_full with insurance_withdraw_max_bps = 10001 should fail
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Build raw InitMarket with insurance_withdraw_max_bps = 10001
     let mut data = vec![0u8]; // tag 0
@@ -1114,7 +1115,7 @@ fn test_top_up_insurance_blocked_on_resolved() {
     let mut env = TestEnv::new();
     env.init_market_hyperp(1_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .unwrap();
     env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
@@ -1235,7 +1236,7 @@ fn test_deposit_cap_enable_via_update_config() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     send_update_config(&mut env, &admin, 20).expect("enable cap");
     let slab = env.svm.get_account(&env.slab).unwrap();
     let cfg = percolator_prog::state::read_config(&slab.data);
@@ -1250,7 +1251,7 @@ fn test_deposit_cap_enforced() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     // Seed insurance so the cap denominator is nonzero.
     let insurance_payer = Keypair::new();
     env.svm
@@ -1286,7 +1287,7 @@ fn test_deposit_cap_disabled_allows_any_deposit() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     // Do NOT call UpdateConfig — cap stays at default 0.
     assert_eq!(
         env.read_insurance_balance(),
@@ -1307,7 +1308,7 @@ fn test_deposit_cap_zero_insurance_rejects() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     // Enable cap WITHOUT seeding insurance. All deposit paths must be
     // rejected — including InitUser's fee_payment, which had been a
     // bypass before the fix.
@@ -1354,7 +1355,7 @@ fn test_deposit_cap_widened_unblocks_deposit() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let insurance_payer = Keypair::new();
     env.svm
         .airdrop(&insurance_payer.pubkey(), 10_000_000_000)
@@ -1388,7 +1389,7 @@ fn test_deposit_cap_topping_up_insurance_unblocks_deposit() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let insurance_payer = Keypair::new();
     env.svm
         .airdrop(&insurance_payer.pubkey(), 10_000_000_000)
@@ -1424,7 +1425,7 @@ fn test_deposit_cap_tightened_blocks_further_deposits() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let insurance_payer = Keypair::new();
     env.svm
         .airdrop(&insurance_payer.pubkey(), 10_000_000_000)
@@ -1607,7 +1608,7 @@ fn test_withdraw_limited_operator_succeeds() {
     program_path();
     let mut env = TestEnv::new();
     setup_bounded_withdrawal(&mut env, 10_000, 500, 100); // 5% cap, 100 slot cooldown
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let insurance_before = env.read_insurance_balance();
     let vault_before = env.vault_balance();
@@ -1626,7 +1627,7 @@ fn test_withdraw_limited_cooldown_enforced() {
     program_path();
     let mut env = TestEnv::new();
     setup_bounded_withdrawal(&mut env, 10_000, 500, 1000);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     send_withdraw_limited(&mut env, &admin, 100).expect("first call ok");
 
@@ -1645,7 +1646,7 @@ fn test_withdraw_limited_after_cooldown_accepted() {
     program_path();
     let mut env = TestEnv::new();
     setup_bounded_withdrawal(&mut env, 10_000, 500, 100);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     send_withdraw_limited(&mut env, &admin, 100).expect("first call");
     env.set_slot(200); // past cooldown of 100
@@ -1658,7 +1659,7 @@ fn test_withdraw_limited_over_cap_rejected() {
     program_path();
     let mut env = TestEnv::new();
     setup_bounded_withdrawal(&mut env, 10_000, 500, 100); // cap = 500
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let over = send_withdraw_limited(&mut env, &admin, 501);
     assert!(over.is_err(), "amount > cap must be rejected");
@@ -1670,7 +1671,7 @@ fn test_withdraw_limited_disabled_rejects() {
     program_path();
     let mut env = TestEnv::new();
     setup_bounded_withdrawal(&mut env, 10_000, 0, 100); // disabled (max_bps=0)
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let result = send_withdraw_limited(&mut env, &admin, 1);
     assert!(result.is_err(), "max_bps=0 must disable the bounded path");
@@ -1684,7 +1685,7 @@ fn test_withdraw_limited_zero_insurance_rejects() {
     setup_bounded_withdrawal(&mut env, 0, 500, 100); // no insurance seeded in call
                                                      // setup_bounded_withdrawal tops up `insurance`; pass 0 to skip.
                                                      // But top_up_insurance(0) is a noop that still packs data — just assert 0.
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Force insurance to zero: init already does so, and our call passed 0
     // above, but top_up_insurance may have written zero. Recheck.
@@ -1713,7 +1714,7 @@ fn test_withdraw_limited_operator_cannot_call_tag_20() {
     program_path();
     let mut env = TestEnv::new();
     setup_bounded_withdrawal(&mut env, 10_000, 500, 100);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Rotate insurance_operator away from admin. Now admin is no longer
     // the operator — and the new operator is not insurance_authority.
@@ -1763,7 +1764,7 @@ fn test_withdraw_limited_floor_prevents_zeno_paradox() {
     // Without the floor, no withdrawal would be possible. The MIN floor of
     // 10 lets operator drain 10 per call.
     setup_bounded_withdrawal(&mut env, 100, 1, 1);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     send_withdraw_limited(&mut env, &admin, 10)
         .expect("anti-Zeno floor must permit 10-unit withdrawal even at tiny bps");
@@ -1785,7 +1786,7 @@ fn test_withdraw_limited_rotation_swaps_authority() {
     program_path();
     let mut env = TestEnv::new();
     setup_bounded_withdrawal(&mut env, 10_000, 500, 100);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Pre-rotation: admin is the default operator → accepted.
     send_withdraw_limited(&mut env, &admin, 100).expect("admin as default operator");
@@ -1818,7 +1819,7 @@ fn test_withdraw_limited_deposit_only_tracks_topups_and_withdrawals() {
     let mut env = TestEnv::new();
     setup_bounded_withdrawal(&mut env, 10_000, 10_000, 1);
     set_withdraw_deposits_only_raw(&mut env, 1);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     assert_eq!(
         read_withdraw_deposit_remaining_raw(&env),
@@ -1859,7 +1860,7 @@ fn test_withdraw_limited_deposit_only_failed_withdrawals_preserve_budget() {
     let mut env = TestEnv::new();
     setup_bounded_withdrawal(&mut env, 0, 10_000, 1);
     set_withdraw_deposits_only_raw(&mut env, 1);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let empty_withdraw = send_withdraw_limited(&mut env, &admin, 1);
     assert!(
@@ -1940,7 +1941,7 @@ fn test_withdraw_limited_deposit_only_can_be_enabled_at_init() {
     env.top_up_insurance(&insurance_payer, 1_000);
     assert_eq!(read_withdraw_deposit_remaining_raw(&env), 1_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     send_withdraw_limited(&mut env, &admin, 1_000)
         .expect("init-enabled deposit-only mode must allow principal withdrawal");
     assert_eq!(env.read_insurance_balance(), 0);
@@ -1957,7 +1958,7 @@ fn test_withdraw_limited_deposit_only_leaves_fee_growth_behind() {
     env.init_market_with_trading_fee(100); // 1% trading fee
     set_withdraw_deposits_only_raw(&mut env, 1);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let insurance_payer = Keypair::new();
     env.svm
         .airdrop(&insurance_payer.pubkey(), 10_000_000_000)
@@ -2021,7 +2022,7 @@ fn test_withdraw_limited_deposit_only_invalid_flag_rejected() {
     let mut env = TestEnv::new();
     setup_bounded_withdrawal(&mut env, 10_000, 10_000, 1);
     set_withdraw_deposits_only_raw(&mut env, 2);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let before = env.read_insurance_balance();
     let result = send_withdraw_limited(&mut env, &admin, 1);
@@ -2067,7 +2068,7 @@ fn test_withdraw_limited_default_mode_not_capped_by_deposit_budget() {
     let insurance_before = env.read_insurance_balance();
     assert!(insurance_before > 0, "test setup must create fee insurance");
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     send_withdraw_limited(&mut env, &admin, 1)
         .expect("default mode must remain uncapped by deposit-only budget");
     assert_eq!(
@@ -2084,7 +2085,7 @@ fn test_withdraw_limited_resolved_market_rejects() {
     program_path();
     let mut env = TestEnv::new();
     setup_bounded_withdrawal(&mut env, 10_000, 500, 100);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     env.set_slot(100);
     env.crank();
@@ -2117,7 +2118,7 @@ fn test_bounded_withdrawal_tightens_deposit_cap() {
     program_path();
     let mut env = TestEnv::new();
     setup_bounded_withdrawal(&mut env, 1_000, 5_000, 100);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Enable deposit cap at k=20. UpdateConfig also sets funding params.
     send_update_config(&mut env, &admin, 20).expect("enable deposit cap k=20");
@@ -2155,7 +2156,7 @@ fn test_deposit_cap_bypassed_via_init_user() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     // Seed insurance, enable the cap with k=20 → ceiling = 20_000 units.
     let insurance_payer = Keypair::new();
     env.svm

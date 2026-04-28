@@ -33,10 +33,72 @@ pub const SPL_TOKEN_ID: Pubkey =
 pub mod spl_token {
     pub use super::SPL_TOKEN_ID as ID;
     pub mod state {
-        pub struct Account;
+        use solana_sdk::pubkey::Pubkey;
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum AccountState {
+            Uninitialized,
+            Initialized,
+            Frozen,
+        }
+
+        #[derive(Debug, Clone, Copy)]
+        pub struct Account {
+            pub mint: Pubkey,
+            pub owner: Pubkey,
+            pub amount: u64,
+            pub delegate: Option<Pubkey>,
+            pub state: AccountState,
+            pub delegated_amount: u64,
+            pub close_authority: Option<Pubkey>,
+        }
+
         impl Account {
             pub const LEN: usize = super::super::TOKEN_ACCOUNT_LEN;
+
+            /// Best-effort SPL Token v1 Account decoder. Tests use it
+            /// to inspect mint/owner/amount/delegate/close_authority
+            /// after a CPI; layout matches the canonical SPL spec.
+            pub fn unpack(data: &[u8]) -> Result<Self, &'static str> {
+                if data.len() < Self::LEN {
+                    return Err("token account too short");
+                }
+                let mint = Pubkey::new_from_array(data[0..32].try_into().unwrap());
+                let owner = Pubkey::new_from_array(data[32..64].try_into().unwrap());
+                let amount = u64::from_le_bytes(data[64..72].try_into().unwrap());
+                let delegate_tag =
+                    u32::from_le_bytes(data[72..76].try_into().unwrap());
+                let delegate = if delegate_tag == 1 {
+                    Some(Pubkey::new_from_array(data[76..108].try_into().unwrap()))
+                } else {
+                    None
+                };
+                let state = match data[108] {
+                    1 => AccountState::Initialized,
+                    2 => AccountState::Frozen,
+                    _ => AccountState::Uninitialized,
+                };
+                let delegated_amount =
+                    u64::from_le_bytes(data[121..129].try_into().unwrap());
+                let close_tag =
+                    u32::from_le_bytes(data[129..133].try_into().unwrap());
+                let close_authority = if close_tag == 1 {
+                    Some(Pubkey::new_from_array(data[133..165].try_into().unwrap()))
+                } else {
+                    None
+                };
+                Ok(Self {
+                    mint,
+                    owner,
+                    amount,
+                    delegate,
+                    state,
+                    delegated_amount,
+                    close_authority,
+                })
+            }
         }
+
         pub struct Mint;
         impl Mint {
             pub const LEN: usize = super::super::MINT_LEN;
@@ -1382,6 +1444,276 @@ impl TestEnv {
             data,
         };
         self.try_send_ix(ix, &[&admin])
+    }
+
+    pub fn try_admin_force_close_account(
+        &mut self,
+        admin: &Keypair,
+        user_idx: u16,
+        owner: &Pubkey,
+    ) -> Result<(), String> {
+        let owner_ata = self.create_ata(owner, 0);
+        let vault_pda = self.vault_pda();
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new(owner_ata, false),
+                AccountMeta::new_readonly(vault_pda, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_admin_force_close_account(user_idx),
+        };
+        self.try_send_ix(ix, &[admin])
+    }
+
+    pub fn try_close_slab(&mut self) -> Result<(), String> {
+        let admin = self.payer.insecure_clone();
+        let vault_pda = self.vault_pda();
+        let admin_ata = self.create_ata(&admin.pubkey(), 0);
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(vault_pda, false),
+                AccountMeta::new(admin_ata, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: encode_close_slab(),
+        };
+        self.try_send_ix(ix, &[&admin])
+    }
+
+    pub fn try_update_authority(
+        &mut self,
+        current: &Keypair,
+        kind: u8,
+        new_kp: Option<&Keypair>,
+    ) -> Result<(), String> {
+        let new_pubkey = match new_kp {
+            Some(kp) => kp.pubkey(),
+            None => Pubkey::default(),
+        };
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(current.pubkey(), true),
+                AccountMeta::new(new_pubkey, new_kp.is_some()),
+                AccountMeta::new(self.slab, false),
+            ],
+            data: encode_update_authority(kind, &new_pubkey),
+        };
+        match new_kp {
+            Some(kp) => self.try_send_ix(ix, &[current, kp]),
+            None => self.try_send_ix(ix, &[current]),
+        }
+    }
+
+    /// Legacy back-compat: route through UpdateAuthority{kind=ADMIN}.
+    pub fn try_update_admin(
+        &mut self,
+        current: &Keypair,
+        new_admin: &Pubkey,
+    ) -> Result<(), String> {
+        // Synthesize a placeholder Keypair with the requested pubkey if it's
+        // already a real key in our airdrop ledger. For burn (`Pubkey::default`),
+        // pass None.
+        let is_burn = *new_admin == Pubkey::default();
+        if is_burn {
+            return self.try_update_authority(current, AUTHORITY_ADMIN, None);
+        }
+        // For non-burn, the v2 dispatch requires the new_authority to be a
+        // signer. Tests that don't have the new keypair handy are testing
+        // the rejection path, so we encode the ix without the new signer
+        // and let the dispatcher reject.
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(current.pubkey(), true),
+                AccountMeta::new(*new_admin, false), // not signing
+                AccountMeta::new(self.slab, false),
+            ],
+            data: encode_update_authority(AUTHORITY_ADMIN, new_admin),
+        };
+        self.try_send_ix(ix, &[current])
+    }
+
+    /// Legacy: SetOracleAuthority routes through
+    /// UpdateAuthority{kind=AUTHORITY_HYPERP_MARK}.
+    pub fn try_set_oracle_authority(
+        &mut self,
+        signer: &Keypair,
+        new_authority: &Pubkey,
+    ) -> Result<(), String> {
+        let is_burn = *new_authority == Pubkey::default();
+        if is_burn {
+            return self.try_update_authority(signer, AUTHORITY_HYPERP_MARK, None);
+        }
+        let new_is_signer = *new_authority == signer.pubkey();
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(signer.pubkey(), true),
+                AccountMeta::new(*new_authority, new_is_signer),
+                AccountMeta::new(self.slab, false),
+            ],
+            data: encode_update_authority(AUTHORITY_HYPERP_MARK, new_authority),
+        };
+        self.try_send_ix(ix, &[signer])
+    }
+
+    pub fn try_push_oracle_price(
+        &mut self,
+        authority: &Keypair,
+        price_e6: u64,
+        _timestamp: i64,
+    ) -> Result<(), String> {
+        // Use current clock unix_timestamp + 1 to guarantee strict
+        // monotonicity. The explicit timestamp parameter is ignored —
+        // kept for API compatibility.
+        let clock: Clock = self.svm.get_sysvar();
+        let ts = clock.unix_timestamp;
+        self.svm.set_sysvar(&Clock {
+            slot: clock.slot,
+            unix_timestamp: ts + 1,
+            ..clock
+        });
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_push_hyperp_mark(price_e6, ts + 1),
+        };
+        self.try_send_ix(ix, &[authority])
+    }
+
+    pub fn try_withdraw_insurance(&mut self, admin: &Keypair) -> Result<(), String> {
+        let admin_ata = self.create_ata(&admin.pubkey(), 0);
+        let vault_pda = self.vault_pda();
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(admin_ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(vault_pda, false),
+            ],
+            data: encode_withdraw_insurance(),
+        };
+        self.try_send_ix(ix, &[admin])
+    }
+
+    /// Legacy alias: same as `try_liquidate`.
+    pub fn try_liquidate_target(&mut self, target_idx: u16) -> Result<(), String> {
+        self.try_liquidate(target_idx)
+    }
+
+    pub fn try_deposit(
+        &mut self,
+        owner: &Keypair,
+        user_idx: u16,
+        amount: u64,
+    ) -> Result<(), String> {
+        let ata = self.create_ata(&owner.pubkey(), amount);
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_deposit(user_idx, amount),
+        };
+        self.try_send_ix(ix, &[owner])
+    }
+
+    /// Permissionless ResolveMarket (Degenerate). Legacy alias.
+    pub fn try_resolve_permissionless(&mut self) -> Result<(), String> {
+        let caller = Keypair::new();
+        self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_resolve_permissionless(),
+        };
+        self.try_send_ix(ix, &[&caller])
+    }
+
+    pub fn try_resolve_permissionless_once(&mut self) -> Result<(), String> {
+        self.try_resolve_permissionless()
+    }
+
+    /// SetMaintenanceFee was removed in v2. The legacy probe was used
+    /// as an admin-gating sentinel; route it through UpdateConfig
+    /// (also admin-only) with a no-op payload so the test surface keeps
+    /// the same semantics.
+    pub fn try_set_maintenance_fee(
+        &mut self,
+        signer: &Keypair,
+        _new_fee: u128,
+    ) -> Result<(), String> {
+        // Read current funding params, send UpdateConfig with same values.
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let cfg = percolator_prog::state::read_config(&d);
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(signer.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_update_config(
+                cfg.funding_horizon_slots,
+                cfg.funding_k_bps,
+                cfg.funding_max_premium_bps,
+                cfg.funding_max_e9_per_slot,
+                cfg.tvl_insurance_cap_mult,
+            ),
+        };
+        self.try_send_ix(ix, &[signer])
+    }
+
+    /// InitMarket with custom unit_scale + new_account_fee. invert is
+    /// passed through.
+    pub fn init_market_full(
+        &mut self,
+        invert: u8,
+        unit_scale: u32,
+        new_account_fee: u128,
+    ) {
+        let mut o =
+            InitOpts::default_for(self.payer.pubkey(), self.mint, TEST_FEED_ID);
+        o.invert = invert;
+        o.unit_scale = unit_scale;
+        o.new_account_fee = new_account_fee;
+        self.init_market_with_opts(o);
+    }
+
+    /// InitMarket with custom warmup window (h_min == h_max == warmup).
+    pub fn init_market_with_warmup(&mut self, invert: u8, warmup_period_slots: u64) {
+        let mut o =
+            InitOpts::default_for(self.payer.pubkey(), self.mint, TEST_FEED_ID);
+        o.invert = invert;
+        o.h_min = warmup_period_slots.max(1);
+        o.h_max = warmup_period_slots.max(1);
+        self.init_market_with_opts(o);
     }
 
     pub fn try_convert_released_pnl(
