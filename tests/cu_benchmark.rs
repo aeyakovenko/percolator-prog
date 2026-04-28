@@ -659,12 +659,6 @@ fn encode_withdraw(user_idx: u16, amount: u64) -> Vec<u8> {
     data
 }
 
-fn encode_liquidate(target_idx: u16) -> Vec<u8> {
-    let mut data = vec![7u8];
-    data.extend_from_slice(&target_idx.to_le_bytes());
-    data
-}
-
 fn encode_close_account(user_idx: u16) -> Vec<u8> {
     let mut data = vec![8u8];
     data.extend_from_slice(&user_idx.to_le_bytes());
@@ -1845,7 +1839,7 @@ fn benchmark_all_instructions() {
 
     // Tag 24 (QueryLpFees) removed from the wire format.
 
-    // --- LiquidateAtOracle (Tag 7) ---
+    // --- KeeperCrank candidate liquidation (direct LiquidateAtOracle retired) ---
     // Measure liquidation in an isolated market. The setup intentionally
     // creates a sharp oracle move; keeping that state out of the main
     // benchmark market prevents later live-path measurements from tripping
@@ -1863,25 +1857,30 @@ fn benchmark_all_instructions() {
         liq_env.crank();
         liq_env.trade(&liq_user, &liq_lp, liq_lp_idx, liq_user_idx, 100_000);
         liq_env.set_price(50_000_000, 700); // $100 -> $50
-        liq_env.crank();
 
         let caller = Keypair::new();
         liq_env
             .svm
             .airdrop(&caller.pubkey(), 1_000_000_000)
             .unwrap();
+        let mut data = vec![5u8]; // KeeperCrank
+        data.extend_from_slice(&u16::MAX.to_le_bytes());
+        data.push(1u8);
+        data.extend_from_slice(&liq_user_idx.to_le_bytes());
+        data.push(0u8); // FullClose
         let ix = Instruction {
             program_id: liq_env.program_id,
             accounts: vec![
+                AccountMeta::new(caller.pubkey(), true),
                 AccountMeta::new(liq_env.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
                 AccountMeta::new_readonly(liq_env.pyth_index, false),
             ],
-            data: encode_liquidate(liq_user_idx),
+            data,
         };
         match measure(&mut liq_env.svm, ix, &[&caller]) {
-            Ok(cu) => println!("LiquidateAtOracle:     {:>8} CU", cu),
-            Err(_) => println!("LiquidateAtOracle:     (user not liquidatable at this price)"),
+            Ok(cu) => println!("KeeperCrank(liq):      {:>8} CU", cu),
+            Err(_) => println!("KeeperCrank(liq):      (user not liquidatable at this price)"),
         }
     }
 

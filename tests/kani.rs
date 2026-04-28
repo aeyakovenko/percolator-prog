@@ -3144,7 +3144,7 @@ fn kani_restart_detected_universal() {
 }
 
 // =============================================================================
-// W. ACCOUNT-FREE CATCHUP POLICY (3 proofs)
+// W. ACCOUNT-FREE CATCHUP POLICY (4 proofs)
 // =============================================================================
 
 /// Prove: account-free catchup rejects any exposed price move. Price movement
@@ -3262,7 +3262,7 @@ fn kani_account_limited_ops_reject_exposed_market_progress() {
 }
 
 // =============================================================================
-// X. KEEPERCRANK PARTIAL-CATCHUP POLICY (4 proofs)
+// X. KEEPERCRANK PARTIAL-CATCHUP POLICY (8 proofs)
 // =============================================================================
 
 /// Prove: when KeeperCrank chooses a partial catchup target, that target is a
@@ -3381,6 +3381,240 @@ fn kani_crank_partial_catchup_exposed_price_move_selects_target() {
         ),
         CrankCatchupTarget::None => {
             assert!(false, "oversized exposed price move must select a target")
+        }
+    }
+}
+
+/// Prove: an oversized exposed funding interval always selects the exact
+/// bounded partial target, even when price is unchanged.
+#[kani::proof]
+fn kani_crank_partial_catchup_exposed_funding_selects_target() {
+    let max_dt_raw: u8 = kani::any();
+    let chunks_raw: u8 = kani::any();
+    let last_slot: u64 = kani::any::<u16>() as u64;
+    let gap_extra: u8 = kani::any();
+    let last_price: u64 = kani::any::<u16>() as u64 + 1;
+    let funding_positive: bool = kani::any();
+    let oi_long: u128 = kani::any::<u16>() as u128 + 1;
+    let oi_short: u128 = kani::any::<u16>() as u128 + 1;
+    let fund_px_last: u64 = kani::any::<u16>() as u64 + 1;
+
+    let max_dt = max_dt_raw as u64 + 1;
+    let chunks = chunks_raw as u64 + 1;
+    let max_step = max_dt.saturating_mul(chunks);
+    let target = last_slot + max_step;
+    let extra = gap_extra as u64 + 1;
+    let now_slot = target + extra;
+    let funding_rate = if funding_positive { 1 } else { -1 };
+
+    match oversized_crank_catchup_target(
+        max_dt,
+        chunks,
+        last_slot,
+        now_slot,
+        last_price,
+        last_price,
+        funding_rate,
+        oi_long,
+        oi_short,
+        fund_px_last,
+    ) {
+        CrankCatchupTarget::Target(actual) => assert_eq!(
+            actual, target,
+            "oversized exposed funding must partial-catchup to last + max_step"
+        ),
+        CrankCatchupTarget::None => {
+            assert!(false, "oversized exposed funding must select a target")
+        }
+    }
+}
+
+/// Prove: flat zero-OI price movement never enters partial-crank mode. A flat
+/// market may adopt the raw target directly because no account can lose equity.
+#[kani::proof]
+fn kani_crank_partial_catchup_flat_price_move_does_not_partial() {
+    let max_dt_raw: u8 = kani::any();
+    let chunks_raw: u8 = kani::any();
+    let last_slot: u64 = kani::any::<u16>() as u64;
+    let gap_extra: u8 = kani::any();
+    let last_price: u64 = kani::any::<u16>() as u64 + 1;
+    let price_delta: u64 = kani::any::<u16>() as u64 + 1;
+    let funding_rate: i128 = kani::any();
+    let fund_px_last: u64 = kani::any::<u16>() as u64;
+
+    let max_dt = max_dt_raw as u64 + 1;
+    let chunks = chunks_raw as u64 + 1;
+    let max_step = max_dt.saturating_mul(chunks);
+    let now_slot = last_slot + max_step + gap_extra as u64 + 1;
+    let fresh_price = last_price + price_delta;
+
+    assert_eq!(
+        oversized_crank_catchup_target(
+            max_dt,
+            chunks,
+            last_slot,
+            now_slot,
+            last_price,
+            fresh_price,
+            funding_rate,
+            0,
+            0,
+            fund_px_last,
+        ),
+        CrankCatchupTarget::None,
+        "flat price movement must not require partial crank catchup"
+    );
+    assert!(
+        account_free_catchup_allows_accrual(
+            0,
+            0,
+            last_price,
+            fresh_price,
+            funding_rate,
+            fund_px_last
+        ),
+        "flat account-free catchup must allow direct price replacement"
+    );
+    assert!(
+        account_limited_op_allows_accrual(
+            0,
+            0,
+            last_price,
+            fresh_price,
+            funding_rate,
+            fund_px_last,
+            now_slot - last_slot,
+        ),
+        "flat account-limited operations must allow direct price replacement"
+    );
+}
+
+/// Issue 33 relational proof: the same oversized exposed price move that
+/// account-free and account-limited paths must reject is accepted by
+/// KeeperCrank as one bounded partial progress step.
+#[kani::proof]
+fn kani_issue33_exposed_price_move_rejected_by_user_paths_but_crank_progresses() {
+    let max_dt_raw: u8 = kani::any();
+    let chunks_raw: u8 = kani::any();
+    let last_slot: u64 = kani::any::<u16>() as u64;
+    let gap_extra: u8 = kani::any();
+    let last_price: u64 = kani::any::<u16>() as u64 + 1;
+    let price_delta: u64 = kani::any::<u16>() as u64 + 1;
+    let oi_long: u128 = kani::any::<u16>() as u128 + 1;
+
+    let max_dt = max_dt_raw as u64 + 1;
+    let chunks = chunks_raw as u64 + 1;
+    let max_step = max_dt.saturating_mul(chunks);
+    let target = last_slot + max_step;
+    let now_slot = target + gap_extra as u64 + 1;
+    let fresh_price = last_price + price_delta;
+
+    assert!(
+        !account_free_catchup_allows_accrual(oi_long, 0, last_price, fresh_price, 0, 0),
+        "account-free paths must reject exposed price movement"
+    );
+    assert!(
+        !account_limited_op_allows_accrual(
+            oi_long,
+            0,
+            last_price,
+            fresh_price,
+            0,
+            0,
+            now_slot - last_slot,
+        ),
+        "account-limited paths must reject exposed price movement"
+    );
+
+    match oversized_crank_catchup_target(
+        max_dt,
+        chunks,
+        last_slot,
+        now_slot,
+        last_price,
+        fresh_price,
+        0,
+        oi_long,
+        0,
+        0,
+    ) {
+        CrankCatchupTarget::Target(actual) => assert_eq!(
+            actual, target,
+            "KeeperCrank must make exactly one bounded progress step"
+        ),
+        CrankCatchupTarget::None => {
+            assert!(false, "KeeperCrank must not reject this progress case")
+        }
+    }
+}
+
+/// Issue 33 relational proof: the same oversized exposed funding interval that
+/// account-free and account-limited paths must reject is accepted by
+/// KeeperCrank as one bounded partial progress step.
+#[kani::proof]
+fn kani_issue33_exposed_funding_rejected_by_user_paths_but_crank_progresses() {
+    let max_dt_raw: u8 = kani::any();
+    let chunks_raw: u8 = kani::any();
+    let last_slot: u64 = kani::any::<u16>() as u64;
+    let gap_extra: u8 = kani::any();
+    let last_price: u64 = kani::any::<u16>() as u64 + 1;
+    let funding_positive: bool = kani::any();
+    let oi_long: u128 = kani::any::<u16>() as u128 + 1;
+    let oi_short: u128 = kani::any::<u16>() as u128 + 1;
+    let fund_px_last: u64 = kani::any::<u16>() as u64 + 1;
+
+    let max_dt = max_dt_raw as u64 + 1;
+    let chunks = chunks_raw as u64 + 1;
+    let max_step = max_dt.saturating_mul(chunks);
+    let target = last_slot + max_step;
+    let now_slot = target + gap_extra as u64 + 1;
+    let funding_rate = if funding_positive { 1 } else { -1 };
+
+    assert!(
+        !account_free_catchup_allows_accrual(
+            oi_long,
+            oi_short,
+            last_price,
+            last_price,
+            funding_rate,
+            fund_px_last,
+        ),
+        "account-free paths must reject exposed funding"
+    );
+    assert!(
+        !account_limited_op_allows_accrual(
+            oi_long,
+            oi_short,
+            last_price,
+            last_price,
+            funding_rate,
+            fund_px_last,
+            now_slot - last_slot,
+        ),
+        "account-limited paths must reject exposed funding"
+    );
+
+    match oversized_crank_catchup_target(
+        max_dt,
+        chunks,
+        last_slot,
+        now_slot,
+        last_price,
+        last_price,
+        funding_rate,
+        oi_long,
+        oi_short,
+        fund_px_last,
+    ) {
+        CrankCatchupTarget::Target(actual) => assert_eq!(
+            actual, target,
+            "KeeperCrank must make exactly one bounded progress step"
+        ),
+        CrankCatchupTarget::None => {
+            assert!(
+                false,
+                "KeeperCrank must not reject this funding progress case"
+            )
         }
     }
 }

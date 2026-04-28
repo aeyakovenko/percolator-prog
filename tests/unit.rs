@@ -405,12 +405,6 @@ fn encode_close_slab() -> Vec<u8> {
     vec![13u8]
 }
 
-fn encode_reclaim_empty_account(user_idx: u16) -> Vec<u8> {
-    let mut data = vec![25u8];
-    encode_u16(user_idx, &mut data);
-    data
-}
-
 fn encode_topup_insurance(amount: u64) -> Vec<u8> {
     let mut data = vec![9u8];
     encode_u64(amount, &mut data);
@@ -999,16 +993,23 @@ fn test_permissionless_crank_gc() {
         assert_eq!(account.reserved_pnl, 0, "reserved_pnl should be 0");
     }
 
-    // Call ReclaimEmptyAccount - should reclaim the dust account
-    // ReclaimEmptyAccount (opcode 25) expects 2 accounts: slab (writable), clock
+    // Public ReclaimEmptyAccount is retired; KeeperCrank candidate GC should
+    // reclaim the dust account.
     {
-        let accs = vec![f.slab.to_info(), f.clock.to_info()];
-        process_instruction(
-            &f.program_id,
-            &accs,
-            &encode_reclaim_empty_account(user_idx),
+        let mut caller = TestAccount::new(
+            Pubkey::new_unique(),
+            solana_program::system_program::id(),
+            0,
+            vec![],
         )
-        .unwrap();
+        .signer();
+        let accs = vec![
+            caller.to_info(),
+            f.slab.to_info(),
+            f.clock.to_info(),
+            f.pyth_index.to_info(),
+        ];
+        process_instruction(&f.program_id, &accs, &encode_crank_permissionless(0)).unwrap();
     }
 
     // Verify reclaim freed the account

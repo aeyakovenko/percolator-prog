@@ -655,12 +655,15 @@ Coverage map:
 
 - **Blocks post-resolution**: `InitUser`, `InitLP`,
   `DepositCollateral`, `WithdrawCollateral`, `KeeperCrank`,
-  `TradeNoCpi`, `TradeCpi`, `LiquidateAtOracle`, `TopUpInsurance`,
-  `UpdateConfig`, `PushHyperpMark`, `SetOraclePriceCap`,
+  `TradeNoCpi`, `TradeCpi`, `TopUpInsurance`,
+  `UpdateConfig`, `PushHyperpMark`,
   `ResolveMarket` (re-resolve), `WithdrawInsuranceLimited`,
-  `ReclaimEmptyAccount`, `SettleAccount`, `DepositFeeCredits`,
+  `DepositFeeCredits`,
   `ConvertReleasedPnl`, `ResolvePermissionless` (re-resolve),
   `CatchupAccrue` (confirmed at `src/percolator.rs:8314`).
+- **Retired public tags**: `LiquidateAtOracle`, `ReclaimEmptyAccount`,
+  and `SettleAccount` reject at decode. Their work is routed through
+  `KeeperCrank` candidates/touch-only candidates.
 - **Requires resolved**: `WithdrawInsurance`,
   `AdminForceCloseAccount`, `ForceCloseResolved`.
 - **Mode-aware**: `CloseAccount` (both modes, different paths).

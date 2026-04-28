@@ -19,6 +19,51 @@ fn set_risk_buffer_scan_cursor_for_test(env: &mut TestEnv, cursor: u16) {
     write_risk_buffer_for_test(env, &buf);
 }
 
+fn move_used_account_slot_for_test(env: &mut TestEnv, from: u16, to: u16) {
+    assert_ne!(from, to, "test helper requires distinct slots");
+    assert!((to as usize) < MAX_ACCOUNTS, "target slot out of range");
+    assert!(env.is_slot_used(from), "source slot must be used");
+    assert!(
+        !env.is_slot_used(to),
+        "target slot must start unused so it carries canonical empty bytes"
+    );
+
+    let mut slab = env.svm.get_account(&env.slab).unwrap();
+    const ACCOUNT_SIZE: usize = 360;
+    let accounts_off = ENGINE_OFFSET + ENGINE_ACCOUNTS_OFFSET;
+    let src = accounts_off + (from as usize) * ACCOUNT_SIZE;
+    let dst = accounts_off + (to as usize) * ACCOUNT_SIZE;
+    let src_bytes = slab.data[src..src + ACCOUNT_SIZE].to_vec();
+    let dst_bytes = slab.data[dst..dst + ACCOUNT_SIZE].to_vec();
+    slab.data[dst..dst + ACCOUNT_SIZE].copy_from_slice(&src_bytes);
+    slab.data[src..src + ACCOUNT_SIZE].copy_from_slice(&dst_bytes);
+
+    let src_word = from as usize / 64;
+    let src_bit = from as usize % 64;
+    let dst_word = to as usize / 64;
+    let dst_bit = to as usize % 64;
+    let src_word_off = ENGINE_OFFSET + ENGINE_BITMAP_OFFSET + src_word * 8;
+    let dst_word_off = ENGINE_OFFSET + ENGINE_BITMAP_OFFSET + dst_word * 8;
+    let mut src_word_bits = u64::from_le_bytes(
+        slab.data[src_word_off..src_word_off + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let mut dst_word_bits = u64::from_le_bytes(
+        slab.data[dst_word_off..dst_word_off + 8]
+            .try_into()
+            .unwrap(),
+    );
+    src_word_bits &= !(1u64 << src_bit);
+    dst_word_bits |= 1u64 << dst_bit;
+    slab.data[src_word_off..src_word_off + 8].copy_from_slice(&src_word_bits.to_le_bytes());
+    slab.data[dst_word_off..dst_word_off + 8].copy_from_slice(&dst_word_bits.to_le_bytes());
+
+    env.svm.set_account(env.slab, slab).unwrap();
+    assert!(!env.is_slot_used(from), "source slot should now be free");
+    assert!(env.is_slot_used(to), "target slot should now be used");
+}
+
 fn crank_with_candidates_for_test(env: &mut TestEnv, candidates: &[u16]) {
     let caller = Keypair::new();
     env.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
@@ -435,9 +480,91 @@ fn test_empty_buffer_first_crank() {
 
     let buf = env.read_risk_buffer();
     assert_eq!(buf.count, 0, "Empty market must keep empty risk buffer");
+    assert_eq!(
+        env.read_rr_cursor_position(),
+        0,
+        "Empty-market crank must scan the whole engine RR range and wrap"
+    );
+    assert!(
+        env.read_sweep_generation() > 0,
+        "Empty-market crank must complete a sweep generation"
+    );
     assert!(
         (buf.scan_cursor as usize) < MAX_ACCOUNTS,
         "Scan cursor must remain valid after empty crank"
+    );
+}
+
+#[test]
+fn test_crank_greedy_sweep_touches_sparse_positions_across_empty_bitmap() {
+    program_path();
+    let mut env = TestEnv::new();
+    let data = encode_init_market_with_maint_fee_bounded(
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
+        1_000_000_000,
+        1,
+        0,
+    );
+    env.try_init_market_raw(data)
+        .expect("init market with maintenance fee");
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let near = Keypair::new();
+    let near_idx = env.init_user(&near);
+    env.deposit(&near, near_idx, 1_000_000_000);
+    env.trade(&near, &lp, lp_idx, near_idx, 1_000_000);
+
+    let far_source = Keypair::new();
+    let far_source_idx = env.init_user(&far_source);
+    env.deposit(&far_source, far_source_idx, 1_000_000_000);
+    env.trade(&far_source, &lp, lp_idx, far_source_idx, 1_000_000);
+
+    let far_idx = core::cmp::min(1024usize, MAX_ACCOUNTS - 1) as u16;
+    assert!(
+        far_idx > far_source_idx,
+        "test requires a sparse target beyond the sequential source"
+    );
+    move_used_account_slot_for_test(&mut env, far_source_idx, far_idx);
+
+    assert!(env.read_account_position(near_idx) != 0);
+    assert!(env.read_account_position(far_idx) != 0);
+    let generation_before = env.read_sweep_generation();
+
+    env.set_slot_and_price_raw_no_walk(100, 143_000_000);
+    env.crank();
+
+    assert_eq!(
+        env.read_account_last_fee_slot(near_idx),
+        100,
+        "near open position should be fee-synced by the bitmap sweep"
+    );
+    assert_eq!(
+        env.read_account_last_fee_slot(far_idx),
+        100,
+        "far open position should be fee-synced despite the empty bitmap span"
+    );
+    assert_eq!(
+        env.read_rr_cursor_position(),
+        0,
+        "Greedy RR sweep should skip empty slots and wrap in one crank"
+    );
+    assert!(
+        env.read_sweep_generation() > generation_before,
+        "Greedy RR sweep should complete a full generation"
+    );
+    let buf = env.read_risk_buffer();
+    assert!(
+        buf.find(near_idx).is_some(),
+        "risk-buffer discovery should see the near sparse position"
+    );
+    assert!(
+        buf.find(far_idx).is_some(),
+        "risk-buffer discovery should see the far sparse position"
     );
 }
 
@@ -445,7 +572,7 @@ fn test_empty_buffer_first_crank() {
 // F4: Liquidation removes from buffer
 // ============================================================================
 
-/// LiquidateAtOracle removes liquidated account from buffer.
+/// KeeperCrank candidate liquidation removes liquidated account from buffer.
 #[test]
 fn test_liquidation_removes_from_buffer() {
     program_path();

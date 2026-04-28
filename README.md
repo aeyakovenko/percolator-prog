@@ -152,10 +152,8 @@ This section describes intent and operational ordering, not argument-by-argument
 - **KeeperCrank**
   - permissionless global maintenance entrypoint
   - two-phase design: keeper computes candidate shortlist off-chain using `preview_account_at_barrier`, then passes the candidate list in instruction data; on-chain processing operates only on shortlisted candidates
-  - charges maintenance fees, liquidates stale/unsafe accounts; funding is handled internally via K-coefficient mechanism
+  - charges maintenance fees, liquidates stale/unsafe accounts, settles touch-only candidates, and reclaims empty candidate accounts; funding is handled internally via K-coefficient mechanism
   - optionally updates insurance floor via smoothed auto-threshold policy
-- **LiquidateAtOracle**
-  - explicit liquidation for a specific target at current oracle
 - **TopUpInsurance**
   - transfers collateral into vault; credits insurance fund in engine
 

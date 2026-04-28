@@ -585,9 +585,9 @@ fn test_honest_participants_standard_market_full_lifecycle() {
     println!("HONEST PARTICIPANTS STANDARD MARKET FULL LIFECYCLE: PASSED");
 }
 
-/// LiquidateAtOracle must be blocked on resolved markets.
+/// The retired direct LiquidateAtOracle tag must reject.
 #[test]
-fn test_liquidate_blocked_on_resolved_market() {
+fn test_liquidate_at_oracle_tag_retired() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_hyperp(1_000_000);
@@ -608,11 +608,24 @@ fn test_liquidate_blocked_on_resolved_market() {
     let position_before = env.read_account_position(user_idx);
     let capital_before = env.read_account_capital(user_idx);
 
-    // Liquidation must fail on resolved market
-    let result = env.try_liquidate(user_idx);
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(env.pyth_index, false),
+        ],
+        data: encode_liquidate(user_idx),
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&admin.pubkey()),
+        &[&admin],
+        env.svm.latest_blockhash(),
+    );
     assert!(
-        result.is_err(),
-        "LiquidateAtOracle must be blocked on resolved markets"
+        env.svm.send_transaction(tx).is_err(),
+        "retired LiquidateAtOracle tag must reject"
     );
 
     // Position and capital must be unchanged after rejection

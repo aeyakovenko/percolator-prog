@@ -96,13 +96,12 @@ fn test_external_oracle_target_staircase_blocks_extraction_until_caught_up() {
     );
     env.try_withdraw(&user, user_idx, 1)
         .expect_err("extraction must reject while oracle target is still pending");
-    let settle_err = env
-        .try_settle_account(user_idx)
-        .expect_err("settle must reject while oracle target is still pending");
-    assert_custom_error(
-        &settle_err,
-        "0x1d",
-        "SettleAccount must surface CatchupRequired while target lags P_last",
+    env.try_settle_account(user_idx)
+        .expect("touch-only crank remains the public catchup/settlement path");
+    assert_ne!(
+        read_engine_last_oracle_price(&env),
+        target,
+        "one touch-only crank should not pretend the raw target is fully caught up"
     );
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
     let resolve_err = env
@@ -2048,7 +2047,8 @@ fn test_position_flip_minimal_equity() {
 // COVERAGE GAP TESTS: Spec-driven tests for critical missing coverage
 // ============================================================================
 
-/// Spec: LiquidateAtOracle must reduce target's position and charge liquidation fee to insurance.
+/// Spec: KeeperCrank FullClose candidates must reduce target position and
+/// charge liquidation fee to insurance.
 ///
 /// This test verifies two key spec requirements:
 /// 1. A liquidated account's position is reduced (FullClose policy zeros position)
@@ -2057,7 +2057,7 @@ fn test_position_flip_minimal_equity() {
 /// Setup uses a long position with thin margin that becomes underwater after a
 /// price drop, making the account eligible for liquidation.
 #[test]
-fn test_liquidation_reduces_position_and_charges_fee() {
+fn test_crank_candidate_liquidation_reduces_position_and_charges_fee() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 80); // liquidation test: max cap (100%/read), unrestricted for these moves
@@ -2094,7 +2094,7 @@ fn test_liquidation_reduces_position_and_charges_fee() {
     // threshold (~$129.5M for this position size + capital).
     env.set_slot_and_price(2000, 90_000_000); // walk target: $138 → ~$115
 
-    // Call LiquidateAtOracle directly (no crank first).
+    // Submit a KeeperCrank FullClose candidate.
     let result = env.try_liquidate(user_idx);
     // Liquidation should succeed (user is deeply underwater at $1)
     assert!(
@@ -2103,9 +2103,7 @@ fn test_liquidation_reduces_position_and_charges_fee() {
         result
     );
 
-    // After LiquidateAtOracle with FullClose, position should be zero.
-    // The instruction uses liquidate_at_oracle(..., FullClose) which calls
-    // attach_effective_position(idx, 0).
+    // After KeeperCrank with FullClose, position should be zero.
     let pos_after = env.read_account_position(user_idx);
     assert_eq!(
         pos_after, 0,
@@ -2126,6 +2124,35 @@ fn test_liquidation_reduces_position_and_charges_fee() {
         engine_vault as u64, spl_vault,
         "Conservation: engine vault ({}) must match SPL vault ({}) after liquidation",
         engine_vault, spl_vault
+    );
+}
+
+/// The retired direct LiquidateAtOracle tag is rejected at decode.
+#[test]
+fn test_liquidate_at_oracle_tag_retired() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+    let caller = Keypair::new();
+    env.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(env.pyth_index, false),
+        ],
+        data: encode_liquidate(0),
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&caller.pubkey()),
+        &[&caller],
+        env.svm.latest_blockhash(),
+    );
+    assert!(
+        env.svm.send_transaction(tx).is_err(),
+        "retired LiquidateAtOracle tag must reject"
     );
 }
 
@@ -2431,11 +2458,12 @@ fn test_keeper_crank_format_v1_touch_only() {
     );
 }
 
-/// Spec SS 10.7: permissionless reclamation of flat/dust accounts.
+/// Spec SS 10.7: permissionless reclamation of flat/dust accounts through
+/// KeeperCrank candidate GC.
 ///
-/// ReclaimEmptyAccount (tag 25) allows anyone to recycle an account slot
-/// that has zero position, zero capital, and zero positive PnL. This frees
-/// the slot for reuse without requiring the account owner's signature.
+/// The direct ReclaimEmptyAccount tag is retired. A touch-only crank candidate
+/// lets anyone recycle an account slot that has zero position, zero capital,
+/// and zero positive PnL without requiring the account owner's signature.
 ///
 /// This test verifies:
 /// 1. An empty account (no deposits, no position) can be reclaimed by anyone
@@ -2445,47 +2473,28 @@ fn test_keeper_crank_format_v1_touch_only() {
 fn test_reclaim_empty_account() {
     program_path();
     let mut env = TestEnv::new();
-    env.init_market_with_invert(0);
-
-    let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
-    env.deposit(&lp, lp_idx, 10_000_000_000);
+    let data = encode_init_market_with_maint_fee_bounded(
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
+        1000,
+        1,
+        0,
+    );
+    env.try_init_market_raw(data).expect("init");
 
     let user = Keypair::new();
-    let user_idx = env.init_user(&user);
-    // init_user pays 100; v12.19.6 anti-spam routes 1 to insurance and
-    // credits 99 as capital. Withdraw credited capital to make the account
-    // truly empty for reclaim.
-    env.crank();
-    env.try_withdraw(&user, user_idx, 99).unwrap();
+    let user_idx = env.init_user_with_fee(&user, 100);
 
     let used_before = env.read_num_used_accounts();
 
-    // Reclaim should succeed -- account is empty (anyone can call)
-    let anyone = Keypair::new();
-    env.svm.airdrop(&anyone.pubkey(), 1_000_000_000).unwrap();
-
-    // Build ReclaimEmptyAccount instruction (tag 25)
-    let mut data = vec![25u8];
-    data.extend_from_slice(&user_idx.to_le_bytes());
-    let ix = Instruction {
-        program_id: env.program_id,
-        accounts: vec![
-            AccountMeta::new(env.slab, false),
-            AccountMeta::new_readonly(sysvar::clock::ID, false),
-        ],
-        data,
-    };
-    let tx = Transaction::new_signed_with_payer(
-        &[cu_ix(), ix],
-        Some(&anyone.pubkey()),
-        &[&anyone],
-        env.svm.latest_blockhash(),
-    );
-    let result = env.svm.send_transaction(tx);
+    // Candidate GC should succeed. The crank first realizes enough maintenance
+    // fees to drain the flat dust account, then frees the slot.
+    env.set_slot_and_price(150, 138_000_000);
+    let result = env.try_reclaim_empty_account(user_idx);
     assert!(
         result.is_ok(),
-        "ReclaimEmptyAccount should succeed on empty account: {:?}",
+        "touch-only crank candidate should reclaim fee-drained account: {:?}",
         result
     );
 
@@ -2593,14 +2602,14 @@ fn test_funding_rate_transfers_pnl_on_premium() {
 }
 
 // ============================================================================
-// SettleAccount (tag 26) tests
+// KeeperCrank touch-only settlement tests
 // ============================================================================
 
-/// SettleAccount triggers lazy settlement (funding, mark-to-market, fees, warmup).
-/// After an oracle price move, calling SettleAccount should update the account's
-/// PnL to reflect the new mark price.
+/// KeeperCrank touch-only candidates trigger lazy settlement (funding,
+/// mark-to-market, fees, warmup). After an oracle price move, touching the
+/// account through crank should update lazy state.
 #[test]
-fn test_settle_account_updates_lazy_state() {
+fn test_crank_touch_only_updates_lazy_state() {
     program_path();
 
     let mut env = TestEnv::new();
@@ -2628,9 +2637,13 @@ fn test_settle_account_updates_lazy_state() {
     // engine price envelope. Price goes from $138 to $150, so the long profits.
     env.set_slot_and_price(450, 150_000_000);
 
-    // Call SettleAccount (tag 26) instead of a full crank.
+    // Submit the account as a touch-only crank candidate.
     let result = env.try_settle_account(user_idx);
-    assert!(result.is_ok(), "SettleAccount should succeed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "touch-only KeeperCrank should succeed: {:?}",
+        result
+    );
 
     let pnl_after = env.read_account_pnl(user_idx);
     let cap_after = env.read_account_capital(user_idx);
@@ -2641,17 +2654,16 @@ fn test_settle_account_updates_lazy_state() {
     let state_changed = pnl_after != pnl_before || cap_after != cap_before;
     assert!(
         state_changed,
-        "SettleAccount must update lazy state after oracle move. \
+        "touch-only KeeperCrank must update lazy state after oracle move. \
          pnl: {} -> {}, capital: {} -> {}",
         pnl_before, pnl_after, cap_before, cap_after
     );
 }
 
-/// SettleAccount is permissionless -- any signer can call it for any account.
-/// This is by design: settlement is a read-compute-write on the account's
-/// lazy fields and does not require the account owner's authorization.
+/// Touch-only KeeperCrank is permissionless: any signer can pay for a crank
+/// that touches any account.
 #[test]
-fn test_settle_account_is_permissionless() {
+fn test_crank_touch_only_is_permissionless() {
     program_path();
 
     let mut env = TestEnv::new();
@@ -2670,7 +2682,8 @@ fn test_settle_account_is_permissionless() {
     env.set_slot(200);
     env.crank();
 
-    // A completely unrelated signer calls SettleAccount on the user's account.
+    // A completely unrelated signer submits a touch-only crank candidate for
+    // the user's account.
     let random_signer = Keypair::new();
     env.svm
         .airdrop(&random_signer.pubkey(), 1_000_000_000)
@@ -2680,44 +2693,39 @@ fn test_settle_account_is_permissionless() {
     let result = env.try_settle_account_with_signer(&random_signer, user_idx);
     assert!(
         result.is_ok(),
-        "SettleAccount must be permissionless -- any signer should work: {:?}",
+        "touch-only KeeperCrank must be permissionless -- any signer should work: {:?}",
         result
     );
 }
 
-/// SettleAccount is blocked on resolved markets.
-/// Once a market is resolved, settlement is no longer allowed because
-/// the final price is locked in.
+/// The retired direct SettleAccount tag is rejected at decode.
 #[test]
-fn test_settle_account_blocked_on_resolved() {
+fn test_settle_account_tag_retired() {
     program_path();
-
     let mut env = TestEnv::new();
-    env.init_market_with_cap(0, 80); // cap > 0 so hyperp_authority defaults to admin
-
-    let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
-    env.deposit(&lp, lp_idx, 50_000_000_000);
-
-    let user = Keypair::new();
-    let user_idx = env.init_user(&user);
-    env.deposit(&user, user_idx, 5_000_000_000);
-
-    env.set_slot(200);
-    env.crank();
-
-    // Resolve the market at a fresh external price.
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.set_slot_and_price(300, 138_000_000);
-    env.try_resolve_market(&admin, 0).unwrap();
-    assert!(env.is_market_resolved(), "Market must be resolved");
-
-    // SettleAccount on a resolved market should fail.
-    env.set_slot_and_price(400, 138_000_000);
-    let result = env.try_settle_account(user_idx);
+    env.init_market_with_invert(0);
+    let mut data = vec![26u8];
+    data.extend_from_slice(&0u16.to_le_bytes());
+    let caller = Keypair::new();
+    env.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(env.pyth_index, false),
+        ],
+        data,
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&caller.pubkey()),
+        &[&caller],
+        env.svm.latest_blockhash(),
+    );
     assert!(
-        result.is_err(),
-        "SettleAccount must be rejected on resolved markets"
+        env.svm.send_transaction(tx).is_err(),
+        "retired SettleAccount tag must reject"
     );
 }
 
@@ -3209,13 +3217,12 @@ fn test_init_lp_blocked_on_resolved() {
 }
 
 // ============================================================================
-// ReclaimEmptyAccount (tag 25) additional coverage
+// KeeperCrank candidate-GC coverage
 // ============================================================================
 
-/// Spec SS 10.7: Reclaim rejects accounts with non-dust capital
-/// (capital >= min_initial_deposit).
+/// Candidate GC must not reclaim accounts with nonzero capital.
 #[test]
-fn test_reclaim_rejects_account_with_capital() {
+fn test_crank_candidate_gc_skips_account_with_capital() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
@@ -3237,14 +3244,18 @@ fn test_reclaim_rejects_account_with_capital() {
 
     let result = env.try_reclaim_empty_account(user_idx);
     assert!(
-        result.is_err(),
-        "ReclaimEmptyAccount must reject account with non-dust capital"
+        result.is_ok(),
+        "candidate GC should ignore ineligible accounts without failing crank"
+    );
+    assert!(
+        env.read_account_capital(user_idx) >= 100,
+        "candidate GC must not reclaim or drain nonzero-capital account"
     );
 }
 
-/// Spec SS 10.7: Reclaim rejects accounts with an open position.
+/// Candidate GC must not reclaim accounts with an open position.
 #[test]
-fn test_reclaim_rejects_account_with_position() {
+fn test_crank_candidate_gc_skips_account_with_position() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
@@ -3267,38 +3278,43 @@ fn test_reclaim_rejects_account_with_position() {
 
     let result = env.try_reclaim_empty_account(user_idx);
     assert!(
-        result.is_err(),
-        "ReclaimEmptyAccount must reject account with an open position"
+        result.is_ok(),
+        "candidate GC should ignore positioned accounts without failing crank"
+    );
+    assert_ne!(
+        env.read_account_position(user_idx),
+        0,
+        "candidate GC must not reclaim account with an open position"
     );
 }
 
-/// Spec: ReclaimEmptyAccount is blocked on resolved markets.
+/// The retired direct ReclaimEmptyAccount tag is rejected at decode.
 #[test]
-fn test_reclaim_blocked_on_resolved() {
+fn test_reclaim_empty_account_tag_retired() {
     program_path();
     let mut env = TestEnv::new();
-    env.init_market_with_cap(0, 80); // cap > 0 → hyperp_authority defaults to admin
-
-    let lp = Keypair::new();
-    let lp_idx = env.init_lp(&lp);
-    env.deposit(&lp, lp_idx, 10_000_000_000);
-
-    let user = Keypair::new();
-    let user_idx = env.init_user(&user);
-    // Withdraw credited init capital to make account empty for reclaim.
-    env.crank();
-    env.try_withdraw(&user, user_idx, 99).unwrap();
-
-    // Resolve the market at a fresh external price.
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    env.set_slot_and_price(200, 138_000_000);
-    env.try_resolve_market(&admin, 0).unwrap();
-    assert!(env.is_market_resolved());
-
-    let result = env.try_reclaim_empty_account(user_idx);
+    env.init_market_with_invert(0);
+    let mut data = vec![25u8];
+    data.extend_from_slice(&0u16.to_le_bytes());
+    let caller = Keypair::new();
+    env.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+        ],
+        data,
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&caller.pubkey()),
+        &[&caller],
+        env.svm.latest_blockhash(),
+    );
     assert!(
-        result.is_err(),
-        "ReclaimEmptyAccount must be rejected on a resolved market"
+        env.svm.send_transaction(tx).is_err(),
+        "retired ReclaimEmptyAccount tag must reject"
     );
 }
 
@@ -3375,10 +3391,9 @@ fn test_init_lp_survives_stale_oracle() {
 }
 
 /// Regression companion to test_top_up_insurance_survives_current
-/// _slot_above_last_market_slot. ReclaimEmptyAccount received the
-/// same monotonicity floor (bounded_now = max(min(clock, lms),
-/// current_slot)) plus a pre-reclaim fee sync; both must respect
-/// engine monotonicity when a prior no-oracle op has split
+/// _slot_above_last_market_slot. Candidate-GC reclaim uses the same
+/// no-oracle fee-sync anchor as the retired direct reclaim path; it must
+/// respect engine monotonicity when a prior no-oracle op has split
 /// current_slot past last_market_slot.
 ///
 /// Tight observable: reclaim must not surface EngineOverflow (0x12)
@@ -3425,7 +3440,7 @@ fn test_reclaim_survives_current_slot_above_last_market_slot() {
 
 /// Regression: TopUpInsurance's bounded-slot computation must not
 /// regress below engine.current_slot. A prior no-oracle op
-/// (InitUser / DepositCollateral / ReclaimEmptyAccount) can advance
+/// (InitUser / DepositCollateral / candidate-GC reclaim) can advance
 /// current_slot past last_market_slot. Before the fix, TopUpInsurance
 /// passed `bounded_now = min(clock.slot, last_market_slot)` which
 /// would then be < current_slot, failing the engine's monotonicity

@@ -2988,8 +2988,8 @@ fn test_attack_withdraw_out_of_bounds_index() {
     );
 }
 
-/// ATTACK: LiquidateAtOracle with out-of-bounds target index.
-/// Expected: Rejected by check_idx.
+/// ATTACK: KeeperCrank liquidation candidate with out-of-bounds target index.
+/// Expected: Invalid candidate is skipped without mutating market state.
 #[test]
 fn test_attack_liquidate_out_of_bounds_index() {
     program_path();
@@ -2997,28 +2997,34 @@ fn test_attack_liquidate_out_of_bounds_index() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let slab_before = env.svm.get_account(&env.slab).unwrap().data;
     let vault_before = env.vault_balance();
+    let engine_vault_before = env.read_engine_vault();
+    let insurance_before = env.read_insurance_balance();
     let used_before = env.read_num_used_accounts();
     let result = env.try_liquidate_target(u16::MAX);
     assert!(
-        result.is_err(),
-        "ATTACK: Liquidate out-of-bounds index should fail"
+        result.is_ok(),
+        "ATTACK: crank should tolerate out-of-bounds liquidation candidates"
     );
-    let slab_after = env.svm.get_account(&env.slab).unwrap().data;
     let vault_after = env.vault_balance();
+    let engine_vault_after = env.read_engine_vault();
+    let insurance_after = env.read_insurance_balance();
     let used_after = env.read_num_used_accounts();
     assert_eq!(
-        slab_after, slab_before,
-        "Rejected out-of-bounds liquidation must not mutate slab"
+        vault_after, vault_before,
+        "Skipped out-of-bounds liquidation candidate must not move vault funds"
     );
     assert_eq!(
-        vault_after, vault_before,
-        "Rejected out-of-bounds liquidation must not move vault funds"
+        engine_vault_after, engine_vault_before,
+        "Skipped out-of-bounds liquidation candidate must not move engine vault"
+    );
+    assert_eq!(
+        insurance_after, insurance_before,
+        "Skipped out-of-bounds liquidation candidate must not move insurance"
     );
     assert_eq!(
         used_after, used_before,
-        "Rejected out-of-bounds liquidation must not change num_used_accounts"
+        "Skipped out-of-bounds liquidation candidate must not change num_used_accounts"
     );
 }
 
@@ -9212,8 +9218,9 @@ fn test_attack_close_account_wrong_vault_pda() {
     );
 }
 
-/// ATTACK: Liquidate permissionless caller not signer.
-/// Verify liquidation requires a valid signer even though it's permissionless.
+/// ATTACK: self-crank caller account is not a signer.
+/// Permissionless crank uses `caller_idx = u16::MAX`; self-crank reward mode
+/// requires the caller account owner to sign.
 #[test]
 fn test_attack_liquidate_caller_not_signer() {
     program_path();
@@ -9237,17 +9244,18 @@ fn test_attack_liquidate_caller_not_signer() {
     let user_pos_before = env.read_account_position(user_idx);
     let user_cap_before = env.read_account_capital(user_idx);
 
-    let caller = Keypair::new();
-    env.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
-
-    // Construct liquidation instruction with caller NOT as signer
-    let mut data = vec![10u8]; // LiquidateAtOracle
+    // Construct KeeperCrank in self-crank mode with the account owner listed
+    // as non-signer. Authorization must reject before candidate liquidation.
+    let mut data = vec![5u8]; // KeeperCrank
     data.extend_from_slice(&user_idx.to_le_bytes());
+    data.push(1u8); // format_version
+    data.extend_from_slice(&user_idx.to_le_bytes());
+    data.push(0u8); // FullClose candidate
 
     let ix = Instruction {
         program_id: env.program_id,
         accounts: vec![
-            AccountMeta::new(caller.pubkey(), false), // NOT a signer
+            AccountMeta::new(user.pubkey(), false), // owner key, but NOT a signer
             AccountMeta::new(env.slab, false),
             AccountMeta::new_readonly(sysvar::clock::ID, false),
             AccountMeta::new_readonly(env.pyth_index, false),
@@ -9263,12 +9271,7 @@ fn test_attack_liquidate_caller_not_signer() {
         env.svm.latest_blockhash(),
     );
     let result = env.svm.send_transaction(tx);
-    // The Solana runtime should reject: caller is in account list but NOT a signer,
-    // yet the transaction only has admin as signer. The runtime enforces that any
-    // account marked in the instruction's AccountMeta must match tx signatures when
-    // is_signer=false - actually it does NOT require signatures for non-signer accounts.
-    // The program's LiquidateAtOracle handler never calls expect_signer on accounts[0],
-    // so this is permissionless. Either way, verify security properties:
+    assert!(result.is_err(), "self-crank caller must be a signer");
     let user_pos_after = env.read_account_position(user_idx);
     let user_cap_after = env.read_account_capital(user_idx);
     assert_eq!(
@@ -10744,11 +10747,12 @@ fn test_attack_liquidate_target_u16_max() {
     let spl_vault_before = env.vault_balance();
     let engine_vault_before = env.read_engine_vault();
 
-    // Try liquidating index u16::MAX (should fail - no such account)
+    // Try liquidating index u16::MAX. Through KeeperCrank this is an
+    // invalid candidate and should be skipped without mutation.
     let result = env.try_liquidate(u16::MAX);
     assert!(
-        result.is_err(),
-        "ATTACK: Liquidate with u16::MAX target should fail!"
+        result.is_ok(),
+        "ATTACK: crank with u16::MAX liquidation candidate should not fail"
     );
     assert_eq!(
         env.read_account_position(lp_idx),

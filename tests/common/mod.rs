@@ -796,6 +796,17 @@ pub fn encode_crank_with_candidates(candidates: &[u16]) -> Vec<u8> {
     data
 }
 
+pub fn encode_crank_with_touch_candidates(candidates: &[u16]) -> Vec<u8> {
+    let mut data = vec![5u8];
+    data.extend_from_slice(&u16::MAX.to_le_bytes());
+    data.push(1u8); // format_version = 1
+    for &idx in candidates {
+        data.extend_from_slice(&idx.to_le_bytes());
+        data.push(0xFFu8); // tag 0xFF = touch-only
+    }
+    data
+}
+
 pub struct TestEnv {
     pub svm: LiteSVM,
     pub program_id: Pubkey,
@@ -2144,6 +2155,28 @@ impl TestEnv {
         )
     }
 
+    /// Read `engine.rr_cursor_position`, the engine Phase 2 greedy sweep cursor.
+    pub fn read_rr_cursor_position(&self) -> u64 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        const RR_CURSOR_OFFSET: usize = ENGINE_OFFSET + 592;
+        u64::from_le_bytes(
+            d[RR_CURSOR_OFFSET..RR_CURSOR_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    /// Read `engine.sweep_generation`, incremented after a complete RR cursor wrap.
+    pub fn read_sweep_generation(&self) -> u64 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        const SWEEP_GENERATION_OFFSET: usize = ENGINE_OFFSET + 600;
+        u64::from_le_bytes(
+            d[SWEEP_GENERATION_OFFSET..SWEEP_GENERATION_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
     /// Read funding_rate_bps_per_slot_last from engine
     pub fn read_funding_rate(&self) -> i128 {
         // v12.17: funding_rate_e9_per_slot_last removed from engine.
@@ -2768,7 +2801,8 @@ impl TestEnv {
             .expect("top_up_insurance failed");
     }
 
-    /// Try liquidation
+    /// Try liquidation through KeeperCrank candidate processing. The direct
+    /// LiquidateAtOracle tag is retired.
     pub fn try_liquidate(&mut self, target_idx: u16) -> Result<(), String> {
         let caller = Keypair::new();
         self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
@@ -2776,11 +2810,12 @@ impl TestEnv {
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
+                AccountMeta::new(caller.pubkey(), true),
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
             ],
-            data: encode_liquidate(target_idx),
+            data: encode_crank_with_candidates(&[target_idx]),
         };
 
         let tx = Transaction::new_signed_with_payer(
@@ -3167,6 +3202,7 @@ impl TestEnv {
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
+                AccountMeta::new(caller.pubkey(), true),
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
@@ -3285,7 +3321,8 @@ impl TestEnv {
         )
     }
 
-    /// Try LiquidateAtOracle instruction
+    /// Try liquidation through KeeperCrank candidate processing. The direct
+    /// LiquidateAtOracle tag is retired.
     pub fn try_liquidate_target(&mut self, target_idx: u16) -> Result<(), String> {
         let caller = Keypair::new();
         self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
@@ -3293,11 +3330,12 @@ impl TestEnv {
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
+                AccountMeta::new(caller.pubkey(), true),
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
             ],
-            data: encode_liquidate(target_idx),
+            data: encode_crank_with_candidates(&[target_idx]),
         };
         let tx = Transaction::new_signed_with_payer(
             &[cu_ix(), ix],
@@ -5389,22 +5427,21 @@ impl TestEnv {
     // Instruction helpers for tags 24, 26, 27, 28
     // ------------------------------------------------------------------
 
-    /// SettleAccount (tag 26) -- permissionless
+    /// Account settlement through KeeperCrank touch-only candidates. The
+    /// direct SettleAccount tag is retired.
     pub fn try_settle_account(&mut self, user_idx: u16) -> Result<(), String> {
         let caller = Keypair::new();
         self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
 
-        let mut data = vec![26u8];
-        data.extend_from_slice(&user_idx.to_le_bytes());
-
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
-                AccountMeta::new(self.slab, false), // 0: slab (writable)
-                AccountMeta::new_readonly(sysvar::clock::ID, false), // 1: clock
-                AccountMeta::new_readonly(self.pyth_index, false), // 2: oracle
+                AccountMeta::new(caller.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
             ],
-            data,
+            data: encode_crank_with_touch_candidates(&[user_idx]),
         };
 
         let tx = Transaction::new_signed_with_payer(
@@ -5419,23 +5456,22 @@ impl TestEnv {
             .map_err(|e| format!("{:?}", e))
     }
 
-    /// SettleAccount (tag 26) with a specific signer -- used for permissionless test
+    /// Account settlement through KeeperCrank touch-only candidates with a
+    /// specific transaction payer.
     pub fn try_settle_account_with_signer(
         &mut self,
         signer: &Keypair,
         user_idx: u16,
     ) -> Result<(), String> {
-        let mut data = vec![26u8];
-        data.extend_from_slice(&user_idx.to_le_bytes());
-
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
+                AccountMeta::new(signer.pubkey(), true),
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
             ],
-            data,
+            data: encode_crank_with_touch_candidates(&[user_idx]),
         };
 
         let tx = Transaction::new_signed_with_payer(
@@ -5538,6 +5574,19 @@ impl TestEnv {
             return 0;
         }
         i128::from_le_bytes(slab_data[off..off + 16].try_into().unwrap())
+    }
+
+    /// Read last_fee_slot (u64) for an account slot.
+    pub fn read_account_last_fee_slot(&self, idx: u16) -> u64 {
+        let slab_data = self.svm.get_account(&self.slab).unwrap().data;
+        const ACCOUNTS_OFFSET: usize = ENGINE_OFFSET + ENGINE_ACCOUNTS_OFFSET;
+        const ACCOUNT_SIZE: usize = 360;
+        const LAST_FEE_SLOT_OFFSET: usize = 240;
+        let off = ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + LAST_FEE_SLOT_OFFSET;
+        if slab_data.len() < off + 8 {
+            return 0;
+        }
+        u64::from_le_bytes(slab_data[off..off + 8].try_into().unwrap())
     }
 
     /// Read fees_earned_total (u128) for an account slot.
@@ -5698,21 +5747,21 @@ impl TestEnv {
         }
     }
 
-    /// Try ReclaimEmptyAccount (tag 25), permissionless.
+    /// Try empty-account reclaim through KeeperCrank candidate GC. The direct
+    /// ReclaimEmptyAccount tag is retired.
     pub fn try_reclaim_empty_account(&mut self, target_idx: u16) -> Result<(), String> {
         let caller = Keypair::new();
         self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
 
-        let mut data = vec![25u8];
-        data.extend_from_slice(&target_idx.to_le_bytes());
-
         let ix = Instruction {
             program_id: self.program_id,
             accounts: vec![
+                AccountMeta::new(caller.pubkey(), true),
                 AccountMeta::new(self.slab, false),
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
             ],
-            data,
+            data: encode_crank_with_touch_candidates(&[target_idx]),
         };
 
         let tx = Transaction::new_signed_with_payer(
