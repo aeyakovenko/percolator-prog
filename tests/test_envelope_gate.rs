@@ -1,4 +1,3 @@
-#![cfg(feature = "legacy-tests")]
 //! Public-path stale-market gates + init-time prevalidation
 //! (security.md seventh / eighth passes).
 //!
@@ -30,7 +29,7 @@ fn test_attack_top_up_insurance_rejected_after_stale_matured() {
     // perm_resolve = 80 (test default, < MAX_ACCRUAL_DT_SLOTS = 100).
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
 
     let lp = Keypair::new();
@@ -81,7 +80,7 @@ fn test_attack_init_user_rejected_after_stale_matured() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 1_000_000_000);
 
     let lp = Keypair::new();
@@ -122,14 +121,15 @@ fn test_attack_init_user_rejected_after_stale_matured() {
 const INVALID_CONFIG_PARAM: u32 = 26;
 
 /// Wire-format byte offset of `RiskParams.max_price_move_bps_per_slot`
-/// in the InitMarket payload (after tag, admin, mint, feed_id, all the
-/// pre-`max_price_move_bps_per_slot` config fields, and three u128 floor
-/// fields). Encoders write a u64 here; we patch to 0 to exercise the
-/// wrapper's prevalidation gate (commit 83078bb).
-const MAX_PRICE_MOVE_OFFSET: usize = 288;
+/// in the v2 InitMarket payload. Layout:
+///   tag(1) admin(32) mint(32) feed_id(32) max_staleness(8) conf(2)
+///   invert(1) unit_scale(4) init_mark(8) maint_fee(16)  = 136
+///   then RiskParamsArgs with max_price_move_bps_per_slot as the
+///   14th and last field at offset 144 inside the struct = 280.
+const MAX_PRICE_MOVE_OFFSET: usize = 280;
 
 fn send_init_market_raw(env: &mut TestEnv, data: Vec<u8>) -> Result<(), String> {
-    let admin = solana_sdk::signature::Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // init_market_with_cap pre-creates a dummy ATA — mirror that here.
     let dummy_ata = solana_sdk::pubkey::Pubkey::new_unique();
@@ -223,7 +223,7 @@ fn test_attack_resolve_market_invalid_mode_rejected() {
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 80);
     env.crank();
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Build a raw ResolveMarket payload with mode = 2 (illegal).
     let mut data = vec![19u8]; // tag

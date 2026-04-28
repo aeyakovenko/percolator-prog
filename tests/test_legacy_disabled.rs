@@ -42,10 +42,6 @@ disabled!(
     "v2-migration: slab fixture + tag encoders pending Phase 6"
 );
 disabled!(
-    test_envelope_gate,
-    "v2-migration: InitMarket extended-tail encoder needs Borsh Option<T> rewrite (R2) in Phase 6"
-);
-disabled!(
     test_insurance,
     "v2-migration: insurance-flow ix encoders pending Phase 6"
 );
