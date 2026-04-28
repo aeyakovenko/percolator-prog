@@ -29,10 +29,10 @@ pub mod units;
 pub mod zc;
 
 use instructions::{
-    CatchupAccrue, CloseAccount, ConvertReleasedPnl, LiquidateAtOracle, PushHyperpMark,
-    ReclaimEmptyAccount, ResolveMarket, ResolvePermissionless, SettleAccount, TopUpInsurance,
-    TradeNoCpi, UpdateAuthority, UpdateConfig, WithdrawCollateral, WithdrawInsurance,
-    WithdrawInsuranceLimited,
+    CatchupAccrue, CloseAccount, ConvertReleasedPnl, DepositCollateral, DepositFeeCredits,
+    LiquidateAtOracle, PushHyperpMark, ReclaimEmptyAccount, ResolveMarket, ResolvePermissionless,
+    SettleAccount, TopUpInsurance, TradeNoCpi, UpdateAuthority, UpdateConfig, WithdrawCollateral,
+    WithdrawInsurance, WithdrawInsuranceLimited,
 };
 // The `#[program]` macro looks for each Accounts struct's auto-generated
 // `__client_accounts_<name>` module at `super::` (= the crate root). Our
@@ -44,6 +44,10 @@ pub use instructions::catchup_accrue::__client_accounts_catchupaccrue;
 pub use instructions::close_account::__client_accounts_closeaccount;
 #[doc(hidden)]
 pub use instructions::convert_released_pnl::__client_accounts_convertreleasedpnl;
+#[doc(hidden)]
+pub use instructions::deposit_collateral::__client_accounts_depositcollateral;
+#[doc(hidden)]
+pub use instructions::deposit_fee_credits::__client_accounts_depositfeecredits;
 #[doc(hidden)]
 pub use instructions::liquidate_at_oracle::__client_accounts_liquidateatoracle;
 #[doc(hidden)]
@@ -121,6 +125,17 @@ pub mod percolator {
         size: i128,
     ) -> Result<()> {
         instructions::trade_no_cpi::handler(ctx, lp_idx, user_idx, size)
+    }
+
+    /// Tag 3 — owner deposits collateral.
+    /// See `instructions/deposit_collateral.rs`.
+    #[discrim = 3]
+    pub fn deposit_collateral(
+        ctx: &mut Context<DepositCollateral>,
+        user_idx: u16,
+        amount: u64,
+    ) -> Result<()> {
+        instructions::deposit_collateral::handler(ctx, user_idx, amount)
     }
 
     /// Tag 4 — owner withdraws collateral to their SPL token ATA.
@@ -209,6 +224,17 @@ pub mod percolator {
     #[discrim = 26]
     pub fn settle_account(ctx: &mut Context<SettleAccount>, user_idx: u16) -> Result<()> {
         instructions::settle_account::handler(ctx, user_idx)
+    }
+
+    /// Tag 27 — direct fee-debt repayment (§10.3.1).
+    /// See `instructions/deposit_fee_credits.rs`.
+    #[discrim = 27]
+    pub fn deposit_fee_credits(
+        ctx: &mut Context<DepositFeeCredits>,
+        user_idx: u16,
+        amount: u64,
+    ) -> Result<()> {
+        instructions::deposit_fee_credits::handler(ctx, user_idx, amount)
     }
 
     /// Tag 28 — voluntary in-engine PnL conversion (no SPL CPI).

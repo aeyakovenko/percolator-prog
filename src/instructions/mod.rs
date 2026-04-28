@@ -6,6 +6,8 @@
 pub mod catchup_accrue;
 pub mod close_account;
 pub mod convert_released_pnl;
+pub mod deposit_collateral;
+pub mod deposit_fee_credits;
 pub mod liquidate_at_oracle;
 pub mod push_hyperp_mark;
 pub mod reclaim_empty_account;
@@ -27,6 +29,8 @@ pub mod withdraw_insurance_limited;
 pub use catchup_accrue::CatchupAccrue;
 pub use close_account::CloseAccount;
 pub use convert_released_pnl::ConvertReleasedPnl;
+pub use deposit_collateral::DepositCollateral;
+pub use deposit_fee_credits::DepositFeeCredits;
 pub use liquidate_at_oracle::LiquidateAtOracle;
 pub use push_hyperp_mark::PushHyperpMark;
 pub use reclaim_empty_account::ReclaimEmptyAccount;
