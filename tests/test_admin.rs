@@ -1,4 +1,4 @@
-#![cfg(feature = "legacy-tests")]
+
 mod common;
 #[allow(unused_imports)]
 use common::*;
@@ -23,7 +23,7 @@ fn test_critical_update_admin_authorization() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let new_admin = Keypair::new();
     let attacker = Keypair::new();
     env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
@@ -70,7 +70,7 @@ fn test_critical_update_config_authorization() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let attacker = Keypair::new();
     env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
 
@@ -275,7 +275,7 @@ fn test_update_admin_zero_accepted_for_burn() {
     // because admin burn requires both for live markets (liveness guard).
     env.init_market_with_cap(0, 100);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let zero_pubkey = Pubkey::new_from_array([0u8; 32]);
 
     // Admin burn to zero is now allowed (spec §7 step [3])
@@ -566,7 +566,7 @@ fn test_update_config_rejects_negative_funding_max_premium() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Capture config snapshot before rejected operation
     let config_before = env.read_update_config_snapshot();
@@ -609,7 +609,7 @@ fn test_update_config_rejects_negative_funding_max_e9_per_slot() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Capture config snapshot before rejected operation
     let config_before = env.read_update_config_snapshot();
@@ -732,7 +732,7 @@ fn test_update_config_rejects_zero_horizon() {
     // Capture config snapshot before rejected operation
     let config_before = env.read_update_config_snapshot();
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let result = env.try_update_config_with_params(&admin, 0);
     assert!(
         result.is_err(),
@@ -774,7 +774,7 @@ fn test_update_authority_init_defaults_match_admin() {
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 80);
 
-    let admin_kp = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin_kp = env.payer.insecure_clone();
 
     // UpdateAuthority with the current admin signing + new_authority = self
     // must succeed for insurance — which proves the current authority IS
@@ -792,7 +792,7 @@ fn test_update_authority_insurance_positive_delegation() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 80);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let delegate = Keypair::new();
     env.svm.airdrop(&delegate.pubkey(), 1_000_000_000).unwrap();
 
@@ -833,7 +833,7 @@ fn test_update_authority_negative_new_pubkey_not_signer() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 80);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let target_pubkey = Pubkey::new_unique();
 
     // Raw instruction: current signs, but new_pubkey is NOT a signer.
@@ -868,7 +868,7 @@ fn test_update_authority_burn_single_sig_and_then_dead() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 80);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Burn insurance_authority (single-sig: only current signs).
     env.try_update_authority(&admin, AUTHORITY_INSURANCE, None)
@@ -889,7 +889,7 @@ fn test_update_authority_burning_one_kind_leaves_others_intact() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 80);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     env.try_update_authority(&admin, AUTHORITY_INSURANCE, None)
         .expect("burn insurance_authority");
@@ -914,7 +914,7 @@ fn test_update_authority_negative_invalid_kind() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 80);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let err = env
         .try_update_authority(&admin, 42u8, None)
@@ -931,7 +931,7 @@ fn test_update_authority_insurance_survives_admin_burn() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 80);
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     // Before admin burn: delegate insurance_authority to a dedicated key.
     let ins_authority = Keypair::new();

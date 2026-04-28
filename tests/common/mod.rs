@@ -99,9 +99,46 @@ pub mod spl_token {
             }
         }
 
-        pub struct Mint;
+        use solana_sdk::program_option::COption;
+
+        #[derive(Debug, Clone, Copy)]
+        pub struct Mint {
+            pub mint_authority: COption<Pubkey>,
+            pub supply: u64,
+            pub decimals: u8,
+            pub is_initialized: bool,
+            pub freeze_authority: COption<Pubkey>,
+        }
+
         impl Mint {
             pub const LEN: usize = super::super::MINT_LEN;
+
+            /// SPL Token v1 Mint pack — emit 82 bytes matching the
+            /// canonical layout. Sufficient for fixture builders that
+            /// just need a well-formed mint account.
+            pub fn pack(mint: Mint, dst: &mut [u8]) -> Result<(), &'static str> {
+                if dst.len() < Self::LEN {
+                    return Err("mint dest too short");
+                }
+                match mint.mint_authority {
+                    COption::Some(pk) => {
+                        dst[0..4].copy_from_slice(&1u32.to_le_bytes());
+                        dst[4..36].copy_from_slice(&pk.to_bytes());
+                    }
+                    COption::None => dst[0..36].fill(0),
+                }
+                dst[36..44].copy_from_slice(&mint.supply.to_le_bytes());
+                dst[44] = mint.decimals;
+                dst[45] = if mint.is_initialized { 1 } else { 0 };
+                match mint.freeze_authority {
+                    COption::Some(pk) => {
+                        dst[46..50].copy_from_slice(&1u32.to_le_bytes());
+                        dst[50..82].copy_from_slice(&pk.to_bytes());
+                    }
+                    COption::None => dst[46..82].fill(0),
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -511,6 +548,21 @@ pub fn encode_update_config(
     funding_k_bps: u64,
     funding_max_premium_bps: i64,
     funding_max_e9_per_slot: i64,
+) -> Vec<u8> {
+    encode_update_config_with_cap(
+        funding_horizon_slots,
+        funding_k_bps,
+        funding_max_premium_bps,
+        funding_max_e9_per_slot,
+        0,
+    )
+}
+
+pub fn encode_update_config_with_cap(
+    funding_horizon_slots: u64,
+    funding_k_bps: u64,
+    funding_max_premium_bps: i64,
+    funding_max_e9_per_slot: i64,
     tvl_insurance_cap_mult: u16,
 ) -> Vec<u8> {
     let mut data = vec![14u8];
@@ -640,6 +692,27 @@ pub fn encode_init_market_with_cap(
     o.permissionless_resolve_stale_slots = permissionless_resolve_stale_slots;
     if permissionless_resolve_stale_slots > 0 {
         o.force_close_delay_slots = 50;
+    }
+    encode_init_market(&o)
+}
+
+/// Legacy wrapper. v2 has unified the `encode_init_market_*` variants
+/// into `encode_init_market(InitOpts)`, but tests still reference the
+/// old name.
+pub fn encode_init_market_full_v2(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    feed_id: &[u8; 32],
+    invert: u8,
+    initial_mark_price_e6: u64,
+    warmup_period_slots: u64,
+) -> Vec<u8> {
+    let mut o = InitOpts::default_for(*admin, *mint, *feed_id);
+    o.invert = invert;
+    o.initial_mark_price_e6 = initial_mark_price_e6;
+    if warmup_period_slots > 0 {
+        o.h_min = warmup_period_slots;
+        o.h_max = warmup_period_slots;
     }
     encode_init_market(&o)
 }
@@ -1446,6 +1519,38 @@ impl TestEnv {
         self.try_send_ix(ix, &[&admin])
     }
 
+    pub fn try_update_config(&mut self, signer: &Keypair) -> Result<(), String> {
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(signer.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_update_config(3600, 100, 100i64, 10i64),
+        };
+        self.try_send_ix(ix, &[signer])
+    }
+
+    pub fn try_update_config_with_params(
+        &mut self,
+        signer: &Keypair,
+        funding_horizon_slots: u64,
+    ) -> Result<(), String> {
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(signer.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_update_config(funding_horizon_slots, 100, 100i64, 10i64),
+        };
+        self.try_send_ix(ix, &[signer])
+    }
+
     pub fn try_admin_force_close_account(
         &mut self,
         admin: &Keypair,
@@ -1679,7 +1784,7 @@ impl TestEnv {
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
             ],
-            data: encode_update_config(
+            data: encode_update_config_with_cap(
                 cfg.funding_horizon_slots,
                 cfg.funding_k_bps,
                 cfg.funding_max_premium_bps,
@@ -1801,9 +1906,12 @@ impl TestEnv {
     }
 
     pub fn is_market_resolved(&self) -> bool {
+        // engine.resolved_price is a u64; engine-relative offset 216 in BPF
+        // (current_slot + market_mode + 7-byte pad → resolved_price). A
+        // nonzero stamped resolve_price implies Resolved.
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        // RiskEngine.resolved flag offset (BPF, engine-relative 600).
-        const RESOLVED_OFF: usize = ENGINE_OFFSET + 600;
-        d[RESOLVED_OFF] != 0
+        let off = ENGINE_OFFSET + 216;
+        let rp = u64::from_le_bytes(d[off..off + 8].try_into().unwrap());
+        rp > 0
     }
 }

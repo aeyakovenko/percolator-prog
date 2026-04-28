@@ -30,10 +30,6 @@ disabled!(
     "v2-migration: encoders use legacy u8-tag + raw-byte arg packing; rewrite for #[discrim] + Borsh in Phase 6"
 );
 disabled!(
-    test_admin,
-    "v2-migration: instruction encoders + slab fixture (needs 8-byte disc prefix) pending Phase 6"
-);
-disabled!(
     test_conservation,
     "v2-migration: SPL token CPI + slab encoders pending Phase 6"
 );
