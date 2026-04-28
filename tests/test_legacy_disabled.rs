@@ -38,10 +38,6 @@ disabled!(
     "v2-migration: insurance-flow ix encoders pending Phase 6"
 );
 disabled!(
-    test_oracle,
-    "v2-migration: oracle ix encoders + slab fixture pending Phase 4 (oracle.rs port) + Phase 6"
-);
-disabled!(
     test_resolution,
     "v2-migration: resolution ix encoders pending Phase 6"
 );
