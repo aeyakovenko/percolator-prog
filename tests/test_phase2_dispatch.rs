@@ -25,12 +25,15 @@ const PROGRAM_ID: Pubkey =
     solana_sdk::pubkey!("Perco1ator111111111111111111111111111111111");
 const CLOCK_SYSVAR: Pubkey = solana_sdk::sysvar::clock::ID;
 
+const INIT_USER: u8 = 1;
+const INIT_LP: u8 = 2;
 const DEPOSIT_COLLATERAL: u8 = 3;
 const WITHDRAW_COLLATERAL: u8 = 4;
 const TRADE_NO_CPI: u8 = 6;
 const LIQUIDATE_AT_ORACLE: u8 = 7;
 const CLOSE_ACCOUNT: u8 = 8;
 const TOP_UP_INSURANCE: u8 = 9;
+const CLOSE_SLAB: u8 = 13;
 const DEPOSIT_FEE_CREDITS: u8 = 27;
 const CONVERT_RELEASED_PNL: u8 = 28;
 const UPDATE_CONFIG: u8 = 14;
@@ -345,6 +348,68 @@ fn withdraw_insurance_limited_rejects_uninitialized() {
             AccountMeta::new_readonly(CLOCK_SYSVAR, false),
         ],
         data,
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn init_user_rejects_uninitialized() {
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let mut data = vec![INIT_USER];
+    data.extend_from_slice(&100u64.to_le_bytes()); // fee_payment
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new(Pubkey::new_unique(), false),
+            AccountMeta::new(Pubkey::new_unique(), false),
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+        ],
+        data,
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn init_lp_rejects_zero_matcher() {
+    // matcher_program == [0; 32] is rejected at the wire-format gate
+    // before any state mutation.
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let mut data = vec![INIT_LP];
+    data.extend_from_slice(&[0u8; 32]); // matcher_program (zero → reject)
+    data.extend_from_slice(&[1u8; 32]); // matcher_context
+    data.extend_from_slice(&100u64.to_le_bytes()); // fee_payment
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(payer.pubkey(), true),
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new(Pubkey::new_unique(), false),
+            AccountMeta::new(Pubkey::new_unique(), false),
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+            AccountMeta::new_readonly(CLOCK_SYSVAR, false),
+        ],
+        data,
+    };
+    assert!(submit(&mut svm, &payer, ix));
+}
+
+#[test]
+fn close_slab_rejects_uninitialized() {
+    let (mut svm, slab_pk, payer) = fresh_svm();
+    let ix = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(payer.pubkey(), true), // dest (admin, mut)
+            AccountMeta::new(slab_pk, false),
+            AccountMeta::new(Pubkey::new_unique(), false), // vault
+            AccountMeta::new_readonly(Pubkey::new_unique(), false), // vault_auth
+            AccountMeta::new(Pubkey::new_unique(), false), // dest_ata
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+        ],
+        data: vec![CLOSE_SLAB], // payload-less
     };
     assert!(submit(&mut svm, &payer, ix));
 }

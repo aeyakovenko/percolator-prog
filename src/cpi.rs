@@ -22,7 +22,7 @@ use crate::errors::PercolatorError;
 use anchor_lang_v2::prelude::*;
 use pinocchio::account::AccountView;
 use pinocchio::address::Address;
-use pinocchio_token::instructions::Transfer;
+use pinocchio_token::instructions::{CloseAccount, Transfer};
 use pinocchio_token::state::{Account as TokenAccount, AccountState};
 use solana_program_error::ProgramError;
 
@@ -163,6 +163,30 @@ pub fn deposit(
         amount,
     }
     .invoke()
+    .map_err(Into::into)
+}
+
+/// SPL Token CloseAccount with PDA signer. Recovers the token
+/// account's rent into `destination`. Used by `CloseSlab` to drain
+/// the vault token account before tearing the slab down.
+pub fn close_token_account(
+    _token_program: &AccountView,
+    account: &AccountView,
+    destination: &AccountView,
+    authority: &AccountView,
+    signer_seeds: &[&[u8]],
+) -> Result<()> {
+    use pinocchio::cpi;
+    let seeds: alloc::vec::Vec<cpi::Seed> =
+        signer_seeds.iter().map(|b| cpi::Seed::from(*b)).collect();
+    let signer = cpi::Signer::from(seeds.as_slice());
+    CloseAccount::<&AccountView> {
+        account,
+        destination,
+        authority,
+        multisig_signers: &[][..],
+    }
+    .invoke_signed(core::slice::from_ref(&signer))
     .map_err(Into::into)
 }
 

@@ -29,11 +29,11 @@ pub mod units;
 pub mod zc;
 
 use instructions::{
-    AdminForceCloseAccount, CatchupAccrue, CloseAccount, ConvertReleasedPnl, DepositCollateral,
-    DepositFeeCredits, ForceCloseResolved, LiquidateAtOracle, PushHyperpMark, ReclaimEmptyAccount,
-    ResolveMarket, ResolvePermissionless, SettleAccount, TopUpInsurance, TradeNoCpi,
-    UpdateAuthority, UpdateConfig, WithdrawCollateral, WithdrawInsurance,
-    WithdrawInsuranceLimited,
+    AdminForceCloseAccount, CatchupAccrue, CloseAccount, CloseSlab, ConvertReleasedPnl,
+    DepositCollateral, DepositFeeCredits, ForceCloseResolved, InitLp, InitUser,
+    LiquidateAtOracle, PushHyperpMark, ReclaimEmptyAccount, ResolveMarket, ResolvePermissionless,
+    SettleAccount, TopUpInsurance, TradeNoCpi, UpdateAuthority, UpdateConfig, WithdrawCollateral,
+    WithdrawInsurance, WithdrawInsuranceLimited,
 };
 // The `#[program]` macro looks for each Accounts struct's auto-generated
 // `__client_accounts_<name>` module at `super::` (= the crate root). Our
@@ -46,6 +46,8 @@ pub use instructions::catchup_accrue::__client_accounts_catchupaccrue;
 #[doc(hidden)]
 pub use instructions::close_account::__client_accounts_closeaccount;
 #[doc(hidden)]
+pub use instructions::close_slab::__client_accounts_closeslab;
+#[doc(hidden)]
 pub use instructions::convert_released_pnl::__client_accounts_convertreleasedpnl;
 #[doc(hidden)]
 pub use instructions::deposit_collateral::__client_accounts_depositcollateral;
@@ -53,6 +55,10 @@ pub use instructions::deposit_collateral::__client_accounts_depositcollateral;
 pub use instructions::deposit_fee_credits::__client_accounts_depositfeecredits;
 #[doc(hidden)]
 pub use instructions::force_close_resolved::__client_accounts_forcecloseresolved;
+#[doc(hidden)]
+pub use instructions::init_lp::__client_accounts_initlp;
+#[doc(hidden)]
+pub use instructions::init_user::__client_accounts_inituser;
 #[doc(hidden)]
 pub use instructions::liquidate_at_oracle::__client_accounts_liquidateatoracle;
 #[doc(hidden)]
@@ -99,6 +105,13 @@ pub mod percolator {
         instructions::top_up_insurance::handler(ctx, amount)
     }
 
+    /// Tag 13 — admin teardown of a fully-resolved + drained market.
+    /// See `instructions/close_slab.rs`.
+    #[discrim = 13]
+    pub fn close_slab(ctx: &mut Context<CloseSlab>) -> Result<()> {
+        instructions::close_slab::handler(ctx)
+    }
+
     /// Tag 14 — admin tunes funding params + TVL/insurance cap.
     /// See `instructions/update_config.rs`.
     #[discrim = 14]
@@ -130,6 +143,25 @@ pub mod percolator {
         size: i128,
     ) -> Result<()> {
         instructions::trade_no_cpi::handler(ctx, lp_idx, user_idx, size)
+    }
+
+    /// Tag 1 — InitUser. Materialize a User account.
+    /// See `instructions/init_user.rs`.
+    #[discrim = 1]
+    pub fn init_user(ctx: &mut Context<InitUser>, fee_payment: u64) -> Result<()> {
+        instructions::init_user::handler(ctx, fee_payment)
+    }
+
+    /// Tag 2 — InitLP. Materialize an LP account with matcher binding.
+    /// See `instructions/init_lp.rs`.
+    #[discrim = 2]
+    pub fn init_lp(
+        ctx: &mut Context<InitLp>,
+        matcher_program: [u8; 32],
+        matcher_context: [u8; 32],
+        fee_payment: u64,
+    ) -> Result<()> {
+        instructions::init_lp::handler(ctx, matcher_program, matcher_context, fee_payment)
     }
 
     /// Tag 3 — owner deposits collateral.
