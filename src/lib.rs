@@ -30,10 +30,10 @@ pub mod zc;
 
 use instructions::{
     AdminForceCloseAccount, CatchupAccrue, CloseAccount, CloseSlab, ConvertReleasedPnl,
-    DepositCollateral, DepositFeeCredits, ForceCloseResolved, InitLp, InitUser,
-    LiquidateAtOracle, PushHyperpMark, ReclaimEmptyAccount, ResolveMarket, ResolvePermissionless,
-    SettleAccount, TopUpInsurance, TradeNoCpi, UpdateAuthority, UpdateConfig, WithdrawCollateral,
-    WithdrawInsurance, WithdrawInsuranceLimited,
+    DepositCollateral, DepositFeeCredits, ForceCloseResolved, InitLp, InitMarket, InitMarketArgs,
+    InitUser, LiquidateAtOracle, PushHyperpMark, ReclaimEmptyAccount, ResolveMarket,
+    ResolvePermissionless, SettleAccount, TopUpInsurance, TradeNoCpi, UpdateAuthority,
+    UpdateConfig, WithdrawCollateral, WithdrawInsurance, WithdrawInsuranceLimited,
 };
 // The `#[program]` macro looks for each Accounts struct's auto-generated
 // `__client_accounts_<name>` module at `super::` (= the crate root). Our
@@ -57,6 +57,8 @@ pub use instructions::deposit_fee_credits::__client_accounts_depositfeecredits;
 pub use instructions::force_close_resolved::__client_accounts_forcecloseresolved;
 #[doc(hidden)]
 pub use instructions::init_lp::__client_accounts_initlp;
+#[doc(hidden)]
+pub use instructions::init_market::__client_accounts_initmarket;
 #[doc(hidden)]
 pub use instructions::init_user::__client_accounts_inituser;
 #[doc(hidden)]
@@ -143,6 +145,13 @@ pub mod percolator {
         size: i128,
     ) -> Result<()> {
         instructions::trade_no_cpi::handler(ctx, lp_idx, user_idx, size)
+    }
+
+    /// Tag 0 — InitMarket. Admin materializes a fresh market.
+    /// See `instructions/init_market.rs`.
+    #[discrim = 0]
+    pub fn init_market(ctx: &mut Context<InitMarket>, args: InitMarketArgs) -> Result<()> {
+        instructions::init_market::handler(ctx, args)
     }
 
     /// Tag 1 — InitUser. Materialize a User account.

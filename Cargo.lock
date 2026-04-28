@@ -2823,6 +2823,7 @@ dependencies = [
  "anchor-lang-v2",
  "bincode",
  "borsh 0.10.4",
+ "borsh 1.6.0",
  "bytemuck",
  "litesvm",
  "percolator",

@@ -161,7 +161,7 @@ pub fn read_pyth_price_e6(
     // PriceUpdateV2 lives in the Anchor-heavy receiver SDK that
     // we deliberately do not pull in as a dep.
     let msg_slice = &data[OFF_PRICE_FEED_MESSAGE..];
-    let msg = <PriceFeedMessage as borsh::BorshDeserialize>::deserialize(&mut &msg_slice[..])
+    let msg = <PriceFeedMessage as borsh010::BorshDeserialize>::deserialize(&mut &msg_slice[..])
         .map_err(|_| PercolatorError::OracleInvalid)?;
 
     // Validate feed_id matches expected

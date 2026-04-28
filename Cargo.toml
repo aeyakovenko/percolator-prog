@@ -54,11 +54,13 @@ bytemuck = { version = "1.14", features = ["derive", "min_const_generics"] }
 # PriceFeedMessage struct used inside Pyth Solana Receiver's
 # PriceUpdateV2 account.
 pythnet-sdk = { version = "2.3", default-features = false }
-# pythnet-sdk uses borsh 0.10 internally; pin the same major so our
-# direct use of BorshDeserialize on its types reads/writes the same
-# wire format. Distinct from anchor-lang-v2's borsh 1.x re-export
-# (`AnchorSerialize`/`AnchorDeserialize`).
-borsh = { version = "0.10", default-features = false }
+# pythnet-sdk pins borsh 0.10; we use the same major to deserialize
+# its `PriceFeedMessage`. Renamed to `borsh010` so the unrenamed
+# `borsh` resolves to anchor-lang-v2's transitive borsh 1.x — needed
+# for the `#[derive(AnchorDeserialize)]` macro output, which emits
+# `borsh::io::*` paths only present in 1.x.
+borsh010 = { package = "borsh", version = "0.10", default-features = false }
+borsh = { version = "1", default-features = false, features = ["derive"] }
 percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "5940285737b514af4416cd8394773abc79e6366d" }
 
 [dev-dependencies]
