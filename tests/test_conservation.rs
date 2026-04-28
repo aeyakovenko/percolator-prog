@@ -1,4 +1,5 @@
 #![cfg(feature = "legacy-tests")]
+
 mod common;
 #[allow(unused_imports)]
 use common::*;
@@ -242,7 +243,7 @@ fn test_attack_premarket_force_close_pnl_conservation() {
 
     env.init_market_hyperp(1_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let matcher_prog = env.matcher_program_id;
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .unwrap();
@@ -356,7 +357,7 @@ fn test_attack_multi_lp_conservation() {
 
     env.init_market_hyperp(1_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let matcher_prog = env.matcher_program_id;
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .unwrap();
@@ -455,7 +456,7 @@ fn test_attack_conservation_through_price_movement() {
 
     env.init_market_hyperp(1_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let matcher_prog = env.matcher_program_id;
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .unwrap();
@@ -547,7 +548,7 @@ fn test_attack_premarket_partial_force_close_conservation() {
 
     env.init_market_hyperp(1_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let matcher_prog = env.matcher_program_id;
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .unwrap();
@@ -802,7 +803,7 @@ fn test_attack_updateconfig_preserves_conservation() {
     };
 
     // UpdateConfig with different parameters
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let result = env.try_update_config_with_params(&admin, 7200);
     assert!(
         result.is_ok(),
@@ -1085,7 +1086,7 @@ fn test_attack_conservation_large_slot_jump() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -1153,7 +1154,7 @@ fn test_attack_unit_scale_trade_conservation() {
     let mut env = TestEnv::new();
     env.init_market_full(0, 1000, 0); // unit_scale=1000
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     // With unit_scale=1000, need 100*1000=100_000 base for min_initial_deposit
@@ -1207,7 +1208,7 @@ fn test_attack_inverted_market_trade_conservation() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(1); // Inverted
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -1256,7 +1257,7 @@ fn test_attack_inverted_with_unit_scale_conservation() {
     let mut env = TestEnv::new();
     env.init_market_full(1, 1000, 0); // invert=1, unit_scale=1000
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     // With unit_scale=1000, need 100*1000=100_000 base for min_initial_deposit
@@ -1309,7 +1310,7 @@ fn test_attack_trade_size_one_conservation() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -1359,7 +1360,7 @@ fn test_attack_trade_size_negative_one_conservation() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -1408,7 +1409,7 @@ fn test_attack_withdraw_redeposit_cycle_conservation() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -1461,7 +1462,7 @@ fn test_attack_warmup_vesting_conservation_with_profit() {
     let mut env = TestEnv::new();
     env.init_market_with_warmup(0, 100); // 100-slot warmup
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -1519,7 +1520,7 @@ fn test_attack_liquidation_conservation() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -1587,7 +1588,7 @@ fn test_attack_four_users_one_lp_conservation() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -1705,7 +1706,7 @@ fn test_attack_many_users_single_lp_conservation() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -1778,7 +1779,7 @@ fn test_attack_inverted_market_large_swing_conservation() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(1); // Inverted market
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -1830,7 +1831,7 @@ fn test_attack_large_price_drop_liquidation_conservation() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -1899,7 +1900,7 @@ fn test_attack_concurrent_max_withdrawals_conservation() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -1975,7 +1976,7 @@ fn test_attack_opposing_users_pnl_conservation() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -2108,7 +2109,7 @@ fn test_property_authorization_exhaustive() {
     // because admin burn requires both for live markets (liveness guard).
     env.init_market_with_cap(0, 100);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let attacker = Keypair::new();
     env.svm.airdrop(&attacker.pubkey(), 10_000_000_000).unwrap();
     env.create_ata(&attacker.pubkey(), 5_000_000_000);
@@ -2210,7 +2211,7 @@ fn test_property_account_lifecycle_invariants() {
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
 
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
@@ -2327,7 +2328,7 @@ fn test_binary_market_complete_lifecycle_conservation() {
 
     env.init_market_hyperp(1_000_000); // $1.00
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let matcher_prog = env.matcher_program_id;
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .expect("oracle authority setup must succeed");
@@ -2484,7 +2485,7 @@ fn test_adl_conservation_after_liquidation() {
     env.deposit(&user_c, user_c_idx, 5_000_000_000);
 
     // Top up insurance so the protocol has a buffer
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 2_000_000_000);
     let vault_after_setup = env.vault_balance();
 

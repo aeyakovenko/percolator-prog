@@ -696,6 +696,32 @@ pub fn encode_init_market_with_cap(
     encode_init_market(&o)
 }
 
+pub fn encode_init_market_with_conf_bps(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    feed_id: &[u8; 32],
+    invert: u8,
+    initial_mark_price_e6: u64,
+    warmup_period_slots: u64,
+    conf_filter_bps: u16,
+) -> Vec<u8> {
+    let mut o = InitOpts::default_for(*admin, *mint, *feed_id);
+    o.invert = invert;
+    o.initial_mark_price_e6 = initial_mark_price_e6;
+    o.conf_filter_bps = conf_filter_bps;
+    if warmup_period_slots > 0 {
+        o.h_min = warmup_period_slots;
+        o.h_max = warmup_period_slots;
+    }
+    encode_init_market(&o)
+}
+
+/// Legacy alias for [`TestEnv`] — matcher tests use this name. The
+/// matcher-specific methods on it (`init_lp_with_matcher`,
+/// `matcher_program_id`, `try_trade_cpi`) are stubs that panic since
+/// the `percolator-match` BPF binary isn't in this repo.
+pub type TradeCpiTestEnv = TestEnv;
+
 /// Legacy wrapper. v2 has unified the `encode_init_market_*` variants
 /// into `encode_init_market(InitOpts)`, but tests still reference the
 /// old name.
@@ -745,10 +771,12 @@ pub fn encode_init_market_with_force_close(
     encode_init_market(&o)
 }
 
-pub fn encode_init_market_hyperp(initial_mark_price_e6: u64) -> Vec<u8> {
-    let admin = Pubkey::new_unique();
-    let mint = Pubkey::new_unique();
-    let mut o = InitOpts::default_for(admin, mint, [0u8; 32]);
+pub fn encode_init_market_hyperp(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    initial_mark_price_e6: u64,
+) -> Vec<u8> {
+    let mut o = InitOpts::default_for(*admin, *mint, [0u8; 32]);
     o.initial_mark_price_e6 = initial_mark_price_e6;
     o.permissionless_resolve_stale_slots = 0;
     encode_init_market(&o)
@@ -961,6 +989,8 @@ impl TestEnv {
         let mut o =
             InitOpts::default_for(self.payer.pubkey(), self.mint, [0u8; 32]);
         o.initial_mark_price_e6 = initial_mark_price_e6;
+        o.permissionless_resolve_stale_slots = 0;
+        o.force_close_delay_slots = 0;
         self.init_market_with_opts(o);
     }
 
@@ -1588,6 +1618,75 @@ impl TestEnv {
     pub fn read_funding_max_e9_per_slot(&self) -> i64 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
         percolator_prog::state::read_config(&d).funding_max_e9_per_slot
+    }
+
+    /// Legacy alias for `read_engine_vault`.
+    pub fn read_vault(&self) -> u128 {
+        self.read_engine_vault()
+    }
+
+    /// Read engine bitmap to check if a slot is in use. The bitmap lives
+    /// at engine-relative `ENGINE_BITMAP_OFFSET` (BPF: 712).
+    pub fn is_slot_used(&self, idx: u16) -> bool {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let bitmap_off = ENGINE_OFFSET + ENGINE_BITMAP_OFFSET;
+        let word_idx = (idx as usize) >> 6;
+        let bit_idx = (idx as usize) & 63;
+        let off = bitmap_off + word_idx * 8;
+        if d.len() < off + 8 {
+            return false;
+        }
+        let word = u64::from_le_bytes(d[off..off + 8].try_into().unwrap());
+        (word >> bit_idx) & 1 == 1
+    }
+
+    pub fn try_deposit_unauthorized(
+        &mut self,
+        attacker: &Keypair,
+        victim_idx: u16,
+        amount: u64,
+    ) -> Result<(), String> {
+        let ata = self.create_ata(&attacker.pubkey(), amount);
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(attacker.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_deposit(victim_idx, amount),
+        };
+        self.try_send_ix(ix, &[attacker])
+    }
+
+    /// Stub: matcher tests need `percolator-match` BPF (not in this repo).
+    /// Methods panic so tests that try to use them fail loudly.
+    pub fn matcher_program_id(&self) -> Pubkey {
+        panic!("matcher tests require ../percolator-match BPF binary; un-buildable here");
+    }
+
+    pub fn init_lp_with_matcher(
+        &mut self,
+        _owner: &Keypair,
+        _matcher: &Pubkey,
+    ) -> (u16, Pubkey) {
+        panic!("matcher tests require ../percolator-match BPF binary; un-buildable here");
+    }
+
+    pub fn try_trade_cpi(
+        &mut self,
+        _user: &Keypair,
+        _lp_owner: &Pubkey,
+        _lp_idx: u16,
+        _user_idx: u16,
+        _size: i128,
+        _matcher_prog: &Pubkey,
+        _matcher_ctx: &Pubkey,
+    ) -> Result<(), String> {
+        Err("matcher tests require ../percolator-match BPF binary".into())
     }
 
     pub fn read_mark_min_fee(&self) -> u64 {

@@ -1,4 +1,5 @@
 #![cfg(feature = "legacy-tests")]
+
 mod common;
 #[allow(unused_imports)]
 use common::*;
@@ -523,7 +524,7 @@ fn test_comprehensive_oracle_price_impact_on_pnl() {
     env.deposit(&user, user_idx, 10_000_000_000);
 
     // Top up insurance to prevent force-realize and dust-close (must exceed threshold after EWMA update)
-    let ins_payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let ins_payer = env.payer.insecure_clone();
     env.top_up_insurance(&ins_payer, 1_000_000_000);
     let vault_initial = env.vault_balance();
 
@@ -816,7 +817,7 @@ fn test_hyperp_index_smoothing_rate_limited() {
     env.init_market_hyperp(initial_price);
 
     // Set oracle authority so we can push prices
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .expect("set oracle authority");
 
@@ -1053,8 +1054,8 @@ fn test_funding_boundary_anti_retroactivity_update_config() {
     let mut env = TradeCpiTestEnv::new();
     env.init_market_hyperp(1_000_000); // $1 initial mark/index
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
-    let matcher_prog = env.matcher_program_id;
+    let admin = env.payer.insecure_clone();
+    let matcher_prog = env.matcher_program_id();
 
     // Oracle authority (v12.19: price-move cap is immutable init-time)
     env.try_set_oracle_authority(&admin, &admin.pubkey())
@@ -1064,7 +1065,7 @@ fn test_funding_boundary_anti_retroactivity_update_config() {
     // Uses short horizon (100 slots) so the per-slot rate is non-zero
     // even with moderate premiums. k multiplier adjusts sensitivity.
     let admin_send_config = |env: &mut TradeCpiTestEnv, k_bps: u64| {
-        let kp = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+        let kp = env.payer.insecure_clone();
         let ix = Instruction {
             program_id: env.program_id,
             accounts: vec![
