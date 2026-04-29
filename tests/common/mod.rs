@@ -497,6 +497,14 @@ pub fn encode_crank_permissionless() -> Vec<u8> {
     data
 }
 
+/// Self-crank: caller_idx is a real account on the market.
+pub fn encode_crank_self(caller_idx: u16) -> Vec<u8> {
+    let mut data = vec![5u8];
+    data.extend_from_slice(&caller_idx.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes()); // empty candidate vec
+    data
+}
+
 /// KeeperCrank with FullClose candidates, permissionless.
 /// Wire: `[5u8] [u16::MAX] [u32 count] [(u16 idx, Option<{u8 tag, Option<u128>}>)…]`.
 pub fn encode_crank_with_candidates(candidates: &[u16]) -> Vec<u8> {
@@ -713,6 +721,146 @@ pub fn encode_init_market_with_conf_bps(
         o.h_min = warmup_period_slots;
         o.h_max = warmup_period_slots;
     }
+    encode_init_market(&o)
+}
+
+// Matcher-binary constants — kept for source-compat with tests that
+// import them. Tests that actually exercise the matcher path stay
+// gated since the BPF binary isn't in this repo.
+pub const MATCHER_CONTEXT_LEN: usize = 320;
+pub const MATCHER_RETURN_LEN: usize = 64;
+pub const MATCHER_CALL_LEN: usize = 67;
+pub const MATCHER_CALL_TAG: u8 = 0;
+pub const MATCHER_INIT_VAMM_TAG: u8 = 2;
+pub const CTX_VAMM_OFFSET: usize = 64;
+pub const VAMM_MAGIC: u64 = 0x5045_5243_4d41_5443; // "PERCMATC"
+
+#[repr(u8)]
+#[derive(Clone, Copy)]
+pub enum MatcherMode {
+    Passive = 0,
+    Vamm = 1,
+}
+
+pub fn matcher_program_path() -> PathBuf {
+    panic!("matcher tests require ../percolator-match BPF binary; un-buildable here");
+}
+
+pub fn encode_init_vamm(
+    _mode: MatcherMode,
+    _trading_fee_bps: u32,
+    _base_spread_bps: u32,
+    _max_total_bps: u32,
+    _impact_k_bps: u32,
+    _liquidity_notional_e6: u128,
+    _max_fill_abs: u128,
+    _max_inventory_abs: u128,
+) -> Vec<u8> {
+    panic!("matcher tests require ../percolator-match BPF binary");
+}
+
+pub fn encode_matcher_call(
+    _req_id: u64,
+    _lp_idx: u16,
+    _lp_account_id: u64,
+    _oracle_price_e6: u64,
+    _req_size: i128,
+) -> Vec<u8> {
+    panic!("matcher tests require ../percolator-match BPF binary");
+}
+
+pub fn encode_init_market_hyperp_with_fees(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    initial_mark_price_e6: u64,
+    max_staleness_secs: u64,
+    trading_fee_bps: u64,
+    mark_min_fee: u64,
+) -> Vec<u8> {
+    let mut o = InitOpts::default_for(*admin, *mint, [0u8; 32]);
+    o.initial_mark_price_e6 = initial_mark_price_e6;
+    o.max_staleness_secs = max_staleness_secs;
+    o.trading_fee_bps = trading_fee_bps;
+    o.mark_min_fee = mark_min_fee;
+    o.permissionless_resolve_stale_slots = 0;
+    o.force_close_delay_slots = 0;
+    encode_init_market(&o)
+}
+
+pub fn encode_init_market_with_funding(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    feed_id: &[u8; 32],
+    invert: u8,
+    permissionless_resolve_stale_slots: u64,
+    funding_horizon_slots: u64,
+    funding_k_bps: u64,
+    funding_max_premium_bps: i64,
+    funding_max_e9_per_slot: i64,
+) -> Vec<u8> {
+    let mut o = InitOpts::default_for(*admin, *mint, *feed_id);
+    o.invert = invert;
+    o.permissionless_resolve_stale_slots = permissionless_resolve_stale_slots;
+    if permissionless_resolve_stale_slots > 0 {
+        o.force_close_delay_slots = 50;
+    }
+    o.funding_horizon_slots = Some(funding_horizon_slots);
+    o.funding_k_bps = Some(funding_k_bps);
+    o.funding_max_premium_bps = Some(funding_max_premium_bps);
+    o.funding_max_e9_per_slot = Some(funding_max_e9_per_slot);
+    encode_init_market(&o)
+}
+
+pub fn encode_init_market_with_min_fee(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    feed_id: &[u8; 32],
+    invert: u8,
+    permissionless_resolve_stale_slots: u64,
+    funding_horizon_slots: u64,
+    funding_k_bps: u64,
+    funding_max_premium_bps: i64,
+    funding_max_e9_per_slot: i64,
+    mark_min_fee: u64,
+) -> Vec<u8> {
+    let mut o = InitOpts::default_for(*admin, *mint, *feed_id);
+    o.invert = invert;
+    o.permissionless_resolve_stale_slots = permissionless_resolve_stale_slots;
+    if permissionless_resolve_stale_slots > 0 {
+        o.force_close_delay_slots = 50;
+    }
+    o.funding_horizon_slots = Some(funding_horizon_slots);
+    o.funding_k_bps = Some(funding_k_bps);
+    o.funding_max_premium_bps = Some(funding_max_premium_bps);
+    o.funding_max_e9_per_slot = Some(funding_max_e9_per_slot);
+    o.mark_min_fee = mark_min_fee;
+    encode_init_market(&o)
+}
+
+/// Stub: full Vamm-context decode lives in the matcher repo.
+pub fn read_matcher_return(data: &[u8]) -> (u32, u32, u64, i128, u64) {
+    let abi_version = u32::from_le_bytes(data[0..4].try_into().unwrap_or([0; 4]));
+    let flags = u32::from_le_bytes(data[4..8].try_into().unwrap_or([0; 4]));
+    let exec_price = u64::from_le_bytes(data[8..16].try_into().unwrap_or([0; 8]));
+    let exec_size = i128::from_le_bytes(data[16..32].try_into().unwrap_or([0; 16]));
+    let req_id = u64::from_le_bytes(data[32..40].try_into().unwrap_or([0; 8]));
+    (abi_version, flags, exec_price, exec_size, req_id)
+}
+
+/// Encode an InitMarket with custom unit_scale + new_account_fee
+/// (legacy 6-arg variant).
+pub fn encode_init_market_full(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    feed_id: &[u8; 32],
+    invert: u8,
+    unit_scale: u32,
+    new_account_fee: u128,
+) -> Vec<u8> {
+    let mut o = InitOpts::default_for(*admin, *mint, *feed_id);
+    o.invert = invert;
+    o.unit_scale = unit_scale;
+    o.new_account_fee = new_account_fee;
     encode_init_market(&o)
 }
 
@@ -1687,6 +1835,221 @@ impl TestEnv {
         _matcher_ctx: &Pubkey,
     ) -> Result<(), String> {
         Err("matcher tests require ../percolator-match BPF binary".into())
+    }
+
+    pub fn read_account_kind(&self, idx: u16) -> u8 {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let off = Self::account_offset(idx) + 16;
+        d.get(off).copied().unwrap_or(0)
+    }
+
+    pub fn read_account_matcher_program(&self, idx: u16) -> [u8; 32] {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let off = Self::account_offset(idx) + 128;
+        d[off..off + 32].try_into().unwrap()
+    }
+
+    pub fn read_account_matcher_context(&self, idx: u16) -> [u8; 32] {
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        let off = Self::account_offset(idx) + 160;
+        d[off..off + 32].try_into().unwrap()
+    }
+
+    pub fn read_oracle_price_cap(&self) -> u64 {
+        // RiskParams.max_price_move_bps_per_slot — engine.params(+32) + 160.
+        let d = self.svm.get_account(&self.slab).unwrap().data;
+        const OFF: usize = ENGINE_OFFSET + 32 + 160;
+        u64::from_le_bytes(d[OFF..OFF + 8].try_into().unwrap())
+    }
+
+    /// v12.17 removed engine-stored funding rate; passed per-call now.
+    pub fn read_funding_rate(&self) -> i128 {
+        0
+    }
+
+    pub fn crank_as(&mut self, caller: &Keypair, caller_idx: u16) {
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(caller.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_crank_self(caller_idx),
+        };
+        self.send_ix_signed_by(ix, &[caller], "crank_as");
+    }
+
+    pub fn try_crank_self(&mut self, caller: &Keypair, caller_idx: u16) -> Result<(), String> {
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(caller.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_crank_self(caller_idx),
+        };
+        self.try_send_ix(ix, &[caller])
+    }
+
+    pub fn init_market_with_min_fee(&mut self, invert: u8, mark_min_fee: u64) {
+        let mut o =
+            InitOpts::default_for(self.payer.pubkey(), self.mint, TEST_FEED_ID);
+        o.invert = invert;
+        o.mark_min_fee = mark_min_fee;
+        self.init_market_with_opts(o);
+    }
+
+    pub fn init_market_fee_weighted(
+        &mut self,
+        invert: u8,
+        _min_oracle_price_cap_e2bps: u64,
+        trading_fee_bps: u64,
+        mark_min_fee: u64,
+    ) {
+        let mut o =
+            InitOpts::default_for(self.payer.pubkey(), self.mint, TEST_FEED_ID);
+        o.invert = invert;
+        o.trading_fee_bps = trading_fee_bps;
+        o.mark_min_fee = mark_min_fee;
+        self.init_market_with_opts(o);
+    }
+
+    pub fn try_settle_account_with_signer(
+        &mut self,
+        signer: &Keypair,
+        user_idx: u16,
+    ) -> Result<(), String> {
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_settle_account(user_idx),
+        };
+        self.try_send_ix(ix, &[signer])
+    }
+
+    pub fn try_reclaim_empty_account(&mut self, target_idx: u16) -> Result<(), String> {
+        let caller = Keypair::new();
+        self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_reclaim_empty_account(target_idx),
+        };
+        self.try_send_ix(ix, &[&caller])
+    }
+
+    pub fn try_deposit_fee_credits(
+        &mut self,
+        owner: &Keypair,
+        user_idx: u16,
+        amount: u64,
+    ) -> Result<(), String> {
+        let ata = self.create_ata(&owner.pubkey(), amount);
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_deposit_fee_credits(user_idx, amount),
+        };
+        self.try_send_ix(ix, &[owner])
+    }
+
+    pub fn try_init_user_with_fee(
+        &mut self,
+        owner: &Keypair,
+        fee: u64,
+    ) -> Result<u16, String> {
+        let idx = self.account_count;
+        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        let ata = self.create_ata(&owner.pubkey(), fee);
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_init_user(fee),
+        };
+        match self.try_send_ix(ix, &[owner]) {
+            Ok(()) => {
+                self.account_count += 1;
+                Ok(idx)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn try_init_lp_proper(
+        &mut self,
+        owner: &Keypair,
+        matcher: &Pubkey,
+        ctx: &Pubkey,
+        fee: u64,
+    ) -> Result<u16, String> {
+        let idx = self.account_count;
+        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        let ata = self.create_ata(&owner.pubkey(), fee);
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_init_lp(matcher, ctx, fee),
+        };
+        match self.try_send_ix(ix, &[owner]) {
+            Ok(()) => {
+                self.account_count += 1;
+                Ok(idx)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn try_trade_without_lp_sig(
+        &mut self,
+        user: &Keypair,
+        lp_idx: u16,
+        user_idx: u16,
+        size: i128,
+    ) -> Result<(), String> {
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(user.pubkey(), true),
+                AccountMeta::new(user.pubkey(), false), // LP not signing
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_trade(lp_idx, user_idx, size),
+        };
+        self.try_send_ix(ix, &[user])
     }
 
     pub fn read_mark_min_fee(&self) -> u64 {

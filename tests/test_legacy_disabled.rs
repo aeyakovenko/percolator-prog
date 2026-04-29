@@ -26,10 +26,6 @@ macro_rules! disabled {
 }
 
 disabled!(
-    test_basic,
-    "v2-migration: encoders use legacy u8-tag + raw-byte arg packing; rewrite for #[discrim] + Borsh in Phase 6"
-);
-disabled!(
     test_conservation,
     "v2-migration: SPL token CPI + slab encoders pending Phase 6"
 );
