@@ -34,10 +34,6 @@ disabled!(
     "v2-migration: matcher CPI + ctx.remaining_accounts() ix shape pending Phase 2 (trade_cpi.rs) + Phase 6"
 );
 disabled!(
-    test_a1_siphon_regression,
-    "v2-migration: insurance-siphon regression encoders pending Phase 6"
-);
-disabled!(
     cu_benchmark,
     "v2-migration: CU baselines must be re-recorded after Phase 6 (Anchor v2 macro-dispatch shifts CU envelopes)"
 );

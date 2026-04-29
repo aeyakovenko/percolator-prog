@@ -1,4 +1,4 @@
-#![cfg(feature = "legacy-tests")]
+
 //! A1 self-dealing insurance-siphon regression tests.
 //!
 //! # Attack
@@ -146,7 +146,7 @@ fn test_a1_external_pyth_siphon_defended() {
     // TEST_MAX_PRICE_MOVE_BPS_PER_SLOT = 4 and perm_resolve = 10_000.
     env.init_market_with_invert(0);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 5_000_000_000);
 
     let attacker_a = Keypair::new();
@@ -212,7 +212,7 @@ fn test_a1_external_pyth_raw_gap_move_defended() {
     let mut env = TestEnv::new();
     env.init_market_with_cap(0, 100);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.top_up_insurance(&admin, 5_000_000_000);
 
     // Put the market at a known fresh baseline before creating exposure.
@@ -309,7 +309,7 @@ fn test_a1_hyperp_mark_siphon_defended() {
     let mut env = TestEnv::new();
     env.init_market_hyperp(1_000_000);
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .expect("set hyperp mark authority");
     env.try_push_oracle_price(&admin, 1_000_000, 100)
@@ -387,6 +387,7 @@ fn test_a1_hyperp_mark_siphon_defended() {
 /// after an adverse oracle drop against a matched-pair position opened
 /// via TradeCpi.
 #[test]
+#[ignore = "needs matcher BPF binary"]
 fn test_a1_tradecpi_siphon_defended() {
     let mut env = TradeCpiTestEnv::new();
     // Use Hyperp mode so the test can drive the oracle adversarially
@@ -394,8 +395,8 @@ fn test_a1_tradecpi_siphon_defended() {
     // the same attack surface as A1c (attacker controlling both sides
     // of a matched pair through the registered matcher).
     env.init_market_hyperp(1_000_000);
-    let matcher_prog = env.matcher_program_id;
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let matcher_prog = env.matcher_program_id();
+    let admin = env.payer.insecure_clone();
     env.try_set_oracle_authority(&admin, &admin.pubkey())
         .expect("set hyperp mark authority");
     env.try_push_oracle_price(&admin, 1_000_000, 100)
