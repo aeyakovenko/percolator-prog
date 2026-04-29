@@ -30,14 +30,6 @@ disabled!(
     "v2-migration: matcher CPI + ctx.remaining_accounts() ix shape pending Phase 2 (trade_cpi.rs) + Phase 6"
 );
 disabled!(
-    cu_benchmark,
-    "v2-migration: CU baselines must be re-recorded after Phase 6 (Anchor v2 macro-dispatch shifts CU envelopes)"
-);
-disabled!(
-    kani,
-    "v2-migration: kani harness imports percolator_prog::matcher_abi (not yet ported); pending Phase 2"
-);
-disabled!(
     unit,
     "v2-migration: native-tier unit tests (solana_program / spl_token) pending Phase 6"
 );

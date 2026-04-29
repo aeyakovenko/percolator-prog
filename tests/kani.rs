@@ -1,4 +1,4 @@
-#![cfg(feature = "legacy-tests")]
+
 //! Kani formal verification harnesses for percolator-prog.
 //!
 //! Run with: `cargo kani --tests`

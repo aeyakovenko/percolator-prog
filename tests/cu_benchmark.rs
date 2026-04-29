@@ -1,5 +1,3 @@
-#![cfg(feature = "legacy-tests")]
-
 //! BPF Compute Unit benchmark using LiteSVM
 //!
 //! Tests worst-case CU scenarios for keeper crank:
@@ -12,19 +10,20 @@
 //! Build BPF: cargo build-sbf (production) or cargo build-sbf --features test (small)
 //! Run: cargo test --release --test cu_benchmark -- --nocapture
 
+mod common;
+#[allow(unused_imports)]
+use common::*;
+
 use litesvm::LiteSVM;
 use solana_sdk::{
     account::Account,
     clock::Clock,
-    compute_budget::ComputeBudgetInstruction,
     instruction::{AccountMeta, Instruction},
-    program_pack::Pack,
     pubkey::Pubkey,
     signature::{Keypair, Signer},
     sysvar,
     transaction::Transaction,
 };
-use spl_token::state::{Account as TokenAccount, AccountState};
 use std::path::PathBuf;
 // Note: Can't read BPF slab from native - struct layouts differ:
 // BPF SLAB_LEN: ~1.1MB, Native SLAB_LEN: ~1.2MB (even with repr(C) and same MAX_ACCOUNTS)
@@ -63,35 +62,15 @@ fn program_path() -> PathBuf {
 }
 
 fn make_token_account_data(mint: &Pubkey, owner: &Pubkey, amount: u64) -> Vec<u8> {
-    let mut data = vec![0u8; TokenAccount::LEN];
-    let mut account = TokenAccount::default();
-    account.mint = *mint;
-    account.owner = *owner;
-    account.amount = amount;
-    account.state = AccountState::Initialized;
-    TokenAccount::pack(account, &mut data).unwrap();
-    data
+    common::make_token_account_data(mint, owner, amount)
 }
 
 fn make_mint_data() -> Vec<u8> {
-    use spl_token::state::Mint;
-    let mut data = vec![0u8; Mint::LEN];
-    let mint = Mint {
-        mint_authority: solana_sdk::program_option::COption::None,
-        supply: 0,
-        decimals: 6,
-        is_initialized: true,
-        freeze_authority: solana_sdk::program_option::COption::None,
-    };
-    Mint::pack(mint, &mut data).unwrap();
-    data
+    common::make_mint_data()
 }
 
-/// Create PriceUpdateV2 mock data (Pyth Pull format)
-/// Layout: discriminator(8) + write_authority(32) + verification_level(2) + feed_id(32) +
-///         price(8) + conf(8) + expo(4) + publish_time(8) + ...
 fn cu_ix() -> Instruction {
-    ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)
+    common::cu_ix()
 }
 
 fn make_pyth_data(
@@ -339,7 +318,7 @@ impl TestEnv {
                 dummy_ata,
                 Account {
                     lamports: 1_000_000,
-                    data: vec![0u8; TokenAccount::LEN],
+                    data: vec![0u8; common::TOKEN_ACCOUNT_LEN],
                     owner: spl_token::ID,
                     executable: false,
                     rent_epoch: 0,
@@ -517,7 +496,7 @@ impl TestEnv {
         let caller = Keypair::new();
         self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
 
-        let budget_ix = ComputeBudgetInstruction::set_compute_unit_limit(cu_limit);
+        let budget_ix = common::cu_ix();
 
         let crank_ix = Instruction {
             program_id: self.program_id,
@@ -596,7 +575,7 @@ impl TestEnv {
         let caller = Keypair::new();
         self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
 
-        let budget_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let budget_ix = common::cu_ix();
 
         let crank_ix = Instruction {
             program_id: self.program_id,
@@ -786,6 +765,7 @@ fn create_users(env: &mut TestEnv, count: usize, deposit_amount: u64) -> Vec<Key
 #[cfg(not(feature = "test"))]
 #[test]
 #[cfg(not(any(feature = "small", feature = "medium")))]
+#[ignore = "v2 CU baselines need re-recording with v2 wire format encoders"]
 fn benchmark_worst_case_scenarios() {
     println!("\n=== WORST-CASE CRANK CU BENCHMARK ===");
     println!("MAX_ACCOUNTS: {}", MAX_ACCOUNTS);
@@ -1686,13 +1666,14 @@ fn benchmark_worst_case_scenarios() {
 #[cfg(not(feature = "test"))]
 #[test]
 #[cfg(not(any(feature = "small", feature = "medium")))]
+#[ignore = "v2 CU baselines need re-recording with v2 wire format encoders"]
 fn benchmark_all_instructions() {
     println!("\n=== PER-INSTRUCTION CU BENCHMARK ===\n");
 
     let mut env = TestEnv::new();
     env.init_market();
 
-    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let admin = env.payer.insecure_clone();
     let lp = Keypair::new();
     let lp_idx = env.init_lp(&lp);
     env.deposit(&lp, lp_idx, 50_000_000_000);
@@ -1707,7 +1688,7 @@ fn benchmark_all_instructions() {
     // Helper: send instruction, return CU consumed
     let measure =
         |svm: &mut LiteSVM, ix: Instruction, signers: &[&Keypair]| -> Result<u64, String> {
-            let budget = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+            let budget = common::cu_ix();
             let payer = signers[0];
             let tx = Transaction::new_signed_with_payer(
                 &[budget, ix],
@@ -1937,7 +1918,7 @@ fn benchmark_all_instructions() {
     // --- ResolveMarket + resolved-path instructions ---
     {
         // Top up insurance so WithdrawInsurance has something to withdraw
-        env.top_up_insurance(&Keypair::from_bytes(&admin.to_bytes()).unwrap(), 1_000_000);
+        env.top_up_insurance(&admin.insecure_clone(), 1_000_000);
 
         env.set_price(100_000_000, 900);
         env.crank();
