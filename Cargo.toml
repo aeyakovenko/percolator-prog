@@ -7,18 +7,18 @@ publish = false
 [lib]
 crate-type = ["cdylib", "lib"]
 name = "percolator_prog"
-path = "src/lib.rs"
 
 [features]
 no-entrypoint = []
 test-sbf = []
 cu-audit = []  # Enable compute unit checkpoints for CU auditing
 kani = []
-# Re-enable the legacy native-program test suite once Phase 6 rewrites the
-# instruction encoders. Off by default so `cargo test` runs only the v2-
-# native tests during migration; each gated file has a corresponding
-# #[ignore] marker in tests/test_legacy_disabled.rs so the suite's status
-# is visible without enabling the feature.
+# Two test files are still gated behind this flag because they depend
+# on infrastructure outside this repo: `test_tradecpi.rs` needs the
+# `percolator-match` BPF binary, and `unit.rs` calls the native
+# `processor::process_instruction` entry point that v2 replaces with
+# Anchor's macro-generated dispatch. See tests/test_legacy_disabled.rs
+# for the full inventory and reasons.
 legacy-tests = []
 # Deployment-size tiers — forward to the engine crate. Only one of
 # `small` / `medium` should be set; leaving both off uses the engine's

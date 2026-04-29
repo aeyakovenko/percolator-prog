@@ -1,9 +1,8 @@
 //! Percolator: perpetual-markets Solana program built on Anchor v2.
 //!
-//! Migration in progress. The legacy native-Solana implementation is
-//! preserved at `percolator-prog/` (untouched) and at
-//! `percolator-prog-v2/src/percolator.rs` (in-tree reference, no
-//! longer compiled — see `[lib].path` in Cargo.toml).
+//! The legacy native-Solana implementation is preserved at
+//! `../percolator-prog/` (untouched, used as a side-by-side reference
+//! for audits and behavior comparisons).
 
 #![no_std]
 #![allow(unexpected_cfgs)]
