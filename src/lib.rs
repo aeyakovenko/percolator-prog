@@ -98,13 +98,6 @@ pub use instructions::withdraw_insurance_limited::__client_accounts_withdrawinsu
 pub mod percolator {
     use super::*;
 
-    /// Smoke handler at discriminator 254 — kept until every legacy tag
-    /// has a real handler. Wire format: `[254u8]`.
-    #[discrim = 254]
-    pub fn ping(_ctx: &mut Context<Ping>) -> Result<()> {
-        Ok(())
-    }
-
     /// Tag 9 — user tops up the insurance fund.
     /// See `instructions/top_up_insurance.rs`.
     #[discrim = 9]
@@ -361,9 +354,4 @@ pub mod percolator {
     ) -> Result<()> {
         instructions::update_authority::handler(ctx, kind, new_pubkey)
     }
-}
-
-#[derive(Accounts)]
-pub struct Ping {
-    pub payer: Signer,
 }
