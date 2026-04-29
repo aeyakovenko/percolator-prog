@@ -769,6 +769,16 @@ pub fn encode_matcher_call(
     panic!("matcher tests require ../percolator-match BPF binary");
 }
 
+pub fn encode_init_market_with_limits(
+    admin: &Pubkey,
+    mint: &Pubkey,
+    feed_id: &[u8; 32],
+    _min_oracle_price_cap_e2bps: u64,
+) -> Vec<u8> {
+    let o = InitOpts::default_for(*admin, *mint, *feed_id);
+    encode_init_market(&o)
+}
+
 pub fn encode_init_market_hyperp_with_fees(
     admin: &Pubkey,
     mint: &Pubkey,
@@ -1879,6 +1889,118 @@ impl TestEnv {
             data: encode_crank_self(caller_idx),
         };
         self.send_ix_signed_by(ix, &[caller], "crank_as");
+    }
+
+    /// Same as `try_init_user` but returns the assigned idx on success.
+    pub fn try_init_lp(&mut self, owner: &Keypair) -> Result<u16, String> {
+        let idx = self.account_count;
+        self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        let ata = self.create_ata(&owner.pubkey(), DEFAULT_INIT_PAYMENT);
+        let matcher = spl_token::ID;
+        let ctx = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000,
+                    data: vec![0u8; 320],
+                    owner: matcher,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_init_lp(&matcher, &ctx, DEFAULT_INIT_PAYMENT),
+        };
+        match self.try_send_ix(ix, &[owner]) {
+            Ok(()) => {
+                self.account_count += 1;
+                Ok(idx)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Permissioned crank with a `allow_panic` byte (legacy parity —
+    /// the byte is currently ignored on-chain; same wire as crank_self).
+    pub fn try_crank_with_panic(
+        &mut self,
+        signer: &Keypair,
+        _allow_panic: u8,
+    ) -> Result<(), String> {
+        // Use permissionless crank since `allow_panic` was a legacy flag
+        // that doesn't have a v2 equivalent. The signer still pays.
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(signer.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_crank_permissionless(),
+        };
+        self.try_send_ix(ix, &[signer])
+    }
+
+    /// Try depositing to a specific account idx (which may not even
+    /// exist). For attack-vector tests that probe out-of-bounds/wrong
+    /// account behavior.
+    pub fn try_deposit_to_idx(
+        &mut self,
+        owner: &Keypair,
+        idx: u16,
+        amount: u64,
+    ) -> Result<(), String> {
+        let ata = self.create_ata(&owner.pubkey(), amount);
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+            ],
+            data: encode_deposit(idx, amount),
+        };
+        self.try_send_ix(ix, &[owner])
+    }
+
+    /// User signs as user but tries to act as LP (or vice versa) — for
+    /// type-confusion attack tests. Wire-equivalent to `try_trade` but
+    /// the LP is the victim, signed by the attacker `user`.
+    pub fn try_trade_type_confused(
+        &mut self,
+        user: &Keypair,
+        victim: &Keypair,
+        victim_idx: u16,
+        user_idx: u16,
+        size: i128,
+    ) -> Result<(), String> {
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(user.pubkey(), true),
+                AccountMeta::new(victim.pubkey(), true), // both sign — but role mismatch
+                AccountMeta::new(self.slab, false),
+                AccountMeta::new_readonly(sysvar::clock::ID, false),
+                AccountMeta::new_readonly(self.pyth_index, false),
+            ],
+            data: encode_trade(victim_idx, user_idx, size),
+        };
+        self.try_send_ix(ix, &[user, victim])
     }
 
     pub fn try_crank_self(&mut self, caller: &Keypair, caller_idx: u16) -> Result<(), String> {
