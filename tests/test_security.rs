@@ -13367,6 +13367,102 @@ fn test_attack_withdraw_decoy_cannot_walk_exposed_market() {
     );
 }
 
+/// Regression for issue 65.
+///
+/// A permissionless KeeperCrank with an empty caller candidate list must not
+/// become a hidden market-progress walker for accounts outside the risk buffer.
+/// The setup fills the 4-entry risk buffer with larger over-collateralized
+/// stuffer positions, then opens a smaller target pair that is evicted from the
+/// buffer. Two empty cranks walk the market price against the target; the final
+/// crank includes the target as a liquidation candidate. The invariant is that
+/// this sequence must not drain insurance below its pre-walk level.
+#[test]
+fn test_attack_issue65_keeper_crank_empty_candidates_cannot_drain_evicted_target() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.set_slot_and_price_raw_no_walk(100, 138_000_000);
+    let data = encode_init_market_bounty_sol_20x_with_h_max_and_perm_resolve(
+        &env.payer.pubkey(),
+        &env.mint,
+        MAX_RISK_H_MAX,
+        80,
+    );
+    env.try_init_market_raw(data)
+        .expect("issue65 market config should pass wrapper validation");
+    let payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&payer, 5_000_000_000);
+    env.crank();
+
+    let stuffer_size = 4_000_000_000i128;
+    let stuffer_deposit = 100_000_000_000u64;
+
+    let s1u = Keypair::new();
+    let s1u_idx = env.init_user(&s1u);
+    env.deposit(&s1u, s1u_idx, stuffer_deposit);
+    let s1l = Keypair::new();
+    let s1l_idx = env.init_lp(&s1l);
+    env.deposit(&s1l, s1l_idx, stuffer_deposit);
+    env.trade(&s1u, &s1l, s1l_idx, s1u_idx, stuffer_size);
+
+    let s2u = Keypair::new();
+    let s2u_idx = env.init_user(&s2u);
+    env.deposit(&s2u, s2u_idx, stuffer_deposit);
+    let s2l = Keypair::new();
+    let s2l_idx = env.init_lp(&s2l);
+    env.deposit(&s2l, s2l_idx, stuffer_deposit);
+    env.trade(&s2u, &s2l, s2l_idx, s2u_idx, stuffer_size);
+
+    let target_a = Keypair::new();
+    let target_a_idx = env.init_user(&target_a);
+    env.deposit(&target_a, target_a_idx, 20_000_000_000);
+    let target_b = Keypair::new();
+    let target_b_idx = env.init_lp(&target_b);
+    env.deposit(&target_b, target_b_idx, 20_000_000_000);
+    env.trade(
+        &target_a,
+        &target_b,
+        target_b_idx,
+        target_a_idx,
+        2_800_000_000,
+    );
+
+    let buf = env.read_risk_buffer();
+    let buf_idxs: Vec<u16> = (0..buf.count as usize)
+        .map(|i| buf.entries[i].idx)
+        .collect();
+    assert!(
+        !buf_idxs.contains(&target_a_idx) && !buf_idxs.contains(&target_b_idx),
+        "target pair must be evicted from risk buffer for the regression: buf={buf_idxs:?}, target_a={target_a_idx}, target_b={target_b_idx}",
+    );
+
+    let insurance_before = env.read_insurance_balance();
+    let start_slot = env.svm.get_sysvar::<Clock>().slot;
+    let p1 = (138_000_000f64 * 0.955) as i64;
+    env.set_slot_and_price_raw_no_walk(start_slot + 10, p1);
+    let first_empty = try_empty_crank(&mut env);
+
+    let p2 = (138_000_000f64 * 0.910) as i64;
+    env.set_slot_and_price_raw_no_walk(start_slot + 20, p2);
+    let second_empty = try_empty_crank(&mut env);
+
+    let after_walk = env.read_insurance_balance();
+    let cap_after_walk = env.read_account_capital(target_a_idx);
+    let final_crank = try_crank_with_candidate_indices(&mut env, &[target_a_idx, target_b_idx]);
+    let insurance_after = env.read_insurance_balance();
+
+    println!(
+        "issue65 regression: insurance_before={insurance_before}, after_walk={after_walk}, after={insurance_after}, cap_after_walk={cap_after_walk}, first_empty_ok={}, second_empty_ok={}, final_crank_ok={}, target_a={target_a_idx}, target_b={target_b_idx}, risk_buffer={buf_idxs:?}",
+        first_empty.is_ok(),
+        second_empty.is_ok(),
+        final_crank.is_ok(),
+    );
+    assert!(
+        insurance_after >= insurance_before,
+        "empty-candidate market walking plus a final target crank must not drain insurance: before={insurance_before}, after_walk={after_walk}, after={insurance_after}, first_empty={first_empty:?}, second_empty={second_empty:?}, final={final_crank:?}",
+    );
+}
+
 fn max_risk_candidate_indices(lp_idx: u16, actors: &[MaxRiskActor]) -> Vec<u16> {
     let mut candidates = Vec::with_capacity(actors.len() + 1);
     candidates.push(lp_idx);

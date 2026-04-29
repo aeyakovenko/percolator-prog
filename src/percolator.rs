@@ -4139,17 +4139,6 @@ pub mod processor {
         Ok(())
     }
 
-    fn ensure_market_accrued_to_now_with_policy(
-        engine: &mut RiskEngine,
-        config: &MarketConfig,
-        now_slot: u64,
-        price: u64,
-        funding_rate_e9: i128,
-    ) -> Result<(), ProgramError> {
-        reject_stuck_target_accrual(config, engine, now_slot, price)?;
-        ensure_market_accrued_to_now(engine, now_slot, price, funding_rate_e9)
-    }
-
     fn reject_account_limited_market_progress(
         engine: &RiskEngine,
         now_slot: u64,
@@ -4180,6 +4169,174 @@ pub mod processor {
     ) -> Result<(), ProgramError> {
         reject_stuck_target_accrual(config, engine, now_slot, price)?;
         reject_account_limited_market_progress(engine, now_slot, price, funding_rate_e9)?;
+        ensure_market_accrued_to_now(engine, now_slot, price, funding_rate_e9)
+    }
+
+    fn keeper_policy_can_liquidate(
+        engine: &RiskEngine,
+        idx: usize,
+        eff: i128,
+        price: u64,
+        policy: Option<percolator::LiquidationPolicy>,
+    ) -> bool {
+        match policy {
+            Some(percolator::LiquidationPolicy::FullClose) => true,
+            Some(percolator::LiquidationPolicy::ExactPartial(q_close_q)) => {
+                let abs_eff = eff.unsigned_abs();
+                if q_close_q == 0 || q_close_q >= abs_eff {
+                    return false;
+                }
+                let account = &engine.accounts[idx];
+                let notional_closed = percolator::wide_math::mul_div_floor_u128(
+                    q_close_q,
+                    price as u128,
+                    percolator::POS_SCALE,
+                );
+                let liq_fee_raw = percolator::wide_math::mul_div_ceil_u128(
+                    notional_closed,
+                    engine.params.liquidation_fee_bps as u128,
+                    10_000,
+                );
+                let liq_fee = core::cmp::min(
+                    core::cmp::max(liq_fee_raw, engine.params.min_liquidation_abs.get()),
+                    engine.params.liquidation_fee_cap.get(),
+                );
+
+                let cap = account.capital.get();
+                let fee_from_capital = core::cmp::min(liq_fee, cap);
+                let fee_shortfall = liq_fee.saturating_sub(fee_from_capital);
+                let current_fc = account.fee_credits.get();
+                let fc_headroom = match current_fc.checked_add(i128::MAX) {
+                    Some(h) if h > 0 => h as u128,
+                    _ => 0u128,
+                };
+                let fee_from_debt = core::cmp::min(fee_shortfall, fc_headroom);
+                let fee_applied = fee_from_capital.saturating_add(fee_from_debt);
+                if fee_applied > i128::MAX as u128 {
+                    return false;
+                }
+                let predicted_eq = match engine
+                    .account_equity_maint_raw(account)
+                    .checked_sub(fee_applied as i128)
+                {
+                    Some(v) => v,
+                    None => return false,
+                };
+
+                let rem_eff = abs_eff - q_close_q;
+                let rem_notional = percolator::wide_math::mul_div_ceil_u128(
+                    rem_eff,
+                    price as u128,
+                    percolator::POS_SCALE,
+                );
+                let proportional = percolator::wide_math::mul_div_floor_u128(
+                    rem_notional,
+                    engine.params.maintenance_margin_bps as u128,
+                    10_000,
+                );
+                let predicted_mm_req =
+                    core::cmp::max(proportional, engine.params.min_nonzero_mm_req);
+                if predicted_mm_req > i128::MAX as u128 {
+                    return false;
+                }
+                predicted_eq > predicted_mm_req as i128
+            }
+            None => false,
+        }
+    }
+
+    fn phase1_reachable_liquidation(
+        engine: &RiskEngine,
+        combined: &[(u16, Option<percolator::LiquidationPolicy>)],
+        idx: u16,
+        price: u64,
+    ) -> Result<bool, ProgramError> {
+        let mut attempts: u16 = 0;
+        let max_candidate_inspections = core::cmp::min(
+            percolator::MAX_TOUCHED_PER_INSTRUCTION as u16,
+            crate::constants::LIQ_BUDGET_PER_CRANK.saturating_mul(4),
+        );
+        let mut inspected: u16 = 0;
+        for &(candidate_idx, policy) in combined.iter() {
+            if attempts >= crate::constants::LIQ_BUDGET_PER_CRANK
+                || inspected >= max_candidate_inspections
+            {
+                break;
+            }
+            inspected = match inspected.checked_add(1) {
+                Some(v) => v,
+                None => return Ok(false),
+            };
+            let candidate_usize = candidate_idx as usize;
+            if !idx_used_in_market(engine, candidate_usize) {
+                continue;
+            }
+            attempts = match attempts.checked_add(1) {
+                Some(v) => v,
+                None => return Ok(false),
+            };
+            if candidate_idx == idx {
+                let eff = effective_pos_q_checked(engine, candidate_usize)?;
+                return Ok(keeper_policy_can_liquidate(
+                    engine,
+                    candidate_usize,
+                    eff,
+                    price,
+                    policy,
+                ));
+            }
+        }
+        Ok(false)
+    }
+
+    fn reject_keeper_crank_uncovered_market_progress(
+        engine: &RiskEngine,
+        now_slot: u64,
+        price: u64,
+        funding_rate_e9: i128,
+        combined: &[(u16, Option<percolator::LiquidationPolicy>)],
+    ) -> Result<(), ProgramError> {
+        let dt_slots = now_slot.saturating_sub(engine.last_market_slot);
+        let _ = funding_rate_e9;
+        if dt_slots == 0 && price == engine.last_oracle_price {
+            return Ok(());
+        }
+
+        let max_accounts = core::cmp::min(
+            engine.params.max_accounts as usize,
+            percolator::MAX_ACCOUNTS,
+        );
+        for idx in 0..max_accounts {
+            if !idx_used_in_market(engine, idx) {
+                continue;
+            }
+            let eff = effective_pos_q_checked(engine, idx)?;
+            if eff == 0 {
+                continue;
+            }
+            if !phase1_reachable_liquidation(engine, combined, idx as u16, price)? {
+                return Err(PercolatorError::CatchupRequired.into());
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_market_accrued_to_now_for_keeper_crank(
+        engine: &mut RiskEngine,
+        config: &MarketConfig,
+        now_slot: u64,
+        price: u64,
+        funding_rate_e9: i128,
+        combined: &[(u16, Option<percolator::LiquidationPolicy>)],
+    ) -> Result<(), ProgramError> {
+        reject_stuck_target_accrual(config, engine, now_slot, price)?;
+        reject_keeper_crank_uncovered_market_progress(
+            engine,
+            now_slot,
+            price,
+            funding_rate_e9,
+            combined,
+        )?;
         ensure_market_accrued_to_now(engine, now_slot, price, funding_rate_e9)
     }
 
@@ -5995,12 +6152,13 @@ pub mod processor {
                         }
                         (target_slot, stored_p_last, true)
                     } else {
-                        ensure_market_accrued_to_now_with_policy(
+                        ensure_market_accrued_to_now_for_keeper_crank(
                             engine,
                             &config,
                             clock.slot,
                             price,
                             funding_rate_e9_pre,
+                            &combined,
                         )?;
                         (clock.slot, price, false)
                     };
