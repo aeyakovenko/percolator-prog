@@ -13463,6 +13463,47 @@ fn test_attack_issue65_keeper_crank_empty_candidates_cannot_drain_evicted_target
     );
 }
 
+#[test]
+fn test_issue65_keeper_crank_does_not_require_all_solvent_accounts_in_phase1_budget() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 1_000_000_000_000);
+
+    let user_deposit = 10_000_000_000u64;
+    let tiny_size = 1_000_000i128;
+    for _ in 0..65 {
+        let user = Keypair::new();
+        let user_idx = env.init_user(&user);
+        env.deposit(&user, user_idx, user_deposit);
+        env.trade(&user, &lp, lp_idx, user_idx, tiny_size);
+        assert_ne!(
+            env.read_account_position(user_idx),
+            0,
+            "setup must create nonzero exposed accounts"
+        );
+    }
+
+    let start_slot = env.read_last_market_slot();
+    let target_price = 138_000_000i64 + (138_000_000i64 / 1_000);
+    env.set_slot_and_price_raw_no_walk(start_slot + 10, target_price);
+
+    let crank = try_empty_crank(&mut env);
+    assert!(
+        crank.is_ok(),
+        "KeeperCrank must not require every solvent exposed account to fit in the first phase-1 liquidation budget: {crank:?}"
+    );
+    assert_eq!(
+        env.read_last_market_slot(),
+        start_slot + 10,
+        "solvent dense-market crank should advance market time"
+    );
+}
+
 fn max_risk_candidate_indices(lp_idx: u16, actors: &[MaxRiskActor]) -> Vec<u16> {
     let mut candidates = Vec::with_capacity(actors.len() + 1);
     candidates.push(lp_idx);

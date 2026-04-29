@@ -4245,6 +4245,205 @@ pub mod processor {
         }
     }
 
+    fn compute_kf_pnl_delta_preview(
+        abs_basis: u128,
+        k_snap: i128,
+        k_now: percolator::wide_math::I256,
+        f_snap: i128,
+        f_now: percolator::wide_math::I256,
+        den: u128,
+    ) -> Option<i128> {
+        use percolator::wide_math::{div_rem_u256, I256, U256};
+
+        if abs_basis == 0 {
+            return Some(0);
+        }
+        let k_diff = k_now.checked_sub(I256::from_i128(k_snap))?;
+        let k_scaled = if k_diff.is_zero() {
+            I256::ZERO
+        } else {
+            if k_diff == I256::MIN {
+                return None;
+            }
+            let neg = k_diff.is_negative();
+            let prod = k_diff
+                .abs_u256()
+                .checked_mul(U256::from_u128(percolator::FUNDING_DEN))?;
+            let pos = I256::from_u256_or_overflow(prod)?;
+            if neg {
+                I256::ZERO.checked_sub(pos)?
+            } else {
+                pos
+            }
+        };
+        let f_diff = f_now.checked_sub(I256::from_i128(f_snap))?;
+        let combined = k_scaled.checked_add(f_diff)?;
+        if combined.is_zero() {
+            return Some(0);
+        }
+        if combined == I256::MIN {
+            return None;
+        }
+        let negative = combined.is_negative();
+        let den_wide =
+            U256::from_u128(den).checked_mul(U256::from_u128(percolator::FUNDING_DEN))?;
+        let p = U256::from_u128(abs_basis).checked_mul(combined.abs_u256())?;
+        let (q, rem) = div_rem_u256(p, den_wide);
+        if negative {
+            let mag = if !rem.is_zero() {
+                q.checked_add(U256::ONE)?
+            } else {
+                q
+            };
+            let mag_u128 = mag.try_into_u128()?;
+            if mag_u128 > i128::MAX as u128 {
+                return None;
+            }
+            Some(-(mag_u128 as i128))
+        } else {
+            let q_u128 = q.try_into_u128()?;
+            if q_u128 > i128::MAX as u128 {
+                return None;
+            }
+            Some(q_u128 as i128)
+        }
+    }
+
+    fn predicted_side_kf_after_accrual(
+        engine: &RiskEngine,
+        long_side: bool,
+        now_slot: u64,
+        price: u64,
+        funding_rate_e9: i128,
+    ) -> Option<(percolator::wide_math::I256, percolator::wide_math::I256)> {
+        use percolator::wide_math::I256;
+
+        if now_slot < engine.last_market_slot {
+            return None;
+        }
+        let dt = now_slot.saturating_sub(engine.last_market_slot);
+        let mut k_long = I256::from_i128(engine.adl_coeff_long);
+        let mut k_short = I256::from_i128(engine.adl_coeff_short);
+        let mut f_long = I256::from_i128(engine.f_long_num);
+        let mut f_short = I256::from_i128(engine.f_short_num);
+
+        let delta_p = (price as i128).checked_sub(engine.last_oracle_price as i128)?;
+        if delta_p != 0 {
+            let delta_p_wide = I256::from_i128(delta_p);
+            let dk_long = I256::from_u128(engine.adl_mult_long).checked_mul_i256(delta_p_wide)?;
+            let dk_short = I256::from_u128(engine.adl_mult_short).checked_mul_i256(delta_p_wide)?;
+            k_long = k_long.checked_add(dk_long)?;
+            k_short = k_short.checked_sub(dk_short)?;
+        }
+
+        if funding_rate_e9 != 0
+            && dt > 0
+            && engine.oi_eff_long_q != 0
+            && engine.oi_eff_short_q != 0
+            && engine.fund_px_last > 0
+        {
+            let fund_num_total = I256::from_u128(engine.fund_px_last as u128)
+                .checked_mul_i256(I256::from_i128(funding_rate_e9))?
+                .checked_mul_i256(I256::from_u128(dt as u128))?;
+            let df_long = I256::from_u128(engine.adl_mult_long).checked_mul_i256(fund_num_total)?;
+            let df_short =
+                I256::from_u128(engine.adl_mult_short).checked_mul_i256(fund_num_total)?;
+            f_long = f_long.checked_sub(df_long)?;
+            f_short = f_short.checked_add(df_short)?;
+        }
+
+        if long_side {
+            Some((k_long, f_long))
+        } else {
+            Some((k_short, f_short))
+        }
+    }
+
+    fn account_provably_above_maintenance_after_accrual(
+        engine: &RiskEngine,
+        idx: usize,
+        eff: i128,
+        now_slot: u64,
+        price: u64,
+        funding_rate_e9: i128,
+    ) -> Result<bool, ProgramError> {
+        use percolator::wide_math::I256;
+
+        if eff == 0 {
+            return Ok(true);
+        }
+        let account = &engine.accounts[idx];
+        let basis = account.position_basis_q;
+        if basis == 0 || basis == i128::MIN || account.adl_a_basis == 0 || account.pnl == i128::MIN
+        {
+            return Ok(false);
+        }
+        let fc = account.fee_credits.get();
+        if fc > 0 || fc == i128::MIN {
+            return Ok(false);
+        }
+
+        let long_side = basis > 0;
+        let epoch_side = if long_side {
+            engine.adl_epoch_long
+        } else {
+            engine.adl_epoch_short
+        };
+        if account.adl_epoch_snap != epoch_side {
+            return Ok(false);
+        }
+
+        let den = match account.adl_a_basis.checked_mul(percolator::POS_SCALE) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let (k_now, f_now) = match predicted_side_kf_after_accrual(
+            engine,
+            long_side,
+            now_slot,
+            price,
+            funding_rate_e9,
+        ) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let pnl_delta = match compute_kf_pnl_delta_preview(
+            basis.unsigned_abs(),
+            account.adl_k_snap,
+            k_now,
+            account.f_snap,
+            f_now,
+            den,
+        ) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let pnl_after = match I256::from_i128(account.pnl).checked_add(I256::from_i128(pnl_delta)) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let fee_debt = if fc < 0 { fc.unsigned_abs() } else { 0 };
+        let eq_after = match I256::from_u128(account.capital.get())
+            .checked_add(pnl_after)
+            .and_then(|v| v.checked_sub(I256::from_u128(fee_debt)))
+        {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+
+        let notional = risk_notional_ceil(eff, price);
+        let proportional = percolator::wide_math::mul_div_floor_u128(
+            notional,
+            engine.params.maintenance_margin_bps as u128,
+            10_000,
+        );
+        let mm_req = core::cmp::max(proportional, engine.params.min_nonzero_mm_req);
+        if mm_req > i128::MAX as u128 {
+            return Ok(false);
+        }
+        Ok(eq_after > I256::from_u128(mm_req))
+    }
+
     fn phase1_reachable_liquidation(
         engine: &RiskEngine,
         combined: &[(u16, Option<percolator::LiquidationPolicy>)],
@@ -4312,6 +4511,16 @@ pub mod processor {
             }
             let eff = effective_pos_q_checked(engine, idx)?;
             if eff == 0 {
+                continue;
+            }
+            if account_provably_above_maintenance_after_accrual(
+                engine,
+                idx,
+                eff,
+                now_slot,
+                price,
+                funding_rate_e9,
+            )? {
                 continue;
             }
             if !phase1_reachable_liquidation(engine, combined, idx as u16, price)? {
