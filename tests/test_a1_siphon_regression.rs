@@ -1,4 +1,4 @@
-//! A1 self-dealing insurance-siphon regression tests.
+//! A1 / PR39-F7 self-dealing insurance-siphon regression tests.
 //!
 //! # Attack
 //!
@@ -13,6 +13,14 @@
 //! never propagates cleanly, so the aggregate `(A_cap + A_pnl) +
 //! (B_cap + B_pnl)` exceeds the pair's combined deposits — and the
 //! surplus came out of the insurance fund.
+//!
+//! This is the regression surface described by PR39/F7 ("insurance
+//! teleport via residual inflation in self-trade liquidation"). The
+//! engine intentionally keeps insurance absorption in junior residual
+//! for honest two-party loss sharing, so the wrapper-level property is
+//! not "residual never grows." It is: a self-dealing matched pair must
+//! not convert that residual into attacker profit or a meaningful
+//! insurance-fund drain.
 //!
 //! # Defense (v12.19)
 //!
@@ -39,9 +47,9 @@
 //! ```text
 //! attacker_delta  =  (A_cap + A_pnl) + (B_cap + B_pnl)
 //!                 -  (A_deposit + B_deposit)
-//!                 <=  1         // tolerate 1 unit of integer rounding
+//!                 <=  ROUNDING_TOLERANCE
 //!
-//! insurance_after  >=  insurance_before - 1     // non-decreasing (±1)
+//! insurance_after  >=  insurance_before - INSURANCE_DROP_TOLERANCE
 //! ```
 //!
 //! A violation (attacker extracts value, or insurance shrinks by more
@@ -194,7 +202,7 @@ fn test_a1_external_pyth_siphon_defended() {
         insurance_before,
         insurance_after,
     };
-    outcome.assert_defended("A1a external-Pyth");
+    outcome.assert_defended("PR39/F7 A1a external-Pyth");
 }
 
 /// A1a gap variant: the oracle jumps between keeper turns.
@@ -282,7 +290,7 @@ fn test_a1_external_pyth_raw_gap_move_defended() {
         insurance_before,
         insurance_after,
     };
-    outcome.assert_defended("A1a external-Pyth raw no-walk gap");
+    outcome.assert_defended("PR39/F7 A1a external-Pyth raw no-walk gap");
 }
 
 /// A1b: Hyperp (internal mark) market.
@@ -364,7 +372,7 @@ fn test_a1_hyperp_mark_siphon_defended() {
         insurance_before,
         insurance_after,
     };
-    outcome.assert_defended("A1b Hyperp mark-push (authority-only)");
+    outcome.assert_defended("PR39/F7 A1b Hyperp mark-push (authority-only)");
 }
 
 /// A1c: TradeCpi (matcher-routed) — dual-keypair self-dealing attack.
@@ -460,5 +468,5 @@ fn test_a1_tradecpi_siphon_defended() {
         insurance_before,
         insurance_after,
     };
-    outcome.assert_defended("A1c TradeCpi matched-pair (Hyperp)");
+    outcome.assert_defended("PR39/F7 A1c TradeCpi matched-pair (Hyperp)");
 }
