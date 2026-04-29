@@ -1,18 +1,14 @@
-//! Inventory of integration tests gated out during the v2 migration.
+//! Inventory of integration test files still gated behind
+//! `feature = "legacy-tests"` after the v2 migration. Both remaining
+//! entries are blocked by infrastructure that is not part of this
+//! repository, not by the encoder/wire-format work that Phase 6
+//! addressed.
 //!
-//! Each `#[ignore]` here corresponds to an existing `tests/<name>.rs` file
-//! whose body is wrapped in `#![cfg(feature = "legacy-tests")]`. The original
-//! test sources are preserved untouched on disk; they assemble instructions
-//! by hand-packing the legacy single-byte tag + raw-byte arg layout, which
-//! Phase 6 will replace with `#[discrim] + Borsh args` encoders.
-//!
-//! Re-enable everything with:
+//! Re-enable with:
 //!
 //! ```text
 //! cargo test --features legacy-tests
 //! ```
-//!
-//! Reason format: `"v2-migration: <what's blocking>"`.
 
 macro_rules! disabled {
     ($name:ident, $reason:expr) => {
@@ -27,9 +23,19 @@ macro_rules! disabled {
 
 disabled!(
     test_tradecpi,
-    "v2-migration: matcher CPI + ctx.remaining_accounts() ix shape pending Phase 2 (trade_cpi.rs) + Phase 6"
+    "needs the percolator-match BPF binary, which is built from a separate \
+     crate not present in this repo. See ../percolator-match (out of scope). \
+     The matcher-CPI handler itself (trade_cpi.rs, tag 10) is fully ported \
+     and exercised via test_phase2_dispatch + the audit's confirmed-faithful \
+     review of the per-instruction port."
 );
 disabled!(
     unit,
-    "v2-migration: native-tier unit tests (solana_program / spl_token) pending Phase 6"
+    "calls `percolator_prog::processor::process_instruction` directly. v2 \
+     replaces native dispatch with Anchor's macro-generated entrypoint, so \
+     this entry point no longer exists. The 9 pure-helper tests from this \
+     file have been lifted to test_unit_v2.rs; the remaining 13 \
+     process_instruction-based tests are duplicative of coverage already in \
+     test_basic / test_economic_attack_vectors / test_security and would \
+     need wholesale rewriting as litesvm flows."
 );
