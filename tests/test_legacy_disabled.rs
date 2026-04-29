@@ -34,10 +34,6 @@ disabled!(
     "v2-migration: CU baselines must be re-recorded after Phase 6 (Anchor v2 macro-dispatch shifts CU envelopes)"
 );
 disabled!(
-    i128_alignment,
-    "v2-migration: BPF u128 alignment probes pending Phase 6 (slab disc prefix shifts engine offsets)"
-);
-disabled!(
     kani,
     "v2-migration: kani harness imports percolator_prog::matcher_abi (not yet ported); pending Phase 2"
 );
