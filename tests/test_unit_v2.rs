@@ -126,3 +126,59 @@ fn test_zc_cast_safety_invariant() {
     // Touch one field to force the load.
     let _ = acc.kind;
 }
+
+/// `nonce_on_success` advances by 1 on every success, returns None at
+/// u64::MAX so the wrapper rejects rather than wrapping (which would
+/// reopen request_id 0 to replay).
+#[test]
+fn test_nonce_on_success_normal() {
+    use percolator_prog::policy::nonce_on_success;
+    assert_eq!(nonce_on_success(0), Some(1));
+    assert_eq!(nonce_on_success(42), Some(43));
+    assert_eq!(nonce_on_success(u64::MAX - 1), Some(u64::MAX));
+}
+
+#[test]
+fn test_nonce_on_success_rejects_overflow() {
+    use percolator_prog::policy::nonce_on_success;
+    assert_eq!(
+        nonce_on_success(u64::MAX),
+        None,
+        "nonce_on_success(u64::MAX) must return None, not wrap to 0"
+    );
+}
+
+#[test]
+fn test_nonce_overflow_does_not_reopen_request_id_space() {
+    use percolator_prog::policy::nonce_on_success;
+    let at_max = nonce_on_success(u64::MAX);
+    assert!(at_max.is_none(), "Must reject at u64::MAX");
+
+    let before_max = nonce_on_success(u64::MAX - 1);
+    assert_eq!(
+        before_max,
+        Some(u64::MAX),
+        "u64::MAX-1 should advance to u64::MAX",
+    );
+}
+
+/// `base_to_units` / `units_to_base_checked` must round-trip when
+/// scale=0 (no conversion) and split base into (units, dust) when
+/// scale>0.
+#[test]
+fn test_unit_scale_conversion() {
+    use percolator_prog::units::{base_to_units, units_to_base_checked};
+
+    // scale=0: identity.
+    assert_eq!(base_to_units(12345, 0), (12345, 0));
+    assert_eq!(units_to_base_checked(12345, 0), Some(12345));
+
+    // scale=1000: 5500 base = 5 units + 500 dust.
+    assert_eq!(base_to_units(5500, 1000), (5, 500));
+    assert_eq!(base_to_units(5000, 1000), (5, 0));
+    assert_eq!(units_to_base_checked(5, 1000), Some(5000));
+
+    // scale=100: 201 base = 2 units + 1 dust.
+    assert_eq!(base_to_units(201, 100), (2, 1));
+    assert_eq!(units_to_base_checked(2, 100), Some(200));
+}
