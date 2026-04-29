@@ -26,10 +26,6 @@ macro_rules! disabled {
 }
 
 disabled!(
-    test_conservation,
-    "v2-migration: SPL token CPI + slab encoders pending Phase 6"
-);
-disabled!(
     test_tradecpi,
     "v2-migration: matcher CPI + ctx.remaining_accounts() ix shape pending Phase 2 (trade_cpi.rs) + Phase 6"
 );

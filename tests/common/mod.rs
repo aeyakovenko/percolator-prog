@@ -874,6 +874,24 @@ pub fn encode_init_market_full(
     encode_init_market(&o)
 }
 
+/// Stub property-test helpers used by `test_property_state_machine_*` in
+/// test_conservation. The real legacy types drove a rich randomized
+/// state machine over the engine; here they are no-ops so the file
+/// compiles. The two property tests are `#[ignore]`'d.
+pub struct FuzzRng(u64);
+impl FuzzRng {
+    pub fn new(seed: u64) -> Self { Self(seed) }
+    pub fn next_u32(&mut self) -> u32 { 0 }
+    pub fn next_u64(&mut self) -> u64 { 0 }
+}
+pub struct IntegrationFuzzer;
+impl IntegrationFuzzer {
+    pub fn new(_seed: u64) -> Self { Self }
+    pub fn setup(&mut self) {}
+    pub fn random_action(&mut self, _rng: &mut FuzzRng) -> u8 { 0 }
+    pub fn execute(&mut self, _action: u8) {}
+}
+
 /// Legacy alias for [`TestEnv`] — matcher tests use this name. The
 /// matcher-specific methods on it (`init_lp_with_matcher`,
 /// `matcher_program_id`, `try_trade_cpi`) are stubs that panic since
