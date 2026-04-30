@@ -2959,6 +2959,207 @@ fn test_attack_extreme_position_size() {
     );
 }
 
+fn init_lp_with_matcher_max_fill(
+    env: &mut TradeCpiTestEnv,
+    owner: &Keypair,
+    matcher_prog: &Pubkey,
+    max_fill_abs: u128,
+) -> (u16, Pubkey) {
+    let idx = env.account_count;
+    env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+    let ata = env.create_ata(&owner.pubkey(), DEFAULT_INIT_PAYMENT);
+
+    let lp_bytes = idx.to_le_bytes();
+    let (lp_pda, _) =
+        Pubkey::find_program_address(&[b"lp", env.slab.as_ref(), &lp_bytes], &env.program_id);
+
+    let ctx = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 10_000_000,
+                data: vec![0u8; MATCHER_CONTEXT_LEN],
+                owner: *matcher_prog,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let init_ix = Instruction {
+        program_id: *matcher_prog,
+        accounts: vec![
+            AccountMeta::new_readonly(lp_pda, false),
+            AccountMeta::new(ctx, false),
+        ],
+        data: encode_init_vamm(MatcherMode::Passive, 5, 10, 200, 0, 0, max_fill_abs, 0),
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), init_ix],
+        Some(&owner.pubkey()),
+        &[owner],
+        env.svm.latest_blockhash(),
+    );
+    env.svm
+        .send_transaction(tx)
+        .expect("init oversized matcher context failed");
+
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new(ata, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+        ],
+        data: encode_init_lp(matcher_prog, &ctx, DEFAULT_INIT_PAYMENT),
+    };
+
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&owner.pubkey()),
+        &[owner],
+        env.svm.latest_blockhash(),
+    );
+    env.svm
+        .send_transaction(tx)
+        .expect("init oversized-fill lp failed");
+    env.account_count += 1;
+    (idx, ctx)
+}
+
+/// BUG REPRO: TradeCpi must reject an oversized matcher fill before fee math.
+///
+/// The matcher context shape allows an LP to configure `max_fill_abs` above the
+/// engine's trade-size bound. If the wrapper accepts that ABI-valid fill, the
+/// fee-cap precheck must still return an error, not panic in narrow u128 math.
+#[test]
+fn test_tradecpi_oversized_matcher_fill_rejected_with_error() {
+    let mut env = TradeCpiTestEnv::new();
+
+    init_hyperp_with_fee_weighting(&mut env, 1_000_000, 10, 0);
+
+    let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    let matcher_prog = env.matcher_program_id;
+    env.try_set_oracle_authority(&admin, &admin.pubkey())
+        .unwrap();
+    env.try_push_oracle_price(&admin, 1_000_000, 1000).unwrap();
+
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) =
+        init_lp_with_matcher_max_fill(&mut env, &lp, &matcher_prog, i128::MAX as u128);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    env.set_slot(100);
+    env.crank();
+
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let vault_before = env.read_vault();
+    let c_tot_before = env.read_c_tot();
+    let insurance_before = env.read_insurance_balance();
+    let used_before = env.read_num_used_accounts();
+    println!(
+        "oversized matcher fill setup: request_size={} max_fill_abs={} trading_fee_bps=10 oracle_price_e6=1000000",
+        i128::MAX,
+        i128::MAX as u128
+    );
+
+    let result = env.try_trade_cpi(
+        &user,
+        &lp.pubkey(),
+        lp_idx,
+        user_idx,
+        i128::MAX,
+        &matcher_prog,
+        &matcher_ctx,
+    );
+
+    let err = result.expect_err("oversized matcher fill must be rejected");
+    println!("oversized matcher fill rejection: {err}");
+    println!(
+        "oversized matcher fill post-state: vault={} c_tot={} insurance={} user_pos={} lp_pos={} used={}",
+        env.read_vault(),
+        env.read_c_tot(),
+        env.read_insurance_balance(),
+        env.read_account_position(user_idx),
+        env.read_account_position(lp_idx),
+        env.read_num_used_accounts()
+    );
+
+    assert_eq!(
+        env.read_account_capital(user_idx),
+        user_cap_before,
+        "Rejected oversized fill must not change user capital"
+    );
+    assert_eq!(
+        env.read_account_capital(lp_idx),
+        lp_cap_before,
+        "Rejected oversized fill must not change LP capital"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx),
+        user_pos_before,
+        "Rejected oversized fill must not change user position"
+    );
+    assert_eq!(
+        env.read_account_position(lp_idx),
+        lp_pos_before,
+        "Rejected oversized fill must not change LP position"
+    );
+    assert_eq!(
+        env.read_vault(),
+        vault_before,
+        "Rejected oversized fill must not change engine vault"
+    );
+    assert_eq!(
+        env.read_c_tot(),
+        c_tot_before,
+        "Rejected oversized fill must not change c_tot"
+    );
+    assert_eq!(
+        env.read_insurance_balance(),
+        insurance_before,
+        "Rejected oversized fill must not change insurance"
+    );
+    assert_eq!(
+        env.read_num_used_accounts(),
+        used_before,
+        "Rejected oversized fill must not change used accounts"
+    );
+    assert!(
+        env.read_vault() >= env.read_c_tot() + env.read_insurance_balance(),
+        "Rejected oversized fill must preserve conservation post-state"
+    );
+    assert_eq!(
+        env.read_account_position(user_idx) + env.read_account_position(lp_idx),
+        0,
+        "Rejected oversized fill must preserve OI symmetry post-state"
+    );
+    assert!(
+        !err.contains("panicked")
+            && !err.contains("mul_div_floor_u128: a*b overflow")
+            && !err.contains("SBF program panicked"),
+        "TradeCpi panicked before the engine size-bound rejection: {err}"
+    );
+    assert!(
+        err.contains("InvalidInstructionData")
+            || err.contains("invalid instruction data")
+            || err.contains("EngineOverflow")
+            || err.contains("0x2"),
+        "TradeCpi oversized size must reject cleanly, got: {err}"
+    );
+}
+
 /// ATTACK: Try to trade with i128::MIN position size (negative extreme).
 #[test]
 fn test_attack_extreme_negative_position_size() {

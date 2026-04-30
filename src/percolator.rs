@@ -7099,6 +7099,9 @@ pub mod processor {
                 if size == 0 || size == i128::MIN {
                     return Err(ProgramError::InvalidInstructionData);
                 }
+                if size.unsigned_abs() > percolator::MAX_TRADE_SIZE_Q {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
                 if lp_idx == user_idx {
                     return Err(ProgramError::InvalidInstructionData);
                 }
@@ -7550,6 +7553,9 @@ pub mod processor {
                     }
 
                     let trade_size = crate::policy::cpi_trade_size(ret.exec_size, size);
+                    if trade_size.unsigned_abs() > percolator::MAX_TRADE_SIZE_Q {
+                        return Err(PercolatorError::EngineOverflow.into());
+                    }
                     let current_fee_paid_cap = current_trade_fee_paid_cap(
                         trade_size,
                         exec_price,
