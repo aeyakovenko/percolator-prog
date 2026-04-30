@@ -3833,6 +3833,30 @@ pub mod processor {
         )
     }
 
+    fn checked_wide_mul_div_floor_u128(a: u128, b: u128, d: u128) -> Option<u128> {
+        if d == 0 {
+            return None;
+        }
+        percolator::wide_math::mul_div_floor_u256(
+            percolator::wide_math::U256::from_u128(a),
+            percolator::wide_math::U256::from_u128(b),
+            percolator::wide_math::U256::from_u128(d),
+        )
+        .try_into_u128()
+    }
+
+    fn checked_wide_mul_div_ceil_u128(a: u128, b: u128, d: u128) -> Option<u128> {
+        if d == 0 {
+            return None;
+        }
+        percolator::wide_math::checked_mul_div_ceil_u256(
+            percolator::wide_math::U256::from_u128(a),
+            percolator::wide_math::U256::from_u128(b),
+            percolator::wide_math::U256::from_u128(d),
+        )
+        .and_then(|v| v.try_into_u128())
+    }
+
     fn current_trade_fee_paid_cap(
         size: i128,
         exec_price: u64,
@@ -3841,16 +3865,18 @@ pub mod processor {
         if trading_fee_bps == 0 || size == 0 {
             return Ok(0);
         }
-        let notional = percolator::wide_math::mul_div_floor_u128(
+        let notional = checked_wide_mul_div_floor_u128(
             size.unsigned_abs(),
             exec_price as u128,
             percolator::POS_SCALE,
-        );
+        )
+        .ok_or_else(|| ProgramError::from(PercolatorError::EngineOverflow))?;
         if notional == 0 {
             return Ok(0);
         }
         let one_side_fee =
-            percolator::wide_math::mul_div_ceil_u128(notional, trading_fee_bps as u128, 10_000);
+            checked_wide_mul_div_ceil_u128(notional, trading_fee_bps as u128, 10_000)
+                .ok_or_else(|| ProgramError::from(PercolatorError::EngineOverflow))?;
         one_side_fee
             .checked_mul(2)
             .ok_or_else(|| PercolatorError::EngineOverflow.into())
