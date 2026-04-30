@@ -39,9 +39,29 @@ fn assert_custom_error(err: &str, code_hex: &str, context: &str) {
 
 fn read_engine_last_oracle_price(env: &TestEnv) -> u64 {
     let d = env.svm.get_account(&env.slab).unwrap().data;
-    const LAST_ORACLE_PRICE_OFFSET: usize = ENGINE_OFFSET + 648;
+    const LAST_ORACLE_PRICE_OFFSET: usize = ENGINE_OFFSET + 656;
     u64::from_le_bytes(
         d[LAST_ORACLE_PRICE_OFFSET..LAST_ORACLE_PRICE_OFFSET + 8]
+            .try_into()
+            .unwrap(),
+    )
+}
+
+fn read_engine_rr_cursor(env: &TestEnv) -> u64 {
+    let d = env.svm.get_account(&env.slab).unwrap().data;
+    const RR_CURSOR_OFFSET: usize = ENGINE_OFFSET + 592;
+    u64::from_le_bytes(
+        d[RR_CURSOR_OFFSET..RR_CURSOR_OFFSET + 8]
+            .try_into()
+            .unwrap(),
+    )
+}
+
+fn read_engine_sweep_generation(env: &TestEnv) -> u64 {
+    let d = env.svm.get_account(&env.slab).unwrap().data;
+    const SWEEP_GENERATION_OFFSET: usize = ENGINE_OFFSET + 600;
+    u64::from_le_bytes(
+        d[SWEEP_GENERATION_OFFSET..SWEEP_GENERATION_OFFSET + 8]
             .try_into()
             .unwrap(),
     )
@@ -2187,14 +2207,12 @@ fn test_liquidate_at_oracle_tag_retired() {
     );
 }
 
-/// Spec: When vault < pnl_pos_tot (h < 1.0), withdrawals/closes are haircutted.
-/// Winners receive less than their full PnL, proportional to available vault funds.
-///
-/// This test verifies that the haircut mechanism does not prevent closing accounts.
-/// Even under stress (h < 1.0), winners can still close -- they just receive
-/// haircutted proceeds rather than full PnL.
+/// Spec: under live haircut stress, a profitable account cannot bypass the
+/// released-PnL conversion path by closing directly. Positive PnL must be
+/// matured/converted first; otherwise CloseAccount rejects without moving vault
+/// funds.
 #[test]
-fn test_withdrawal_under_haircut_conditions() {
+fn test_live_haircut_conditions_block_unconverted_positive_pnl_close() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
@@ -2228,44 +2246,40 @@ fn test_withdrawal_under_haircut_conditions() {
     env.set_slot(1800);
     env.crank();
 
-    // Check that winner can still close account (haircut applies)
-    // Flatten position first
+    // Flatten position first. This leaves the winner flat but with positive
+    // PnL that is still subject to the live haircut/maturity rules.
     env.trade(&winner, &lp, lp_idx, winner_idx, -1_000_000);
     env.set_slot(1900);
     env.crank();
+    // The flattening trade creates fresh positive PnL reserve. Under the
+    // stress-envelope/two-bucket spec, a post-stress touch may first promote
+    // pending profit into the scheduled bucket; a later touch releases it.
+    env.set_slot(1901);
+    env.crank();
+    env.set_slot(1902);
+    env.crank();
 
-    // Record vault balance before close to verify conservation
+    assert!(
+        env.read_account_pnl(winner_idx) > 0,
+        "precondition: winner should still have positive PnL"
+    );
+
     let vault_before_close = env.vault_balance();
-
     let result = env.try_close_account(&winner, winner_idx);
     assert!(
-        result.is_ok(),
-        "Winner should be able to close even under potential haircut: {:?}",
-        result
+        result.is_err(),
+        "live close must not bypass unconverted positive PnL under haircut stress"
     );
-
-    // Vault conservation: the vault balance after close must account for all
-    // capital returned. The total deposited was 10B (LP) + 5B (winner) + 5B (loser) = 20B.
-    // Some fees went to insurance during init. After close, vault should decrease
-    // by the amount returned to the winner.
-    let vault_after_close = env.vault_balance();
-    let returned_to_winner = vault_before_close - vault_after_close;
-
-    // The winner deposited 5B and had a profitable position (price went from $138 to $200).
-    // Under haircut, the returned capital should be LESS than deposit + full PnL.
-    // At minimum, the winner should get back something (they deposited 5B and won).
-    assert!(
-        returned_to_winner > 0,
-        "Winner must receive some capital back on close"
+    let err = result.unwrap_err();
+    assert_custom_error(
+        &err,
+        "0x11",
+        "live close with unconverted positive PnL should fail as PnlNotWarmedUp",
     );
-    // Under haircut conditions (loser liquidated, vault stressed), the winner
-    // should receive less than their initial deposit + full PnL would suggest.
-    // Their initial deposit was 5B; if they got full PnL they'd get significantly more.
-    // Verify returned amount is less than initial deposit + generous upper bound.
-    // (This confirms the haircut mechanism is working.)
-    assert!(
-        returned_to_winner <= vault_before_close,
-        "Returned capital cannot exceed vault balance (conservation)"
+    assert_eq!(
+        env.vault_balance(),
+        vault_before_close,
+        "rejected close must not transfer vault funds"
     );
 }
 
@@ -6331,6 +6345,131 @@ fn test_attack_fresh_keeper_cranker_cannot_capture_third_party_candidate_fees() 
         ins_after.saturating_sub(ins_before),
         victim_fee_paid,
         "candidate-synced third-party fees should stay entirely in insurance"
+    );
+}
+
+#[test]
+fn test_keeper_crank_noop_candidate_syncs_do_not_spend_bitmap_sweep_budget() {
+    program_path();
+    let mut env = TestEnv::new();
+    let data = encode_init_market_with_maint_fee_bounded(
+        &env.payer.pubkey(),
+        &env.mint,
+        &TEST_FEED_ID,
+        1_000_000_000,
+        1_000,
+        0,
+    );
+    env.try_init_market_raw(data).expect("init_market");
+
+    let mut owners = Vec::new();
+    for _ in 0..140 {
+        let owner = Keypair::new();
+        let idx = env.init_user(&owner);
+        assert_eq!(idx as usize, owners.len());
+        owners.push(owner);
+    }
+
+    let candidates: Vec<u16> = (0..percolator_prog::constants::LIQ_BUDGET_PER_CRANK).collect();
+    let data = encode_crank_with_touch_candidates(&candidates);
+    let caller = Keypair::new();
+    env.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(caller.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(env.pyth_index, false),
+        ],
+        data,
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&caller.pubkey()),
+        &[&caller],
+        env.svm.latest_blockhash(),
+    );
+    env.svm.send_transaction(tx).expect("crank should succeed");
+
+    let slab = env.svm.get_account(&env.slab).unwrap();
+    let config = percolator_prog::state::read_config(&slab.data);
+    assert_eq!(
+        (config.fee_sweep_cursor_word, config.fee_sweep_cursor_bit),
+        (2, 0),
+        "same-anchor candidate syncs are no-ops and must not shrink the 128-account bitmap sweep window"
+    );
+}
+
+#[test]
+fn test_keeper_crank_healthy_tail_candidate_does_not_defer_phase2() {
+    program_path();
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    assert_eq!(lp_idx, 0);
+    env.deposit(&lp, lp_idx, 2_000_000_000_000);
+
+    let target = Keypair::new();
+    let target_idx = env.init_user(&target);
+    assert_eq!(target_idx, 1);
+    env.deposit(&target, target_idx, 10_000_000_000);
+
+    let mut flat_candidate_idxs = Vec::new();
+    for _ in 0..percolator_prog::constants::LIQ_BUDGET_PER_CRANK {
+        let owner = Keypair::new();
+        let idx = env.init_user(&owner);
+        env.deposit(&owner, idx, 10_000_000_000);
+        flat_candidate_idxs.push(idx);
+    }
+
+    for _ in 0..4 {
+        let owner = Keypair::new();
+        let idx = env.init_user(&owner);
+        env.deposit(&owner, idx, 10_000_000_000);
+        env.trade(&owner, &lp, lp_idx, idx, 10_000_000);
+    }
+
+    env.trade(&target, &lp, lp_idx, target_idx, 1_000_000);
+
+    let mut candidates = flat_candidate_idxs;
+    assert_eq!(
+        candidates.len(),
+        percolator_prog::constants::LIQ_BUDGET_PER_CRANK as usize
+    );
+    candidates.push(target_idx);
+
+    let start_slot = env.read_last_market_slot();
+    env.set_slot(start_slot + 1);
+    let rr_cursor_before = read_engine_rr_cursor(&env);
+    let sweep_generation_before = read_engine_sweep_generation(&env);
+
+    let caller = Keypair::new();
+    env.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(caller.pubkey(), true),
+            AccountMeta::new(env.slab, false),
+            AccountMeta::new_readonly(sysvar::clock::ID, false),
+            AccountMeta::new_readonly(env.pyth_index, false),
+        ],
+        data: encode_crank_with_candidates(&candidates),
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), ix],
+        Some(&caller.pubkey()),
+        &[&caller],
+        env.svm.latest_blockhash(),
+    );
+    env.svm.send_transaction(tx).expect("crank should succeed");
+
+    assert!(
+        read_engine_rr_cursor(&env) != rr_cursor_before
+            || read_engine_sweep_generation(&env) > sweep_generation_before,
+        "healthy tail candidates beyond phase-1 budget must not suppress phase-2 RR progress"
     );
 }
 

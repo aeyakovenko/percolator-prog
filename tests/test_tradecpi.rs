@@ -5802,7 +5802,7 @@ fn test_tradecpi_zero_fill_advances_engine_time() {
     // engine struct changes.
     let read_last_market_slot = |env: &TradeCpiTestEnv| -> u64 {
         let data = env.svm.get_account(&env.slab).unwrap().data;
-        let off = ENGINE_OFFSET + 664;
+        let off = ENGINE_OFFSET + 672;
         u64::from_le_bytes(data[off..off + 8].try_into().unwrap())
     };
 
@@ -5890,7 +5890,7 @@ fn test_tradecpi_zero_fill_advances_engine_time() {
 fn test_tradecpi_zero_fill_rejects_exposed_price_progress() {
     let read_last_market_slot = |env: &TradeCpiTestEnv| -> u64 {
         let data = env.svm.get_account(&env.slab).unwrap().data;
-        let off = ENGINE_OFFSET + 664;
+        let off = ENGINE_OFFSET + 672;
         u64::from_le_bytes(data[off..off + 8].try_into().unwrap())
     };
 
@@ -5984,7 +5984,7 @@ fn test_tradecpi_zero_fill_rejects_exposed_price_progress() {
 fn test_tradecpi_nonzero_fill_requires_crank_for_exposed_price_progress() {
     let read_last_market_slot = |env: &TradeCpiTestEnv| -> u64 {
         let data = env.svm.get_account(&env.slab).unwrap().data;
-        let off = ENGINE_OFFSET + 664;
+        let off = ENGINE_OFFSET + 672;
         u64::from_le_bytes(data[off..off + 8].try_into().unwrap())
     };
 

@@ -1730,12 +1730,11 @@ fn test_withdraw_limited_operator_cannot_call_tag_20() {
     // The ONLY remaining gate is the authority check — this isolates the
     // authority-split property from the resolved/empty gates.
     //
-    // Resolve the market (admin, via ResolveMarket with authority price
-    // set). No accounts have been created → num_used == 0. In this state,
-    // tag 20 would succeed for insurance_authority, but not for operator.
-    env.set_slot_and_price(200, 1_000_000);
-    env.crank();
-    env.try_resolve_market(&admin, 0).expect("admin resolves");
+    // Resolve the market. No accounts have been created → num_used == 0. In
+    // this state, tag 20 would succeed for insurance_authority, but not for
+    // operator.
+    env.try_resolve_permissionless()
+        .expect("permissionless resolve");
 
     // Operator attempts tag 20: must fail (auth mismatch).
     let bypass = env.try_withdraw_insurance(&operator);

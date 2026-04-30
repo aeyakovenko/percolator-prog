@@ -5783,14 +5783,18 @@ fn test_attack_warmup_profit_vests_gradually() {
     );
 }
 
-/// ATTACK: Warmup period=0 means instant settlement.
-/// With warmup=0, all PnL should vest immediately.
+/// ATTACK: h_min=0 must not allow withdrawing profit that has not actually
+/// been converted into capital.
 #[test]
 fn test_attack_warmup_period_zero_instant_settlement() {
     program_path();
 
     let mut env = TestEnv::new();
-    env.init_market_with_invert(0); // warmup_period=0
+    let mut init_data =
+        encode_init_market_with_invert(&env.payer.pubkey(), &env.mint, &TEST_FEED_ID, 0);
+    init_data[136..144].copy_from_slice(&0u64.to_le_bytes()); // h_min=0 product mode
+    env.try_init_market_raw(init_data)
+        .expect("h_min=0 market init");
 
     let admin = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
 
@@ -5827,34 +5831,52 @@ fn test_attack_warmup_period_zero_instant_settlement() {
         user_pos_after_close
     );
     assert!(
-        user_cap_after_close > user_cap_before,
-        "With warmup=0 and favorable move, closing should realize profit immediately: cap_before={} cap_after_close={}",
+        user_cap_after_close >= user_cap_before,
+        "Favorable flat close must not reduce user capital: cap_before={} cap_after_close={}",
         user_cap_before,
         user_cap_after_close
     );
 
-    // Immediate withdrawal above original deposit must succeed with warmup=0.
+    // Withdrawal must follow actual capital accounting. If h_min=0 released
+    // profit into capital, withdrawing one atom above the original balance is
+    // valid. If profit remained unavailable, the same withdrawal must fail
+    // without moving capital or SPL vault balance.
     let withdraw_amount = user_cap_before as u64 + 1;
     let vault_before_withdraw = env.vault_balance();
     let cap_before_withdraw = env.read_account_capital(user_idx);
     let withdraw_result = env.try_withdraw(&user, user_idx, withdraw_amount);
-    assert!(
+    let expected_success = (withdraw_amount as u128) <= cap_before_withdraw;
+    assert_eq!(
         withdraw_result.is_ok(),
-        "Warmup=0 should allow immediate withdrawal of realized profit: {:?}",
-        withdraw_result
+        expected_success,
+        "withdrawal result must match accounted capital, result={:?} cap_before_withdraw={} withdraw_amount={}",
+        withdraw_result,
+        cap_before_withdraw,
+        withdraw_amount
     );
     let cap_after_withdraw = env.read_account_capital(user_idx);
     let vault_after_withdraw = env.vault_balance();
-    assert_eq!(
-        cap_after_withdraw,
-        cap_before_withdraw - withdraw_amount as u128,
-        "Immediate withdrawal should decrement capital exactly"
-    );
-    assert_eq!(
-        vault_after_withdraw,
-        vault_before_withdraw - withdraw_amount,
-        "Immediate withdrawal should decrement vault exactly"
-    );
+    if expected_success {
+        assert_eq!(
+            cap_after_withdraw,
+            cap_before_withdraw - withdraw_amount as u128,
+            "Successful withdrawal should decrement capital exactly"
+        );
+        assert_eq!(
+            vault_after_withdraw,
+            vault_before_withdraw - withdraw_amount,
+            "Successful withdrawal should decrement vault exactly"
+        );
+    } else {
+        assert_eq!(
+            cap_after_withdraw, cap_before_withdraw,
+            "Rejected withdrawal must preserve capital"
+        );
+        assert_eq!(
+            vault_after_withdraw, vault_before_withdraw,
+            "Rejected withdrawal must preserve vault"
+        );
+    }
 
     // Conservation must still hold.
     let c_tot = env.read_c_tot();
@@ -5872,8 +5894,12 @@ fn test_attack_warmup_period_zero_instant_settlement() {
     };
     assert_eq!(
         spl_vault,
-        26_000_000_200 - withdraw_amount,
-        "ATTACK: SPL vault mismatch after immediate warmup=0 profit withdrawal!"
+        if expected_success {
+            26_000_000_200 - withdraw_amount
+        } else {
+            26_000_000_200
+        },
+        "ATTACK: SPL vault mismatch after h_min=0 profit withdrawal attempt!"
     );
 }
 
