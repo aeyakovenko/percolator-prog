@@ -1182,6 +1182,16 @@ pub mod policy {
         last_effective_price_e6.max(1)
     }
 
+    /// Apply fee weighting to an already-computed EWMA alpha.
+    #[inline]
+    pub fn ewma_effective_alpha_bps(alpha_bps: u128, fee_paid: u64, mark_min_fee: u64) -> u128 {
+        if mark_min_fee == 0 || fee_paid >= mark_min_fee {
+            alpha_bps
+        } else {
+            alpha_bps * (fee_paid as u128) / (mark_min_fee as u128)
+        }
+    }
+
     /// EWMA update for mark price tracking.
     ///
     /// Computes: new = old * (1 - alpha) + price * alpha
@@ -1225,11 +1235,7 @@ pub mod policy {
         // Trades below the fee threshold get proportionally reduced mark influence.
         // This makes wash trading cost-proportional: to move the mark like a
         // legitimate trade, the attacker must burn the same fee into insurance.
-        let effective_alpha_bps = if mark_min_fee == 0 || fee_paid >= mark_min_fee {
-            alpha_bps
-        } else {
-            alpha_bps * (fee_paid as u128) / (mark_min_fee as u128)
-        };
+        let effective_alpha_bps = ewma_effective_alpha_bps(alpha_bps, fee_paid, mark_min_fee);
 
         let old128 = old as u128;
         let price128 = price as u128;
