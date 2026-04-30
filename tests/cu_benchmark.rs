@@ -37,8 +37,14 @@ const SLAB_LEN: usize = 96696;
 const SLAB_LEN: usize = 382488;
 #[cfg(not(any(feature = "small", feature = "medium")))]
 const SLAB_LEN: usize = 1525656;
-const MAX_ACCOUNTS: usize = 2048;
+#[cfg(all(feature = "small", not(feature = "medium")))]
+const MAX_ACCOUNTS: usize = 256;
+#[cfg(all(feature = "medium", not(feature = "small")))]
+const MAX_ACCOUNTS: usize = 1024;
+#[cfg(not(any(feature = "small", feature = "medium")))]
+const MAX_ACCOUNTS: usize = 4096;
 const TEST_MAX_STALENESS_SECS: u64 = percolator_prog::constants::MAX_ORACLE_STALENESS_SECS;
+const BENCHMARK_PERMISSIONLESS_RESOLVE_STALE_SLOTS: u64 = 10_000;
 
 // Pyth Receiver program ID (rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ)
 const PYTH_RECEIVER_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
@@ -142,7 +148,7 @@ fn encode_init_market_with_params(
     data.extend_from_slice(&(MAX_ACCOUNTS as u64).to_le_bytes());
     data.extend_from_slice(&1u128.to_le_bytes()); // new_account_fee (anti-spam floor)
     data.extend_from_slice(&warmup_period_slots.max(1).to_le_bytes()); // h_max (must be >= h_min)
-    data.extend_from_slice(&50u64.to_le_bytes()); // max_crank_staleness_slots (< perm_resolve <= MAX_ACCRUAL_DT_SLOTS)
+    data.extend_from_slice(&50u64.to_le_bytes()); // legacy max_crank_staleness_slots wire field
     data.extend_from_slice(&50u64.to_le_bytes()); // liquidation_fee_bps
     data.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // liquidation_fee_cap
     data.extend_from_slice(&1000u64.to_le_bytes()); // resolve_price_deviation_bps
@@ -154,8 +160,10 @@ fn encode_init_market_with_params(
     data.extend_from_slice(&2u64.to_le_bytes()); // max_price_move_bps_per_slot
     data.extend_from_slice(&0u16.to_le_bytes()); // insurance_withdraw_max_bps
     data.extend_from_slice(&0u64.to_le_bytes()); // insurance_withdraw_cooldown_slots
-                                                 // v12.19.6: perm_resolve must be > max_crank_staleness (50) AND <= MAX_ACCRUAL_DT_SLOTS (100).
-    data.extend_from_slice(&80u64.to_le_bytes()); // permissionless_resolve_stale_slots
+                                                 // Keep the benchmark market live while thousands of setup trades are
+                                                 // created, so dense crank measurements exercise crank CU rather than the
+                                                 // hard stale gate.
+    data.extend_from_slice(&BENCHMARK_PERMISSIONLESS_RESOLVE_STALE_SLOTS.to_le_bytes());
     data.extend_from_slice(&500u64.to_le_bytes()); // funding_horizon_slots
     data.extend_from_slice(&100u64.to_le_bytes()); // funding_k_bps
     data.extend_from_slice(&500i64.to_le_bytes()); // funding_max_premium_bps
@@ -539,16 +547,15 @@ impl TestEnv {
     }
 
     fn set_price(&mut self, price_e6: i64, slot: u64) {
-        // v12.19.6 envelope: perm_resolve=80 at init, so gaps > 80 slots
-        // since the last good oracle read fail with OracleStale. Chunk any
-        // jump from current slot into ≤50-slot steps with a best-effort
-        // crank between each to advance `last_good_oracle_slot` before
-        // the next jump.
+        // If a benchmark jumps beyond the hard stale window, chunk with
+        // best-effort cranks so the harness keeps testing crank CU instead
+        // of terminal market resolution.
         let current = self.svm.get_sysvar::<Clock>().slot;
-        if slot > current.saturating_add(50) {
+        let max_live_step = BENCHMARK_PERMISSIONLESS_RESOLVE_STALE_SLOTS.saturating_sub(1);
+        if max_live_step > 0 && slot > current.saturating_add(max_live_step) {
             let mut s = current;
-            while s.saturating_add(50) < slot {
-                s = s.saturating_add(50);
+            while s.saturating_add(max_live_step) < slot {
+                s = s.saturating_add(max_live_step);
                 self.write_price_and_clock(price_e6, s);
                 let _ = self.try_crank();
             }
@@ -786,7 +793,7 @@ fn benchmark_worst_case_scenarios() {
 
     // Assert we're testing with production config (4096 accounts)
     assert_eq!(
-        MAX_ACCOUNTS, 2048,
+        MAX_ACCOUNTS, 4096,
         "Expected MAX_ACCOUNTS=4096 for production benchmark"
     );
     assert!(
@@ -1212,7 +1219,7 @@ fn benchmark_worst_case_scenarios() {
 
     // Scenario 8: 🔥🔥 Full 4096 sweep - worst single crank across 16 calls
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("Scenario 8: 🔥🔥 Full sweep worst-case (32 cranks, 128 each)");
+    println!("Scenario 8: 🔥🔥 Full sweep worst-case (16 cranks)");
     println!("  Testing worst single crank CU across 16-crank full sweep");
     println!("  8a: Healthy accounts with positions (no liquidations)");
     {
@@ -1286,6 +1293,7 @@ fn benchmark_worst_case_scenarios() {
             let mut worst_cu: u64 = 0;
             let mut total_cu: u64 = 0;
             let mut any_failed = false;
+            let mut first_error: Option<String> = None;
 
             for crank_num in 0..16 {
                 match env.try_crank() {
@@ -1301,16 +1309,22 @@ fn benchmark_worst_case_scenarios() {
                             any_failed = true;
                             break;
                         }
-                        // Other errors might be OK (no work to do)
+                        first_error = Some(format!("crank {} failed: {}", crank_num + 1, e));
+                        any_failed = true;
+                        break;
                     }
                 }
             }
 
             if any_failed {
-                println!(
-                    "  {:>4} users: ❌ Single crank exceeded 1.4M CU limit",
-                    num_users
-                );
+                if let Some(e) = first_error {
+                    println!("  {:>4} users: ❌ {}", num_users, e);
+                } else {
+                    println!(
+                        "  {:>4} users: ❌ Single crank exceeded 1.4M CU limit",
+                        num_users
+                    );
+                }
             } else {
                 let pct = (worst_cu as f64 / 1_400_000.0) * 100.0;
                 println!("  {:>4} users: worst={:>10} CU ({:.1}% of limit), total={} CU across 16 cranks",
@@ -1388,6 +1402,7 @@ fn benchmark_worst_case_scenarios() {
             let mut total_cu: u64 = 0;
             let mut any_failed = false;
             let mut last_logs: Vec<String> = Vec::new();
+            let mut first_error: Option<String> = None;
 
             for crank_num in 0..16 {
                 match env.try_crank() {
@@ -1404,15 +1419,22 @@ fn benchmark_worst_case_scenarios() {
                             any_failed = true;
                             break;
                         }
+                        first_error = Some(format!("crank {} failed: {}", crank_num + 1, e));
+                        any_failed = true;
+                        break;
                     }
                 }
             }
 
             if any_failed {
-                println!(
-                    "  {:>4} users: ❌ Single crank exceeded 1.4M CU limit",
-                    num_users
-                );
+                if let Some(e) = first_error {
+                    println!("  {:>4} users: ❌ {}", num_users, e);
+                } else {
+                    println!(
+                        "  {:>4} users: ❌ Single crank exceeded 1.4M CU limit",
+                        num_users
+                    );
+                }
             } else {
                 let pct = (worst_cu as f64 / 1_400_000.0) * 100.0;
                 // Extract CRANK_STATS from logs - sol_log_64 format: "Program log: 0xtag, 0xliqs, 0xforce, 0xmax_accounts, 0x0"
@@ -1664,11 +1686,8 @@ fn benchmark_worst_case_scenarios() {
 
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("=== SUMMARY ===");
-    println!("• Crank sweeps 128 accounts max per call (32 cranks for full 4096)");
-    println!(
-        "• With MAX_ACCOUNTS={}, baseline scan alone is ~194K CU",
-        MAX_ACCOUNTS
-    );
+    println!("• Empty cranks use the greedy RR window; candidate cranks use the audited candidate window");
+    println!("• Scenario 1 reports the LP-only baseline for MAX_ACCOUNTS={MAX_ACCOUNTS}");
     println!("• Key metric: worst single crank must stay under 1.4M CU");
     println!("• ADL/liquidation processing adds CU overhead per affected account");
 }
