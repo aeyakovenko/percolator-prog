@@ -1612,6 +1612,72 @@ fn test_comprehensive_margin_limit_enforcement() {
     );
 }
 
+#[test]
+fn test_trade_nocpi_oversized_size_rejected_with_error() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_trading_fee(10);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 100_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 10_000_000_000);
+
+    let user_cap_before = env.read_account_capital(user_idx);
+    let lp_cap_before = env.read_account_capital(lp_idx);
+    let user_pos_before = env.read_account_position(user_idx);
+    let lp_pos_before = env.read_account_position(lp_idx);
+    let vault_before = env.read_engine_vault();
+    let c_tot_before = env.read_c_tot();
+    let insurance_before = env.read_insurance_balance();
+    let used_before = env.read_num_used_accounts();
+    println!(
+        "oversized TradeNoCpi setup: request_size={} trading_fee_bps=10",
+        i128::MAX
+    );
+
+    let result = env.try_trade(&user, &lp, lp_idx, user_idx, i128::MAX);
+    let err = result.expect_err("oversized TradeNoCpi must be rejected");
+    println!("oversized TradeNoCpi rejection: {err}");
+    println!(
+        "oversized TradeNoCpi post-state: vault={} c_tot={} insurance={} user_pos={} lp_pos={} used={}",
+        env.read_engine_vault(),
+        env.read_c_tot(),
+        env.read_insurance_balance(),
+        env.read_account_position(user_idx),
+        env.read_account_position(lp_idx),
+        env.read_num_used_accounts()
+    );
+
+    assert_eq!(env.read_account_capital(user_idx), user_cap_before);
+    assert_eq!(env.read_account_capital(lp_idx), lp_cap_before);
+    assert_eq!(env.read_account_position(user_idx), user_pos_before);
+    assert_eq!(env.read_account_position(lp_idx), lp_pos_before);
+    assert_eq!(env.read_engine_vault(), vault_before);
+    assert_eq!(env.read_c_tot(), c_tot_before);
+    assert_eq!(env.read_insurance_balance(), insurance_before);
+    assert_eq!(env.read_num_used_accounts(), used_before);
+    assert!(env.read_engine_vault() >= env.read_c_tot() + env.read_insurance_balance());
+    assert_eq!(
+        env.read_account_position(user_idx) + env.read_account_position(lp_idx),
+        0
+    );
+    assert!(
+        !err.contains("panicked")
+            && !err.contains("mul_div_floor_u128: a*b overflow")
+            && !err.contains("SBF program panicked"),
+        "TradeNoCpi panicked before the engine size-bound rejection: {err}"
+    );
+    assert!(
+        err.contains("InvalidInstructionData") || err.contains("invalid instruction data"),
+        "TradeNoCpi oversized size must reject at wrapper entry, got: {err}"
+    );
+}
+
 /// Test 10: Funding accrual - multiple cranks succeed over time
 #[test]
 fn test_comprehensive_funding_accrual() {

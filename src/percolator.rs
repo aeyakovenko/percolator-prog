@@ -6813,6 +6813,9 @@ pub mod processor {
                 if size == 0 || size == i128::MIN {
                     return Err(ProgramError::InvalidInstructionData);
                 }
+                if size.unsigned_abs() > percolator::MAX_TRADE_SIZE_Q {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
 
                 let mut data = state::slab_data_mut(a_slab)?;
                 slab_guard(program_id, a_slab, &data)?;
