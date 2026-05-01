@@ -76,6 +76,7 @@ use percolator_prog::policy::{
     owner_ok,
     partial_crank_config_fields_to_write,
     pda_key_matches,
+    recurring_fee_pre_touch_safe_shape,
     // New: Oracle unit scale math
     scale_price_e6,
     signer_ok,
@@ -4475,4 +4476,61 @@ fn kani_issue65_prefix_scan_step_inductive() {
         account_ok,
         "covered prefix extends exactly when the next account does not need an unavailable phase-1 slot"
     );
+}
+
+// =============================================================================
+// AC. RECURRING FEE PRE-TOUCH SAFETY (1 proof)
+// =============================================================================
+
+/// Prove the wrapper only permits pre-touch recurring-fee collection from
+/// account shapes that cannot have same-account lazy losses or unresolved side
+/// effects senior to fees. Nonflat, exposed-effective, negative-PnL, reserve,
+/// pending/scheduled, positive-fee-credit, and i128::MIN fee-credit shapes are
+/// all rejected before the wrapper calls the engine fee-sync endpoint.
+#[kani::proof]
+fn kani_recurring_fee_pre_touch_safe_shape_universal() {
+    let used: bool = kani::any();
+    let position_basis_q: i128 = kani::any();
+    let effective_pos_q: i128 = kani::any();
+    let pnl: i128 = kani::any();
+    let reserved_pnl: u128 = kani::any();
+    let sched_present: u8 = kani::any();
+    let pending_present: u8 = kani::any();
+    let fee_credits: i128 = kani::any();
+
+    let safe = recurring_fee_pre_touch_safe_shape(
+        used,
+        position_basis_q,
+        effective_pos_q,
+        pnl,
+        reserved_pnl,
+        sched_present,
+        pending_present,
+        fee_credits,
+    );
+    let expected = used
+        && position_basis_q == 0
+        && effective_pos_q == 0
+        && pnl >= 0
+        && reserved_pnl == 0
+        && sched_present == 0
+        && pending_present == 0
+        && fee_credits <= 0
+        && fee_credits != i128::MIN;
+
+    assert_eq!(
+        safe, expected,
+        "pre-touch recurring fees are allowed iff the account is flat/current and non-corrupt"
+    );
+    if safe {
+        assert!(used);
+        assert_eq!(position_basis_q, 0);
+        assert_eq!(effective_pos_q, 0);
+        assert!(pnl >= 0);
+        assert_eq!(reserved_pnl, 0);
+        assert_eq!(sched_present, 0);
+        assert_eq!(pending_present, 0);
+        assert!(fee_credits <= 0);
+        assert_ne!(fee_credits, i128::MIN);
+    }
 }

@@ -9,7 +9,7 @@ use percolator_prog::{
     constants::MAGIC,
     error::PercolatorError,
     matcher_abi::{validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_VALID},
-    oracle,
+    oracle, policy,
     processor::process_instruction,
     state, zc,
 };
@@ -491,6 +491,49 @@ fn test_external_oracle_with_open_interest_respects_zero_dt_clamp() {
     assert_eq!(price, 100_000_000);
     assert_eq!(config.last_effective_price_e6, 100_000_000);
     assert_eq!(config.oracle_target_price_e6, 120_000_000);
+}
+
+#[test]
+fn test_recurring_fee_pre_touch_policy_is_loss_senior() {
+    assert!(policy::recurring_fee_pre_touch_safe_shape(
+        true, 0, 0, 0, 0, 0, 0, 0,
+    ));
+    assert!(policy::recurring_fee_pre_touch_safe_shape(
+        true, 0, 0, 10, 0, 0, 0, -5,
+    ));
+
+    assert!(
+        !policy::recurring_fee_pre_touch_safe_shape(true, 1, 0, 0, 0, 0, 0, 0),
+        "raw nonflat accounts may have lazy A/K/F losses even when effective position is zero"
+    );
+    assert!(
+        !policy::recurring_fee_pre_touch_safe_shape(true, 0, 1, 0, 0, 0, 0, 0),
+        "effective exposure must be flat before pre-touch fee collection"
+    );
+    assert!(
+        !policy::recurring_fee_pre_touch_safe_shape(true, 0, 0, -1, 0, 0, 0, 0),
+        "materialized negative PnL is senior to recurring fees"
+    );
+    assert!(
+        !policy::recurring_fee_pre_touch_safe_shape(true, 0, 0, 1, 1, 0, 0, 0),
+        "reserved PnL state requires engine finalization before fees"
+    );
+    assert!(
+        !policy::recurring_fee_pre_touch_safe_shape(true, 0, 0, 1, 0, 1, 0, 0),
+        "scheduled reserves require engine finalization before fees"
+    );
+    assert!(
+        !policy::recurring_fee_pre_touch_safe_shape(true, 0, 0, 1, 0, 0, 1, 0),
+        "pending reserves require engine finalization before fees"
+    );
+    assert!(
+        !policy::recurring_fee_pre_touch_safe_shape(true, 0, 0, 1, 0, 0, 0, 1),
+        "positive fee credits are corrupt and fail closed"
+    );
+    assert!(
+        !policy::recurring_fee_pre_touch_safe_shape(true, 0, 0, 1, 0, 0, 0, i128::MIN),
+        "i128::MIN fee credits are corrupt and fail closed"
+    );
 }
 
 #[test]

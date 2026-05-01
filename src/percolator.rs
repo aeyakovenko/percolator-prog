@@ -506,6 +506,31 @@ pub mod policy {
         is_writable
     }
 
+    /// Pre-touch recurring fee safety. A wrapper may charge recurring
+    /// maintenance fees before an engine local touch only when the account is
+    /// already flat/current and fee collection cannot outrank same-account
+    /// mark/funding losses or already-materialized negative PnL.
+    #[inline]
+    pub fn recurring_fee_pre_touch_safe_shape(
+        used: bool,
+        position_basis_q: i128,
+        effective_pos_q: i128,
+        pnl: i128,
+        reserved_pnl: u128,
+        sched_present: u8,
+        pending_present: u8,
+        fee_credits: i128,
+    ) -> bool {
+        used && position_basis_q == 0
+            && effective_pos_q == 0
+            && pnl >= 0
+            && reserved_pnl == 0
+            && sched_present == 0
+            && pending_present == 0
+            && fee_credits <= 0
+            && fee_credits != i128::MIN
+    }
+
     /// Account count requirement: must have at least `need` accounts.
     #[inline]
     /// Strict equality check for instruction account-count ABIs.
@@ -3757,17 +3782,43 @@ pub mod processor {
     /// Compute funding rate in e9-per-slot (ppb) directly.
     /// Avoids bps quantization: sub-bps rates are preserved as nonzero ppb values.
     /// Realize due maintenance fees for a single account up to `now_slot`.
+    /// Pre-touch recurring maintenance fees are loss-senior only for accounts
+    /// that are already flat/current. Nonflat or stale accounts must first be
+    /// touched by an engine path that settles lazy A/K/F and side effects.
+    fn recurring_fee_pre_touch_safe(engine: &RiskEngine, idx: usize) -> Result<bool, ProgramError> {
+        if !idx_used_in_market(engine, idx) {
+            return Ok(false);
+        }
+        let acc = &engine.accounts[idx];
+        let fc = acc.fee_credits.get();
+        if acc.position_basis_q == i128::MIN || acc.pnl == i128::MIN || fc == i128::MIN || fc > 0 {
+            return Err(PercolatorError::EngineCorruptState.into());
+        }
+        let effective_pos_q = if acc.position_basis_q == 0 {
+            effective_pos_q_checked(engine, idx)?
+        } else {
+            1
+        };
+        Ok(crate::policy::recurring_fee_pre_touch_safe_shape(
+            true,
+            acc.position_basis_q,
+            effective_pos_q,
+            acc.pnl,
+            acc.reserved_pnl,
+            acc.sched_present,
+            acc.pending_present,
+            fc,
+        ))
+    }
+
     /// Idempotent: the engine's per-account `last_fee_slot` cursor prevents
     /// double-charging over the same interval, and a call at the same anchor
-    /// as the cursor is a no-op (engine v12.18.4 §4.6.1).
+    /// as the cursor is a no-op.
     ///
-    /// Wrappers MUST call this before any health-sensitive engine operation
-    /// on the acting account when `maintenance_fee_per_slot > 0`, so that
-    /// the margin / withdrawal / close check sees post-fee capital. Between
-    /// cranks, each acting account self-realizes its share via this call;
-    /// KeeperCrank sweeps the rest.
-    ///
-    /// No-op when `maintenance_fee_per_slot == 0`.
+    /// No-op when `maintenance_fee_per_slot == 0` or the account is not safe
+    /// for pre-touch recurring fee collection. This helper is deliberately
+    /// conservative: collecting fees from nonflat/stale capital before the
+    /// engine's local touch would make fees senior to same-account losses.
     ///
     /// Invariant: capital-sensitive operations MUST fully accrue the
     /// market (advance `last_market_slot` to `now_slot`) before syncing
@@ -3790,6 +3841,10 @@ pub mod processor {
         now_slot: u64,
     ) -> Result<(), ProgramError> {
         if config.maintenance_fee_per_slot == 0 {
+            return Ok(());
+        }
+        check_idx(engine, idx)?;
+        if !recurring_fee_pre_touch_safe(engine, idx as usize)? {
             return Ok(());
         }
         let is_resolved = engine.is_resolved();
@@ -3833,6 +3888,9 @@ pub mod processor {
             return Ok(());
         }
         check_idx(engine, idx)?;
+        if !recurring_fee_pre_touch_safe(engine, idx as usize)? {
+            return Ok(());
+        }
         let Some(anchor) = crate::policy::no_oracle_fee_sync_anchor(
             wallclock_slot,
             engine.last_market_slot,
@@ -4908,10 +4966,13 @@ pub mod processor {
                 continue;
             }
             // Candidate fees run only after the engine's authoritative
-            // candidate pass. That keeps recurring fees junior to any lazy
-            // mark/funding loss realized by the touch, unlike the bitmap
-            // sweep below which intentionally skips nonflat accounts.
+            // candidate pass, and only when the account is now flat/current.
+            // That keeps recurring fees junior to lazy mark/funding losses
+            // realized by the touch.
             if engine.accounts[i].last_fee_slot >= now_slot {
+                continue;
+            }
+            if !recurring_fee_pre_touch_safe(engine, i)? {
                 continue;
             }
             engine
@@ -4990,13 +5051,11 @@ pub mod processor {
                     continue;
                 }
                 // Keeper fee sweeping is loss-senior: do not charge recurring
-                // fees from exposed accounts before their lazy K/F/mark loss
-                // has been settled by an engine touch. Nonflat accounts pay
-                // fees through their own value-moving operation or after a
-                // future fee-aware engine touch path; the bitmap sweep is for
-                // flat accounts whose capital is not standing in front of
-                // unsettled position loss.
-                if effective_pos_q_checked(engine, idx)? != 0 {
+                // fees from exposed, stale-epoch, reserved, or negative-PnL
+                // accounts before their local losses and side effects have
+                // been settled by an engine touch. The bitmap sweep is for
+                // flat/current accounts only.
+                if !recurring_fee_pre_touch_safe(engine, idx)? {
                     continue;
                 }
                 engine
@@ -5099,7 +5158,7 @@ pub mod processor {
         size: i128,
         funding_rate_e9: i128,
         lp_account_id: u64,
-        maintenance_fee_per_slot: u128,
+        _maintenance_fee_per_slot: u128,
     ) -> Result<(), RiskError> {
         let lp = &engine.accounts[lp_idx as usize];
         let exec = matcher.execute_match(
@@ -5126,12 +5185,6 @@ pub mod processor {
         };
         let admit_h_min = engine.params.h_min;
         let admit_h_max = engine.params.h_max;
-        // Realize due maintenance fees on both counterparties BEFORE the trade
-        // so margin checks see post-fee capital. No-op when fee rate is 0.
-        if maintenance_fee_per_slot > 0 {
-            engine.sync_account_fee_to_slot_not_atomic(a, now_slot, maintenance_fee_per_slot)?;
-            engine.sync_account_fee_to_slot_not_atomic(b, now_slot, maintenance_fee_per_slot)?;
-        }
         let admit_threshold = Some(engine.params.maintenance_margin_bps as u128);
         engine.execute_trade_not_atomic(
             a,
@@ -7212,8 +7265,7 @@ pub mod processor {
 
                 // Exposed market progress belongs to KeeperCrank. If this
                 // account-limited trade is allowed to proceed, accrue to
-                // clock.slot before execute_trade_with_matcher, which
-                // internally syncs both counterparties' fees before the trade.
+                // clock.slot before the engine trade touch.
                 ensure_market_accrued_to_now_for_account_limited_op(
                     engine,
                     &config,
@@ -7223,35 +7275,18 @@ pub mod processor {
                 )?;
                 reject_any_target_lag(&config, engine)?;
 
-                // Pre-sync maintenance fees for both counterparties BEFORE
-                // capturing ins_before for the mark-EWMA fee-weight
-                // snapshot. Without this, the `delta = ins_after -
-                // ins_before` used as `fee_paid` would include
-                // maintenance fees collected by execute_trade_with
-                // _matcher's own internal sync — inflating EWMA weight
-                // on a small trade after large maintenance accrual, a
-                // mark-manipulation vector. The internal sync at the
-                // same anchor becomes a no-op on `last_fee_slot`.
-                if config.maintenance_fee_per_slot > 0 {
-                    engine
-                        .sync_account_fee_to_slot_not_atomic(
-                            user_idx,
-                            clock.slot,
-                            config.maintenance_fee_per_slot,
-                        )
-                        .map_err(map_risk_error)?;
-                    engine
-                        .sync_account_fee_to_slot_not_atomic(
-                            lp_idx,
-                            clock.slot,
-                            config.maintenance_fee_per_slot,
-                        )
-                        .map_err(map_risk_error)?;
-                }
+                // Pre-touch maintenance fees are collected only for
+                // flat/current counterparties. Nonflat/stale accounts must
+                // settle lazy A/K/F through execute_trade_not_atomic before
+                // recurring fee debt can safely become senior.
+                sync_account_fee(engine, &config, user_idx, clock.slot)?;
+                sync_account_fee(engine, &config, lp_idx, clock.slot)?;
 
                 // Snapshot insurance fund balance for fee-weighted EWMA.
                 // The delta after execute_trade = trading_fees -
-                // losses_absorbed (maintenance fees already synced above).
+                // losses_absorbed. Flat/current maintenance fees, if any,
+                // were synced before this snapshot; nonflat maintenance fees
+                // are intentionally deferred until after loss settlement.
                 // NOTE: If loss absorption occurs during the same trade (spec §5.4),
                 // delta undercounts the actual fee. This is the conservative direction:
                 // mark is stickier during volatile loss-absorption events, never
@@ -7265,9 +7300,6 @@ pub mod processor {
                     msg!("CU_CHECKPOINT: trade_nocpi_execute_start");
                     sol_log_compute_units();
                 }
-                // Pass maintenance_fee_per_slot = 0 so the helper's
-                // internal sync is a no-op — we already pre-synced both
-                // sides just above. Halves fee-sync CU on the hot path.
                 execute_trade_with_matcher(
                     engine,
                     &NoOpMatcher,
@@ -7858,8 +7890,7 @@ pub mod processor {
 
                     // Exposed market progress belongs to KeeperCrank. If this
                     // account-limited trade is allowed to proceed, accrue to
-                    // clock.slot before execute_trade_with_matcher, which
-                    // internally syncs both sides' fees before the trade.
+                    // clock.slot before the engine trade touch.
                     ensure_market_accrued_to_now_for_account_limited_op(
                         engine,
                         &config,
@@ -7868,25 +7899,9 @@ pub mod processor {
                         funding_rate_e9_pre,
                     )?;
 
-                    // Pre-sync fees BEFORE the ins_before snapshot to
-                    // prevent maintenance-fee-inflated EWMA weight on
-                    // small trades (see TradeNoCpi for rationale).
-                    if config.maintenance_fee_per_slot > 0 {
-                        engine
-                            .sync_account_fee_to_slot_not_atomic(
-                                user_idx,
-                                clock.slot,
-                                config.maintenance_fee_per_slot,
-                            )
-                            .map_err(map_risk_error)?;
-                        engine
-                            .sync_account_fee_to_slot_not_atomic(
-                                lp_idx,
-                                clock.slot,
-                                config.maintenance_fee_per_slot,
-                            )
-                            .map_err(map_risk_error)?;
-                    }
+                    // Same loss-senior pre-touch fee policy as TradeNoCpi.
+                    sync_account_fee(engine, &config, user_idx, clock.slot)?;
+                    sync_account_fee(engine, &config, lp_idx, clock.slot)?;
 
                     let trade_size = crate::policy::cpi_trade_size(ret.exec_size, size);
                     let current_fee_paid_cap = current_trade_fee_paid_cap(
@@ -7896,8 +7911,9 @@ pub mod processor {
                     )?;
 
                     // Snapshot insurance for fee-weighted EWMA (delta approach).
-                    // delta now captures ONLY trading_fees - losses_absorbed
-                    // (maintenance fees already synced above).
+                    // Flat/current maintenance fees were synced before this
+                    // snapshot; nonflat maintenance fees are intentionally
+                    // deferred until after loss settlement.
                     // NOTE: Conservative undercount during volatile
                     // loss-absorption events (see TradeNoCpi comment).
                     let ins_before_cpi = engine.insurance_fund.balance.get();
@@ -7912,10 +7928,6 @@ pub mod processor {
                         exec_size: trade_size,
                     };
                     // Use pre-oracle-read funding rate (anti-retroactivity §5.5).
-                    // Pass maintenance_fee_per_slot = 0 so the helper's
-                    // internal sync is a no-op — we already pre-synced
-                    // both sides just above (pre-ins_before-snapshot).
-                    // Halves fee-sync CU on the hot path.
                     execute_trade_with_matcher(
                         engine,
                         &matcher,
