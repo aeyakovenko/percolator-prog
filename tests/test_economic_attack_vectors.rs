@@ -1188,16 +1188,16 @@ fn test_attack_unmatured_pnl_keeper_branch_matrix_no_extraction() {
         let before = pnl_interface_snapshot(&env, user_idx, lp_idx);
         let slot_before = env.read_last_market_slot();
         let target = env.read_last_effective_price().saturating_add(1);
-        let inline_budget = percolator_prog::constants::MAX_ACCRUAL_DT_SLOTS * 20;
-        let far_slot = slot_before + inline_budget + 50;
+        let segment = percolator_prog::constants::MAX_ACCRUAL_DT_SLOTS;
+        let far_slot = slot_before + segment + 50;
         env.set_slot_and_price_raw_no_walk(far_slot, target as i64);
 
         env.try_crank_once()
             .expect("KeeperCrank should commit partial catchup instead of rejecting");
         assert_eq!(
             env.read_last_market_slot(),
-            slot_before + inline_budget,
-            "partial catchup branch should commit one bounded chunk"
+            slot_before + segment,
+            "partial catchup branch should commit one bounded equity-active segment"
         );
         let after = pnl_interface_snapshot(&env, user_idx, lp_idx);
         assert_no_unmatured_capital_unlock("KeeperCrank partial catchup", before, after);

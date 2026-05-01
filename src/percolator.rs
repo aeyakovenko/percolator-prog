@@ -68,9 +68,14 @@ pub mod constants {
     pub const MAX_KEEPER_CANDIDATES: usize = 128;
     /// Phase 1 revalidation/liquidation execution budget per KeeperCrank
     /// (wrapper-owned since v12.19, which dropped the engine-level
-    /// `LIQ_BUDGET_PER_CRANK`). Kept at 16 so dense liquidation cascades plus
+    /// `LIQ_BUDGET_PER_CRANK`). Kept at 8 so dense liquidation cascades plus
     /// wrapper coverage checks fit the SVM compute envelope.
-    pub const LIQ_BUDGET_PER_CRANK: u16 = 16;
+    pub const LIQ_BUDGET_PER_CRANK: u16 = 8;
+    /// Maximum candidate entries the wrapper/engine may inspect before Phase 2.
+    /// This is deliberately independent from the liquidation execution budget:
+    /// malformed or non-actionable candidate padding still consumes bounded
+    /// inspection work, while honest keepers can over-specify a small tail.
+    pub const CANDIDATE_INSPECTION_BUDGET_PER_CRANK: u16 = 32;
     /// Phase 2 mandatory engine round-robin touch window. Kept at 32 so dense
     /// no-candidate cranks remain below the SVM CU cap after the engine's
     /// liquidation pass and wrapper risk-buffer maintenance.
@@ -626,8 +631,9 @@ pub mod policy {
     }
 
     /// KeeperCrank partial-catchup decision. When the market clock is too far
-    /// behind for one full inline catchup, the crank may commit one bounded
-    /// chunk at stored P_last only if price/funding progress is equity-active.
+    /// behind for one inline accrual, the crank may commit one bounded
+    /// equity-active segment while keeping the authenticated wall-clock slot
+    /// as the public time anchor.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum CrankCatchupTarget {
         None,
@@ -655,9 +661,9 @@ pub mod policy {
             return CrankCatchupTarget::None;
         }
 
+        let _ = chunks_per_instruction;
         let gap = now_slot - last_market_slot;
-        let max_step = max_accrual_dt_slots.saturating_mul(chunks_per_instruction);
-        if max_step == 0 || gap <= max_step {
+        if gap <= max_accrual_dt_slots {
             return CrankCatchupTarget::None;
         }
 
@@ -669,9 +675,10 @@ pub mod policy {
             return CrankCatchupTarget::None;
         }
 
-        // Since gap > max_step and gap = now - last, last + max_step is
-        // strictly before now and cannot overflow.
-        CrankCatchupTarget::Target(last_market_slot + max_step)
+        // Since gap > max_accrual_dt_slots and gap = now - last,
+        // last + max_accrual_dt_slots is strictly before now and cannot
+        // overflow.
+        CrankCatchupTarget::Target(last_market_slot + max_accrual_dt_slots)
     }
 
     /// The subset of MarketConfig fields that a partial crank catchup is
@@ -688,17 +695,18 @@ pub mod policy {
         pub fee_sweep_cursor_bit: u64,
     }
 
-    /// Partial crank catchup must preserve the fresh liveness/target data and
-    /// fee-sweep cursor, while rolling back effective/index fields that the
-    /// engine has not reached yet.
+    /// Partial crank catchup preserves fresh target/liveness data, the
+    /// bounded effective/index step actually fed to the engine, and the
+    /// fee-sweep cursor. The raw target may remain ahead of the effective
+    /// engine price; user value-moving paths handle that lag separately.
     #[inline]
     pub fn partial_crank_config_fields_to_write(
-        before_read: PartialCrankConfigFields,
+        _before_read: PartialCrankConfigFields,
         after_read_and_sweep: PartialCrankConfigFields,
     ) -> PartialCrankConfigFields {
         PartialCrankConfigFields {
-            last_effective_price_e6: before_read.last_effective_price_e6,
-            last_hyperp_index_slot: before_read.last_hyperp_index_slot,
+            last_effective_price_e6: after_read_and_sweep.last_effective_price_e6,
+            last_hyperp_index_slot: after_read_and_sweep.last_hyperp_index_slot,
             last_good_oracle_slot: after_read_and_sweep.last_good_oracle_slot,
             last_oracle_publish_time: after_read_and_sweep.last_oracle_publish_time,
             oracle_target_price_e6: after_read_and_sweep.oracle_target_price_e6,
@@ -1330,6 +1338,9 @@ pub mod zc {
     const SM_SHORT_OFF: usize = offset_of!(RiskEngine, side_mode_short);
     /// Offset of market_mode within RiskEngine (repr(u8) enum)
     const MM_OFF: usize = offset_of!(RiskEngine, market_mode);
+    /// Offset of bankruptcy_hmax_lock_active within RiskEngine (bool)
+    const BANKRUPTCY_HMAX_LOCK_ACTIVE_OFF: usize =
+        offset_of!(RiskEngine, bankruptcy_hmax_lock_active);
     // Runtime tripwire: a unit test in tests/unit.rs
     // (`test_zc_cast_safety_invariant`) asserts that no slab-persisted
     // field has an invalid bit pattern beyond the enums validated
@@ -1347,23 +1358,22 @@ pub mod zc {
     /// struct containing an invalid bit pattern is UB on first field
     /// access, irrespective of whether we read the field.
     ///
-    /// With the currently pinned engine, the only field types in the
-    /// RiskEngine slab with invalid bit patterns are:
+    /// With the currently pinned engine, the field types in the RiskEngine
+    /// slab with invalid bit patterns are:
     ///   - SideMode (2 instances at side_mode_long / side_mode_short):
     ///     valid tag bytes 0 (Normal), 1 (DrainOnly), 2 (ResetPending).
     ///   - MarketMode (at market_mode): valid tag bytes 0 (Live),
     ///     1 (Resolved).
+    ///   - bankruptcy_hmax_lock_active: valid bool bytes 0 or 1.
     /// No other field type in either RiskEngine or Account has invalid
     /// bit patterns: every other field is u64/u128/i64/i128/[u8; N]/
     /// wrapper-Pod (U128/I128) or fixed u8 — all-bits-valid types.
     ///
-    /// If a future revision adds any new enum or bool field to the
-    /// slab, the validation below must be extended before the cast
-    /// can be considered sound. A compile-time invariant check
-    /// (`assert!(size_of::<RiskEngine>() == EXPECTED)`) elsewhere in
-    /// this module forces deliberate attention on layout changes.
+    /// If a future revision adds any new enum or bool field to the slab, the
+    /// validation below must be extended before the cast can be considered
+    /// sound.
     #[inline]
-    fn validate_raw_discriminants(data: &[u8]) -> Result<(), ProgramError> {
+    fn validate_raw_engine_state_shape(data: &[u8]) -> Result<(), ProgramError> {
         let base = ENGINE_OFF;
         // SideMode: valid 0 (Normal), 1 (DrainOnly), 2 (ResetPending)
         let sm_long = data[base + SM_LONG_OFF];
@@ -1376,7 +1386,16 @@ pub mod zc {
         if mm > 1 {
             return Err(ProgramError::InvalidAccountData);
         }
+        let hmax = data[base + BANKRUPTCY_HMAX_LOCK_ACTIVE_OFF];
+        if hmax > 1 {
+            return Err(ProgramError::InvalidAccountData);
+        }
         Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn validate_raw_engine_bytes_for_test(data: &[u8]) -> Result<(), ProgramError> {
+        validate_raw_engine_state_shape(data)
     }
 
     pub fn engine_ref<'a>(data: &'a [u8]) -> Result<&'a RiskEngine, ProgramError> {
@@ -1388,8 +1407,8 @@ pub mod zc {
         if (ptr as usize) % ENGINE_ALIGN != 0 {
             return Err(ProgramError::InvalidAccountData);
         }
-        // Validate enum discriminants from raw bytes before creating reference
-        validate_raw_discriminants(data)?;
+        // Validate invalid-bit-pattern fields before creating a reference.
+        validate_raw_engine_state_shape(data)?;
         Ok(unsafe { &*(ptr as *const RiskEngine) })
     }
 
@@ -1402,7 +1421,7 @@ pub mod zc {
         if (ptr as usize) % ENGINE_ALIGN != 0 {
             return Err(ProgramError::InvalidAccountData);
         }
-        validate_raw_discriminants(data)?;
+        validate_raw_engine_state_shape(data)?;
         Ok(unsafe { &mut *(ptr as *mut RiskEngine) })
     }
 
@@ -4138,7 +4157,7 @@ pub mod processor {
     ) -> Result<Option<u64>, ProgramError> {
         match crate::policy::oversized_crank_catchup_target(
             engine.params.max_accrual_dt_slots,
-            CATCHUP_CHUNKS_MAX as u64,
+            1,
             engine.last_market_slot,
             now_slot,
             engine.last_oracle_price,
@@ -4151,6 +4170,31 @@ pub mod processor {
             crate::policy::CrankCatchupTarget::None => Ok(None),
             crate::policy::CrankCatchupTarget::Target(target) => Ok(Some(target)),
         }
+    }
+
+    fn keeper_partial_segment_price(
+        engine: &RiskEngine,
+        config: &MarketConfig,
+        target_slot: u64,
+    ) -> Result<u64, ProgramError> {
+        let dt = target_slot
+            .checked_sub(engine.last_market_slot)
+            .ok_or(PercolatorError::EngineOverflow)?;
+        let target = if oracle::is_hyperp_mode(config) {
+            hyperp_target_price(config)
+        } else {
+            config.oracle_target_price_e6
+        };
+        if target == 0 {
+            return Ok(engine.last_oracle_price);
+        }
+        Ok(crate::oracle::effective_price_from_target(
+            engine.last_oracle_price,
+            target,
+            engine.params.max_price_move_bps_per_slot,
+            dt,
+            engine.oi_eff_long_q != 0 || engine.oi_eff_short_q != 0,
+        ))
     }
 
     fn partial_crank_config_fields(
@@ -4655,10 +4699,7 @@ pub mod processor {
         phase1_protective: &mut [u64; (percolator::MAX_ACCOUNTS + 63) / 64],
     ) -> Result<u16, ProgramError> {
         let mut attempts: u16 = 0;
-        let max_candidate_inspections = core::cmp::min(
-            percolator::MAX_TOUCHED_PER_INSTRUCTION as u16,
-            crate::constants::LIQ_BUDGET_PER_CRANK.saturating_mul(4),
-        );
+        let max_candidate_inspections = keeper_candidate_inspection_cap();
         let mut inspected: u16 = 0;
         let mut protective_attempts: u16 = 0;
         for &(candidate_idx, policy) in combined.iter() {
@@ -4693,6 +4734,13 @@ pub mod processor {
             }
         }
         Ok(protective_attempts)
+    }
+
+    fn keeper_candidate_inspection_cap() -> u16 {
+        core::cmp::min(
+            percolator::MAX_TOUCHED_PER_INSTRUCTION as u16,
+            crate::constants::CANDIDATE_INSPECTION_BUDGET_PER_CRANK,
+        )
     }
 
     fn check_keeper_crank_market_progress_coverage(
@@ -4792,8 +4840,8 @@ pub mod processor {
         Ok(defer_phase2)
     }
 
-    fn ensure_market_accrued_to_now_for_keeper_crank(
-        engine: &mut RiskEngine,
+    fn prepare_keeper_crank_market_progress(
+        engine: &RiskEngine,
         config: &MarketConfig,
         now_slot: u64,
         price: u64,
@@ -4819,8 +4867,61 @@ pub mod processor {
             rr_window_size,
             rr_scan_limit,
         )?;
-        ensure_market_accrued_to_now(engine, now_slot, price, funding_rate_e9)?;
         Ok((defer_phase2, rr_window_size, rr_scan_limit))
+    }
+
+    fn sync_keeper_candidate_fees_after_crank(
+        engine: &mut RiskEngine,
+        combined: &[(u16, Option<percolator::LiquidationPolicy>)],
+        now_slot: u64,
+        maintenance_fee_per_slot: u128,
+    ) -> Result<usize, ProgramError> {
+        if maintenance_fee_per_slot == 0 {
+            return Ok(0);
+        }
+        let cap = core::cmp::min(
+            crate::constants::LIQ_BUDGET_PER_CRANK as usize,
+            crate::constants::FEE_SWEEP_BUDGET,
+        );
+        let mut synced: [u16; crate::constants::LIQ_BUDGET_PER_CRANK as usize] =
+            [u16::MAX; crate::constants::LIQ_BUDGET_PER_CRANK as usize];
+        let mut synced_count = 0usize;
+        let mut attempts = 0usize;
+        let mut candidate_syncs = 0usize;
+        for &(idx, _policy) in combined.iter() {
+            if attempts >= cap || candidate_syncs >= crate::constants::FEE_SWEEP_BUDGET {
+                break;
+            }
+            let i = idx as usize;
+            if !idx_used_in_market(engine, i) {
+                continue;
+            }
+            attempts += 1;
+            let mut already = false;
+            for j in 0..synced_count {
+                if synced[j] == idx {
+                    already = true;
+                    break;
+                }
+            }
+            if already {
+                continue;
+            }
+            // Candidate fees run only after the engine's authoritative
+            // candidate pass. That keeps recurring fees junior to any lazy
+            // mark/funding loss realized by the touch, unlike the bitmap
+            // sweep below which intentionally skips nonflat accounts.
+            if engine.accounts[i].last_fee_slot >= now_slot {
+                continue;
+            }
+            engine
+                .sync_account_fee_to_slot_not_atomic(idx, now_slot, maintenance_fee_per_slot)
+                .map_err(map_risk_error)?;
+            synced[synced_count] = idx;
+            synced_count += 1;
+            candidate_syncs += 1;
+        }
+        Ok(candidate_syncs)
     }
 
     /// Incrementally sweep maintenance fees from the current cursor position.
@@ -4886,6 +4987,16 @@ pub mod processor {
                 bits &= bits - 1;
                 let idx = word_cursor * 64 + bit;
                 if !idx_within_market_capacity(engine, idx) {
+                    continue;
+                }
+                // Keeper fee sweeping is loss-senior: do not charge recurring
+                // fees from exposed accounts before their lazy K/F/mark loss
+                // has been settled by an engine touch. Nonflat accounts pay
+                // fees through their own value-moving operation or after a
+                // future fee-aware engine touch path; the bitmap sweep is for
+                // flat accounts whose capital is not standing in front of
+                // unsettled position loss.
+                if effective_pos_q_checked(engine, idx)? != 0 {
                     continue;
                 }
                 engine
@@ -6627,9 +6738,10 @@ pub mod processor {
                 //   - Shortfalls — routed through charge_fee_to_insurance as
                 //     fee-credits debt; never fails with InsufficientBalance.
                 //
-                // Ordering: sweep BEFORE keeper_crank_not_atomic so the crank's
-                // lifecycle (side-mode drain detection / resets / health
-                // reconciliation) observes fee-induced state.
+                // Ordering: keeper_crank_not_atomic first, then candidate fee
+                // syncs and the bitmap sweep. That keeps recurring fees junior
+                // to lazy mark/funding losses discovered by the authoritative
+                // touch while retaining a bounded post-crank fee pass.
                 //
                 // Crank reward: pay CRANK_REWARD_BPS (50 %) of the maintenance-
                 // fee sweep delta back to the non-permissionless caller as
@@ -6638,8 +6750,8 @@ pub mod processor {
                 // FEE_SWEEP_BUDGET accounts per crank, and each contribution
                 // is `fee_per_slot × dt_that_account_owed`). Trading,
                 // liquidation, and resolution fees are NOT shared with the
-                // cranker — sweep_delta is captured BEFORE keeper_crank_not_atomic
-                // so those fees don't inflate the reward.
+                // cranker — sweep_delta is measured only around the post-crank
+                // bitmap sweep, not around liquidation or candidate fees.
                 //
                 // Reward is paid AFTER keeper_crank_not_atomic. Paying it
                 // before would let a borderline caller self-rescue: the capital
@@ -6648,15 +6760,17 @@ pub mod processor {
                 // after leaves the crank's risk decisions on pre-reward state,
                 // and a caller who got liquidated inside the crank (slot no
                 // longer used) simply doesn't collect the reward.
-                // Fully accrue market to clock.slot when the full gap fits
-                // the per-instruction budget. If the market is farther
-                // behind, KeeperCrank is the durable progress path: advance
-                // one bounded chunk at stored P_last, touch accounts at that
-                // partial slot, and commit. Repeated cranks, even if several
-                // submitted attempts land in the same wall-clock slot, keep
-                // reducing the gap instead of returning CatchupRequired.
+                // Fully accrue market to clock.slot when the full gap fits.
+                // If the market is farther behind, the latest engine advances
+                // exactly one bounded segment toward the raw target while
+                // retaining clock.slot as the authenticated public time.
+                let raw_target = if oracle::is_hyperp_mode(&config) {
+                    hyperp_target_price(&config)
+                } else {
+                    config.oracle_target_price_e6
+                };
                 let partial_target =
-                    oversized_catchup_target(engine, clock.slot, price, funding_rate_e9_pre)?;
+                    oversized_catchup_target(engine, clock.slot, raw_target, funding_rate_e9_pre)?;
                 let (
                     crank_slot,
                     crank_price,
@@ -6665,12 +6779,19 @@ pub mod processor {
                     rr_window_size,
                     rr_scan_limit,
                 ) = if let Some(target_slot) = partial_target {
-                    let stored_p_last = engine.last_oracle_price;
-                    catchup_accrue(engine, target_slot, stored_p_last, funding_rate_e9_pre)?;
-                    if target_slot > engine.last_market_slot {
-                        engine
-                            .accrue_market_to(target_slot, stored_p_last, funding_rate_e9_pre)
-                            .map_err(map_risk_error)?;
+                    let segment_price = keeper_partial_segment_price(engine, &config, target_slot)?;
+                    if segment_price == engine.last_oracle_price
+                        && raw_target != engine.last_oracle_price
+                        && (engine.oi_eff_long_q != 0 || engine.oi_eff_short_q != 0)
+                    {
+                        return Err(PercolatorError::CatchupRequired.into());
+                    }
+                    config.last_effective_price_e6 = segment_price;
+                    if oracle::is_hyperp_mode(&config)
+                        && (segment_price != engine.last_oracle_price
+                            || segment_price == hyperp_target_price(&config))
+                    {
+                        config.last_hyperp_index_slot = clock.slot;
                     }
                     let rr_window_size = if candidates.is_empty() {
                         crate::constants::RR_WINDOW_PER_CRANK
@@ -6682,8 +6803,8 @@ pub mod processor {
                         engine.params.max_accounts,
                     );
                     (
-                        target_slot,
-                        stored_p_last,
+                        clock.slot,
+                        segment_price,
                         true,
                         false,
                         rr_window_size,
@@ -6691,7 +6812,7 @@ pub mod processor {
                     )
                 } else {
                     let (defer_phase2, rr_window_size, rr_scan_limit) =
-                        ensure_market_accrued_to_now_for_keeper_crank(
+                        prepare_keeper_crank_market_progress(
                             engine,
                             &config,
                             clock.slot,
@@ -6709,123 +6830,27 @@ pub mod processor {
                     )
                 };
 
-                // Shared per-instruction fee-sync budget (audit #2).
-                // Candidate syncs run FIRST so the engine's crank sees
-                // post-fee equity for health checks. The sweep then
-                // runs with the REMAINING budget, so the worst-case
-                // total syncs per instruction is capped at
-                // FEE_SWEEP_BUDGET (not FEE_SWEEP_BUDGET +
-                // LIQ_BUDGET_PER_CRANK as it was previously). This
-                // keeps the crank's CU usage bounded by the stated
-                // envelope even when a full candidate list is paired
-                // with a full sweep.
-                //
-                // Ordering: candidates first, then sweep with
-                // remaining budget, then crank. Candidate syncs are
-                // health-preparation work for caller-supplied accounts;
-                // their third-party maintenance fees are not rewardable.
-                // The keeper reward is computed only from the subsequent
-                // bitmap sweep's insurance delta.
-                //
-                // Budget accounting MUST MIRROR keeper_crank_not_atomic's:
-                // invalid / out-of-range / unused entries are SKIPPED
-                // without consuming the attempts budget (engine §10.6).
-                // If we instead capped by array position (min(cap)), an
-                // attacker could pad the front of `combined` with 64
-                // invalid indices so the real target at position 65 is
-                // never fee-synced — but the engine's crank would still
-                // skip the invalid entries and reach the target, running
-                // its health check on stale fee debt. The loop below
-                // counts `attempts` exactly like the engine: valid
-                // existing candidates consume budget; others don't.
-                //
-                // Dedup is also mirrored: the engine treats duplicates as
-                // separate attempts (it re-processes the same idx twice
-                // on consecutive entries, which is idempotent at the same
-                // anchor). The wrapper skips duplicate SYNC calls purely
-                // to save CU — dedup is within the loop, not the budget.
-                let mut candidate_syncs = 0usize;
-                if config.maintenance_fee_per_slot > 0 {
-                    // Candidate syncs share the FEE_SWEEP_BUDGET with
-                    // the maintenance sweep below. Hard-cap at
-                    // min(LIQ_BUDGET_PER_CRANK, FEE_SWEEP_BUDGET) so
-                    // that (a) the engine's per-crank liquidation
-                    // attempts cap is respected, and (b) candidate
-                    // syncs ALONE can never exceed the total fee-sync
-                    // budget — no matter how the two engine constants
-                    // relate, the total syncs per instruction is
-                    // bounded by FEE_SWEEP_BUDGET.
-                    let cap = core::cmp::min(
-                        crate::constants::LIQ_BUDGET_PER_CRANK as usize,
-                        crate::constants::FEE_SWEEP_BUDGET,
-                    );
-                    let mut synced: [u16; crate::constants::LIQ_BUDGET_PER_CRANK as usize] =
-                        [u16::MAX; crate::constants::LIQ_BUDGET_PER_CRANK as usize];
-                    let mut synced_count = 0usize;
-                    let mut attempts = 0usize;
-                    for &(idx, _policy) in combined.iter() {
-                        if attempts >= cap {
-                            break;
-                        }
-                        // Defense-in-depth: also bail if we're already
-                        // at the shared budget. The attempts cap above
-                        // subsumes this under today's constants, but
-                        // keeps the bound mechanical if either
-                        // constant changes.
-                        if candidate_syncs >= crate::constants::FEE_SWEEP_BUDGET {
-                            break;
-                        }
-                        let i = idx as usize;
-                        if !idx_used_in_market(engine, i) {
-                            continue;
-                        }
-                        attempts += 1;
-                        let mut already = false;
-                        for j in 0..synced_count {
-                            if synced[j] == idx {
-                                already = true;
-                                break;
-                            }
-                        }
-                        if already {
-                            continue;
-                        }
-                        if engine.accounts[i].last_fee_slot >= crank_slot {
-                            continue;
-                        }
-                        engine
-                            .sync_account_fee_to_slot_not_atomic(
-                                idx,
-                                crank_slot,
-                                config.maintenance_fee_per_slot,
-                            )
-                            .map_err(map_risk_error)?;
-                        synced[synced_count] = idx;
-                        synced_count += 1;
-                        candidate_syncs += 1;
-                    }
-                }
-
-                let ins_before_reward_sweep = engine.insurance_fund.balance.get();
-                let remaining_budget =
-                    crate::constants::FEE_SWEEP_BUDGET.saturating_sub(candidate_syncs);
-                sweep_maintenance_fees(engine, &mut config, crank_slot, remaining_budget)?;
-                let sweep_delta = engine
-                    .insurance_fund
-                    .balance
-                    .get()
-                    .saturating_sub(ins_before_reward_sweep);
-
                 let admit_h_min = engine.params.h_min;
                 let admit_h_max = engine.params.h_max;
                 let admit_threshold = Some(engine.params.maintenance_margin_bps as u128);
                 let rr_window_size = if defer_phase2 { 0 } else { rr_window_size };
+                let engine_candidates: &[(u16, Option<percolator::LiquidationPolicy>)] =
+                    if partial_catchup { &[] } else { &combined };
                 let _outcome = engine
                     .keeper_crank_with_request_not_atomic(percolator::KeeperCrankRequest {
                         now_slot: crank_slot,
                         oracle_price: crank_price,
-                        ordered_candidates: &combined,
-                        max_revalidations: crate::constants::LIQ_BUDGET_PER_CRANK,
+                        ordered_candidates: engine_candidates,
+                        max_revalidations: if partial_catchup {
+                            0
+                        } else {
+                            crate::constants::LIQ_BUDGET_PER_CRANK
+                        },
+                        max_candidate_inspections: if partial_catchup {
+                            0
+                        } else {
+                            keeper_candidate_inspection_cap()
+                        },
                         funding_rate_e9: funding_rate_e9_pre,
                         admit_h_min,
                         admit_h_max,
@@ -6840,11 +6865,40 @@ pub mod processor {
                     sol_log_compute_units();
                 }
 
+                // Fee realization runs after authoritative keeper touch/loss
+                // settlement so recurring fees cannot become senior to lazy
+                // mark/funding losses. Candidate syncs are bounded and not
+                // rewardable; the reward delta is measured only over the
+                // bitmap sweep that follows them.
+                let sweep_delta = if partial_catchup {
+                    // The market remains loss-stale. Do not charge recurring
+                    // fees until a later crank makes the market loss-current;
+                    // fee sync would otherwise be senior to the remaining
+                    // unapplied historical loss segment.
+                    0
+                } else {
+                    let candidate_syncs = sync_keeper_candidate_fees_after_crank(
+                        engine,
+                        &combined,
+                        crank_slot,
+                        config.maintenance_fee_per_slot,
+                    )?;
+                    let ins_before_reward_sweep = engine.insurance_fund.balance.get();
+                    let remaining_budget =
+                        crate::constants::FEE_SWEEP_BUDGET.saturating_sub(candidate_syncs);
+                    sweep_maintenance_fees(engine, &mut config, crank_slot, remaining_budget)?;
+                    engine
+                        .insurance_fund
+                        .balance
+                        .get()
+                        .saturating_sub(ins_before_reward_sweep)
+                };
+
                 // Pay the crank reward AFTER keeper_crank_not_atomic has run
-                // all liquidation / lifecycle logic. The sweep_delta was
-                // captured pre-crank, so the reward is bounded only by the
-                // maintenance-fee collection on this call, not by incidental
-                // insurance growth from liquidation fees.
+                // all liquidation / lifecycle logic. The sweep_delta is
+                // captured around the post-crank sweep, so the reward is
+                // bounded only by the maintenance-fee collection on this call,
+                // not by incidental insurance growth from liquidation fees.
                 //
                 // Skip conditions:
                 //   - permissionless caller (no account to credit)
@@ -9165,7 +9219,8 @@ pub mod processor {
                         return Err(PercolatorError::CatchupRequired.into());
                     }
                     let stress_envelope_active = engine.stress_consumed_bps_e9_since_envelope != 0
-                        || engine.stress_envelope_remaining_indices != 0;
+                        || engine.stress_envelope_remaining_indices != 0
+                        || engine.bankruptcy_hmax_lock_active;
                     if !crate::policy::live_insurance_withdraw_market_healthy(
                         engine.vault.get(),
                         engine.c_tot.get(),

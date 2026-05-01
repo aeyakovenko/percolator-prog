@@ -89,10 +89,20 @@ fn crank_with_candidates_for_test(env: &mut TestEnv, candidates: &[u16]) {
         .expect("candidate crank failed");
 }
 
+fn crank_until_all_positions_zero_for_test(env: &mut TestEnv, idxs: &[u16]) {
+    for _ in 0..40 {
+        crank_with_candidates_for_test(env, &[]);
+        if idxs.iter().all(|&idx| env.read_account_position(idx) == 0) {
+            return;
+        }
+        env.svm.expire_blockhash();
+    }
+}
+
 fn setup_risk_buffer_refill_market() -> (TestEnv, u16, Vec<u16>, Vec<u16>) {
     program_path();
     let mut env = TestEnv::new();
-    let data = encode_init_market_with_maint_fee_bounded(
+    let mut data = encode_init_market_with_maint_fee_bounded(
         &env.payer.pubkey(),
         &env.mint,
         &TEST_FEED_ID,
@@ -100,6 +110,14 @@ fn setup_risk_buffer_refill_market() -> (TestEnv, u16, Vec<u16>, Vec<u16>) {
         40_000_000,
         0,
     );
+    // This refill fixture intentionally drives a multi-segment bounded catchup
+    // from the same fresh oracle observation. Keep the stale horizon longer
+    // than the test's raw clock gap so the crank validates the update instead
+    // of routing to permissionless resolve.
+    const INIT_PERMISSIONLESS_RESOLVE_STALE_SLOTS_OFFSET: usize = 306;
+    data[INIT_PERMISSIONLESS_RESOLVE_STALE_SLOTS_OFFSET
+        ..INIT_PERMISSIONLESS_RESOLVE_STALE_SLOTS_OFFSET + 8]
+        .copy_from_slice(&600u64.to_le_bytes());
     env.try_init_market_raw(data)
         .expect("init market with maintenance fee");
 
@@ -116,7 +134,7 @@ fn setup_risk_buffer_refill_market() -> (TestEnv, u16, Vec<u16>, Vec<u16>) {
     let mut survivors = Vec::new();
 
     // These accounts are large and thinly margined. They should be in the
-    // initial top-4 buffer and be fully liquidated after one fee-bearing crank.
+    // initial top-4 buffer and become liquidatable after a bounded price walk.
     for &size in &risky_sizes {
         let user = Keypair::new();
         let idx = env.init_user(&user);
@@ -1000,9 +1018,8 @@ fn test_buffer_with_five_accounts_evicts_smallest() {
 // E (integration). Refill after crank clears buffered entries
 // ============================================================================
 
-/// When a crank liquidates buffered accounts and the progressive scan window
-/// covers lower-ranked live positions, Phase C refills the holes in the same
-/// crank.
+/// When repeated cranks liquidate buffered accounts and the progressive scan
+/// window covers lower-ranked live positions, Phase C refills the holes.
 #[test]
 fn test_crank_scan_refills_after_buffer_entries_are_liquidated() {
     let (mut env, lp_idx, risky, survivors) = setup_risk_buffer_refill_market();
@@ -1011,8 +1028,8 @@ fn test_crank_scan_refills_after_buffer_entries_are_liquidated() {
     // indices created by the setup.
     let buf = env.read_risk_buffer();
     assert_eq!(buf.scan_cursor, 0, "setup should not have cranked yet");
-    env.set_slot_and_price_raw_no_walk(149, 138_000_000);
-    crank_with_candidates_for_test(&mut env, &[]);
+    env.set_slot_and_price_raw_no_walk(499, 120_000_000);
+    crank_until_all_positions_zero_for_test(&mut env, &risky);
 
     for &idx in &risky {
         assert_eq!(
@@ -1094,8 +1111,7 @@ fn test_crank_candidate_refills_after_bitmap_scan_budget_exhausted() {
 }
 
 /// Sparse bitmap scanning wraps to lower-ranked live positions even when the
-/// cursor starts past them; holes are refilled in the same crank without
-/// requiring candidates.
+/// cursor starts past them; holes are refilled without requiring candidates.
 #[test]
 fn test_crank_bitmap_scan_wraps_to_sparse_survivors_when_cursor_starts_past_them() {
     let (mut env, lp_idx, risky, survivors) = setup_risk_buffer_refill_market();
@@ -1105,8 +1121,8 @@ fn test_crank_bitmap_scan_wraps_to_sparse_survivors_when_cursor_starts_past_them
     // empty dense range 32..63.
     set_risk_buffer_scan_cursor_for_test(&mut env, 32);
 
-    env.set_slot_and_price_raw_no_walk(149, 138_000_000);
-    crank_with_candidates_for_test(&mut env, &[]);
+    env.set_slot_and_price_raw_no_walk(499, 120_000_000);
+    crank_until_all_positions_zero_for_test(&mut env, &risky);
 
     for &idx in &risky {
         assert_eq!(

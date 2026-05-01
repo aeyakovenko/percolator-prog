@@ -32,11 +32,11 @@ use std::path::PathBuf;
 // tests) has been removed; integration tests go through the BPF binary.
 // BPF-target SLAB_LEN, cfg-gated by deployment-size feature.
 #[cfg(all(feature = "small", not(feature = "medium")))]
-const SLAB_LEN: usize = 96696;
+const SLAB_LEN: usize = 96736;
 #[cfg(all(feature = "medium", not(feature = "small")))]
-const SLAB_LEN: usize = 382488;
+const SLAB_LEN: usize = 382528;
 #[cfg(not(any(feature = "small", feature = "medium")))]
-const SLAB_LEN: usize = 1525656;
+const SLAB_LEN: usize = 1525696;
 #[cfg(all(feature = "small", not(feature = "medium")))]
 const MAX_ACCOUNTS: usize = 256;
 #[cfg(all(feature = "medium", not(feature = "small")))]
@@ -44,11 +44,11 @@ const MAX_ACCOUNTS: usize = 1024;
 #[cfg(not(any(feature = "small", feature = "medium")))]
 const MAX_ACCOUNTS: usize = 4096;
 #[cfg(all(feature = "small", not(feature = "medium")))]
-const ENGINE_ACCOUNTS_OFFSET: usize = 1808;
+const ENGINE_ACCOUNTS_OFFSET: usize = 1848;
 #[cfg(all(feature = "medium", not(feature = "small")))]
-const ENGINE_ACCOUNTS_OFFSET: usize = 4976;
+const ENGINE_ACCOUNTS_OFFSET: usize = 5016;
 #[cfg(not(any(feature = "small", feature = "medium")))]
-const ENGINE_ACCOUNTS_OFFSET: usize = 17648;
+const ENGINE_ACCOUNTS_OFFSET: usize = 17688;
 const TEST_MAX_STALENESS_SECS: u64 = percolator_prog::constants::MAX_ORACLE_STALENESS_SECS;
 const BENCHMARK_PERMISSIONLESS_RESOLVE_STALE_SLOTS: u64 = 10_000;
 
@@ -747,7 +747,7 @@ impl TestEnv {
 
     fn read_last_market_slot(&self) -> u64 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        const LAST_MARKET_SLOT_OFFSET: usize = 520 + 672;
+        const LAST_MARKET_SLOT_OFFSET: usize = 520 + 712;
         u64::from_le_bytes(
             d[LAST_MARKET_SLOT_OFFSET..LAST_MARKET_SLOT_OFFSET + 8]
                 .try_into()
@@ -757,7 +757,7 @@ impl TestEnv {
 
     fn read_rr_cursor_position(&self) -> u64 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        const RR_CURSOR_OFFSET: usize = 520 + 592;
+        const RR_CURSOR_OFFSET: usize = 520 + 624;
         u64::from_le_bytes(
             d[RR_CURSOR_OFFSET..RR_CURSOR_OFFSET + 8]
                 .try_into()

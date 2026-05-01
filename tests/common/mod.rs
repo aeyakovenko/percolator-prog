@@ -25,17 +25,17 @@ pub use std::path::PathBuf;
 // --features medium` for MAX_ACCOUNTS=1024, or no flag for the
 // default MAX_ACCOUNTS=4096.
 #[cfg(all(feature = "small", not(feature = "medium")))]
-pub const SLAB_LEN: usize = 96696;
+pub const SLAB_LEN: usize = 96736;
 #[cfg(all(feature = "small", not(feature = "medium")))]
 pub const MAX_ACCOUNTS: usize = 256;
 
 #[cfg(all(feature = "medium", not(feature = "small")))]
-pub const SLAB_LEN: usize = 382488;
+pub const SLAB_LEN: usize = 382528;
 #[cfg(all(feature = "medium", not(feature = "small")))]
 pub const MAX_ACCOUNTS: usize = 1024;
 
 #[cfg(not(any(feature = "small", feature = "medium")))]
-pub const SLAB_LEN: usize = 1525656;
+pub const SLAB_LEN: usize = 1525696;
 #[cfg(not(any(feature = "small", feature = "medium")))]
 pub const MAX_ACCOUNTS: usize = 4096;
 
@@ -65,22 +65,22 @@ pub const DEFAULT_INIT_CAPITAL: u64 = DEFAULT_INIT_PAYMENT - DEFAULT_NEW_ACCOUNT
 // SBF-target RiskEngine offsets. These are not derived from native
 // `size_of` because host u128 alignment differs from SBF.
 pub const ENGINE_OFFSET: usize = 520;
-pub const ENGINE_BITMAP_OFFSET: usize = 744;
+pub const ENGINE_BITMAP_OFFSET: usize = 784;
 
 #[cfg(all(feature = "small", not(feature = "medium")))]
-pub const ENGINE_NUM_USED_OFFSET: usize = 776;
+pub const ENGINE_NUM_USED_OFFSET: usize = 816;
 #[cfg(all(feature = "small", not(feature = "medium")))]
-pub const ENGINE_ACCOUNTS_OFFSET: usize = 1808;
+pub const ENGINE_ACCOUNTS_OFFSET: usize = 1848;
 
 #[cfg(all(feature = "medium", not(feature = "small")))]
-pub const ENGINE_NUM_USED_OFFSET: usize = 872;
+pub const ENGINE_NUM_USED_OFFSET: usize = 912;
 #[cfg(all(feature = "medium", not(feature = "small")))]
-pub const ENGINE_ACCOUNTS_OFFSET: usize = 4976;
+pub const ENGINE_ACCOUNTS_OFFSET: usize = 5016;
 
 #[cfg(not(any(feature = "small", feature = "medium")))]
-pub const ENGINE_NUM_USED_OFFSET: usize = 1256;
+pub const ENGINE_NUM_USED_OFFSET: usize = 1296;
 #[cfg(not(any(feature = "small", feature = "medium")))]
-pub const ENGINE_ACCOUNTS_OFFSET: usize = 17648;
+pub const ENGINE_ACCOUNTS_OFFSET: usize = 17688;
 
 // Pyth Receiver program ID
 pub const PYTH_RECEIVER_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
@@ -2147,7 +2147,7 @@ impl TestEnv {
     /// need to verify forward progress through the SBF-written slab.
     pub fn read_last_market_slot(&self) -> u64 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        const LAST_MARKET_SLOT_OFFSET: usize = ENGINE_OFFSET + 672;
+        const LAST_MARKET_SLOT_OFFSET: usize = ENGINE_OFFSET + 712;
         u64::from_le_bytes(
             d[LAST_MARKET_SLOT_OFFSET..LAST_MARKET_SLOT_OFFSET + 8]
                 .try_into()
@@ -2158,7 +2158,7 @@ impl TestEnv {
     /// Read `engine.rr_cursor_position`, the engine Phase 2 greedy sweep cursor.
     pub fn read_rr_cursor_position(&self) -> u64 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        const RR_CURSOR_OFFSET: usize = ENGINE_OFFSET + 592;
+        const RR_CURSOR_OFFSET: usize = ENGINE_OFFSET + 624;
         u64::from_le_bytes(
             d[RR_CURSOR_OFFSET..RR_CURSOR_OFFSET + 8]
                 .try_into()
@@ -2169,7 +2169,7 @@ impl TestEnv {
     /// Read `engine.sweep_generation`, incremented after a complete RR cursor wrap.
     pub fn read_sweep_generation(&self) -> u64 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        const SWEEP_GENERATION_OFFSET: usize = ENGINE_OFFSET + 600;
+        const SWEEP_GENERATION_OFFSET: usize = ENGINE_OFFSET + 632;
         u64::from_le_bytes(
             d[SWEEP_GENERATION_OFFSET..SWEEP_GENERATION_OFFSET + 8]
                 .try_into()

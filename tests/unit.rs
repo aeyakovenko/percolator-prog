@@ -621,14 +621,14 @@ fn test_struct_sizes() {
 /// / `zc::engine_mut`. The cast is sound only if every field of
 /// `RiskEngine` (including its nested `accounts: [Account;
 /// MAX_ACCOUNTS]`) either (a) has no invalid bit patterns, or (b) is
-/// explicitly validated by `validate_raw_discriminants`.
+/// explicitly validated by `validate_raw_engine_state_shape`.
 ///
 /// The audit flagged the theoretical risk of a future author adding a
 /// `bool` or `#[repr(u8)] enum` field to one of these structs, which
 /// would make the unsafe cast UB on first access unless the raw bytes
 /// are validated first. Today the slab-persisted invalid-bit fields are
-/// the `SideMode` / `MarketMode` enums, all validated before casting in the
-/// currently pinned engine.
+/// the `SideMode` / `MarketMode` enums plus the persistent h-max bool, all
+/// validated before casting in the currently pinned engine.
 ///
 /// This test asserts that structural invariant at runtime by
 /// instantiating every slab field through zero bytes (via
@@ -665,9 +665,26 @@ fn test_zc_cast_safety_invariant() {
     let _ = acct.pending_present;
     // If the above compiles and runs clean, every field in Account
     // is all-bits-valid. RiskEngine-level fields (vault, params, enum
-    // discriminants, etc.) are already either all-bits-valid or
-    // covered by validate_raw_discriminants; the audit concern was
+    // discriminants, persistent bools, etc.) are already either all-bits-valid
+    // or covered by validate_raw_engine_state_shape; the audit concern was
     // specifically nested Account fields.
+}
+
+#[test]
+fn test_zc_rejects_invalid_persistent_bool_before_casting_engine_ref() {
+    use core::mem::offset_of;
+    use percolator::RiskEngine;
+    use percolator_prog::constants::{ENGINE_OFF, SLAB_LEN};
+
+    let mut slab = vec![0u8; SLAB_LEN];
+    let bool_off = ENGINE_OFF + offset_of!(RiskEngine, bankruptcy_hmax_lock_active);
+    slab[bool_off] = 2;
+
+    assert_eq!(
+        zc::validate_raw_engine_bytes_for_test(&slab),
+        Err(ProgramError::InvalidAccountData),
+        "persistent bool fields must be raw-validated before unsafe zero-copy cast"
+    );
 }
 
 #[test]

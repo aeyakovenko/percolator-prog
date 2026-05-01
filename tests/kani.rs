@@ -3834,7 +3834,6 @@ fn kani_crank_partial_catchup_target_is_bounded_progress() {
         oi_short,
         fund_px_last,
     ) {
-        let max_step = max_dt.saturating_mul(chunks);
         assert!(target > last_slot, "partial catchup must move forward");
         assert!(
             target < now_slot,
@@ -3842,8 +3841,8 @@ fn kani_crank_partial_catchup_target_is_bounded_progress() {
         );
         assert_eq!(
             target - last_slot,
-            max_step,
-            "partial catchup target must be exactly one bounded chunk"
+            max_dt,
+            "partial catchup target must be exactly one bounded segment"
         );
         assert!(
             now_slot - target < now_slot - last_slot,
@@ -3895,8 +3894,7 @@ fn kani_crank_partial_catchup_exposed_price_move_selects_target() {
 
     let max_dt = max_dt_raw as u64 + 1;
     let chunks = chunks_raw as u64 + 1;
-    let max_step = max_dt.saturating_mul(chunks);
-    let target = last_slot + max_step;
+    let target = last_slot + max_dt;
     let extra = gap_extra as u64 + 1;
     let now_slot = target + extra;
 
@@ -3918,7 +3916,7 @@ fn kani_crank_partial_catchup_exposed_price_move_selects_target() {
     ) {
         CrankCatchupTarget::Target(actual) => assert_eq!(
             actual, target,
-            "oversized exposed price move must partial-catchup to last + max_step"
+            "oversized exposed price move must partial-catchup to last + max_dt"
         ),
         CrankCatchupTarget::None => {
             assert!(false, "oversized exposed price move must select a target")
@@ -3942,8 +3940,7 @@ fn kani_crank_partial_catchup_exposed_funding_selects_target() {
 
     let max_dt = max_dt_raw as u64 + 1;
     let chunks = chunks_raw as u64 + 1;
-    let max_step = max_dt.saturating_mul(chunks);
-    let target = last_slot + max_step;
+    let target = last_slot + max_dt;
     let extra = gap_extra as u64 + 1;
     let now_slot = target + extra;
     let funding_rate = if funding_positive { 1 } else { -1 };
@@ -3962,7 +3959,7 @@ fn kani_crank_partial_catchup_exposed_funding_selects_target() {
     ) {
         CrankCatchupTarget::Target(actual) => assert_eq!(
             actual, target,
-            "oversized exposed funding must partial-catchup to last + max_step"
+            "oversized exposed funding must partial-catchup to last + max_dt"
         ),
         CrankCatchupTarget::None => {
             assert!(false, "oversized exposed funding must select a target")
@@ -3985,8 +3982,7 @@ fn kani_crank_partial_catchup_flat_price_move_does_not_partial() {
 
     let max_dt = max_dt_raw as u64 + 1;
     let chunks = chunks_raw as u64 + 1;
-    let max_step = max_dt.saturating_mul(chunks);
-    let now_slot = last_slot + max_step + gap_extra as u64 + 1;
+    let now_slot = last_slot + max_dt + gap_extra as u64 + 1;
     let fresh_price = last_price + price_delta;
 
     assert_eq!(
@@ -4045,8 +4041,7 @@ fn kani_issue33_exposed_price_move_rejected_by_user_paths_but_crank_progresses()
 
     let max_dt = max_dt_raw as u64 + 1;
     let chunks = chunks_raw as u64 + 1;
-    let max_step = max_dt.saturating_mul(chunks);
-    let target = last_slot + max_step;
+    let target = last_slot + max_dt;
     let now_slot = target + gap_extra as u64 + 1;
     let fresh_price = last_price + price_delta;
 
@@ -4106,8 +4101,7 @@ fn kani_issue33_exposed_funding_rejected_by_user_paths_but_crank_progresses() {
 
     let max_dt = max_dt_raw as u64 + 1;
     let chunks = chunks_raw as u64 + 1;
-    let max_step = max_dt.saturating_mul(chunks);
-    let target = last_slot + max_step;
+    let target = last_slot + max_dt;
     let now_slot = target + gap_extra as u64 + 1;
     let funding_rate = if funding_positive { 1 } else { -1 };
 
