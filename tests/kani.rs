@@ -4157,8 +4157,10 @@ fn kani_issue33_exposed_funding_rejected_by_user_paths_but_crank_progresses() {
     }
 }
 
-/// Prove: partial-crank config write rolls back effective/index fields and
-/// preserves only fresh liveness/target plus fee cursor state.
+/// Prove: partial-crank config write persists the bounded effective/index
+/// step actually fed to the engine, fresh liveness/target data, and fee
+/// cursor state. The raw target may remain ahead of the effective price; user
+/// value-moving paths reject that lag separately.
 #[kani::proof]
 fn kani_partial_crank_config_write_field_sources() {
     let before = PartialCrankConfigFields {
@@ -4184,8 +4186,8 @@ fn kani_partial_crank_config_write_field_sources() {
 
     let out = partial_crank_config_fields_to_write(before, after);
 
-    assert_eq!(out.last_effective_price_e6, before.last_effective_price_e6);
-    assert_eq!(out.last_hyperp_index_slot, before.last_hyperp_index_slot);
+    assert_eq!(out.last_effective_price_e6, after.last_effective_price_e6);
+    assert_eq!(out.last_hyperp_index_slot, after.last_hyperp_index_slot);
     assert_eq!(out.last_good_oracle_slot, after.last_good_oracle_slot);
     assert_eq!(out.last_oracle_publish_time, after.last_oracle_publish_time);
     assert_eq!(out.oracle_target_price_e6, after.oracle_target_price_e6);

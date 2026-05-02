@@ -62,10 +62,10 @@ pub mod constants {
 
     /// Maximum caller-supplied liquidation candidates decoded for one crank.
     /// This is intentionally larger than the per-crank execution budget so
-    /// honest keepers can over-specify the next cascade segment; the wrapper
-    /// uses the tail for issue-65 coverage checks while the engine executes a
-    /// CU-bounded prefix.
-    pub const MAX_KEEPER_CANDIDATES: usize = 128;
+    /// honest keepers can submit one bounded cascade segment while keeping
+    /// decode + wrapper simulation + engine execution below the SVM compute
+    /// cap in dense max-risk markets.
+    pub const MAX_KEEPER_CANDIDATES: usize = 8;
     /// Phase 1 revalidation/liquidation execution budget per KeeperCrank
     /// (wrapper-owned since v12.19, which dropped the engine-level
     /// `LIQ_BUDGET_PER_CRANK`). Kept at 8 so dense liquidation cascades plus
@@ -75,15 +75,15 @@ pub mod constants {
     /// This is deliberately independent from the liquidation execution budget:
     /// malformed or non-actionable candidate padding still consumes bounded
     /// inspection work, while honest keepers can over-specify a small tail.
-    pub const CANDIDATE_INSPECTION_BUDGET_PER_CRANK: u16 = 32;
+    pub const CANDIDATE_INSPECTION_BUDGET_PER_CRANK: u16 = 8;
     /// Phase 2 mandatory engine round-robin touch window. Kept at 32 so dense
     /// no-candidate cranks remain below the SVM CU cap after the engine's
     /// liquidation pass and wrapper risk-buffer maintenance.
     pub const RR_WINDOW_PER_CRANK: u64 = 32;
     /// Candidate-bearing cranks have extra wrapper coverage checks and engine
-    /// liquidation work. Use the same fixed touch budget as empty cranks so
-    /// KeeperCrank CU does not scale with total live accounts.
-    pub const RR_WINDOW_WITH_CANDIDATES_PER_CRANK: u64 = 32;
+    /// liquidation work. Keep their structural RR window small; empty cranks
+    /// own the wider cursor walk.
+    pub const RR_WINDOW_WITH_CANDIDATES_PER_CRANK: u64 = 4;
     /// Engine Phase 2 inspected-slot cap. This is intentionally explicit even
     /// when the deployment wants full-slab greedy progress: avoid delegating
     /// unbounded `u64::MAX` scan policy to the engine API.
@@ -4332,31 +4332,6 @@ pub mod processor {
         }
     }
 
-    fn keeper_partial_segment_price(
-        engine: &RiskEngine,
-        config: &MarketConfig,
-        target_slot: u64,
-    ) -> Result<u64, ProgramError> {
-        let dt = target_slot
-            .checked_sub(engine.last_market_slot)
-            .ok_or(PercolatorError::EngineOverflow)?;
-        let target = if oracle::is_hyperp_mode(config) {
-            hyperp_target_price(config)
-        } else {
-            config.oracle_target_price_e6
-        };
-        if target == 0 {
-            return Ok(engine.last_oracle_price);
-        }
-        Ok(crate::oracle::effective_price_from_target(
-            engine.last_oracle_price,
-            target,
-            engine.params.max_price_move_bps_per_slot,
-            dt,
-            engine.oi_eff_long_q != 0 || engine.oi_eff_short_q != 0,
-        ))
-    }
-
     fn partial_crank_config_fields(
         config: MarketConfig,
     ) -> crate::policy::PartialCrankConfigFields {
@@ -4493,6 +4468,24 @@ pub mod processor {
             // coverage for an unhealthy account include a FullClose fallback.
             Some(percolator::LiquidationPolicy::ExactPartial(_)) => false,
             None => false,
+        }
+    }
+
+    fn keeper_policy_can_protect(
+        engine: &RiskEngine,
+        idx: usize,
+        eff: i128,
+        price: u64,
+        policy: Option<percolator::LiquidationPolicy>,
+    ) -> bool {
+        match policy {
+            // Touch-only candidates are still protective progress: Phase 1
+            // settles the account's local A/K/F state without taking the
+            // FullClose liquidation/ADL branch. That is the bounded fallback
+            // lane for dense markets where a FullClose can be too expensive
+            // but the crank must still commit one incremental touch.
+            None => true,
+            Some(_) => keeper_policy_can_liquidate(engine, idx, eff, price, policy),
         }
     }
 
@@ -4875,8 +4868,8 @@ pub mod processor {
                 continue;
             }
             let eff = effective_pos_q_checked(engine, candidate_usize)?;
-            let can_liquidate =
-                keeper_policy_can_liquidate(engine, candidate_usize, eff, price, policy);
+            let can_protect =
+                keeper_policy_can_protect(engine, candidate_usize, eff, price, policy);
             let phase1_attempt = attempts < crate::constants::LIQ_BUDGET_PER_CRANK;
             attempts = attempts.saturating_add(1);
             let needs_protection = eff != 0
@@ -4888,7 +4881,7 @@ pub mod processor {
                     price,
                     funding_rate_e9,
                 )?;
-            if can_liquidate && phase1_attempt && needs_protection {
+            if can_protect && phase1_attempt && needs_protection {
                 set_idx_bit(phase1_protective, candidate_usize);
                 protective_attempts = protective_attempts.saturating_add(1);
             }
@@ -4901,6 +4894,47 @@ pub mod processor {
             percolator::MAX_TOUCHED_PER_INSTRUCTION as u16,
             crate::constants::CANDIDATE_INSPECTION_BUDGET_PER_CRANK,
         )
+    }
+
+    const DENSE_ADL_FULLCLOSE_SIDE_SCAN_LIMIT: u64 = 8;
+
+    fn bounded_keeper_policy_for_engine(
+        engine: &RiskEngine,
+        idx: u16,
+        policy: Option<percolator::LiquidationPolicy>,
+    ) -> Option<percolator::LiquidationPolicy> {
+        if !matches!(policy, Some(percolator::LiquidationPolicy::FullClose)) {
+            return policy;
+        }
+        if !idx_used_in_market(engine, idx as usize) {
+            return policy;
+        }
+        let eff = match effective_pos_q_checked(engine, idx as usize) {
+            Ok(v) => v,
+            Err(_) => return policy,
+        };
+        if eff == 0 {
+            return policy;
+        }
+        let (same_side_count, opposing_count) = if eff > 0 {
+            (engine.stored_pos_count_long, engine.stored_pos_count_short)
+        } else {
+            (engine.stored_pos_count_short, engine.stored_pos_count_long)
+        };
+        if same_side_count > DENSE_ADL_FULLCLOSE_SIDE_SCAN_LIMIT
+            || opposing_count > DENSE_ADL_FULLCLOSE_SIDE_SCAN_LIMIT
+        {
+            // A bankrupt FullClose can require exact socialized-loss
+            // accounting across side state. In a dense book that path is not a
+            // fixed-CU progress unit, so the wrapper degrades this candidate
+            // to touch-only and lets the crank commit local settlement /
+            // h-lock progress. Keepers can continue with further bounded
+            // touch cranks until an engine-level bounded ADL close is
+            // available.
+            None
+        } else {
+            policy
+        }
     }
 
     fn check_keeper_crank_market_progress_coverage(
@@ -6951,20 +6985,12 @@ pub mod processor {
                     defer_phase2,
                     rr_window_size,
                     rr_scan_limit,
-                ) = if let Some(target_slot) = partial_target {
-                    let segment_price = keeper_partial_segment_price(engine, &config, target_slot)?;
-                    if segment_price == engine.last_oracle_price
+                ) = if partial_target.is_some() {
+                    if price == engine.last_oracle_price
                         && raw_target != engine.last_oracle_price
                         && (engine.oi_eff_long_q != 0 || engine.oi_eff_short_q != 0)
                     {
                         return Err(PercolatorError::CatchupRequired.into());
-                    }
-                    config.last_effective_price_e6 = segment_price;
-                    if oracle::is_hyperp_mode(&config)
-                        && (segment_price != engine.last_oracle_price
-                            || segment_price == hyperp_target_price(&config))
-                    {
-                        config.last_hyperp_index_slot = clock.slot;
                     }
                     let rr_window_size = if candidates.is_empty() {
                         crate::constants::RR_WINDOW_PER_CRANK
@@ -6977,7 +7003,7 @@ pub mod processor {
                     );
                     (
                         clock.slot,
-                        segment_price,
+                        price,
                         true,
                         false,
                         rr_window_size,
@@ -7007,23 +7033,30 @@ pub mod processor {
                 let admit_h_max = engine.params.h_max;
                 let admit_threshold = Some(engine.params.maintenance_margin_bps as u128);
                 let rr_window_size = if defer_phase2 { 0 } else { rr_window_size };
+                let bounded_engine_candidates;
                 let engine_candidates: &[(u16, Option<percolator::LiquidationPolicy>)] =
-                    if partial_catchup { &[] } else { &combined };
+                    if partial_catchup {
+                        bounded_engine_candidates = combined
+                            .iter()
+                            .map(|&(idx, _policy)| (idx, None))
+                            .collect::<alloc::vec::Vec<_>>();
+                        &bounded_engine_candidates
+                    } else {
+                        bounded_engine_candidates = combined
+                            .iter()
+                            .map(|&(idx, policy)| {
+                                (idx, bounded_keeper_policy_for_engine(engine, idx, policy))
+                            })
+                            .collect::<alloc::vec::Vec<_>>();
+                        &bounded_engine_candidates
+                    };
                 let _outcome = engine
                     .keeper_crank_with_request_not_atomic(percolator::KeeperCrankRequest {
                         now_slot: crank_slot,
                         oracle_price: crank_price,
                         ordered_candidates: engine_candidates,
-                        max_revalidations: if partial_catchup {
-                            0
-                        } else {
-                            crate::constants::LIQ_BUDGET_PER_CRANK
-                        },
-                        max_candidate_inspections: if partial_catchup {
-                            0
-                        } else {
-                            keeper_candidate_inspection_cap()
-                        },
+                        max_revalidations: crate::constants::LIQ_BUDGET_PER_CRANK,
+                        max_candidate_inspections: keeper_candidate_inspection_cap(),
                         funding_rate_e9: funding_rate_e9_pre,
                         admit_h_min,
                         admit_h_max,
@@ -7057,8 +7090,16 @@ pub mod processor {
                         config.maintenance_fee_per_slot,
                     )?;
                     let ins_before_reward_sweep = engine.insurance_fund.balance.get();
-                    let remaining_budget =
-                        crate::constants::FEE_SWEEP_BUDGET.saturating_sub(candidate_syncs);
+                    let remaining_budget = if candidates.is_empty() {
+                        crate::constants::FEE_SWEEP_BUDGET.saturating_sub(candidate_syncs)
+                    } else {
+                        // Candidate-bearing cranks already spend their fixed
+                        // CU envelope on Phase 1 settlement/liquidation and
+                        // post-touch candidate fee sync. Empty cranks own the
+                        // bitmap fee sweep so candidate padding cannot push a
+                        // max-risk liquidation progress unit over the SVM cap.
+                        0
+                    };
                     sweep_maintenance_fees(engine, &mut config, crank_slot, remaining_budget)?;
                     engine
                         .insurance_fund

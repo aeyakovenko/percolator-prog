@@ -26,11 +26,11 @@ use std::path::PathBuf;
 // SLAB_LEN for production BPF (MAX_ACCOUNTS=4096)
 // BPF-target SLAB_LEN, cfg-gated by deployment-size feature.
 #[cfg(all(feature = "small", not(feature = "medium")))]
-const SLAB_LEN: usize = 96736;
+const SLAB_LEN: usize = 111288;
 #[cfg(all(feature = "medium", not(feature = "small")))]
-const SLAB_LEN: usize = 382528;
+const SLAB_LEN: usize = 440088;
 #[cfg(not(any(feature = "small", feature = "medium")))]
-const SLAB_LEN: usize = 1525696;
+const SLAB_LEN: usize = 1755288;
 const TEST_MAX_STALENESS_SECS: u64 = percolator_prog::constants::MAX_ORACLE_STALENESS_SECS;
 #[cfg(all(feature = "small", not(feature = "medium")))]
 const MAX_ACCOUNTS: usize = 256;
@@ -262,6 +262,10 @@ fn test_account_struct_alignment() {
         adl_k_snap: 0i128,
         f_snap: 0i128,
         adl_epoch_snap: 0u64,
+        loss_weight: 0,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
         matcher_program: [0xAA; 32],
         matcher_context: [0xBB; 32],
         owner: [0xCC; 32],

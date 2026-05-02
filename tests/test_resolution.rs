@@ -12,6 +12,36 @@ use solana_sdk::{
     transaction::Transaction,
 };
 
+fn settle_warmup_and_convert_released_pnl(
+    env: &mut TestEnv,
+    owner: &Keypair,
+    idx: u16,
+    price_e6: i64,
+    maturity_slots: u64,
+) {
+    env.try_settle_account(idx)
+        .expect("first settlement should create or advance the profit reserve");
+
+    if env.read_account_reserved_pnl(idx) > 0 {
+        let now = env.svm.get_sysvar::<Clock>().slot;
+        env.set_slot_and_price_raw_no_walk(
+            now.saturating_add(maturity_slots).saturating_add(1),
+            price_e6,
+        );
+        env.try_settle_account(idx)
+            .expect("second settlement should mature the profit reserve");
+    }
+
+    let released = env
+        .read_account_pnl(idx)
+        .max(0)
+        .saturating_sub(env.read_account_reserved_pnl(idx) as i128) as u64;
+    if released > 0 {
+        env.try_convert_released_pnl(owner, idx, released)
+            .expect("released PnL conversion should succeed before close");
+    }
+}
+
 /// Test that resolved markets block new activity
 #[test]
 fn test_resolved_market_blocks_new_activity() {
@@ -283,8 +313,8 @@ fn test_attack_resolve_market_non_admin() {
     );
 }
 
-/// Standard Pyth market: user deposits, trades (long), price goes up, flattens, closes account.
-/// warmup_period_slots=0 so PnL converts instantly.
+/// Standard Pyth market: user deposits, trades (long), price goes up, flattens, waits
+/// for profit maturity, converts released PnL, and closes account.
 #[test]
 fn test_honest_user_standard_market_profitable_close() {
     program_path();
@@ -329,10 +359,11 @@ fn test_honest_user_standard_market_profitable_close() {
     // Crank to settle final state
     env.set_slot_and_price(330, 150_000_000);
     env.crank();
+    settle_warmup_and_convert_released_pnl(&mut env, &user, user_idx, 150_000_000, 1);
 
     let vault_before = env.vault_balance();
 
-    // Close account — warmup_period=0 so PnL converts instantly
+    // Close account after positive PnL has matured and been converted.
     let result = env.try_close_account(&user, user_idx);
     assert!(
         result.is_ok(),
@@ -465,6 +496,7 @@ fn test_honest_user_standard_market_warmup_close() {
     // guard while proving the account can exit after the configured warmup.
     env.set_slot_and_price(430, 150_000_000);
     env.crank();
+    settle_warmup_and_convert_released_pnl(&mut env, &user, user_idx, 150_000_000, 50);
 
     let result = env.try_close_account(&user, user_idx);
     assert!(

@@ -2506,7 +2506,7 @@ dependencies = [
 [[package]]
 name = "percolator"
 version = "0.1.0"
-source = "git+https://github.com/aeyakovenko/percolator?rev=2a6a12c360b38cb3db55bf9475ddd15d2852409f#2a6a12c360b38cb3db55bf9475ddd15d2852409f"
+source = "git+https://github.com/aeyakovenko/percolator?rev=d509c444253af48283dd35d3535e1fb4971514bf#d509c444253af48283dd35d3535e1fb4971514bf"
 
 [[package]]
 name = "percolator-prog"

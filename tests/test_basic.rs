@@ -49,7 +49,7 @@ fn assert_no_sbf_panic(err: &str, context: &str) {
 
 fn read_engine_last_oracle_price(env: &TestEnv) -> u64 {
     let d = env.svm.get_account(&env.slab).unwrap().data;
-    const LAST_ORACLE_PRICE_OFFSET: usize = ENGINE_OFFSET + 696;
+    const LAST_ORACLE_PRICE_OFFSET: usize = ENGINE_OFFSET + 912;
     u64::from_le_bytes(
         d[LAST_ORACLE_PRICE_OFFSET..LAST_ORACLE_PRICE_OFFSET + 8]
             .try_into()
@@ -59,7 +59,7 @@ fn read_engine_last_oracle_price(env: &TestEnv) -> u64 {
 
 fn read_engine_rr_cursor(env: &TestEnv) -> u64 {
     let d = env.svm.get_account(&env.slab).unwrap().data;
-    const RR_CURSOR_OFFSET: usize = ENGINE_OFFSET + 624;
+    const RR_CURSOR_OFFSET: usize = ENGINE_OFFSET + 840;
     u64::from_le_bytes(
         d[RR_CURSOR_OFFSET..RR_CURSOR_OFFSET + 8]
             .try_into()
@@ -69,7 +69,7 @@ fn read_engine_rr_cursor(env: &TestEnv) -> u64 {
 
 fn read_engine_sweep_generation(env: &TestEnv) -> u64 {
     let d = env.svm.get_account(&env.slab).unwrap().data;
-    const SWEEP_GENERATION_OFFSET: usize = ENGINE_OFFSET + 632;
+    const SWEEP_GENERATION_OFFSET: usize = ENGINE_OFFSET + 848;
     u64::from_le_bytes(
         d[SWEEP_GENERATION_OFFSET..SWEEP_GENERATION_OFFSET + 8]
             .try_into()
@@ -78,8 +78,8 @@ fn read_engine_sweep_generation(env: &TestEnv) -> u64 {
 }
 
 fn write_account_fee_credits(env: &mut TestEnv, idx: u16, value: i128) {
-    const ACCOUNT_SIZE: usize = 360;
-    const FEE_CREDITS_OFFSET: usize = 224;
+    const ACCOUNT_SIZE: usize = 416;
+    const FEE_CREDITS_OFFSET: usize = 280;
     let mut slab = env.svm.get_account(&env.slab).unwrap();
     let off =
         ENGINE_OFFSET + ENGINE_ACCOUNTS_OFFSET + (idx as usize) * ACCOUNT_SIZE + FEE_CREDITS_OFFSET;
@@ -3974,6 +3974,26 @@ fn test_inverted_market_full_lifecycle() {
         vault_with_insurance,
         "conservation: closing trade must not change vault"
     );
+    env.try_settle_account(user_idx)
+        .expect("user settlement crank should succeed before close");
+    env.try_settle_account(lp_idx)
+        .expect("lp settlement crank should succeed before close");
+    env.set_slot_and_price(1700, 120_000_000);
+    env.crank();
+    env.try_settle_account(user_idx)
+        .expect("user maturity settlement should succeed before close");
+    env.try_settle_account(lp_idx)
+        .expect("lp maturity settlement should succeed before close");
+    let user_released = env.read_account_pnl(user_idx).max(0) as u64;
+    if user_released > 0 {
+        env.try_convert_released_pnl(&user, user_idx, user_released)
+            .expect("user released pnl conversion should succeed before close");
+    }
+    let lp_released = env.read_account_pnl(lp_idx).max(0) as u64;
+    if lp_released > 0 {
+        env.try_convert_released_pnl(&lp, lp_idx, lp_released)
+            .expect("lp released pnl conversion should succeed before close");
+    }
 
     // Close accounts to verify capital is returned correctly
     env.try_close_account(&user, user_idx)
@@ -6724,7 +6744,7 @@ fn test_attack_fresh_keeper_cranker_cannot_capture_third_party_candidate_fees() 
 }
 
 #[test]
-fn test_keeper_crank_noop_candidate_syncs_do_not_spend_bitmap_sweep_budget() {
+fn test_keeper_crank_candidate_cranks_do_not_run_bitmap_fee_sweep() {
     program_path();
     let mut env = TestEnv::new();
     let data = encode_init_market_with_maint_fee_bounded(
@@ -6771,13 +6791,13 @@ fn test_keeper_crank_noop_candidate_syncs_do_not_spend_bitmap_sweep_budget() {
     let config = percolator_prog::state::read_config(&slab.data);
     assert_eq!(
         (config.fee_sweep_cursor_word, config.fee_sweep_cursor_bit),
-        (2, 0),
-        "same-anchor candidate syncs are no-ops and must not shrink the 128-account bitmap sweep window"
+        (0, 0),
+        "candidate-bearing cranks spend their fixed CU envelope on candidate progress; empty cranks own the bitmap fee sweep"
     );
 }
 
 #[test]
-fn test_keeper_crank_healthy_tail_candidate_does_not_defer_phase2() {
+fn test_keeper_crank_noop_candidates_do_not_suppress_phase2() {
     program_path();
     let mut env = TestEnv::new();
     env.init_market_with_invert(0);
@@ -6820,15 +6840,15 @@ fn test_keeper_crank_healthy_tail_candidate_does_not_defer_phase2() {
 
     env.trade(&target, &lp, lp_idx, target_idx, 1_000_000);
 
-    let mut candidates = flat_candidate_idxs;
-    assert_eq!(
-        candidates.len(),
-        percolator_prog::constants::LIQ_BUDGET_PER_CRANK as usize
+    let candidates = flat_candidate_idxs;
+    assert!(
+        candidates.len() <= percolator_prog::constants::MAX_KEEPER_CANDIDATES,
+        "test candidates must fit the public crank ABI cap"
     );
-    candidates.push(target_idx);
 
     let start_slot = env.read_last_market_slot();
-    env.set_slot(start_slot + 1);
+    let p_last = read_engine_last_oracle_price(&env);
+    env.set_slot_and_price_raw_no_walk(start_slot + 1, p_last as i64);
     let rr_cursor_before = read_engine_rr_cursor(&env);
     let sweep_generation_before = read_engine_sweep_generation(&env);
 
@@ -6855,7 +6875,7 @@ fn test_keeper_crank_healthy_tail_candidate_does_not_defer_phase2() {
     assert!(
         read_engine_rr_cursor(&env) != rr_cursor_before
             || read_engine_sweep_generation(&env) > sweep_generation_before,
-        "healthy tail candidates beyond phase-1 budget must not suppress phase-2 RR progress"
+        "noop candidate padding must not suppress bounded phase-2 RR progress"
     );
 }
 

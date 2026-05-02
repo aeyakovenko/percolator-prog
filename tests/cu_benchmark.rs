@@ -32,11 +32,11 @@ use std::path::PathBuf;
 // tests) has been removed; integration tests go through the BPF binary.
 // BPF-target SLAB_LEN, cfg-gated by deployment-size feature.
 #[cfg(all(feature = "small", not(feature = "medium")))]
-const SLAB_LEN: usize = 96736;
+const SLAB_LEN: usize = 111288;
 #[cfg(all(feature = "medium", not(feature = "small")))]
-const SLAB_LEN: usize = 382528;
+const SLAB_LEN: usize = 440088;
 #[cfg(not(any(feature = "small", feature = "medium")))]
-const SLAB_LEN: usize = 1525696;
+const SLAB_LEN: usize = 1755288;
 #[cfg(all(feature = "small", not(feature = "medium")))]
 const MAX_ACCOUNTS: usize = 256;
 #[cfg(all(feature = "medium", not(feature = "small")))]
@@ -44,11 +44,11 @@ const MAX_ACCOUNTS: usize = 1024;
 #[cfg(not(any(feature = "small", feature = "medium")))]
 const MAX_ACCOUNTS: usize = 4096;
 #[cfg(all(feature = "small", not(feature = "medium")))]
-const ENGINE_ACCOUNTS_OFFSET: usize = 1848;
+const ENGINE_ACCOUNTS_OFFSET: usize = 2064;
 #[cfg(all(feature = "medium", not(feature = "small")))]
-const ENGINE_ACCOUNTS_OFFSET: usize = 5016;
+const ENGINE_ACCOUNTS_OFFSET: usize = 5232;
 #[cfg(not(any(feature = "small", feature = "medium")))]
-const ENGINE_ACCOUNTS_OFFSET: usize = 17688;
+const ENGINE_ACCOUNTS_OFFSET: usize = 17904;
 const TEST_MAX_STALENESS_SECS: u64 = percolator_prog::constants::MAX_ORACLE_STALENESS_SECS;
 const BENCHMARK_PERMISSIONLESS_RESOLVE_STALE_SLOTS: u64 = 10_000;
 
@@ -205,14 +205,9 @@ fn encode_deposit(user_idx: u16, amount: u64) -> Vec<u8> {
 }
 
 fn encode_crank_permissionless(_panic: u8) -> Vec<u8> {
-    // format_version=1: (u16 idx, u8 tag) per candidate
     let mut data = vec![5u8];
     data.extend_from_slice(&u16::MAX.to_le_bytes());
     data.push(1u8); // format_version = 1
-    for i in 0..128u16 {
-        data.extend_from_slice(&i.to_le_bytes());
-        data.push(0u8); // tag 0 = FullClose
-    }
     data
 }
 
@@ -223,6 +218,17 @@ fn encode_crank_with_candidates(candidates: &[u16]) -> Vec<u8> {
     for &idx in candidates {
         data.extend_from_slice(&idx.to_le_bytes());
         data.push(0u8); // tag 0 = FullClose
+    }
+    data
+}
+
+fn encode_crank_with_touch_candidates(candidates: &[u16]) -> Vec<u8> {
+    let mut data = vec![5u8];
+    data.extend_from_slice(&u16::MAX.to_le_bytes());
+    data.push(1u8); // format_version = 1
+    for &idx in candidates {
+        data.extend_from_slice(&idx.to_le_bytes());
+        data.push(0xFFu8); // tag 0xFF = touch-only
     }
     data
 }
@@ -687,6 +693,17 @@ impl TestEnv {
         &mut self,
         candidates: &[u16],
     ) -> Result<(u64, Vec<String>), String> {
+        self.try_crank_with_data(encode_crank_with_candidates(candidates))
+    }
+
+    fn try_crank_with_touch_candidates(
+        &mut self,
+        candidates: &[u16],
+    ) -> Result<(u64, Vec<String>), String> {
+        self.try_crank_with_data(encode_crank_with_touch_candidates(candidates))
+    }
+
+    fn try_crank_with_data(&mut self, data: Vec<u8>) -> Result<(u64, Vec<String>), String> {
         let caller = Keypair::new();
         self.svm.airdrop(&caller.pubkey(), 1_000_000_000).unwrap();
 
@@ -700,7 +717,7 @@ impl TestEnv {
                 AccountMeta::new_readonly(sysvar::clock::ID, false),
                 AccountMeta::new_readonly(self.pyth_index, false),
             ],
-            data: encode_crank_with_candidates(candidates),
+            data,
         };
 
         let tx = Transaction::new_signed_with_payer(
@@ -747,7 +764,7 @@ impl TestEnv {
 
     fn read_last_market_slot(&self) -> u64 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        const LAST_MARKET_SLOT_OFFSET: usize = 520 + 712;
+        const LAST_MARKET_SLOT_OFFSET: usize = 520 + 928;
         u64::from_le_bytes(
             d[LAST_MARKET_SLOT_OFFSET..LAST_MARKET_SLOT_OFFSET + 8]
                 .try_into()
@@ -757,7 +774,7 @@ impl TestEnv {
 
     fn read_rr_cursor_position(&self) -> u64 {
         let d = self.svm.get_account(&self.slab).unwrap().data;
-        const RR_CURSOR_OFFSET: usize = 520 + 624;
+        const RR_CURSOR_OFFSET: usize = 520 + 840;
         u64::from_le_bytes(
             d[RR_CURSOR_OFFSET..RR_CURSOR_OFFSET + 8]
                 .try_into()
@@ -769,7 +786,7 @@ impl TestEnv {
         let d = self.svm.get_account(&self.slab).unwrap().data;
         const ENGINE: usize = 520;
         const ACCOUNTS_OFFSET: usize = ENGINE + ENGINE_ACCOUNTS_OFFSET;
-        const ACCOUNT_SIZE: usize = 360;
+        const ACCOUNT_SIZE: usize = 416;
         const PBQ: usize = 56;
         const A_BASIS: usize = 72;
         const EPOCH_SNAP: usize = 120;
@@ -1032,7 +1049,194 @@ fn count_open_positions(env: &TestEnv, indices: &[u16]) -> usize {
         .count()
 }
 
-#[cfg(not(feature = "test"))]
+fn setup_dense_crank_market(
+    num_actors: usize,
+    balanced_after_candidate_cap: bool,
+) -> (TestEnv, Vec<u16>) {
+    assert!(num_actors + 1 <= MAX_ACCOUNTS);
+    let mut env = TestEnv::new();
+    env.write_price_and_clock(DENSE_CRANK_P0_E6 as i64, DENSE_CRANK_START_SLOT);
+    let admin = env.payer.pubkey();
+    let mint = env.mint;
+    env.init_market_raw(encode_dense_crank_market(&admin, &mint));
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp_with_fee(&lp, DENSE_CRANK_LP_CAPITAL + DENSE_CRANK_SETUP_BUFFER);
+    let payer = Keypair::from_bytes(&env.payer.to_bytes()).unwrap();
+    env.top_up_insurance(&payer, DENSE_CRANK_INSURANCE);
+
+    let size = dense_crank_position_size(DENSE_CRANK_CAPITAL_PER_USER, DENSE_CRANK_P0_E6);
+    let mut actors = Vec::with_capacity(num_actors);
+    for i in 0..num_actors {
+        let user = Keypair::new();
+        let user_idx = env.init_user_with_fee(
+            &user,
+            DENSE_CRANK_CAPITAL_PER_USER + DENSE_CRANK_SETUP_BUFFER,
+        );
+        let direction = if balanced_after_candidate_cap
+            && i >= percolator_prog::constants::MAX_KEEPER_CANDIDATES
+        {
+            -1i128
+        } else {
+            1i128
+        };
+        env.trade(&user, &lp, lp_idx, user_idx, size * direction);
+        actors.push(user_idx);
+    }
+    (env, actors)
+}
+
+fn move_dense_crank_market_to_liquidation_round(env: &mut TestEnv) {
+    let start_slot = env.read_last_market_slot();
+    let target_dt_slots = 40;
+    let target = dense_crank_next_price_for_dt(
+        DENSE_CRANK_P0_E6,
+        -(DENSE_CRANK_CAP_BPS as i16),
+        target_dt_slots,
+    );
+    env.set_price(target as i64, start_slot + target_dt_slots);
+}
+
+fn saturated_open_candidate_prefix(env: &TestEnv, actors: &[u16]) -> Vec<u16> {
+    actors
+        .iter()
+        .copied()
+        .filter(|&idx| env.read_account_position(idx) != 0)
+        .take(percolator_prog::constants::MAX_KEEPER_CANDIDATES)
+        .collect()
+}
+
+#[test]
+fn benchmark_keeper_crank_dense_touch_only_progress_is_fixed_size() {
+    println!("\n=== KEEPER DENSE TOUCH-ONLY PROGRESS CU REGRESSION ===");
+    let test_sizes: &[usize] = if MAX_ACCOUNTS >= 512 {
+        &[128, 256, 512]
+    } else {
+        &[64, 128, 192]
+    };
+    let mut saturated_reference: Option<u64> = None;
+
+    for &num_actors in test_sizes {
+        let (mut env, actors) = setup_dense_crank_market(num_actors, true);
+        move_dense_crank_market_to_liquidation_round(&mut env);
+
+        let mut worst_cu = 0u64;
+        for round in 0..4 {
+            let before_slot = env.read_last_market_slot();
+            let before_rr = env.read_rr_cursor_position();
+            let before_open = count_open_positions(&env, &actors);
+            let candidates = saturated_open_candidate_prefix(&env, &actors);
+            let (cu, _logs) = env
+                .try_crank_with_touch_candidates(&candidates)
+                .expect("touch-only dense crank must not brick");
+            assert!(
+                cu <= 1_400_000,
+                "touch-only crank exceeded SVM limit: actors={num_actors}, round={round}, cu={cu}"
+            );
+            worst_cu = worst_cu.max(cu);
+            let after_slot = env.read_last_market_slot();
+            let after_rr = env.read_rr_cursor_position();
+            let after_open = count_open_positions(&env, &actors);
+            assert!(
+                after_slot > before_slot || after_rr != before_rr || after_open < before_open,
+                "touch-only dense crank made no progress: actors={num_actors}, round={round}, cu={cu}, slot={before_slot}->{after_slot}, rr={before_rr}->{after_rr}, open={before_open}->{after_open}"
+            );
+            println!(
+                "  actors={num_actors:>3}, round={round:>2}: cu={cu:>8}, open={before_open}->{after_open}, rr={before_rr}->{after_rr}, slot={before_slot}->{after_slot}"
+            );
+        }
+
+        println!("  actors={num_actors:>3}: worst_cu={worst_cu:>8}");
+        if num_actors == percolator_prog::constants::MAX_KEEPER_CANDIDATES {
+            saturated_reference = Some(worst_cu);
+        } else if let Some(reference) = saturated_reference {
+            assert!(
+                worst_cu <= reference + 250_000,
+                "touch-only CU should remain fixed-size after candidate cap: cap_cu={reference}, actors={num_actors}, worst_cu={worst_cu}"
+            );
+        }
+    }
+}
+
+#[test]
+fn benchmark_keeper_crank_dense_fullclose_single_opposing_side_stays_bounded() {
+    println!("\n=== KEEPER DENSE FULLCLOSE SINGLE-OPPOSING-SIDE CU REGRESSION ===");
+    let (mut env, actors) =
+        setup_dense_crank_market(percolator_prog::constants::MAX_KEEPER_CANDIDATES, false);
+    move_dense_crank_market_to_liquidation_round(&mut env);
+
+    let mut closed_total = 0usize;
+    let mut worst_cu = 0u64;
+    for round in 0..4 {
+        let before_open = count_open_positions(&env, &actors);
+        let before_slot = env.read_last_market_slot();
+        let candidates = saturated_open_candidate_prefix(&env, &actors);
+        let (cu, _logs) = env
+            .try_crank_with_candidates(&candidates)
+            .expect("single-opposing-side fullclose crank must not brick");
+        assert!(
+            cu <= 1_400_000,
+            "single-opposing-side fullclose crank exceeded SVM limit on round {round}: cu={cu}"
+        );
+        worst_cu = worst_cu.max(cu);
+        let after_open = count_open_positions(&env, &actors);
+        let closed = before_open.saturating_sub(after_open);
+        closed_total += closed;
+        assert!(
+            env.read_last_market_slot() > before_slot || closed > 0,
+            "single-opposing-side fullclose crank made no progress on round {round}"
+        );
+        println!("  round={round:>2}: cu={cu:>8}, closed={closed}, open_after={after_open}");
+    }
+    assert!(
+        closed_total > 0,
+        "fullclose lane should close at least one account"
+    );
+    assert!(
+        worst_cu <= 1_350_000,
+        "single-opposing-side fullclose lane should stay within the fixed-size headroom ceiling: worst_cu={worst_cu}"
+    );
+}
+
+#[test]
+fn benchmark_keeper_crank_phase2_only_dense_positions_stays_bounded() {
+    println!("\n=== KEEPER PHASE2-ONLY DENSE POSITION CU REGRESSION ===");
+    let test_sizes: &[usize] = if MAX_ACCOUNTS >= 512 {
+        &[128, 256, 512]
+    } else {
+        &[64, 128, 192]
+    };
+    let mut saturated_reference: Option<u64> = None;
+
+    for &num_actors in test_sizes {
+        let (mut env, actors) = setup_dense_crank_market(num_actors, true);
+        let start_slot = env.read_last_market_slot();
+        env.set_price(DENSE_CRANK_P0_E6 as i64, start_slot + 1);
+
+        let before_rr = env.read_rr_cursor_position();
+        let (cu, _logs) = env.try_crank().expect("phase2-only crank must not brick");
+        let after_rr = env.read_rr_cursor_position();
+        assert_ne!(
+            after_rr, before_rr,
+            "phase2-only crank should advance the RR cursor for actors={num_actors}"
+        );
+        assert_eq!(
+            count_open_positions(&env, &actors),
+            actors.len(),
+            "phase2-only no-price-move crank must not close accounts"
+        );
+        println!("  actors={num_actors:>3}: cu={cu:>8}, rr={before_rr}->{after_rr}");
+        if num_actors == percolator_prog::constants::MAX_KEEPER_CANDIDATES {
+            saturated_reference = Some(cu);
+        } else if let Some(reference) = saturated_reference {
+            assert!(
+                cu <= reference + 150_000,
+                "phase2-only CU should remain fixed-size after candidate cap: cap_cu={reference}, actors={num_actors}, cu={cu}"
+            );
+        }
+    }
+}
+
 #[test]
 fn benchmark_keeper_crank_dense_candidate_cap_fixed_size_and_progress() {
     println!("\n=== KEEPER DENSE CANDIDATE-CAP CU REGRESSION ===");
@@ -1044,7 +1248,14 @@ fn benchmark_keeper_crank_dense_candidate_cap_fixed_size_and_progress() {
     );
 
     let test_sizes: &[usize] = if MAX_ACCOUNTS >= 512 {
-        &[128, 256, 512, 1024, MAX_ACCOUNTS - 1]
+        &[
+            percolator_prog::constants::MAX_KEEPER_CANDIDATES,
+            128,
+            256,
+            512,
+            1024,
+            MAX_ACCOUNTS - 1,
+        ]
     } else {
         &[64, 128, 192]
     };
@@ -1157,7 +1368,6 @@ fn benchmark_keeper_crank_dense_candidate_cap_fixed_size_and_progress() {
     }
 }
 
-#[cfg(not(feature = "test"))]
 #[test]
 #[cfg(not(any(feature = "small", feature = "medium")))]
 fn benchmark_worst_case_scenarios() {
@@ -2069,7 +2279,6 @@ fn benchmark_worst_case_scenarios() {
 
 /// Per-instruction CU benchmark covering all instruction types.
 /// Measures CU consumed for each instruction under typical conditions.
-#[cfg(not(feature = "test"))]
 #[test]
 #[cfg(not(any(feature = "small", feature = "medium")))]
 fn benchmark_all_instructions() {

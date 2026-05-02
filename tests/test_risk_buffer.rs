@@ -29,7 +29,7 @@ fn move_used_account_slot_for_test(env: &mut TestEnv, from: u16, to: u16) {
     );
 
     let mut slab = env.svm.get_account(&env.slab).unwrap();
-    const ACCOUNT_SIZE: usize = 360;
+    const ACCOUNT_SIZE: usize = 416;
     let accounts_off = ENGINE_OFFSET + ENGINE_ACCOUNTS_OFFSET;
     let src = accounts_off + (from as usize) * ACCOUNT_SIZE;
     let dst = accounts_off + (to as usize) * ACCOUNT_SIZE;
