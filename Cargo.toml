@@ -46,7 +46,7 @@ pinocchio = "0.6"
 arrayref = "0.3"
 num-derive = "0.4"
 num-traits = "0.2"
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "9e3300566dddb778114cbca81dd683775c438083" }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "f6b13f5751a11176afd070f6e89c6aaa77a886f1" }
 
 [dev-dependencies]
 bincode = "1"
