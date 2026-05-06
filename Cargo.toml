@@ -29,9 +29,7 @@ small = ["percolator/small"]
 medium = ["percolator/medium"]
 
 [dependencies]
-# Anchor v2 (pinned commit per CLAUDE.md). Path dep into the locally
-# cloned reference checkout.
-anchor-lang-v2 = { path = "../anchor-v2-ref/lang-v2" }
+anchor-lang-v2 = { git = "https://github.com/solana-foundation/anchor/", rev = "9725e11"}
 # v2's `#[program]` macro emits references to these crates as if they
 # were direct deps of the user crate (mirrors how tests-v2 programs
 # declare them). Keep versions aligned with anchor-lang-v2's pins.
