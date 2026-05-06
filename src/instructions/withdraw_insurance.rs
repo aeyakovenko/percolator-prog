@@ -35,11 +35,11 @@ pub struct WithdrawInsurance {
     pub slab: Account<PercolatorSlab>,
     /// CHECK: validated as admin's SPL token ATA in the handler.
     #[account(mut)]
-    pub admin_ata: UncheckedAccount,
+    pub admin_ata: crate::spl::TokenAccount,
     /// CHECK: validated against `MarketConfig.vault_pubkey` + program-
     /// derived vault authority in the handler.
     #[account(mut)]
-    pub vault: UncheckedAccount,
+    pub vault: crate::spl::TokenAccount,
     pub token_program: Program<crate::spl::TokenProgram>,
     /// Program-derived vault authority. Validated via `seeds` + `bump`
     /// constraint and signed via `signer_seeds` for the SPL Token CPI.

@@ -96,11 +96,10 @@ pub struct InitMarket {
     /// MAGIC + header + config + engine.
     #[account(zeroed)]
     pub slab: Account<PercolatorSlab>,
-    /// CHECK: SPL Token mint, validated by `pinocchio_token::Mint::from_account_view`.
-    pub mint: UncheckedAccount,
+    pub mint: crate::spl::Mint,
     /// CHECK: vault token account, validated by `cpi::verify_vault_empty`.
     #[account(mut)]
-    pub vault: UncheckedAccount,
+    pub vault: crate::spl::TokenAccount,
     pub clock: Sysvar<Clock>,
     /// CHECK: Pyth / Chainlink oracle for non-Hyperp init; validated by `oracle::*`.
     pub oracle: UncheckedAccount,
@@ -146,17 +145,9 @@ pub fn handler(ctx: &mut Context<InitMarket>, args: InitMarketArgs) -> Result<()
         return Err(ProgramError::InvalidInstructionData.into());
     }
 
-    // SPL Token Mint shape: owner + LEN + initialized.
-    if !mint_view.owned_by(&pinocchio_token::ID) {
-        return Err(ProgramError::IllegalOwner.into());
-    }
-    {
-        // pinocchio_token::Mint::from_account_view does length + owner;
-        // the existence of a successful borrow + the LEN match is enough
-        // to confirm the mint is a real SPL mint.
-        let _mint = pinocchio_token::state::Mint::from_account_view(&mint_view)
-            .map_err(|_| ProgramError::from(PercolatorError::InvalidMint))?;
-    }
+    // Mint shape (owner = SPL Token program, LEN, owner-of-mint) is
+    // framework-validated via the `Mint` typed account.
+    let _ = mint_view;
 
     // Boolean encoded as u8.
     if invert > 1 {

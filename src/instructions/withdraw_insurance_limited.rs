@@ -50,10 +50,10 @@ pub struct WithdrawInsuranceLimited {
     pub slab: Account<PercolatorSlab>,
     /// CHECK: validated as operator's SPL token ATA in the handler.
     #[account(mut)]
-    pub operator_ata: UncheckedAccount,
+    pub operator_ata: crate::spl::TokenAccount,
     /// CHECK: validated against `MarketConfig.vault_pubkey` + PDA auth.
     #[account(mut)]
-    pub vault: UncheckedAccount,
+    pub vault: crate::spl::TokenAccount,
     pub token_program: Program<crate::spl::TokenProgram>,
     /// CHECK: framework-validated via `seeds` + `bump` constraint.
     #[account(seeds = [b"vault", slab], bump = slab.config.vault_authority_bump())]

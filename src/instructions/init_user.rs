@@ -32,10 +32,10 @@ pub struct InitUser {
     pub slab: Account<PercolatorSlab>,
     /// CHECK: validated as user's SPL token ATA in the handler.
     #[account(mut)]
-    pub user_ata: UncheckedAccount,
+    pub user_ata: crate::spl::TokenAccount,
     /// CHECK: validated against `MarketConfig.vault_pubkey` + PDA auth.
     #[account(mut)]
-    pub vault: UncheckedAccount,
+    pub vault: crate::spl::TokenAccount,
     pub token_program: Program<crate::spl::TokenProgram>,
     pub clock: Sysvar<Clock>,
 }

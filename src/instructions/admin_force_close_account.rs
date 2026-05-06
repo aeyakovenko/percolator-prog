@@ -35,11 +35,11 @@ pub struct AdminForceCloseAccount {
     pub slab: Account<PercolatorSlab>,
     /// CHECK: validated against `MarketConfig.vault_pubkey` + PDA auth.
     #[account(mut)]
-    pub vault: UncheckedAccount,
+    pub vault: crate::spl::TokenAccount,
     /// CHECK: validated as the closed account's owner ATA when payout
     /// is nonzero.
     #[account(mut)]
-    pub owner_ata: UncheckedAccount,
+    pub owner_ata: crate::spl::TokenAccount,
     /// CHECK: framework-validated via `seeds` + `bump` constraint.
     #[account(seeds = [b"vault", slab], bump = slab.config.vault_authority_bump())]
     pub vault_pda: UncheckedAccount,

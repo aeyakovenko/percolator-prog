@@ -34,10 +34,10 @@ pub struct WithdrawCollateral {
     pub slab: Account<PercolatorSlab>,
     /// CHECK: validated against `MarketConfig.vault_pubkey` + PDA auth.
     #[account(mut)]
-    pub vault: UncheckedAccount,
+    pub vault: crate::spl::TokenAccount,
     /// CHECK: validated as user's SPL token ATA in the handler.
     #[account(mut)]
-    pub user_ata: UncheckedAccount,
+    pub user_ata: crate::spl::TokenAccount,
     /// Program-derived vault authority. Anchor verifies the address
     /// matches `find_program_address([b"vault", slab.key()], ID)` with
     /// the bump cached in `slab.config.vault_authority_bump`.

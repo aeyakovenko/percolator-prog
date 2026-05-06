@@ -38,14 +38,14 @@ pub struct CloseSlab {
     pub slab: Account<PercolatorSlab>,
     /// CHECK: validated against `MarketConfig.vault_pubkey` + PDA auth.
     #[account(mut)]
-    pub vault: UncheckedAccount,
+    pub vault: crate::spl::TokenAccount,
     /// CHECK: framework-validated via `seeds` + `bump` constraint.
     #[account(seeds = [b"vault", slab], bump = slab.config.vault_authority_bump())]
     pub vault_auth: UncheckedAccount,
     /// CHECK: validated as admin's SPL token ATA when there are
     /// stranded tokens to drain.
     #[account(mut)]
-    pub dest_ata: UncheckedAccount,
+    pub dest_ata: crate::spl::TokenAccount,
     pub token_program: Program<crate::spl::TokenProgram>,
 }
 
