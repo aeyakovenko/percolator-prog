@@ -42,6 +42,7 @@ use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
 
 #[derive(Accounts)]
+#[instruction(lp_idx: u16, user_idx: u16, size: i128, limit_price_e6: u64)]
 pub struct TradeCpi {
     pub user: Signer,
     /// LP owner — does NOT sign. Authority is delegated to the matcher
@@ -60,8 +61,11 @@ pub struct TradeCpi {
     /// by `policy::matcher_identity_ok` against the LP slab record.
     #[account(mut)]
     pub matcher_ctx: UncheckedAccount,
-    /// CHECK: LP PDA `[b"lp", slab, lp_idx]`. Key match enforced inside
-    /// the handler against `find_program_address`.
+    /// LP PDA `[b"lp", slab, lp_idx]`. Framework-validated; the
+    /// canonical bump lands in `ctx.bumps.lp_pda` for the matcher CPI
+    /// signing seeds.
+    /// CHECK: framework-validated via `seeds` + `bump` constraint.
+    #[account(seeds = [b"lp", slab, lp_idx.to_le_bytes().as_ref()], bump)]
     pub lp_pda: UncheckedAccount,
 }
 
@@ -112,15 +116,11 @@ pub fn handler(
         return Err(ProgramError::InvalidAccountData.into());
     }
 
-    // LP PDA derivation.
+    // LP PDA framework-validated; bump cached in ctx.bumps for the
+    // matcher CPI signing seeds below.
     let lp_bytes = lp_idx.to_le_bytes();
-    let (expected_lp_pda, bump) = pinocchio::address::Address::find_program_address(
-        &[b"lp", slab_addr.as_ref(), &lp_bytes],
-        &crate::ID,
-    );
-    if !crate::policy::pda_key_matches(expected_lp_pda.to_bytes(), lp_pda_addr.to_bytes()) {
-        return Err(ProgramError::InvalidSeeds.into());
-    }
+    let bump = ctx.bumps.lp_pda;
+    let _ = lp_pda_addr;
 
     // Phase 3+4: read slab state, generate nonce, validate matcher identity.
     let (
