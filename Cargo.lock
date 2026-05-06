@@ -191,8 +191,8 @@ dependencies = [
  "solana-address 2.6.0",
  "solana-define-syscall 5.1.0",
  "solana-instruction",
+ "solana-msg",
  "solana-program-error",
- "solana-program-log",
  "wincode",
 ]
 
