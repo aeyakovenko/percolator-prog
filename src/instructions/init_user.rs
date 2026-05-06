@@ -36,13 +36,12 @@ pub struct InitUser {
     /// CHECK: validated against `MarketConfig.vault_pubkey` + PDA auth.
     #[account(mut)]
     pub vault: UncheckedAccount,
-    /// CHECK: must be the SPL Token program.
-    pub token_program: UncheckedAccount,
+    pub token_program: Program<crate::spl::TokenProgram>,
     pub clock: Sysvar<Clock>,
 }
 
 pub fn handler(ctx: &mut Context<InitUser>, fee_payment: u64) -> Result<()> {
-    cpi::verify_token_program(ctx.accounts.token_program.account())?;
+
 
     slab_shape_guard(&ctx.accounts.slab)?;
     let user_addr = *ctx.accounts.user.address();

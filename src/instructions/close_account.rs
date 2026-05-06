@@ -44,15 +44,14 @@ pub struct CloseAccount {
     pub user_ata: UncheckedAccount,
     /// CHECK: must equal the program-derived vault authority PDA.
     pub vault_pda: UncheckedAccount,
-    /// CHECK: must be the SPL Token program.
-    pub token_program: UncheckedAccount,
+    pub token_program: Program<crate::spl::TokenProgram>,
     pub clock: Sysvar<Clock>,
     /// CHECK: oracle (only consulted on live markets; ignored on resolved).
     pub oracle: UncheckedAccount,
 }
 
 pub fn handler(ctx: &mut Context<CloseAccount>, user_idx: u16) -> Result<()> {
-    cpi::verify_token_program(ctx.accounts.token_program.account())?;
+
 
     slab_shape_guard(&ctx.accounts.slab)?;
     let user_addr = *ctx.accounts.user.address();

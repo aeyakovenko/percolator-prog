@@ -34,13 +34,12 @@ pub struct TopUpInsurance {
     /// derived vault authority in the handler.
     #[account(mut)]
     pub vault: UncheckedAccount,
-    /// CHECK: must be the SPL Token program (`pinocchio_token::ID`).
-    pub token_program: UncheckedAccount,
+    pub token_program: Program<crate::spl::TokenProgram>,
     pub clock: Sysvar<Clock>,
 }
 
 pub fn handler(ctx: &mut Context<TopUpInsurance>, amount: u64) -> Result<()> {
-    cpi::verify_token_program(ctx.accounts.token_program.account())?;
+
     if amount == 0 {
         return Err(ProgramError::InvalidArgument.into());
     }

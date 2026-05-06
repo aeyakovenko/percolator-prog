@@ -40,15 +40,14 @@ pub struct WithdrawInsurance {
     /// derived vault authority in the handler.
     #[account(mut)]
     pub vault: UncheckedAccount,
-    /// CHECK: must be the SPL Token program.
-    pub token_program: UncheckedAccount,
+    pub token_program: Program<crate::spl::TokenProgram>,
     /// CHECK: must equal the program-derived vault authority PDA;
     /// signed via `signer_seeds` for the SPL Token CPI.
     pub vault_pda: UncheckedAccount,
 }
 
 pub fn handler(ctx: &mut Context<WithdrawInsurance>) -> Result<()> {
-    cpi::verify_token_program(ctx.accounts.token_program.account())?;
+
 
     slab_shape_guard(&ctx.accounts.slab)?;
     let admin_addr = *ctx.accounts.admin.address();

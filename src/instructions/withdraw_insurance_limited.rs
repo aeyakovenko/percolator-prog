@@ -54,15 +54,14 @@ pub struct WithdrawInsuranceLimited {
     /// CHECK: validated against `MarketConfig.vault_pubkey` + PDA auth.
     #[account(mut)]
     pub vault: UncheckedAccount,
-    /// CHECK: must be the SPL Token program.
-    pub token_program: UncheckedAccount,
+    pub token_program: Program<crate::spl::TokenProgram>,
     /// CHECK: must equal the program-derived vault authority PDA.
     pub vault_pda: UncheckedAccount,
     pub clock: Sysvar<Clock>,
 }
 
 pub fn handler(ctx: &mut Context<WithdrawInsuranceLimited>, amount: u64) -> Result<()> {
-    cpi::verify_token_program(ctx.accounts.token_program.account())?;
+
 
     slab_shape_guard(&ctx.accounts.slab)?;
     let operator_addr = *ctx.accounts.operator.address();

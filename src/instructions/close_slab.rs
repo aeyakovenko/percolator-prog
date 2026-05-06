@@ -45,12 +45,11 @@ pub struct CloseSlab {
     /// stranded tokens to drain.
     #[account(mut)]
     pub dest_ata: UncheckedAccount,
-    /// CHECK: must be the SPL Token program.
-    pub token_program: UncheckedAccount,
+    pub token_program: Program<crate::spl::TokenProgram>,
 }
 
 pub fn handler(ctx: &mut Context<CloseSlab>) -> Result<()> {
-    cpi::verify_token_program(ctx.accounts.token_program.account())?;
+
 
     slab_shape_guard(&ctx.accounts.slab)?;
     let dest_addr = *ctx.accounts.dest.address();

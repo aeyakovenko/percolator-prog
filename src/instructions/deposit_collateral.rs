@@ -36,8 +36,7 @@ pub struct DepositCollateral {
     /// CHECK: validated against `MarketConfig.vault_pubkey` + PDA auth.
     #[account(mut)]
     pub vault: UncheckedAccount,
-    /// CHECK: must be the SPL Token program.
-    pub token_program: UncheckedAccount,
+    pub token_program: Program<crate::spl::TokenProgram>,
     pub clock: Sysvar<Clock>,
 }
 
@@ -46,7 +45,7 @@ pub fn handler(
     user_idx: u16,
     amount: u64,
 ) -> Result<()> {
-    cpi::verify_token_program(ctx.accounts.token_program.account())?;
+
     if amount == 0 {
         return Err(ProgramError::InvalidArgument.into());
     }

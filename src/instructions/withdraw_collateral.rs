@@ -40,8 +40,7 @@ pub struct WithdrawCollateral {
     pub user_ata: UncheckedAccount,
     /// CHECK: must equal the program-derived vault authority PDA.
     pub vault_pda: UncheckedAccount,
-    /// CHECK: must be the SPL Token program.
-    pub token_program: UncheckedAccount,
+    pub token_program: Program<crate::spl::TokenProgram>,
     pub clock: Sysvar<Clock>,
     /// CHECK: foreign-program oracle (Pyth/Chainlink) — decoded by `oracle::*`.
     pub oracle: UncheckedAccount,
@@ -52,7 +51,7 @@ pub fn handler(
     user_idx: u16,
     amount: u64,
 ) -> Result<()> {
-    cpi::verify_token_program(ctx.accounts.token_program.account())?;
+
     if amount == 0 {
         return Err(ProgramError::InvalidArgument.into());
     }
