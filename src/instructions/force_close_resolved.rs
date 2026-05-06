@@ -7,7 +7,7 @@
 //!   `[30u8] [user_idx: u16]`   (3 bytes)
 //!
 //! Accounts (strict order, matches legacy):
-//!   1. slab (Account<SlabHeader>, mut)
+//!   1. slab (Account<PercolatorSlab>, mut)
 //!   2. vault (UncheckedAccount, mut)
 //!   3. owner_ata (UncheckedAccount, mut)
 //!   4. vault_pda (UncheckedAccount)
@@ -18,7 +18,7 @@ use crate::cpi;
 use crate::errors::{map_risk_error, PercolatorError};
 use crate::guards::{require_initialized, require_no_reentrancy, slab_shape_guard};
 use crate::processor::{check_idx, sync_account_fee};
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -26,7 +26,7 @@ use solana_program_error::ProgramError;
 #[derive(Accounts)]
 pub struct ForceCloseResolved {
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     /// CHECK: validated against `MarketConfig.vault_pubkey` + PDA auth.
     #[account(mut)]
     pub vault: UncheckedAccount,

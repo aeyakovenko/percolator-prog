@@ -5,7 +5,7 @@
 //!   `[26u8] [user_idx: u16]`  (3 bytes)
 //!
 //! Accounts (strict order, matches legacy):
-//!   1. slab (Account<SlabHeader>, mut) — market state
+//!   1. slab (Account<PercolatorSlab>, mut) — market state
 //!   2. clock (Sysvar<Clock>)            — runtime clock
 //!   3. oracle (UncheckedAccount)        — Pyth/Chainlink/etc
 //!
@@ -24,7 +24,7 @@ use crate::processor::{
     compute_current_funding_rate_e9, ensure_market_accrued_to_now_with_policy,
     price_move_residual_dt, read_price_and_stamp, reject_any_target_lag, sync_account_fee,
 };
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -32,7 +32,7 @@ use solana_program_error::ProgramError;
 #[derive(Accounts)]
 pub struct SettleAccount {
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     pub clock: Sysvar<Clock>,
     /// CHECK: Pyth/Chainlink oracle (or any address for Hyperp).
     /// Validated inside `oracle::*` decoders against owner / disc /

@@ -6,7 +6,7 @@
 //!   `[29u8]`     (payload-less)
 //!
 //! Accounts (strict order, matches legacy):
-//!   1. slab (Account<SlabHeader>, mut)
+//!   1. slab (Account<PercolatorSlab>, mut)
 //!   2. clock (Sysvar<Clock>)
 //!
 //! STRICT HARD-TIMEOUT POLICY:
@@ -19,7 +19,7 @@
 use crate::errors::{map_risk_error, PercolatorError};
 use crate::guards::{require_initialized, require_no_reentrancy, slab_shape_guard};
 use crate::oracle;
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -27,7 +27,7 @@ use solana_program_error::ProgramError;
 #[derive(Accounts)]
 pub struct ResolvePermissionless {
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     pub clock: Sysvar<Clock>,
 }
 

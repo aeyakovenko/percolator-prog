@@ -9,7 +9,7 @@
 //!
 //! Accounts (strict order, matches legacy):
 //!   1. user (Signer)
-//!   2. slab (Account<SlabHeader>, mut)
+//!   2. slab (Account<PercolatorSlab>, mut)
 //!   3. vault (UncheckedAccount, mut)
 //!   4. user_ata (UncheckedAccount, mut)
 //!   5. vault_pda (UncheckedAccount)
@@ -25,7 +25,7 @@ use crate::processor::{
     check_idx, compute_current_funding_rate_e9, ensure_market_accrued_to_now_with_policy,
     price_move_residual_dt, read_price_and_stamp, reject_any_target_lag, sync_account_fee,
 };
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -34,7 +34,7 @@ use solana_program_error::ProgramError;
 pub struct CloseAccount {
     pub user: Signer,
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     /// CHECK: validated against `MarketConfig.vault_pubkey` + PDA auth.
     #[account(mut)]
     pub vault: UncheckedAccount,

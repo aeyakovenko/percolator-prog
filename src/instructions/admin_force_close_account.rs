@@ -8,7 +8,7 @@
 //!
 //! Accounts (strict order, matches legacy):
 //!   1. admin (Signer)
-//!   2. slab (Account<SlabHeader>, mut)
+//!   2. slab (Account<PercolatorSlab>, mut)
 //!   3. vault (UncheckedAccount, mut)
 //!   4. owner_ata (UncheckedAccount, mut)  — destination for any payout
 //!   5. vault_pda (UncheckedAccount)
@@ -23,7 +23,7 @@ use crate::guards::{
     require_admin, require_initialized, require_no_reentrancy, slab_shape_guard,
 };
 use crate::processor::{check_idx, sync_account_fee};
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -32,7 +32,7 @@ use solana_program_error::ProgramError;
 pub struct AdminForceCloseAccount {
     pub admin: Signer,
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     /// CHECK: validated against `MarketConfig.vault_pubkey` + PDA auth.
     #[account(mut)]
     pub vault: UncheckedAccount,

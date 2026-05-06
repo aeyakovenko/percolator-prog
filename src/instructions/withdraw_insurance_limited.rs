@@ -8,7 +8,7 @@
 //!
 //! Accounts (strict order, matches legacy):
 //!   1. operator (Signer)          — must equal header.insurance_operator
-//!   2. slab (Account<SlabHeader>, mut)
+//!   2. slab (Account<PercolatorSlab>, mut)
 //!   3. operator_ata (UncheckedAccount, mut)
 //!   4. vault (UncheckedAccount, mut)
 //!   5. token_program (UncheckedAccount)
@@ -36,7 +36,7 @@ use crate::guards::{
 };
 use crate::oracle;
 use crate::processor::{insurance_withdraw_deposits_only, reject_any_target_lag};
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -47,7 +47,7 @@ const MIN_WITHDRAW_FLOOR_UNITS: u128 = 10;
 pub struct WithdrawInsuranceLimited {
     pub operator: Signer,
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     /// CHECK: validated as operator's SPL token ATA in the handler.
     #[account(mut)]
     pub operator_ata: UncheckedAccount,

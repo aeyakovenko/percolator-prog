@@ -13,7 +13,7 @@
 //!
 //! Accounts (strict order, matches legacy):
 //!   1. admin (Signer)
-//!   2. slab (Account<SlabHeader>, `#[account(zeroed)]`) — pre-allocated,
+//!   2. slab (Account<PercolatorSlab>, `#[account(zeroed)]`) — pre-allocated,
 //!      disc bytes all zero. Anchor stamps the disc on entry.
 //!   3. mint (UncheckedAccount)            — SPL Token mint, validated manually
 //!   4. vault (UncheckedAccount)           — vault token account, must be empty
@@ -37,7 +37,7 @@ use crate::cpi;
 use crate::errors::{map_risk_error, PercolatorError};
 use crate::guards::{require_no_reentrancy, slab_shape_guard};
 use crate::oracle;
-use crate::state::{self, MarketConfig, SlabHeader};
+use crate::state::{self, MarketConfig, PercolatorSlab, SlabHeader};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use percolator::{RiskParams, U128};
@@ -95,7 +95,7 @@ pub struct InitMarket {
     /// Anchor stamps the disc on entry; the handler then writes
     /// MAGIC + header + config + engine.
     #[account(zeroed)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     /// CHECK: SPL Token mint, validated by `pinocchio_token::Mint::from_account_view`.
     pub mint: UncheckedAccount,
     /// CHECK: vault token account, validated by `cpi::verify_vault_empty`.

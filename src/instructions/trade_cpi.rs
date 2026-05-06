@@ -10,7 +10,7 @@
 //!   1. user            (Signer)
 //!   2. lp_owner        (UncheckedAccount, NOT a signer — LP owner has
 //!                       delegated trade auth to the matcher)
-//!   3. slab            (`Account<SlabHeader>`, mut)
+//!   3. slab            (`Account<PercolatorSlab>`, mut)
 //!   4. clock           (Sysvar<Clock>)
 //!   5. oracle          (UncheckedAccount)
 //!   6. matcher_program (UncheckedAccount, executable)
@@ -36,7 +36,7 @@ use crate::processor::{
     price_move_residual_dt_from_parts, read_price_and_stamp, reject_stuck_target_accrual,
     risk_notional_ceil, target_lag_after_read, CpiMatcher,
 };
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -50,7 +50,7 @@ pub struct TradeCpi {
     /// CHECK: validated by `policy::owner_ok` against the engine slab.
     pub lp_owner: UncheckedAccount,
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     pub clock: Sysvar<Clock>,
     /// CHECK: foreign-program oracle account, validated by `oracle::*`.
     pub oracle: UncheckedAccount,

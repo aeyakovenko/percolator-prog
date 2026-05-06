@@ -5,7 +5,7 @@
 //!   `[25u8] [user_idx: u16]`   (3 bytes)
 //!
 //! Accounts (strict order, matches legacy):
-//!   1. slab (Account<SlabHeader>, mut) — market state
+//!   1. slab (Account<PercolatorSlab>, mut) — market state
 //!   2. clock (Sysvar<Clock>)            — runtime clock
 //!
 //! Behavior summary (matches legacy `Instruction::ReclaimEmptyAccount`
@@ -20,7 +20,7 @@ use crate::errors::{map_risk_error, PercolatorError};
 use crate::guards::{require_initialized, require_no_reentrancy, slab_shape_guard};
 use crate::oracle;
 use crate::processor::{check_no_oracle_live_envelope, sync_account_fee_bounded_to_market};
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -28,7 +28,7 @@ use solana_program_error::ProgramError;
 #[derive(Accounts)]
 pub struct ReclaimEmptyAccount {
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     pub clock: Sysvar<Clock>,
 }
 

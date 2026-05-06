@@ -7,7 +7,7 @@
 //!
 //! Accounts (strict order, matches legacy):
 //!   1. admin (Signer)                       — must equal header.admin
-//!   2. slab (Account<SlabHeader>, mut)
+//!   2. slab (Account<PercolatorSlab>, mut)
 //!   3. clock (Sysvar<Clock>)
 //!   4. oracle (UncheckedAccount)            — Pyth/Chainlink (or any
 //!      address for Hyperp; non-Hyperp Ordinary requires it live)
@@ -26,7 +26,7 @@ use crate::processor::{
     catchup_accrue, compute_current_funding_rate_e9, hyperp_target_price, price_move_residual_dt,
     read_price_and_stamp, reject_stuck_target_accrual,
 };
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -35,7 +35,7 @@ use solana_program_error::ProgramError;
 pub struct ResolveMarket {
     pub admin: Signer,
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     pub clock: Sysvar<Clock>,
     /// CHECK: external oracle (Pyth/Chainlink) for non-Hyperp Ordinary;
     /// foreign-program data, validated by `oracle::*` decoders.

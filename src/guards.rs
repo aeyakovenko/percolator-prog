@@ -16,13 +16,13 @@
 
 use crate::constants::{MAGIC, SLAB_LEN};
 use crate::errors::PercolatorError;
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
 
 /// Slab account-shape check.
 ///
-/// `Account<SlabHeader>` already validates the 8-byte discriminator and
+/// `Account<PercolatorSlab>` already validates the 8-byte discriminator and
 /// the program owner at handler entry. The minimum-length check
 /// (`>= 8 + size_of::<SlabHeader>()`) is also done by the framework.
 /// What's NOT covered is the EXACT-length contract: the slab packs the
@@ -30,7 +30,7 @@ use solana_program_error::ProgramError;
 /// total length must equal `SLAB_LEN`. Anything shorter would let
 /// downstream `slab_data_mut` UB-deref past the end; longer would
 /// silently ignore the tail and break engine offsets.
-pub fn slab_shape_guard(slab: &Account<SlabHeader>) -> Result<()> {
+pub fn slab_shape_guard(slab: &Account<PercolatorSlab>) -> Result<()> {
     if slab.account().data_len() != SLAB_LEN {
         return Err(PercolatorError::InvalidSlabLen.into());
     }

@@ -8,7 +8,7 @@
 //!
 //! Accounts (strict order, matches legacy):
 //!   1. dest (Signer, mut)             — admin (header.admin)
-//!   2. slab (Account<SlabHeader>, mut)
+//!   2. slab (Account<PercolatorSlab>, mut)
 //!   3. vault (UncheckedAccount, mut)
 //!   4. vault_auth (UncheckedAccount)  — vault PDA
 //!   5. dest_ata (UncheckedAccount, mut)
@@ -24,7 +24,7 @@ use crate::errors::PercolatorError;
 use crate::guards::{
     require_admin, require_initialized, require_no_reentrancy, slab_shape_guard,
 };
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -35,7 +35,7 @@ pub struct CloseSlab {
     #[account(mut)]
     pub dest: Signer,
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     /// CHECK: validated against `MarketConfig.vault_pubkey` + PDA auth.
     #[account(mut)]
     pub vault: UncheckedAccount,

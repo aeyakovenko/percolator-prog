@@ -6,7 +6,7 @@
 //!
 //! Accounts (strict order, matches legacy):
 //!   1. admin (Signer)             — must equal header.insurance_authority
-//!   2. slab (Account<SlabHeader>, mut)
+//!   2. slab (Account<PercolatorSlab>, mut)
 //!   3. admin_ata (UncheckedAccount, mut)
 //!   4. vault (UncheckedAccount, mut)
 //!   5. token_program (UncheckedAccount)
@@ -23,7 +23,7 @@ use crate::errors::{map_risk_error, PercolatorError};
 use crate::guards::{
     require_admin, require_initialized, require_no_reentrancy, slab_shape_guard,
 };
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -32,7 +32,7 @@ use solana_program_error::ProgramError;
 pub struct WithdrawInsurance {
     pub admin: Signer,
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     /// CHECK: validated as admin's SPL token ATA in the handler.
     #[account(mut)]
     pub admin_ata: UncheckedAccount,

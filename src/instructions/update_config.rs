@@ -7,7 +7,7 @@
 //!
 //! Accounts (strict order, matches legacy):
 //!   1. admin (Signer)                       — must equal header.admin
-//!   2. slab (Account<SlabHeader>, mut)
+//!   2. slab (Account<PercolatorSlab>, mut)
 //!   3. clock (Sysvar<Clock>)
 //!   4. oracle (UncheckedAccount)            — required for non-Hyperp
 //!
@@ -27,7 +27,7 @@ use crate::processor::{
     catchup_accrue, compute_current_funding_rate_e9, hyperp_target_price, price_move_residual_dt,
     read_price_and_stamp, reject_any_target_lag, reject_stuck_target_accrual,
 };
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -36,7 +36,7 @@ use solana_program_error::ProgramError;
 pub struct UpdateConfig {
     pub admin: Signer,
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     pub clock: Sysvar<Clock>,
     /// CHECK: required for non-Hyperp markets; validated inside
     /// `read_price_and_stamp` (which fails with OracleStale on a dead

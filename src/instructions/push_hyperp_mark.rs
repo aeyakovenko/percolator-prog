@@ -29,7 +29,7 @@ use crate::processor::{
     catchup_accrue, compute_current_funding_rate_e9, hyperp_target_price, price_move_residual_dt,
     reject_stuck_target_accrual,
 };
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -40,9 +40,9 @@ pub struct PushHyperpMark {
     /// enforced by the `Signer` constraint; key equality is checked
     /// in the handler against the slab body.
     pub authority: Signer,
-    /// `Account<SlabHeader>` validates v2 disc + program owner.
+    /// `Account<PercolatorSlab>` validates v2 disc + program owner.
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
 }
 
 pub fn handler(

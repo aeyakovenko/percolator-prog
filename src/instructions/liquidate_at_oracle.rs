@@ -5,7 +5,7 @@
 //!   `[7u8] [target_idx: u16]`   (3 bytes)
 //!
 //! Accounts (strict order, matches legacy):
-//!   1. slab (Account<SlabHeader>, mut)
+//!   1. slab (Account<PercolatorSlab>, mut)
 //!   2. clock (Sysvar<Clock>)
 //!   3. oracle (UncheckedAccount)        — Pyth/Chainlink (or any
 //!      address for Hyperp; the handler decodes via `oracle::*`)
@@ -26,7 +26,7 @@ use crate::processor::{
     ensure_market_accrued_to_now_with_policy, price_move_residual_dt, read_price_and_stamp,
     risk_notional_ceil, sync_account_fee,
 };
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -34,7 +34,7 @@ use solana_program_error::ProgramError;
 #[derive(Accounts)]
 pub struct LiquidateAtOracle {
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     pub clock: Sysvar<Clock>,
     /// CHECK: foreign-program oracle account, validated by `oracle::*`.
     pub oracle: UncheckedAccount,

@@ -19,7 +19,7 @@
 use crate::errors::PercolatorError;
 use crate::guards::{require_admin, require_initialized, require_no_reentrancy, slab_shape_guard};
 use crate::oracle;
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 
@@ -40,12 +40,12 @@ pub struct UpdateAuthority {
     /// (burn skips the check) — `Signer` cannot express that, so the
     /// handler validates `is_signer` + key equality manually.
     pub new_authority: UncheckedAccount,
-    /// `Account<SlabHeader>` validates the v2 disc + program owner.
+    /// `Account<PercolatorSlab>` validates the v2 disc + program owner.
     /// Body bytes (engine, market config) reached via
     /// `state::slab_data_mut` after `slab_shape_guard` confirms the
     /// exact length.
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
 }
 
 pub fn handler(

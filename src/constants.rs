@@ -1,6 +1,6 @@
 //! Compile-time constants. Ported from the legacy `mod constants`.
 //!
-//! **R1 resolution:** the slab is wrapped as `Account<SlabHeader>`, so
+//! **R1 resolution:** the slab is wrapped as `Account<PercolatorSlab>`, so
 //! Anchor v2 prepends an 8-byte account discriminator. The body
 //! follows verbatim from legacy starting at `BODY_OFF = DISC_LEN = 8`.
 //! All `*_OFF` constants and the body byte-window helpers in

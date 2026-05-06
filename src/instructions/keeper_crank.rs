@@ -27,7 +27,7 @@
 //! Accounts (strict order, matches legacy):
 //!   1. caller (Signer if `caller_idx != CRANK_NO_CALLER`, else
 //!      placeholder)
-//!   2. slab (`Account<SlabHeader>`, mut)
+//!   2. slab (`Account<PercolatorSlab>`, mut)
 //!   3. clock (Sysvar<Clock>)
 //!   4. oracle (UncheckedAccount)
 
@@ -43,7 +43,7 @@ use crate::processor::{
     ensure_market_accrued_to_now_with_policy, idx_used_in_market, price_move_residual_dt,
     read_price_and_stamp, risk_notional_ceil,
 };
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -89,7 +89,7 @@ pub struct KeeperCrank {
     /// enforced after slab decoding.
     pub caller: UncheckedAccount,
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     pub clock: Sysvar<Clock>,
     /// CHECK: foreign-program oracle account, validated by `oracle::*`.
     pub oracle: UncheckedAccount,

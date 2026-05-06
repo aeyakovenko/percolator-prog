@@ -1,39 +1,61 @@
-//! On-chain account types + raw byte-window accessors for the slab body.
+//! On-chain account types + raw byte-window accessors for the slab.
 //!
-//! `SlabHeader` is declared via `#[account]` so the slab is wrapped as
-//! Anchor v2's `Account<SlabHeader>`, which validates the account
-//! discriminator + program owner at handler entry. The legacy
-//! `magic` / `version` / `bump` fields stay inside the body and are
-//! still verified by `guards::require_initialized` for cross-deployment
-//! compatibility against off-chain readers that learned the body
-//! layout.
+//! `PercolatorSlab` is the unified `#[account]` type covering the entire
+//! slab body — header, market config, risk engine, risk buffer, and the
+//! per-account materialization generation table. Anchor v2 wraps it as
+//! `Account<PercolatorSlab>`, validating the account discriminator +
+//! program owner at handler entry, and length on load.
 //!
-//! `slab_data` / `slab_data_mut` derive a `&[u8]` / `&mut [u8]` over the
-//! full account-data buffer (disc + body) by walking back from the
-//! header pointer Anchor maintains internally — same pattern Anchor
-//! v2's own `Slab<H>` uses. Callers MUST run `slab_shape_guard` first
-//! to confirm `data_len == SLAB_LEN`; the helper assumes that length.
+//! ## Why byte-array storage for some regions
 //!
-//! `MarketConfig`, `RiskBuffer`, the embedded `RiskEngine`, and the
-//! generation table remain plain `#[repr(C)]` Pod regions reached by
-//! offset arithmetic into that slice.
+//! `Account<H>` requires `align_of::<H>() <= 8`: Solana account-data
+//! buffers are 8-aligned at the entrypoint, and Anchor's `header_ptr`
+//! sits at offset 8 (after the disc) — so any field whose natural
+//! alignment exceeds 8 would be UB to dereference through `&H`. On the
+//! host (post-Rust-1.77) `u128` aligns to 16, which makes `MarketConfig`,
+//! `RiskBuffer`, and `RiskEngine` all align-16. To keep the outer
+//! `PercolatorSlab` align-≤-8, those regions use byte-storage wrappers
+//! (`ConfigBytes`, `RiskBufBytes`, `EngineCell`) with align-1, plus
+//! typed accessors that bytemuck-cast through unaligned reads (or, for
+//! the engine, runtime-validated alignment + discriminant checks).
+//!
+//! ## EngineCell / `MaybeUninit` rationale
+//!
+//! `RiskEngine` embeds three `#[repr(u8)]` enums (`MarketMode`,
+//! `SideMode × 2`) whose discriminants don't cover every byte value, so
+//! `RiskEngine` cannot be `bytemuck::Pod`. The `EngineCell` storage is a
+//! `[MaybeUninit<u8>; ENGINE_LEN]` array — it has no validity
+//! invariants at the type level, so any byte pattern is sound to
+//! *store*. The `engine()` / `engine_mut()` accessors run
+//! `validate_raw_discriminants` plus an alignment check before forming
+//! `&RiskEngine` / `&mut RiskEngine`. The `unsafe impl Pod` on
+//! `EngineCell` is sound because the cell holds opaque bytes; the
+//! `RiskEngine` validity contract is enforced exclusively at the
+//! accessor boundary.
+
+#![allow(unsafe_code)]
 
 use crate::constants::{
-    CONFIG_LEN, CONFIG_OFF, DISC_LEN, GEN_TABLE_OFF, HEADER_LEN, HEADER_OFF, RISK_BUF_LEN,
-    RISK_BUF_OFF, SLAB_LEN,
+    CONFIG_LEN, CONFIG_OFF, DISC_LEN, ENGINE_LEN, ENGINE_OFF, GEN_TABLE_OFF, HEADER_LEN,
+    HEADER_OFF, RISK_BUF_LEN, RISK_BUF_OFF, SLAB_LEN,
 };
 use anchor_lang_v2::prelude::*;
 use bytemuck::{Pod, Zeroable};
-use core::mem::offset_of;
+use core::mem::{align_of, offset_of, size_of, MaybeUninit};
+use percolator::RiskEngine;
+use solana_program_error::ProgramError;
 
-#[account]
+// ── Inner typed regions (decoded by value via bytemuck) ────────────────────
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
 pub struct SlabHeader {
     pub magic: u64,
     pub version: u32,
     pub bump: u8,
     pub _padding: [u8; 3],
     pub admin: [u8; 32],
-    pub _reserved: [u8; 24], // [0..8]=nonce, [8..24]=mat_counter (u64) + 8 bytes unused
+    pub _reserved: [u8; 24], // [0..8]=nonce, [8..16]=mat_counter (u64) + 8 bytes unused
     pub insurance_authority: [u8; 32],
     pub insurance_operator: [u8; 32],
 }
@@ -43,8 +65,6 @@ pub const RESERVED_OFF_BODY: usize = offset_of!(SlabHeader, _reserved);
 /// Account-data-relative offset of `_reserved` (= disc + body offset).
 pub const RESERVED_OFF: usize = HEADER_OFF + RESERVED_OFF_BODY;
 
-// Compile-time guard that the field layout matches expectations
-// (insurance_authority + insurance_operator sit immediately after _reserved).
 const _: [(); 48] = [(); RESERVED_OFF_BODY];
 
 #[repr(C)]
@@ -97,7 +117,206 @@ pub struct MarketConfig {
     pub new_account_fee: u128,
 }
 
-// ── Header / config bytewise accessors ──────────────────────────────────────
+// ── Byte-storage wrappers for alignment-tricky regions ─────────────────────
+
+/// Byte-array storage for `MarketConfig`. Forces align-1, lets the
+/// outer `PercolatorSlab` keep `align <= 8` (Anchor's `Account<H>`
+/// invariant). `MarketConfig` itself has align-16 on host (raw `u128`
+/// fields), align-8 on BPF.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct ConfigBytes {
+    pub bytes: [u8; CONFIG_LEN],
+}
+
+impl ConfigBytes {
+    /// Decode the stored bytes as a `MarketConfig`. Copies 384 bytes —
+    /// same cost as the legacy `read_config(slab_data)`.
+    #[inline]
+    pub fn get(&self) -> MarketConfig {
+        bytemuck::pod_read_unaligned(&self.bytes)
+    }
+
+    /// Overwrite the stored bytes from a `MarketConfig` value. Same
+    /// shape as the legacy `write_config(slab_data, &cfg)`.
+    #[inline]
+    pub fn set(&mut self, c: &MarketConfig) {
+        self.bytes.copy_from_slice(bytemuck::bytes_of(c));
+    }
+}
+
+/// Byte-array storage for `RiskBuffer` (same alignment story as
+/// `ConfigBytes` — `u128` entries push align to 16 on host).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct RiskBufBytes {
+    pub bytes: [u8; RISK_BUF_LEN],
+}
+
+impl RiskBufBytes {
+    #[inline]
+    pub fn get(&self) -> crate::risk_buffer::RiskBuffer {
+        bytemuck::pod_read_unaligned(&self.bytes)
+    }
+
+    #[inline]
+    pub fn set(&mut self, b: &crate::risk_buffer::RiskBuffer) {
+        self.bytes.copy_from_slice(bytemuck::bytes_of(b));
+    }
+}
+
+/// Storage cell for `RiskEngine`. `[MaybeUninit<u8>; ENGINE_LEN]`
+/// disables Rust's validity invariants at the type level — bytes can
+/// hold any pattern, including the "invalid" `#[repr(u8)]` enum
+/// discriminants raw account data might carry. Reads validate enum
+/// discriminants + memory alignment before forming `&RiskEngine`;
+/// writes go through `engine_mut`, which performs the same checks.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct EngineCell {
+    raw: [MaybeUninit<u8>; ENGINE_LEN],
+}
+
+// SAFETY: any byte pattern is a valid `EngineCell`. The `RiskEngine`
+// validity contract (enum discriminants in range, pointer alignment
+// matching `align_of::<RiskEngine>()`) is enforced in the typed
+// accessors below; raw byte access through `as_bytes` / `as_bytes_mut`
+// is sound for any contents.
+unsafe impl Zeroable for EngineCell {}
+unsafe impl Pod for EngineCell {}
+
+const _: () = assert!(size_of::<EngineCell>() == ENGINE_LEN);
+const _: () = assert!(align_of::<EngineCell>() == 1);
+
+impl EngineCell {
+    /// Validate `RiskEngine`'s `#[repr(u8)]` enum discriminant bytes
+    /// AND pointer alignment, then form a `&RiskEngine`. Both checks
+    /// must pass; either failure returns `InvalidAccountData`. Forming
+    /// `&RiskEngine` over invalid bytes / misaligned memory is UB on
+    /// any field access, so the validation is load-bearing.
+    #[inline]
+    pub fn engine(&self) -> core::result::Result<&RiskEngine, ProgramError> {
+        let ptr = self.raw.as_ptr().cast::<u8>();
+        if (ptr as usize) % align_of::<RiskEngine>() != 0 {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        // SAFETY: `self.raw` is `ENGINE_LEN` bytes of any pattern; reading
+        // them as `&[u8]` is sound for any contents.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, ENGINE_LEN) };
+        validate_raw_discriminants(bytes)?;
+        // SAFETY: alignment validated above, discriminants validated; the
+        // remaining `RiskEngine` fields are numeric / arrays of `Pod` types
+        // for which any bit pattern is valid.
+        Ok(unsafe { &*ptr.cast::<RiskEngine>() })
+    }
+
+    #[inline]
+    pub fn engine_mut(&mut self) -> core::result::Result<&mut RiskEngine, ProgramError> {
+        let ptr = self.raw.as_mut_ptr().cast::<u8>();
+        if (ptr as usize) % align_of::<RiskEngine>() != 0 {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, ENGINE_LEN) };
+        validate_raw_discriminants(bytes)?;
+        Ok(unsafe { &mut *ptr.cast::<RiskEngine>() })
+    }
+
+    /// Raw byte view; used by the legacy byte-window helpers.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.raw.as_ptr().cast::<u8>(), ENGINE_LEN) }
+    }
+
+    #[inline]
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        unsafe {
+            core::slice::from_raw_parts_mut(self.raw.as_mut_ptr().cast::<u8>(), ENGINE_LEN)
+        }
+    }
+}
+
+#[inline]
+fn validate_raw_discriminants(data: &[u8]) -> core::result::Result<(), ProgramError> {
+    // SideMode: valid 0 (Normal), 1 (DrainOnly), 2 (ResetPending)
+    let sm_long = data[offset_of!(RiskEngine, side_mode_long)];
+    let sm_short = data[offset_of!(RiskEngine, side_mode_short)];
+    if sm_long > 2 || sm_short > 2 {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    // MarketMode: valid 0 (Live), 1 (Resolved)
+    let mm = data[offset_of!(RiskEngine, market_mode)];
+    if mm > 1 {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    Ok(())
+}
+
+// ── The unified slab account ───────────────────────────────────────────────
+
+/// Compile-time check: the legacy ENGINE_OFF math (which inserts
+/// padding to align the engine to 16-byte boundaries) must produce no
+/// padding for the current `MarketConfig` size, so the typed-field
+/// layout matches the on-wire layout without an explicit `_engine_pad`
+/// field. If `MarketConfig` ever changes such that this is no longer
+/// the case, this assert fires and an explicit padding field needs to
+/// be added between `config` and `engine`.
+const _: () = {
+    let pre_engine = HEADER_OFF + HEADER_LEN + CONFIG_LEN;
+    assert!(
+        pre_engine == ENGINE_OFF,
+        "MarketConfig size changed; insert _engine_pad field in PercolatorSlab"
+    );
+};
+
+#[account]
+#[repr(C)]
+pub struct PercolatorSlab {
+    pub header: SlabHeader,
+    pub config: ConfigBytes,
+    pub engine: EngineCell,
+    pub risk_buf: RiskBufBytes,
+    pub gen_table: [u64; percolator::MAX_ACCOUNTS],
+}
+
+const _: () = assert!(
+    DISC_LEN + size_of::<PercolatorSlab>() == SLAB_LEN,
+    "PercolatorSlab layout drift",
+);
+const _: () = assert!(align_of::<PercolatorSlab>() <= 8);
+
+// ── Raw-byte accessors for the legacy byte-window helpers ──────────────────
+//
+// Both helpers derive the data slice from the typed `&PercolatorSlab`
+// pointer Anchor v2's `Account<PercolatorSlab>` maintains internally:
+// the slab sits at offset `DISC_LEN = 8` of the data buffer, so
+// subtracting that lands at the start of the buffer. `SLAB_LEN` is the
+// assumed full length — `slab_shape_guard` MUST run first.
+//
+// Solana's runtime guarantees the data buffer's address + capacity are
+// valid for the entire instruction lifetime; this is the same pattern
+// Anchor v2's internal `Slab::guard_bytes_mut` uses (see
+// `anchor-v2-ref/lang-v2/src/accounts/slab.rs`).
+
+/// Mutable view of the full slab data buffer (disc + body).
+///
+/// SAFETY: requires `slab_shape_guard` has confirmed `data_len ==
+/// SLAB_LEN`. Reading past `SLAB_LEN` would be UB.
+pub fn slab_data_mut<'a>(slab: &'a mut Account<PercolatorSlab>) -> &'a mut [u8] {
+    let typed: &mut PercolatorSlab = slab;
+    let ptr = typed as *mut PercolatorSlab as *mut u8;
+    let data_ptr = unsafe { ptr.sub(DISC_LEN) };
+    unsafe { core::slice::from_raw_parts_mut(data_ptr, SLAB_LEN) }
+}
+
+/// Read-only view of the full slab data buffer (disc + body).
+pub fn slab_data<'a>(slab: &'a Account<PercolatorSlab>) -> &'a [u8] {
+    let typed: &PercolatorSlab = slab;
+    let ptr = typed as *const PercolatorSlab as *const u8;
+    let data_ptr = unsafe { ptr.sub(DISC_LEN) };
+    unsafe { core::slice::from_raw_parts(data_ptr, SLAB_LEN) }
+}
+
+// ── Header / config bytewise accessors ─────────────────────────────────────
 
 pub fn read_header(data: &[u8]) -> SlabHeader {
     let mut h = SlabHeader::zeroed();
@@ -123,7 +342,7 @@ pub fn write_config(data: &mut [u8], c: &MarketConfig) {
     data[CONFIG_OFF..CONFIG_OFF + CONFIG_LEN].copy_from_slice(src);
 }
 
-// ── Reserved-window helpers (request nonce + mat counter) ───────────────────
+// ── Reserved-window helpers (request nonce + mat counter) ──────────────────
 
 pub fn read_req_nonce(data: &[u8]) -> u64 {
     u64::from_le_bytes(data[RESERVED_OFF..RESERVED_OFF + 8].try_into().unwrap())
@@ -154,7 +373,7 @@ pub fn next_mat_counter(data: &mut [u8]) -> Option<u64> {
     Some(c)
 }
 
-// ── Market flags (live in `_padding[0]`) ────────────────────────────────────
+// ── Market flags (live in `_padding[0]`) ───────────────────────────────────
 
 /// Body-relative offset of `_padding[0]` inside `SlabHeader`.
 const FLAGS_OFF_BODY: usize = 13;
@@ -194,7 +413,7 @@ pub fn set_oracle_initialized(data: &mut [u8]) {
     write_flags(data, read_flags(data) | FLAG_ORACLE_INITIALIZED);
 }
 
-// ── Risk buffer + generation table ──────────────────────────────────────────
+// ── Risk buffer + generation table ─────────────────────────────────────────
 
 pub fn read_risk_buffer(data: &[u8]) -> crate::risk_buffer::RiskBuffer {
     let mut buf = crate::risk_buffer::RiskBuffer::zeroed();
@@ -237,49 +456,24 @@ pub fn write_account_generation(data: &mut [u8], idx: u16, generation: u64) {
     data[off..off + 8].copy_from_slice(&generation.to_le_bytes());
 }
 
-/// First 8 bytes of `sha256("account:SlabHeader")` — Anchor v2's
-/// account discriminator for `SlabHeader`. Exposed so test fixtures
+/// First 8 bytes of `sha256("account:PercolatorSlab")` — Anchor v2's
+/// account discriminator for `PercolatorSlab`. Exposed so test fixtures
 /// (and any off-chain client that pre-allocates a slab via
 /// `set_account` / `system_program::create_account`) can prefix the
 /// slab buffer correctly without taking a direct dependency on
 /// `anchor_lang_v2`.
+pub fn slab_discriminator() -> &'static [u8] {
+    <PercolatorSlab as Discriminator>::DISCRIMINATOR
+}
+
+/// Legacy alias retained for test fixtures that imported the previous
+/// name. Forwards to `slab_discriminator`.
+#[deprecated(note = "Use `slab_discriminator()` (slab is now PercolatorSlab, not SlabHeader).")]
 pub fn slab_header_discriminator() -> &'static [u8] {
-    <SlabHeader as Discriminator>::DISCRIMINATOR
+    slab_discriminator()
 }
 
-// ── Slab data accessors (raw byte-window over the full account data) ────────
-//
-// Both helpers derive the data slice from the header pointer Anchor's
-// `Account<SlabHeader>` maintains internally: header sits at offset
-// `DISC_LEN = 8` of the data buffer, so subtracting that lands at
-// the start of the buffer. SLAB_LEN is the assumed full length —
-// `slab_shape_guard` MUST run first.
-//
-// Solana's runtime guarantees the data buffer's address + capacity are
-// valid for the entire instruction lifetime; Anchor v2's internal
-// `Slab::guard_bytes_mut` uses the same pattern (see
-// `anchor-v2-ref/lang-v2/src/accounts/slab.rs`).
-
-/// Mutable view of the full slab data buffer (disc + body).
-///
-/// SAFETY: requires `slab_shape_guard` has confirmed `data_len ==
-/// SLAB_LEN`. Reading past `SLAB_LEN` would be UB.
-pub fn slab_data_mut<'a>(slab: &'a mut Account<SlabHeader>) -> &'a mut [u8] {
-    let header: &mut SlabHeader = slab;
-    let header_ptr = header as *mut SlabHeader as *mut u8;
-    let data_ptr = unsafe { header_ptr.sub(DISC_LEN) };
-    unsafe { core::slice::from_raw_parts_mut(data_ptr, SLAB_LEN) }
-}
-
-/// Read-only view of the full slab data buffer (disc + body).
-pub fn slab_data<'a>(slab: &'a Account<SlabHeader>) -> &'a [u8] {
-    let header: &SlabHeader = slab;
-    let header_ptr = header as *const SlabHeader as *const u8;
-    let data_ptr = unsafe { header_ptr.sub(DISC_LEN) };
-    unsafe { core::slice::from_raw_parts(data_ptr, SLAB_LEN) }
-}
-
-// ── Compile-time layout invariants ──────────────────────────────────────────
+// ── Compile-time layout invariants ─────────────────────────────────────────
 //
 // Guards the disc-prefix relationship and `_reserved` position; numeric
 // sizes are derived from the field definitions.

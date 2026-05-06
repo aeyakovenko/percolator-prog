@@ -10,7 +10,7 @@
 //! Accounts (strict order, matches legacy):
 //!   1. user (Signer)                    — must equal engine.accounts[user_idx].owner
 //!   2. lp   (Signer)                    — must equal engine.accounts[lp_idx].owner
-//!   3. slab (Account<SlabHeader>, mut)
+//!   3. slab (Account<PercolatorSlab>, mut)
 //!   4. clock (Sysvar<Clock>)
 //!   5. oracle (UncheckedAccount)
 //!
@@ -30,7 +30,7 @@ use crate::processor::{
     execute_trade_with_matcher, read_price_and_stamp, reject_any_target_lag, risk_notional_ceil,
     NoOpMatcher,
 };
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -40,7 +40,7 @@ pub struct TradeNoCpi {
     pub user: Signer,
     pub lp: Signer,
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     pub clock: Sysvar<Clock>,
     /// CHECK: foreign-program oracle account, validated by `oracle::*`.
     pub oracle: UncheckedAccount,

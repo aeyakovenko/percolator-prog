@@ -4,7 +4,7 @@
 //!   `[31u8]`   (no args; the instruction is payload-less.)
 //!
 //! Accounts (strict order, matches legacy):
-//!   1. slab (Account<SlabHeader>, mut) — market state
+//!   1. slab (Account<PercolatorSlab>, mut) — market state
 //!   2. clock (Sysvar<Clock>)            — runtime clock
 //!   3. oracle (UncheckedAccount)        — Pyth/Chainlink (or any
 //!      account for Hyperp; the oracle is read for liveness proof)
@@ -26,7 +26,7 @@ use crate::processor::{
     catchup_accrue, compute_current_funding_rate_e9, price_move_residual_dt, read_price_and_stamp,
     reject_stuck_target_accrual, CATCHUP_CHUNKS_MAX,
 };
-use crate::state::{self, SlabHeader};
+use crate::state::{self, PercolatorSlab};
 use crate::zc;
 use anchor_lang_v2::prelude::*;
 use solana_program_error::ProgramError;
@@ -34,7 +34,7 @@ use solana_program_error::ProgramError;
 #[derive(Accounts)]
 pub struct CatchupAccrue {
     #[account(mut)]
-    pub slab: Account<SlabHeader>,
+    pub slab: Account<PercolatorSlab>,
     pub clock: Sysvar<Clock>,
     /// CHECK: caller-supplied oracle (Pyth `PriceUpdateV2` or
     /// Chainlink OCR2 store, or any address for Hyperp). The handler
