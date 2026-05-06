@@ -39,7 +39,8 @@ pub struct CloseSlab {
     /// CHECK: validated against `MarketConfig.vault_pubkey` + PDA auth.
     #[account(mut)]
     pub vault: UncheckedAccount,
-    /// CHECK: must equal the program-derived vault authority PDA.
+    /// CHECK: framework-validated via `seeds` + `bump` constraint.
+    #[account(seeds = [b"vault", slab], bump = slab.config.vault_authority_bump())]
     pub vault_auth: UncheckedAccount,
     /// CHECK: validated as admin's SPL token ATA when there are
     /// stranded tokens to drain.
@@ -76,15 +77,8 @@ pub fn handler(ctx: &mut Context<CloseSlab>) -> Result<()> {
 
         let config = state::read_config(data);
         let mint = Address::from(config.collateral_mint);
-        let auth = cpi::derive_vault_authority_with_bump(
-            &crate::ID,
-            &slab_addr,
-            config.vault_authority_bump,
-        )?;
+        let auth = *vault_auth_view.address();
         cpi::verify_vault(&vault_view, &auth, &mint, &Address::from(config.vault_pubkey))?;
-        if vault_auth_view.address() != &auth {
-            return Err(ProgramError::InvalidArgument.into());
-        }
 
         // Engine accounting must be zero before we tear down.
         let engine = zc::engine_ref(data)?;

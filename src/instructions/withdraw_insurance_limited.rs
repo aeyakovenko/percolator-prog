@@ -55,7 +55,8 @@ pub struct WithdrawInsuranceLimited {
     #[account(mut)]
     pub vault: UncheckedAccount,
     pub token_program: Program<crate::spl::TokenProgram>,
-    /// CHECK: must equal the program-derived vault authority PDA.
+    /// CHECK: framework-validated via `seeds` + `bump` constraint.
+    #[account(seeds = [b"vault", slab], bump = slab.config.vault_authority_bump())]
     pub vault_pda: UncheckedAccount,
     pub clock: Sysvar<Clock>,
 }
@@ -136,16 +137,9 @@ pub fn handler(ctx: &mut Context<WithdrawInsuranceLimited>, amount: u64) -> Resu
     // Vault + ATA verifiers.
     let mint = Address::from(config.collateral_mint);
     let vault_pubkey = Address::from(config.vault_pubkey);
-    let auth = cpi::derive_vault_authority_with_bump(
-        &crate::ID,
-        &slab_addr,
-        config.vault_authority_bump,
-    )?;
+    let auth = *vault_pda_view.address();
     cpi::verify_vault(&vault_view, &auth, &mint, &vault_pubkey)?;
     cpi::verify_token_account(&operator_ata_view, &operator_addr, &mint)?;
-    if vault_pda_view.address() != &auth {
-        return Err(ProgramError::InvalidArgument.into());
-    }
 
     // Commit state changes BEFORE the CPI (SPL Token can't re-enter
     // this program; CPI failure reverts atomically).

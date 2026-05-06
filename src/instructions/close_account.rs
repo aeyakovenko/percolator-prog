@@ -42,7 +42,8 @@ pub struct CloseAccount {
     /// (only when `base_to_pay > 0`).
     #[account(mut)]
     pub user_ata: UncheckedAccount,
-    /// CHECK: must equal the program-derived vault authority PDA.
+    /// CHECK: framework-validated via `seeds` + `bump` constraint.
+    #[account(seeds = [b"vault", slab], bump = slab.config.vault_authority_bump())]
     pub vault_pda: UncheckedAccount,
     pub token_program: Program<crate::spl::TokenProgram>,
     pub clock: Sysvar<Clock>,
@@ -69,15 +70,8 @@ pub fn handler(ctx: &mut Context<CloseAccount>, user_idx: u16) -> Result<()> {
     let mut config = state::read_config(data);
     let mint = Address::from(config.collateral_mint);
 
-    let auth = cpi::derive_vault_authority_with_bump(
-        &crate::ID,
-        &slab_addr,
-        config.vault_authority_bump,
-    )?;
+    let auth = *pda_view.address();
     cpi::verify_vault(&vault_view, &auth, &mint, &Address::from(config.vault_pubkey))?;
-    if pda_view.address() != &auth {
-        return Err(ProgramError::InvalidArgument.into());
-    }
 
     let resolved = zc::engine_ref(data)?.is_resolved();
     let mut funding_rate_e9 = 0i128;

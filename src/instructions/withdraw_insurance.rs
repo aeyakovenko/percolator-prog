@@ -41,8 +41,10 @@ pub struct WithdrawInsurance {
     #[account(mut)]
     pub vault: UncheckedAccount,
     pub token_program: Program<crate::spl::TokenProgram>,
-    /// CHECK: must equal the program-derived vault authority PDA;
-    /// signed via `signer_seeds` for the SPL Token CPI.
+    /// Program-derived vault authority. Validated via `seeds` + `bump`
+    /// constraint and signed via `signer_seeds` for the SPL Token CPI.
+    /// CHECK: framework-validated.
+    #[account(seeds = [b"vault", slab], bump = slab.config.vault_authority_bump())]
     pub vault_pda: UncheckedAccount,
 }
 
@@ -71,16 +73,9 @@ pub fn handler(ctx: &mut Context<WithdrawInsurance>) -> Result<()> {
     let config = state::read_config(data);
     let mint = Address::from(config.collateral_mint);
     let vault_pubkey = Address::from(config.vault_pubkey);
-    let auth = cpi::derive_vault_authority_with_bump(
-        &crate::ID,
-        &slab_addr,
-        config.vault_authority_bump,
-    )?;
+    let auth = *vault_pda_view.address();
     cpi::verify_vault(&vault_view, &auth, &mint, &vault_pubkey)?;
     cpi::verify_token_account(&admin_ata_view, &admin_addr, &mint)?;
-    if vault_pda_view.address() != &auth {
-        return Err(ProgramError::InvalidArgument.into());
-    }
 
     let payout_units = {
         let engine = zc::engine_mut(data)?;

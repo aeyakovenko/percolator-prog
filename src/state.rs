@@ -143,6 +143,39 @@ impl ConfigBytes {
     pub fn set(&mut self, c: &MarketConfig) {
         self.bytes.copy_from_slice(bytemuck::bytes_of(c));
     }
+
+    // ── Single-field accessors for use in `#[account(...)]` constraints
+    //
+    // Avoid the 384-byte `get()` memcpy in constraint expressions (each
+    // is evaluated as an independent statement). Each accessor reads
+    // only the bytes it needs; offsets are derived from `offset_of!` so
+    // they track field reordering.
+
+    /// Cached vault PDA bump (1 byte read).
+    #[inline]
+    pub fn vault_authority_bump(&self) -> u8 {
+        self.bytes[offset_of!(MarketConfig, vault_authority_bump)]
+    }
+
+    /// `vault_pubkey` as `&[u8; 32]` — zero-copy reference into the
+    /// stored bytes. Use `Address::from(*slab.config.vault_pubkey())`
+    /// in `#[account(address = ...)]` constraints.
+    #[inline]
+    pub fn vault_pubkey(&self) -> &[u8; 32] {
+        bytemuck::from_bytes(
+            &self.bytes[offset_of!(MarketConfig, vault_pubkey)
+                ..offset_of!(MarketConfig, vault_pubkey) + 32],
+        )
+    }
+
+    /// `collateral_mint` as `&[u8; 32]` — zero-copy.
+    #[inline]
+    pub fn collateral_mint(&self) -> &[u8; 32] {
+        bytemuck::from_bytes(
+            &self.bytes[offset_of!(MarketConfig, collateral_mint)
+                ..offset_of!(MarketConfig, collateral_mint) + 32],
+        )
+    }
 }
 
 /// Byte-array storage for `RiskBuffer` (same alignment story as

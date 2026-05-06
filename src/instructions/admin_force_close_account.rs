@@ -40,7 +40,8 @@ pub struct AdminForceCloseAccount {
     /// is nonzero.
     #[account(mut)]
     pub owner_ata: UncheckedAccount,
-    /// CHECK: must equal the program-derived vault authority PDA.
+    /// CHECK: framework-validated via `seeds` + `bump` constraint.
+    #[account(seeds = [b"vault", slab], bump = slab.config.vault_authority_bump())]
     pub vault_pda: UncheckedAccount,
     pub token_program: Program<crate::spl::TokenProgram>,
     /// Present for ABI parity with the legacy 7-account layout.
@@ -73,15 +74,8 @@ pub fn handler(ctx: &mut Context<AdminForceCloseAccount>, user_idx: u16) -> Resu
 
     let config = state::read_config(data);
     let mint = Address::from(config.collateral_mint);
-    let auth = cpi::derive_vault_authority_with_bump(
-        &crate::ID,
-        &slab_addr,
-        config.vault_authority_bump,
-    )?;
+    let auth = *pda_view.address();
     cpi::verify_vault(&vault_view, &auth, &mint, &Address::from(config.vault_pubkey))?;
-    if pda_view.address() != &auth {
-        return Err(ProgramError::InvalidArgument.into());
-    }
 
     let engine = zc::engine_mut(data)?;
     let (price, resolved_slot) = engine.resolved_context();
