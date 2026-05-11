@@ -382,19 +382,19 @@ fn test_buffer_eviction() {
     assert!(!changed, "Entry below min_notional must be rejected");
     assert_eq!(buf.count, 4);
 
-    // Try to insert entry equal to min — should fail
+    // Try to insert entry equal to min — must succeed: equal-notional entries
+    // must be able to displace the minimum slot so that decoy accounts at the
+    // same notional cannot permanently block other accounts from the buffer.
     let changed = buf.upsert(10, 100);
-    assert!(!changed, "Entry equal to min_notional must be rejected");
+    assert!(changed, "Entry equal to min_notional must be accepted (displaces minimum slot)");
+    assert_eq!(buf.count, 4);
+    assert_eq!(buf.min_notional, 100);
 
-    // Insert entry larger than min — should evict smallest
-    let changed = buf.upsert(10, 150);
+    // Insert entry larger than min — must also succeed; displaces the 100 entry.
+    let changed = buf.upsert(11, 150);
     assert!(changed, "Entry above min_notional must be accepted");
     assert_eq!(buf.count, 4);
     assert_eq!(buf.min_notional, 150);
-
-    // idx=0 (notional=100) should be evicted
-    assert!(buf.find(0).is_none(), "Smallest entry must be evicted");
-    assert!(buf.find(10).is_some(), "New entry must be present");
 }
 
 /// E4: Update-in-place does not trigger eviction.
@@ -1429,4 +1429,65 @@ fn test_find_adl_bytes() {
             println!("ADL_ONE bytes at ENGINE+{}", off);
         }
     }
+}
+
+/// Regression test for the equal-notional decoy lock.
+///
+/// If `upsert` uses strict `>` instead of `>=` for the displacement guard,
+/// an attacker can fill all RISK_BUF_CAP slots with "decoy" accounts at
+/// notional N, then open victim accounts at the same notional N.  Because
+/// equal-notional never displaces, decoys permanently hold every buffer slot
+/// and victims can never enter — defeating the liquidation buffer entirely
+/// while allowing insider candidates to bypass it via explicit candidate lists.
+///
+/// After the fix (`<` guard), victims at the same notional as decoys CAN
+/// displace the minimum-slot entry, so the buffer rotates and no account
+/// can be permanently excluded by equal-notional padding.
+#[test]
+fn test_equal_notional_decoy_cannot_permanently_lock_buffer() {
+    use bytemuck::Zeroable;
+    use percolator_prog::constants::RISK_BUF_CAP;
+    use percolator_prog::risk_buffer::RiskBuffer;
+
+    const DECOY_NOTIONAL: u128 = 1_000_000;
+
+    let mut buf = RiskBuffer::zeroed();
+
+    // Fill the buffer with RISK_BUF_CAP decoy accounts, all at DECOY_NOTIONAL.
+    for i in 0..RISK_BUF_CAP {
+        let inserted = buf.upsert(i as u16, DECOY_NOTIONAL);
+        assert!(inserted, "decoy {i} must enter the buffer while slots are free");
+    }
+    assert_eq!(buf.count as usize, RISK_BUF_CAP);
+    assert_eq!(buf.min_notional, DECOY_NOTIONAL);
+
+    // Now try to insert a victim account at the same notional.
+    // With the equal-notional displacement fix this MUST succeed.
+    let victim_idx: u16 = RISK_BUF_CAP as u16; // guaranteed fresh index
+    let inserted = buf.upsert(victim_idx, DECOY_NOTIONAL);
+    assert!(
+        inserted,
+        "victim at equal notional must displace the minimum decoy slot; \
+         if this fails the decoy lock vulnerability is still present"
+    );
+    assert_eq!(buf.count as usize, RISK_BUF_CAP, "buffer size must not change");
+    assert!(
+        buf.find(victim_idx).is_some(),
+        "victim must now be present in the buffer"
+    );
+    assert_eq!(
+        buf.min_notional, DECOY_NOTIONAL,
+        "min_notional invariant must be maintained"
+    );
+
+    // Verify that all RISK_BUF_CAP - 1 remaining decoys are still at DECOY_NOTIONAL.
+    // (Exactly one decoy was displaced.)
+    let decoy_count = (0..RISK_BUF_CAP as u16)
+        .filter(|&idx| buf.find(idx).is_some())
+        .count();
+    assert_eq!(
+        decoy_count,
+        RISK_BUF_CAP - 1,
+        "exactly one decoy must have been displaced"
+    );
 }

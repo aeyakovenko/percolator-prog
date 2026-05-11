@@ -4713,3 +4713,134 @@ fn kani_permissionless_resolve_horizon_policy_independent_from_accrual_window() 
         "cap+1 is rejected"
     );
 }
+
+// =============================================================================
+// AE. RISK BUFFER DISPLACEMENT INVARIANT (3 proofs)
+// =============================================================================
+
+use percolator_prog::constants::RISK_BUF_CAP;
+use percolator_prog::risk_buffer::{RiskBuffer, RiskEntry};
+
+/// Build a full RiskBuffer where every slot holds the same notional `n` but
+/// distinct indices.  Returns `None` if `n == 0` (would violate the buffer
+/// invariant that notional > 0 means a used entry).
+fn full_buf_at_notional(n: u128) -> Option<RiskBuffer> {
+    if n == 0 {
+        return None;
+    }
+    let mut buf = RiskBuffer::zeroed();
+    for i in 0..RISK_BUF_CAP {
+        buf.entries[i] = RiskEntry { idx: i as u16, notional: n, _pad: [0; 14] };
+    }
+    buf.count = RISK_BUF_CAP as u8;
+    buf.recompute_min();
+    Some(buf)
+}
+
+/// Verify that `min_notional` always equals the true minimum of all live entry
+/// notionals after any `upsert` call.
+fn min_notional_invariant_holds(buf: &RiskBuffer) -> bool {
+    if buf.count == 0 {
+        return buf.min_notional == 0;
+    }
+    let mut true_min = u128::MAX;
+    for i in 0..buf.count as usize {
+        if buf.entries[i].notional < true_min {
+            true_min = buf.entries[i].notional;
+        }
+    }
+    buf.min_notional == true_min
+}
+
+/// An account whose notional equals the buffer's current minimum MUST be able
+/// to displace an existing entry when the buffer is full. Without this property
+/// an attacker can permanently occupy all buffer slots with equal-notional
+/// "decoy" accounts, preventing any other account from ever entering —
+/// regardless of how long it stays exposed.
+///
+/// This proof covers the general symbolic case: for every full buffer state and
+/// every incoming `(idx, notional)` pair where `notional == min_notional` and
+/// `idx` is not already present, `upsert` must return `true`.
+#[kani::proof]
+fn kani_risk_buf_equal_notional_can_displace() {
+    let n: u128 = kani::any();
+    kani::assume(n > 0 && n < u128::MAX);
+
+    let mut buf = match full_buf_at_notional(n) {
+        Some(b) => b,
+        None => return,
+    };
+
+    // Incoming account: different index, same notional.
+    let new_idx: u16 = kani::any();
+    kani::assume((new_idx as usize) >= RISK_BUF_CAP); // guaranteed not already in buf
+
+    let changed = buf.upsert(new_idx, n);
+
+    assert!(
+        changed,
+        "equal-notional entry must displace the minimum slot when the buffer is full"
+    );
+    assert!(
+        min_notional_invariant_holds(&buf),
+        "min_notional must equal the true minimum after displacement"
+    );
+    assert!(
+        buf.count as usize == RISK_BUF_CAP,
+        "buffer count must not change after displacement"
+    );
+}
+
+/// Prove the general `min_notional` structural invariant: after any sequence
+/// of a single `upsert`, the cached `min_notional` field equals the true
+/// minimum of all live entry notionals.
+#[kani::proof]
+fn kani_risk_buf_min_notional_invariant_after_upsert() {
+    // Symbolic buffer state: count in [0, RISK_BUF_CAP], entries unconstrained.
+    let count: u8 = kani::any();
+    kani::assume((count as usize) <= RISK_BUF_CAP);
+    let e0_n: u128 = kani::any();
+    let e1_n: u128 = kani::any();
+    let e2_n: u128 = kani::any();
+    let e3_n: u128 = kani::any();
+
+    let mut buf = RiskBuffer::zeroed();
+    buf.count = count;
+    if count > 0 { buf.entries[0] = RiskEntry { idx: 0, notional: e0_n, _pad: [0; 14] }; }
+    if count > 1 { buf.entries[1] = RiskEntry { idx: 1, notional: e1_n, _pad: [0; 14] }; }
+    if count > 2 { buf.entries[2] = RiskEntry { idx: 2, notional: e2_n, _pad: [0; 14] }; }
+    if count > 3 { buf.entries[3] = RiskEntry { idx: 3, notional: e3_n, _pad: [0; 14] }; }
+    buf.recompute_min();
+
+    let new_idx: u16 = kani::any();
+    let new_n: u128 = kani::any();
+    buf.upsert(new_idx, new_n);
+
+    assert!(
+        min_notional_invariant_holds(&buf),
+        "min_notional must equal the true minimum of all live entries after upsert"
+    );
+}
+
+/// Prove that a strictly-greater-notional entry always displaces the minimum
+/// slot when the buffer is full (regression: this must hold regardless of
+/// the equal-notional fix).
+#[kani::proof]
+fn kani_risk_buf_strictly_greater_notional_always_displaces() {
+    let n: u128 = kani::any();
+    kani::assume(n > 0 && n < u128::MAX);
+
+    let mut buf = match full_buf_at_notional(n) {
+        Some(b) => b,
+        None => return,
+    };
+
+    let new_idx: u16 = kani::any();
+    kani::assume((new_idx as usize) >= RISK_BUF_CAP);
+
+    let changed = buf.upsert(new_idx, n + 1);
+
+    assert!(changed, "strictly-greater notional must always displace the minimum slot");
+    assert!(min_notional_invariant_holds(&buf));
+    assert_eq!(buf.count as usize, RISK_BUF_CAP);
+}

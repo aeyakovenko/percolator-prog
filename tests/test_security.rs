@@ -14710,3 +14710,71 @@ fn test_attack_max_risk_8_slot_oracle_crank_orderings_do_not_drain_insurance() {
         );
     }
 }
+
+/// Issue #89 regression: the structural Phase-2 window must promote exposed
+/// accounts to Phase-1 liquidation candidates even on **empty cranks** (no
+/// caller-supplied candidates). Without this, an account outside the
+/// RISK_BUF_CAP slots can accumulate deficit across O(K / RISK_BUF_CAP) empty
+/// cranks before the buffer rotates to it.
+///
+/// This mirrors `test_issue81_candidate_padding_cannot_shield_tail_loss_into_insurance`
+/// but drives the market with empty cranks instead of candidate-bearing cranks,
+/// proving the structural window is no longer gated on `!candidates.is_empty()`.
+#[test]
+fn test_issue89_empty_crank_structural_window_catches_tail_loss() {
+    program_path();
+
+    let (mut env, _lp, _lp_idx, actors) = setup_max_risk_probe(17, 0);
+    assert!(
+        actors.len() > percolator_prog::constants::RISK_BUF_CAP,
+        "setup must leave accounts outside the RISK_BUF_CAP buffer"
+    );
+
+    let tail = actors
+        .iter()
+        .skip(percolator_prog::constants::RISK_BUF_CAP)
+        .find(|a| env.read_account_position(a.idx) != 0)
+        .expect("setup must have an account outside the initial buffer")
+        .idx;
+
+    let insurance_start = env.read_insurance_balance();
+    let mut min_insurance = insurance_start;
+    let mut price = MAX_RISK_P0_E6;
+
+    for round in 0..6 {
+        let slot = env.read_last_market_slot().saturating_add(10);
+        price = max_risk_next_clamped_price(price, -1, 10);
+        env.set_slot_and_price_raw_no_walk(slot, price as i64);
+
+        let before_rr = env.read_rr_cursor_position();
+        let before_tail_pos = env.read_account_position(tail);
+        let before_tail_cap = env.read_account_capital(tail);
+
+        // Empty crank — no explicit candidates.
+        env.crank();
+
+        let after_rr = env.read_rr_cursor_position();
+        let after_tail_pos = env.read_account_position(tail);
+        let after_tail_cap = env.read_account_capital(tail);
+        min_insurance = min_insurance.min(env.read_insurance_balance());
+
+        assert!(
+            after_rr != before_rr
+                || after_tail_pos != before_tail_pos
+                || after_tail_cap != before_tail_cap
+                || env.read_last_market_slot() >= slot,
+            "empty crank made no observable progress on round {round}: \
+             rr={before_rr}->{after_rr}, \
+             tail_pos={before_tail_pos}->{after_tail_pos}, \
+             tail_cap={before_tail_cap}->{after_tail_cap}"
+        );
+        assert!(
+            min_insurance >= insurance_start,
+            "EXPLOIT (issue #89): empty cranks allowed tail account to drain insurance: \
+             start={insurance_start}, min={min_insurance}, round={round}, tail={tail}, \
+             rr={before_rr}->{after_rr}, \
+             tail_pos={before_tail_pos}->{after_tail_pos}, \
+             tail_cap={before_tail_cap}->{after_tail_cap}"
+        );
+    }
+}

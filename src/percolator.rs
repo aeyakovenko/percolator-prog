@@ -112,7 +112,6 @@ pub mod constants {
             <= percolator::MAX_TOUCHED_PER_INSTRUCTION as u64,
         "KeeperCrank candidate Phase 1 + Phase 2 must fit engine touched-account capacity"
     );
-
     // ── Engine envelope constants (wrapper-owned, immutable per deployment) ──
     //
     // These values populate the engine's per-market RiskParams envelope at
@@ -417,7 +416,7 @@ pub mod risk_buffer {
                 self.recompute_min();
                 return true;
             }
-            if notional <= self.min_notional {
+            if notional < self.min_notional {
                 return false;
             }
             let victim = self.min_slot();
@@ -7129,15 +7128,23 @@ pub mod processor {
                 let admit_h_min = engine.params.h_min;
                 let admit_h_max = engine.params.h_max;
                 let admit_threshold = Some(engine.params.maintenance_margin_bps as u128);
-                if !candidates.is_empty() {
-                    append_phase2_fullclose_candidates(
-                        engine,
-                        &mut combined,
-                        &candidates,
-                        rr_window_size,
-                        rr_scan_limit,
-                        COMBINED_CAP,
-                    )?;
+                #[cfg(feature = "cu-audit")]
+                {
+                    msg!("CU_CHECKPOINT: structural_window_start");
+                    sol_log_compute_units();
+                }
+                append_phase2_fullclose_candidates(
+                    engine,
+                    &mut combined,
+                    &candidates,
+                    rr_window_size,
+                    rr_scan_limit,
+                    COMBINED_CAP,
+                )?;
+                #[cfg(feature = "cu-audit")]
+                {
+                    msg!("CU_CHECKPOINT: structural_window_end");
+                    sol_log_compute_units();
                 }
                 for &(cidx, policy) in candidates.iter() {
                     let mut already_promoted = candidate_list_contains(&combined, cidx);
@@ -7152,7 +7159,13 @@ pub mod processor {
                         }
                     }
                     if !already_promoted {
-                        combined.push((cidx, policy));
+                        let admit = !matches!(
+                            policy,
+                            Some(percolator::LiquidationPolicy::FullClose)
+                        ) || effective_pos_q_checked(engine, cidx as usize)? != 0;
+                        if admit {
+                            combined.push((cidx, policy));
+                        }
                     }
                     if combined.len() == COMBINED_CAP {
                         break;
