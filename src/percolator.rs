@@ -417,7 +417,10 @@ pub mod risk_buffer {
                 self.recompute_min();
                 return true;
             }
-            if notional <= self.min_notional {
+            // Equal-notional ties are allowed to refresh one minimum slot so
+            // the secondary cache cannot be permanently pinned by the first
+            // accounts in a tie class. Strictly lower risk still stays out.
+            if notional < self.min_notional {
                 return false;
             }
             let victim = self.min_slot();

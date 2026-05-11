@@ -382,19 +382,66 @@ fn test_buffer_eviction() {
     assert!(!changed, "Entry below min_notional must be rejected");
     assert_eq!(buf.count, 4);
 
-    // Try to insert entry equal to min — should fail
+    // Equal-min entries are accepted as a cache freshness tie-break. Without
+    // this, equal-notional accounts can pin all cache slots indefinitely even
+    // though the buffer is only a secondary risk-discovery cache.
     let changed = buf.upsert(10, 100);
-    assert!(!changed, "Entry equal to min_notional must be rejected");
+    assert!(
+        changed,
+        "Entry equal to min_notional must refresh a min slot"
+    );
+    assert_eq!(buf.count, 4);
+    assert_eq!(buf.min_notional, 100);
+    assert!(buf.find(10).is_some(), "Equal-min entry must be present");
+    assert!(buf.find(0).is_none(), "One old min entry must be evicted");
 
     // Insert entry larger than min — should evict smallest
-    let changed = buf.upsert(10, 150);
+    let changed = buf.upsert(11, 150);
     assert!(changed, "Entry above min_notional must be accepted");
     assert_eq!(buf.count, 4);
     assert_eq!(buf.min_notional, 150);
 
-    // idx=0 (notional=100) should be evicted
-    assert!(buf.find(0).is_none(), "Smallest entry must be evicted");
-    assert!(buf.find(10).is_some(), "New entry must be present");
+    // idx=10 (notional=100) should now be evicted
+    assert!(buf.find(10).is_none(), "Smallest entry must be evicted");
+    assert!(buf.find(11).is_some(), "New entry must be present");
+}
+
+/// A full buffer of equal notionals should still admit another equal-notional
+/// account. This keeps the secondary cache from becoming permanently pinned by
+/// the first four accounts in a tie class.
+#[test]
+fn test_buffer_equal_notional_tie_refreshes_cache() {
+    use bytemuck::Zeroable;
+    use percolator_prog::constants::RISK_BUF_CAP;
+    use percolator_prog::risk_buffer::RiskBuffer;
+
+    let mut buf = RiskBuffer::zeroed();
+    for idx in 0..RISK_BUF_CAP as u16 {
+        assert!(buf.upsert(idx, 1_000));
+    }
+
+    assert_eq!(buf.count, RISK_BUF_CAP as u8);
+    assert_eq!(buf.min_notional, 1_000);
+
+    assert!(
+        buf.upsert(99, 1_000),
+        "equal-notional account should replace one equal-min cache slot"
+    );
+    assert_eq!(buf.count, RISK_BUF_CAP as u8);
+    assert_eq!(buf.min_notional, 1_000);
+    assert!(
+        buf.find(99).is_some(),
+        "new equal-notional account must enter"
+    );
+
+    let old_survivors = (0..RISK_BUF_CAP as u16)
+        .filter(|&idx| buf.find(idx).is_some())
+        .count();
+    assert_eq!(
+        old_survivors,
+        RISK_BUF_CAP - 1,
+        "exactly one old equal-notional cache entry should be replaced"
+    );
 }
 
 /// E4: Update-in-place does not trigger eviction.
