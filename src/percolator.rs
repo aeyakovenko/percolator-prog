@@ -8405,6 +8405,22 @@ pub mod processor {
                     restored.oracle_target_price_e6 = config.oracle_target_price_e6;
                     restored.oracle_target_publish_time = config.oracle_target_publish_time;
                     restored.last_hyperp_index_slot = config.last_hyperp_index_slot;
+                    // Per-leg ratchet (`oracle_leg_publish_times` /
+                    // `oracle_leg_prices_e6`) is the documented
+                    // anti-replay defense for composite oracles
+                    // (`MarketConfig::oracle_leg_publish_times` doc-
+                    // comment). `read_external_price_e6` only writes
+                    // these arrays when `publish_time > prev_time`
+                    // (rejecting rollback) and rejects same-timestamp
+                    // disagreement, so the post-read state is a
+                    // validated monotonic advance. Carry it forward
+                    // alongside the other oracle/index state above —
+                    // otherwise the per-leg ratchet de-advances on
+                    // disk while `oracle_target_price_e6` advances,
+                    // and the next composite read admits a stale
+                    // leg paired with a fresh one.
+                    restored.oracle_leg_publish_times = config.oracle_leg_publish_times;
+                    restored.oracle_leg_prices_e6 = config.oracle_leg_prices_e6;
                     state::write_config(&mut data, &restored);
                     state::write_req_nonce(&mut data, req_id);
                     return Ok(());
