@@ -4272,14 +4272,21 @@ pub mod processor {
         let (price, advanced) = price_advanced;
         if advanced {
             config.last_good_oracle_slot = clock_slot;
-            if oracle::is_hybrid_after_hours_mode(config) {
-                // During regular hours, the trusted external composite is the
-                // mark baseline. This makes the stale fallback start from the
-                // last accepted real price instead of an old after-hours EWMA.
-                config.hyperp_mark_e6 = price;
-                config.mark_ewma_e6 = price;
-                config.mark_ewma_last_slot = clock_slot;
-            }
+        }
+        if oracle::is_hybrid_after_hours_mode(config)
+            && (advanced || config.mark_ewma_e6 != price || config.hyperp_mark_e6 != price)
+        {
+            // During regular hours, the trusted external composite owns the
+            // hybrid mark baseline. A fresh publish_time starts/updates the
+            // raw target, and duplicate reads may continue the already-
+            // accepted target/effective staircase without refreshing the
+            // liveness cursor. The mark must follow those accepted effective
+            // steps too; otherwise regular-hours duplicate cranks can create
+            // artificial mark/index funding divergence before after-hours
+            // fallback has actually started.
+            config.hyperp_mark_e6 = price;
+            config.mark_ewma_e6 = price;
+            config.mark_ewma_last_slot = clock_slot;
         }
         Ok(price)
     }

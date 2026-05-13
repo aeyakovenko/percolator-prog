@@ -1,5 +1,50 @@
 # Security findings — 2026-05-13 hybrid after-hours sweep
 
+## F8 — Hybrid duplicate-oracle staircase must keep mark on index (Medium)
+
+**Status:** fixed by having hybrid regular-hours mark state track every
+accepted effective external-oracle step, not just fresh publish-time advances.
+Regression coverage:
+
+```bash
+cargo build-sbf --no-default-features
+cargo test --release --test test_tradecpi \
+  test_external_hybrid_duplicate_oracle_staircase_keeps_mark_on_external_index \
+  -- --nocapture
+cargo test --release --test test_tradecpi external_hybrid -- --nocapture
+```
+
+**Attacker/UX model:** a live-OI hybrid market receives a fresh external target
+that is outside the per-slot cap. The first fresh read starts the clamped
+target/effective staircase. Later cranks may reuse the same publish-time update
+while it remains within `max_staleness_secs`; those duplicate reads are not new
+liveness proofs, but they are legitimate continuation steps toward the already
+accepted target.
+
+**Original issue:** the hybrid mark cache (`mark_ewma_e6` / `hyperp_mark_e6`)
+reset only when the external oracle publish time advanced. During later duplicate
+staircase steps, `last_effective_price_e6` moved while the mark stayed at the
+previous effective price. That created regular-hours mark/index divergence and
+therefore surprising funding/fee behavior before after-hours fallback had
+started.
+
+**Fix invariant:**
+
+```text
+Hybrid regular-hours external branch:
+  fresh publish_time advances last_good_oracle_slot and sets target;
+  duplicate publish_time never advances last_good_oracle_slot;
+  any accepted effective staircase movement updates mark_ewma_e6 and
+  hyperp_mark_e6 to the same effective price.
+
+Hybrid after-hours fallback branch:
+  unchanged from F5/F7; trade flow owns EWMA and pays dynamic externality fees.
+```
+
+**Disposition:** `PASS_SAFE` after fix. Regular-hours hybrid is now fully
+oracle/index-owned across both fresh and duplicate staircase steps, while the
+hard-stale liveness cursor remains protected from replay.
+
 ## F7 — Hybrid regular-hours duplicate oracle must not become trade-owned mark (Medium)
 
 **Status:** fixed locally by making hybrid trade-derived mark updates and dynamic
