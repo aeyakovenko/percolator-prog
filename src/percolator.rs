@@ -766,6 +766,17 @@ pub mod policy {
         pub oracle_target_publish_time: i64,
         pub fee_sweep_cursor_word: u64,
         pub fee_sweep_cursor_bit: u64,
+        // Hybrid-after-hours mark sync: `read_price_and_stamp` snaps these
+        // to the freshly-accepted external price on every successful read
+        // in hybrid mode (`prog/src/percolator.rs:4276-4290`, added by
+        // commit 40d9024). Persisting them across partial-catchup writeback
+        // is required to enforce the invariant the snap exists for:
+        // regular-hours duplicate cranks must not create artificial
+        // mark/index funding divergence before after-hours fallback has
+        // actually started.
+        pub hyperp_mark_e6: u64,
+        pub mark_ewma_e6: u64,
+        pub mark_ewma_last_slot: u64,
     }
 
     /// Partial crank catchup preserves fresh target/liveness data, the
@@ -786,6 +797,9 @@ pub mod policy {
             oracle_target_publish_time: after_read_and_sweep.oracle_target_publish_time,
             fee_sweep_cursor_word: after_read_and_sweep.fee_sweep_cursor_word,
             fee_sweep_cursor_bit: after_read_and_sweep.fee_sweep_cursor_bit,
+            hyperp_mark_e6: after_read_and_sweep.hyperp_mark_e6,
+            mark_ewma_e6: after_read_and_sweep.mark_ewma_e6,
+            mark_ewma_last_slot: after_read_and_sweep.mark_ewma_last_slot,
         }
     }
 
@@ -5020,6 +5034,9 @@ pub mod processor {
             oracle_target_publish_time: config.oracle_target_publish_time,
             fee_sweep_cursor_word: config.fee_sweep_cursor_word,
             fee_sweep_cursor_bit: config.fee_sweep_cursor_bit,
+            hyperp_mark_e6: config.hyperp_mark_e6,
+            mark_ewma_e6: config.mark_ewma_e6,
+            mark_ewma_last_slot: config.mark_ewma_last_slot,
         }
     }
 
@@ -5035,6 +5052,9 @@ pub mod processor {
         config.oracle_target_publish_time = fields.oracle_target_publish_time;
         config.fee_sweep_cursor_word = fields.fee_sweep_cursor_word;
         config.fee_sweep_cursor_bit = fields.fee_sweep_cursor_bit;
+        config.hyperp_mark_e6 = fields.hyperp_mark_e6;
+        config.mark_ewma_e6 = fields.mark_ewma_e6;
+        config.mark_ewma_last_slot = fields.mark_ewma_last_slot;
     }
 
     fn partial_crank_config_to_write(
@@ -8425,6 +8445,21 @@ pub mod processor {
                     restored.oracle_target_price_e6 = config.oracle_target_price_e6;
                     restored.oracle_target_publish_time = config.oracle_target_publish_time;
                     restored.last_hyperp_index_slot = config.last_hyperp_index_slot;
+                    // Hybrid-after-hours mark sync: `read_price_and_stamp`
+                    // snaps these to the freshly-accepted external price on
+                    // every successful read in hybrid mode (see :4276-4290,
+                    // added by commit 40d9024). Carry them forward so the
+                    // mark/index funding-divergence invariant the snap
+                    // exists for survives the zero-fill rollback —
+                    // otherwise repeated zero-fill TradeCpi calls leave
+                    // `mark_ewma_e6` pinned at the pre-call value while
+                    // `last_effective_price_e6` advances, and
+                    // `compute_current_funding_rate_e9` (:5410-5419) reads
+                    // both fields and saturates the per-slot rate at the
+                    // engine cap.
+                    restored.hyperp_mark_e6 = config.hyperp_mark_e6;
+                    restored.mark_ewma_e6 = config.mark_ewma_e6;
+                    restored.mark_ewma_last_slot = config.mark_ewma_last_slot;
                     state::write_config(&mut data, &restored);
                     state::write_req_nonce(&mut data, req_id);
                     return Ok(());
