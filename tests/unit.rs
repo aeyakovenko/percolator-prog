@@ -1872,3 +1872,351 @@ fn test_nonce_overflow_does_not_reopen_request_id_space() {
         "u64::MAX-1 should advance to u64::MAX"
     );
 }
+
+// =============================================================================
+// Bounty 4 disclosure: hybrid-after-hours mark fields dropped by both
+// partial-restore writebacks (host-side companion tests).
+//
+// Source citation:
+//   `prog/src/percolator.rs:4276-4290` (commit 40d9024) — `read_price_and_stamp`
+//     snaps `hyperp_mark_e6`, `mark_ewma_e6`, `mark_ewma_last_slot` to the
+//     freshly-accepted external price on every successful read in
+//     hybrid-after-hours markets.
+//   `prog/src/percolator.rs:760-790` — `policy::PartialCrankConfigFields` +
+//     `partial_crank_config_fields_to_write` — 8-field whitelist; none of the
+//     three mark fields are present.
+//   `prog/src/percolator.rs:8421-8428` — TradeCpi zero-fill rollback's
+//     open-coded six-field forwarding; none of the three mark fields are
+//     present.
+//
+// The three tests below build a hybrid-after-hours `MarketConfig`, simulate
+// the in-memory snap, simulate the relevant writeback, and assert the
+// post-writeback on-disk state. The funding-rate consequence test consumes
+// the post-writeback state through `policy::funding_rate_e9_from_mark_index`
+// directly. No LiteSVM, no BPF.
+// =============================================================================
+
+/// Build a hybrid-after-hours `MarketConfig` with sane test defaults: mark
+/// pinned at `mark_old`, effective at `eff_old`, snap on, funding params from
+/// the wrapper's `append_default_extended_tail_for(non_hyperp = false)`.
+fn build_hybrid_test_config(mark_old: u64, eff_old: u64, slot_old: u64) -> state::MarketConfig {
+    let mut cfg = state::MarketConfig::zeroed();
+    cfg.trade_fee_mode = percolator_prog::constants::TRADE_FEE_MODE_HYBRID_AFTER_HOURS;
+    // Non-Hyperp: index_feed_id is non-zero (any non-zero pattern works for
+    // `is_hybrid_after_hours_mode`, which only checks `index_feed_id != [0;32]
+    // && trade_fee_mode == HYBRID_AFTER_HOURS`).
+    cfg.index_feed_id = [1u8; 32];
+    cfg.last_effective_price_e6 = eff_old;
+    cfg.mark_ewma_e6 = mark_old;
+    cfg.hyperp_mark_e6 = mark_old;
+    cfg.mark_ewma_last_slot = slot_old;
+    cfg.last_oracle_publish_time = slot_old as i64;
+    cfg.oracle_target_price_e6 = eff_old;
+    cfg.oracle_target_publish_time = slot_old as i64;
+    cfg.last_good_oracle_slot = slot_old;
+    // Funding params from the wrapper's default test tail
+    // (`append_default_extended_tail_for`, `tests/common/mod.rs:213`).
+    cfg.funding_horizon_slots = 500;
+    cfg.funding_k_bps = 100;
+    cfg.funding_max_premium_bps = 500;
+    cfg.funding_max_e9_per_slot = 1_000;
+    cfg
+}
+
+/// Mirror the snap at `prog:4276-4290` — `read_price_and_stamp` writes these
+/// three mark fields to the freshly-accepted effective price on every
+/// successful read in hybrid-after-hours markets. `read_price_and_stamp` is a
+/// private wrapper helper, but the snap logic is small and self-contained;
+/// re-implement it here with the public oracle gate.
+fn simulate_hybrid_mark_snap(cfg: &mut state::MarketConfig, price: u64, clock_slot: u64) {
+    let advanced = price != cfg.last_effective_price_e6
+        || cfg.mark_ewma_e6 != price
+        || cfg.hyperp_mark_e6 != price;
+    if oracle::is_hybrid_after_hours_mode(cfg) && advanced {
+        cfg.hyperp_mark_e6 = price;
+        cfg.mark_ewma_e6 = price;
+        cfg.mark_ewma_last_slot = clock_slot;
+    }
+}
+
+/// Mirror the OLD (pre-fix) writeback shape at `prog:5040-5051` and
+/// `prog:760-790` — partial-catchup restores `before_read` and overlays only
+/// the original 8 fields. Implemented as a direct copy here (NOT through
+/// `policy::partial_crank_config_fields_to_write`) so the test reproduces the
+/// pre-fix behavior even on a tree where the fix has extended the helper to
+/// also forward the three mark fields.
+fn simulate_partial_crank_writeback_buggy(
+    before_read: state::MarketConfig,
+    after_read: state::MarketConfig,
+) -> state::MarketConfig {
+    let mut restored = before_read;
+    restored.last_effective_price_e6 = after_read.last_effective_price_e6;
+    restored.last_hyperp_index_slot = after_read.last_hyperp_index_slot;
+    restored.last_good_oracle_slot = after_read.last_good_oracle_slot;
+    restored.last_oracle_publish_time = after_read.last_oracle_publish_time;
+    restored.oracle_target_price_e6 = after_read.oracle_target_price_e6;
+    restored.oracle_target_publish_time = after_read.oracle_target_publish_time;
+    restored.fee_sweep_cursor_word = after_read.fee_sweep_cursor_word;
+    restored.fee_sweep_cursor_bit = after_read.fee_sweep_cursor_bit;
+    restored
+}
+
+/// Mirror the FIXED partial-catchup writeback — extends the original 8-field
+/// forwarding to include `hyperp_mark_e6`, `mark_ewma_e6`, and
+/// `mark_ewma_last_slot`. Used by the post-fix assertion below to demonstrate
+/// the proposed patch closes the bug.
+fn simulate_partial_crank_writeback_fixed(
+    before_read: state::MarketConfig,
+    after_read: state::MarketConfig,
+) -> state::MarketConfig {
+    let mut restored = simulate_partial_crank_writeback_buggy(before_read, after_read);
+    restored.hyperp_mark_e6 = after_read.hyperp_mark_e6;
+    restored.mark_ewma_e6 = after_read.mark_ewma_e6;
+    restored.mark_ewma_last_slot = after_read.mark_ewma_last_slot;
+    restored
+}
+
+/// Mirror the TradeCpi zero-fill rollback at `prog:8421-8428` — restores
+/// `config_pre_oracle` and overlays exactly six oracle/index fields.
+fn simulate_zerofill_writeback(
+    before_read: state::MarketConfig,
+    after_read: state::MarketConfig,
+) -> state::MarketConfig {
+    let mut restored = before_read;
+    restored.last_good_oracle_slot = after_read.last_good_oracle_slot;
+    restored.last_effective_price_e6 = after_read.last_effective_price_e6;
+    restored.last_oracle_publish_time = after_read.last_oracle_publish_time;
+    restored.oracle_target_price_e6 = after_read.oracle_target_price_e6;
+    restored.oracle_target_publish_time = after_read.oracle_target_publish_time;
+    restored.last_hyperp_index_slot = after_read.last_hyperp_index_slot;
+    restored
+}
+
+#[test]
+fn bug_partial_catchup_drops_hybrid_mark_fields() {
+    // Hybrid-after-hours config: mark pinned at $100, effective at $100,
+    // both at slot 100.
+    let mark_old: u64 = 100_000_000;
+    let eff_old: u64 = 100_000_000;
+    let slot_old: u64 = 100;
+    let before = build_hybrid_test_config(mark_old, eff_old, slot_old);
+
+    // Sanity: the snap is gated on hybrid-after-hours mode.
+    assert!(
+        oracle::is_hybrid_after_hours_mode(&before),
+        "test config must be in hybrid-after-hours mode"
+    );
+
+    // Simulate the in-memory state after a read advances the effective price
+    // to $110 in slot 110: `read_price_and_stamp` snaps mark fields to the
+    // new price (4276-4290).
+    let new_price: u64 = 110_000_000;
+    let new_slot: u64 = 110;
+    let mut after = before;
+    after.last_effective_price_e6 = new_price;
+    after.last_oracle_publish_time = new_slot as i64;
+    after.oracle_target_price_e6 = new_price;
+    after.oracle_target_publish_time = new_slot as i64;
+    after.last_good_oracle_slot = new_slot;
+    simulate_hybrid_mark_snap(&mut after, new_price, new_slot);
+
+    // Confirm the in-memory snap fired.
+    assert_eq!(after.mark_ewma_e6, new_price, "snap should set mark_ewma_e6");
+    assert_eq!(
+        after.hyperp_mark_e6, new_price,
+        "snap should set hyperp_mark_e6"
+    );
+    assert_eq!(
+        after.mark_ewma_last_slot, new_slot,
+        "snap should set mark_ewma_last_slot"
+    );
+
+    // Run the partial-catchup writeback. On disk after the writeback:
+    let restored = simulate_partial_crank_writeback_buggy(before, after);
+
+    // Effective + target survived (whitelisted):
+    assert_eq!(
+        restored.last_effective_price_e6, new_price,
+        "last_effective_price_e6 is whitelisted; should advance"
+    );
+    assert_eq!(
+        restored.oracle_target_price_e6, new_price,
+        "oracle_target_price_e6 is whitelisted; should advance"
+    );
+    assert_eq!(
+        restored.last_oracle_publish_time, new_slot as i64,
+        "last_oracle_publish_time is whitelisted; should advance"
+    );
+
+    // Mark fields reverted (NOT whitelisted) — this is the bug:
+    assert_eq!(
+        restored.mark_ewma_e6, mark_old,
+        "BUG: mark_ewma_e6 must REVERT to pre-call value (not in PartialCrankConfigFields whitelist)"
+    );
+    assert_eq!(
+        restored.hyperp_mark_e6, mark_old,
+        "BUG: hyperp_mark_e6 must REVERT to pre-call value (not in whitelist)"
+    );
+    assert_eq!(
+        restored.mark_ewma_last_slot, slot_old,
+        "BUG: mark_ewma_last_slot must REVERT to pre-call value (not in whitelist)"
+    );
+
+    println!("  partial-catchup BUG REPRODUCED: mark_ewma_e6 reverted to ${} (pre-call), while last_effective_price_e6 advanced to ${}", mark_old / 1_000_000, new_price / 1_000_000);
+}
+
+#[test]
+fn bug_tradecpi_zerofill_drops_hybrid_mark_fields() {
+    // Same setup as the partial-catchup test, but exercising the TradeCpi
+    // zero-fill open-coded rollback at `prog:8421-8428`.
+    let mark_old: u64 = 100_000_000;
+    let eff_old: u64 = 100_000_000;
+    let slot_old: u64 = 100;
+    let before = build_hybrid_test_config(mark_old, eff_old, slot_old);
+
+    let new_price: u64 = 95_000_000;
+    let new_slot: u64 = 110;
+    let mut after = before;
+    after.last_effective_price_e6 = new_price;
+    after.last_oracle_publish_time = new_slot as i64;
+    after.oracle_target_price_e6 = new_price;
+    after.oracle_target_publish_time = new_slot as i64;
+    after.last_good_oracle_slot = new_slot;
+    simulate_hybrid_mark_snap(&mut after, new_price, new_slot);
+
+    assert_eq!(after.mark_ewma_e6, new_price);
+
+    let restored = simulate_zerofill_writeback(before, after);
+
+    assert_eq!(
+        restored.last_effective_price_e6, new_price,
+        "last_effective_price_e6 is in the zero-fill forwarded set; should advance"
+    );
+    assert_eq!(
+        restored.mark_ewma_e6, mark_old,
+        "BUG: mark_ewma_e6 must REVERT (not in TradeCpi zero-fill forwarded set)"
+    );
+    assert_eq!(
+        restored.hyperp_mark_e6, mark_old,
+        "BUG: hyperp_mark_e6 must REVERT (not in TradeCpi zero-fill forwarded set)"
+    );
+    assert_eq!(
+        restored.mark_ewma_last_slot, slot_old,
+        "BUG: mark_ewma_last_slot must REVERT (not in TradeCpi zero-fill forwarded set)"
+    );
+
+    println!("  tradecpi-zerofill BUG REPRODUCED: mark_ewma_e6 reverted to ${} (pre-call), while last_effective_price_e6 advanced to ${}", mark_old / 1_000_000, new_price / 1_000_000);
+}
+
+#[test]
+fn bug_funding_rate_diverges_after_hybrid_mark_revert() {
+    // Walk the bug end-to-end into the funding rate computation. After a
+    // sequence of zero-fill TradeCpi calls the on-disk state is
+    // `mark_ewma_e6 = mark_old` (reverted) and `last_effective_price_e6 =
+    // eff_new` (advanced). `compute_current_funding_rate_e9` reads both and
+    // produces a saturated negative per-slot rate even though no genuine
+    // mark/index divergence exists.
+    let mark_old: u64 = 100_000_000;
+    let eff_new: u64 = 110_000_000;
+    let slot_old: u64 = 100;
+    let mut config = build_hybrid_test_config(mark_old, eff_new, slot_old);
+    // Force the post-bug shape directly: mark stayed at $100, effective
+    // walked to $110.
+    config.mark_ewma_e6 = mark_old;
+
+    // Funding rate as compute_current_funding_rate_e9 would compute it
+    // (`prog:5410-5419`): direct call to the public policy helper.
+    let rate = policy::funding_rate_e9_from_mark_index(
+        config.mark_ewma_e6,
+        config.last_effective_price_e6,
+        config.funding_horizon_slots,
+        config.funding_k_bps,
+        config.funding_max_premium_bps,
+        config.funding_max_e9_per_slot,
+    )
+    .expect("funding rate must compute");
+
+    assert!(
+        rate < 0,
+        "funding rate must be negative when mark < effective (got {})",
+        rate
+    );
+    assert_eq!(
+        rate, -(config.funding_max_e9_per_slot as i128),
+        "with mark $100 vs effective $110 (10% gap, premium cap = 500 bps = 5%), \
+         per-slot rate must saturate at -funding_max_e9_per_slot"
+    );
+
+    // Sanity: an honest (no-bug) state has mark == effective and rate = 0.
+    let rate_honest = policy::funding_rate_e9_from_mark_index(
+        eff_new,
+        eff_new,
+        config.funding_horizon_slots,
+        config.funding_k_bps,
+        config.funding_max_premium_bps,
+        config.funding_max_e9_per_slot,
+    )
+    .unwrap();
+    assert_eq!(
+        rate_honest, 0,
+        "honest mark==effective state must produce zero funding rate"
+    );
+
+    println!("  bug-state funding rate = {} e9/slot (saturated negative)", rate);
+    println!("  honest-state funding rate = {} e9/slot", rate_honest);
+    println!("  divergence is FABRICATED — no real mark/index gap, just a writeback drop");
+}
+
+#[test]
+fn fix_partial_catchup_carries_hybrid_mark_fields_forward() {
+    // Mirror image of `bug_partial_catchup_drops_hybrid_mark_fields`, but
+    // running the proposed fix's writeback (which forwards the three mark
+    // fields from `after_read_and_sweep`). Asserts that the post-writeback
+    // state has mark==effective, leaving zero funding-rate divergence.
+    let mark_old: u64 = 100_000_000;
+    let eff_old: u64 = 100_000_000;
+    let slot_old: u64 = 100;
+    let before = build_hybrid_test_config(mark_old, eff_old, slot_old);
+
+    let new_price: u64 = 110_000_000;
+    let new_slot: u64 = 110;
+    let mut after = before;
+    after.last_effective_price_e6 = new_price;
+    after.last_oracle_publish_time = new_slot as i64;
+    after.oracle_target_price_e6 = new_price;
+    after.oracle_target_publish_time = new_slot as i64;
+    after.last_good_oracle_slot = new_slot;
+    simulate_hybrid_mark_snap(&mut after, new_price, new_slot);
+
+    let restored = simulate_partial_crank_writeback_fixed(before, after);
+
+    assert_eq!(
+        restored.last_effective_price_e6, new_price,
+        "fix preserves whitelisted last_effective_price_e6 advance"
+    );
+    assert_eq!(
+        restored.mark_ewma_e6, new_price,
+        "FIX: mark_ewma_e6 carried forward to match effective"
+    );
+    assert_eq!(
+        restored.hyperp_mark_e6, new_price,
+        "FIX: hyperp_mark_e6 carried forward"
+    );
+    assert_eq!(
+        restored.mark_ewma_last_slot, new_slot,
+        "FIX: mark_ewma_last_slot carried forward"
+    );
+
+    let rate = policy::funding_rate_e9_from_mark_index(
+        restored.mark_ewma_e6,
+        restored.last_effective_price_e6,
+        restored.funding_horizon_slots,
+        restored.funding_k_bps,
+        restored.funding_max_premium_bps,
+        restored.funding_max_e9_per_slot,
+    )
+    .unwrap();
+    assert_eq!(rate, 0, "post-fix funding rate must be zero (no fabricated divergence)");
+
+    println!("  POST-FIX: mark_ewma_e6 = ${} == last_effective_price_e6 = ${}, funding rate = {} e9/slot", restored.mark_ewma_e6 / 1_000_000, restored.last_effective_price_e6 / 1_000_000, rate);
+}
