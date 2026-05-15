@@ -9,9 +9,10 @@
 extern crate alloc;
 
 use percolator::{
-    MarketGroupV13, PermissionlessCrankActionV13, PermissionlessCrankRequestV13,
-    PermissionlessRecoveryReasonV13, PortfolioAccountV13, ProvenanceHeaderV13,
-    ResolvedCloseOutcomeV13, TradeRequestV13, V13Config, V13Error, V13_MAX_PORTFOLIO_ASSETS_N,
+    AssetStateV13, HealthCertV13, MarketGroupV13, MarketModeV13, PermissionlessCrankActionV13,
+    PermissionlessCrankRequestV13, PermissionlessRecoveryReasonV13, PortfolioAccountV13,
+    PortfolioLegV13, ProvenanceHeaderV13, ResolvedCloseOutcomeV13, TradeRequestV13, V13Config,
+    V13Error, V13_MAX_PORTFOLIO_ASSETS_N,
 };
 use solana_program::{
     account_info::AccountInfo, clock::Clock, declare_id, entrypoint::ProgramResult,
@@ -99,6 +100,8 @@ pub mod state {
         },
         error::PercolatorError,
     };
+    use alloc::boxed::Box;
+    use core::alloc::Layout;
     use core::mem::{align_of, size_of};
     use percolator::{MarketGroupV13, PortfolioAccountV13};
     use solana_program::program_error::ProgramError;
@@ -197,6 +200,23 @@ pub mod state {
         Ok(())
     }
 
+    #[allow(unsafe_code)]
+    #[inline]
+    fn read_boxed<T: Copy>(data: &[u8], off: usize) -> Result<Box<T>, ProgramError> {
+        if data.len() < off + size_of::<T>() {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
+        let layout = Layout::new::<T>();
+        let raw = unsafe { alloc::alloc::alloc(layout) };
+        if raw.is_null() {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr().add(off), raw, size_of::<T>());
+            Ok(Box::from_raw(raw as *mut T))
+        }
+    }
+
     pub fn init_market_account(
         data: &mut [u8],
         config: &WrapperConfigV13,
@@ -223,6 +243,18 @@ pub mod state {
         check_header(data, KIND_MARKET)?;
         let config = read_copy(data, HEADER_LEN)?;
         let group = read_copy(data, MARKET_GROUP_OFF)?;
+        Ok((config, group))
+    }
+
+    pub fn read_market_boxed(
+        data: &[u8],
+    ) -> Result<(WrapperConfigV13, Box<MarketGroupV13>), ProgramError> {
+        if data.len() < MARKET_ACCOUNT_LEN {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
+        check_header(data, KIND_MARKET)?;
+        let config = read_copy(data, HEADER_LEN)?;
+        let group = read_boxed(data, MARKET_GROUP_OFF)?;
         Ok((config, group))
     }
 
@@ -262,6 +294,14 @@ pub mod state {
         }
         check_header(data, KIND_PORTFOLIO)?;
         read_copy(data, HEADER_LEN)
+    }
+
+    pub fn read_portfolio_boxed(data: &[u8]) -> Result<Box<PortfolioAccountV13>, ProgramError> {
+        if data.len() < PORTFOLIO_ACCOUNT_LEN {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
+        check_header(data, KIND_PORTFOLIO)?;
+        read_boxed(data, HEADER_LEN)
     }
 
     pub fn write_portfolio(
@@ -649,8 +689,7 @@ pub mod processor {
         cfg.max_price_move_bps_per_slot = max_price_move_bps_per_slot;
         cfg.max_accrual_dt_slots = max_accrual_dt_slots;
         cfg.min_funding_lifetime_slots = max_accrual_dt_slots;
-        let mut group =
-            MarketGroupV13::new(market_ai.key.to_bytes(), cfg).map_err(map_v13_error)?;
+        let mut group = new_market_group_boxed(market_ai.key.to_bytes(), cfg)?;
         if initial_price == 0 || initial_price > percolator::MAX_ORACLE_PRICE {
             return Err(PercolatorError::EngineInvalidConfig.into());
         }
@@ -668,7 +707,11 @@ pub mod processor {
             insurance_authority: admin.key.to_bytes(),
             insurance_operator: admin.key.to_bytes(),
         };
-        state::init_market_account(&mut market_ai.try_borrow_mut_data()?, &wrapper, &group)
+        state::init_market_account(
+            &mut market_ai.try_borrow_mut_data()?,
+            &wrapper,
+            group.as_ref(),
+        )
     }
 
     #[inline(never)]
@@ -684,17 +727,17 @@ pub mod processor {
         expect_writable(portfolio_ai)?;
         expect_owner(market_ai, program_id)?;
         expect_owner(portfolio_ai, program_id)?;
-        let (cfg, mut group) = state::read_market(&market_ai.try_borrow_data()?)?;
-        let account = PortfolioAccountV13::empty(ProvenanceHeaderV13::new(
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let account = new_portfolio_boxed(ProvenanceHeaderV13::new(
             market_ai.key.to_bytes(),
             portfolio_ai.key.to_bytes(),
             owner.key.to_bytes(),
-        ));
+        ))?;
         group
-            .create_portfolio_account(&account)
+            .create_portfolio_account(account.as_ref())
             .map_err(map_v13_error)?;
-        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, &group)?;
-        state::init_portfolio_account(&mut portfolio_ai.try_borrow_mut_data()?, &account)
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
+        state::init_portfolio_account(&mut portfolio_ai.try_borrow_mut_data()?, account.as_ref())
     }
 
     #[inline(never)]
@@ -719,17 +762,17 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         expect_owner(account_a_ai, program_id)?;
         expect_owner(account_b_ai, program_id)?;
-        let (cfg, mut group) = state::read_market(&market_ai.try_borrow_data()?)?;
-        let mut account_a = state::read_portfolio(&account_a_ai.try_borrow_data()?)?;
-        let mut account_b = state::read_portfolio(&account_b_ai.try_borrow_data()?)?;
-        expect_portfolio_owner(&account_a, signer_a.key)?;
-        expect_portfolio_owner(&account_b, signer_b.key)?;
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let mut account_a = state::read_portfolio_boxed(&account_a_ai.try_borrow_data()?)?;
+        let mut account_b = state::read_portfolio_boxed(&account_b_ai.try_borrow_data()?)?;
+        expect_portfolio_owner(account_a.as_ref(), signer_a.key)?;
+        expect_portfolio_owner(account_b.as_ref(), signer_b.key)?;
         let size_abs = if size_q == i128::MIN || size_q == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         } else {
             size_q.unsigned_abs()
         };
-        let prices = effective_prices(&group);
+        let prices = effective_prices(group.as_ref());
         let req = TradeRequestV13 {
             asset_index: asset_index as usize,
             size_q: size_abs,
@@ -738,16 +781,26 @@ pub mod processor {
         };
         if size_q > 0 {
             group
-                .execute_trade_with_fee_not_atomic(&mut account_a, &mut account_b, req, &prices)
+                .execute_trade_with_fee_not_atomic(
+                    account_a.as_mut(),
+                    account_b.as_mut(),
+                    req,
+                    &prices,
+                )
                 .map_err(map_v13_error)?;
         } else {
             group
-                .execute_trade_with_fee_not_atomic(&mut account_b, &mut account_a, req, &prices)
+                .execute_trade_with_fee_not_atomic(
+                    account_b.as_mut(),
+                    account_a.as_mut(),
+                    req,
+                    &prices,
+                )
                 .map_err(map_v13_error)?;
         }
-        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, &group)?;
-        state::write_portfolio(&mut account_a_ai.try_borrow_mut_data()?, &account_a)?;
-        state::write_portfolio(&mut account_b_ai.try_borrow_mut_data()?, &account_b)
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
+        state::write_portfolio(&mut account_a_ai.try_borrow_mut_data()?, account_a.as_ref())?;
+        state::write_portfolio(&mut account_b_ai.try_borrow_mut_data()?, account_b.as_ref())
     }
 
     #[inline(never)]
@@ -763,13 +816,13 @@ pub mod processor {
         expect_writable(portfolio_ai)?;
         expect_owner(market_ai, program_id)?;
         expect_owner(portfolio_ai, program_id)?;
-        let (cfg, mut group) = state::read_market(&market_ai.try_borrow_data()?)?;
-        let portfolio = state::read_portfolio(&portfolio_ai.try_borrow_data()?)?;
-        expect_portfolio_owner(&portfolio, owner.key)?;
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
+        expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
         group
-            .close_portfolio_account(&portfolio)
+            .close_portfolio_account(portfolio.as_ref())
             .map_err(map_v13_error)?;
-        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, &group)?;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
         for b in portfolio_ai.try_borrow_mut_data()?.iter_mut() {
             *b = 0;
         }
@@ -787,7 +840,7 @@ pub mod processor {
         expect_signer(signer)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
-        let (cfg, mut group) = state::read_market(&market_ai.try_borrow_data()?)?;
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         if cfg.insurance_authority != signer.key.to_bytes() {
             return Err(PercolatorError::Unauthorized.into());
         }
@@ -800,7 +853,7 @@ pub mod processor {
             .checked_add(amount)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         group.assert_public_invariants().map_err(map_v13_error)?;
-        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, &group)
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
     }
 
     #[inline(never)]
@@ -813,7 +866,7 @@ pub mod processor {
         expect_signer(admin)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
-        let (cfg, mut group) = state::read_market(&market_ai.try_borrow_data()?)?;
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         if cfg.admin != admin.key.to_bytes() {
             return Err(PercolatorError::Unauthorized.into());
         }
@@ -821,7 +874,7 @@ pub mod processor {
         group
             .resolve_market_not_atomic(slot)
             .map_err(map_v13_error)?;
-        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, &group)
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
     }
 
     #[inline(never)]
@@ -864,6 +917,111 @@ pub mod processor {
                 &prices,
             )
             .map(|_| ())
+    }
+
+    #[allow(unsafe_code)]
+    #[inline(never)]
+    fn alloc_raw<T>() -> Result<*mut T, ProgramError> {
+        let layout = core::alloc::Layout::new::<T>();
+        let raw = unsafe { alloc::alloc::alloc(layout) as *mut T };
+        if raw.is_null() {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        Ok(raw)
+    }
+
+    #[allow(unsafe_code)]
+    #[inline(never)]
+    fn new_market_group_boxed(
+        market_group_id: [u8; 32],
+        config: V13Config,
+    ) -> Result<alloc::boxed::Box<MarketGroupV13>, ProgramError> {
+        // Keep InitMarket SBF-safe by writing the large market object directly
+        // to heap memory. This mirrors `MarketGroupV13::new` field-for-field,
+        // then validates through the engine's public invariant checker before
+        // the bytes are persisted.
+        config.validate_public_user_fund().map_err(map_v13_error)?;
+        let raw = alloc_raw::<MarketGroupV13>()?;
+        unsafe {
+            core::ptr::addr_of_mut!((*raw).market_group_id).write(market_group_id);
+            core::ptr::addr_of_mut!((*raw).config).write(config);
+            core::ptr::addr_of_mut!((*raw).vault).write(0);
+            core::ptr::addr_of_mut!((*raw).insurance).write(0);
+            core::ptr::addr_of_mut!((*raw).c_tot).write(0);
+            core::ptr::addr_of_mut!((*raw).pnl_pos_tot).write(0);
+            core::ptr::addr_of_mut!((*raw).pnl_matured_pos_tot).write(0);
+            core::ptr::addr_of_mut!((*raw).materialized_portfolio_count).write(0);
+            core::ptr::addr_of_mut!((*raw).stale_certificate_count).write(0);
+            core::ptr::addr_of_mut!((*raw).b_stale_account_count).write(0);
+            core::ptr::addr_of_mut!((*raw).negative_pnl_account_count).write(0);
+            core::ptr::addr_of_mut!((*raw).risk_epoch).write(0);
+            core::ptr::addr_of_mut!((*raw).oracle_epoch).write(0);
+            core::ptr::addr_of_mut!((*raw).funding_epoch).write(0);
+            core::ptr::addr_of_mut!((*raw).slot_last).write(0);
+            core::ptr::addr_of_mut!((*raw).current_slot).write(0);
+            let assets = core::ptr::addr_of_mut!((*raw).assets) as *mut AssetStateV13;
+            let mut i = 0;
+            while i < V13_MAX_PORTFOLIO_ASSETS_N {
+                assets.add(i).write(AssetStateV13::default());
+                i += 1;
+            }
+            core::ptr::addr_of_mut!((*raw).bankruptcy_hlock_active).write(false);
+            core::ptr::addr_of_mut!((*raw).threshold_stress_active).write(false);
+            core::ptr::addr_of_mut!((*raw).active_bankrupt_close_present).write(false);
+            core::ptr::addr_of_mut!((*raw).loss_stale_active).write(false);
+            core::ptr::addr_of_mut!((*raw).recovery_reason).write(None);
+            core::ptr::addr_of_mut!((*raw).mode).write(MarketModeV13::Live);
+            core::ptr::addr_of_mut!((*raw).resolved_slot).write(0);
+            core::ptr::addr_of_mut!((*raw).payout_snapshot).write(0);
+            core::ptr::addr_of_mut!((*raw).payout_snapshot_pnl_pos_tot).write(0);
+            core::ptr::addr_of_mut!((*raw).payout_snapshot_captured).write(false);
+            let group = alloc::boxed::Box::from_raw(raw);
+            group.assert_public_invariants().map_err(map_v13_error)?;
+            Ok(group)
+        }
+    }
+
+    #[allow(unsafe_code)]
+    #[inline(never)]
+    fn new_portfolio_boxed(
+        header: ProvenanceHeaderV13,
+    ) -> Result<alloc::boxed::Box<PortfolioAccountV13>, ProgramError> {
+        // Same pattern as market init: avoid a multi-KB stack temporary in the
+        // SBF entrypoint while preserving the engine's canonical empty shape.
+        let raw = alloc_raw::<PortfolioAccountV13>()?;
+        unsafe {
+            core::ptr::addr_of_mut!((*raw).provenance_header).write(header);
+            core::ptr::addr_of_mut!((*raw).owner).write(header.owner);
+            core::ptr::addr_of_mut!((*raw).capital).write(0);
+            core::ptr::addr_of_mut!((*raw).pnl).write(0);
+            core::ptr::addr_of_mut!((*raw).reserved_pnl).write(0);
+            core::ptr::addr_of_mut!((*raw).fee_credits).write(0);
+            core::ptr::addr_of_mut!((*raw).last_fee_slot).write(0);
+            core::ptr::addr_of_mut!((*raw).active_bitmap).write(0);
+            let legs = core::ptr::addr_of_mut!((*raw).legs) as *mut PortfolioLegV13;
+            let mut i = 0;
+            while i < V13_MAX_PORTFOLIO_ASSETS_N {
+                legs.add(i).write(PortfolioLegV13::EMPTY);
+                i += 1;
+            }
+            core::ptr::addr_of_mut!((*raw).health_cert).write(HealthCertV13 {
+                certified_equity: 0,
+                certified_initial_req: 0,
+                certified_maintenance_req: 0,
+                certified_liq_deficit: 0,
+                certified_worst_case_loss: 0,
+                cert_oracle_epoch: 0,
+                cert_funding_epoch: 0,
+                cert_risk_epoch: 0,
+                active_bitmap_at_cert: 0,
+                valid: false,
+            });
+            core::ptr::addr_of_mut!((*raw).stale_state).write(false);
+            core::ptr::addr_of_mut!((*raw).b_stale_state).write(false);
+            core::ptr::addr_of_mut!((*raw).rebalance_lock).write(false);
+            core::ptr::addr_of_mut!((*raw).liquidation_lock).write(false);
+            Ok(alloc::boxed::Box::from_raw(raw))
+        }
     }
 
     fn account<'a>(
@@ -927,14 +1085,14 @@ pub mod processor {
         expect_writable(portfolio_ai)?;
         expect_owner(market_ai, program_id)?;
         expect_owner(portfolio_ai, program_id)?;
-        let (cfg, mut group) = state::read_market(&market_ai.try_borrow_data()?)?;
-        let mut portfolio = state::read_portfolio(&portfolio_ai.try_borrow_data()?)?;
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
         if owner_must_sign {
-            expect_portfolio_owner(&portfolio, owner.key)?;
+            expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
         }
-        f(&mut group, &mut portfolio, &cfg).map_err(map_v13_error)?;
-        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, &group)?;
-        state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, &portfolio)
+        f(group.as_mut(), portfolio.as_mut(), &cfg).map_err(map_v13_error)?;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
+        state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())
     }
 
     fn effective_prices(group: &MarketGroupV13) -> [u64; V13_MAX_PORTFOLIO_ASSETS_N] {

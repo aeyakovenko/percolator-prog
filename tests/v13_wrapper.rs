@@ -1,4 +1,6 @@
-use percolator::{MarketModeV13, PermissionlessRecoveryReasonV13, POS_SCALE};
+use percolator::{
+    MarketGroupV13, MarketModeV13, PermissionlessRecoveryReasonV13, V13Config, POS_SCALE,
+};
 use percolator_prog::{
     constants::{MARKET_ACCOUNT_LEN, PORTFOLIO_ACCOUNT_LEN},
     ix::Instruction,
@@ -107,6 +109,18 @@ fn deposit(
     .unwrap();
 }
 
+fn assert_err_and_market_unchanged(
+    result: Result<(), ProgramError>,
+    market: &TestAccount,
+    before: &[u8],
+) {
+    assert!(result.is_err(), "instruction should reject");
+    assert_eq!(
+        market.data, before,
+        "failed wrapper instruction must not persist partial market mutation"
+    );
+}
+
 #[test]
 fn v13_wrapper_init_binds_market_and_portfolio_provenance() {
     let mut admin = signer();
@@ -131,6 +145,87 @@ fn v13_wrapper_init_binds_market_and_portfolio_provenance() {
     );
     assert_eq!(acct.owner, owner.key.to_bytes());
     assert_eq!(group.validate_account_shape(&acct), Ok(()));
+
+    let mut cfg = V13Config::public_user_fund(1, 0, 10);
+    cfg.maintenance_margin_bps = 10_000;
+    cfg.initial_margin_bps = 10_000;
+    cfg.max_trading_fee_bps = 10_000;
+    cfg.max_price_move_bps_per_slot = 10_000;
+    cfg.max_accrual_dt_slots = 1;
+    cfg.min_funding_lifetime_slots = 1;
+    let mut expected = MarketGroupV13::new(market.key.to_bytes(), cfg).unwrap();
+    expected.assets[0].raw_oracle_target_price = 100;
+    expected.assets[0].effective_price = 100;
+    expected.assets[0].fund_px_last = 100;
+    expected.materialized_portfolio_count = 1;
+    assert_eq!(
+        group, expected,
+        "wrapper heap init must match canonical engine init shape"
+    );
+}
+
+#[test]
+fn v13_wrapper_top_up_insurance_requires_authority_and_updates_vault() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut attacker = signer();
+
+    init_market(&mut admin, &mut market);
+
+    let before = market.data.clone();
+    let unauthorized = run_ix(
+        Instruction::TopUpInsurance { amount: 777 },
+        &mut [&mut attacker, &mut market],
+    );
+    assert_err_and_market_unchanged(unauthorized, &market, &before);
+
+    run_ix(
+        Instruction::TopUpInsurance { amount: 777 },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.insurance, 777);
+    assert_eq!(group.vault, 777);
+}
+
+#[test]
+fn v13_wrapper_close_portfolio_rejects_non_empty_and_closes_empty() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 1_000);
+
+    let before = market.data.clone();
+    let rejected = run_ix(
+        Instruction::ClosePortfolio,
+        &mut [&mut owner, &mut market, &mut portfolio],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before);
+    assert!(state::read_portfolio(&portfolio.data).is_ok());
+
+    run_ix(
+        Instruction::Withdraw { amount: 1_000 },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::ClosePortfolio,
+        &mut [&mut owner, &mut market, &mut portfolio],
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.materialized_portfolio_count, 0);
+    assert!(
+        portfolio.data.iter().all(|b| *b == 0),
+        "closed portfolio account should be fully zeroed"
+    );
 }
 
 #[test]
@@ -156,6 +251,44 @@ fn v13_wrapper_deposit_withdraw_roundtrip_preserves_accounting() {
     assert_eq!(group.c_tot, 600);
     assert_eq!(group.vault, 600);
     assert_eq!(group.insurance, 0);
+}
+
+#[test]
+fn v13_wrapper_tradenocpi_negative_size_flips_long_short_roles() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut signer_a = signer();
+    let mut signer_b = signer();
+    let mut account_a = portfolio_account();
+    let mut account_b = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut signer_a, &mut market, &mut account_a);
+    init_portfolio(&mut signer_b, &mut market, &mut account_b);
+    deposit(&mut signer_a, &mut market, &mut account_a, 1_000_000);
+    deposit(&mut signer_b, &mut market, &mut account_b, 1_000_000);
+
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: -(POS_SCALE as i128),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut signer_a,
+            &mut signer_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+        ],
+    )
+    .unwrap();
+
+    let a = state::read_portfolio(&account_a.data).unwrap();
+    let b = state::read_portfolio(&account_b.data).unwrap();
+    assert_eq!(a.legs[0].basis_pos_q, -(POS_SCALE as i128));
+    assert_eq!(b.legs[0].basis_pos_q, POS_SCALE as i128);
 }
 
 #[test]
@@ -306,6 +439,54 @@ fn v13_wrapper_permissionless_crank_advances_account_local_market_progress() {
 }
 
 #[test]
+fn v13_wrapper_permissionless_crank_rejects_stale_now_without_mutation() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    )
+    .unwrap();
+
+    let market_before = market.data.clone();
+    let portfolio_before = portfolio.data.clone();
+    let rejected = run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 0,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    );
+
+    assert_err_and_market_unchanged(rejected, &market, &market_before);
+    assert_eq!(
+        portfolio.data, portfolio_before,
+        "failed crank must not persist account-local mutation"
+    );
+}
+
+#[test]
 fn v13_wrapper_permissionless_crank_can_liquidate_unhealthy_candidate() {
     let mut admin = signer();
     let mut market = market_account();
@@ -359,6 +540,36 @@ fn v13_wrapper_permissionless_crank_can_liquidate_unhealthy_candidate() {
         short.active_bitmap, 0,
         "liquidation should close the unhealthy short through the public crank path"
     );
+}
+
+#[test]
+fn v13_wrapper_permissionless_settle_b_without_b_state_is_fail_closed() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+
+    let market_before = market.data.clone();
+    let portfolio_before = portfolio.data.clone();
+    let rejected = run_ix(
+        Instruction::PermissionlessCrank {
+            action: 2,
+            asset_index: 0,
+            now_slot: 0,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    );
+
+    assert_err_and_market_unchanged(rejected, &market, &market_before);
+    assert_eq!(portfolio.data, portfolio_before);
 }
 
 #[test]

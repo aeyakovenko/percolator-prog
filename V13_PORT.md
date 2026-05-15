@@ -2,7 +2,7 @@
 
 Engine branch tested: `aeyakovenko/percolator@v13`
 
-Pinned engine SHA: `816cc22cb49df3cb8d8d063fcd06e1bd5d3eef9e`
+Pinned engine SHA: `4b581d81a704d9bbf0d3b0e720dc532dfa7bf3a3`
 
 ## Current Retest Result
 
@@ -12,26 +12,57 @@ wrapper entrypoint at `src/v13_program.rs`.
 Passing:
 
 - `cargo check --release --lib`
-- `cargo test --release --test v13_wrapper -- --nocapture`
 - `cargo test --release -- --nocapture`
+- `cargo kani --tests --output-format terse`
 
 The old v12 integration tests are compiled out on this branch with
 `#![cfg(any())]`; they target the removed global slab ABI and cannot be
-mechanically reused. The replacement suite is `tests/v13_wrapper.rs`.
+mechanically reused. The replacement suite is:
 
-`cargo build-sbf --no-default-features` exits successfully, but the SBF stack
-analyzer reports oversized frames:
+- `tests/v13_wrapper.rs`: 13 native account-local wrapper tests
+- `tests/v13_cu.rs`: 2 LiteSVM BPF crank CU tests
+- `tests/v13_kani.rs`: 3 wrapper ABI Kani proofs
+
+`tests/v13_cu.rs` currently measures:
+
+- refresh crank: 8,985 CU
+- recovery crank: 3,236 CU
+- refresh crank before 64 extra portfolios: 8,983 CU
+- refresh crank after 64 extra portfolios: 8,983 CU
+
+This confirms the wrapper crank path is account-local and does not scale with
+materialized portfolio count. The v13 engine no longer has a global slab scan,
+so the old dense 4096-account crank benchmark is not the relevant worst case.
+
+`cargo build-sbf --no-default-features` exits successfully and the wrapper no
+longer reports oversized stack frames after moving large runtime reads and init
+construction off-stack. The SBF stack analyzer still reports two engine-crate
+frames:
 
 - `percolator::v13::MarketGroupV13::new`: estimated 13,632 bytes
 - `percolator::v13::MarketGroupV13::execute_trade_with_fee_not_atomic`:
   estimated 13,120 bytes
-- wrapper handlers that read/write full v13 market or portfolio values by
-  value, including `handle_init_market`, `handle_init_portfolio`,
-  `handle_trade_nocpi`, `handle_top_up_insurance`, and `handle_resolve_market`
 
-The wrapper frames need heap/in-place account decoding instead of large
-by-value locals. The two engine frames require SBF-safe engine entrypoints or
-removing large by-value staging inside the engine.
+The wrapper avoids calling `MarketGroupV13::new` on-chain, but the symbol is
+still compiled in the dependency. `TradeNoCpi` still calls
+`execute_trade_with_fee_not_atomic`; LiteSVM confirms the BPF trade path traps
+with an access violation consistent with that engine stack warning. Crank CU
+tests therefore seed no-position portfolio state through BPF and measure the
+BPF crank path directly. Liquidation CU cannot be measured through the wrapper
+until the engine exposes an SBF-safe trade/position setup path or removes the
+large staged copies in `execute_trade_with_fee_not_atomic`.
+
+Engine proof sweep status for the same SHA:
+
+- Wrapper Kani proofs: PASS, 3/3.
+- Engine `scripts/run_kani_full_audit.sh`: started against
+  `/home/anatoly/percolator` at the same SHA. It produced PASS results through
+  the early v13 harnesses but hit 10-minute timeouts on:
+  - `proof_v13_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_once`
+  - `proof_v13_funding_accrual_refresh_matches_sign_and_floor`
+
+Those are proof-time blockers in the engine checkout under the requested
+10-minute cap, not wrapper test failures.
 
 ## Original API Break
 
