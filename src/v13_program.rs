@@ -727,6 +727,9 @@ pub mod processor {
             return Err(PercolatorError::AlreadyInitialized.into());
         }
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if group.mode != MarketModeV13::Live {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
         let account = new_portfolio_boxed(ProvenanceHeaderV13::new(
             market_ai.key.to_bytes(),
             portfolio_ai.key.to_bytes(),
@@ -761,7 +764,11 @@ pub mod processor {
         verify_token_program(token_program)?;
 
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if group.mode != MarketModeV13::Live {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
         let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
+        expect_portfolio_account_key(portfolio.as_ref(), portfolio_ai.key)?;
         expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
         let mint = Pubkey::new_from_array(cfg.collateral_mint);
         let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
@@ -801,7 +808,11 @@ pub mod processor {
         verify_token_program(token_program)?;
 
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if group.mode != MarketModeV13::Live {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
         let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
+        expect_portfolio_account_key(portfolio.as_ref(), portfolio_ai.key)?;
         expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
         let mint = Pubkey::new_from_array(cfg.collateral_mint);
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
@@ -851,9 +862,14 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         expect_owner(account_a_ai, program_id)?;
         expect_owner(account_b_ai, program_id)?;
+        if account_a_ai.key == account_b_ai.key {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         let mut account_a = state::read_portfolio_boxed(&account_a_ai.try_borrow_data()?)?;
         let mut account_b = state::read_portfolio_boxed(&account_b_ai.try_borrow_data()?)?;
+        expect_portfolio_account_key(account_a.as_ref(), account_a_ai.key)?;
+        expect_portfolio_account_key(account_b.as_ref(), account_b_ai.key)?;
         expect_portfolio_owner(account_a.as_ref(), signer_a.key)?;
         expect_portfolio_owner(account_b.as_ref(), signer_b.key)?;
         let size_abs = if size_q == i128::MIN || size_q == 0 {
@@ -907,6 +923,7 @@ pub mod processor {
         expect_owner(portfolio_ai, program_id)?;
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         let portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
+        expect_portfolio_account_key(portfolio.as_ref(), portfolio_ai.key)?;
         expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
         group
             .close_portfolio_account(portfolio.as_ref())
@@ -936,6 +953,9 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         verify_token_program(token_program)?;
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if group.mode != MarketModeV13::Live {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
         if cfg.insurance_authority != signer.key.to_bytes() {
             return Err(PercolatorError::Unauthorized.into());
         }
@@ -969,6 +989,9 @@ pub mod processor {
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if group.mode != MarketModeV13::Live {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
         if cfg.admin != admin.key.to_bytes() {
             return Err(PercolatorError::Unauthorized.into());
         }
@@ -1002,6 +1025,7 @@ pub mod processor {
 
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
+        expect_portfolio_account_key(portfolio.as_ref(), portfolio_ai.key)?;
         expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
         let mint = Pubkey::new_from_array(cfg.collateral_mint);
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
@@ -1215,6 +1239,16 @@ pub mod processor {
         Ok(())
     }
 
+    fn expect_portfolio_account_key(
+        portfolio: &PortfolioAccountV13,
+        key: &Pubkey,
+    ) -> Result<(), ProgramError> {
+        if portfolio.provenance_header.portfolio_account_id != key.to_bytes() {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
+        Ok(())
+    }
+
     fn with_one_portfolio<'a, F>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
@@ -1240,6 +1274,7 @@ pub mod processor {
         expect_owner(portfolio_ai, program_id)?;
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
+        expect_portfolio_account_key(portfolio.as_ref(), portfolio_ai.key)?;
         if owner_must_sign {
             expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
         }

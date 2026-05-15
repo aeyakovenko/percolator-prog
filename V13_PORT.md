@@ -21,22 +21,22 @@ mechanically reused. `V13_TEST_PORT_COVERAGE.md` tracks the retired v12 test
 classes and the active v13 wrapper/engine coverage that replaces each class.
 The replacement suite is:
 
-- `tests/v13_wrapper.rs`: 35 native account-local wrapper tests
+- `tests/v13_wrapper.rs`: 46 native account-local wrapper tests
 - `tests/v13_cu.rs`: 5 LiteSVM BPF wrapper/CU tests
 - `tests/v13_kani.rs`: 8 wrapper ABI Kani proofs
 
 `tests/v13_cu.rs` currently measures:
 
-- init portfolio: 3,366 CU
-- deposit: 14,761 CU
-- withdraw: 22,082 CU
-- top-up insurance: 12,792 CU
-- resolve: 1,455 CU
-- close resolved: 20,093 CU
-- refresh crank: 8,988 CU
-- recovery crank: 3,239 CU
-- refresh crank before 64 extra portfolios: 8,986 CU
-- refresh crank after 64 extra portfolios: 8,986 CU
+- init portfolio: 3,368 CU
+- deposit: 14,789 CU
+- withdraw: 22,111 CU
+- top-up insurance: 12,796 CU
+- resolve: 1,457 CU
+- close resolved: 20,122 CU
+- refresh crank: 9,016 CU
+- recovery crank: 3,267 CU
+- refresh crank before 64 extra portfolios: 9,014 CU
+- refresh crank after 64 extra portfolios: 9,014 CU
 
 It also verifies that BPF `Deposit`, `Withdraw`, `TopUpInsurance`, and
 `CloseResolved` move real SPL Token balances in lockstep with `group.vault`,
