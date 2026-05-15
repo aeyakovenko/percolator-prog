@@ -7356,7 +7356,7 @@ fn test_static_tradenocpi_accepts_consented_wide_exec_price() {
     env.deposit(&user_b, user_b_idx, 1_000_000_000_000);
 
     let cfg = read_market_config(&env);
-    let exec_price = cfg.last_effective_price_e6 * 105 / 100;
+    let exec_price = cfg.last_effective_price_e6 * 150 / 100;
     try_trade_nocpi_with_exec_price_in_tradecpi_env(
         &mut env,
         &user_a,
@@ -7442,7 +7442,16 @@ fn test_external_hybrid_fresh_duplicate_oracle_uses_external_mark_not_trade_mark
     );
 
     let insurance_before = env.read_insurance_balance();
-    let exec_price = cfg_before.last_effective_price_e6 * 105 / 100;
+    let exec_price = cfg_before.last_effective_price_e6 * 150 / 100;
+    let exec_move_bps = percolator_prog::policy::price_move_bps_ceil(
+        cfg_before.last_effective_price_e6,
+        exec_price,
+    )
+    .unwrap();
+    assert!(
+        exec_move_bps > read_max_price_move_bps(&env),
+        "test must exercise execution-price flexibility beyond the oracle clamp budget"
+    );
     let size = 10_000_000i128;
 
     try_trade_nocpi_with_exec_price_in_tradecpi_env(
@@ -7470,6 +7479,85 @@ fn test_external_hybrid_fresh_duplicate_oracle_uses_external_mark_not_trade_mark
         insurance_after - insurance_before,
         two_sided_fee_for_trade(size, exec_price, 1),
         "regular-hours hybrid trades must pay only the configured base fee"
+    );
+}
+
+#[test]
+fn test_external_hybrid_fresh_tradecpi_accepts_wide_matcher_price_without_mark_update() {
+    let mut env = TradeCpiTestEnv::new();
+    init_external_hybrid_with_dynamic_fee(&mut env, 10_000, 1, 0);
+
+    let matcher_prog = env.matcher_program_id;
+    let lp = Keypair::new();
+    let (lp_idx, matcher_ctx) = init_lp_with_passive_matcher_params(
+        &mut env,
+        &lp,
+        &matcher_prog,
+        0,
+        5_000,
+        5_000,
+        20_000_000_000,
+    );
+    env.deposit(&lp, lp_idx, 1_000_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 1_000_000_000_000);
+
+    // The Pyth account still carries its init publish_time=100 and is
+    // well inside max_staleness_secs=10 at slot 105. TradeCpi execution
+    // price is matcher/user-consented, so it may be much wider than the
+    // oracle clamp; the mark/index path remains external-oracle owned.
+    set_tradecpi_clock_only(&mut env, 105);
+    let cfg_before = read_market_config(&env);
+    assert!(
+        !percolator_prog::oracle::hybrid_soft_stale_matured(&cfg_before, 105),
+        "test setup must remain before hybrid soft-stale fallback"
+    );
+
+    let exec_price = cfg_before.last_effective_price_e6 * 15_000 / 10_000;
+    let exec_move_bps = percolator_prog::policy::price_move_bps_ceil(
+        cfg_before.last_effective_price_e6,
+        exec_price,
+    )
+    .unwrap();
+    assert!(
+        exec_move_bps > read_max_price_move_bps(&env),
+        "test must exercise matcher spread beyond the oracle clamp budget"
+    );
+
+    let insurance_before = env.read_insurance_balance();
+    let size = 10_000_000i128;
+    env.try_trade_cpi(
+        &user,
+        &lp.pubkey(),
+        lp_idx,
+        user_idx,
+        size,
+        &matcher_prog,
+        &matcher_ctx,
+    )
+    .expect("regular-hours hybrid TradeCpi should accept a matcher-consented wide exec price");
+
+    let cfg_after = read_market_config(&env);
+    let insurance_after = env.read_insurance_balance();
+    assert_ne!(
+        env.read_account_position(user_idx),
+        0,
+        "wide-price TradeCpi must execute, not be pre-rejected by wrapper banding"
+    );
+    assert_eq!(
+        cfg_after.mark_ewma_e6, cfg_before.mark_ewma_e6,
+        "regular-hours hybrid TradeCpi must keep the mark pinned to the external oracle baseline"
+    );
+    assert_eq!(
+        cfg_after.mark_ewma_last_slot, cfg_before.mark_ewma_last_slot,
+        "regular-hours TradeCpi must not stamp the fallback EWMA clock"
+    );
+    assert_eq!(
+        insurance_after - insurance_before,
+        two_sided_fee_for_trade(size, exec_price, 1),
+        "regular-hours hybrid TradeCpi must pay only the configured base fee"
     );
 }
 
