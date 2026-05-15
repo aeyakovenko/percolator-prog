@@ -21,8 +21,8 @@ anchor-v2 = ["dep:anchor-lang-v2"]
 # default (MAX_ACCOUNTS=4096). Both the BPF binary and the test
 # harness honor these flags so tests run against the same size tier
 # as the deployed program.
-small = ["percolator/small"]
-medium = ["percolator/medium"]
+small = []
+medium = []
 
 [dependencies]
 solana-program = "1.18"
@@ -48,7 +48,7 @@ pinocchio = "0.6"
 arrayref = "0.3"
 num-derive = "0.4"
 num-traits = "0.2"
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "1dc4466e1a6c3532f2781bc242fa4e4033751fb6" }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "816cc22cb49df3cb8d8d063fcd06e1bd5d3eef9e" }
 anchor-lang-v2 = { git = "https://github.com/solana-foundation/anchor", rev = "e3cf760826fa0a60f247635ea0572e59861ec9b5", package = "anchor-lang-v2", default-features = false, features = ["alloc", "guardrails"], optional = true }
 
 [dev-dependencies]
