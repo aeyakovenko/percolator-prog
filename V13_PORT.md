@@ -17,9 +17,11 @@ Passing:
 
 The old v12 integration tests are compiled out on this branch with
 `#![cfg(any())]`; they target the removed global slab ABI and cannot be
-mechanically reused. The replacement suite is:
+mechanically reused. `V13_TEST_PORT_COVERAGE.md` tracks the retired v12 test
+classes and the active v13 wrapper/engine coverage that replaces each class.
+The replacement suite is:
 
-- `tests/v13_wrapper.rs`: 17 native account-local wrapper tests
+- `tests/v13_wrapper.rs`: 23 native account-local wrapper tests
 - `tests/v13_cu.rs`: 4 LiteSVM BPF wrapper/CU tests
 - `tests/v13_kani.rs`: 7 wrapper ABI Kani proofs
 

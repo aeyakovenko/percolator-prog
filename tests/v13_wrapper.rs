@@ -132,6 +132,10 @@ fn mint_account() -> TestAccount {
     TestAccount::new_with_data(Pubkey::new_unique(), spl_token::ID, make_mint_data())
 }
 
+fn invalid_mint_account() -> TestAccount {
+    TestAccount::new_with_data(Pubkey::new_unique(), Pubkey::new_unique(), make_mint_data())
+}
+
 fn user_token_account(owner: Pubkey, mint: Pubkey, amount: u64) -> TestAccount {
     TestAccount::new_with_data(
         Pubkey::new_unique(),
@@ -328,6 +332,96 @@ fn v13_wrapper_init_binds_market_and_portfolio_provenance() {
 }
 
 #[test]
+fn v13_wrapper_init_market_rejects_invalid_mint_and_double_init() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut bad_mint = invalid_mint_account();
+
+    let before = market.data.clone();
+    let invalid_mint = run_ix(
+        Instruction::InitMarket {
+            h_min: 0,
+            h_max: 10,
+            initial_price: 100,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_trading_fee_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            maintenance_fee_per_slot: 0,
+        },
+        &mut [&mut admin, &mut market, &mut bad_mint],
+    );
+    assert_err_and_market_unchanged(invalid_mint, &market, &before);
+
+    let mut good_mint = mint_account();
+    run_ix(
+        Instruction::InitMarket {
+            h_min: 0,
+            h_max: 10,
+            initial_price: 100,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_trading_fee_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            maintenance_fee_per_slot: 0,
+        },
+        &mut [&mut admin, &mut market, &mut good_mint],
+    )
+    .unwrap();
+    let initialized = market.data.clone();
+    let double_init = run_ix(
+        Instruction::InitMarket {
+            h_min: 0,
+            h_max: 10,
+            initial_price: 100,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_trading_fee_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            maintenance_fee_per_slot: 0,
+        },
+        &mut [&mut admin, &mut market, &mut good_mint],
+    );
+    assert_err_and_market_unchanged(double_init, &market, &initialized);
+}
+
+#[test]
+fn v13_wrapper_init_portfolio_requires_signer_and_rejects_double_init_without_mutation() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut unsigned_owner = TestAccount::new(owner.key, Pubkey::new_unique(), 0);
+    let mut portfolio = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let missing_signature = run_ix(
+        Instruction::InitPortfolio,
+        &mut [&mut unsigned_owner, &mut market, &mut portfolio],
+    );
+    assert_err_and_market_unchanged(missing_signature, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    let initialized_market = market.data.clone();
+    let initialized_portfolio = portfolio.data.clone();
+    let double_init = run_ix(
+        Instruction::InitPortfolio,
+        &mut [&mut owner, &mut market, &mut portfolio],
+    );
+    assert_err_and_market_unchanged(double_init, &market, &initialized_market);
+    assert_eq!(
+        portfolio.data, initialized_portfolio,
+        "double init must fail before market materialized-count mutation"
+    );
+}
+
+#[test]
 fn v13_wrapper_top_up_insurance_requires_authority_and_updates_vault() {
     let mut admin = signer();
     let mut market = market_account();
@@ -367,6 +461,43 @@ fn v13_wrapper_top_up_insurance_requires_authority_and_updates_vault() {
     let (_, group) = state::read_market(&market.data).unwrap();
     assert_eq!(group.insurance, 777);
     assert_eq!(group.vault, 777);
+}
+
+#[test]
+fn v13_wrapper_top_up_insurance_rejects_wrong_mint_and_insufficient_source_balance() {
+    let mut admin = signer();
+    let mut market = market_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    let mut wrong_source = user_token_account(admin.key, Pubkey::new_unique(), 777);
+    let mut short_source = user_token_account(admin.key, mint, 776);
+    let mut vault = vault_token_account(&market, mint, 0);
+    let mut token_program = token_program_account();
+    let before = market.data.clone();
+
+    let wrong_mint = run_ix(
+        Instruction::TopUpInsurance { amount: 777 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut wrong_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(wrong_mint, &market, &before);
+
+    let short_balance = run_ix(
+        Instruction::TopUpInsurance { amount: 777 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut short_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(short_balance, &market, &before);
 }
 
 #[test]
@@ -674,6 +805,83 @@ fn v13_wrapper_tradenocpi_rejects_when_consented_price_would_break_margin() {
 }
 
 #[test]
+fn v13_wrapper_tradenocpi_rejects_bad_size_and_missing_signer_before_mutation() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut unsigned_b = TestAccount::new(owner_b.key, Pubkey::new_unique(), 0);
+    let mut account_a = portfolio_account();
+    let mut account_b = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner_a, &mut market, &mut account_a);
+    init_portfolio(&mut owner_b, &mut market, &mut account_b);
+    deposit(&mut owner_a, &mut market, &mut account_a, 1_000_000);
+    deposit(&mut owner_b, &mut market, &mut account_b, 1_000_000);
+
+    let before_market = market.data.clone();
+    let before_a = account_a.data.clone();
+    let before_b = account_b.data.clone();
+    let missing_signature = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut unsigned_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+        ],
+    );
+    assert_err_and_market_unchanged(missing_signature, &market, &before_market);
+    assert_eq!(account_a.data, before_a);
+    assert_eq!(account_b.data, before_b);
+
+    let zero_size = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: 0,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+        ],
+    );
+    assert_err_and_market_unchanged(zero_size, &market, &before_market);
+    assert_eq!(account_a.data, before_a);
+    assert_eq!(account_b.data, before_b);
+
+    let min_size = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: i128::MIN,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+        ],
+    );
+    assert_err_and_market_unchanged(min_size, &market, &before_market);
+    assert_eq!(account_a.data, before_a);
+    assert_eq!(account_b.data, before_b);
+}
+
+#[test]
 fn v13_wrapper_permissionless_crank_advances_account_local_market_progress() {
     let mut admin = signer();
     let mut market = market_account();
@@ -891,6 +1099,98 @@ fn v13_wrapper_permissionless_recovery_is_public_progress() {
         group.recovery_reason,
         Some(PermissionlessRecoveryReasonV13::BelowProgressFloor)
     );
+}
+
+#[test]
+fn v13_wrapper_permissionless_crank_rejects_invalid_action_and_recovery_reason() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let bad_action = run_ix(
+        Instruction::PermissionlessCrank {
+            action: 9,
+            asset_index: 0,
+            now_slot: 0,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    );
+    assert_err_and_market_unchanged(bad_action, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+
+    let bad_recovery_reason = run_ix(
+        Instruction::PermissionlessCrank {
+            action: 3,
+            asset_index: 0,
+            now_slot: 0,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 99,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    );
+    assert_err_and_market_unchanged(bad_recovery_reason, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+}
+
+#[test]
+fn v13_wrapper_resolve_market_is_admin_only_and_blocks_live_trade() {
+    let mut admin = signer();
+    let mut attacker = signer();
+    let mut market = market_account();
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut portfolio_a = portfolio_account();
+    let mut portfolio_b = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner_a, &mut market, &mut portfolio_a);
+    init_portfolio(&mut owner_b, &mut market, &mut portfolio_b);
+    deposit(&mut owner_a, &mut market, &mut portfolio_a, 1_000_000);
+    deposit(&mut owner_b, &mut market, &mut portfolio_b, 1_000_000);
+
+    let before = market.data.clone();
+    let non_admin = run_ix(
+        Instruction::ResolveMarket,
+        &mut [&mut attacker, &mut market],
+    );
+    assert_err_and_market_unchanged(non_admin, &market, &before);
+
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+    let resolved_market = market.data.clone();
+    let before_a = portfolio_a.data.clone();
+    let before_b = portfolio_b.data.clone();
+    let trade_after_resolve = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut portfolio_a,
+            &mut portfolio_b,
+        ],
+    );
+    assert_err_and_market_unchanged(trade_after_resolve, &market, &resolved_market);
+    assert_eq!(portfolio_a.data, before_a);
+    assert_eq!(portfolio_b.data, before_b);
 }
 
 #[test]

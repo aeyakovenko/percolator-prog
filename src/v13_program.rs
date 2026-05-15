@@ -723,6 +723,9 @@ pub mod processor {
         expect_writable(portfolio_ai)?;
         expect_owner(market_ai, program_id)?;
         expect_owner(portfolio_ai, program_id)?;
+        if state::is_initialized(&portfolio_ai.try_borrow_data()?) {
+            return Err(PercolatorError::AlreadyInitialized.into());
+        }
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         let account = new_portfolio_boxed(ProvenanceHeaderV13::new(
             market_ai.key.to_bytes(),
