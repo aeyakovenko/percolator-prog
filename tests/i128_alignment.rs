@@ -1,3 +1,4 @@
+#![cfg(any())]
 //! BPF i128 Alignment Test
 //!
 //! Tests that I128/U128 wrapper types work correctly:

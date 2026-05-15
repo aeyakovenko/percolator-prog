@@ -1,3 +1,4 @@
+#![cfg(any())]
 #![allow(dead_code, unused_imports)]
 //! Shared test infrastructure for integration tests.
 

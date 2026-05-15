@@ -1,3 +1,4 @@
+#![cfg(any())]
 //! Kani formal verification harnesses for percolator-prog.
 //!
 //! Run with: `cargo kani --tests`

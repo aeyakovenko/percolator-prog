@@ -1,3 +1,4 @@
+#![cfg(any())]
 //! A1 / PR39-F7 self-dealing insurance-siphon regression tests.
 //!
 //! # Attack

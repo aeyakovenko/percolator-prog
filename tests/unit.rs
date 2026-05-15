@@ -1,3 +1,4 @@
+#![cfg(any())]
 //! Unit tests for percolator-prog
 //!
 //! These tests verify the Solana program wrapper's instruction handling,

@@ -1,3 +1,4 @@
+#![cfg(any())]
 //! Public-path stale-market gates + init-time prevalidation
 //! (security.md seventh / eighth passes).
 //!

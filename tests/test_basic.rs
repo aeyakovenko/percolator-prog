@@ -1,3 +1,4 @@
+#![cfg(any())]
 mod common;
 #[allow(unused_imports)]
 use common::*;

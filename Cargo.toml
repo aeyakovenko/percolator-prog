@@ -7,7 +7,7 @@ publish = false
 [lib]
 crate-type = ["cdylib", "lib"]
 name = "percolator_prog"
-path = "src/percolator.rs"
+path = "src/v13_program.rs"
 
 [features]
 default = ["anchor-v2"]
