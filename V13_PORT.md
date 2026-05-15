@@ -21,7 +21,7 @@ mechanically reused. `V13_TEST_PORT_COVERAGE.md` tracks the retired v12 test
 classes and the active v13 wrapper/engine coverage that replaces each class.
 The replacement suite is:
 
-- `tests/v13_wrapper.rs`: 32 native account-local wrapper tests
+- `tests/v13_wrapper.rs`: 35 native account-local wrapper tests
 - `tests/v13_cu.rs`: 5 LiteSVM BPF wrapper/CU tests
 - `tests/v13_kani.rs`: 8 wrapper ABI Kani proofs
 
