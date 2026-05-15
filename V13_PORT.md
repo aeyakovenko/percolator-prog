@@ -2,7 +2,7 @@
 
 Engine branch tested: `aeyakovenko/percolator@v13`
 
-Pinned engine SHA: `4b581d81a704d9bbf0d3b0e720dc532dfa7bf3a3`
+Pinned engine SHA: `aa1bc92956038e966cb1a11a1b7155bafd03d888`
 
 ## Current Retest Result
 
@@ -19,16 +19,22 @@ The old v12 integration tests are compiled out on this branch with
 `#![cfg(any())]`; they target the removed global slab ABI and cannot be
 mechanically reused. The replacement suite is:
 
-- `tests/v13_wrapper.rs`: 13 native account-local wrapper tests
-- `tests/v13_cu.rs`: 2 LiteSVM BPF crank CU tests
+- `tests/v13_wrapper.rs`: 15 native account-local wrapper tests
+- `tests/v13_cu.rs`: 3 LiteSVM BPF wrapper/CU tests
 - `tests/v13_kani.rs`: 3 wrapper ABI Kani proofs
 
 `tests/v13_cu.rs` currently measures:
 
-- refresh crank: 8,985 CU
-- recovery crank: 3,236 CU
-- refresh crank before 64 extra portfolios: 8,983 CU
-- refresh crank after 64 extra portfolios: 8,983 CU
+- refresh crank: 8,984 CU
+- recovery crank: 3,235 CU
+- refresh crank before 64 extra portfolios: 8,982 CU
+- refresh crank after 64 extra portfolios: 8,982 CU
+
+It also verifies that BPF `Deposit`, `Withdraw`, and `TopUpInsurance` move
+real SPL Token balances in lockstep with `group.vault`, user capital, and
+insurance. The v13 wrapper ABI now binds markets to a collateral mint at
+`InitMarket`, validates user/vault token accounts, and wraps public ledger
+mutations with SPL Token CPIs.
 
 This confirms the wrapper crank path is account-local and does not scale with
 materialized portfolio count. The v13 engine no longer has a global slab scan,

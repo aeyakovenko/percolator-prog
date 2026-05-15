@@ -15,8 +15,15 @@ use percolator::{
     V13Error, V13_MAX_PORTFOLIO_ASSETS_N,
 };
 use solana_program::{
-    account_info::AccountInfo, clock::Clock, declare_id, entrypoint::ProgramResult,
-    program_error::ProgramError, pubkey::Pubkey, sysvar::Sysvar,
+    account_info::AccountInfo,
+    clock::Clock,
+    declare_id,
+    entrypoint::ProgramResult,
+    program::{invoke, invoke_signed},
+    program_error::ProgramError,
+    program_pack::Pack,
+    pubkey::Pubkey,
+    sysvar::Sysvar,
 };
 
 declare_id!("Perco1ator111111111111111111111111111111111");
@@ -53,6 +60,10 @@ pub mod error {
         ExpectedWritable,
         Unauthorized,
         InvalidInstruction,
+        InvalidMint,
+        InvalidTokenAccount,
+        InvalidVaultAccount,
+        InvalidTokenProgram,
         EngineInvalidConfig,
         EngineArithmeticOverflow,
         EngineProvenanceMismatch,
@@ -597,17 +608,8 @@ pub mod processor {
                 maintenance_fee_per_slot,
             ),
             Instruction::InitPortfolio => handle_init_portfolio(program_id, accounts),
-            Instruction::Deposit { amount } => {
-                with_one_portfolio(program_id, accounts, true, |group, portfolio, _cfg| {
-                    group.deposit_not_atomic(portfolio, amount)
-                })
-            }
-            Instruction::Withdraw { amount } => {
-                with_one_portfolio(program_id, accounts, true, |group, portfolio, _cfg| {
-                    let prices = effective_prices(group);
-                    group.withdraw_not_atomic(portfolio, amount, &prices)
-                })
-            }
+            Instruction::Deposit { amount } => handle_deposit(program_id, accounts, amount),
+            Instruction::Withdraw { amount } => handle_withdraw(program_id, accounts, amount),
             Instruction::PermissionlessCrank {
                 action,
                 asset_index,
@@ -679,9 +681,11 @@ pub mod processor {
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
+        let mint_ai = account(accounts, 2)?;
         expect_signer(admin)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
+        verify_mint(mint_ai)?;
         let mut cfg = V13Config::public_user_fund(1, h_min, h_max);
         cfg.maintenance_margin_bps = maintenance_margin_bps;
         cfg.initial_margin_bps = initial_margin_bps;
@@ -698,7 +702,7 @@ pub mod processor {
         group.assets[0].fund_px_last = initial_price;
         let wrapper = WrapperConfigV13 {
             admin: admin.key.to_bytes(),
-            collateral_mint: [0u8; 32],
+            collateral_mint: mint_ai.key.to_bytes(),
             maintenance_fee_per_slot,
             trade_fee_base_bps: max_trading_fee_bps,
             permissionless_resolve_stale_slots: 0,
@@ -738,6 +742,96 @@ pub mod processor {
             .map_err(map_v13_error)?;
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
         state::init_portfolio_account(&mut portfolio_ai.try_borrow_mut_data()?, account.as_ref())
+    }
+
+    #[inline(never)]
+    fn handle_deposit<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        amount: u128,
+    ) -> ProgramResult {
+        let owner = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let portfolio_ai = account(accounts, 2)?;
+        let source_token = account(accounts, 3)?;
+        let vault_token = account(accounts, 4)?;
+        let token_program = account(accounts, 5)?;
+        expect_signer(owner)?;
+        expect_writable(market_ai)?;
+        expect_writable(portfolio_ai)?;
+        expect_writable(source_token)?;
+        expect_writable(vault_token)?;
+        expect_owner(market_ai, program_id)?;
+        expect_owner(portfolio_ai, program_id)?;
+        verify_token_program(token_program)?;
+
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
+        expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
+        let mint = Pubkey::new_from_array(cfg.collateral_mint);
+        let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
+        verify_user_token_account(source_token, owner.key, &mint)?;
+        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+        let amount_u64 = amount_to_u64(amount)?;
+        require_token_balance(source_token, amount_u64)?;
+
+        group
+            .deposit_not_atomic(portfolio.as_mut(), amount)
+            .map_err(map_v13_error)?;
+        transfer_tokens(token_program, source_token, vault_token, owner, amount_u64)?;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
+        state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())
+    }
+
+    #[inline(never)]
+    fn handle_withdraw<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        amount: u128,
+    ) -> ProgramResult {
+        let owner = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let portfolio_ai = account(accounts, 2)?;
+        let dest_token = account(accounts, 3)?;
+        let vault_token = account(accounts, 4)?;
+        let vault_authority_ai = account(accounts, 5)?;
+        let token_program = account(accounts, 6)?;
+        expect_signer(owner)?;
+        expect_writable(market_ai)?;
+        expect_writable(portfolio_ai)?;
+        expect_writable(dest_token)?;
+        expect_writable(vault_token)?;
+        expect_owner(market_ai, program_id)?;
+        expect_owner(portfolio_ai, program_id)?;
+        verify_token_program(token_program)?;
+
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
+        expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
+        let mint = Pubkey::new_from_array(cfg.collateral_mint);
+        let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
+        expect_key(vault_authority_ai, &vault_authority)?;
+        verify_user_token_account(dest_token, owner.key, &mint)?;
+        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+        let amount_u64 = amount_to_u64(amount)?;
+        require_token_balance(vault_token, amount_u64)?;
+
+        let prices = effective_prices(group.as_ref());
+        group
+            .withdraw_not_atomic(portfolio.as_mut(), amount, &prices)
+            .map_err(map_v13_error)?;
+        let bump_arr = [bump];
+        let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+        transfer_tokens_signed(
+            token_program,
+            vault_token,
+            dest_token,
+            vault_authority_ai,
+            amount_u64,
+            signer_seeds,
+        )?;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
+        state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())
     }
 
     #[inline(never)]
@@ -837,13 +931,25 @@ pub mod processor {
     ) -> ProgramResult {
         let signer = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
+        let source_token = account(accounts, 2)?;
+        let vault_token = account(accounts, 3)?;
+        let token_program = account(accounts, 4)?;
         expect_signer(signer)?;
         expect_writable(market_ai)?;
+        expect_writable(source_token)?;
+        expect_writable(vault_token)?;
         expect_owner(market_ai, program_id)?;
+        verify_token_program(token_program)?;
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         if cfg.insurance_authority != signer.key.to_bytes() {
             return Err(PercolatorError::Unauthorized.into());
         }
+        let mint = Pubkey::new_from_array(cfg.collateral_mint);
+        let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
+        verify_user_token_account(source_token, signer.key, &mint)?;
+        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+        let amount_u64 = amount_to_u64(amount)?;
+        require_token_balance(source_token, amount_u64)?;
         group.insurance = group
             .insurance
             .checked_add(amount)
@@ -853,6 +959,7 @@ pub mod processor {
             .checked_add(amount)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         group.assert_public_invariants().map_err(map_v13_error)?;
+        transfer_tokens(token_program, source_token, vault_token, signer, amount_u64)?;
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
     }
 
@@ -1132,6 +1239,159 @@ pub mod processor {
             7 => Ok(PermissionlessRecoveryReasonV13::CounterOrEpochOverflowDeclaredRecovery),
             _ => Err(V13Error::InvalidConfig),
         }
+    }
+
+    fn amount_to_u64(amount: u128) -> Result<u64, ProgramError> {
+        u64::try_from(amount).map_err(|_| PercolatorError::InvalidInstruction.into())
+    }
+
+    fn derive_vault_authority(program_id: &Pubkey, market_key: &Pubkey) -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[b"vault", market_key.as_ref()], program_id)
+    }
+
+    fn expect_key(ai: &AccountInfo, expected: &Pubkey) -> Result<(), ProgramError> {
+        if ai.key != expected {
+            return Err(ProgramError::InvalidArgument);
+        }
+        Ok(())
+    }
+
+    fn verify_mint(mint_ai: &AccountInfo) -> Result<(), ProgramError> {
+        if mint_ai.owner != &spl_token::ID {
+            return Err(PercolatorError::InvalidMint.into());
+        }
+        if mint_ai.data_len() != spl_token::state::Mint::LEN {
+            return Err(PercolatorError::InvalidMint.into());
+        }
+        let data = mint_ai.try_borrow_data()?;
+        spl_token::state::Mint::unpack(&data)
+            .map(|_| ())
+            .map_err(|_| PercolatorError::InvalidMint.into())
+    }
+
+    fn verify_token_program(token_program: &AccountInfo) -> Result<(), ProgramError> {
+        if *token_program.key != spl_token::ID || !token_program.executable {
+            return Err(PercolatorError::InvalidTokenProgram.into());
+        }
+        Ok(())
+    }
+
+    fn unpack_token_account(
+        token_ai: &AccountInfo,
+    ) -> Result<spl_token::state::Account, ProgramError> {
+        if token_ai.owner != &spl_token::ID {
+            return Err(PercolatorError::InvalidTokenAccount.into());
+        }
+        if token_ai.data_len() != spl_token::state::Account::LEN {
+            return Err(PercolatorError::InvalidTokenAccount.into());
+        }
+        let data = token_ai.try_borrow_data()?;
+        spl_token::state::Account::unpack(&data)
+            .map_err(|_| PercolatorError::InvalidTokenAccount.into())
+    }
+
+    fn verify_user_token_account(
+        token_ai: &AccountInfo,
+        expected_owner: &Pubkey,
+        expected_mint: &Pubkey,
+    ) -> Result<(), ProgramError> {
+        let token = unpack_token_account(token_ai)?;
+        if token.mint != *expected_mint {
+            return Err(PercolatorError::InvalidMint.into());
+        }
+        if token.owner != *expected_owner
+            || token.state != spl_token::state::AccountState::Initialized
+        {
+            return Err(PercolatorError::InvalidTokenAccount.into());
+        }
+        Ok(())
+    }
+
+    fn verify_vault_token_account(
+        token_ai: &AccountInfo,
+        expected_owner: &Pubkey,
+        expected_mint: &Pubkey,
+    ) -> Result<(), ProgramError> {
+        let token = unpack_token_account(token_ai)?;
+        if token.mint != *expected_mint {
+            return Err(PercolatorError::InvalidMint.into());
+        }
+        if token.owner != *expected_owner
+            || token.state != spl_token::state::AccountState::Initialized
+            || token.delegate.is_some()
+            || token.close_authority.is_some()
+        {
+            return Err(PercolatorError::InvalidVaultAccount.into());
+        }
+        Ok(())
+    }
+
+    fn require_token_balance(token_ai: &AccountInfo, amount: u64) -> Result<(), ProgramError> {
+        let token = unpack_token_account(token_ai)?;
+        if token.amount < amount {
+            return Err(PercolatorError::InvalidTokenAccount.into());
+        }
+        Ok(())
+    }
+
+    fn transfer_tokens<'a>(
+        token_program: &AccountInfo<'a>,
+        source: &AccountInfo<'a>,
+        dest: &AccountInfo<'a>,
+        authority: &AccountInfo<'a>,
+        amount: u64,
+    ) -> Result<(), ProgramError> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let ix = spl_token::instruction::transfer(
+            token_program.key,
+            source.key,
+            dest.key,
+            authority.key,
+            &[],
+            amount,
+        )?;
+        invoke(
+            &ix,
+            &[
+                source.clone(),
+                dest.clone(),
+                authority.clone(),
+                token_program.clone(),
+            ],
+        )
+    }
+
+    fn transfer_tokens_signed<'a>(
+        token_program: &AccountInfo<'a>,
+        source: &AccountInfo<'a>,
+        dest: &AccountInfo<'a>,
+        authority: &AccountInfo<'a>,
+        amount: u64,
+        signer_seeds: &[&[&[u8]]],
+    ) -> Result<(), ProgramError> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let ix = spl_token::instruction::transfer(
+            token_program.key,
+            source.key,
+            dest.key,
+            authority.key,
+            &[],
+            amount,
+        )?;
+        invoke_signed(
+            &ix,
+            &[
+                source.clone(),
+                dest.clone(),
+                authority.clone(),
+                token_program.clone(),
+            ],
+            signer_seeds,
+        )
     }
 }
 

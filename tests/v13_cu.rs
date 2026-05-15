@@ -8,10 +8,13 @@ use solana_sdk::{
     account::Account,
     compute_budget::ComputeBudgetInstruction,
     instruction::{AccountMeta, Instruction},
+    program_option::COption,
+    program_pack::Pack,
     pubkey::Pubkey,
     signature::{Keypair, Signer},
     transaction::Transaction,
 };
+use spl_token::state::{Account as TokenAccount, AccountState, Mint};
 use std::path::PathBuf;
 
 const CRANK_CU_LIMIT: u64 = 300_000;
@@ -27,6 +30,60 @@ fn program_path() -> PathBuf {
     path
 }
 
+fn spl_token_program_path() -> PathBuf {
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+            home.push(".cargo");
+            home
+        });
+    let registry_src = cargo_home.join("registry/src");
+    for registry in std::fs::read_dir(&registry_src).expect("registry/src") {
+        let registry = registry.expect("registry entry").path();
+        let candidate = registry.join("litesvm-0.1.0/src/spl/programs/spl_token-3.5.0.so");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    panic!("could not find LiteSVM SPL Token BPF under {registry_src:?}");
+}
+
+fn make_mint_data() -> Vec<u8> {
+    let mut data = vec![0u8; Mint::LEN];
+    Mint::pack(
+        Mint {
+            mint_authority: COption::None,
+            supply: 0,
+            decimals: 0,
+            is_initialized: true,
+            freeze_authority: COption::None,
+        },
+        &mut data,
+    )
+    .unwrap();
+    data
+}
+
+fn make_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
+    let mut data = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint,
+            owner,
+            amount,
+            delegate: COption::None,
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 0,
+            close_authority: COption::None,
+        },
+        &mut data,
+    )
+    .unwrap();
+    data
+}
+
 fn cu_ix() -> Instruction {
     ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)
 }
@@ -35,7 +92,11 @@ struct V13CuEnv {
     svm: LiteSVM,
     program_id: Pubkey,
     payer: Keypair,
+    admin: Keypair,
     market: Pubkey,
+    mint: Pubkey,
+    vault: Pubkey,
+    vault_authority: Pubkey,
 }
 
 impl V13CuEnv {
@@ -44,12 +105,40 @@ impl V13CuEnv {
         let program_id = percolator_prog::id();
         let program_bytes = std::fs::read(program_path()).expect("read BPF");
         svm.add_program(program_id, &program_bytes);
+        let token_program_bytes = std::fs::read(spl_token_program_path()).expect("read token BPF");
+        svm.add_program(spl_token::ID, &token_program_bytes);
 
         let payer = Keypair::new();
         let admin = Keypair::new();
         let market = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let vault = Pubkey::new_unique();
+        let vault_authority =
+            Pubkey::find_program_address(&[b"vault", market.as_ref()], &program_id).0;
         svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
         svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
+        svm.set_account(
+            mint,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_mint_data(),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+        svm.set_account(
+            vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(mint, vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
         svm.set_account(
             market,
             Account {
@@ -80,6 +169,7 @@ impl V13CuEnv {
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(market, false),
+                AccountMeta::new_readonly(mint, false),
             ],
             &[&admin],
         )
@@ -88,7 +178,11 @@ impl V13CuEnv {
             svm,
             program_id,
             payer,
+            admin,
             market,
+            mint,
+            vault,
+            vault_authority,
         }
     }
 
@@ -120,17 +214,102 @@ impl V13CuEnv {
         portfolio
     }
 
-    fn deposit(&mut self, owner: &Keypair, portfolio: Pubkey, amount: u128) {
+    fn deposit(&mut self, owner: &Keypair, portfolio: Pubkey, amount: u128) -> Pubkey {
+        let source = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                source,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(self.mint, owner.pubkey(), amount as u64),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
         self.send(
             ProgInstruction::Deposit { amount },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
                 AccountMeta::new(portfolio, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
             ],
             &[owner],
         )
         .expect("deposit");
+        source
+    }
+
+    fn withdraw(&mut self, owner: &Keypair, portfolio: Pubkey, amount: u128) -> Pubkey {
+        let dest = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                dest,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(self.mint, owner.pubkey(), 0),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        self.send(
+            ProgInstruction::Withdraw { amount },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[owner],
+        )
+        .expect("withdraw");
+        dest
+    }
+
+    fn top_up_insurance(&mut self, amount: u128) -> Pubkey {
+        let source = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                source,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(self.mint, self.admin.pubkey(), amount as u64),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::TopUpInsurance { amount },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("top up insurance");
+        source
+    }
+
+    fn token_amount(&self, key: Pubkey) -> u64 {
+        let account = self.svm.get_account(&key).expect("token account");
+        TokenAccount::unpack(&account.data).unwrap().amount
     }
 
     fn crank(&mut self, portfolio: Pubkey, ix: ProgInstruction) -> u64 {
@@ -188,6 +367,43 @@ fn send_tx(
     svm.send_transaction(tx)
         .map(|meta| meta.compute_units_consumed)
         .map_err(|e| format!("{e:?}"))
+}
+
+#[test]
+fn v13_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
+    let mut env = V13CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+
+    let source = env.deposit(&owner, portfolio, 1_000);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(env.vault), 1_000);
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let portfolio_data = env.svm.get_account(&portfolio).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    let account = state::read_portfolio(&portfolio_data).unwrap();
+    assert_eq!(group.vault, 1_000);
+    assert_eq!(group.c_tot, 1_000);
+    assert_eq!(account.capital, 1_000);
+
+    let dest = env.withdraw(&owner, portfolio, 400);
+    assert_eq!(env.token_amount(dest), 400);
+    assert_eq!(env.token_amount(env.vault), 600);
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let portfolio_data = env.svm.get_account(&portfolio).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    let account = state::read_portfolio(&portfolio_data).unwrap();
+    assert_eq!(group.vault, 600);
+    assert_eq!(group.c_tot, 600);
+    assert_eq!(account.capital, 600);
+
+    let insurance_source = env.top_up_insurance(250);
+    assert_eq!(env.token_amount(insurance_source), 0);
+    assert_eq!(env.token_amount(env.vault), 850);
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    assert_eq!(group.insurance, 250);
+    assert_eq!(group.vault, 850);
 }
 
 #[test]

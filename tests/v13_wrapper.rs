@@ -6,7 +6,11 @@ use percolator_prog::{
     ix::Instruction,
     processor, state,
 };
-use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
+use solana_program::{
+    account_info::AccountInfo, program_error::ProgramError, program_option::COption,
+    program_pack::Pack, pubkey::Pubkey,
+};
+use spl_token::state::{Account as TokenAccount, AccountState, Mint};
 
 struct TestAccount {
     key: Pubkey,
@@ -15,6 +19,7 @@ struct TestAccount {
     data: Vec<u8>,
     is_signer: bool,
     is_writable: bool,
+    executable: bool,
 }
 
 impl TestAccount {
@@ -26,6 +31,19 @@ impl TestAccount {
             data: vec![0u8; data_len],
             is_signer: false,
             is_writable: false,
+            executable: false,
+        }
+    }
+
+    fn new_with_data(key: Pubkey, owner: Pubkey, data: Vec<u8>) -> Self {
+        Self {
+            key,
+            owner,
+            lamports: 1_000_000,
+            data,
+            is_signer: false,
+            is_writable: false,
+            executable: false,
         }
     }
 
@@ -39,6 +57,12 @@ impl TestAccount {
         self
     }
 
+    fn executable(mut self) -> Self {
+        self.is_writable = false;
+        self.executable = true;
+        self
+    }
+
     fn to_info<'a>(&'a mut self) -> AccountInfo<'a> {
         AccountInfo::new(
             &self.key,
@@ -47,7 +71,7 @@ impl TestAccount {
             &mut self.lamports,
             &mut self.data,
             &self.owner,
-            false,
+            self.executable,
             0,
         )
     }
@@ -69,12 +93,83 @@ fn portfolio_account() -> TestAccount {
     TestAccount::new(Pubkey::new_unique(), program_id(), PORTFOLIO_ACCOUNT_LEN).writable()
 }
 
+fn make_mint_data() -> Vec<u8> {
+    let mut data = vec![0u8; Mint::LEN];
+    Mint::pack(
+        Mint {
+            mint_authority: COption::None,
+            supply: 0,
+            decimals: 0,
+            is_initialized: true,
+            freeze_authority: COption::None,
+        },
+        &mut data,
+    )
+    .unwrap();
+    data
+}
+
+fn make_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
+    let mut data = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint,
+            owner,
+            amount,
+            delegate: COption::None,
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 0,
+            close_authority: COption::None,
+        },
+        &mut data,
+    )
+    .unwrap();
+    data
+}
+
+fn mint_account() -> TestAccount {
+    TestAccount::new_with_data(Pubkey::new_unique(), spl_token::ID, make_mint_data())
+}
+
+fn user_token_account(owner: Pubkey, mint: Pubkey, amount: u64) -> TestAccount {
+    TestAccount::new_with_data(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        make_token_data(mint, owner, amount),
+    )
+    .writable()
+}
+
+fn vault_authority(market: &TestAccount) -> Pubkey {
+    Pubkey::find_program_address(&[b"vault", market.key.as_ref()], &program_id()).0
+}
+
+fn vault_token_account(market: &TestAccount, mint: Pubkey, amount: u64) -> TestAccount {
+    TestAccount::new_with_data(
+        Pubkey::new_unique(),
+        spl_token::ID,
+        make_token_data(mint, vault_authority(market), amount),
+    )
+    .writable()
+}
+
+fn vault_authority_account(market: &TestAccount) -> TestAccount {
+    TestAccount::new(vault_authority(market), Pubkey::new_unique(), 0)
+}
+
+fn token_program_account() -> TestAccount {
+    TestAccount::new(spl_token::ID, Pubkey::default(), 0).executable()
+}
+
 fn run_ix(ix: Instruction, accounts: &mut [&mut TestAccount]) -> Result<(), ProgramError> {
     let infos: Vec<AccountInfo> = accounts.iter_mut().map(|a| a.to_info()).collect();
     processor::process_instruction(&program_id(), &infos, &ix.encode())
 }
 
-fn init_market(admin: &mut TestAccount, market: &mut TestAccount) {
+fn init_market(admin: &mut TestAccount, market: &mut TestAccount) -> Pubkey {
+    let mut mint = mint_account();
+    let mint_key = mint.key;
     run_ix(
         Instruction::InitMarket {
             h_min: 0,
@@ -87,9 +182,10 @@ fn init_market(admin: &mut TestAccount, market: &mut TestAccount) {
             max_accrual_dt_slots: 1,
             maintenance_fee_per_slot: 0,
         },
-        &mut [admin, market],
+        &mut [admin, market, &mut mint],
     )
     .unwrap();
+    mint_key
 }
 
 fn init_portfolio(owner: &mut TestAccount, market: &mut TestAccount, portfolio: &mut TestAccount) {
@@ -102,9 +198,48 @@ fn deposit(
     portfolio: &mut TestAccount,
     amount: u128,
 ) {
+    let mint = Pubkey::new_from_array(state::read_market(&market.data).unwrap().0.collateral_mint);
+    let amount_u64 = u64::try_from(amount).unwrap();
+    let mut source_token = user_token_account(owner.key, mint, amount_u64);
+    let mut vault_token = vault_token_account(market, mint, 0);
+    let mut token_program = token_program_account();
     run_ix(
         Instruction::Deposit { amount },
-        &mut [owner, market, portfolio],
+        &mut [
+            owner,
+            market,
+            portfolio,
+            &mut source_token,
+            &mut vault_token,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+}
+
+fn withdraw(
+    owner: &mut TestAccount,
+    market: &mut TestAccount,
+    portfolio: &mut TestAccount,
+    amount: u128,
+) {
+    let mint = Pubkey::new_from_array(state::read_market(&market.data).unwrap().0.collateral_mint);
+    let amount_u64 = u64::try_from(amount).unwrap();
+    let mut dest_token = user_token_account(owner.key, mint, 0);
+    let mut vault_token = vault_token_account(market, mint, amount_u64);
+    let mut vault_auth = vault_authority_account(market);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::Withdraw { amount },
+        &mut [
+            owner,
+            market,
+            portfolio,
+            &mut dest_token,
+            &mut vault_token,
+            &mut vault_auth,
+            &mut token_program,
+        ],
     )
     .unwrap();
 }
@@ -170,18 +305,34 @@ fn v13_wrapper_top_up_insurance_requires_authority_and_updates_vault() {
     let mut market = market_account();
     let mut attacker = signer();
 
-    init_market(&mut admin, &mut market);
+    let mint = init_market(&mut admin, &mut market);
+    let mut attacker_src = user_token_account(attacker.key, mint, 777);
+    let mut admin_src = user_token_account(admin.key, mint, 777);
+    let mut vault = vault_token_account(&market, mint, 0);
+    let mut token_program = token_program_account();
 
     let before = market.data.clone();
     let unauthorized = run_ix(
         Instruction::TopUpInsurance { amount: 777 },
-        &mut [&mut attacker, &mut market],
+        &mut [
+            &mut attacker,
+            &mut market,
+            &mut attacker_src,
+            &mut vault,
+            &mut token_program,
+        ],
     );
     assert_err_and_market_unchanged(unauthorized, &market, &before);
 
     run_ix(
         Instruction::TopUpInsurance { amount: 777 },
-        &mut [&mut admin, &mut market],
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut admin_src,
+            &mut vault,
+            &mut token_program,
+        ],
     )
     .unwrap();
 
@@ -209,11 +360,7 @@ fn v13_wrapper_close_portfolio_rejects_non_empty_and_closes_empty() {
     assert_err_and_market_unchanged(rejected, &market, &before);
     assert!(state::read_portfolio(&portfolio.data).is_ok());
 
-    run_ix(
-        Instruction::Withdraw { amount: 1_000 },
-        &mut [&mut owner, &mut market, &mut portfolio],
-    )
-    .unwrap();
+    withdraw(&mut owner, &mut market, &mut portfolio, 1_000);
     run_ix(
         Instruction::ClosePortfolio,
         &mut [&mut owner, &mut market, &mut portfolio],
@@ -239,11 +386,7 @@ fn v13_wrapper_deposit_withdraw_roundtrip_preserves_accounting() {
     init_portfolio(&mut owner, &mut market, &mut portfolio);
     deposit(&mut owner, &mut market, &mut portfolio, 1_000);
 
-    run_ix(
-        Instruction::Withdraw { amount: 400 },
-        &mut [&mut owner, &mut market, &mut portfolio],
-    )
-    .unwrap();
+    withdraw(&mut owner, &mut market, &mut portfolio, 400);
 
     let (_, group) = state::read_market(&market.data).unwrap();
     let acct = state::read_portfolio(&portfolio.data).unwrap();
@@ -251,6 +394,74 @@ fn v13_wrapper_deposit_withdraw_roundtrip_preserves_accounting() {
     assert_eq!(group.c_tot, 600);
     assert_eq!(group.vault, 600);
     assert_eq!(group.insurance, 0);
+}
+
+#[test]
+fn v13_wrapper_deposit_rejects_without_token_accounts() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let rejected = run_ix(
+        Instruction::Deposit { amount: 1_000 },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before_market);
+    assert_eq!(
+        portfolio.data, before_portfolio,
+        "ledger-only deposits must not be reachable through the public wrapper"
+    );
+}
+
+#[test]
+fn v13_wrapper_deposit_rejects_wrong_mint_and_insufficient_source_balance() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    let mut wrong_source = user_token_account(owner.key, Pubkey::new_unique(), 1_000);
+    let mut source_with_dust = user_token_account(owner.key, mint, 999);
+    let mut vault = vault_token_account(&market, mint, 0);
+    let mut token_program = token_program_account();
+
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let wrong_mint = run_ix(
+        Instruction::Deposit { amount: 1_000 },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut wrong_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(wrong_mint, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+
+    let short_balance = run_ix(
+        Instruction::Deposit { amount: 1_000 },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut source_with_dust,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(short_balance, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
 }
 
 #[test]
