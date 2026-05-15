@@ -651,17 +651,9 @@ pub mod processor {
                 handle_top_up_insurance(program_id, accounts, amount)
             }
             Instruction::ResolveMarket => handle_resolve_market(program_id, accounts),
-            Instruction::CloseResolved { fee_rate_per_slot } => with_one_portfolio(
-                program_id,
-                accounts,
-                false,
-                |group, portfolio, _cfg| match group
-                    .close_resolved_account_not_atomic(portfolio, fee_rate_per_slot)?
-                {
-                    ResolvedCloseOutcomeV13::ProgressOnly => Ok(()),
-                    ResolvedCloseOutcomeV13::Closed { .. } => Ok(()),
-                },
-            ),
+            Instruction::CloseResolved { fee_rate_per_slot } => {
+                handle_close_resolved(program_id, accounts, fee_rate_per_slot)
+            }
         }
     }
 
@@ -982,6 +974,57 @@ pub mod processor {
             .resolve_market_not_atomic(slot)
             .map_err(map_v13_error)?;
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+    }
+
+    #[inline(never)]
+    fn handle_close_resolved<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        fee_rate_per_slot: u128,
+    ) -> ProgramResult {
+        let owner = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let portfolio_ai = account(accounts, 2)?;
+        let dest_token = account(accounts, 3)?;
+        let vault_token = account(accounts, 4)?;
+        let vault_authority_ai = account(accounts, 5)?;
+        let token_program = account(accounts, 6)?;
+        expect_writable(market_ai)?;
+        expect_writable(portfolio_ai)?;
+        expect_writable(dest_token)?;
+        expect_writable(vault_token)?;
+        expect_owner(market_ai, program_id)?;
+        expect_owner(portfolio_ai, program_id)?;
+        verify_token_program(token_program)?;
+
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
+        expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
+        let mint = Pubkey::new_from_array(cfg.collateral_mint);
+        let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
+        expect_key(vault_authority_ai, &vault_authority)?;
+        verify_user_token_account(dest_token, owner.key, &mint)?;
+        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+
+        let outcome = group
+            .close_resolved_account_not_atomic(portfolio.as_mut(), fee_rate_per_slot)
+            .map_err(map_v13_error)?;
+        if let ResolvedCloseOutcomeV13::Closed { payout } = outcome {
+            let payout_u64 = amount_to_u64(payout)?;
+            require_token_balance(vault_token, payout_u64)?;
+            let bump_arr = [bump];
+            let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+            transfer_tokens_signed(
+                token_program,
+                vault_token,
+                dest_token,
+                vault_authority_ai,
+                payout_u64,
+                signer_seeds,
+            )?;
+        }
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
+        state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())
     }
 
     #[inline(never)]

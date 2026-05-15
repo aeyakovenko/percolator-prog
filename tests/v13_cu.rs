@@ -275,6 +275,54 @@ impl V13CuEnv {
         dest
     }
 
+    fn resolve(&mut self) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::ResolveMarket,
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("resolve market")
+    }
+
+    fn close_resolved(&mut self, owner: &Keypair, portfolio: Pubkey) -> Pubkey {
+        let dest = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                dest,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(self.mint, owner.pubkey(), 0),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        self.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("close resolved");
+        dest
+    }
+
     fn top_up_insurance(&mut self, amount: u128) -> Pubkey {
         let source = Pubkey::new_unique();
         self.svm
@@ -404,6 +452,27 @@ fn v13_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
     let (_, group) = state::read_market(&market_data).unwrap();
     assert_eq!(group.insurance, 250);
     assert_eq!(group.vault, 850);
+}
+
+#[test]
+fn v13_bpf_close_resolved_moves_payout_tokens_with_ledger() {
+    let mut env = V13CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+
+    env.resolve();
+    let dest = env.close_resolved(&owner, portfolio);
+    assert_eq!(env.token_amount(dest), 1_000);
+    assert_eq!(env.token_amount(env.vault), 0);
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let portfolio_data = env.svm.get_account(&portfolio).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    let account = state::read_portfolio(&portfolio_data).unwrap();
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(account.capital, 0);
 }
 
 #[test]

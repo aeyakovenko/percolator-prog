@@ -2,7 +2,7 @@
 
 Engine branch tested: `aeyakovenko/percolator@v13`
 
-Pinned engine SHA: `aa1bc92956038e966cb1a11a1b7155bafd03d888`
+Pinned engine SHA: `6fc2276c854329c3b1d6227d2c569eefa4dc6c48`
 
 ## Current Retest Result
 
@@ -19,22 +19,22 @@ The old v12 integration tests are compiled out on this branch with
 `#![cfg(any())]`; they target the removed global slab ABI and cannot be
 mechanically reused. The replacement suite is:
 
-- `tests/v13_wrapper.rs`: 15 native account-local wrapper tests
-- `tests/v13_cu.rs`: 3 LiteSVM BPF wrapper/CU tests
-- `tests/v13_kani.rs`: 3 wrapper ABI Kani proofs
+- `tests/v13_wrapper.rs`: 17 native account-local wrapper tests
+- `tests/v13_cu.rs`: 4 LiteSVM BPF wrapper/CU tests
+- `tests/v13_kani.rs`: 7 wrapper ABI Kani proofs
 
 `tests/v13_cu.rs` currently measures:
 
-- refresh crank: 8,984 CU
-- recovery crank: 3,235 CU
-- refresh crank before 64 extra portfolios: 8,982 CU
-- refresh crank after 64 extra portfolios: 8,982 CU
+- refresh crank: 8,988 CU
+- recovery crank: 3,239 CU
+- refresh crank before 64 extra portfolios: 8,986 CU
+- refresh crank after 64 extra portfolios: 8,986 CU
 
-It also verifies that BPF `Deposit`, `Withdraw`, and `TopUpInsurance` move
-real SPL Token balances in lockstep with `group.vault`, user capital, and
-insurance. The v13 wrapper ABI now binds markets to a collateral mint at
-`InitMarket`, validates user/vault token accounts, and wraps public ledger
-mutations with SPL Token CPIs.
+It also verifies that BPF `Deposit`, `Withdraw`, `TopUpInsurance`, and
+`CloseResolved` move real SPL Token balances in lockstep with `group.vault`,
+user capital, resolved payout, and insurance. The v13 wrapper ABI now binds
+markets to a collateral mint at `InitMarket`, validates user/vault token
+accounts, and wraps public ledger mutations with SPL Token CPIs.
 
 This confirms the wrapper crank path is account-local and does not scale with
 materialized portfolio count. The v13 engine no longer has a global slab scan,
@@ -60,7 +60,7 @@ large staged copies in `execute_trade_with_fee_not_atomic`.
 
 Engine proof sweep status for the same SHA:
 
-- Wrapper Kani proofs: PASS, 3/3.
+- Wrapper Kani proofs: PASS, 7/7.
 - Engine `scripts/run_kani_full_audit.sh`: started against
   `/home/anatoly/percolator` at the same SHA. It produced PASS results through
   the early v13 harnesses but hit 10-minute timeouts on:
