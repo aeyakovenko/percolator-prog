@@ -18,6 +18,7 @@ use spl_token::state::{Account as TokenAccount, AccountState, Mint};
 use std::path::PathBuf;
 
 const CRANK_CU_LIMIT: u64 = 300_000;
+const CUSTODY_CU_LIMIT: u64 = 300_000;
 
 fn program_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -187,6 +188,10 @@ impl V13CuEnv {
     }
 
     fn create_portfolio(&mut self, owner: &Keypair) -> Pubkey {
+        self.create_portfolio_with_cu(owner).0
+    }
+
+    fn create_portfolio_with_cu(&mut self, owner: &Keypair) -> (Pubkey, u64) {
         let portfolio = Pubkey::new_unique();
         self.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
         self.svm
@@ -201,20 +206,30 @@ impl V13CuEnv {
                 },
             )
             .unwrap();
-        self.send(
-            ProgInstruction::InitPortfolio,
-            vec![
-                AccountMeta::new(owner.pubkey(), true),
-                AccountMeta::new(self.market, false),
-                AccountMeta::new(portfolio, false),
-            ],
-            &[owner],
-        )
-        .expect("init portfolio");
-        portfolio
+        let cu = self
+            .send(
+                ProgInstruction::InitPortfolio,
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(self.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[owner],
+            )
+            .expect("init portfolio");
+        (portfolio, cu)
     }
 
     fn deposit(&mut self, owner: &Keypair, portfolio: Pubkey, amount: u128) -> Pubkey {
+        self.deposit_with_cu(owner, portfolio, amount).0
+    }
+
+    fn deposit_with_cu(
+        &mut self,
+        owner: &Keypair,
+        portfolio: Pubkey,
+        amount: u128,
+    ) -> (Pubkey, u64) {
         let source = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -228,23 +243,33 @@ impl V13CuEnv {
                 },
             )
             .unwrap();
-        self.send(
-            ProgInstruction::Deposit { amount },
-            vec![
-                AccountMeta::new(owner.pubkey(), true),
-                AccountMeta::new(self.market, false),
-                AccountMeta::new(portfolio, false),
-                AccountMeta::new(source, false),
-                AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ],
-            &[owner],
-        )
-        .expect("deposit");
-        source
+        let cu = self
+            .send(
+                ProgInstruction::Deposit { amount },
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(self.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(source, false),
+                    AccountMeta::new(self.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[owner],
+            )
+            .expect("deposit");
+        (source, cu)
     }
 
     fn withdraw(&mut self, owner: &Keypair, portfolio: Pubkey, amount: u128) -> Pubkey {
+        self.withdraw_with_cu(owner, portfolio, amount).0
+    }
+
+    fn withdraw_with_cu(
+        &mut self,
+        owner: &Keypair,
+        portfolio: Pubkey,
+        amount: u128,
+    ) -> (Pubkey, u64) {
         let dest = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -258,21 +283,22 @@ impl V13CuEnv {
                 },
             )
             .unwrap();
-        self.send(
-            ProgInstruction::Withdraw { amount },
-            vec![
-                AccountMeta::new(owner.pubkey(), true),
-                AccountMeta::new(self.market, false),
-                AccountMeta::new(portfolio, false),
-                AccountMeta::new(dest, false),
-                AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(self.vault_authority, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ],
-            &[owner],
-        )
-        .expect("withdraw");
-        dest
+        let cu = self
+            .send(
+                ProgInstruction::Withdraw { amount },
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(self.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(self.vault, false),
+                    AccountMeta::new_readonly(self.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[owner],
+            )
+            .expect("withdraw");
+        (dest, cu)
     }
 
     fn resolve(&mut self) -> u64 {
@@ -291,6 +317,10 @@ impl V13CuEnv {
     }
 
     fn close_resolved(&mut self, owner: &Keypair, portfolio: Pubkey) -> Pubkey {
+        self.close_resolved_with_cu(owner, portfolio).0
+    }
+
+    fn close_resolved_with_cu(&mut self, owner: &Keypair, portfolio: Pubkey) -> (Pubkey, u64) {
         let dest = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -304,26 +334,31 @@ impl V13CuEnv {
                 },
             )
             .unwrap();
-        self.send(
-            ProgInstruction::CloseResolved {
-                fee_rate_per_slot: 0,
-            },
-            vec![
-                AccountMeta::new_readonly(owner.pubkey(), false),
-                AccountMeta::new(self.market, false),
-                AccountMeta::new(portfolio, false),
-                AccountMeta::new(dest, false),
-                AccountMeta::new(self.vault, false),
-                AccountMeta::new_readonly(self.vault_authority, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ],
-            &[],
-        )
-        .expect("close resolved");
-        dest
+        let cu = self
+            .send(
+                ProgInstruction::CloseResolved {
+                    fee_rate_per_slot: 0,
+                },
+                vec![
+                    AccountMeta::new_readonly(owner.pubkey(), false),
+                    AccountMeta::new(self.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(self.vault, false),
+                    AccountMeta::new_readonly(self.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[],
+            )
+            .expect("close resolved");
+        (dest, cu)
     }
 
     fn top_up_insurance(&mut self, amount: u128) -> Pubkey {
+        self.top_up_insurance_with_cu(amount).0
+    }
+
+    fn top_up_insurance_with_cu(&mut self, amount: u128) -> (Pubkey, u64) {
         let source = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -337,7 +372,7 @@ impl V13CuEnv {
                 },
             )
             .unwrap();
-        send_tx(
+        let cu = send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
@@ -352,7 +387,7 @@ impl V13CuEnv {
             &[&self.admin],
         )
         .expect("top up insurance");
-        source
+        (source, cu)
     }
 
     fn token_amount(&self, key: Pubkey) -> u64 {
@@ -473,6 +508,38 @@ fn v13_bpf_close_resolved_moves_payout_tokens_with_ledger() {
     assert_eq!(group.vault, 0);
     assert_eq!(group.c_tot, 0);
     assert_eq!(account.capital, 0);
+}
+
+#[test]
+fn v13_cu_custody_and_resolution_paths_are_bounded() {
+    let mut env = V13CuEnv::new();
+    let owner = Keypair::new();
+    let (portfolio, init_portfolio_cu) = env.create_portfolio_with_cu(&owner);
+    let (_source, deposit_cu) = env.deposit_with_cu(&owner, portfolio, 1_000);
+    let (_dest, withdraw_cu) = env.withdraw_with_cu(&owner, portfolio, 400);
+    let (_insurance_source, top_up_cu) = env.top_up_insurance_with_cu(250);
+    let resolve_cu = env.resolve();
+    let (_resolved_dest, close_resolved_cu) = env.close_resolved_with_cu(&owner, portfolio);
+
+    println!(
+        "v13 custody CU init_portfolio={init_portfolio_cu}, deposit={deposit_cu}, withdraw={withdraw_cu}, top_up={top_up_cu}, resolve={resolve_cu}, close_resolved={close_resolved_cu}"
+    );
+    for (name, cu) in [
+        ("init_portfolio", init_portfolio_cu),
+        ("deposit", deposit_cu),
+        ("withdraw", withdraw_cu),
+        ("top_up", top_up_cu),
+        ("resolve", resolve_cu),
+        ("close_resolved", close_resolved_cu),
+    ] {
+        assert!(
+            cu <= CUSTODY_CU_LIMIT,
+            "{} CU {} exceeded limit {}",
+            name,
+            cu,
+            CUSTODY_CU_LIMIT
+        );
+    }
 }
 
 #[test]

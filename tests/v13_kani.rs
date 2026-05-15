@@ -200,3 +200,27 @@ fn kani_v13_zero_length_decode_rejects() {
     let data: [u8; 0] = [];
     assert!(Instruction::decode(&data).is_err());
 }
+
+#[kani::proof]
+fn kani_v13_every_active_payload_rejects_one_byte_truncation() {
+    let init_market = [0u8; 80];
+    assert!(Instruction::decode(&init_market).is_err());
+
+    let deposit = [3u8; 16];
+    assert!(Instruction::decode(&deposit).is_err());
+
+    let withdraw = [4u8; 16];
+    assert!(Instruction::decode(&withdraw).is_err());
+
+    let crank = [5u8; 59];
+    assert!(Instruction::decode(&crank).is_err());
+
+    let trade = [6u8; 33];
+    assert!(Instruction::decode(&trade).is_err());
+
+    let top_up = [9u8; 16];
+    assert!(Instruction::decode(&top_up).is_err());
+
+    let close_resolved = [30u8; 16];
+    assert!(Instruction::decode(&close_resolved).is_err());
+}

@@ -21,12 +21,18 @@ mechanically reused. `V13_TEST_PORT_COVERAGE.md` tracks the retired v12 test
 classes and the active v13 wrapper/engine coverage that replaces each class.
 The replacement suite is:
 
-- `tests/v13_wrapper.rs`: 23 native account-local wrapper tests
-- `tests/v13_cu.rs`: 4 LiteSVM BPF wrapper/CU tests
-- `tests/v13_kani.rs`: 7 wrapper ABI Kani proofs
+- `tests/v13_wrapper.rs`: 32 native account-local wrapper tests
+- `tests/v13_cu.rs`: 5 LiteSVM BPF wrapper/CU tests
+- `tests/v13_kani.rs`: 8 wrapper ABI Kani proofs
 
 `tests/v13_cu.rs` currently measures:
 
+- init portfolio: 3,366 CU
+- deposit: 14,761 CU
+- withdraw: 22,082 CU
+- top-up insurance: 12,792 CU
+- resolve: 1,455 CU
+- close resolved: 20,093 CU
 - refresh crank: 8,988 CU
 - recovery crank: 3,239 CU
 - refresh crank before 64 extra portfolios: 8,986 CU
@@ -62,7 +68,7 @@ large staged copies in `execute_trade_with_fee_not_atomic`.
 
 Engine proof sweep status for the same SHA:
 
-- Wrapper Kani proofs: PASS, 7/7.
+- Wrapper Kani proofs: PASS, 8/8.
 - Engine `scripts/run_kani_full_audit.sh`: started against
   `/home/anatoly/percolator` at the same SHA. It produced PASS results through
   the early v13 harnesses but hit 10-minute timeouts on:

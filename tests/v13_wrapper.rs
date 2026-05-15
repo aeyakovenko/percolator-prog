@@ -166,6 +166,10 @@ fn token_program_account() -> TestAccount {
     TestAccount::new(spl_token::ID, Pubkey::default(), 0).executable()
 }
 
+fn non_executable_token_program_account() -> TestAccount {
+    TestAccount::new(spl_token::ID, Pubkey::default(), 0)
+}
+
 fn run_ix(ix: Instruction, accounts: &mut [&mut TestAccount]) -> Result<(), ProgramError> {
     let infos: Vec<AccountInfo> = accounts.iter_mut().map(|a| a.to_info()).collect();
     processor::process_instruction(&program_id(), &infos, &ix.encode())
@@ -624,6 +628,53 @@ fn v13_wrapper_deposit_rejects_wrong_mint_and_insufficient_source_balance() {
 }
 
 #[test]
+fn v13_wrapper_deposit_rejects_wrong_owner_and_bad_token_program() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut attacker = signer();
+    let mut portfolio = portfolio_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    let mut attacker_source = user_token_account(attacker.key, mint, 1_000);
+    let mut owner_source = user_token_account(owner.key, mint, 1_000);
+    let mut vault = vault_token_account(&market, mint, 0);
+    let mut token_program = token_program_account();
+    let mut bad_token_program = non_executable_token_program_account();
+
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let wrong_owner = run_ix(
+        Instruction::Deposit { amount: 1_000 },
+        &mut [
+            &mut attacker,
+            &mut market,
+            &mut portfolio,
+            &mut attacker_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(wrong_owner, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+
+    let bad_program = run_ix(
+        Instruction::Deposit { amount: 1_000 },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut owner_source,
+            &mut vault,
+            &mut bad_token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(bad_program, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+}
+
+#[test]
 fn v13_wrapper_withdraw_rejects_wrong_vault_authority_and_wrong_destination_mint() {
     let mut admin = signer();
     let mut market = market_account();
@@ -670,6 +721,76 @@ fn v13_wrapper_withdraw_rejects_wrong_vault_authority_and_wrong_destination_mint
         ],
     );
     assert_err_and_market_unchanged(wrong_authority, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+}
+
+#[test]
+fn v13_wrapper_withdraw_rejects_over_capital_and_insufficient_vault_without_mutation() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 500);
+
+    let mut dest = user_token_account(owner.key, mint, 0);
+    let mut vault = vault_token_account(&market, mint, 501);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut token_program = token_program_account();
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let over_capital = run_ix(
+        Instruction::Withdraw { amount: 501 },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(over_capital, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+
+    let mut underfunded_vault = vault_token_account(&market, mint, 399);
+    let insufficient_vault = run_ix(
+        Instruction::Withdraw { amount: 400 },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut dest,
+            &mut underfunded_vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(insufficient_vault, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+}
+
+#[test]
+fn v13_wrapper_close_portfolio_rejects_wrong_owner_without_mutation() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut attacker = signer();
+    let mut portfolio = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let rejected = run_ix(
+        Instruction::ClosePortfolio,
+        &mut [&mut attacker, &mut market, &mut portfolio],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before_market);
     assert_eq!(portfolio.data, before_portfolio);
 }
 
@@ -882,6 +1003,83 @@ fn v13_wrapper_tradenocpi_rejects_bad_size_and_missing_signer_before_mutation() 
 }
 
 #[test]
+fn v13_wrapper_tradenocpi_rejects_wrong_owner_fee_cap_and_invalid_asset() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut attacker = signer();
+    let mut account_a = portfolio_account();
+    let mut account_b = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner_a, &mut market, &mut account_a);
+    init_portfolio(&mut owner_b, &mut market, &mut account_b);
+    deposit(&mut owner_a, &mut market, &mut account_a, 1_000_000);
+    deposit(&mut owner_b, &mut market, &mut account_b, 1_000_000);
+
+    let before_market = market.data.clone();
+    let before_a = account_a.data.clone();
+    let before_b = account_b.data.clone();
+    let wrong_owner = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut attacker,
+            &mut owner_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+        ],
+    );
+    assert_err_and_market_unchanged(wrong_owner, &market, &before_market);
+    assert_eq!(account_a.data, before_a);
+    assert_eq!(account_b.data, before_b);
+
+    let fee_over_cap = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 10_001,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+        ],
+    );
+    assert_err_and_market_unchanged(fee_over_cap, &market, &before_market);
+    assert_eq!(account_a.data, before_a);
+    assert_eq!(account_b.data, before_b);
+
+    let invalid_asset = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+        ],
+    );
+    assert_err_and_market_unchanged(invalid_asset, &market, &before_market);
+    assert_eq!(account_a.data, before_a);
+    assert_eq!(account_b.data, before_b);
+}
+
+#[test]
 fn v13_wrapper_permissionless_crank_advances_account_local_market_progress() {
     let mut admin = signer();
     let mut market = market_account();
@@ -1070,6 +1268,51 @@ fn v13_wrapper_permissionless_settle_b_without_b_state_is_fail_closed() {
 }
 
 #[test]
+fn v13_wrapper_permissionless_crank_rejects_invalid_asset_and_price_without_mutation() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let invalid_asset = run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: 0,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    );
+    assert_err_and_market_unchanged(invalid_asset, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+
+    let zero_price = run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 0,
+            effective_price: 0,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    );
+    assert_err_and_market_unchanged(zero_price, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+}
+
+#[test]
 fn v13_wrapper_permissionless_recovery_is_public_progress() {
     let mut admin = signer();
     let mut market = market_account();
@@ -1099,6 +1342,46 @@ fn v13_wrapper_permissionless_recovery_is_public_progress() {
         group.recovery_reason,
         Some(PermissionlessRecoveryReasonV13::BelowProgressFloor)
     );
+}
+
+#[test]
+fn v13_wrapper_permissionless_recovery_accepts_every_public_reason() {
+    let expected = [
+        PermissionlessRecoveryReasonV13::BelowProgressFloor,
+        PermissionlessRecoveryReasonV13::BlockedSegmentHeadroomOrRepresentability,
+        PermissionlessRecoveryReasonV13::AccountBSettlementCannotProgress,
+        PermissionlessRecoveryReasonV13::BIndexHeadroomExhausted,
+        PermissionlessRecoveryReasonV13::ActiveBankruptCloseCannotProgress,
+        PermissionlessRecoveryReasonV13::ExplicitLossOrDustAuditOverflow,
+        PermissionlessRecoveryReasonV13::OracleOrTargetUnavailableByAuthenticatedPolicy,
+        PermissionlessRecoveryReasonV13::CounterOrEpochOverflowDeclaredRecovery,
+    ];
+
+    for (reason, expected_reason) in expected.iter().copied().enumerate() {
+        let mut admin = signer();
+        let mut market = market_account();
+        let mut owner = signer();
+        let mut portfolio = portfolio_account();
+        init_market(&mut admin, &mut market);
+        init_portfolio(&mut owner, &mut market, &mut portfolio);
+
+        run_ix(
+            Instruction::PermissionlessCrank {
+                action: 3,
+                asset_index: 0,
+                now_slot: 0,
+                effective_price: 100,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: reason as u8,
+            },
+            &mut [&mut owner, &mut market, &mut portfolio],
+        )
+        .unwrap();
+        let (_, group) = state::read_market(&market.data).unwrap();
+        assert_eq!(group.recovery_reason, Some(expected_reason));
+    }
 }
 
 #[test]
@@ -1211,6 +1494,163 @@ fn v13_wrapper_resolved_close_uses_engine_loss_and_fee_ordering_path() {
     assert_eq!(group.mode, MarketModeV13::Resolved);
     assert_eq!(acct.capital, 0);
     assert_eq!(group.vault, 0);
+}
+
+#[test]
+fn v13_wrapper_close_resolved_is_permissionless_but_pays_only_owner_token_account() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let owner = signer();
+    let mut owner_meta = TestAccount::new(owner.key, Pubkey::new_unique(), 0);
+    let mut portfolio = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    let mut owner_for_init = TestAccount::new(owner.key, Pubkey::new_unique(), 0).signer();
+    init_portfolio(&mut owner_for_init, &mut market, &mut portfolio);
+    deposit(&mut owner_for_init, &mut market, &mut portfolio, 1_000);
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+
+    let mint = Pubkey::new_from_array(state::read_market(&market.data).unwrap().0.collateral_mint);
+    let mut attacker_dest = user_token_account(Pubkey::new_unique(), mint, 0);
+    let mut vault = vault_token_account(&market, mint, 1_000);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut token_program = token_program_account();
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let wrong_destination = run_ix(
+        Instruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        &mut [
+            &mut owner_meta,
+            &mut market,
+            &mut portfolio,
+            &mut attacker_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(wrong_destination, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+
+    let mut owner_dest = user_token_account(owner.key, mint, 0);
+    run_ix(
+        Instruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        &mut [
+            &mut owner_meta,
+            &mut market,
+            &mut portfolio,
+            &mut owner_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(group.vault, 0);
+    assert_eq!(account.capital, 0);
+}
+
+#[test]
+fn v13_wrapper_close_resolved_rejects_before_resolution_without_mutation() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 1_000);
+    let mut dest = user_token_account(owner.key, mint, 0);
+    let mut vault = vault_token_account(&market, mint, 1_000);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut token_program = token_program_account();
+
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let rejected = run_ix(
+        Instruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+}
+
+#[test]
+fn v13_wrapper_close_resolved_progress_only_does_not_pay_active_position() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 1_000_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+
+    let mut dest = user_token_account(long_owner.key, mint, 0);
+    let mut vault = vault_token_account(&market, mint, 2_000_000);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut market,
+            &mut long_account,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let long = state::read_portfolio(&long_account.data).unwrap();
+    assert_eq!(
+        group.vault, 2_000_000,
+        "progress-only resolved close must not pay before account exposure is cleared"
+    );
+    assert_ne!(long.active_bitmap, 0);
+    assert_eq!(long.capital, 1_000_000);
 }
 
 #[test]
