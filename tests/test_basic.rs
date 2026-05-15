@@ -466,6 +466,25 @@ fn test_keeper_crank_partial_catchup_candidate_sequence_does_not_drain_insurance
     let mut min_insurance = insurance_before;
 
     for _ in 0..16 {
+        // If the prior candidate crank caught the engine up to the current
+        // authenticated slot while raw/effective target lag remains, an
+        // immediate same-slot retry is only a duplicate/no-op. Honest keeper
+        // progress for the pending target requires a later slot; keep the same
+        // oracle account so this exercises the duplicate-observation
+        // staircase rather than installing a new target.
+        let clock: Clock = env.svm.get_sysvar();
+        if env.read_last_market_slot() >= clock.slot
+            && env.read_oracle_target_price() != env.read_last_effective_price()
+        {
+            let next_slot = env
+                .read_last_market_slot()
+                .saturating_add(percolator_prog::constants::MAX_ACCRUAL_DT_SLOTS);
+            env.svm.set_sysvar(&Clock {
+                slot: next_slot,
+                unix_timestamp: next_slot as i64,
+                ..clock
+            });
+        }
         let before_slot = env.read_last_market_slot();
         let before_pos = env.read_account_position(user_idx);
         let before_cap = env.read_account_capital(user_idx);

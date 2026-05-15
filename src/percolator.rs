@@ -7352,6 +7352,19 @@ pub mod processor {
                 let admit_h_min = engine.params.h_min;
                 let admit_h_max = engine.params.h_max;
                 let admit_threshold = Some(engine.params.maintenance_margin_bps as u128);
+                let authenticated_recovery_target = if crank_slot > engine.last_market_slot {
+                    raw_target
+                } else {
+                    // Same-slot duplicate cranks are valid keeper traffic, but
+                    // they do not prove a positive-time price step is
+                    // impossible. Passing the still-pending raw target to the
+                    // engine's P-last recovery gate when dt==0 can make a
+                    // healthy exposed market satisfy BelowProgressFloor solely
+                    // because no additional slot elapsed. Keep ordinary
+                    // keeper/touch progress enabled, but withhold raw-target
+                    // recovery evidence until a real bounded segment exists.
+                    engine.last_oracle_price
+                };
                 if !candidates.is_empty() {
                     append_phase2_fullclose_candidates(
                         engine,
@@ -7399,7 +7412,7 @@ pub mod processor {
                     .permissionless_progress_not_atomic(percolator::PermissionlessProgressRequest {
                         now_slot: crank_slot,
                         oracle_price: crank_price,
-                        authenticated_raw_target_price: raw_target,
+                        authenticated_raw_target_price: authenticated_recovery_target,
                         ordered_candidates: engine_candidates,
                         // Account-B progress/recovery is explicitly
                         // caller-directed. Liquidation hints may need this

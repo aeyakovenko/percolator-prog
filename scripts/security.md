@@ -1,5 +1,46 @@
 # Security findings — 2026-05-13 hybrid after-hours sweep
 
+## F9 — Same-slot target-lag crank must not trigger P-last recovery (High)
+
+**Status:** fixed by withholding raw-target recovery evidence from
+`permissionless_progress_not_atomic` when the wrapper has no positive-time
+bounded segment to advance (`crank_slot == engine.last_market_slot`).
+Regression coverage:
+
+```bash
+cargo build-sbf --no-default-features
+cargo test --release --test test_security \
+  test_attack_same_slot_target_lag_crank_does_not_recover_resolve \
+  -- --nocapture
+```
+
+**Attacker/UX model:** a healthy exposed market receives a fresh external target
+outside the per-slot cap. The first crank advances the effective index one
+bounded step and leaves raw/effective target lag. A duplicate keeper crank in
+the same slot is normal operational traffic and should be harmless.
+
+**Original issue:** the wrapper passed the pending raw target to the engine's
+permissionless P-last recovery dispatcher even when `dt == 0`. In the pinned
+engine, `BelowProgressFloor` can validate from
+`bounded_price_step_cap_abs(now_slot) == 0`; with same-slot target lag that is
+true only because no additional slot elapsed, not because the market is
+unrecoverable. The second crank could therefore terminal-resolve a solvent live
+market at `P_last`.
+
+**Fix invariant:**
+
+```text
+KeeperCrank recovery evidence:
+  if crank_slot > last_market_slot:
+    raw target may be supplied to engine recovery gates;
+  if crank_slot == last_market_slot:
+    ordinary crank/touch progress remains allowed;
+    raw-target P-last recovery evidence is withheld.
+```
+
+**Disposition:** `PASS_SAFE` after fix. Same-slot duplicate cranks no longer
+prove below-floor recovery, while positive-dt recovery remains available.
+
 ## F8 — Hybrid duplicate-oracle staircase must keep mark on index (Medium)
 
 **Status:** fixed by having hybrid regular-hours mark state track every

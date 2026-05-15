@@ -5975,6 +5975,84 @@ fn test_attack_same_slot_triple_crank_convergence() {
     assert_eq!(spl_vault, 26_000_000_200);
 }
 
+/// REGRESSION: same-slot KeeperCrank must not terminal-resolve a healthy
+/// exposed market merely because raw/effective target lag remains and no
+/// additional slot elapsed.
+///
+/// The first crank below accepts a fresh external target and advances the
+/// effective price by the configured staircase cap. The target is still ahead
+/// of the engine price. A second crank in the same slot is a valid keeper
+/// duplicate/no-op path; it must not route through the engine's
+/// BelowProgressFloor P_last recovery.
+#[test]
+fn test_attack_same_slot_target_lag_crank_does_not_recover_resolve() {
+    program_path();
+
+    let mut env = TestEnv::new();
+    env.init_market_with_invert(0);
+
+    let lp = Keypair::new();
+    let lp_idx = env.init_lp(&lp);
+    env.deposit(&lp, lp_idx, 20_000_000_000);
+
+    let user = Keypair::new();
+    let user_idx = env.init_user(&user);
+    env.deposit(&user, user_idx, 5_000_000_000);
+
+    env.crank();
+    env.trade(&user, &lp, lp_idx, user_idx, 100_000_000);
+    assert_ne!(
+        env.read_account_position(user_idx),
+        0,
+        "setup must create exposed OI"
+    );
+
+    let start_slot = env.read_last_market_slot();
+    let target_price = 160_000_000i64;
+    env.set_slot_and_price_raw_no_walk(start_slot + 10, target_price);
+
+    env.crank();
+    assert!(
+        !env.is_market_resolved(),
+        "first bounded crank must keep the market live"
+    );
+    assert_eq!(
+        env.read_last_market_slot(),
+        start_slot + 10,
+        "first crank should advance exactly to the authenticated slot"
+    );
+    assert!(
+        env.read_oracle_target_price() > env.read_last_effective_price(),
+        "test requires raw/effective target lag after the first crank"
+    );
+
+    let slot_after_first = env.read_last_market_slot();
+    let price_after_first = env.read_last_effective_price();
+    let target_after_first = env.read_oracle_target_price();
+
+    env.crank();
+
+    assert!(
+        !env.is_market_resolved(),
+        "same-slot duplicate crank with target lag must not permissionlessly resolve at P_last"
+    );
+    assert_eq!(
+        env.read_last_market_slot(),
+        slot_after_first,
+        "same-slot duplicate crank must not move the market clock backward or forward"
+    );
+    assert_eq!(
+        env.read_last_effective_price(),
+        price_after_first,
+        "same-slot duplicate crank must not bypass the price-move staircase"
+    );
+    assert_eq!(
+        env.read_oracle_target_price(),
+        target_after_first,
+        "same-slot duplicate crank should preserve the authenticated raw target"
+    );
+}
+
 /// ATTACK: Funding rate with extreme k_bps.
 /// Set funding_k_bps to maximum, verify funding rate is capped at ±10,000 bps/slot.
 #[test]
