@@ -21,7 +21,7 @@ mechanically reused. `V13_TEST_PORT_COVERAGE.md` tracks the retired v12 test
 classes and the active v13 wrapper/engine coverage that replaces each class.
 The replacement suite is:
 
-- `tests/v13_wrapper.rs`: 51 native account-local wrapper tests
+- `tests/v13_wrapper.rs`: 54 native account-local wrapper tests
 - `tests/v13_cu.rs`: 6 LiteSVM BPF wrapper/CU tests
 - `tests/v13_kani.rs`: 10 wrapper ABI Kani proofs
 
@@ -51,6 +51,12 @@ both the current authority and destination key to sign; scoped zero-key burns
 are allowed for insurance roles. Live admin burn is rejected until a
 permissionless resolved-exit profile exists. The old Hyperp mark authority kind
 is rejected until Hyperp wrapper configuration is ported.
+
+The v12 `CloseSlab` terminal lifecycle path is restored as an account-local
+market close. It requires the admin destination to sign, the market to be
+resolved, engine vault/insurance/capital accounting to be zero, and
+`materialized_portfolio_count == 0`; it then closes the supplied SPL vault and
+zeros/rent-drains the market account.
 
 This confirms the wrapper crank path is account-local and does not scale with
 materialized portfolio count. The v13 engine no longer has a global slab scan,

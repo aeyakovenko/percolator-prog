@@ -1044,6 +1044,157 @@ fn v13_wrapper_close_portfolio_rejects_non_empty_and_closes_empty() {
 }
 
 #[test]
+fn v13_wrapper_close_slab_requires_admin_resolved_empty_market() {
+    let mut admin = signer().writable();
+    let mut market = market_account();
+    let mut attacker = signer().writable();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    let mut vault = vault_token_account(&market, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut dest_token = user_token_account(admin.key, mint, 0);
+    let mut token_program = token_program_account();
+
+    let live_before = market.data.clone();
+    let live_close = run_ix(
+        Instruction::CloseSlab,
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut vault,
+            &mut vault_auth,
+            &mut dest_token,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(live_close, &market, &live_before);
+
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+    let resolved_before = market.data.clone();
+    let non_admin = run_ix(
+        Instruction::CloseSlab,
+        &mut [
+            &mut attacker,
+            &mut market,
+            &mut vault,
+            &mut vault_auth,
+            &mut dest_token,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(non_admin, &market, &resolved_before);
+
+    let with_portfolio = market.data.clone();
+    let nonempty_count = run_ix(
+        Instruction::CloseSlab,
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut vault,
+            &mut vault_auth,
+            &mut dest_token,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(nonempty_count, &market, &with_portfolio);
+
+    run_ix(
+        Instruction::ClosePortfolio,
+        &mut [&mut owner, &mut market, &mut portfolio],
+    )
+    .unwrap();
+    let market_lamports = market.lamports;
+    let admin_lamports = admin.lamports;
+    run_ix(
+        Instruction::CloseSlab,
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut vault,
+            &mut vault_auth,
+            &mut dest_token,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    assert_eq!(market.lamports, 0);
+    assert_eq!(admin.lamports, admin_lamports + market_lamports);
+    assert!(
+        market.data.iter().all(|b| *b == 0),
+        "closed market account should be zeroed"
+    );
+}
+
+#[test]
+fn v13_wrapper_close_slab_rejects_nonzero_engine_vault_or_insurance() {
+    let mut admin = signer().writable();
+    let mut market = market_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    let mut source = user_token_account(admin.key, mint, 10);
+    let mut vault = vault_token_account(&market, mint, 10);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpInsurance { amount: 10 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+
+    let mut vault_auth = vault_authority_account(&market);
+    let mut dest_token = user_token_account(admin.key, mint, 0);
+    let before = market.data.clone();
+    let rejected = run_ix(
+        Instruction::CloseSlab,
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut vault,
+            &mut vault_auth,
+            &mut dest_token,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before);
+}
+
+#[test]
+fn v13_wrapper_close_slab_rejects_uninitialized_market_without_rent_drain() {
+    let mut admin = signer().writable();
+    let mut market = market_account();
+    let mint = Pubkey::new_unique();
+    let mut vault = vault_token_account(&market, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut dest_token = user_token_account(admin.key, mint, 0);
+    let mut token_program = token_program_account();
+
+    let before_market = market.data.clone();
+    let before_lamports = (admin.lamports, market.lamports);
+    let rejected = run_ix(
+        Instruction::CloseSlab,
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut vault,
+            &mut vault_auth,
+            &mut dest_token,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before_market);
+    assert_eq!((admin.lamports, market.lamports), before_lamports);
+}
+
+#[test]
 fn v13_wrapper_deposit_withdraw_roundtrip_preserves_accounting() {
     let mut admin = signer();
     let mut market = market_account();

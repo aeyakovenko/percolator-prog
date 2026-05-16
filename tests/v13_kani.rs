@@ -266,6 +266,10 @@ fn kani_v13_every_active_payload_rejects_trailing_byte() {
     top_up.push(extra);
     assert!(Instruction::decode(&top_up).is_err());
 
+    let mut close_slab = Instruction::CloseSlab.encode();
+    close_slab.push(extra);
+    assert!(Instruction::decode(&close_slab).is_err());
+
     let mut resolve = Instruction::ResolveMarket.encode();
     resolve.push(extra);
     assert!(Instruction::decode(&resolve).is_err());
@@ -297,6 +301,7 @@ fn kani_v13_unknown_or_truncated_tags_reject() {
     kani::assume(tag != 6);
     kani::assume(tag != 8);
     kani::assume(tag != 9);
+    kani::assume(tag != 13);
     kani::assume(tag != 19);
     kani::assume(tag != 30);
     kani::assume(tag != 32);
