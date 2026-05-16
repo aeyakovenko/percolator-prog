@@ -9,54 +9,104 @@ fn kani_v13_init_market_decode_preserves_wire_fields() {
     let h_min_raw: u16 = kani::any();
     let h_max_raw: u16 = kani::any();
     let initial_price_raw: u16 = kani::any();
+    let min_nonzero_mm_raw: u16 = kani::any();
+    let min_nonzero_im_raw: u16 = kani::any();
     let maintenance_margin_bps_raw: u16 = kani::any();
     let initial_margin_bps_raw: u16 = kani::any();
     let max_trading_fee_bps_raw: u16 = kani::any();
+    let liquidation_fee_bps_raw: u16 = kani::any();
+    let liquidation_fee_cap_raw: u16 = kani::any();
+    let min_liquidation_abs_raw: u16 = kani::any();
     let max_price_move_bps_raw: u16 = kani::any();
     let max_accrual_dt_raw: u16 = kani::any();
+    let max_abs_funding_raw: u16 = kani::any();
+    let min_funding_lifetime_raw: u16 = kani::any();
+    let max_account_b_chunks_raw: u16 = kani::any();
+    let max_bankrupt_close_chunks_raw: u16 = kani::any();
+    let public_b_chunk_atoms_raw: u16 = kani::any();
     let maintenance_fee_raw: u16 = kani::any();
     let h_min = h_min_raw as u64;
     let h_max = h_max_raw as u64;
     let initial_price = initial_price_raw as u64;
+    let min_nonzero_mm_req = min_nonzero_mm_raw as u128;
+    let min_nonzero_im_req = min_nonzero_im_raw as u128;
     let maintenance_margin_bps = maintenance_margin_bps_raw as u64;
     let initial_margin_bps = initial_margin_bps_raw as u64;
     let max_trading_fee_bps = max_trading_fee_bps_raw as u64;
+    let liquidation_fee_bps = liquidation_fee_bps_raw as u64;
+    let liquidation_fee_cap = liquidation_fee_cap_raw as u128;
+    let min_liquidation_abs = min_liquidation_abs_raw as u128;
     let max_price_move_bps_per_slot = max_price_move_bps_raw as u64;
     let max_accrual_dt_slots = max_accrual_dt_raw as u64;
+    let max_abs_funding_e9_per_slot = max_abs_funding_raw as u64;
+    let min_funding_lifetime_slots = min_funding_lifetime_raw as u64;
+    let max_account_b_settlement_chunks = max_account_b_chunks_raw as u64;
+    let max_bankrupt_close_chunks = max_bankrupt_close_chunks_raw as u64;
+    let public_b_chunk_atoms = public_b_chunk_atoms_raw as u128;
     let maintenance_fee_per_slot = maintenance_fee_raw as u128;
 
-    let mut data = [0u8; 81];
+    let mut data = [0u8; 201];
     data[0] = 0;
     data[1..9].copy_from_slice(&h_min.to_le_bytes());
     data[9..17].copy_from_slice(&h_max.to_le_bytes());
     data[17..25].copy_from_slice(&initial_price.to_le_bytes());
-    data[25..33].copy_from_slice(&maintenance_margin_bps.to_le_bytes());
-    data[33..41].copy_from_slice(&initial_margin_bps.to_le_bytes());
-    data[41..49].copy_from_slice(&max_trading_fee_bps.to_le_bytes());
-    data[49..57].copy_from_slice(&max_price_move_bps_per_slot.to_le_bytes());
-    data[57..65].copy_from_slice(&max_accrual_dt_slots.to_le_bytes());
-    data[65..81].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
+    data[25..41].copy_from_slice(&min_nonzero_mm_req.to_le_bytes());
+    data[41..57].copy_from_slice(&min_nonzero_im_req.to_le_bytes());
+    data[57..65].copy_from_slice(&maintenance_margin_bps.to_le_bytes());
+    data[65..73].copy_from_slice(&initial_margin_bps.to_le_bytes());
+    data[73..81].copy_from_slice(&max_trading_fee_bps.to_le_bytes());
+    data[81..89].copy_from_slice(&liquidation_fee_bps.to_le_bytes());
+    data[89..105].copy_from_slice(&liquidation_fee_cap.to_le_bytes());
+    data[105..121].copy_from_slice(&min_liquidation_abs.to_le_bytes());
+    data[121..129].copy_from_slice(&max_price_move_bps_per_slot.to_le_bytes());
+    data[129..137].copy_from_slice(&max_accrual_dt_slots.to_le_bytes());
+    data[137..145].copy_from_slice(&max_abs_funding_e9_per_slot.to_le_bytes());
+    data[145..153].copy_from_slice(&min_funding_lifetime_slots.to_le_bytes());
+    data[153..161].copy_from_slice(&max_account_b_settlement_chunks.to_le_bytes());
+    data[161..169].copy_from_slice(&max_bankrupt_close_chunks.to_le_bytes());
+    data[169..185].copy_from_slice(&public_b_chunk_atoms.to_le_bytes());
+    data[185..201].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::InitMarket {
             h_min: got_h_min,
             h_max: got_h_max,
             initial_price: got_initial_price,
+            min_nonzero_mm_req: got_min_mm,
+            min_nonzero_im_req: got_min_im,
             maintenance_margin_bps: got_mm,
             initial_margin_bps: got_im,
             max_trading_fee_bps: got_fee,
+            liquidation_fee_bps: got_liq_fee,
+            liquidation_fee_cap: got_liq_cap,
+            min_liquidation_abs: got_min_liq,
             max_price_move_bps_per_slot: got_move,
             max_accrual_dt_slots: got_dt,
+            max_abs_funding_e9_per_slot: got_max_funding,
+            min_funding_lifetime_slots: got_funding_life,
+            max_account_b_settlement_chunks: got_b_chunks,
+            max_bankrupt_close_chunks: got_bankrupt_chunks,
+            public_b_chunk_atoms: got_public_b,
             maintenance_fee_per_slot: got_maintenance_fee,
         } => {
             assert_eq!(got_h_min, h_min);
             assert_eq!(got_h_max, h_max);
             assert_eq!(got_initial_price, initial_price);
+            assert_eq!(got_min_mm, min_nonzero_mm_req);
+            assert_eq!(got_min_im, min_nonzero_im_req);
             assert_eq!(got_mm, maintenance_margin_bps);
             assert_eq!(got_im, initial_margin_bps);
             assert_eq!(got_fee, max_trading_fee_bps);
+            assert_eq!(got_liq_fee, liquidation_fee_bps);
+            assert_eq!(got_liq_cap, liquidation_fee_cap);
+            assert_eq!(got_min_liq, min_liquidation_abs);
             assert_eq!(got_move, max_price_move_bps_per_slot);
             assert_eq!(got_dt, max_accrual_dt_slots);
+            assert_eq!(got_max_funding, max_abs_funding_e9_per_slot);
+            assert_eq!(got_funding_life, min_funding_lifetime_slots);
+            assert_eq!(got_b_chunks, max_account_b_settlement_chunks);
+            assert_eq!(got_bankrupt_chunks, max_bankrupt_close_chunks);
+            assert_eq!(got_public_b, public_b_chunk_atoms);
             assert_eq!(got_maintenance_fee, maintenance_fee_per_slot);
         }
         _ => unreachable!(),
@@ -215,11 +265,21 @@ fn kani_v13_every_active_payload_rejects_trailing_byte() {
         h_min: 1,
         h_max: 2,
         initial_price: 100,
+        min_nonzero_mm_req: 1,
+        min_nonzero_im_req: 2,
         maintenance_margin_bps: 500,
         initial_margin_bps: 1_000,
         max_trading_fee_bps: 10_000,
+        liquidation_fee_bps: 0,
+        liquidation_fee_cap: 0,
+        min_liquidation_abs: 0,
         max_price_move_bps_per_slot: 100,
         max_accrual_dt_slots: 10,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 10,
+        max_account_b_settlement_chunks: 1,
+        max_bankrupt_close_chunks: 1,
+        public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
         maintenance_fee_per_slot: 0,
     }
     .encode();

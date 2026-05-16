@@ -21,24 +21,24 @@ mechanically reused. `V13_TEST_PORT_COVERAGE.md` tracks the retired v12 test
 classes and the active v13 wrapper/engine coverage that replaces each class.
 The replacement suite is:
 
-- `tests/v13_wrapper.rs`: 59 native account-local wrapper tests
+- `tests/v13_wrapper.rs`: 60 native account-local wrapper tests
 - `tests/v13_cu.rs`: 6 LiteSVM BPF wrapper/CU tests
 - `tests/v13_kani.rs`: 10 wrapper ABI Kani proofs
 
 `tests/v13_cu.rs` currently measures:
 
-- init portfolio: 3,379 CU
-- deposit: 13,303 CU
-- withdraw: 20,618 CU
-- top-up insurance: 11,308 CU
-- withdraw insurance: 11,530 CU
-- resolve: 1,466 CU
-- close resolved: 18,629 CU
-- TradeNoCpi: 59,746 CU
-- refresh crank: 9,022 CU
-- recovery crank: 3,273 CU
-- refresh crank before 64 extra portfolios: 9,020 CU
-- refresh crank after 64 extra portfolios: 9,020 CU
+- init portfolio: 3,439 CU
+- deposit: 13,365 CU
+- withdraw: 20,686 CU
+- top-up insurance: 11,368 CU
+- withdraw insurance: 11,592 CU
+- resolve: 1,527 CU
+- close resolved: 18,692 CU
+- TradeNoCpi: 59,807 CU
+- refresh crank: 9,086 CU
+- recovery crank: 3,337 CU
+- refresh crank before 64 extra portfolios: 9,084 CU
+- refresh crank after 64 extra portfolios: 9,084 CU
 
 It also verifies that BPF `Deposit`, `Withdraw`, `TopUpInsurance`,
 `WithdrawInsuranceLimited`, and `CloseResolved` move real SPL Token balances in
@@ -74,6 +74,12 @@ amount in one call, so the wrapper treats the instruction amount as a maximum:
 if the released amount would exceed the caller's cap, the instruction fails
 without persisting the staged engine mutation. Resolved markets still use the
 terminal `CloseResolved` payout path instead of live conversion.
+
+`InitMarket` now exposes the full v13 public-fund engine envelope instead of
+hardcoding the non-default fields in the wrapper. The engine remains the source
+of truth for config validation; the wrapper decodes the exact wire fields,
+builds `V13Config`, and only persists the market if `validate_public_user_fund`
+accepts the shape.
 
 This confirms the wrapper crank path is account-local and does not scale with
 materialized portfolio count. The v13 engine no longer has a global slab scan,

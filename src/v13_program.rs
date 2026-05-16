@@ -345,11 +345,21 @@ pub mod ix {
             h_min: u64,
             h_max: u64,
             initial_price: u64,
+            min_nonzero_mm_req: u128,
+            min_nonzero_im_req: u128,
             maintenance_margin_bps: u64,
             initial_margin_bps: u64,
             max_trading_fee_bps: u64,
+            liquidation_fee_bps: u64,
+            liquidation_fee_cap: u128,
+            min_liquidation_abs: u128,
             max_price_move_bps_per_slot: u64,
             max_accrual_dt_slots: u64,
+            max_abs_funding_e9_per_slot: u64,
+            min_funding_lifetime_slots: u64,
+            max_account_b_settlement_chunks: u64,
+            max_bankrupt_close_chunks: u64,
+            public_b_chunk_atoms: u128,
             maintenance_fee_per_slot: u128,
         },
         InitPortfolio,
@@ -406,11 +416,21 @@ pub mod ix {
                     h_min: read_u64(&mut rest)?,
                     h_max: read_u64(&mut rest)?,
                     initial_price: read_u64(&mut rest)?,
+                    min_nonzero_mm_req: read_u128(&mut rest)?,
+                    min_nonzero_im_req: read_u128(&mut rest)?,
                     maintenance_margin_bps: read_u64(&mut rest)?,
                     initial_margin_bps: read_u64(&mut rest)?,
                     max_trading_fee_bps: read_u64(&mut rest)?,
+                    liquidation_fee_bps: read_u64(&mut rest)?,
+                    liquidation_fee_cap: read_u128(&mut rest)?,
+                    min_liquidation_abs: read_u128(&mut rest)?,
                     max_price_move_bps_per_slot: read_u64(&mut rest)?,
                     max_accrual_dt_slots: read_u64(&mut rest)?,
+                    max_abs_funding_e9_per_slot: read_u64(&mut rest)?,
+                    min_funding_lifetime_slots: read_u64(&mut rest)?,
+                    max_account_b_settlement_chunks: read_u64(&mut rest)?,
+                    max_bankrupt_close_chunks: read_u64(&mut rest)?,
+                    public_b_chunk_atoms: read_u128(&mut rest)?,
                     maintenance_fee_per_slot: read_u128(&mut rest)?,
                 },
                 1 => Self::InitPortfolio,
@@ -470,22 +490,42 @@ pub mod ix {
                     h_min,
                     h_max,
                     initial_price,
+                    min_nonzero_mm_req,
+                    min_nonzero_im_req,
                     maintenance_margin_bps,
                     initial_margin_bps,
                     max_trading_fee_bps,
+                    liquidation_fee_bps,
+                    liquidation_fee_cap,
+                    min_liquidation_abs,
                     max_price_move_bps_per_slot,
                     max_accrual_dt_slots,
+                    max_abs_funding_e9_per_slot,
+                    min_funding_lifetime_slots,
+                    max_account_b_settlement_chunks,
+                    max_bankrupt_close_chunks,
+                    public_b_chunk_atoms,
                     maintenance_fee_per_slot,
                 } => {
                     out.push(0);
                     push_u64(&mut out, h_min);
                     push_u64(&mut out, h_max);
                     push_u64(&mut out, initial_price);
+                    push_u128(&mut out, min_nonzero_mm_req);
+                    push_u128(&mut out, min_nonzero_im_req);
                     push_u64(&mut out, maintenance_margin_bps);
                     push_u64(&mut out, initial_margin_bps);
                     push_u64(&mut out, max_trading_fee_bps);
+                    push_u64(&mut out, liquidation_fee_bps);
+                    push_u128(&mut out, liquidation_fee_cap);
+                    push_u128(&mut out, min_liquidation_abs);
                     push_u64(&mut out, max_price_move_bps_per_slot);
                     push_u64(&mut out, max_accrual_dt_slots);
+                    push_u64(&mut out, max_abs_funding_e9_per_slot);
+                    push_u64(&mut out, min_funding_lifetime_slots);
+                    push_u64(&mut out, max_account_b_settlement_chunks);
+                    push_u64(&mut out, max_bankrupt_close_chunks);
+                    push_u128(&mut out, public_b_chunk_atoms);
                     push_u128(&mut out, maintenance_fee_per_slot);
                 }
                 Self::InitPortfolio => out.push(1),
@@ -638,11 +678,21 @@ pub mod processor {
                 h_min,
                 h_max,
                 initial_price,
+                min_nonzero_mm_req,
+                min_nonzero_im_req,
                 maintenance_margin_bps,
                 initial_margin_bps,
                 max_trading_fee_bps,
+                liquidation_fee_bps,
+                liquidation_fee_cap,
+                min_liquidation_abs,
                 max_price_move_bps_per_slot,
                 max_accrual_dt_slots,
+                max_abs_funding_e9_per_slot,
+                min_funding_lifetime_slots,
+                max_account_b_settlement_chunks,
+                max_bankrupt_close_chunks,
+                public_b_chunk_atoms,
                 maintenance_fee_per_slot,
             } => handle_init_market(
                 program_id,
@@ -650,11 +700,21 @@ pub mod processor {
                 h_min,
                 h_max,
                 initial_price,
+                min_nonzero_mm_req,
+                min_nonzero_im_req,
                 maintenance_margin_bps,
                 initial_margin_bps,
                 max_trading_fee_bps,
+                liquidation_fee_bps,
+                liquidation_fee_cap,
+                min_liquidation_abs,
                 max_price_move_bps_per_slot,
                 max_accrual_dt_slots,
+                max_abs_funding_e9_per_slot,
+                min_funding_lifetime_slots,
+                max_account_b_settlement_chunks,
+                max_bankrupt_close_chunks,
+                public_b_chunk_atoms,
                 maintenance_fee_per_slot,
             ),
             Instruction::InitPortfolio => handle_init_portfolio(program_id, accounts),
@@ -724,11 +784,21 @@ pub mod processor {
         h_min: u64,
         h_max: u64,
         initial_price: u64,
+        min_nonzero_mm_req: u128,
+        min_nonzero_im_req: u128,
         maintenance_margin_bps: u64,
         initial_margin_bps: u64,
         max_trading_fee_bps: u64,
+        liquidation_fee_bps: u64,
+        liquidation_fee_cap: u128,
+        min_liquidation_abs: u128,
         max_price_move_bps_per_slot: u64,
         max_accrual_dt_slots: u64,
+        max_abs_funding_e9_per_slot: u64,
+        min_funding_lifetime_slots: u64,
+        max_account_b_settlement_chunks: u64,
+        max_bankrupt_close_chunks: u64,
+        public_b_chunk_atoms: u128,
         maintenance_fee_per_slot: u128,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
@@ -739,12 +809,21 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         verify_mint(mint_ai)?;
         let mut cfg = V13Config::public_user_fund(1, h_min, h_max);
+        cfg.min_nonzero_mm_req = min_nonzero_mm_req;
+        cfg.min_nonzero_im_req = min_nonzero_im_req;
         cfg.maintenance_margin_bps = maintenance_margin_bps;
         cfg.initial_margin_bps = initial_margin_bps;
         cfg.max_trading_fee_bps = max_trading_fee_bps;
+        cfg.liquidation_fee_bps = liquidation_fee_bps;
+        cfg.liquidation_fee_cap = liquidation_fee_cap;
+        cfg.min_liquidation_abs = min_liquidation_abs;
         cfg.max_price_move_bps_per_slot = max_price_move_bps_per_slot;
         cfg.max_accrual_dt_slots = max_accrual_dt_slots;
-        cfg.min_funding_lifetime_slots = max_accrual_dt_slots;
+        cfg.max_abs_funding_e9_per_slot = max_abs_funding_e9_per_slot;
+        cfg.min_funding_lifetime_slots = min_funding_lifetime_slots;
+        cfg.max_account_b_settlement_chunks = max_account_b_settlement_chunks;
+        cfg.max_bankrupt_close_chunks = max_bankrupt_close_chunks;
+        cfg.public_b_chunk_atoms = public_b_chunk_atoms;
         let mut group = new_market_group_boxed(market_ai.key.to_bytes(), cfg)?;
         if initial_price == 0 || initial_price > percolator::MAX_ORACLE_PRICE {
             return Err(PercolatorError::EngineInvalidConfig.into());

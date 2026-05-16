@@ -263,24 +263,40 @@ fn run_ix(ix: Instruction, accounts: &mut [&mut TestAccount]) -> Result<(), Prog
     processor::process_instruction(&program_id(), &infos, &ix.encode())
 }
 
+fn default_init_market_ix() -> Instruction {
+    Instruction::InitMarket {
+        h_min: 0,
+        h_max: 10,
+        initial_price: 100,
+        min_nonzero_mm_req: 1,
+        min_nonzero_im_req: 2,
+        maintenance_margin_bps: 10_000,
+        initial_margin_bps: 10_000,
+        max_trading_fee_bps: 10_000,
+        liquidation_fee_bps: 0,
+        liquidation_fee_cap: 0,
+        min_liquidation_abs: 0,
+        max_price_move_bps_per_slot: 10_000,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        max_account_b_settlement_chunks: 1,
+        max_bankrupt_close_chunks: 1,
+        public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
+        maintenance_fee_per_slot: 0,
+    }
+}
+
+fn init_market_ix_with(f: impl FnOnce(&mut Instruction)) -> Instruction {
+    let mut ix = default_init_market_ix();
+    f(&mut ix);
+    ix
+}
+
 fn init_market(admin: &mut TestAccount, market: &mut TestAccount) -> Pubkey {
     let mut mint = mint_account();
     let mint_key = mint.key;
-    run_ix(
-        Instruction::InitMarket {
-            h_min: 0,
-            h_max: 10,
-            initial_price: 100,
-            maintenance_margin_bps: 10_000,
-            initial_margin_bps: 10_000,
-            max_trading_fee_bps: 10_000,
-            max_price_move_bps_per_slot: 10_000,
-            max_accrual_dt_slots: 1,
-            maintenance_fee_per_slot: 0,
-        },
-        &mut [admin, market, &mut mint],
-    )
-    .unwrap();
+    run_ix(default_init_market_ix(), &mut [admin, market, &mut mint]).unwrap();
     mint_key
 }
 
@@ -424,6 +440,79 @@ fn v13_wrapper_init_binds_market_and_portfolio_provenance() {
 }
 
 #[test]
+fn v13_wrapper_init_market_ports_full_engine_config_fields() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                h_max,
+                min_nonzero_mm_req,
+                min_nonzero_im_req,
+                maintenance_margin_bps,
+                initial_margin_bps,
+                max_trading_fee_bps,
+                liquidation_fee_bps,
+                liquidation_fee_cap,
+                min_liquidation_abs,
+                max_price_move_bps_per_slot,
+                max_accrual_dt_slots,
+                max_abs_funding_e9_per_slot,
+                min_funding_lifetime_slots,
+                max_account_b_settlement_chunks,
+                max_bankrupt_close_chunks,
+                public_b_chunk_atoms,
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *h_max = 30;
+                *min_nonzero_mm_req = 5;
+                *min_nonzero_im_req = 8;
+                *maintenance_margin_bps = 10_000;
+                *initial_margin_bps = 10_000;
+                *max_trading_fee_bps = 1_000;
+                *liquidation_fee_bps = 1;
+                *liquidation_fee_cap = 1;
+                *min_liquidation_abs = 0;
+                *max_price_move_bps_per_slot = 1;
+                *max_accrual_dt_slots = 1;
+                *max_abs_funding_e9_per_slot = 0;
+                *min_funding_lifetime_slots = 30;
+                *max_account_b_settlement_chunks = 3;
+                *max_bankrupt_close_chunks = 4;
+                *public_b_chunk_atoms = 12_345;
+                *maintenance_fee_per_slot = 7;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    let (wrapper, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(wrapper.maintenance_fee_per_slot, 7);
+    assert_eq!(wrapper.trade_fee_base_bps, 1_000);
+    assert_eq!(group.config.h_max, 30);
+    assert_eq!(group.config.min_nonzero_mm_req, 5);
+    assert_eq!(group.config.min_nonzero_im_req, 8);
+    assert_eq!(group.config.maintenance_margin_bps, 10_000);
+    assert_eq!(group.config.initial_margin_bps, 10_000);
+    assert_eq!(group.config.max_trading_fee_bps, 1_000);
+    assert_eq!(group.config.liquidation_fee_bps, 1);
+    assert_eq!(group.config.liquidation_fee_cap, 1);
+    assert_eq!(group.config.min_liquidation_abs, 0);
+    assert_eq!(group.config.max_price_move_bps_per_slot, 1);
+    assert_eq!(group.config.max_accrual_dt_slots, 1);
+    assert_eq!(group.config.max_abs_funding_e9_per_slot, 0);
+    assert_eq!(group.config.min_funding_lifetime_slots, 30);
+    assert_eq!(group.config.max_account_b_settlement_chunks, 3);
+    assert_eq!(group.config.max_bankrupt_close_chunks, 4);
+    assert_eq!(group.config.public_b_chunk_atoms, 12_345);
+}
+
+#[test]
 fn v13_wrapper_account_layout_constants_match_serialized_state() {
     assert_eq!(
         MARKET_ACCOUNT_LEN,
@@ -471,50 +560,20 @@ fn v13_wrapper_init_market_rejects_invalid_mint_and_double_init() {
 
     let before = market.data.clone();
     let invalid_mint = run_ix(
-        Instruction::InitMarket {
-            h_min: 0,
-            h_max: 10,
-            initial_price: 100,
-            maintenance_margin_bps: 10_000,
-            initial_margin_bps: 10_000,
-            max_trading_fee_bps: 10_000,
-            max_price_move_bps_per_slot: 10_000,
-            max_accrual_dt_slots: 1,
-            maintenance_fee_per_slot: 0,
-        },
+        default_init_market_ix(),
         &mut [&mut admin, &mut market, &mut bad_mint],
     );
     assert_err_and_market_unchanged(invalid_mint, &market, &before);
 
     let mut good_mint = mint_account();
     run_ix(
-        Instruction::InitMarket {
-            h_min: 0,
-            h_max: 10,
-            initial_price: 100,
-            maintenance_margin_bps: 10_000,
-            initial_margin_bps: 10_000,
-            max_trading_fee_bps: 10_000,
-            max_price_move_bps_per_slot: 10_000,
-            max_accrual_dt_slots: 1,
-            maintenance_fee_per_slot: 0,
-        },
+        default_init_market_ix(),
         &mut [&mut admin, &mut market, &mut good_mint],
     )
     .unwrap();
     let initialized = market.data.clone();
     let double_init = run_ix(
-        Instruction::InitMarket {
-            h_min: 0,
-            h_max: 10,
-            initial_price: 100,
-            maintenance_margin_bps: 10_000,
-            initial_margin_bps: 10_000,
-            max_trading_fee_bps: 10_000,
-            max_price_move_bps_per_slot: 10_000,
-            max_accrual_dt_slots: 1,
-            maintenance_fee_per_slot: 0,
-        },
+        default_init_market_ix(),
         &mut [&mut admin, &mut market, &mut good_mint],
     );
     assert_err_and_market_unchanged(double_init, &market, &initialized);
@@ -529,34 +588,14 @@ fn v13_wrapper_init_and_account_meta_guards_fail_before_mutation() {
 
     let before_market = market.data.clone();
     let missing_admin_signature = run_ix(
-        Instruction::InitMarket {
-            h_min: 0,
-            h_max: 10,
-            initial_price: 100,
-            maintenance_margin_bps: 10_000,
-            initial_margin_bps: 10_000,
-            max_trading_fee_bps: 10_000,
-            max_price_move_bps_per_slot: 10_000,
-            max_accrual_dt_slots: 1,
-            maintenance_fee_per_slot: 0,
-        },
+        default_init_market_ix(),
         &mut [&mut unsigned_admin, &mut market, &mut mint],
     );
     assert_err_and_market_unchanged(missing_admin_signature, &market, &before_market);
 
     market.is_writable = false;
     let nonwritable_market = run_ix(
-        Instruction::InitMarket {
-            h_min: 0,
-            h_max: 10,
-            initial_price: 100,
-            maintenance_margin_bps: 10_000,
-            initial_margin_bps: 10_000,
-            max_trading_fee_bps: 10_000,
-            max_price_move_bps_per_slot: 10_000,
-            max_accrual_dt_slots: 1,
-            maintenance_fee_per_slot: 0,
-        },
+        default_init_market_ix(),
         &mut [&mut admin, &mut market, &mut mint],
     );
     assert_err_and_market_unchanged(nonwritable_market, &market, &before_market);
@@ -564,17 +603,7 @@ fn v13_wrapper_init_and_account_meta_guards_fail_before_mutation() {
 
     market.owner = Pubkey::new_unique();
     let wrong_market_owner = run_ix(
-        Instruction::InitMarket {
-            h_min: 0,
-            h_max: 10,
-            initial_price: 100,
-            maintenance_margin_bps: 10_000,
-            initial_margin_bps: 10_000,
-            max_trading_fee_bps: 10_000,
-            max_price_move_bps_per_slot: 10_000,
-            max_accrual_dt_slots: 1,
-            maintenance_fee_per_slot: 0,
-        },
+        default_init_market_ix(),
         &mut [&mut admin, &mut market, &mut mint],
     );
     assert_err_and_market_unchanged(wrong_market_owner, &market, &before_market);
@@ -612,52 +641,99 @@ fn v13_wrapper_init_market_rejects_invalid_engine_params_without_mutation() {
 
     let before = market.data.clone();
     let zero_price = run_ix(
-        Instruction::InitMarket {
-            h_min: 0,
-            h_max: 10,
-            initial_price: 0,
-            maintenance_margin_bps: 10_000,
-            initial_margin_bps: 10_000,
-            max_trading_fee_bps: 10_000,
-            max_price_move_bps_per_slot: 10_000,
-            max_accrual_dt_slots: 1,
-            maintenance_fee_per_slot: 0,
-        },
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket { initial_price, .. } = ix {
+                *initial_price = 0;
+            }
+        }),
         &mut [&mut admin, &mut market, &mut mint],
     );
     assert_err_and_market_unchanged(zero_price, &market, &before);
 
     let zero_dt = run_ix(
-        Instruction::InitMarket {
-            h_min: 0,
-            h_max: 10,
-            initial_price: 100,
-            maintenance_margin_bps: 10_000,
-            initial_margin_bps: 10_000,
-            max_trading_fee_bps: 10_000,
-            max_price_move_bps_per_slot: 10_000,
-            max_accrual_dt_slots: 0,
-            maintenance_fee_per_slot: 0,
-        },
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_accrual_dt_slots,
+                ..
+            } = ix
+            {
+                *max_accrual_dt_slots = 0;
+            }
+        }),
         &mut [&mut admin, &mut market, &mut mint],
     );
     assert_err_and_market_unchanged(zero_dt, &market, &before);
 
     let zero_price_move = run_ix(
-        Instruction::InitMarket {
-            h_min: 0,
-            h_max: 10,
-            initial_price: 100,
-            maintenance_margin_bps: 10_000,
-            initial_margin_bps: 10_000,
-            max_trading_fee_bps: 10_000,
-            max_price_move_bps_per_slot: 0,
-            max_accrual_dt_slots: 1,
-            maintenance_fee_per_slot: 0,
-        },
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_price_move_bps_per_slot,
+                ..
+            } = ix
+            {
+                *max_price_move_bps_per_slot = 0;
+            }
+        }),
         &mut [&mut admin, &mut market, &mut mint],
     );
     assert_err_and_market_unchanged(zero_price_move, &market, &before);
+
+    let invalid_min_margin_floor = run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                min_nonzero_mm_req, ..
+            } = ix
+            {
+                *min_nonzero_mm_req = 0;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    );
+    assert_err_and_market_unchanged(invalid_min_margin_floor, &market, &before);
+
+    let invalid_liq_floor = run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                liquidation_fee_cap,
+                min_liquidation_abs,
+                ..
+            } = ix
+            {
+                *liquidation_fee_cap = 1;
+                *min_liquidation_abs = 2;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    );
+    assert_err_and_market_unchanged(invalid_liq_floor, &market, &before);
+
+    let invalid_funding_cap = run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_abs_funding_e9_per_slot,
+                ..
+            } = ix
+            {
+                *max_abs_funding_e9_per_slot = 10_001;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    );
+    assert_err_and_market_unchanged(invalid_funding_cap, &market, &before);
+
+    let invalid_b_budget = run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_account_b_settlement_chunks,
+                ..
+            } = ix
+            {
+                *max_account_b_settlement_chunks = 0;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    );
+    assert_err_and_market_unchanged(invalid_b_budget, &market, &before);
 }
 
 #[test]
