@@ -350,6 +350,7 @@ pub mod ix {
             maintenance_margin_bps: u64,
             initial_margin_bps: u64,
             max_trading_fee_bps: u64,
+            trade_fee_base_bps: u64,
             liquidation_fee_bps: u64,
             liquidation_fee_cap: u128,
             min_liquidation_abs: u128,
@@ -421,6 +422,7 @@ pub mod ix {
                     maintenance_margin_bps: read_u64(&mut rest)?,
                     initial_margin_bps: read_u64(&mut rest)?,
                     max_trading_fee_bps: read_u64(&mut rest)?,
+                    trade_fee_base_bps: read_u64(&mut rest)?,
                     liquidation_fee_bps: read_u64(&mut rest)?,
                     liquidation_fee_cap: read_u128(&mut rest)?,
                     min_liquidation_abs: read_u128(&mut rest)?,
@@ -495,6 +497,7 @@ pub mod ix {
                     maintenance_margin_bps,
                     initial_margin_bps,
                     max_trading_fee_bps,
+                    trade_fee_base_bps,
                     liquidation_fee_bps,
                     liquidation_fee_cap,
                     min_liquidation_abs,
@@ -516,6 +519,7 @@ pub mod ix {
                     push_u64(&mut out, maintenance_margin_bps);
                     push_u64(&mut out, initial_margin_bps);
                     push_u64(&mut out, max_trading_fee_bps);
+                    push_u64(&mut out, trade_fee_base_bps);
                     push_u64(&mut out, liquidation_fee_bps);
                     push_u128(&mut out, liquidation_fee_cap);
                     push_u128(&mut out, min_liquidation_abs);
@@ -683,6 +687,7 @@ pub mod processor {
                 maintenance_margin_bps,
                 initial_margin_bps,
                 max_trading_fee_bps,
+                trade_fee_base_bps,
                 liquidation_fee_bps,
                 liquidation_fee_cap,
                 min_liquidation_abs,
@@ -705,6 +710,7 @@ pub mod processor {
                 maintenance_margin_bps,
                 initial_margin_bps,
                 max_trading_fee_bps,
+                trade_fee_base_bps,
                 liquidation_fee_bps,
                 liquidation_fee_cap,
                 min_liquidation_abs,
@@ -789,6 +795,7 @@ pub mod processor {
         maintenance_margin_bps: u64,
         initial_margin_bps: u64,
         max_trading_fee_bps: u64,
+        trade_fee_base_bps: u64,
         liquidation_fee_bps: u64,
         liquidation_fee_cap: u128,
         min_liquidation_abs: u128,
@@ -808,6 +815,9 @@ pub mod processor {
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
         verify_mint(mint_ai)?;
+        if trade_fee_base_bps > max_trading_fee_bps {
+            return Err(PercolatorError::EngineInvalidConfig.into());
+        }
         let mut cfg = V13Config::public_user_fund(1, h_min, h_max);
         cfg.min_nonzero_mm_req = min_nonzero_mm_req;
         cfg.min_nonzero_im_req = min_nonzero_im_req;
@@ -835,7 +845,7 @@ pub mod processor {
             admin: admin.key.to_bytes(),
             collateral_mint: mint_ai.key.to_bytes(),
             maintenance_fee_per_slot,
-            trade_fee_base_bps: max_trading_fee_bps,
+            trade_fee_base_bps,
             permissionless_resolve_stale_slots: 0,
             force_close_delay_slots: 0,
             last_good_oracle_slot: Clock::get().map(|c| c.slot).unwrap_or(0),
@@ -1017,6 +1027,7 @@ pub mod processor {
             size_q.unsigned_abs()
         };
         let prices = effective_prices(group.as_ref());
+        let fee_bps = core::cmp::max(fee_bps, cfg.trade_fee_base_bps);
         let req = TradeRequestV13 {
             asset_index: asset_index as usize,
             size_q: size_abs,

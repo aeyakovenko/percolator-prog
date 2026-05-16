@@ -14,6 +14,7 @@ fn kani_v13_init_market_decode_preserves_wire_fields() {
     let maintenance_margin_bps_raw: u16 = kani::any();
     let initial_margin_bps_raw: u16 = kani::any();
     let max_trading_fee_bps_raw: u16 = kani::any();
+    let trade_fee_base_bps_raw: u16 = kani::any();
     let liquidation_fee_bps_raw: u16 = kani::any();
     let liquidation_fee_cap_raw: u16 = kani::any();
     let min_liquidation_abs_raw: u16 = kani::any();
@@ -33,6 +34,7 @@ fn kani_v13_init_market_decode_preserves_wire_fields() {
     let maintenance_margin_bps = maintenance_margin_bps_raw as u64;
     let initial_margin_bps = initial_margin_bps_raw as u64;
     let max_trading_fee_bps = max_trading_fee_bps_raw as u64;
+    let trade_fee_base_bps = trade_fee_base_bps_raw as u64;
     let liquidation_fee_bps = liquidation_fee_bps_raw as u64;
     let liquidation_fee_cap = liquidation_fee_cap_raw as u128;
     let min_liquidation_abs = min_liquidation_abs_raw as u128;
@@ -45,7 +47,7 @@ fn kani_v13_init_market_decode_preserves_wire_fields() {
     let public_b_chunk_atoms = public_b_chunk_atoms_raw as u128;
     let maintenance_fee_per_slot = maintenance_fee_raw as u128;
 
-    let mut data = [0u8; 201];
+    let mut data = [0u8; 209];
     data[0] = 0;
     data[1..9].copy_from_slice(&h_min.to_le_bytes());
     data[9..17].copy_from_slice(&h_max.to_le_bytes());
@@ -55,17 +57,18 @@ fn kani_v13_init_market_decode_preserves_wire_fields() {
     data[57..65].copy_from_slice(&maintenance_margin_bps.to_le_bytes());
     data[65..73].copy_from_slice(&initial_margin_bps.to_le_bytes());
     data[73..81].copy_from_slice(&max_trading_fee_bps.to_le_bytes());
-    data[81..89].copy_from_slice(&liquidation_fee_bps.to_le_bytes());
-    data[89..105].copy_from_slice(&liquidation_fee_cap.to_le_bytes());
-    data[105..121].copy_from_slice(&min_liquidation_abs.to_le_bytes());
-    data[121..129].copy_from_slice(&max_price_move_bps_per_slot.to_le_bytes());
-    data[129..137].copy_from_slice(&max_accrual_dt_slots.to_le_bytes());
-    data[137..145].copy_from_slice(&max_abs_funding_e9_per_slot.to_le_bytes());
-    data[145..153].copy_from_slice(&min_funding_lifetime_slots.to_le_bytes());
-    data[153..161].copy_from_slice(&max_account_b_settlement_chunks.to_le_bytes());
-    data[161..169].copy_from_slice(&max_bankrupt_close_chunks.to_le_bytes());
-    data[169..185].copy_from_slice(&public_b_chunk_atoms.to_le_bytes());
-    data[185..201].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
+    data[81..89].copy_from_slice(&trade_fee_base_bps.to_le_bytes());
+    data[89..97].copy_from_slice(&liquidation_fee_bps.to_le_bytes());
+    data[97..113].copy_from_slice(&liquidation_fee_cap.to_le_bytes());
+    data[113..129].copy_from_slice(&min_liquidation_abs.to_le_bytes());
+    data[129..137].copy_from_slice(&max_price_move_bps_per_slot.to_le_bytes());
+    data[137..145].copy_from_slice(&max_accrual_dt_slots.to_le_bytes());
+    data[145..153].copy_from_slice(&max_abs_funding_e9_per_slot.to_le_bytes());
+    data[153..161].copy_from_slice(&min_funding_lifetime_slots.to_le_bytes());
+    data[161..169].copy_from_slice(&max_account_b_settlement_chunks.to_le_bytes());
+    data[169..177].copy_from_slice(&max_bankrupt_close_chunks.to_le_bytes());
+    data[177..193].copy_from_slice(&public_b_chunk_atoms.to_le_bytes());
+    data[193..209].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::InitMarket {
@@ -77,6 +80,7 @@ fn kani_v13_init_market_decode_preserves_wire_fields() {
             maintenance_margin_bps: got_mm,
             initial_margin_bps: got_im,
             max_trading_fee_bps: got_fee,
+            trade_fee_base_bps: got_base_fee,
             liquidation_fee_bps: got_liq_fee,
             liquidation_fee_cap: got_liq_cap,
             min_liquidation_abs: got_min_liq,
@@ -97,6 +101,7 @@ fn kani_v13_init_market_decode_preserves_wire_fields() {
             assert_eq!(got_mm, maintenance_margin_bps);
             assert_eq!(got_im, initial_margin_bps);
             assert_eq!(got_fee, max_trading_fee_bps);
+            assert_eq!(got_base_fee, trade_fee_base_bps);
             assert_eq!(got_liq_fee, liquidation_fee_bps);
             assert_eq!(got_liq_cap, liquidation_fee_cap);
             assert_eq!(got_min_liq, min_liquidation_abs);
@@ -270,6 +275,7 @@ fn kani_v13_every_active_payload_rejects_trailing_byte() {
         maintenance_margin_bps: 500,
         initial_margin_bps: 1_000,
         max_trading_fee_bps: 10_000,
+        trade_fee_base_bps: 0,
         liquidation_fee_bps: 0,
         liquidation_fee_cap: 0,
         min_liquidation_abs: 0,

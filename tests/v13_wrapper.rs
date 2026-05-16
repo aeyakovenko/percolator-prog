@@ -273,6 +273,7 @@ fn default_init_market_ix() -> Instruction {
         maintenance_margin_bps: 10_000,
         initial_margin_bps: 10_000,
         max_trading_fee_bps: 10_000,
+        trade_fee_base_bps: 0,
         liquidation_fee_bps: 0,
         liquidation_fee_cap: 0,
         min_liquidation_abs: 0,
@@ -454,6 +455,7 @@ fn v13_wrapper_init_market_ports_full_engine_config_fields() {
                 maintenance_margin_bps,
                 initial_margin_bps,
                 max_trading_fee_bps,
+                trade_fee_base_bps,
                 liquidation_fee_bps,
                 liquidation_fee_cap,
                 min_liquidation_abs,
@@ -474,6 +476,7 @@ fn v13_wrapper_init_market_ports_full_engine_config_fields() {
                 *maintenance_margin_bps = 10_000;
                 *initial_margin_bps = 10_000;
                 *max_trading_fee_bps = 1_000;
+                *trade_fee_base_bps = 7;
                 *liquidation_fee_bps = 1;
                 *liquidation_fee_cap = 1;
                 *min_liquidation_abs = 0;
@@ -493,7 +496,7 @@ fn v13_wrapper_init_market_ports_full_engine_config_fields() {
 
     let (wrapper, group) = state::read_market(&market.data).unwrap();
     assert_eq!(wrapper.maintenance_fee_per_slot, 7);
-    assert_eq!(wrapper.trade_fee_base_bps, 1_000);
+    assert_eq!(wrapper.trade_fee_base_bps, 7);
     assert_eq!(group.config.h_max, 30);
     assert_eq!(group.config.min_nonzero_mm_req, 5);
     assert_eq!(group.config.min_nonzero_im_req, 8);
@@ -706,6 +709,22 @@ fn v13_wrapper_init_market_rejects_invalid_engine_params_without_mutation() {
         &mut [&mut admin, &mut market, &mut mint],
     );
     assert_err_and_market_unchanged(invalid_liq_floor, &market, &before);
+
+    let invalid_base_fee = run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_trading_fee_bps,
+                trade_fee_base_bps,
+                ..
+            } = ix
+            {
+                *max_trading_fee_bps = 99;
+                *trade_fee_base_bps = 100;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    );
+    assert_err_and_market_unchanged(invalid_base_fee, &market, &before);
 
     let invalid_funding_cap = run_ix(
         init_market_ix_with(|ix| {
@@ -2469,6 +2488,60 @@ fn v13_wrapper_tradenocpi_accepts_consented_wide_exec_price_without_moving_index
     assert_eq!(
         group.insurance, 30,
         "notional=1500 and 100 bps charges 15 to each side"
+    );
+}
+
+#[test]
+fn v13_wrapper_tradenocpi_applies_static_base_fee_floor() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_trading_fee_bps,
+                trade_fee_base_bps,
+                ..
+            } = ix
+            {
+                *max_trading_fee_bps = 1_000;
+                *trade_fee_base_bps = 100;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 1_000_000);
+
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: (10 * POS_SCALE) as i128,
+            exec_price: 150,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        group.insurance, 30,
+        "zero caller fee still pays the configured 100 bps base fee on both sides"
     );
 }
 

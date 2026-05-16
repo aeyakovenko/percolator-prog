@@ -167,6 +167,7 @@ impl V13CuEnv {
                 maintenance_margin_bps: 10_000,
                 initial_margin_bps: 10_000,
                 max_trading_fee_bps: 10_000,
+                trade_fee_base_bps: 0,
                 liquidation_fee_bps: 0,
                 liquidation_fee_cap: 0,
                 min_liquidation_abs: 0,
