@@ -1,9 +1,12 @@
 use percolator::{
-    MarketGroupV13, MarketModeV13, PermissionlessRecoveryReasonV13, PortfolioAccountV13, V13Config,
-    POS_SCALE,
+    MarketGroupV13, MarketGroupV13Account, MarketModeV13, PermissionlessRecoveryReasonV13,
+    PortfolioAccountV13Account, V13Config, POS_SCALE,
 };
 use percolator_prog::{
-    constants::{MARKET_ACCOUNT_LEN, PORTFOLIO_ACCOUNT_LEN},
+    constants::{
+        MARKET_ACCOUNT_LEN, MARKET_GROUP_LEN, PORTFOLIO_ACCOUNT_LEN, PORTFOLIO_STATE_LEN,
+        WRAPPER_CONFIG_LEN,
+    },
     ix::Instruction,
     processor, state,
 };
@@ -248,6 +251,46 @@ fn vault_token_account_with_controls(
 
 fn vault_authority_account(market: &TestAccount) -> TestAccount {
     TestAccount::new(vault_authority(market), Pubkey::new_unique(), 0)
+}
+
+fn matcher_delegate(
+    market: &TestAccount,
+    maker: &TestAccount,
+    matcher_program: &TestAccount,
+    matcher_context: &TestAccount,
+) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            b"matcher",
+            market.key.as_ref(),
+            maker.key.as_ref(),
+            matcher_program.key.as_ref(),
+            matcher_context.key.as_ref(),
+        ],
+        &program_id(),
+    )
+    .0
+}
+
+fn matcher_program_account() -> TestAccount {
+    TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0).executable()
+}
+
+fn matcher_context_account(matcher_program: &TestAccount) -> TestAccount {
+    TestAccount::new(Pubkey::new_unique(), matcher_program.key, 320).writable()
+}
+
+fn matcher_delegate_account(
+    market: &TestAccount,
+    maker: &TestAccount,
+    matcher_program: &TestAccount,
+    matcher_context: &TestAccount,
+) -> TestAccount {
+    TestAccount::new(
+        matcher_delegate(market, maker, matcher_program, matcher_context),
+        Pubkey::default(),
+        0,
+    )
 }
 
 fn token_program_account() -> TestAccount {
@@ -518,19 +561,30 @@ fn v13_wrapper_init_market_ports_full_engine_config_fields() {
 #[test]
 fn v13_wrapper_account_layout_constants_match_serialized_state() {
     assert_eq!(
+        MARKET_GROUP_LEN,
+        core::mem::size_of::<MarketGroupV13Account>()
+    );
+    assert_eq!(
+        PORTFOLIO_STATE_LEN,
+        core::mem::size_of::<PortfolioAccountV13Account>()
+    );
+    assert_eq!(
+        WRAPPER_CONFIG_LEN,
+        core::mem::size_of::<state::WrapperConfigV13>()
+    );
+    assert_eq!(core::mem::align_of::<MarketGroupV13Account>(), 1);
+    assert_eq!(core::mem::align_of::<PortfolioAccountV13Account>(), 1);
+    assert_eq!(
         MARKET_ACCOUNT_LEN,
-        16 + state::wrapper_config_len_for_test() + core::mem::size_of::<MarketGroupV13>(),
-        "market account length must exactly cover header + wrapper config + engine state"
+        16 + WRAPPER_CONFIG_LEN + MARKET_GROUP_LEN,
+        "market account length must exactly cover header + wrapper config + serialized engine state"
     );
     assert_eq!(
         PORTFOLIO_ACCOUNT_LEN,
-        16 + core::mem::size_of::<PortfolioAccountV13>(),
-        "portfolio account length must exactly cover header + portfolio state"
+        16 + PORTFOLIO_STATE_LEN,
+        "portfolio account length must exactly cover header + serialized portfolio state"
     );
-    assert!(
-        state::alignment_note() <= core::mem::align_of::<MarketGroupV13>(),
-        "wrapper alignment note should not exceed the market group alignment"
-    );
+    assert_eq!(state::alignment_note(), 1);
 
     let mut admin = signer();
     let mut market = market_account();
@@ -552,6 +606,21 @@ fn v13_wrapper_account_layout_constants_match_serialized_state() {
     assert_eq!(
         portfolio.data, portfolio_before,
         "read/write-copy roundtrip must preserve portfolio account bytes"
+    );
+
+    let mut corrupt_market = market.data.clone();
+    corrupt_market[MARKET_ACCOUNT_LEN - 1] = 2;
+    assert_eq!(
+        state::read_market(&corrupt_market),
+        Err(ProgramError::InvalidAccountData),
+        "serialized bool fields must be validated before engine state is materialized"
+    );
+    let mut corrupt_portfolio = portfolio.data.clone();
+    corrupt_portfolio[PORTFOLIO_ACCOUNT_LEN - 1] = 2;
+    assert_eq!(
+        state::read_portfolio(&corrupt_portfolio),
+        Err(ProgramError::InvalidAccountData),
+        "serialized portfolio bool fields must be validated before engine state is materialized"
     );
 }
 
@@ -2892,6 +2961,158 @@ fn v13_wrapper_tradenocpi_rejects_wrong_owner_fee_cap_and_invalid_asset() {
         ],
     );
     assert_err_and_market_unchanged(above_max_price, &market, &before_market);
+    assert_eq!(account_a.data, before_a);
+    assert_eq!(account_b.data, before_b);
+}
+
+#[test]
+fn v13_wrapper_tradecpi_requires_bilateral_signatures_before_matcher_cpi() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut unsigned_b = TestAccount::new(owner_b.key, Pubkey::new_unique(), 0);
+    let mut account_a = portfolio_account();
+    let mut account_b = portfolio_account();
+    let mut matcher_program = matcher_program_account();
+    let mut matcher_context = matcher_context_account(&matcher_program);
+    let mut delegate =
+        matcher_delegate_account(&market, &account_b, &matcher_program, &matcher_context);
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner_a, &mut market, &mut account_a);
+    init_portfolio(&mut owner_b, &mut market, &mut account_b);
+    deposit(&mut owner_a, &mut market, &mut account_a, 1_000_000);
+    deposit(&mut owner_b, &mut market, &mut account_b, 1_000_000);
+
+    let before_market = market.data.clone();
+    let before_a = account_a.data.clone();
+    let before_b = account_b.data.clone();
+    let rejected = run_ix(
+        Instruction::TradeCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            fee_bps: 0,
+            limit_price: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut unsigned_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+            &mut matcher_program,
+            &mut matcher_context,
+            &mut delegate,
+        ],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before_market);
+    assert_eq!(account_a.data, before_a);
+    assert_eq!(account_b.data, before_b);
+    assert_eq!(
+        matcher_context.data,
+        vec![0u8; 320],
+        "signature failure must happen before matcher context mutation"
+    );
+}
+
+#[test]
+fn v13_wrapper_tradecpi_rejects_wrong_delegate_and_unsafe_tail_before_cpi() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut account_a = portfolio_account();
+    let mut account_b = portfolio_account();
+    let mut matcher_program = matcher_program_account();
+    let mut matcher_context = matcher_context_account(&matcher_program);
+    let mut wrong_delegate = TestAccount::new(Pubkey::new_unique(), Pubkey::default(), 0);
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner_a, &mut market, &mut account_a);
+    init_portfolio(&mut owner_b, &mut market, &mut account_b);
+    deposit(&mut owner_a, &mut market, &mut account_a, 1_000_000);
+    deposit(&mut owner_b, &mut market, &mut account_b, 1_000_000);
+
+    let before_market = market.data.clone();
+    let before_a = account_a.data.clone();
+    let before_b = account_b.data.clone();
+    let wrong_delegate_result = run_ix(
+        Instruction::TradeCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            fee_bps: 0,
+            limit_price: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+            &mut matcher_program,
+            &mut matcher_context,
+            &mut wrong_delegate,
+        ],
+    );
+    assert_err_and_market_unchanged(wrong_delegate_result, &market, &before_market);
+    assert_eq!(account_a.data, before_a);
+    assert_eq!(account_b.data, before_b);
+
+    let mut delegate =
+        matcher_delegate_account(&market, &account_b, &matcher_program, &matcher_context);
+    let mut program_owned_tail = TestAccount::new(Pubkey::new_unique(), program_id(), 0).writable();
+    let unsafe_tail = run_ix(
+        Instruction::TradeCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            fee_bps: 0,
+            limit_price: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+            &mut matcher_program,
+            &mut matcher_context,
+            &mut delegate,
+            &mut program_owned_tail,
+        ],
+    );
+    assert_err_and_market_unchanged(unsafe_tail, &market, &before_market);
+    assert_eq!(account_a.data, before_a);
+    assert_eq!(account_b.data, before_b);
+
+    let mut too_many_tail: Vec<TestAccount> = (0..33)
+        .map(|_| TestAccount::new(Pubkey::new_unique(), Pubkey::new_unique(), 0))
+        .collect();
+    let oversized_tail = {
+        let mut infos = vec![
+            owner_a.to_info(),
+            owner_b.to_info(),
+            market.to_info(),
+            account_a.to_info(),
+            account_b.to_info(),
+            matcher_program.to_info(),
+            matcher_context.to_info(),
+            delegate.to_info(),
+        ];
+        infos.extend(too_many_tail.iter_mut().map(TestAccount::to_info));
+        processor::process_instruction(
+            &program_id(),
+            &infos,
+            &Instruction::TradeCpi {
+                asset_index: 0,
+                size_q: POS_SCALE as i128,
+                fee_bps: 0,
+                limit_price: 0,
+            }
+            .encode(),
+        )
+    };
+    assert_err_and_market_unchanged(oversized_tail, &market, &before_market);
     assert_eq!(account_a.data, before_a);
     assert_eq!(account_b.data, before_b);
 }

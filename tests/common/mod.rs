@@ -774,12 +774,7 @@ pub fn encode_trade(lp: u16, user: u16, size: i128) -> Vec<u8> {
     data
 }
 
-pub fn encode_trade_with_exec_price(
-    lp: u16,
-    user: u16,
-    size: i128,
-    exec_price_e6: u64,
-) -> Vec<u8> {
+pub fn encode_trade_with_exec_price(lp: u16, user: u16, size: i128, exec_price_e6: u64) -> Vec<u8> {
     let mut data = encode_trade(lp, user, size);
     data.extend_from_slice(&exec_price_e6.to_le_bytes());
     data

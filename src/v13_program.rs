@@ -8,6 +8,7 @@
 
 extern crate alloc;
 
+use alloc::vec::Vec;
 use percolator::{
     AssetStateV13, HealthCertV13, MarketGroupV13, MarketModeV13, PermissionlessCrankActionV13,
     PermissionlessCrankRequestV13, PermissionlessRecoveryReasonV13, PortfolioAccountV13,
@@ -19,6 +20,7 @@ use solana_program::{
     clock::Clock,
     declare_id,
     entrypoint::ProgramResult,
+    instruction::{AccountMeta, Instruction as SolInstruction},
     program::{invoke, invoke_signed},
     program_error::ProgramError,
     program_pack::Pack,
@@ -30,7 +32,7 @@ declare_id!("Perco1ator111111111111111111111111111111111");
 
 pub mod constants {
     use core::mem::size_of;
-    use percolator::{MarketGroupV13, PortfolioAccountV13};
+    use percolator::{MarketGroupV13Account, PortfolioAccountV13Account};
 
     pub const MAGIC: u64 = 0x5045_5243_5631_3300; // "PERCV13\0"
     pub const VERSION: u16 = 13;
@@ -38,10 +40,15 @@ pub mod constants {
     pub const KIND_PORTFOLIO: u8 = 2;
 
     pub const HEADER_LEN: usize = 16;
-    pub const WRAPPER_CONFIG_LEN: usize = size_of::<crate::state::WrapperConfigV13>();
+    pub const WRAPPER_CONFIG_LEN: usize = 176;
+    pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV13Account>();
+    pub const PORTFOLIO_STATE_LEN: usize = size_of::<PortfolioAccountV13Account>();
     pub const MARKET_GROUP_OFF: usize = HEADER_LEN + WRAPPER_CONFIG_LEN;
-    pub const MARKET_ACCOUNT_LEN: usize = MARKET_GROUP_OFF + size_of::<MarketGroupV13>();
-    pub const PORTFOLIO_ACCOUNT_LEN: usize = HEADER_LEN + size_of::<PortfolioAccountV13>();
+    pub const MARKET_ACCOUNT_LEN: usize = MARKET_GROUP_OFF + MARKET_GROUP_LEN;
+    pub const PORTFOLIO_ACCOUNT_LEN: usize = HEADER_LEN + PORTFOLIO_STATE_LEN;
+    pub const MAX_MATCHER_TAIL_ACCOUNTS: usize = 32;
+    pub const MATCHER_ABI_VERSION: u32 = 2;
+    pub const MATCHER_CONTEXT_MIN_LEN: usize = 64;
 }
 
 pub mod error {
@@ -112,13 +119,17 @@ pub mod state {
         error::PercolatorError,
     };
     use alloc::boxed::Box;
-    use core::alloc::Layout;
-    use core::mem::{align_of, size_of};
-    use percolator::{MarketGroupV13, PortfolioAccountV13};
+    use core::ptr::addr_of_mut;
+    use percolator::{
+        AssetStateV13Account, HealthCertV13Account, MarketGroupV13, MarketGroupV13Account,
+        MarketModeV13, PortfolioAccountV13, PortfolioAccountV13Account, PortfolioLegV13Account,
+        ProvenanceHeaderV13Account, V13ConfigAccount, V13Error, V13OptionalRecoveryReasonAccount,
+        V13PodI128, V13PodU128, V13PodU32, V13PodU64, V13_MAX_PORTFOLIO_ASSETS_N,
+    };
     use solana_program::program_error::ProgramError;
 
     #[repr(C)]
-    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
     pub struct WrapperConfigV13 {
         pub admin: [u8; 32],
         pub collateral_mint: [u8; 32],
@@ -187,45 +198,283 @@ pub mod state {
         data.len() >= HEADER_LEN && read_u64(data, 0).ok() == Some(MAGIC)
     }
 
-    #[allow(unsafe_code)]
     #[inline]
-    fn read_copy<T: Copy>(data: &[u8], off: usize) -> Result<T, ProgramError> {
-        if data.len() < off + size_of::<T>() {
-            return Err(PercolatorError::InvalidAccountLen.into());
-        }
-        let ptr = unsafe { data.as_ptr().add(off) as *const T };
-        Ok(unsafe { core::ptr::read_unaligned(ptr) })
+    fn map_account_wire_error(_: V13Error) -> ProgramError {
+        ProgramError::InvalidAccountData
     }
 
-    #[allow(unsafe_code)]
     #[inline]
-    fn write_copy<T: Copy>(data: &mut [u8], off: usize, value: &T) -> Result<(), ProgramError> {
-        if data.len() < off + size_of::<T>() {
-            return Err(PercolatorError::InvalidAccountLen.into());
-        }
-        let src = value as *const T as *const u8;
-        let dst = unsafe { data.as_mut_ptr().add(off) };
-        unsafe {
-            core::ptr::copy_nonoverlapping(src, dst, size_of::<T>());
-        }
+    fn read_wrapper_config_from_bytes(data: &[u8]) -> Result<WrapperConfigV13, ProgramError> {
+        let bytes = data
+            .get(HEADER_LEN..HEADER_LEN + WRAPPER_CONFIG_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        Ok(bytemuck::pod_read_unaligned(bytes))
+    }
+
+    #[inline]
+    fn write_wrapper_config_to_bytes(
+        data: &mut [u8],
+        config: &WrapperConfigV13,
+    ) -> Result<(), ProgramError> {
+        data.get_mut(HEADER_LEN..HEADER_LEN + WRAPPER_CONFIG_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?
+            .copy_from_slice(bytemuck::bytes_of(config));
         Ok(())
     }
 
-    #[allow(unsafe_code)]
     #[inline]
-    fn read_boxed<T: Copy>(data: &[u8], off: usize) -> Result<Box<T>, ProgramError> {
-        if data.len() < off + size_of::<T>() {
-            return Err(PercolatorError::InvalidAccountLen.into());
+    fn market_wire(data: &[u8]) -> Result<&MarketGroupV13Account, ProgramError> {
+        let bytes = data
+            .get(MARKET_GROUP_OFF..MARKET_GROUP_OFF + core::mem::size_of::<MarketGroupV13Account>())
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        bytemuck::try_from_bytes(bytes).map_err(|_| ProgramError::InvalidAccountData)
+    }
+
+    #[inline]
+    fn market_wire_mut(data: &mut [u8]) -> Result<&mut MarketGroupV13Account, ProgramError> {
+        let bytes = data
+            .get_mut(
+                MARKET_GROUP_OFF..MARKET_GROUP_OFF + core::mem::size_of::<MarketGroupV13Account>(),
+            )
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        bytemuck::try_from_bytes_mut(bytes).map_err(|_| ProgramError::InvalidAccountData)
+    }
+
+    #[inline]
+    fn portfolio_wire(data: &[u8]) -> Result<&PortfolioAccountV13Account, ProgramError> {
+        let bytes = data
+            .get(HEADER_LEN..HEADER_LEN + core::mem::size_of::<PortfolioAccountV13Account>())
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        bytemuck::try_from_bytes(bytes).map_err(|_| ProgramError::InvalidAccountData)
+    }
+
+    #[inline]
+    fn portfolio_wire_mut(
+        data: &mut [u8],
+    ) -> Result<&mut PortfolioAccountV13Account, ProgramError> {
+        let bytes = data
+            .get_mut(HEADER_LEN..HEADER_LEN + core::mem::size_of::<PortfolioAccountV13Account>())
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        bytemuck::try_from_bytes_mut(bytes).map_err(|_| ProgramError::InvalidAccountData)
+    }
+
+    #[inline]
+    fn encode_bool(v: bool) -> u8 {
+        v as u8
+    }
+
+    #[inline]
+    fn decode_bool(v: u8) -> Result<bool, ProgramError> {
+        match v {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(ProgramError::InvalidAccountData),
         }
-        let layout = Layout::new::<T>();
-        let raw = unsafe { alloc::alloc::alloc(layout) };
-        if raw.is_null() {
+    }
+
+    #[inline]
+    fn encode_market_mode(mode: MarketModeV13) -> u8 {
+        match mode {
+            MarketModeV13::Live => 0,
+            MarketModeV13::Resolved => 1,
+            MarketModeV13::Recovery => 2,
+        }
+    }
+
+    #[inline]
+    fn decode_market_mode(v: u8) -> Result<MarketModeV13, ProgramError> {
+        match v {
+            0 => Ok(MarketModeV13::Live),
+            1 => Ok(MarketModeV13::Resolved),
+            2 => Ok(MarketModeV13::Recovery),
+            _ => Err(ProgramError::InvalidAccountData),
+        }
+    }
+
+    #[inline]
+    fn validate_non_min_i128(v: i128) -> Result<(), ProgramError> {
+        if v == i128::MIN {
+            Err(ProgramError::InvalidAccountData)
+        } else {
+            Ok(())
+        }
+    }
+
+    #[inline]
+    fn validate_fee_credits(v: i128) -> Result<(), ProgramError> {
+        if v > 0 || v == i128::MIN {
+            Err(ProgramError::InvalidAccountData)
+        } else {
+            Ok(())
+        }
+    }
+
+    // The engine owns the Pod wire structs and discriminator validation. The
+    // wrapper still materializes top-level accounts field-by-field so SBF never
+    // places an entire MarketGroupV13/PortfolioAccountV13 temporary on stack.
+    fn market_from_wire_boxed(
+        wire: &MarketGroupV13Account,
+    ) -> Result<Box<MarketGroupV13>, ProgramError> {
+        let mut boxed = Box::<MarketGroupV13>::new_uninit();
+        let ptr = boxed.as_mut_ptr();
+        unsafe {
+            addr_of_mut!((*ptr).market_group_id).write(wire.market_group_id);
+            addr_of_mut!((*ptr).config).write(
+                wire.config
+                    .try_to_runtime()
+                    .map_err(map_account_wire_error)?,
+            );
+            addr_of_mut!((*ptr).vault).write(wire.vault.get());
+            addr_of_mut!((*ptr).insurance).write(wire.insurance.get());
+            addr_of_mut!((*ptr).c_tot).write(wire.c_tot.get());
+            addr_of_mut!((*ptr).pnl_pos_tot).write(wire.pnl_pos_tot.get());
+            addr_of_mut!((*ptr).pnl_matured_pos_tot).write(wire.pnl_matured_pos_tot.get());
+            addr_of_mut!((*ptr).materialized_portfolio_count)
+                .write(wire.materialized_portfolio_count.get());
+            addr_of_mut!((*ptr).stale_certificate_count).write(wire.stale_certificate_count.get());
+            addr_of_mut!((*ptr).b_stale_account_count).write(wire.b_stale_account_count.get());
+            addr_of_mut!((*ptr).negative_pnl_account_count)
+                .write(wire.negative_pnl_account_count.get());
+            addr_of_mut!((*ptr).risk_epoch).write(wire.risk_epoch.get());
+            addr_of_mut!((*ptr).oracle_epoch).write(wire.oracle_epoch.get());
+            addr_of_mut!((*ptr).funding_epoch).write(wire.funding_epoch.get());
+            addr_of_mut!((*ptr).slot_last).write(wire.slot_last.get());
+            addr_of_mut!((*ptr).current_slot).write(wire.current_slot.get());
+            for i in 0..V13_MAX_PORTFOLIO_ASSETS_N {
+                addr_of_mut!((*ptr).assets[i]).write(
+                    wire.assets[i]
+                        .try_to_runtime()
+                        .map_err(map_account_wire_error)?,
+                );
+            }
+            addr_of_mut!((*ptr).bankruptcy_hlock_active)
+                .write(decode_bool(wire.bankruptcy_hlock_active)?);
+            addr_of_mut!((*ptr).threshold_stress_active)
+                .write(decode_bool(wire.threshold_stress_active)?);
+            addr_of_mut!((*ptr).active_bankrupt_close_present)
+                .write(decode_bool(wire.active_bankrupt_close_present)?);
+            addr_of_mut!((*ptr).loss_stale_active).write(decode_bool(wire.loss_stale_active)?);
+            addr_of_mut!((*ptr).recovery_reason).write(
+                wire.recovery_reason
+                    .try_to_runtime()
+                    .map_err(map_account_wire_error)?,
+            );
+            addr_of_mut!((*ptr).mode).write(decode_market_mode(wire.mode)?);
+            addr_of_mut!((*ptr).resolved_slot).write(wire.resolved_slot.get());
+            addr_of_mut!((*ptr).payout_snapshot).write(wire.payout_snapshot.get());
+            addr_of_mut!((*ptr).payout_snapshot_pnl_pos_tot)
+                .write(wire.payout_snapshot_pnl_pos_tot.get());
+            addr_of_mut!((*ptr).payout_snapshot_captured)
+                .write(decode_bool(wire.payout_snapshot_captured)?);
+            let group = boxed.assume_init();
+            group
+                .assert_public_invariants()
+                .map_err(map_account_wire_error)?;
+            Ok(group)
+        }
+    }
+
+    fn write_market_wire(wire: &mut MarketGroupV13Account, group: &MarketGroupV13) {
+        wire.market_group_id = group.market_group_id;
+        wire.config = V13ConfigAccount::from_runtime(&group.config);
+        wire.vault = V13PodU128::new(group.vault);
+        wire.insurance = V13PodU128::new(group.insurance);
+        wire.c_tot = V13PodU128::new(group.c_tot);
+        wire.pnl_pos_tot = V13PodU128::new(group.pnl_pos_tot);
+        wire.pnl_matured_pos_tot = V13PodU128::new(group.pnl_matured_pos_tot);
+        wire.materialized_portfolio_count = V13PodU64::new(group.materialized_portfolio_count);
+        wire.stale_certificate_count = V13PodU64::new(group.stale_certificate_count);
+        wire.b_stale_account_count = V13PodU64::new(group.b_stale_account_count);
+        wire.negative_pnl_account_count = V13PodU64::new(group.negative_pnl_account_count);
+        wire.risk_epoch = V13PodU64::new(group.risk_epoch);
+        wire.oracle_epoch = V13PodU64::new(group.oracle_epoch);
+        wire.funding_epoch = V13PodU64::new(group.funding_epoch);
+        wire.slot_last = V13PodU64::new(group.slot_last);
+        wire.current_slot = V13PodU64::new(group.current_slot);
+        for i in 0..V13_MAX_PORTFOLIO_ASSETS_N {
+            wire.assets[i] = AssetStateV13Account::from_runtime(&group.assets[i]);
+        }
+        wire.bankruptcy_hlock_active = encode_bool(group.bankruptcy_hlock_active);
+        wire.threshold_stress_active = encode_bool(group.threshold_stress_active);
+        wire.active_bankrupt_close_present = encode_bool(group.active_bankrupt_close_present);
+        wire.loss_stale_active = encode_bool(group.loss_stale_active);
+        wire.recovery_reason =
+            V13OptionalRecoveryReasonAccount::from_runtime(group.recovery_reason);
+        wire.mode = encode_market_mode(group.mode);
+        wire.resolved_slot = V13PodU64::new(group.resolved_slot);
+        wire.payout_snapshot = V13PodU128::new(group.payout_snapshot);
+        wire.payout_snapshot_pnl_pos_tot = V13PodU128::new(group.payout_snapshot_pnl_pos_tot);
+        wire.payout_snapshot_captured = encode_bool(group.payout_snapshot_captured);
+    }
+
+    fn portfolio_from_wire_boxed(
+        wire: &PortfolioAccountV13Account,
+    ) -> Result<Box<PortfolioAccountV13>, ProgramError> {
+        let provenance_header = wire
+            .provenance_header
+            .try_to_runtime()
+            .map_err(map_account_wire_error)?;
+        if provenance_header.owner != wire.owner {
             return Err(ProgramError::InvalidAccountData);
         }
-        unsafe {
-            core::ptr::copy_nonoverlapping(data.as_ptr().add(off), raw, size_of::<T>());
-            Ok(Box::from_raw(raw as *mut T))
+        let pnl = wire.pnl.get();
+        let fee_credits = wire.fee_credits.get();
+        validate_non_min_i128(pnl)?;
+        validate_fee_credits(fee_credits)?;
+        let reserved_pnl = wire.reserved_pnl.get();
+        if reserved_pnl > pnl.max(0) as u128 {
+            return Err(ProgramError::InvalidAccountData);
         }
+
+        let mut boxed = Box::<PortfolioAccountV13>::new_uninit();
+        let ptr = boxed.as_mut_ptr();
+        unsafe {
+            addr_of_mut!((*ptr).provenance_header).write(provenance_header);
+            addr_of_mut!((*ptr).owner).write(wire.owner);
+            addr_of_mut!((*ptr).capital).write(wire.capital.get());
+            addr_of_mut!((*ptr).pnl).write(pnl);
+            addr_of_mut!((*ptr).reserved_pnl).write(reserved_pnl);
+            addr_of_mut!((*ptr).fee_credits).write(fee_credits);
+            addr_of_mut!((*ptr).last_fee_slot).write(wire.last_fee_slot.get());
+            addr_of_mut!((*ptr).active_bitmap).write(wire.active_bitmap.get());
+            for i in 0..V13_MAX_PORTFOLIO_ASSETS_N {
+                addr_of_mut!((*ptr).legs[i]).write(
+                    wire.legs[i]
+                        .try_to_runtime()
+                        .map_err(map_account_wire_error)?,
+                );
+            }
+            addr_of_mut!((*ptr).health_cert).write(
+                wire.health_cert
+                    .try_to_runtime()
+                    .map_err(map_account_wire_error)?,
+            );
+            addr_of_mut!((*ptr).stale_state).write(decode_bool(wire.stale_state)?);
+            addr_of_mut!((*ptr).b_stale_state).write(decode_bool(wire.b_stale_state)?);
+            addr_of_mut!((*ptr).rebalance_lock).write(decode_bool(wire.rebalance_lock)?);
+            addr_of_mut!((*ptr).liquidation_lock).write(decode_bool(wire.liquidation_lock)?);
+            Ok(boxed.assume_init())
+        }
+    }
+
+    fn write_portfolio_wire(wire: &mut PortfolioAccountV13Account, account: &PortfolioAccountV13) {
+        wire.provenance_header =
+            ProvenanceHeaderV13Account::from_runtime(&account.provenance_header);
+        wire.owner = account.owner;
+        wire.capital = V13PodU128::new(account.capital);
+        wire.pnl = V13PodI128::new(account.pnl);
+        wire.reserved_pnl = V13PodU128::new(account.reserved_pnl);
+        wire.fee_credits = V13PodI128::new(account.fee_credits);
+        wire.last_fee_slot = V13PodU64::new(account.last_fee_slot);
+        wire.active_bitmap = V13PodU32::new(account.active_bitmap);
+        for i in 0..V13_MAX_PORTFOLIO_ASSETS_N {
+            wire.legs[i] = PortfolioLegV13Account::from_runtime(&account.legs[i]);
+        }
+        wire.health_cert = HealthCertV13Account::from_runtime(&account.health_cert);
+        wire.stale_state = encode_bool(account.stale_state);
+        wire.b_stale_state = encode_bool(account.b_stale_state);
+        wire.rebalance_lock = encode_bool(account.rebalance_lock);
+        wire.liquidation_lock = encode_bool(account.liquidation_lock);
     }
 
     pub fn init_market_account(
@@ -243,18 +492,19 @@ pub mod state {
             *b = 0;
         }
         write_header(data, KIND_MARKET)?;
-        write_copy(data, HEADER_LEN, config)?;
-        write_copy(data, MARKET_GROUP_OFF, group)
+        write_wrapper_config_to_bytes(data, config)?;
+        write_market_wire(market_wire_mut(data)?, group);
+        Ok(())
     }
 
+    #[cfg(not(target_os = "solana"))]
     pub fn read_market(data: &[u8]) -> Result<(WrapperConfigV13, MarketGroupV13), ProgramError> {
         if data.len() < MARKET_ACCOUNT_LEN {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         check_header(data, KIND_MARKET)?;
-        let config = read_copy(data, HEADER_LEN)?;
-        let group = read_copy(data, MARKET_GROUP_OFF)?;
-        Ok((config, group))
+        let config = read_wrapper_config_from_bytes(data)?;
+        Ok((config, *market_from_wire_boxed(market_wire(data)?)?))
     }
 
     pub fn read_market_boxed(
@@ -264,9 +514,8 @@ pub mod state {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         check_header(data, KIND_MARKET)?;
-        let config = read_copy(data, HEADER_LEN)?;
-        let group = read_boxed(data, MARKET_GROUP_OFF)?;
-        Ok((config, group))
+        let config = read_wrapper_config_from_bytes(data)?;
+        Ok((config, market_from_wire_boxed(market_wire(data)?)?))
     }
 
     pub fn write_market(
@@ -278,8 +527,9 @@ pub mod state {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         check_header(data, KIND_MARKET)?;
-        write_copy(data, HEADER_LEN, config)?;
-        write_copy(data, MARKET_GROUP_OFF, group)
+        write_wrapper_config_to_bytes(data, config)?;
+        write_market_wire(market_wire_mut(data)?, group);
+        Ok(())
     }
 
     pub fn init_portfolio_account(
@@ -296,15 +546,17 @@ pub mod state {
             *b = 0;
         }
         write_header(data, KIND_PORTFOLIO)?;
-        write_copy(data, HEADER_LEN, account)
+        write_portfolio_wire(portfolio_wire_mut(data)?, account);
+        Ok(())
     }
 
+    #[cfg(not(target_os = "solana"))]
     pub fn read_portfolio(data: &[u8]) -> Result<PortfolioAccountV13, ProgramError> {
         if data.len() < PORTFOLIO_ACCOUNT_LEN {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         check_header(data, KIND_PORTFOLIO)?;
-        read_copy(data, HEADER_LEN)
+        Ok(*portfolio_from_wire_boxed(portfolio_wire(data)?)?)
     }
 
     pub fn read_portfolio_boxed(data: &[u8]) -> Result<Box<PortfolioAccountV13>, ProgramError> {
@@ -312,7 +564,7 @@ pub mod state {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         check_header(data, KIND_PORTFOLIO)?;
-        read_boxed(data, HEADER_LEN)
+        portfolio_from_wire_boxed(portfolio_wire(data)?)
     }
 
     pub fn write_portfolio(
@@ -323,11 +575,12 @@ pub mod state {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         check_header(data, KIND_PORTFOLIO)?;
-        write_copy(data, HEADER_LEN, account)
+        write_portfolio_wire(portfolio_wire_mut(data)?, account);
+        Ok(())
     }
 
     pub const fn alignment_note() -> usize {
-        align_of::<MarketGroupV13>()
+        1
     }
 
     pub const fn wrapper_config_len_for_test() -> usize {
@@ -385,6 +638,12 @@ pub mod ix {
             size_q: i128,
             exec_price: u64,
             fee_bps: u64,
+        },
+        TradeCpi {
+            asset_index: u8,
+            size_q: i128,
+            fee_bps: u64,
+            limit_price: u64,
         },
         ClosePortfolio,
         TopUpInsurance {
@@ -457,6 +716,12 @@ pub mod ix {
                     size_q: read_i128(&mut rest)?,
                     exec_price: read_u64(&mut rest)?,
                     fee_bps: read_u64(&mut rest)?,
+                },
+                10 => Self::TradeCpi {
+                    asset_index: read_u8(&mut rest)?,
+                    size_q: read_i128(&mut rest)?,
+                    fee_bps: read_u64(&mut rest)?,
+                    limit_price: read_u64(&mut rest)?,
                 },
                 8 => Self::ClosePortfolio,
                 9 => Self::TopUpInsurance {
@@ -573,6 +838,18 @@ pub mod ix {
                     push_u64(&mut out, exec_price);
                     push_u64(&mut out, fee_bps);
                 }
+                Self::TradeCpi {
+                    asset_index,
+                    size_q,
+                    fee_bps,
+                    limit_price,
+                } => {
+                    out.push(10);
+                    out.push(asset_index);
+                    push_i128(&mut out, size_q);
+                    push_u64(&mut out, fee_bps);
+                    push_u64(&mut out, limit_price);
+                }
                 Self::ClosePortfolio => out.push(8),
                 Self::TopUpInsurance { amount } => {
                     out.push(9);
@@ -656,6 +933,91 @@ pub mod ix {
 
     fn push_i128(out: &mut Vec<u8>, v: i128) {
         out.extend_from_slice(&v.to_le_bytes());
+    }
+}
+
+pub mod matcher_abi {
+    use crate::constants::MATCHER_ABI_VERSION;
+    use solana_program::program_error::ProgramError;
+
+    pub const FLAG_VALID: u32 = 1;
+    pub const FLAG_PARTIAL_OK: u32 = 2;
+    pub const FLAG_REJECTED: u32 = 4;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct MatcherReturn {
+        pub abi_version: u32,
+        pub flags: u32,
+        pub exec_price_e6: u64,
+        pub exec_size: i128,
+        pub req_id: u64,
+        pub lp_account_id: u64,
+        pub oracle_price_e6: u64,
+        pub reserved: u64,
+    }
+
+    pub fn read_matcher_return(ctx: &[u8]) -> Result<MatcherReturn, ProgramError> {
+        if ctx.len() < 64 {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        Ok(MatcherReturn {
+            abi_version: u32::from_le_bytes(ctx[0..4].try_into().unwrap()),
+            flags: u32::from_le_bytes(ctx[4..8].try_into().unwrap()),
+            exec_price_e6: u64::from_le_bytes(ctx[8..16].try_into().unwrap()),
+            exec_size: i128::from_le_bytes(ctx[16..32].try_into().unwrap()),
+            req_id: u64::from_le_bytes(ctx[32..40].try_into().unwrap()),
+            lp_account_id: u64::from_le_bytes(ctx[40..48].try_into().unwrap()),
+            oracle_price_e6: u64::from_le_bytes(ctx[48..56].try_into().unwrap()),
+            reserved: u64::from_le_bytes(ctx[56..64].try_into().unwrap()),
+        })
+    }
+
+    pub fn validate_matcher_return(
+        ret: &MatcherReturn,
+        lp_account_id: u64,
+        oracle_price_e6: u64,
+        req_size: i128,
+        req_id: u64,
+    ) -> Result<(), ProgramError> {
+        if ret.abi_version != MATCHER_ABI_VERSION {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        const KNOWN_FLAGS: u32 = FLAG_VALID | FLAG_PARTIAL_OK | FLAG_REJECTED;
+        if (ret.flags & !KNOWN_FLAGS) != 0
+            || (ret.flags & FLAG_VALID) == 0
+            || (ret.flags & FLAG_REJECTED) != 0
+        {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if ret.lp_account_id != lp_account_id
+            || ret.oracle_price_e6 != oracle_price_e6
+            || ret.reserved != 0
+            || ret.req_id != req_id
+            || ret.exec_price_e6 == 0
+        {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if ret.exec_size == 0 {
+            if (ret.flags & FLAG_PARTIAL_OK) == 0 || ret.exec_price_e6 != oracle_price_e6 {
+                return Err(ProgramError::InvalidAccountData);
+            }
+            return Ok(());
+        }
+        if ret.exec_size == i128::MIN || req_size == i128::MIN || req_size == 0 {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if ret.exec_size.signum() != req_size.signum() {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if ret.exec_size.unsigned_abs() > req_size.unsigned_abs() {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if ret.exec_size.unsigned_abs() < req_size.unsigned_abs()
+            && (ret.flags & FLAG_PARTIAL_OK) == 0
+        {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        Ok(())
     }
 }
 
@@ -761,6 +1123,19 @@ pub mod processor {
                 size_q,
                 exec_price,
                 fee_bps,
+            ),
+            Instruction::TradeCpi {
+                asset_index,
+                size_q,
+                fee_bps,
+                limit_price,
+            } => handle_trade_cpi(
+                program_id,
+                accounts,
+                asset_index,
+                size_q,
+                fee_bps,
+                limit_price,
             ),
             Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
             Instruction::TopUpInsurance { amount } => {
@@ -1035,6 +1410,165 @@ pub mod processor {
             fee_bps,
         };
         if size_q > 0 {
+            execute_trade_svm_aware(
+                group.as_mut(),
+                account_a.as_mut(),
+                account_b.as_mut(),
+                req,
+                &prices,
+            )
+            .map_err(map_v13_error)?;
+        } else {
+            execute_trade_svm_aware(
+                group.as_mut(),
+                account_b.as_mut(),
+                account_a.as_mut(),
+                req,
+                &prices,
+            )
+            .map_err(map_v13_error)?;
+        }
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
+        state::write_portfolio(&mut account_a_ai.try_borrow_mut_data()?, account_a.as_ref())?;
+        state::write_portfolio(&mut account_b_ai.try_borrow_mut_data()?, account_b.as_ref())
+    }
+
+    #[inline(never)]
+    fn handle_trade_cpi<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        asset_index: u8,
+        size_q: i128,
+        fee_bps: u64,
+        limit_price: u64,
+    ) -> ProgramResult {
+        let signer_a = account(accounts, 0)?;
+        let signer_b = account(accounts, 1)?;
+        let market_ai = account(accounts, 2)?;
+        let account_a_ai = account(accounts, 3)?;
+        let account_b_ai = account(accounts, 4)?;
+        let matcher_prog = account(accounts, 5)?;
+        let matcher_ctx = account(accounts, 6)?;
+        let matcher_delegate = account(accounts, 7)?;
+        let tail = &accounts[8..];
+
+        expect_signer(signer_a)?;
+        expect_signer(signer_b)?;
+        expect_writable(market_ai)?;
+        expect_writable(account_a_ai)?;
+        expect_writable(account_b_ai)?;
+        expect_writable(matcher_ctx)?;
+        expect_owner(market_ai, program_id)?;
+        expect_owner(account_a_ai, program_id)?;
+        expect_owner(account_b_ai, program_id)?;
+        if account_a_ai.key == account_b_ai.key
+            || !matcher_prog.executable
+            || matcher_ctx.owner != matcher_prog.key
+            || matcher_ctx.data_len() < constants::MATCHER_CONTEXT_MIN_LEN
+            || tail.len() > constants::MAX_MATCHER_TAIL_ACCOUNTS
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        for ai in tail {
+            if ai.key == market_ai.key
+                || ai.key == account_a_ai.key
+                || ai.key == account_b_ai.key
+                || ai.key == program_id
+                || ai.owner == program_id
+            {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+        }
+
+        let (delegate, bump) = derive_matcher_delegate(
+            program_id,
+            market_ai.key,
+            account_b_ai.key,
+            matcher_prog.key,
+            matcher_ctx.key,
+        );
+        expect_key(matcher_delegate, &delegate)?;
+
+        let (_cfg_pre, group_pre) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let account_a_pre = state::read_portfolio_boxed(&account_a_ai.try_borrow_data()?)?;
+        let account_b_pre = state::read_portfolio_boxed(&account_b_ai.try_borrow_data()?)?;
+        expect_portfolio_account_key(account_a_pre.as_ref(), account_a_ai.key)?;
+        expect_portfolio_account_key(account_b_pre.as_ref(), account_b_ai.key)?;
+        expect_portfolio_owner(account_a_pre.as_ref(), signer_a.key)?;
+        expect_portfolio_owner(account_b_pre.as_ref(), signer_b.key)?;
+        if size_q == 0 || size_q == i128::MIN {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let oracle_price = *group_pre
+            .assets
+            .get(asset_index as usize)
+            .map(|a| &a.effective_price)
+            .ok_or(PercolatorError::InvalidInstruction)?;
+        if oracle_price == 0 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let req_id = group_pre.current_slot.wrapping_add(1);
+        let lp_account_id = matcher_lp_account_id(&delegate);
+        drop(group_pre);
+        drop(account_a_pre);
+        drop(account_b_pre);
+
+        invoke_matcher(
+            matcher_prog,
+            matcher_ctx,
+            matcher_delegate,
+            tail,
+            req_id,
+            asset_index,
+            lp_account_id,
+            oracle_price,
+            size_q,
+            &[
+                b"matcher",
+                market_ai.key.as_ref(),
+                account_b_ai.key.as_ref(),
+                matcher_prog.key.as_ref(),
+                matcher_ctx.key.as_ref(),
+                &[bump],
+            ],
+        )?;
+
+        let ret = {
+            let data = matcher_ctx.try_borrow_data()?;
+            matcher_abi::read_matcher_return(&data)?
+        };
+        matcher_abi::validate_matcher_return(&ret, lp_account_id, oracle_price, size_q, req_id)?;
+        if limit_price != 0 {
+            let limit_ok = if size_q > 0 {
+                ret.exec_price_e6 <= limit_price
+            } else {
+                ret.exec_price_e6 >= limit_price
+            };
+            if !limit_ok {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+        }
+        if ret.exec_size == 0 {
+            return Ok(());
+        }
+
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let mut account_a = state::read_portfolio_boxed(&account_a_ai.try_borrow_data()?)?;
+        let mut account_b = state::read_portfolio_boxed(&account_b_ai.try_borrow_data()?)?;
+        expect_portfolio_account_key(account_a.as_ref(), account_a_ai.key)?;
+        expect_portfolio_account_key(account_b.as_ref(), account_b_ai.key)?;
+        expect_portfolio_owner(account_a.as_ref(), signer_a.key)?;
+        expect_portfolio_owner(account_b.as_ref(), signer_b.key)?;
+
+        let prices = effective_prices(group.as_ref());
+        let fee_bps = core::cmp::max(fee_bps, cfg.trade_fee_base_bps);
+        let req = TradeRequestV13 {
+            asset_index: asset_index as usize,
+            size_q: ret.exec_size.unsigned_abs(),
+            exec_price: ret.exec_price_e6,
+            fee_bps,
+        };
+        if ret.exec_size > 0 {
             execute_trade_svm_aware(
                 group.as_mut(),
                 account_a.as_mut(),
@@ -1740,6 +2274,76 @@ pub mod processor {
         }
     }
 
+    fn derive_matcher_delegate(
+        program_id: &Pubkey,
+        market_key: &Pubkey,
+        maker_account: &Pubkey,
+        matcher_program: &Pubkey,
+        matcher_context: &Pubkey,
+    ) -> (Pubkey, u8) {
+        Pubkey::find_program_address(
+            &[
+                b"matcher",
+                market_key.as_ref(),
+                maker_account.as_ref(),
+                matcher_program.as_ref(),
+                matcher_context.as_ref(),
+            ],
+            program_id,
+        )
+    }
+
+    fn matcher_lp_account_id(delegate: &Pubkey) -> u64 {
+        let bytes = delegate.to_bytes();
+        u64::from_le_bytes(bytes[0..8].try_into().unwrap())
+    }
+
+    fn invoke_matcher<'a>(
+        matcher_prog: &AccountInfo<'a>,
+        matcher_ctx: &AccountInfo<'a>,
+        matcher_delegate: &AccountInfo<'a>,
+        tail: &[AccountInfo<'a>],
+        req_id: u64,
+        asset_index: u8,
+        lp_account_id: u64,
+        oracle_price_e6: u64,
+        req_size: i128,
+        seeds: &[&[u8]],
+    ) -> ProgramResult {
+        let mut data = [0u8; 67];
+        data[0] = 0;
+        data[1..9].copy_from_slice(&req_id.to_le_bytes());
+        data[9..11].copy_from_slice(&(asset_index as u16).to_le_bytes());
+        data[11..19].copy_from_slice(&lp_account_id.to_le_bytes());
+        data[19..27].copy_from_slice(&oracle_price_e6.to_le_bytes());
+        data[27..43].copy_from_slice(&req_size.to_le_bytes());
+
+        let mut metas = Vec::with_capacity(2 + tail.len());
+        metas.push(AccountMeta::new_readonly(*matcher_delegate.key, true));
+        metas.push(AccountMeta::new(*matcher_ctx.key, false));
+        for ai in tail {
+            if ai.is_writable {
+                metas.push(AccountMeta::new(*ai.key, ai.is_signer));
+            } else {
+                metas.push(AccountMeta::new_readonly(*ai.key, ai.is_signer));
+            }
+        }
+
+        let ix = SolInstruction {
+            program_id: *matcher_prog.key,
+            accounts: metas,
+            data: data.to_vec(),
+        };
+        let mut infos = Vec::with_capacity(3 + tail.len());
+        infos.push(matcher_delegate.clone());
+        infos.push(matcher_ctx.clone());
+        infos.push(matcher_prog.clone());
+        for ai in tail {
+            infos.push(ai.clone());
+        }
+        invoke_signed(&ix, &infos, &[seeds])
+    }
+
     fn amount_to_u64(amount: u128) -> Result<u64, ProgramError> {
         u64::try_from(amount).map_err(|_| PercolatorError::InvalidInstruction.into())
     }
@@ -1894,7 +2498,7 @@ pub mod processor {
     }
 }
 
-#[cfg(not(feature = "no-entrypoint"))]
+#[cfg(all(not(feature = "no-entrypoint"), not(feature = "anchor-v2")))]
 pub mod entrypoint {
     use super::processor;
     #[allow(unused_imports)]
@@ -1911,6 +2515,144 @@ pub mod entrypoint {
         instruction_data: &[u8],
     ) -> ProgramResult {
         processor::process_instruction(program_id, accounts, instruction_data)
+    }
+}
+
+#[cfg(all(not(feature = "no-entrypoint"), feature = "anchor-v2"))]
+#[allow(unsafe_code)]
+pub mod entrypoint {
+    extern crate alloc;
+
+    use super::processor;
+    use alloc::{rc::Rc, vec::Vec};
+    use anchor_lang_v2::pinocchio::{
+        account::{AccountView, RuntimeAccount},
+        address::Address,
+        entrypoint,
+        error::ProgramError as AnchorProgramError,
+        ProgramResult,
+    };
+    use core::{cell::RefCell, mem::size_of, slice::from_raw_parts_mut};
+    use solana_program::{
+        account_info::AccountInfo, clock::Epoch, program_error::ProgramError as LegacyProgramError,
+        pubkey::Pubkey,
+    };
+
+    entrypoint!(process_instruction);
+
+    fn process_instruction(
+        program_id: &Address,
+        accounts: &mut [AccountView],
+        instruction_data: &[u8],
+    ) -> ProgramResult {
+        let program_id = Pubkey::new_from_array(program_id.to_bytes());
+        process_with_legacy_account_infos(&program_id, accounts, instruction_data)
+            .map_err(map_legacy_error)
+    }
+
+    #[inline(never)]
+    fn process_with_legacy_account_infos(
+        program_id: &Pubkey,
+        accounts: &mut [AccountView],
+        instruction_data: &[u8],
+    ) -> Result<(), LegacyProgramError> {
+        let len = accounts.len();
+        let mut lamports = Vec::with_capacity(len);
+        let mut data = Vec::with_capacity(len);
+
+        for i in 0..len {
+            if let Some(first) = first_duplicate(accounts, i) {
+                lamports.push(Rc::clone(&lamports[first]));
+                data.push(Rc::clone(&data[first]));
+                continue;
+            }
+
+            let raw = accounts[i].account_mut_ptr();
+            // Anchor v2 / Pinocchio owns the runtime account view. The v13
+            // processor still uses AccountInfo internally, so this adapter is
+            // the only compatibility bridge; persisted state serialization is
+            // handled explicitly by `state`, not by raw Rust layout casts.
+            let lamports_ref = unsafe { &mut (*raw).lamports };
+            let data_ref = unsafe {
+                from_raw_parts_mut(
+                    (raw as *mut u8).add(size_of::<RuntimeAccount>()),
+                    (*raw).data_len as usize,
+                )
+            };
+            lamports.push(Rc::new(RefCell::new(lamports_ref)));
+            data.push(Rc::new(RefCell::new(data_ref)));
+        }
+
+        let mut legacy_accounts = Vec::with_capacity(len);
+        for (i, account) in accounts.iter().enumerate() {
+            let key = unsafe { &*(account.address() as *const Address as *const Pubkey) };
+            let owner = unsafe { &*(account.owner() as *const Address as *const Pubkey) };
+            legacy_accounts.push(AccountInfo {
+                key,
+                lamports: Rc::clone(&lamports[i]),
+                data: Rc::clone(&data[i]),
+                owner,
+                rent_epoch: Epoch::default(),
+                is_signer: account.is_signer(),
+                is_writable: account.is_writable(),
+                executable: account.executable(),
+            });
+        }
+
+        processor::process_instruction(program_id, &legacy_accounts, instruction_data)
+    }
+
+    fn first_duplicate(accounts: &[AccountView], index: usize) -> Option<usize> {
+        let ptr = accounts[index].account_ptr();
+        let mut i = 0;
+        while i < index {
+            if accounts[i].account_ptr() == ptr {
+                return Some(i);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    fn map_legacy_error(error: LegacyProgramError) -> AnchorProgramError {
+        match error {
+            LegacyProgramError::Custom(code) => AnchorProgramError::Custom(code),
+            LegacyProgramError::InvalidArgument => AnchorProgramError::InvalidArgument,
+            LegacyProgramError::InvalidInstructionData => {
+                AnchorProgramError::InvalidInstructionData
+            }
+            LegacyProgramError::InvalidAccountData => AnchorProgramError::InvalidAccountData,
+            LegacyProgramError::AccountDataTooSmall => AnchorProgramError::AccountDataTooSmall,
+            LegacyProgramError::InsufficientFunds => AnchorProgramError::InsufficientFunds,
+            LegacyProgramError::IncorrectProgramId => AnchorProgramError::IncorrectProgramId,
+            LegacyProgramError::MissingRequiredSignature => {
+                AnchorProgramError::MissingRequiredSignature
+            }
+            LegacyProgramError::AccountAlreadyInitialized => {
+                AnchorProgramError::AccountAlreadyInitialized
+            }
+            LegacyProgramError::UninitializedAccount => AnchorProgramError::UninitializedAccount,
+            LegacyProgramError::NotEnoughAccountKeys => AnchorProgramError::NotEnoughAccountKeys,
+            LegacyProgramError::AccountBorrowFailed => AnchorProgramError::AccountBorrowFailed,
+            LegacyProgramError::MaxSeedLengthExceeded => AnchorProgramError::MaxSeedLengthExceeded,
+            LegacyProgramError::InvalidSeeds => AnchorProgramError::InvalidSeeds,
+            LegacyProgramError::BorshIoError(_) => AnchorProgramError::BorshIoError,
+            LegacyProgramError::AccountNotRentExempt => AnchorProgramError::AccountNotRentExempt,
+            LegacyProgramError::UnsupportedSysvar => AnchorProgramError::UnsupportedSysvar,
+            LegacyProgramError::IllegalOwner => AnchorProgramError::IllegalOwner,
+            LegacyProgramError::MaxAccountsDataAllocationsExceeded => {
+                AnchorProgramError::MaxAccountsDataAllocationsExceeded
+            }
+            LegacyProgramError::InvalidRealloc => AnchorProgramError::InvalidRealloc,
+            LegacyProgramError::MaxInstructionTraceLengthExceeded => {
+                AnchorProgramError::MaxInstructionTraceLengthExceeded
+            }
+            LegacyProgramError::BuiltinProgramsMustConsumeComputeUnits => {
+                AnchorProgramError::BuiltinProgramsMustConsumeComputeUnits
+            }
+            LegacyProgramError::InvalidAccountOwner => AnchorProgramError::InvalidAccountOwner,
+            LegacyProgramError::ArithmeticOverflow => AnchorProgramError::ArithmeticOverflow,
+        }
     }
 }
 

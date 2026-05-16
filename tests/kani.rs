@@ -4402,7 +4402,10 @@ fn kani_trade_cpi_pre_cpi_allowed_despite_post_read_lag() {
         effective_price,
     );
 
-    assert!(allowed, "TradeCpi target lag must not block matcher invocation");
+    assert!(
+        allowed,
+        "TradeCpi target lag must not block matcher invocation"
+    );
 }
 
 // =============================================================================

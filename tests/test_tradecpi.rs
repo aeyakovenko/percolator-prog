@@ -7359,13 +7359,7 @@ fn test_static_tradenocpi_accepts_consented_wide_exec_price() {
     let cfg = read_market_config(&env);
     let exec_price = cfg.last_effective_price_e6 * 150 / 100;
     try_trade_nocpi_with_exec_price_in_tradecpi_env(
-        &mut env,
-        &user_a,
-        &user_b,
-        user_b_idx,
-        user_a_idx,
-        10_000_000,
-        exec_price,
+        &mut env, &user_a, &user_b, user_b_idx, user_a_idx, 10_000_000, exec_price,
     )
     .expect("static bilateral TradeNoCpi should accept a signer-consented wide exec price");
 
@@ -7396,13 +7390,7 @@ fn test_external_hybrid_tradenocpi_wide_exec_price_charges_dynamic_fee() {
     let size = 10_000_000i128;
 
     try_trade_nocpi_with_exec_price_in_tradecpi_env(
-        &mut env,
-        &user_a,
-        &user_b,
-        user_b_idx,
-        user_a_idx,
-        size,
-        exec_price,
+        &mut env, &user_a, &user_b, user_b_idx, user_a_idx, size, exec_price,
     )
     .expect("hybrid TradeNoCpi should accept a signer-consented wide exec price");
 
@@ -7456,13 +7444,7 @@ fn test_external_hybrid_fresh_duplicate_oracle_uses_external_mark_not_trade_mark
     let size = 10_000_000i128;
 
     try_trade_nocpi_with_exec_price_in_tradecpi_env(
-        &mut env,
-        &user_a,
-        &user_b,
-        user_b_idx,
-        user_a_idx,
-        size,
-        exec_price,
+        &mut env, &user_a, &user_b, user_b_idx, user_a_idx, size, exec_price,
     )
     .expect("fresh duplicate external-oracle TradeNoCpi should execute");
 
@@ -7575,8 +7557,10 @@ fn test_external_hybrid_duplicate_oracle_staircase_keeps_mark_on_external_index(
     let user_b_idx = env.init_user(&user_b);
     env.deposit(&user_b, user_b_idx, 1_000_000_000_000);
 
-    try_trade_nocpi_in_tradecpi_env(&mut env, &user_a, &user_b, user_b_idx, user_a_idx, 10_000_000)
-        .expect("setup trade should create live OI");
+    try_trade_nocpi_in_tradecpi_env(
+        &mut env, &user_a, &user_b, user_b_idx, user_a_idx, 10_000_000,
+    )
+    .expect("setup trade should create live OI");
 
     // A fresh regular-hours oracle update far from the prior index starts the
     // external target/effective staircase. Hybrid regular hours are oracle-
@@ -7631,13 +7615,7 @@ fn test_hyperp_tradenocpi_accepts_consented_exec_price_and_updates_mark() {
     let size = 10_000_000i128;
 
     try_trade_nocpi_with_exec_price_in_tradecpi_env(
-        &mut env,
-        &user_a,
-        &user_b,
-        user_b_idx,
-        user_a_idx,
-        size,
-        exec_price,
+        &mut env, &user_a, &user_b, user_b_idx, user_a_idx, size, exec_price,
     )
     .expect("Hyperp TradeNoCpi should accept a signer-consented exec price");
 
@@ -7723,12 +7701,7 @@ fn test_external_tradenocpi_executes_while_oracle_target_lags_effective_price() 
     env.deposit(&user_b, user_b_idx, 1_000_000_000_000);
 
     try_trade_nocpi_in_tradecpi_env(
-        &mut env,
-        &user_a,
-        &user_b,
-        user_b_idx,
-        user_a_idx,
-        1_000_000,
+        &mut env, &user_a, &user_b, user_b_idx, user_a_idx, 1_000_000,
     )
     .expect("initial TradeNoCpi should create exposed OI");
 
@@ -7737,13 +7710,7 @@ fn test_external_tradenocpi_executes_while_oracle_target_lags_effective_price() 
     set_tradecpi_pyth_price(&mut env, 101, target as i64, 1);
 
     try_trade_nocpi_with_exec_price_in_tradecpi_env(
-        &mut env,
-        &user_a,
-        &user_b,
-        user_b_idx,
-        user_a_idx,
-        10_000_000,
-        target,
+        &mut env, &user_a, &user_b, user_b_idx, user_a_idx, 10_000_000, target,
     )
     .expect("TradeNoCpi should execute while raw oracle target is ahead of capped effective price");
 
@@ -7805,13 +7772,7 @@ fn test_hyperp_trades_execute_while_target_lags_effective_index() {
     env.set_slot(102);
     let exec_price = cfg_after_cpi.hyperp_mark_e6;
     try_trade_nocpi_with_exec_price_in_tradecpi_env(
-        &mut env,
-        &user_b,
-        &user_c,
-        user_c_idx,
-        user_b_idx,
-        10_000_000,
-        exec_price,
+        &mut env, &user_b, &user_c, user_c_idx, user_b_idx, 10_000_000, exec_price,
     )
     .expect("Hyperp TradeNoCpi should also execute while target/effective lag remains");
     assert_ne!(env.read_account_position(user_b_idx), 0);
@@ -8675,11 +8636,8 @@ fn run_external_hybrid_stale_fallback_direction_case(
 
     let insurance_after_fallback = env.read_insurance_balance();
     let fallback_price = read_market_config(&env).last_effective_price_e6;
-    let expected_uncertainty_fee = two_sided_fee_for_trade(
-        size,
-        fallback_price,
-        1 + read_max_price_move_bps(&env),
-    );
+    let expected_uncertainty_fee =
+        two_sided_fee_for_trade(size, fallback_price, 1 + read_max_price_move_bps(&env));
     assert_eq!(
         insurance_after_fallback - insurance_before_fallback,
         expected_uncertainty_fee,
@@ -8706,12 +8664,7 @@ fn test_attack_external_hybrid_stale_fallback_direction_matrix_cannot_extract() 
     for (use_cpi, size, fresh_price_e6, label) in [
         (true, 100_000_000, 138_027_600, "TradeCpi long then up"),
         (true, -100_000_000, 137_972_400, "TradeCpi short then down"),
-        (
-            false,
-            100_000_000,
-            138_027_600,
-            "TradeNoCpi long then up",
-        ),
+        (false, 100_000_000, 138_027_600, "TradeNoCpi long then up"),
         (
             false,
             -100_000_000,

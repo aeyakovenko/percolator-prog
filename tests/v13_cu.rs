@@ -21,6 +21,7 @@ use std::path::PathBuf;
 const CRANK_CU_LIMIT: u64 = 300_000;
 const CUSTODY_CU_LIMIT: u64 = 300_000;
 const TRADE_CU_LIMIT: u64 = 300_000;
+const MATCHER_CONTEXT_LEN: usize = 320;
 
 fn program_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -28,6 +29,18 @@ fn program_path() -> PathBuf {
     assert!(
         path.exists(),
         "BPF not found at {:?}. Run `cargo build-sbf --no-default-features` first",
+        path
+    );
+    path
+}
+
+fn matcher_program_path() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.pop();
+    path.push("percolator-match/target/deploy/percolator_match.so");
+    assert!(
+        path.exists(),
+        "matcher BPF not found at {:?}. Run `cd ../percolator-match && cargo build-sbf` first",
         path
     );
     path
@@ -50,6 +63,35 @@ fn spl_token_program_path() -> PathBuf {
         }
     }
     panic!("could not find LiteSVM SPL Token BPF under {registry_src:?}");
+}
+
+fn matcher_delegate_key(
+    program_id: &Pubkey,
+    market: &Pubkey,
+    maker: &Pubkey,
+    matcher_program: &Pubkey,
+    matcher_context: &Pubkey,
+) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            b"matcher",
+            market.as_ref(),
+            maker.as_ref(),
+            matcher_program.as_ref(),
+            matcher_context.as_ref(),
+        ],
+        program_id,
+    )
+    .0
+}
+
+fn encode_matcher_init_passive(max_fill_abs: u128) -> Vec<u8> {
+    let mut data = vec![0u8; 66];
+    data[0] = 2;
+    data[1] = 0;
+    data[10..14].copy_from_slice(&100u32.to_le_bytes());
+    data[34..50].copy_from_slice(&max_fill_abs.to_le_bytes());
+    data
 }
 
 fn make_mint_data() -> Vec<u8> {
@@ -302,6 +344,94 @@ impl V13CuEnv {
         .expect("trade")
     }
 
+    fn init_matcher_context(
+        &mut self,
+        matcher_program: Pubkey,
+        maker_account: Pubkey,
+    ) -> (Pubkey, Pubkey, u64) {
+        let ctx = Pubkey::new_unique();
+        let delegate = matcher_delegate_key(
+            &self.program_id,
+            &self.market,
+            &maker_account,
+            &matcher_program,
+            &ctx,
+        );
+        self.svm
+            .set_account(
+                delegate,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: vec![],
+                    owner: Pubkey::default(),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        self.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: vec![0u8; MATCHER_CONTEXT_LEN],
+                    owner: matcher_program,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let cu = send_raw_tx(
+            &mut self.svm,
+            &self.payer,
+            Instruction {
+                program_id: matcher_program,
+                accounts: vec![
+                    AccountMeta::new_readonly(delegate, false),
+                    AccountMeta::new(ctx, false),
+                ],
+                data: encode_matcher_init_passive(u128::MAX),
+            },
+            &[],
+        )
+        .expect("init matcher context");
+        (ctx, delegate, cu)
+    }
+
+    fn trade_cpi_with_cu(
+        &mut self,
+        owner_a: &Keypair,
+        account_a: Pubkey,
+        owner_b: &Keypair,
+        account_b: Pubkey,
+        matcher_program: Pubkey,
+        matcher_context: Pubkey,
+        matcher_delegate: Pubkey,
+        size_q: i128,
+        fee_bps: u64,
+    ) -> u64 {
+        self.send(
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q,
+                fee_bps,
+                limit_price: 0,
+            },
+            vec![
+                AccountMeta::new(owner_a.pubkey(), true),
+                AccountMeta::new(owner_b.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(account_a, false),
+                AccountMeta::new(account_b, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(matcher_context, false),
+                AccountMeta::new_readonly(matcher_delegate, false),
+            ],
+            &[owner_a, owner_b],
+        )
+        .expect("trade cpi")
+    }
+
     fn withdraw(&mut self, owner: &Keypair, portfolio: Pubkey, amount: u128) -> Pubkey {
         self.withdraw_with_cu(owner, portfolio, amount).0
     }
@@ -527,6 +657,26 @@ fn send_tx(
         .map_err(|e| format!("{e:?}"))
 }
 
+fn send_raw_tx(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    instruction: Instruction,
+    extra_signers: &[&Keypair],
+) -> Result<u64, String> {
+    let mut signer_refs = Vec::with_capacity(1 + extra_signers.len());
+    signer_refs.push(payer);
+    signer_refs.extend_from_slice(extra_signers);
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix(), instruction],
+        Some(&payer.pubkey()),
+        &signer_refs,
+        svm.latest_blockhash(),
+    );
+    svm.send_transaction(tx)
+        .map(|meta| meta.compute_units_consumed)
+        .map_err(|e| format!("{e:?}"))
+}
+
 #[test]
 fn v13_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
     let mut env = V13CuEnv::new();
@@ -601,9 +751,19 @@ fn v13_bpf_tradenocpi_executes_and_is_bounded() {
     );
 
     let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let long_data = env.svm.get_account(&long_account).unwrap().data;
+    let short_data = env.svm.get_account(&short_account).unwrap().data;
     let (_, group) = state::read_market(&market_data).unwrap();
+    let long = state::read_portfolio(&long_data).unwrap();
+    let short = state::read_portfolio(&short_data).unwrap();
 
     assert_eq!(env.token_amount(env.vault), 2_000_000);
+    println!(
+        "TradeNoCpi BPF long_basis={}, short_basis={}, insurance={}",
+        long.legs[0].basis_pos_q, short.legs[0].basis_pos_q, group.insurance
+    );
+    assert_eq!(long.legs[0].basis_pos_q, (10 * POS_SCALE) as i128);
+    assert_eq!(short.legs[0].basis_pos_q, -((10 * POS_SCALE) as i128));
     assert_eq!(
         group.assets[0].effective_price, 100,
         "consented execution price must not move the effective oracle price"
@@ -614,6 +774,110 @@ fn v13_bpf_tradenocpi_executes_and_is_bounded() {
     );
     assert_eq!(group.vault, 2_000_000);
     assert_eq!(group.c_tot + group.insurance, group.vault);
+}
+
+#[test]
+fn v13_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
+    let mut env = V13CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let taker_owner = Keypair::new();
+    let maker_owner = Keypair::new();
+    let taker_account = env.create_portfolio(&taker_owner);
+    let maker_account = env.create_portfolio(&maker_owner);
+    env.deposit(&taker_owner, taker_account, 1_000_000);
+    env.deposit(&maker_owner, maker_account, 1_000_000);
+
+    let (matcher_ctx, matcher_delegate, init_matcher_cu) =
+        env.init_matcher_context(matcher_program, maker_account);
+    let trade_cpi_cu = env.trade_cpi_with_cu(
+        &taker_owner,
+        taker_account,
+        &maker_owner,
+        maker_account,
+        matcher_program,
+        matcher_ctx,
+        matcher_delegate,
+        (10 * POS_SCALE) as i128,
+        100,
+    );
+    println!("v13 matcher init CU: {init_matcher_cu}, TradeCpi BPF CU: {trade_cpi_cu}");
+    assert!(
+        trade_cpi_cu <= TRADE_CU_LIMIT,
+        "TradeCpi CU {} exceeded limit {}",
+        trade_cpi_cu,
+        TRADE_CU_LIMIT
+    );
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let taker_data = env.svm.get_account(&taker_account).unwrap().data;
+    let maker_data = env.svm.get_account(&maker_account).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    let taker = state::read_portfolio(&taker_data).unwrap();
+    let maker = state::read_portfolio(&maker_data).unwrap();
+    println!(
+        "TradeCpi BPF taker_basis={}, maker_basis={}, insurance={}",
+        taker.legs[0].basis_pos_q, maker.legs[0].basis_pos_q, group.insurance
+    );
+    assert_eq!(group.assets[0].effective_price, 100);
+    assert_eq!(taker.legs[0].basis_pos_q, (10 * POS_SCALE) as i128);
+    assert_eq!(maker.legs[0].basis_pos_q, -((10 * POS_SCALE) as i128));
+    assert_eq!(
+        group.insurance, 20,
+        "passive matcher fills at oracle price; 100 bps charges 10 to each side"
+    );
+    assert_eq!(group.c_tot + group.insurance, group.vault);
+}
+
+#[test]
+fn v13_bpf_permissionless_liquidation_is_bounded() {
+    let mut env = V13CuEnv::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 100);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    let liquidation_cu = env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 1,
+            effective_price: 200,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    println!("v13 liquidation crank CU: {liquidation_cu}");
+    assert!(
+        liquidation_cu <= CRANK_CU_LIMIT,
+        "liquidation CU {} exceeded limit {}",
+        liquidation_cu,
+        CRANK_CU_LIMIT
+    );
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let short_data = env.svm.get_account(&short_account).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    let short = state::read_portfolio(&short_data).unwrap();
+    assert_eq!(group.slot_last, 1);
+    assert_eq!(group.assets[0].effective_price, 200);
+    assert_eq!(short.active_bitmap, 0);
 }
 
 #[test]

@@ -3,6 +3,9 @@
 extern crate kani;
 
 use percolator_prog::ix::Instruction;
+use percolator_prog::matcher_abi::{
+    validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
+};
 
 #[kani::proof]
 fn kani_v13_init_market_decode_preserves_wire_fields() {
@@ -178,6 +181,81 @@ fn kani_v13_tradenocpi_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v13_tradecpi_decode_preserves_wire_fields() {
+    let asset_index: u8 = kani::any();
+    let size_raw: i16 = kani::any();
+    let fee_bps_raw: u16 = kani::any();
+    let limit_price_raw: u16 = kani::any();
+    let size_q = size_raw as i128;
+    let fee_bps = fee_bps_raw as u64;
+    let limit_price = limit_price_raw as u64;
+
+    let mut data = [0u8; 34];
+    data[0] = 10;
+    data[1] = asset_index;
+    data[2..18].copy_from_slice(&size_q.to_le_bytes());
+    data[18..26].copy_from_slice(&fee_bps.to_le_bytes());
+    data[26..34].copy_from_slice(&limit_price.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::TradeCpi {
+            asset_index: got_asset,
+            size_q: got_size,
+            fee_bps: got_fee,
+            limit_price: got_limit,
+        } => {
+            assert_eq!(got_asset, asset_index);
+            assert_eq!(got_size, size_q);
+            assert_eq!(got_fee, fee_bps);
+            assert_eq!(got_limit, limit_price);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v13_matcher_return_accepts_only_bound_echoed_fills() {
+    let req_raw: i16 = kani::any();
+    let exec_raw: i16 = kani::any();
+    let price_raw: u16 = kani::any();
+    let req_id_raw: u16 = kani::any();
+    let lp_raw: u16 = kani::any();
+    let flags: u32 = kani::any();
+    kani::assume(req_raw != 0);
+    kani::assume(req_raw != i16::MIN);
+    kani::assume(exec_raw != i16::MIN);
+    let req_size = req_raw as i128;
+    let exec_size = exec_raw as i128;
+    let oracle_price = (price_raw as u64).saturating_add(1);
+    let req_id = req_id_raw as u64;
+    let lp_account_id = lp_raw as u64;
+    let ret = MatcherReturn {
+        abi_version: percolator_prog::constants::MATCHER_ABI_VERSION,
+        flags,
+        exec_price_e6: oracle_price,
+        exec_size,
+        req_id,
+        lp_account_id,
+        oracle_price_e6: oracle_price,
+        reserved: 0,
+    };
+
+    if validate_matcher_return(&ret, lp_account_id, oracle_price, req_size, req_id).is_ok() {
+        assert!((flags & FLAG_VALID) != 0);
+        assert!((flags & FLAG_REJECTED) == 0);
+        if exec_size == 0 {
+            assert!((flags & FLAG_PARTIAL_OK) != 0);
+        } else {
+            assert_eq!(exec_size.signum(), req_size.signum());
+            assert!(exec_size.unsigned_abs() <= req_size.unsigned_abs());
+            if exec_size.unsigned_abs() < req_size.unsigned_abs() {
+                assert!((flags & FLAG_PARTIAL_OK) != 0);
+            }
+        }
+    }
+}
+
+#[kani::proof]
 fn kani_v13_permissionless_crank_decode_preserves_wire_fields() {
     let action: u8 = kani::any();
     let asset_index: u8 = kani::any();
@@ -328,6 +406,16 @@ fn kani_v13_every_active_payload_rejects_trailing_byte() {
     trade.push(extra);
     assert!(Instruction::decode(&trade).is_err());
 
+    let mut trade_cpi = Instruction::TradeCpi {
+        asset_index: 0,
+        size_q: 1,
+        fee_bps: 0,
+        limit_price: 0,
+    }
+    .encode();
+    trade_cpi.push(extra);
+    assert!(Instruction::decode(&trade_cpi).is_err());
+
     let mut close_portfolio = Instruction::ClosePortfolio.encode();
     close_portfolio.push(extra);
     assert!(Instruction::decode(&close_portfolio).is_err());
@@ -379,6 +467,7 @@ fn kani_v13_unknown_or_truncated_tags_reject() {
     kani::assume(tag != 6);
     kani::assume(tag != 8);
     kani::assume(tag != 9);
+    kani::assume(tag != 10);
     kani::assume(tag != 13);
     kani::assume(tag != 19);
     kani::assume(tag != 23);
@@ -413,6 +502,9 @@ fn kani_v13_every_active_payload_rejects_one_byte_truncation() {
 
     let trade = [6u8; 33];
     assert!(Instruction::decode(&trade).is_err());
+
+    let trade_cpi = [10u8; 33];
+    assert!(Instruction::decode(&trade_cpi).is_err());
 
     let top_up = [9u8; 16];
     assert!(Instruction::decode(&top_up).is_err());
