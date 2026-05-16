@@ -1,5 +1,6 @@
 use percolator::{
-    MarketGroupV13, MarketModeV13, PermissionlessRecoveryReasonV13, V13Config, POS_SCALE,
+    MarketGroupV13, MarketModeV13, PermissionlessRecoveryReasonV13, PortfolioAccountV13, V13Config,
+    POS_SCALE,
 };
 use percolator_prog::{
     constants::{MARKET_ACCOUNT_LEN, PORTFOLIO_ACCOUNT_LEN},
@@ -423,6 +424,46 @@ fn v13_wrapper_init_binds_market_and_portfolio_provenance() {
 }
 
 #[test]
+fn v13_wrapper_account_layout_constants_match_serialized_state() {
+    assert_eq!(
+        MARKET_ACCOUNT_LEN,
+        16 + state::wrapper_config_len_for_test() + core::mem::size_of::<MarketGroupV13>(),
+        "market account length must exactly cover header + wrapper config + engine state"
+    );
+    assert_eq!(
+        PORTFOLIO_ACCOUNT_LEN,
+        16 + core::mem::size_of::<PortfolioAccountV13>(),
+        "portfolio account length must exactly cover header + portfolio state"
+    );
+    assert!(
+        state::alignment_note() <= core::mem::align_of::<MarketGroupV13>(),
+        "wrapper alignment note should not exceed the market group alignment"
+    );
+
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    let market_before = market.data.clone();
+    let portfolio_before = portfolio.data.clone();
+    state::write_market(&mut market.data, &cfg, &group).unwrap();
+    state::write_portfolio(&mut portfolio.data, &account).unwrap();
+    assert_eq!(
+        market.data, market_before,
+        "read/write-copy roundtrip must preserve market account bytes"
+    );
+    assert_eq!(
+        portfolio.data, portfolio_before,
+        "read/write-copy roundtrip must preserve portfolio account bytes"
+    );
+}
+
+#[test]
 fn v13_wrapper_init_market_rejects_invalid_mint_and_double_init() {
     let mut admin = signer();
     let mut market = market_account();
@@ -601,6 +642,22 @@ fn v13_wrapper_init_market_rejects_invalid_engine_params_without_mutation() {
         &mut [&mut admin, &mut market, &mut mint],
     );
     assert_err_and_market_unchanged(zero_dt, &market, &before);
+
+    let zero_price_move = run_ix(
+        Instruction::InitMarket {
+            h_min: 0,
+            h_max: 10,
+            initial_price: 100,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_trading_fee_bps: 10_000,
+            max_price_move_bps_per_slot: 0,
+            max_accrual_dt_slots: 1,
+            maintenance_fee_per_slot: 0,
+        },
+        &mut [&mut admin, &mut market, &mut mint],
+    );
+    assert_err_and_market_unchanged(zero_price_move, &market, &before);
 }
 
 #[test]
@@ -713,6 +770,243 @@ fn v13_wrapper_top_up_insurance_rejects_wrong_mint_and_insufficient_source_balan
         ],
     );
     assert_err_and_market_unchanged(short_balance, &market, &before);
+}
+
+#[test]
+fn v13_wrapper_update_authority_rotates_admin_with_dual_signature() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut new_admin = signer();
+    let mut attacker = signer();
+
+    init_market(&mut admin, &mut market);
+    let initialized = market.data.clone();
+
+    let missing_new_sig = {
+        let mut unsigned_new_admin = TestAccount::new(new_admin.key, Pubkey::new_unique(), 0);
+        run_ix(
+            Instruction::UpdateAuthority {
+                kind: processor::AUTHORITY_ADMIN,
+                new_pubkey: new_admin.key.to_bytes(),
+            },
+            &mut [&mut admin, &mut unsigned_new_admin, &mut market],
+        )
+    };
+    assert_err_and_market_unchanged(missing_new_sig, &market, &initialized);
+
+    let unauthorized_current = run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_ADMIN,
+            new_pubkey: new_admin.key.to_bytes(),
+        },
+        &mut [&mut attacker, &mut new_admin, &mut market],
+    );
+    assert_err_and_market_unchanged(unauthorized_current, &market, &initialized);
+
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_ADMIN,
+            new_pubkey: new_admin.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut new_admin, &mut market],
+    )
+    .unwrap();
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.admin, new_admin.key.to_bytes());
+
+    let rotated = market.data.clone();
+    let old_admin_resolve = run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]);
+    assert_err_and_market_unchanged(old_admin_resolve, &market, &rotated);
+    run_ix(
+        Instruction::ResolveMarket,
+        &mut [&mut new_admin, &mut market],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.mode, MarketModeV13::Resolved);
+}
+
+#[test]
+fn v13_wrapper_update_authority_rotates_insurance_keys_and_supports_operator_burn() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut insurance = signer();
+    let mut operator = signer();
+
+    let mint = init_market(&mut admin, &mut market);
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.admin, admin.key.to_bytes());
+    assert_eq!(cfg.insurance_authority, admin.key.to_bytes());
+    assert_eq!(cfg.insurance_operator, admin.key.to_bytes());
+
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_INSURANCE,
+            new_pubkey: insurance.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut insurance, &mut market],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_INSURANCE_OPERATOR,
+            new_pubkey: operator.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut operator, &mut market],
+    )
+    .unwrap();
+
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.insurance_authority, insurance.key.to_bytes());
+    assert_eq!(cfg.insurance_operator, operator.key.to_bytes());
+
+    let mut admin_src = user_token_account(admin.key, mint, 1);
+    let mut insurance_src = user_token_account(insurance.key, mint, 1);
+    let mut vault = vault_token_account(&market, mint, 0);
+    let mut token_program = token_program_account();
+    let rotated = market.data.clone();
+    let old_insurance_auth = run_ix(
+        Instruction::TopUpInsurance { amount: 1 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut admin_src,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(old_insurance_auth, &market, &rotated);
+    run_ix(
+        Instruction::TopUpInsurance { amount: 1 },
+        &mut [
+            &mut insurance,
+            &mut market,
+            &mut insurance_src,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let mut zero_new = TestAccount::new(Pubkey::default(), Pubkey::new_unique(), 0);
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_INSURANCE_OPERATOR,
+            new_pubkey: [0u8; 32],
+        },
+        &mut [&mut operator, &mut zero_new, &mut market],
+    )
+    .unwrap();
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.insurance_operator, [0u8; 32]);
+    assert_eq!(group.insurance, 1);
+
+    let mut insurance_src = user_token_account(insurance.key, mint, 1);
+    let mut vault = vault_token_account(&market, mint, 1);
+    run_ix(
+        Instruction::TopUpInsurance { amount: 1 },
+        &mut [
+            &mut insurance,
+            &mut market,
+            &mut insurance_src,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let mut zero_new = TestAccount::new(Pubkey::default(), Pubkey::new_unique(), 0);
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_INSURANCE,
+            new_pubkey: [0u8; 32],
+        },
+        &mut [&mut insurance, &mut zero_new, &mut market],
+    )
+    .unwrap();
+    let after_burn = market.data.clone();
+    let mut dead_src = user_token_account(insurance.key, mint, 1);
+    let dead_insurance_auth = run_ix(
+        Instruction::TopUpInsurance { amount: 1 },
+        &mut [
+            &mut insurance,
+            &mut market,
+            &mut dead_src,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(dead_insurance_auth, &market, &after_burn);
+}
+
+#[test]
+fn v13_wrapper_update_authority_rejects_unsupported_kind_and_live_admin_burn() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut new_key = signer();
+
+    init_market(&mut admin, &mut market);
+    let initialized = market.data.clone();
+
+    let hyperp_not_yet_ported = run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_HYPERP_MARK,
+            new_pubkey: new_key.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut new_key, &mut market],
+    );
+    assert_err_and_market_unchanged(hyperp_not_yet_ported, &market, &initialized);
+
+    let unknown = run_ix(
+        Instruction::UpdateAuthority {
+            kind: 99,
+            new_pubkey: new_key.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut new_key, &mut market],
+    );
+    assert_err_and_market_unchanged(unknown, &market, &initialized);
+
+    let live_admin_burn = run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_ADMIN,
+            new_pubkey: [0u8; 32],
+        },
+        &mut [&mut admin, &mut new_key, &mut market],
+    );
+    assert_err_and_market_unchanged(live_admin_burn, &market, &initialized);
+}
+
+#[test]
+fn v13_wrapper_update_authority_allows_chained_admin_rotation_without_old_key_reuse() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut admin_b = signer();
+    let mut admin_c = signer();
+
+    init_market(&mut admin, &mut market);
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_ADMIN,
+            new_pubkey: admin_b.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut admin_b, &mut market],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_ADMIN,
+            new_pubkey: admin_c.key.to_bytes(),
+        },
+        &mut [&mut admin_b, &mut admin_c, &mut market],
+    )
+    .unwrap();
+
+    let rotated = market.data.clone();
+    let old_admin = run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]);
+    assert_err_and_market_unchanged(old_admin, &market, &rotated);
+    let prior_admin = run_ix(Instruction::ResolveMarket, &mut [&mut admin_b, &mut market]);
+    assert_err_and_market_unchanged(prior_admin, &market, &rotated);
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin_c, &mut market]).unwrap();
 }
 
 #[test]

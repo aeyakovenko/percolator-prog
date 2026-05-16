@@ -2,7 +2,7 @@
 
 Engine branch tested: `aeyakovenko/percolator@v13`
 
-Pinned engine SHA: `6fc2276c854329c3b1d6227d2c569eefa4dc6c48`
+Pinned engine SHA: `a6d510651b4d2c423314dffa85c383f9c1911925`
 
 ## Current Retest Result
 
@@ -21,18 +21,19 @@ mechanically reused. `V13_TEST_PORT_COVERAGE.md` tracks the retired v12 test
 classes and the active v13 wrapper/engine coverage that replaces each class.
 The replacement suite is:
 
-- `tests/v13_wrapper.rs`: 46 native account-local wrapper tests
-- `tests/v13_cu.rs`: 5 LiteSVM BPF wrapper/CU tests
-- `tests/v13_kani.rs`: 8 wrapper ABI Kani proofs
+- `tests/v13_wrapper.rs`: 51 native account-local wrapper tests
+- `tests/v13_cu.rs`: 6 LiteSVM BPF wrapper/CU tests
+- `tests/v13_kani.rs`: 10 wrapper ABI Kani proofs
 
 `tests/v13_cu.rs` currently measures:
 
 - init portfolio: 3,368 CU
-- deposit: 14,789 CU
-- withdraw: 22,111 CU
-- top-up insurance: 12,796 CU
+- deposit: 17,789 CU
+- withdraw: 25,111 CU
+- top-up insurance: 15,796 CU
 - resolve: 1,457 CU
-- close resolved: 20,122 CU
+- close resolved: 23,122 CU
+- TradeNoCpi: 59,731 CU
 - refresh crank: 9,016 CU
 - recovery crank: 3,267 CU
 - refresh crank before 64 extra portfolios: 9,014 CU
@@ -44,31 +45,32 @@ user capital, resolved payout, and insurance. The v13 wrapper ABI now binds
 markets to a collateral mint at `InitMarket`, validates user/vault token
 accounts, and wraps public ledger mutations with SPL Token CPIs.
 
+The v12 `UpdateAuthority` tag is restored for the v13-backed authority fields:
+admin, insurance authority, and insurance operator. Nonzero handoffs require
+both the current authority and destination key to sign; scoped zero-key burns
+are allowed for insurance roles. Live admin burn is rejected until a
+permissionless resolved-exit profile exists. The old Hyperp mark authority kind
+is rejected until Hyperp wrapper configuration is ported.
+
 This confirms the wrapper crank path is account-local and does not scale with
 materialized portfolio count. The v13 engine no longer has a global slab scan,
 so the old dense 4096-account crank benchmark is not the relevant worst case.
 
-`cargo build-sbf --no-default-features` exits successfully and the wrapper no
-longer reports oversized stack frames after moving large runtime reads and init
-construction off-stack. The SBF stack analyzer still reports two engine-crate
-frames:
+`cargo build-sbf --no-default-features` exits successfully with no SBF stack
+analyzer errors. The engine pin includes an SVM-safe in-place trade entrypoint
+for Solana builds and gates the large native staging helpers out of SBF. The
+wrapper uses the staged engine API in native tests, but switches to the
+in-place API under `target_os = "solana"` where SVM rollback supplies
+instruction atomicity.
 
-- `percolator::v13::MarketGroupV13::new`: estimated 13,632 bytes
-- `percolator::v13::MarketGroupV13::execute_trade_with_fee_not_atomic`:
-  estimated 13,120 bytes
-
-The wrapper avoids calling `MarketGroupV13::new` on-chain, but the symbol is
-still compiled in the dependency. `TradeNoCpi` still calls
-`execute_trade_with_fee_not_atomic`; LiteSVM confirms the BPF trade path traps
-with an access violation consistent with that engine stack warning. Crank CU
-tests therefore seed no-position portfolio state through BPF and measure the
-BPF crank path directly. Liquidation CU cannot be measured through the wrapper
-until the engine exposes an SBF-safe trade/position setup path or removes the
-large staged copies in `execute_trade_with_fee_not_atomic`.
+LiteSVM now executes `TradeNoCpi` through the BPF program and measures it at
+59,731 CU in the current regression. Liquidation CU is no longer blocked by the
+trade stack frame; it still needs a dedicated BPF liquidation fixture with an
+unhealthy position.
 
 Engine proof sweep status for the same SHA:
 
-- Wrapper Kani proofs: PASS, 8/8.
+- Wrapper Kani proofs: PASS, 10/10.
 - Engine `scripts/run_kani_full_audit.sh`: started against
   `/home/anatoly/percolator` at the same SHA. It produced PASS results through
   the early v13 harnesses but hit 10-minute timeouts on:

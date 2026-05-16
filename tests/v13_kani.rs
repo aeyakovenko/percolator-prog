@@ -170,10 +170,120 @@ fn kani_v13_permissionless_crank_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v13_update_authority_decode_preserves_wire_fields() {
+    let kind: u8 = kani::any();
+    let mut new_pubkey = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        new_pubkey[i] = kani::any();
+        i += 1;
+    }
+
+    let mut data = [0u8; 34];
+    data[0] = 32;
+    data[1] = kind;
+    data[2..34].copy_from_slice(&new_pubkey);
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::UpdateAuthority {
+            kind: got_kind,
+            new_pubkey: got_pubkey,
+        } => {
+            assert_eq!(got_kind, kind);
+            assert_eq!(got_pubkey, new_pubkey);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
 fn kani_v13_decode_rejects_trailing_bytes() {
     let extra: u8 = kani::any();
     let data = [1u8, extra];
     assert!(Instruction::decode(&data).is_err());
+}
+
+#[kani::proof]
+fn kani_v13_every_active_payload_rejects_trailing_byte() {
+    let extra: u8 = kani::any();
+
+    let mut init_market = Instruction::InitMarket {
+        h_min: 1,
+        h_max: 2,
+        initial_price: 100,
+        maintenance_margin_bps: 500,
+        initial_margin_bps: 1_000,
+        max_trading_fee_bps: 10_000,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 10,
+        maintenance_fee_per_slot: 0,
+    }
+    .encode();
+    init_market.push(extra);
+    assert!(Instruction::decode(&init_market).is_err());
+
+    let mut init_portfolio = Instruction::InitPortfolio.encode();
+    init_portfolio.push(extra);
+    assert!(Instruction::decode(&init_portfolio).is_err());
+
+    let mut deposit = Instruction::Deposit { amount: 1 }.encode();
+    deposit.push(extra);
+    assert!(Instruction::decode(&deposit).is_err());
+
+    let mut withdraw = Instruction::Withdraw { amount: 1 }.encode();
+    withdraw.push(extra);
+    assert!(Instruction::decode(&withdraw).is_err());
+
+    let mut crank = Instruction::PermissionlessCrank {
+        action: 0,
+        asset_index: 0,
+        now_slot: 1,
+        effective_price: 100,
+        funding_rate_e9: 0,
+        close_q: 0,
+        fee_bps: 0,
+        recovery_reason: 0,
+    }
+    .encode();
+    crank.push(extra);
+    assert!(Instruction::decode(&crank).is_err());
+
+    let mut trade = Instruction::TradeNoCpi {
+        asset_index: 0,
+        size_q: 1,
+        exec_price: 100,
+        fee_bps: 0,
+    }
+    .encode();
+    trade.push(extra);
+    assert!(Instruction::decode(&trade).is_err());
+
+    let mut close_portfolio = Instruction::ClosePortfolio.encode();
+    close_portfolio.push(extra);
+    assert!(Instruction::decode(&close_portfolio).is_err());
+
+    let mut top_up = Instruction::TopUpInsurance { amount: 1 }.encode();
+    top_up.push(extra);
+    assert!(Instruction::decode(&top_up).is_err());
+
+    let mut resolve = Instruction::ResolveMarket.encode();
+    resolve.push(extra);
+    assert!(Instruction::decode(&resolve).is_err());
+
+    let mut close_resolved = Instruction::CloseResolved {
+        fee_rate_per_slot: 0,
+    }
+    .encode();
+    close_resolved.push(extra);
+    assert!(Instruction::decode(&close_resolved).is_err());
+
+    let mut update_authority = Instruction::UpdateAuthority {
+        kind: 0,
+        new_pubkey: [1u8; 32],
+    }
+    .encode();
+    update_authority.push(extra);
+    assert!(Instruction::decode(&update_authority).is_err());
 }
 
 #[kani::proof]
@@ -189,6 +299,7 @@ fn kani_v13_unknown_or_truncated_tags_reject() {
     kani::assume(tag != 9);
     kani::assume(tag != 19);
     kani::assume(tag != 30);
+    kani::assume(tag != 32);
     assert!(Instruction::decode(&[tag]).is_err());
 
     let deposit_tag_only = [3u8];
@@ -223,4 +334,7 @@ fn kani_v13_every_active_payload_rejects_one_byte_truncation() {
 
     let close_resolved = [30u8; 16];
     assert!(Instruction::decode(&close_resolved).is_err());
+
+    let update_authority = [32u8; 33];
+    assert!(Instruction::decode(&update_authority).is_err());
 }

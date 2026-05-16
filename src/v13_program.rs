@@ -11,8 +11,8 @@ extern crate alloc;
 use percolator::{
     AssetStateV13, HealthCertV13, MarketGroupV13, MarketModeV13, PermissionlessCrankActionV13,
     PermissionlessCrankRequestV13, PermissionlessRecoveryReasonV13, PortfolioAccountV13,
-    PortfolioLegV13, ProvenanceHeaderV13, ResolvedCloseOutcomeV13, TradeRequestV13, V13Config,
-    V13Error, V13_MAX_PORTFOLIO_ASSETS_N,
+    PortfolioLegV13, ProvenanceHeaderV13, ResolvedCloseOutcomeV13, TradeOutcomeV13,
+    TradeRequestV13, V13Config, V13Error, V13_MAX_PORTFOLIO_ASSETS_N,
 };
 use solana_program::{
     account_info::AccountInfo,
@@ -383,6 +383,10 @@ pub mod ix {
         CloseResolved {
             fee_rate_per_slot: u128,
         },
+        UpdateAuthority {
+            kind: u8,
+            new_pubkey: [u8; 32],
+        },
     }
 
     impl Instruction {
@@ -432,6 +436,10 @@ pub mod ix {
                 19 => Self::ResolveMarket,
                 30 => Self::CloseResolved {
                     fee_rate_per_slot: read_u128(&mut rest)?,
+                },
+                32 => Self::UpdateAuthority {
+                    kind: read_u8(&mut rest)?,
+                    new_pubkey: read_bytes32(&mut rest)?,
                 },
                 _ => return Err(ProgramError::InvalidInstructionData),
             };
@@ -517,6 +525,11 @@ pub mod ix {
                     out.push(30);
                     push_u128(&mut out, fee_rate_per_slot);
                 }
+                Self::UpdateAuthority { kind, new_pubkey } => {
+                    out.push(32);
+                    out.push(kind);
+                    out.extend_from_slice(&new_pubkey);
+                }
             }
             out
         }
@@ -557,6 +570,15 @@ pub mod ix {
         Ok(i128::from_le_bytes(bytes.try_into().unwrap()))
     }
 
+    fn read_bytes32(input: &mut &[u8]) -> Result<[u8; 32], ProgramError> {
+        if input.len() < 32 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let (bytes, rest) = input.split_at(32);
+        *input = rest;
+        Ok(bytes.try_into().unwrap())
+    }
+
     fn push_u64(out: &mut Vec<u8>, v: u64) {
         out.extend_from_slice(&v.to_le_bytes());
     }
@@ -577,6 +599,11 @@ pub mod processor {
         ix::Instruction,
         state::{self, WrapperConfigV13},
     };
+
+    pub const AUTHORITY_ADMIN: u8 = 0;
+    pub const AUTHORITY_HYPERP_MARK: u8 = 1;
+    pub const AUTHORITY_INSURANCE: u8 = 2;
+    pub const AUTHORITY_INSURANCE_OPERATOR: u8 = 4;
 
     pub fn process_instruction<'a>(
         program_id: &Pubkey,
@@ -653,6 +680,9 @@ pub mod processor {
             Instruction::ResolveMarket => handle_resolve_market(program_id, accounts),
             Instruction::CloseResolved { fee_rate_per_slot } => {
                 handle_close_resolved(program_id, accounts, fee_rate_per_slot)
+            }
+            Instruction::UpdateAuthority { kind, new_pubkey } => {
+                handle_update_authority(program_id, accounts, kind, new_pubkey)
             }
         }
     }
@@ -885,23 +915,23 @@ pub mod processor {
             fee_bps,
         };
         if size_q > 0 {
-            group
-                .execute_trade_with_fee_not_atomic(
-                    account_a.as_mut(),
-                    account_b.as_mut(),
-                    req,
-                    &prices,
-                )
-                .map_err(map_v13_error)?;
+            execute_trade_svm_aware(
+                group.as_mut(),
+                account_a.as_mut(),
+                account_b.as_mut(),
+                req,
+                &prices,
+            )
+            .map_err(map_v13_error)?;
         } else {
-            group
-                .execute_trade_with_fee_not_atomic(
-                    account_b.as_mut(),
-                    account_a.as_mut(),
-                    req,
-                    &prices,
-                )
-                .map_err(map_v13_error)?;
+            execute_trade_svm_aware(
+                group.as_mut(),
+                account_b.as_mut(),
+                account_a.as_mut(),
+                req,
+                &prices,
+            )
+            .map_err(map_v13_error)?;
         }
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
         state::write_portfolio(&mut account_a_ai.try_borrow_mut_data()?, account_a.as_ref())?;
@@ -999,6 +1029,63 @@ pub mod processor {
         group
             .resolve_market_not_atomic(slot)
             .map_err(map_v13_error)?;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+    }
+
+    #[inline(never)]
+    fn handle_update_authority<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        kind: u8,
+        new_pubkey: [u8; 32],
+    ) -> ProgramResult {
+        let current = account(accounts, 0)?;
+        let new_authority = account(accounts, 1)?;
+        let market_ai = account(accounts, 2)?;
+        expect_signer(current)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+
+        if new_pubkey != [0u8; 32] {
+            expect_signer(new_authority)?;
+            if new_authority.key.to_bytes() != new_pubkey {
+                return Err(PercolatorError::Unauthorized.into());
+            }
+        }
+
+        let (mut cfg, group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        match kind {
+            AUTHORITY_ADMIN => {
+                if cfg.admin != current.key.to_bytes() {
+                    return Err(PercolatorError::Unauthorized.into());
+                }
+                if new_pubkey == [0u8; 32]
+                    && (group.mode == MarketModeV13::Live
+                        && (cfg.permissionless_resolve_stale_slots == 0
+                            || cfg.force_close_delay_slots == 0))
+                {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                cfg.admin = new_pubkey;
+            }
+            AUTHORITY_HYPERP_MARK => {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            AUTHORITY_INSURANCE => {
+                if cfg.insurance_authority != current.key.to_bytes() {
+                    return Err(PercolatorError::Unauthorized.into());
+                }
+                cfg.insurance_authority = new_pubkey;
+            }
+            AUTHORITY_INSURANCE_OPERATOR => {
+                if cfg.insurance_operator != current.key.to_bytes() {
+                    return Err(PercolatorError::Unauthorized.into());
+                }
+                cfg.insurance_operator = new_pubkey;
+            }
+            _ => return Err(PercolatorError::InvalidInstruction.into()),
+        }
+
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
     }
 
@@ -1292,6 +1379,34 @@ pub mod processor {
             i += 1;
         }
         prices
+    }
+
+    #[inline(never)]
+    fn execute_trade_svm_aware(
+        group: &mut MarketGroupV13,
+        long_account: &mut PortfolioAccountV13,
+        short_account: &mut PortfolioAccountV13,
+        request: TradeRequestV13,
+        effective_prices: &[u64; V13_MAX_PORTFOLIO_ASSETS_N],
+    ) -> Result<TradeOutcomeV13, V13Error> {
+        #[cfg(target_os = "solana")]
+        {
+            group.execute_trade_with_fee_in_place_not_atomic(
+                long_account,
+                short_account,
+                request,
+                effective_prices,
+            )
+        }
+        #[cfg(not(target_os = "solana"))]
+        {
+            group.execute_trade_with_fee_not_atomic(
+                long_account,
+                short_account,
+                request,
+                effective_prices,
+            )
+        }
     }
 
     fn effective_prices_with(

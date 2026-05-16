@@ -1,4 +1,5 @@
 use litesvm::LiteSVM;
+use percolator::POS_SCALE;
 use percolator_prog::{
     constants::{MARKET_ACCOUNT_LEN, PORTFOLIO_ACCOUNT_LEN},
     ix::Instruction as ProgInstruction,
@@ -19,6 +20,7 @@ use std::path::PathBuf;
 
 const CRANK_CU_LIMIT: u64 = 300_000;
 const CUSTODY_CU_LIMIT: u64 = 300_000;
+const TRADE_CU_LIMIT: u64 = 300_000;
 
 fn program_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -260,6 +262,35 @@ impl V13CuEnv {
         (source, cu)
     }
 
+    fn trade_with_cu(
+        &mut self,
+        owner_a: &Keypair,
+        account_a: Pubkey,
+        owner_b: &Keypair,
+        account_b: Pubkey,
+        size_q: i128,
+        exec_price: u64,
+        fee_bps: u64,
+    ) -> u64 {
+        self.send(
+            ProgInstruction::TradeNoCpi {
+                asset_index: 0,
+                size_q,
+                exec_price,
+                fee_bps,
+            },
+            vec![
+                AccountMeta::new(owner_a.pubkey(), true),
+                AccountMeta::new(owner_b.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(account_a, false),
+                AccountMeta::new(account_b, false),
+            ],
+            &[owner_a, owner_b],
+        )
+        .expect("trade")
+    }
+
     fn withdraw(&mut self, owner: &Keypair, portfolio: Pubkey, amount: u128) -> Pubkey {
         self.withdraw_with_cu(owner, portfolio, amount).0
     }
@@ -487,6 +518,49 @@ fn v13_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
     let (_, group) = state::read_market(&market_data).unwrap();
     assert_eq!(group.insurance, 250);
     assert_eq!(group.vault, 850);
+}
+
+#[test]
+fn v13_bpf_tradenocpi_executes_and_is_bounded() {
+    let mut env = V13CuEnv::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+
+    let trade_cu = env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        150,
+        100,
+    );
+    println!("v13 TradeNoCpi BPF CU: {trade_cu}");
+    assert!(
+        trade_cu <= TRADE_CU_LIMIT,
+        "TradeNoCpi CU {} exceeded limit {}",
+        trade_cu,
+        TRADE_CU_LIMIT
+    );
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+
+    assert_eq!(env.token_amount(env.vault), 2_000_000);
+    assert_eq!(
+        group.assets[0].effective_price, 100,
+        "consented execution price must not move the effective oracle price"
+    );
+    assert_eq!(
+        group.insurance, 30,
+        "notional=1500 and 100 bps charges 15 to each side"
+    );
+    assert_eq!(group.vault, 2_000_000);
+    assert_eq!(group.c_tot + group.insurance, group.vault);
 }
 
 #[test]
