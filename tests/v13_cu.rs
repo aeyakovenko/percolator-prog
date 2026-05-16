@@ -421,6 +421,39 @@ impl V13CuEnv {
         (source, cu)
     }
 
+    fn withdraw_insurance_with_cu(&mut self, amount: u128) -> (Pubkey, u64) {
+        let dest = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                dest,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(self.mint, self.admin.pubkey(), 0),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let cu = send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::WithdrawInsuranceLimited { amount },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("withdraw insurance");
+        (dest, cu)
+    }
+
     fn token_amount(&self, key: Pubkey) -> u64 {
         let account = self.svm.get_account(&key).expect("token account");
         TokenAccount::unpack(&account.data).unwrap().amount
@@ -518,6 +551,15 @@ fn v13_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
     let (_, group) = state::read_market(&market_data).unwrap();
     assert_eq!(group.insurance, 250);
     assert_eq!(group.vault, 850);
+
+    let (insurance_dest, _withdraw_insurance_cu) = env.withdraw_insurance_with_cu(100);
+    assert_eq!(env.token_amount(insurance_dest), 100);
+    assert_eq!(env.token_amount(env.vault), 750);
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    assert_eq!(group.insurance, 150);
+    assert_eq!(group.vault, 750);
+    assert_eq!(group.c_tot, 600);
 }
 
 #[test]
@@ -592,17 +634,19 @@ fn v13_cu_custody_and_resolution_paths_are_bounded() {
     let (_source, deposit_cu) = env.deposit_with_cu(&owner, portfolio, 1_000);
     let (_dest, withdraw_cu) = env.withdraw_with_cu(&owner, portfolio, 400);
     let (_insurance_source, top_up_cu) = env.top_up_insurance_with_cu(250);
+    let (_insurance_dest, withdraw_insurance_cu) = env.withdraw_insurance_with_cu(100);
     let resolve_cu = env.resolve();
     let (_resolved_dest, close_resolved_cu) = env.close_resolved_with_cu(&owner, portfolio);
 
     println!(
-        "v13 custody CU init_portfolio={init_portfolio_cu}, deposit={deposit_cu}, withdraw={withdraw_cu}, top_up={top_up_cu}, resolve={resolve_cu}, close_resolved={close_resolved_cu}"
+        "v13 custody CU init_portfolio={init_portfolio_cu}, deposit={deposit_cu}, withdraw={withdraw_cu}, top_up={top_up_cu}, withdraw_insurance={withdraw_insurance_cu}, resolve={resolve_cu}, close_resolved={close_resolved_cu}"
     );
     for (name, cu) in [
         ("init_portfolio", init_portfolio_cu),
         ("deposit", deposit_cu),
         ("withdraw", withdraw_cu),
         ("top_up", top_up_cu),
+        ("withdraw_insurance", withdraw_insurance_cu),
         ("resolve", resolve_cu),
         ("close_resolved", close_resolved_cu),
     ] {

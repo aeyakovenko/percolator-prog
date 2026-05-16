@@ -773,6 +773,258 @@ fn v13_wrapper_top_up_insurance_rejects_wrong_mint_and_insufficient_source_balan
 }
 
 #[test]
+fn v13_wrapper_withdraw_insurance_requires_operator_and_healthy_market() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut attacker = signer();
+
+    let mint = init_market(&mut admin, &mut market);
+    let mut source = user_token_account(admin.key, mint, 100);
+    let mut vault = vault_token_account(&market, mint, 100);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpInsurance { amount: 100 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let mut attacker_dest = user_token_account(attacker.key, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    let topped_up = market.data.clone();
+    let unauthorized = run_ix(
+        Instruction::WithdrawInsuranceLimited { amount: 1 },
+        &mut [
+            &mut attacker,
+            &mut market,
+            &mut attacker_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(unauthorized, &market, &topped_up);
+
+    let zero = run_ix(
+        Instruction::WithdrawInsuranceLimited { amount: 0 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut attacker_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(zero, &market, &topped_up);
+
+    let stress_cases: &[fn(&mut MarketGroupV13)] = &[
+        |group| group.bankruptcy_hlock_active = true,
+        |group| group.threshold_stress_active = true,
+        |group| group.active_bankrupt_close_present = true,
+        |group| group.loss_stale_active = true,
+        |group| group.recovery_reason = Some(PermissionlessRecoveryReasonV13::BelowProgressFloor),
+    ];
+    for set_stress in stress_cases {
+        let (cfg, mut group) = state::read_market(&topped_up).unwrap();
+        set_stress(&mut group);
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+        let stressed = market.data.clone();
+        let stressed_withdraw = run_ix(
+            Instruction::WithdrawInsuranceLimited { amount: 1 },
+            &mut [
+                &mut admin,
+                &mut market,
+                &mut attacker_dest,
+                &mut vault,
+                &mut vault_auth,
+                &mut token_program,
+            ],
+        );
+        assert_err_and_market_unchanged(stressed_withdraw, &market, &stressed);
+    }
+    market.data.copy_from_slice(&topped_up);
+    let mut admin_dest = user_token_account(admin.key, mint, 0);
+    run_ix(
+        Instruction::WithdrawInsuranceLimited { amount: 40 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut admin_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.insurance, 60);
+    assert_eq!(group.vault, 60);
+
+    let overdraw = run_ix(
+        Instruction::WithdrawInsuranceLimited { amount: 61 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut admin_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert!(overdraw.is_err());
+
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group.c_tot = 60;
+        group.vault = 100;
+        group.insurance = 60;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+    let corrupt = market.data.clone();
+    let senior_invariant_reject = run_ix(
+        Instruction::WithdrawInsuranceLimited { amount: 1 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut admin_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(senior_invariant_reject, &market, &corrupt);
+}
+
+#[test]
+fn v13_wrapper_withdraw_insurance_uses_rotated_operator_and_terminal_drain() {
+    let mut admin = signer().writable();
+    let mut market = market_account();
+    let mut operator = signer();
+
+    let mint = init_market(&mut admin, &mut market);
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_INSURANCE_OPERATOR,
+            new_pubkey: operator.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut operator, &mut market],
+    )
+    .unwrap();
+    let mut source = user_token_account(admin.key, mint, 50);
+    let mut vault = vault_token_account(&market, mint, 50);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpInsurance { amount: 50 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+
+    let mut vault_auth = vault_authority_account(&market);
+    let mut admin_dest = user_token_account(admin.key, mint, 0);
+    let resolved = market.data.clone();
+    let old_operator = run_ix(
+        Instruction::WithdrawInsuranceLimited { amount: 1 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut admin_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(old_operator, &market, &resolved);
+
+    let mut operator_dest = user_token_account(operator.key, mint, 0);
+    run_ix(
+        Instruction::WithdrawInsuranceLimited { amount: 50 },
+        &mut [
+            &mut operator,
+            &mut market,
+            &mut operator_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.insurance, 0);
+    assert_eq!(group.vault, 0);
+
+    let mut close_dest = user_token_account(admin.key, mint, 0);
+    run_ix(
+        Instruction::CloseSlab,
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut vault,
+            &mut vault_auth,
+            &mut close_dest,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    assert!(market.data.iter().all(|b| *b == 0));
+}
+
+#[test]
+fn v13_wrapper_withdraw_insurance_resolved_requires_all_portfolios_closed() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 10);
+    let mut source = user_token_account(admin.key, mint, 10);
+    let mut vault = vault_token_account(&market, mint, 20);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpInsurance { amount: 10 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+
+    let mut dest = user_token_account(admin.key, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    let resolved_with_claims = market.data.clone();
+    let rejected = run_ix(
+        Instruction::WithdrawInsuranceLimited { amount: 1 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &resolved_with_claims);
+}
+
+#[test]
 fn v13_wrapper_update_authority_rotates_admin_with_dual_signature() {
     let mut admin = signer();
     let mut market = market_account();

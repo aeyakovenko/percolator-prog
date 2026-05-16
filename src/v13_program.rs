@@ -381,6 +381,9 @@ pub mod ix {
         },
         CloseSlab,
         ResolveMarket,
+        WithdrawInsuranceLimited {
+            amount: u128,
+        },
         CloseResolved {
             fee_rate_per_slot: u128,
         },
@@ -436,6 +439,9 @@ pub mod ix {
                 },
                 13 => Self::CloseSlab,
                 19 => Self::ResolveMarket,
+                23 => Self::WithdrawInsuranceLimited {
+                    amount: read_u128(&mut rest)?,
+                },
                 30 => Self::CloseResolved {
                     fee_rate_per_slot: read_u128(&mut rest)?,
                 },
@@ -524,6 +530,10 @@ pub mod ix {
                 }
                 Self::CloseSlab => out.push(13),
                 Self::ResolveMarket => out.push(19),
+                Self::WithdrawInsuranceLimited { amount } => {
+                    out.push(23);
+                    push_u128(&mut out, amount);
+                }
                 Self::CloseResolved { fee_rate_per_slot } => {
                     out.push(30);
                     push_u128(&mut out, fee_rate_per_slot);
@@ -682,6 +692,9 @@ pub mod processor {
             }
             Instruction::CloseSlab => handle_close_slab(program_id, accounts),
             Instruction::ResolveMarket => handle_resolve_market(program_id, accounts),
+            Instruction::WithdrawInsuranceLimited { amount } => {
+                handle_withdraw_insurance_limited(program_id, accounts, amount)
+            }
             Instruction::CloseResolved { fee_rate_per_slot } => {
                 handle_close_resolved(program_id, accounts, fee_rate_per_slot)
             }
@@ -1096,6 +1109,79 @@ pub mod processor {
             .checked_add(market_lamports)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         Ok(())
+    }
+
+    #[inline(never)]
+    fn handle_withdraw_insurance_limited<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        amount: u128,
+    ) -> ProgramResult {
+        let operator = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let dest_token = account(accounts, 2)?;
+        let vault_token = account(accounts, 3)?;
+        let vault_authority_ai = account(accounts, 4)?;
+        let token_program = account(accounts, 5)?;
+        expect_signer(operator)?;
+        expect_writable(market_ai)?;
+        expect_writable(dest_token)?;
+        expect_writable(vault_token)?;
+        expect_owner(market_ai, program_id)?;
+        verify_token_program(token_program)?;
+        if amount == 0 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if cfg.insurance_operator != operator.key.to_bytes() {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+
+        match group.mode {
+            MarketModeV13::Live => {
+                if group.bankruptcy_hlock_active
+                    || group.threshold_stress_active
+                    || group.active_bankrupt_close_present
+                    || group.loss_stale_active
+                    || group.recovery_reason.is_some()
+                {
+                    return Err(PercolatorError::EngineLockActive.into());
+                }
+            }
+            MarketModeV13::Resolved => {
+                if group.materialized_portfolio_count != 0 || group.c_tot != 0 {
+                    return Err(PercolatorError::EngineLockActive.into());
+                }
+            }
+            MarketModeV13::Recovery => return Err(PercolatorError::EngineLockActive.into()),
+        }
+
+        if amount > group.insurance || amount > group.vault {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        group.insurance -= amount;
+        group.vault -= amount;
+        group.assert_public_invariants().map_err(map_v13_error)?;
+
+        let mint = Pubkey::new_from_array(cfg.collateral_mint);
+        let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
+        expect_key(vault_authority_ai, &vault_authority)?;
+        verify_user_token_account(dest_token, operator.key, &mint)?;
+        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+        let amount_u64 = amount_to_u64(amount)?;
+        require_token_balance(vault_token, amount_u64)?;
+        let bump_arr = [bump];
+        let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+        transfer_tokens_signed(
+            token_program,
+            vault_token,
+            dest_token,
+            vault_authority_ai,
+            amount_u64,
+            signer_seeds,
+        )?;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
     }
 
     #[inline(never)]

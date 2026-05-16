@@ -21,27 +21,29 @@ mechanically reused. `V13_TEST_PORT_COVERAGE.md` tracks the retired v12 test
 classes and the active v13 wrapper/engine coverage that replaces each class.
 The replacement suite is:
 
-- `tests/v13_wrapper.rs`: 54 native account-local wrapper tests
+- `tests/v13_wrapper.rs`: 57 native account-local wrapper tests
 - `tests/v13_cu.rs`: 6 LiteSVM BPF wrapper/CU tests
 - `tests/v13_kani.rs`: 10 wrapper ABI Kani proofs
 
 `tests/v13_cu.rs` currently measures:
 
-- init portfolio: 3,368 CU
-- deposit: 17,789 CU
-- withdraw: 25,111 CU
-- top-up insurance: 15,796 CU
-- resolve: 1,457 CU
-- close resolved: 23,122 CU
-- TradeNoCpi: 59,731 CU
-- refresh crank: 9,016 CU
-- recovery crank: 3,267 CU
-- refresh crank before 64 extra portfolios: 9,014 CU
-- refresh crank after 64 extra portfolios: 9,014 CU
+- init portfolio: 3,379 CU
+- deposit: 13,303 CU
+- withdraw: 20,618 CU
+- top-up insurance: 11,308 CU
+- withdraw insurance: 11,530 CU
+- resolve: 1,466 CU
+- close resolved: 18,629 CU
+- TradeNoCpi: 59,746 CU
+- refresh crank: 9,022 CU
+- recovery crank: 3,273 CU
+- refresh crank before 64 extra portfolios: 9,020 CU
+- refresh crank after 64 extra portfolios: 9,020 CU
 
-It also verifies that BPF `Deposit`, `Withdraw`, `TopUpInsurance`, and
-`CloseResolved` move real SPL Token balances in lockstep with `group.vault`,
-user capital, resolved payout, and insurance. The v13 wrapper ABI now binds
+It also verifies that BPF `Deposit`, `Withdraw`, `TopUpInsurance`,
+`WithdrawInsuranceLimited`, and `CloseResolved` move real SPL Token balances in
+lockstep with `group.vault`, user capital, resolved payout, and insurance. The
+v13 wrapper ABI now binds
 markets to a collateral mint at `InitMarket`, validates user/vault token
 accounts, and wraps public ledger mutations with SPL Token CPIs.
 
@@ -57,6 +59,14 @@ market close. It requires the admin destination to sign, the market to be
 resolved, engine vault/insurance/capital accounting to be zero, and
 `materialized_portfolio_count == 0`; it then closes the supplied SPL vault and
 zeros/rent-drains the market account.
+
+The v12 bounded insurance withdrawal surface is restored as
+`WithdrawInsuranceLimited`. It is gated by the configured insurance operator,
+allows live withdrawal only while the market is healthy and not in h-lock,
+stress, loss-stale, active-bankrupt, or recovery state, and allows terminal
+resolved withdrawal only after all portfolio claims/capital are closed. The
+handler debits group insurance/vault accounting, asserts public senior
+invariants, then moves SPL tokens from the vault PDA.
 
 This confirms the wrapper crank path is account-local and does not scale with
 materialized portfolio count. The v13 engine no longer has a global slab scan,
