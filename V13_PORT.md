@@ -21,7 +21,7 @@ mechanically reused. `V13_TEST_PORT_COVERAGE.md` tracks the retired v12 test
 classes and the active v13 wrapper/engine coverage that replaces each class.
 The replacement suite is:
 
-- `tests/v13_wrapper.rs`: 57 native account-local wrapper tests
+- `tests/v13_wrapper.rs`: 59 native account-local wrapper tests
 - `tests/v13_cu.rs`: 6 LiteSVM BPF wrapper/CU tests
 - `tests/v13_kani.rs`: 10 wrapper ABI Kani proofs
 
@@ -67,6 +67,13 @@ stress, loss-stale, active-bankrupt, or recovery state, and allows terminal
 resolved withdrawal only after all portfolio claims/capital are closed. The
 handler debits group insurance/vault accounting, asserts public senior
 invariants, then moves SPL tokens from the vault PDA.
+
+The v12 released-PnL conversion surface is restored as `ConvertReleasedPnl`.
+The v13 engine conversion primitive converts the released residual-bounded
+amount in one call, so the wrapper treats the instruction amount as a maximum:
+if the released amount would exceed the caller's cap, the instruction fails
+without persisting the staged engine mutation. Resolved markets still use the
+terminal `CloseResolved` payout path instead of live conversion.
 
 This confirms the wrapper crank path is account-local and does not scale with
 materialized portfolio count. The v13 engine no longer has a global slab scan,

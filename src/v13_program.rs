@@ -384,6 +384,9 @@ pub mod ix {
         WithdrawInsuranceLimited {
             amount: u128,
         },
+        ConvertReleasedPnl {
+            amount: u128,
+        },
         CloseResolved {
             fee_rate_per_slot: u128,
         },
@@ -440,6 +443,9 @@ pub mod ix {
                 13 => Self::CloseSlab,
                 19 => Self::ResolveMarket,
                 23 => Self::WithdrawInsuranceLimited {
+                    amount: read_u128(&mut rest)?,
+                },
+                28 => Self::ConvertReleasedPnl {
                     amount: read_u128(&mut rest)?,
                 },
                 30 => Self::CloseResolved {
@@ -532,6 +538,10 @@ pub mod ix {
                 Self::ResolveMarket => out.push(19),
                 Self::WithdrawInsuranceLimited { amount } => {
                     out.push(23);
+                    push_u128(&mut out, amount);
+                }
+                Self::ConvertReleasedPnl { amount } => {
+                    out.push(28);
                     push_u128(&mut out, amount);
                 }
                 Self::CloseResolved { fee_rate_per_slot } => {
@@ -694,6 +704,9 @@ pub mod processor {
             Instruction::ResolveMarket => handle_resolve_market(program_id, accounts),
             Instruction::WithdrawInsuranceLimited { amount } => {
                 handle_withdraw_insurance_limited(program_id, accounts, amount)
+            }
+            Instruction::ConvertReleasedPnl { amount } => {
+                handle_convert_released_pnl(program_id, accounts, amount)
             }
             Instruction::CloseResolved { fee_rate_per_slot } => {
                 handle_close_resolved(program_id, accounts, fee_rate_per_slot)
@@ -1182,6 +1195,30 @@ pub mod processor {
             signer_seeds,
         )?;
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+    }
+
+    #[inline(never)]
+    fn handle_convert_released_pnl<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        amount: u128,
+    ) -> ProgramResult {
+        if amount == 0 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        with_one_portfolio(program_id, accounts, true, |group, portfolio, _cfg| {
+            if group.mode != MarketModeV13::Live {
+                return Err(V13Error::LockActive);
+            }
+            // The v13 engine converts the currently released residual-bounded
+            // amount atomically. Preserve the v12 caller cap by staging the
+            // conversion and only committing it when the converted amount fits.
+            let converted = group.convert_released_pnl_to_capital_not_atomic(portfolio)?;
+            if converted == 0 || converted > amount {
+                return Err(V13Error::LockActive);
+            }
+            Ok(())
+        })
     }
 
     #[inline(never)]

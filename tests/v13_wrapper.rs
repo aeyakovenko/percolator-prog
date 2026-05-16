@@ -2438,6 +2438,124 @@ fn v13_wrapper_tradenocpi_rejects_when_consented_price_would_break_margin() {
 }
 
 #[test]
+fn v13_wrapper_convert_released_pnl_respects_cap_and_unlocks_withdrawal() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
+
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: (2 * POS_SCALE) as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            effective_price: 101,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut admin, &mut market, &mut long_account],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: (2 * POS_SCALE) as i128,
+            exec_price: 101,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut short_owner,
+            &mut long_owner,
+            &mut market,
+            &mut short_account,
+            &mut long_account,
+        ],
+    )
+    .unwrap();
+
+    let before_market = market.data.clone();
+    let before_long = long_account.data.clone();
+    let before_short = short_account.data.clone();
+    let long = state::read_portfolio(&long_account.data).unwrap();
+    assert_eq!(long.active_bitmap, 0);
+    assert_eq!(long.pnl, 2);
+    assert_eq!(long.capital, 10_000);
+
+    let too_low_cap = run_ix(
+        Instruction::ConvertReleasedPnl { amount: 1 },
+        &mut [&mut long_owner, &mut market, &mut long_account],
+    );
+    assert_err_and_market_unchanged(too_low_cap, &market, &before_market);
+    assert_eq!(long_account.data, before_long);
+    assert_eq!(short_account.data, before_short);
+
+    run_ix(
+        Instruction::ConvertReleasedPnl { amount: 2 },
+        &mut [&mut long_owner, &mut market, &mut long_account],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let long = state::read_portfolio(&long_account.data).unwrap();
+    assert_eq!(long.pnl, 0);
+    assert_eq!(long.capital, 10_002);
+    assert_eq!(group.pnl_pos_tot, 0);
+
+    withdraw(&mut long_owner, &mut market, &mut long_account, 2);
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let long = state::read_portfolio(&long_account.data).unwrap();
+    assert_eq!(long.capital, 10_000);
+    assert_eq!(group.vault, 19_998);
+}
+
+#[test]
+fn v13_wrapper_convert_released_pnl_rejects_resolved_market_without_mutation() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 10);
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+
+    let market_before = market.data.clone();
+    let portfolio_before = portfolio.data.clone();
+    let rejected = run_ix(
+        Instruction::ConvertReleasedPnl { amount: 1 },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &market_before);
+    assert_eq!(portfolio.data, portfolio_before);
+}
+
+#[test]
 fn v13_wrapper_tradenocpi_rejects_bad_size_and_missing_signer_before_mutation() {
     let mut admin = signer();
     let mut market = market_account();

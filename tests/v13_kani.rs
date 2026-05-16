@@ -66,7 +66,7 @@ fn kani_v13_init_market_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v13_amount_instructions_decode_preserves_wire_fields() {
     let tag: u8 = kani::any();
-    kani::assume(tag == 3 || tag == 4 || tag == 9 || tag == 23 || tag == 30);
+    kani::assume(tag == 3 || tag == 4 || tag == 9 || tag == 23 || tag == 28 || tag == 30);
     let amount_raw: u16 = kani::any();
     let amount = amount_raw as u128;
 
@@ -81,6 +81,7 @@ fn kani_v13_amount_instructions_decode_preserves_wire_fields() {
         (23, Instruction::WithdrawInsuranceLimited { amount: got }) => {
             assert_eq!(got, amount)
         }
+        (28, Instruction::ConvertReleasedPnl { amount: got }) => assert_eq!(got, amount),
         (30, Instruction::CloseResolved { fee_rate_per_slot }) => {
             assert_eq!(fee_rate_per_slot, amount)
         }
@@ -281,6 +282,10 @@ fn kani_v13_every_active_payload_rejects_trailing_byte() {
     withdraw_insurance.push(extra);
     assert!(Instruction::decode(&withdraw_insurance).is_err());
 
+    let mut convert_pnl = Instruction::ConvertReleasedPnl { amount: 1 }.encode();
+    convert_pnl.push(extra);
+    assert!(Instruction::decode(&convert_pnl).is_err());
+
     let mut close_resolved = Instruction::CloseResolved {
         fee_rate_per_slot: 0,
     }
@@ -311,6 +316,7 @@ fn kani_v13_unknown_or_truncated_tags_reject() {
     kani::assume(tag != 13);
     kani::assume(tag != 19);
     kani::assume(tag != 23);
+    kani::assume(tag != 28);
     kani::assume(tag != 30);
     kani::assume(tag != 32);
     assert!(Instruction::decode(&[tag]).is_err());
@@ -347,6 +353,9 @@ fn kani_v13_every_active_payload_rejects_one_byte_truncation() {
 
     let withdraw_insurance = [23u8; 16];
     assert!(Instruction::decode(&withdraw_insurance).is_err());
+
+    let convert_pnl = [28u8; 16];
+    assert!(Instruction::decode(&convert_pnl).is_err());
 
     let close_resolved = [30u8; 16];
     assert!(Instruction::decode(&close_resolved).is_err());
