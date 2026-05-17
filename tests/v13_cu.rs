@@ -1,12 +1,16 @@
 use litesvm::LiteSVM;
 use percolator::POS_SCALE;
 use percolator_prog::{
-    constants::{MARKET_ACCOUNT_LEN, PORTFOLIO_ACCOUNT_LEN},
+    constants::{
+        MARKET_ACCOUNT_LEN, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        PORTFOLIO_ACCOUNT_LEN,
+    },
     ix::Instruction as ProgInstruction,
-    state,
+    oracle_v13, state,
 };
 use solana_sdk::{
     account::Account,
+    clock::Clock,
     compute_budget::ComputeBudgetInstruction,
     instruction::{AccountMeta, Instruction},
     program_option::COption,
@@ -126,6 +130,24 @@ fn make_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
         &mut data,
     )
     .unwrap();
+    data
+}
+
+fn make_pyth_data(
+    feed_id: &[u8; 32],
+    price: i64,
+    expo: i32,
+    conf: u64,
+    publish_time: i64,
+) -> Vec<u8> {
+    let mut data = vec![0u8; 134];
+    data[0..8].copy_from_slice(&[0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd]);
+    data[40] = 1;
+    data[41..73].copy_from_slice(feed_id);
+    data[73..81].copy_from_slice(&price.to_le_bytes());
+    data[81..89].copy_from_slice(&conf.to_le_bytes());
+    data[89..93].copy_from_slice(&expo.to_le_bytes());
+    data[93..101].copy_from_slice(&publish_time.to_le_bytes());
     data
 }
 
@@ -486,6 +508,115 @@ impl V13CuEnv {
             &[&self.admin],
         )
         .expect("resolve market")
+    }
+
+    fn configure_permissionless_resolve_with_cu(
+        &mut self,
+        stale_slots: u64,
+        force_close_delay_slots: u64,
+    ) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::ConfigurePermissionlessResolve {
+                stale_slots,
+                force_close_delay_slots,
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("configure permissionless resolve")
+    }
+
+    fn set_pyth_price(
+        &mut self,
+        feed: &[u8; 32],
+        price: i64,
+        expo: i32,
+        publish_time: i64,
+    ) -> Pubkey {
+        let key = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_pyth_data(feed, price, expo, 1, publish_time),
+                    owner: oracle_v13::PYTH_RECEIVER_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        key
+    }
+
+    fn configure_three_leg_hybrid_with_cu(
+        &mut self,
+        feeds: [[u8; 32]; 3],
+        leg0: Pubkey,
+        leg1: Pubkey,
+        leg2: Pubkey,
+        now_slot: u64,
+        now_unix_ts: i64,
+    ) -> u64 {
+        self.try_configure_three_leg_hybrid(feeds, leg0, leg1, leg2, now_slot, now_unix_ts)
+            .expect("configure hybrid oracle")
+    }
+
+    fn try_configure_three_leg_hybrid(
+        &mut self,
+        feeds: [[u8; 32]; 3],
+        leg0: Pubkey,
+        leg1: Pubkey,
+        leg2: Pubkey,
+        now_slot: u64,
+        now_unix_ts: i64,
+    ) -> Result<u64, String> {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::ConfigureHybridOracle {
+                now_slot,
+                now_unix_ts,
+                oracle_leg_count: 3,
+                oracle_leg_flags: ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+                max_staleness_secs: 60,
+                hybrid_soft_stale_slots: 3,
+                mark_ewma_halflife_slots: 1,
+                mark_min_fee: 0,
+                invert: 0,
+                unit_scale: 0,
+                conf_filter_bps: 500,
+                oracle_leg_feeds: feeds,
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new_readonly(leg0, false),
+                AccountMeta::new_readonly(leg1, false),
+                AccountMeta::new_readonly(leg2, false),
+            ],
+            &[&self.admin],
+        )
+    }
+
+    fn resolve_stale_permissionless_with_cu(&mut self, now_slot: u64) -> u64 {
+        self.svm.warp_to_slot(now_slot);
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::ResolveStalePermissionless { now_slot },
+            vec![AccountMeta::new(self.market, false)],
+            &[],
+        )
+        .expect("resolve stale permissionless")
     }
 
     fn close_resolved(&mut self, owner: &Keypair, portfolio: Pubkey) -> Pubkey {
@@ -850,6 +981,7 @@ fn v13_bpf_permissionless_liquidation_is_bounded() {
         0,
     );
 
+    env.svm.warp_to_slot(1);
     let liquidation_cu = env.crank(
         short_account,
         ProgInstruction::PermissionlessCrank {
@@ -902,6 +1034,35 @@ fn v13_bpf_close_resolved_moves_payout_tokens_with_ledger() {
 }
 
 #[test]
+fn v13_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free() {
+    let mut env = V13CuEnv::new();
+    let configure_cu = env.configure_permissionless_resolve_with_cu(5, 1);
+    let stale_resolve_cu = env.resolve_stale_permissionless_with_cu(5);
+    println!(
+        "v13 permissionless stale resolve CU configure={configure_cu}, resolve={stale_resolve_cu}"
+    );
+    assert!(
+        configure_cu <= CUSTODY_CU_LIMIT,
+        "configure permissionless resolve CU {} exceeded limit {}",
+        configure_cu,
+        CUSTODY_CU_LIMIT
+    );
+    assert!(
+        stale_resolve_cu <= CUSTODY_CU_LIMIT,
+        "permissionless stale resolve CU {} exceeded limit {}",
+        stale_resolve_cu,
+        CUSTODY_CU_LIMIT
+    );
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let (cfg, group) = state::read_market(&market_data).unwrap();
+    assert_eq!(cfg.permissionless_resolve_stale_slots, 5);
+    assert_eq!(cfg.force_close_delay_slots, 1);
+    assert_eq!(group.mode, percolator::MarketModeV13::Resolved);
+    assert_eq!(group.resolved_slot, 5);
+}
+
+#[test]
 fn v13_cu_custody_and_resolution_paths_are_bounded() {
     let mut env = V13CuEnv::new();
     let owner = Keypair::new();
@@ -936,7 +1097,7 @@ fn v13_cu_custody_and_resolution_paths_are_bounded() {
 }
 
 #[test]
-fn v13_cu_permissionless_crank_refresh_and_recovery_are_bounded() {
+fn v13_cu_permissionless_crank_refresh_is_bounded() {
     let mut env = V13CuEnv::new();
     let owner = Keypair::new();
     let portfolio = env.create_portfolio(&owner);
@@ -957,22 +1118,113 @@ fn v13_cu_permissionless_crank_refresh_and_recovery_are_bounded() {
     );
     println!("v13 refresh crank CU: {refresh_cu}");
     assert!(refresh_cu <= CRANK_CU_LIMIT);
+}
 
-    let recovery_cu = env.crank(
+#[test]
+fn v13_bpf_permissionless_crank_uses_authenticated_clock_slot_not_caller_slot() {
+    let mut env = V13CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000_000);
+
+    let real_slot = 10;
+    let spoofed_slot = 1_000_000;
+    env.svm.warp_to_slot(real_slot);
+    env.crank(
         portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 3,
+            action: 0,
             asset_index: 0,
-            now_slot: 1,
-            effective_price: 101,
+            now_slot: spoofed_slot,
+            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
             recovery_reason: 0,
         },
     );
-    println!("v13 recovery crank CU: {recovery_cu}");
-    assert!(recovery_cu <= CRANK_CU_LIMIT);
+
+    let clock = env.svm.get_sysvar::<Clock>();
+    assert_eq!(clock.slot, real_slot);
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    assert_eq!(
+        group.current_slot, clock.slot,
+        "permissionless crank must authenticate engine time from SVM Clock, not the instruction body"
+    );
+    assert_ne!(
+        group.current_slot, spoofed_slot,
+        "caller-supplied crank now_slot must not be able to move engine time into the future"
+    );
+}
+
+#[test]
+fn v13_bpf_configure_hybrid_oracle_uses_authenticated_clock_slot_not_caller_slot() {
+    let mut env = V13CuEnv::new();
+    let real_slot = 10;
+    let spoofed_slot = 1_000_000;
+    env.svm.warp_to_slot(real_slot);
+    let mut clock = env.svm.get_sysvar::<Clock>();
+    clock.unix_timestamp = 1_000;
+    env.svm.set_sysvar(&clock);
+    let clock = env.svm.get_sysvar::<Clock>();
+
+    let feeds = [[0x91u8; 32], [0x92u8; 32], [0x93u8; 32]];
+    let leg0 = env.set_pyth_price(&feeds[0], 4_000_000_000, -6, clock.unix_timestamp);
+    let leg1 = env.set_pyth_price(&feeds[1], 150_000_000, -6, clock.unix_timestamp);
+    let leg2 = env.set_pyth_price(&feeds[2], 200_000_000, -6, clock.unix_timestamp);
+    env.configure_three_leg_hybrid_with_cu(
+        feeds,
+        leg0,
+        leg1,
+        leg2,
+        spoofed_slot,
+        clock.unix_timestamp,
+    );
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let (cfg, group) = state::read_market(&market_data).unwrap();
+    assert_eq!(
+        group.current_slot, real_slot,
+        "hybrid configuration must authenticate engine time from SVM Clock, not the instruction body"
+    );
+    assert_eq!(group.slot_last, real_slot);
+    assert_eq!(cfg.last_good_oracle_slot, real_slot);
+    assert_eq!(cfg.mark_ewma_last_slot, real_slot);
+    assert_ne!(
+        group.current_slot, spoofed_slot,
+        "caller-supplied configure now_slot must not future-clock the market"
+    );
+}
+
+#[test]
+fn v13_bpf_configure_hybrid_oracle_uses_authenticated_unix_time_not_caller_time() {
+    let mut env = V13CuEnv::new();
+    env.svm.warp_to_slot(10);
+    let mut clock = env.svm.get_sysvar::<Clock>();
+    clock.unix_timestamp = 1_000;
+    env.svm.set_sysvar(&clock);
+
+    let feeds = [[0xa1u8; 32], [0xa2u8; 32], [0xa3u8; 32]];
+    let stale_publish_time = 1;
+    let leg0 = env.set_pyth_price(&feeds[0], 4_000_000_000, -6, stale_publish_time);
+    let leg1 = env.set_pyth_price(&feeds[1], 150_000_000, -6, stale_publish_time);
+    let leg2 = env.set_pyth_price(&feeds[2], 200_000_000, -6, stale_publish_time);
+    let before = env.svm.get_account(&env.market).unwrap().data;
+
+    let spoofed_fresh_unix = stale_publish_time;
+    let result =
+        env.try_configure_three_leg_hybrid(feeds, leg0, leg1, leg2, 10, spoofed_fresh_unix);
+
+    assert!(
+        result.is_err(),
+        "hybrid configuration must not accept stale oracle accounts by trusting caller now_unix_ts"
+    );
+    let after = env.svm.get_account(&env.market).unwrap().data;
+    assert_eq!(
+        after, before,
+        "rejected stale-oracle configuration must not mutate the market"
+    );
 }
 
 #[test]

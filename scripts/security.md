@@ -1,5 +1,47 @@
 # Security findings — 2026-05-13 hybrid after-hours sweep
 
+## F10 — Hybrid stale-fallback fee floor must scale with the next crank segment (Medium)
+
+**Status:** fixed locally by charging the stale-fallback uncertainty floor over
+the same bounded segment that the next honest permissionless crank can consume,
+not just one slot. Regression coverage:
+
+```bash
+cargo test --release --no-default-features \
+  v13_wrapper_hybrid_after_hours_fee_floor_scales_with_next_crank_segment_budget \
+  -- --nocapture --test-threads=1
+```
+
+**Attacker/UX model:** a hybrid after-hours market is soft-stale and the engine
+slot is behind the authenticated clock by multiple slots. Consenting traders can
+still execute at arbitrary prices, but the next honest crank may move the
+effective external index by up to:
+
+```text
+max_price_move_bps_per_slot * min(now_slot - slot_last, max_accrual_dt_slots)
+```
+
+**Original issue:** stale-fallback trades paid an uncertainty floor of only
+`max_price_move_bps_per_slot`. When `max_accrual_dt_slots > 1`, a trader could
+enter during stale fallback while paying for a one-slot oracle step even though
+the next honest crank could consume a larger bounded segment.
+
+**Fix invariant:**
+
+```text
+Hybrid stale-fallback trade fee:
+  min_externality_bps >= max_price_move_bps_per_slot
+      * max(1, min(authenticated_now_slot - slot_last, max_accrual_dt_slots))
+```
+
+The one-slot minimum preserves the existing same-slot uncertainty floor. If the
+configured maximum trade fee cannot cover the resulting dynamic fee, the wrapper
+rejects rather than silently undercharging.
+
+**Disposition:** `PASS_SAFE` after fix. The retained trade fee now covers the
+full next-crank price movement budget, and the existing one-slot hybrid tests
+continue to pass.
+
 ## F9 — Same-slot target-lag crank must not trigger P-last recovery (High)
 
 **Status:** fixed by withholding raw-target recovery evidence from

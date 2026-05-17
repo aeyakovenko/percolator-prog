@@ -11,9 +11,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use percolator::{
     AssetStateV13, HealthCertV13, MarketGroupV13, MarketModeV13, PermissionlessCrankActionV13,
-    PermissionlessCrankRequestV13, PermissionlessRecoveryReasonV13, PortfolioAccountV13,
-    PortfolioLegV13, ProvenanceHeaderV13, ResolvedCloseOutcomeV13, TradeOutcomeV13,
-    TradeRequestV13, V13Config, V13Error, V13_MAX_PORTFOLIO_ASSETS_N,
+    PermissionlessCrankRequestV13, PortfolioAccountV13, PortfolioLegV13, ProvenanceHeaderV13,
+    ResolvedCloseOutcomeV13, SideModeV13, TradeOutcomeV13, TradeRequestV13, V13Config, V13Error,
+    V13_MAX_PORTFOLIO_ASSETS_N,
 };
 use solana_program::{
     account_info::AccountInfo,
@@ -40,7 +40,7 @@ pub mod constants {
     pub const KIND_PORTFOLIO: u8 = 2;
 
     pub const HEADER_LEN: usize = 16;
-    pub const WRAPPER_CONFIG_LEN: usize = 176;
+    pub const WRAPPER_CONFIG_LEN: usize = 464;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV13Account>();
     pub const PORTFOLIO_STATE_LEN: usize = size_of::<PortfolioAccountV13Account>();
     pub const MARKET_GROUP_OFF: usize = HEADER_LEN + WRAPPER_CONFIG_LEN;
@@ -49,6 +49,18 @@ pub mod constants {
     pub const MAX_MATCHER_TAIL_ACCOUNTS: usize = 32;
     pub const MATCHER_ABI_VERSION: u32 = 2;
     pub const MATCHER_CONTEXT_MIN_LEN: usize = 64;
+    pub const ORACLE_LEG_CAP: usize = 3;
+    pub const ORACLE_MODE_MANUAL: u8 = 0;
+    pub const ORACLE_MODE_HYBRID_AFTER_HOURS: u8 = 1;
+    pub const ORACLE_MODE_HYPERP: u8 = 2;
+    pub const ORACLE_LEG_FLAG_DIVIDE_LEG2: u8 = 1 << 0;
+    pub const ORACLE_LEG_FLAG_DIVIDE_LEG3: u8 = 1 << 1;
+    pub const ORACLE_LEG_FLAGS_MASK: u8 = ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3;
+    pub const DEFAULT_MARK_EWMA_HALFLIFE_SLOTS: u64 = 600;
+    pub const MAX_DYNAMIC_TRADE_FEE_BPS: u64 = 10_000;
+    pub const MIN_INSURANCE_WITHDRAW_FLOOR_UNITS: u128 = 10;
+    pub const MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS: u64 = 6_480_000;
+    pub const MAX_FORCE_CLOSE_DELAY_SLOTS: u64 = 10_000_000;
 }
 
 pub mod error {
@@ -83,6 +95,10 @@ pub mod error {
         EngineRecoveryRequired,
         EngineCounterOverflow,
         EngineCounterUnderflow,
+        OracleInvalid,
+        OracleStale,
+        OracleConfTooWide,
+        InvalidOracleKey,
     }
 
     impl From<PercolatorError> for ProgramError {
@@ -114,7 +130,8 @@ pub mod state {
     use crate::{
         constants::{
             HEADER_LEN, KIND_MARKET, KIND_PORTFOLIO, MAGIC, MARKET_ACCOUNT_LEN, MARKET_GROUP_OFF,
-            PORTFOLIO_ACCOUNT_LEN, VERSION, WRAPPER_CONFIG_LEN,
+            ORACLE_LEG_CAP, ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_HYBRID_AFTER_HOURS,
+            ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN, VERSION, WRAPPER_CONFIG_LEN,
         },
         error::PercolatorError,
     };
@@ -140,6 +157,31 @@ pub mod state {
         pub last_good_oracle_slot: u64,
         pub insurance_authority: [u8; 32],
         pub insurance_operator: [u8; 32],
+        pub hyperp_mark_authority: [u8; 32],
+        pub insurance_withdraw_deposit_remaining: u128,
+        pub insurance_withdraw_max_bps: u16,
+        pub liquidation_cranker_fee_share_bps: u16,
+        pub unit_scale: u32,
+        pub conf_filter_bps: u16,
+        pub insurance_withdraw_deposits_only: u8,
+        pub oracle_mode: u8,
+        pub oracle_leg_count: u8,
+        pub oracle_leg_flags: u8,
+        pub invert: u8,
+        pub _padding0: u8,
+        pub insurance_withdraw_cooldown_slots: u64,
+        pub last_insurance_withdraw_slot: u64,
+        pub max_staleness_secs: u64,
+        pub hybrid_soft_stale_slots: u64,
+        pub mark_ewma_e6: u64,
+        pub mark_ewma_last_slot: u64,
+        pub mark_ewma_halflife_slots: u64,
+        pub mark_min_fee: u64,
+        pub oracle_target_price_e6: u64,
+        pub oracle_target_publish_time: i64,
+        pub oracle_leg_feeds: [[u8; 32]; ORACLE_LEG_CAP],
+        pub oracle_leg_prices_e6: [u64; ORACLE_LEG_CAP],
+        pub oracle_leg_publish_times: [i64; ORACLE_LEG_CAP],
     }
 
     #[inline]
@@ -208,7 +250,49 @@ pub mod state {
         let bytes = data
             .get(HEADER_LEN..HEADER_LEN + WRAPPER_CONFIG_LEN)
             .ok_or(PercolatorError::InvalidAccountLen)?;
-        Ok(bytemuck::pod_read_unaligned(bytes))
+        let config = bytemuck::pod_read_unaligned(bytes);
+        validate_wrapper_config(&config)?;
+        Ok(config)
+    }
+
+    #[inline]
+    fn validate_wrapper_config(config: &WrapperConfigV13) -> Result<(), ProgramError> {
+        if config.insurance_withdraw_max_bps > 10_000
+            || config.liquidation_cranker_fee_share_bps > 10_000
+            || config.conf_filter_bps > 10_000
+            || config.insurance_withdraw_deposits_only > 1
+            || config.invert > 1
+            || config._padding0 != 0
+            || config.oracle_leg_count as usize > ORACLE_LEG_CAP
+            || (config.oracle_leg_flags & !ORACLE_LEG_FLAGS_MASK) != 0
+        {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        match config.oracle_mode {
+            ORACLE_MODE_MANUAL => {
+                if config.oracle_leg_count != 0 || config.oracle_leg_flags != 0 {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+            }
+            ORACLE_MODE_HYBRID_AFTER_HOURS => {
+                if config.oracle_leg_count == 0
+                    || config.max_staleness_secs == 0
+                    || config.hybrid_soft_stale_slots == 0
+                    || config.mark_ewma_e6 == 0
+                    || !crate::oracle_v13::oracle_leg_config_ok(
+                        config.oracle_leg_count,
+                        config.oracle_leg_flags,
+                        &config.oracle_leg_feeds,
+                    )
+                {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+            }
+            _ => return Err(ProgramError::InvalidAccountData),
+        }
+
+        Ok(())
     }
 
     #[inline]
@@ -216,6 +300,7 @@ pub mod state {
         data: &mut [u8],
         config: &WrapperConfigV13,
     ) -> Result<(), ProgramError> {
+        validate_wrapper_config(config)?;
         data.get_mut(HEADER_LEN..HEADER_LEN + WRAPPER_CONFIG_LEN)
             .ok_or(PercolatorError::InvalidAccountLen)?
             .copy_from_slice(bytemuck::bytes_of(config));
@@ -664,6 +749,45 @@ pub mod ix {
             kind: u8,
             new_pubkey: [u8; 32],
         },
+        UpdateInsurancePolicy {
+            max_bps: u16,
+            deposits_only: u8,
+            cooldown_slots: u64,
+        },
+        UpdateLiquidationFeePolicy {
+            cranker_share_bps: u16,
+        },
+        ConfigurePermissionlessResolve {
+            stale_slots: u64,
+            force_close_delay_slots: u64,
+        },
+        ResolveStalePermissionless {
+            now_slot: u64,
+        },
+        ConfigureHybridOracle {
+            now_slot: u64,
+            now_unix_ts: i64,
+            oracle_leg_count: u8,
+            oracle_leg_flags: u8,
+            max_staleness_secs: u64,
+            hybrid_soft_stale_slots: u64,
+            mark_ewma_halflife_slots: u64,
+            mark_min_fee: u64,
+            invert: u8,
+            unit_scale: u32,
+            conf_filter_bps: u16,
+            oracle_leg_feeds: [[u8; 32]; 3],
+        },
+        ConfigureHyperpMark {
+            now_slot: u64,
+            initial_mark_e6: u64,
+            mark_ewma_halflife_slots: u64,
+            mark_min_fee: u64,
+        },
+        PushHyperpMark {
+            now_slot: u64,
+            mark_e6: u64,
+        },
     }
 
     impl Instruction {
@@ -741,6 +865,49 @@ pub mod ix {
                 32 => Self::UpdateAuthority {
                     kind: read_u8(&mut rest)?,
                     new_pubkey: read_bytes32(&mut rest)?,
+                },
+                33 => Self::UpdateInsurancePolicy {
+                    max_bps: read_u16(&mut rest)?,
+                    deposits_only: read_u8(&mut rest)?,
+                    cooldown_slots: read_u64(&mut rest)?,
+                },
+                37 => Self::UpdateLiquidationFeePolicy {
+                    cranker_share_bps: read_u16(&mut rest)?,
+                },
+                38 => Self::ConfigurePermissionlessResolve {
+                    stale_slots: read_u64(&mut rest)?,
+                    force_close_delay_slots: read_u64(&mut rest)?,
+                },
+                39 => Self::ResolveStalePermissionless {
+                    now_slot: read_u64(&mut rest)?,
+                },
+                34 => Self::ConfigureHybridOracle {
+                    now_slot: read_u64(&mut rest)?,
+                    now_unix_ts: read_i64(&mut rest)?,
+                    oracle_leg_count: read_u8(&mut rest)?,
+                    oracle_leg_flags: read_u8(&mut rest)?,
+                    max_staleness_secs: read_u64(&mut rest)?,
+                    hybrid_soft_stale_slots: read_u64(&mut rest)?,
+                    mark_ewma_halflife_slots: read_u64(&mut rest)?,
+                    mark_min_fee: read_u64(&mut rest)?,
+                    invert: read_u8(&mut rest)?,
+                    unit_scale: read_u32(&mut rest)?,
+                    conf_filter_bps: read_u16(&mut rest)?,
+                    oracle_leg_feeds: [
+                        read_bytes32(&mut rest)?,
+                        read_bytes32(&mut rest)?,
+                        read_bytes32(&mut rest)?,
+                    ],
+                },
+                35 => Self::ConfigureHyperpMark {
+                    now_slot: read_u64(&mut rest)?,
+                    initial_mark_e6: read_u64(&mut rest)?,
+                    mark_ewma_halflife_slots: read_u64(&mut rest)?,
+                    mark_min_fee: read_u64(&mut rest)?,
+                },
+                36 => Self::PushHyperpMark {
+                    now_slot: read_u64(&mut rest)?,
+                    mark_e6: read_u64(&mut rest)?,
                 },
                 _ => return Err(ProgramError::InvalidInstructionData),
             };
@@ -874,6 +1041,79 @@ pub mod ix {
                     out.push(kind);
                     out.extend_from_slice(&new_pubkey);
                 }
+                Self::UpdateInsurancePolicy {
+                    max_bps,
+                    deposits_only,
+                    cooldown_slots,
+                } => {
+                    out.push(33);
+                    push_u16(&mut out, max_bps);
+                    out.push(deposits_only);
+                    push_u64(&mut out, cooldown_slots);
+                }
+                Self::UpdateLiquidationFeePolicy { cranker_share_bps } => {
+                    out.push(37);
+                    push_u16(&mut out, cranker_share_bps);
+                }
+                Self::ConfigurePermissionlessResolve {
+                    stale_slots,
+                    force_close_delay_slots,
+                } => {
+                    out.push(38);
+                    push_u64(&mut out, stale_slots);
+                    push_u64(&mut out, force_close_delay_slots);
+                }
+                Self::ResolveStalePermissionless { now_slot } => {
+                    out.push(39);
+                    push_u64(&mut out, now_slot);
+                }
+                Self::ConfigureHybridOracle {
+                    now_slot,
+                    now_unix_ts,
+                    oracle_leg_count,
+                    oracle_leg_flags,
+                    max_staleness_secs,
+                    hybrid_soft_stale_slots,
+                    mark_ewma_halflife_slots,
+                    mark_min_fee,
+                    invert,
+                    unit_scale,
+                    conf_filter_bps,
+                    oracle_leg_feeds,
+                } => {
+                    out.push(34);
+                    push_u64(&mut out, now_slot);
+                    push_i64(&mut out, now_unix_ts);
+                    out.push(oracle_leg_count);
+                    out.push(oracle_leg_flags);
+                    push_u64(&mut out, max_staleness_secs);
+                    push_u64(&mut out, hybrid_soft_stale_slots);
+                    push_u64(&mut out, mark_ewma_halflife_slots);
+                    push_u64(&mut out, mark_min_fee);
+                    out.push(invert);
+                    push_u32(&mut out, unit_scale);
+                    push_u16(&mut out, conf_filter_bps);
+                    for feed in oracle_leg_feeds {
+                        out.extend_from_slice(&feed);
+                    }
+                }
+                Self::ConfigureHyperpMark {
+                    now_slot,
+                    initial_mark_e6,
+                    mark_ewma_halflife_slots,
+                    mark_min_fee,
+                } => {
+                    out.push(35);
+                    push_u64(&mut out, now_slot);
+                    push_u64(&mut out, initial_mark_e6);
+                    push_u64(&mut out, mark_ewma_halflife_slots);
+                    push_u64(&mut out, mark_min_fee);
+                }
+                Self::PushHyperpMark { now_slot, mark_e6 } => {
+                    out.push(36);
+                    push_u64(&mut out, now_slot);
+                    push_u64(&mut out, mark_e6);
+                }
             }
             out
         }
@@ -896,6 +1136,24 @@ pub mod ix {
         Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
     }
 
+    fn read_u16(input: &mut &[u8]) -> Result<u16, ProgramError> {
+        if input.len() < 2 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let (bytes, rest) = input.split_at(2);
+        *input = rest;
+        Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
+    }
+
+    fn read_u32(input: &mut &[u8]) -> Result<u32, ProgramError> {
+        if input.len() < 4 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let (bytes, rest) = input.split_at(4);
+        *input = rest;
+        Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+    }
+
     fn read_u128(input: &mut &[u8]) -> Result<u128, ProgramError> {
         if input.len() < 16 {
             return Err(ProgramError::InvalidInstructionData);
@@ -914,6 +1172,15 @@ pub mod ix {
         Ok(i128::from_le_bytes(bytes.try_into().unwrap()))
     }
 
+    fn read_i64(input: &mut &[u8]) -> Result<i64, ProgramError> {
+        if input.len() < 8 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let (bytes, rest) = input.split_at(8);
+        *input = rest;
+        Ok(i64::from_le_bytes(bytes.try_into().unwrap()))
+    }
+
     fn read_bytes32(input: &mut &[u8]) -> Result<[u8; 32], ProgramError> {
         if input.len() < 32 {
             return Err(ProgramError::InvalidInstructionData);
@@ -927,11 +1194,23 @@ pub mod ix {
         out.extend_from_slice(&v.to_le_bytes());
     }
 
+    fn push_u16(out: &mut Vec<u8>, v: u16) {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn push_u32(out: &mut Vec<u8>, v: u32) {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+
     fn push_u128(out: &mut Vec<u8>, v: u128) {
         out.extend_from_slice(&v.to_le_bytes());
     }
 
     fn push_i128(out: &mut Vec<u8>, v: i128) {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn push_i64(out: &mut Vec<u8>, v: i64) {
         out.extend_from_slice(&v.to_le_bytes());
     }
 }
@@ -1021,6 +1300,392 @@ pub mod matcher_abi {
     }
 }
 
+pub mod oracle_v13 {
+    use crate::{
+        constants::{
+            ORACLE_LEG_CAP, ORACLE_LEG_FLAGS_MASK, ORACLE_LEG_FLAG_DIVIDE_LEG2,
+            ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL,
+        },
+        error::PercolatorError,
+        state::WrapperConfigV13,
+    };
+    use borsh::BorshDeserialize;
+    use pythnet_sdk::messages::PriceFeedMessage;
+    use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
+
+    pub const PYTH_RECEIVER_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+        0x0c, 0xb7, 0xfa, 0xbb, 0x52, 0xf7, 0xa6, 0x48, 0xbb, 0x5b, 0x31, 0x7d, 0x9a, 0x01, 0x8b,
+        0x90, 0x57, 0xcb, 0x02, 0x47, 0x74, 0xfa, 0xfe, 0x01, 0xe6, 0xc4, 0xdf, 0x98, 0xcc, 0x38,
+        0x58, 0x81,
+    ]);
+    const PRICE_UPDATE_V2_MIN_LEN: usize = 134;
+    const OFF_VERIFICATION_LEVEL: usize = 40;
+    const OFF_PRICE_FEED_MESSAGE: usize = 41;
+    const PYTH_PRICE_UPDATE_V2_DISCRIMINATOR: [u8; 8] =
+        [0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd];
+    const PYTH_VERIFICATION_FULL_TAG: u8 = 1;
+    const MAX_EXPO_ABS: i32 = 18;
+
+    pub fn is_hybrid(config: &WrapperConfigV13) -> bool {
+        config.oracle_mode == ORACLE_MODE_HYBRID_AFTER_HOURS
+    }
+
+    pub fn hybrid_soft_stale_matured(config: &WrapperConfigV13, now_slot: u64) -> bool {
+        is_hybrid(config)
+            && config.hybrid_soft_stale_slots != 0
+            && now_slot.saturating_sub(config.last_good_oracle_slot)
+                > config.hybrid_soft_stale_slots
+    }
+
+    pub fn hard_stale_matured(config: &WrapperConfigV13, now_slot: u64) -> bool {
+        is_hybrid(config) && permissionless_stale_matured(config, now_slot)
+    }
+
+    pub fn permissionless_stale_matured(config: &WrapperConfigV13, now_slot: u64) -> bool {
+        config.permissionless_resolve_stale_slots != 0
+            && now_slot.saturating_sub(config.last_good_oracle_slot)
+                >= config.permissionless_resolve_stale_slots
+    }
+
+    pub fn oracle_leg_config_ok(count: u8, flags: u8, feeds: &[[u8; 32]; ORACLE_LEG_CAP]) -> bool {
+        if flags & !ORACLE_LEG_FLAGS_MASK != 0 {
+            return false;
+        }
+        if count == 0 {
+            return flags == 0 && feeds.iter().all(|f| *f == [0u8; 32]);
+        }
+        if count > ORACLE_LEG_CAP as u8 || feeds[0] == [0u8; 32] {
+            return false;
+        }
+        if count == 1 {
+            return flags == 0 && feeds[1] == [0u8; 32] && feeds[2] == [0u8; 32];
+        }
+        if feeds[1] == [0u8; 32] || feeds[1] == feeds[0] {
+            return false;
+        }
+        if count == 2 {
+            return (flags & ORACLE_LEG_FLAG_DIVIDE_LEG3) == 0 && feeds[2] == [0u8; 32];
+        }
+        feeds[2] != [0u8; 32] && feeds[2] != feeds[0] && feeds[2] != feeds[1]
+    }
+
+    fn leg_divides(config: &WrapperConfigV13, idx: usize) -> bool {
+        match idx {
+            1 => (config.oracle_leg_flags & ORACLE_LEG_FLAG_DIVIDE_LEG2) != 0,
+            2 => (config.oracle_leg_flags & ORACLE_LEG_FLAG_DIVIDE_LEG3) != 0,
+            _ => false,
+        }
+    }
+
+    pub fn read_pyth_price_e6(
+        price_ai: &AccountInfo,
+        expected_feed_id: &[u8; 32],
+        now_unix_ts: i64,
+        max_staleness_secs: u64,
+        conf_bps: u16,
+    ) -> Result<(u64, i64), ProgramError> {
+        if *price_ai.owner != PYTH_RECEIVER_PROGRAM_ID {
+            return Err(ProgramError::IllegalOwner);
+        }
+        let data = price_ai.try_borrow_data()?;
+        if data.len() < PRICE_UPDATE_V2_MIN_LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if data[..8] != PYTH_PRICE_UPDATE_V2_DISCRIMINATOR {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        if data[OFF_VERIFICATION_LEVEL] != PYTH_VERIFICATION_FULL_TAG {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let msg = <PriceFeedMessage as BorshDeserialize>::deserialize(
+            &mut &data[OFF_PRICE_FEED_MESSAGE..],
+        )
+        .map_err(|_| PercolatorError::OracleInvalid)?;
+        if &msg.feed_id != expected_feed_id {
+            return Err(PercolatorError::InvalidOracleKey.into());
+        }
+        if msg.price <= 0 || msg.exponent < -MAX_EXPO_ABS || msg.exponent > MAX_EXPO_ABS {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let age = now_unix_ts.saturating_sub(msg.publish_time);
+        if age < 0 || age as u64 > max_staleness_secs {
+            return Err(PercolatorError::OracleStale.into());
+        }
+        let price_u = msg.price as u128;
+        if conf_bps != 0 && (msg.conf as u128).saturating_mul(10_000) > price_u * conf_bps as u128 {
+            return Err(PercolatorError::OracleConfTooWide.into());
+        }
+        let scale = msg.exponent + 6;
+        let out = if scale >= 0 {
+            price_u
+                .checked_mul(10u128.pow(scale as u32))
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?
+        } else {
+            price_u / 10u128.pow((-scale) as u32)
+        };
+        if out == 0 || out > percolator::MAX_ORACLE_PRICE as u128 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        Ok((out as u64, msg.publish_time))
+    }
+
+    fn apply_transform(raw_price: u64, invert: u8, unit_scale: u32) -> Result<u64, ProgramError> {
+        let mut price = raw_price;
+        if invert != 0 {
+            price = (1_000_000_000_000u128 / price as u128)
+                .try_into()
+                .map_err(|_| PercolatorError::OracleInvalid)?;
+        }
+        if unit_scale > 1 {
+            price /= unit_scale as u64;
+        }
+        if price == 0 || price > percolator::MAX_ORACLE_PRICE {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        Ok(price)
+    }
+
+    fn compose(acc_e6: u64, leg_e6: u64, divide: bool) -> Result<u64, ProgramError> {
+        if leg_e6 == 0 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let next = if divide {
+            (acc_e6 as u128)
+                .checked_mul(1_000_000)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?
+                / leg_e6 as u128
+        } else {
+            (acc_e6 as u128)
+                .checked_mul(leg_e6 as u128)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?
+                / 1_000_000
+        };
+        if next == 0 || next > percolator::MAX_ORACLE_PRICE as u128 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        Ok(next as u64)
+    }
+
+    pub fn read_external_price_e6(
+        config: &mut WrapperConfigV13,
+        oracle_accounts: &[AccountInfo],
+        now_unix_ts: i64,
+    ) -> Result<(u64, i64, bool), ProgramError> {
+        if config.oracle_mode == ORACLE_MODE_MANUAL {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let count = config.oracle_leg_count as usize;
+        if count == 0 || count > ORACLE_LEG_CAP || oracle_accounts.len() < count {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        }
+        if !oracle_leg_config_ok(
+            config.oracle_leg_count,
+            config.oracle_leg_flags,
+            &config.oracle_leg_feeds,
+        ) {
+            return Err(PercolatorError::EngineInvalidConfig.into());
+        }
+        let mut acc = 0u64;
+        let mut advanced = false;
+        let mut max_publish_time = i64::MIN;
+        let mut i = 0usize;
+        while i < count {
+            let (price, publish_time) = read_pyth_price_e6(
+                &oracle_accounts[i],
+                &config.oracle_leg_feeds[i],
+                now_unix_ts,
+                config.max_staleness_secs,
+                config.conf_filter_bps,
+            )?;
+            let prev_time = config.oracle_leg_publish_times[i];
+            let prev_price = config.oracle_leg_prices_e6[i];
+            if prev_time != 0 {
+                if publish_time < prev_time {
+                    return Err(PercolatorError::OracleStale.into());
+                }
+                if publish_time == prev_time && prev_price != 0 && price != prev_price {
+                    return Err(PercolatorError::OracleInvalid.into());
+                }
+            }
+            if publish_time > prev_time {
+                config.oracle_leg_publish_times[i] = publish_time;
+                config.oracle_leg_prices_e6[i] = price;
+                advanced = true;
+            }
+            max_publish_time = core::cmp::max(max_publish_time, publish_time);
+            acc = if i == 0 {
+                price
+            } else {
+                compose(acc, price, leg_divides(config, i))?
+            };
+            i += 1;
+        }
+        Ok((
+            apply_transform(acc, config.invert, config.unit_scale)?,
+            max_publish_time,
+            advanced,
+        ))
+    }
+
+    pub fn clamp_toward_engine_dt(p_last: u64, target: u64, cap_bps: u64, dt_slots: u64) -> u64 {
+        if p_last == 0 || target == 0 {
+            return target;
+        }
+        if cap_bps == 0 || dt_slots == 0 {
+            return p_last;
+        }
+        let max_delta = (p_last as u128)
+            .saturating_mul(cap_bps as u128)
+            .saturating_mul(dt_slots as u128)
+            / 10_000;
+        let max_delta = core::cmp::min(max_delta, u64::MAX as u128) as u64;
+        if target > p_last {
+            core::cmp::min(target, p_last.saturating_add(max_delta))
+        } else {
+            core::cmp::max(target, p_last.saturating_sub(max_delta))
+        }
+    }
+
+    pub fn effective_price_from_target(
+        anchor: u64,
+        target: u64,
+        max_change_bps: u64,
+        dt_slots: u64,
+        exposed: bool,
+    ) -> u64 {
+        if exposed {
+            clamp_toward_engine_dt(anchor, target, max_change_bps, dt_slots)
+        } else {
+            target
+        }
+    }
+}
+
+pub mod policy_v13 {
+    use crate::constants::MAX_DYNAMIC_TRADE_FEE_BPS;
+
+    pub fn price_move_bps_ceil(old: u64, new: u64) -> Option<u64> {
+        if old == 0 || old == new {
+            return Some(0);
+        }
+        let diff = old.abs_diff(new) as u128;
+        let den = old as u128;
+        let bps = diff.checked_mul(10_000)?.checked_add(den.checked_sub(1)?)? / den;
+        u64::try_from(bps).ok()
+    }
+
+    fn two_sided_trade_fee_paid_cap(notional: u128, fee_bps: u64) -> Option<u64> {
+        if notional == 0 || fee_bps == 0 {
+            return Some(0);
+        }
+        let one_side = notional.checked_mul(fee_bps as u128)?.checked_add(9_999)? / 10_000;
+        u64::try_from(one_side.checked_mul(2)?).ok()
+    }
+
+    fn ceil_div_u128(num: u128, den: u128) -> Option<u128> {
+        if den == 0 {
+            return None;
+        }
+        Some(num.checked_add(den.checked_sub(1)?)? / den)
+    }
+
+    fn ewma_effective_alpha_bps(alpha_bps: u128, fee_paid: u64, mark_min_fee: u64) -> u128 {
+        if mark_min_fee == 0 || fee_paid >= mark_min_fee {
+            alpha_bps
+        } else {
+            alpha_bps.saturating_mul(fee_paid as u128) / mark_min_fee as u128
+        }
+    }
+
+    pub fn ewma_update(
+        old: u64,
+        price: u64,
+        halflife_slots: u64,
+        last_slot: u64,
+        now_slot: u64,
+        fee_paid: u64,
+        mark_min_fee: u64,
+    ) -> u64 {
+        if old == 0 {
+            if mark_min_fee > 0 && fee_paid < mark_min_fee {
+                return 0;
+            }
+            return price;
+        }
+        let dt = now_slot.saturating_sub(last_slot);
+        if dt == 0 {
+            return old;
+        }
+        if halflife_slots == 0 {
+            return price;
+        }
+        if fee_paid == 0 && mark_min_fee > 0 {
+            return old;
+        }
+        let alpha_bps = (10_000u128 * dt as u128) / (dt as u128 + halflife_slots as u128);
+        let alpha_bps = ewma_effective_alpha_bps(alpha_bps, fee_paid, mark_min_fee);
+        let old128 = old as u128;
+        let price128 = price as u128;
+        let out = if price >= old {
+            old128 + ((price128 - old128) * alpha_bps / 10_000)
+        } else {
+            old128 - ((old128 - price128) * alpha_bps / 10_000)
+        };
+        core::cmp::min(out, u64::MAX as u128) as u64
+    }
+
+    pub fn dynamic_fee_bps_with_externality_floor(
+        base_fee_bps: u64,
+        old_mark_e6: u64,
+        clamped_exec_e6: u64,
+        halflife_slots: u64,
+        last_mark_slot: u64,
+        now_slot: u64,
+        trade_notional: u128,
+        mark_externality_notional: u128,
+        mark_min_fee: u64,
+        min_externality_bps: u64,
+    ) -> Option<u64> {
+        if base_fee_bps > MAX_DYNAMIC_TRADE_FEE_BPS {
+            return None;
+        }
+        let mut fee_bps = base_fee_bps;
+        let mut i = 0;
+        while i < 64 {
+            let fee_paid = two_sided_trade_fee_paid_cap(trade_notional, fee_bps)?;
+            let next_mark = ewma_update(
+                old_mark_e6,
+                clamped_exec_e6,
+                halflife_slots,
+                last_mark_slot,
+                now_slot,
+                fee_paid,
+                mark_min_fee,
+            );
+            let mark_move_bps = price_move_bps_ceil(old_mark_e6, next_mark)?;
+            let charged_move_bps = core::cmp::max(mark_move_bps, min_externality_bps);
+            let base_paid = two_sided_trade_fee_paid_cap(trade_notional, base_fee_bps)? as u128;
+            let mark_fee = ceil_div_u128(
+                mark_externality_notional.checked_mul(charged_move_bps as u128)?,
+                10_000,
+            )?;
+            let required = base_paid.checked_add(mark_fee)?;
+            let denom = trade_notional.checked_mul(2)?;
+            let needed = ceil_div_u128(required.checked_mul(10_000)?, denom)?;
+            let needed = u64::try_from(needed).ok()?;
+            if needed > MAX_DYNAMIC_TRADE_FEE_BPS {
+                return None;
+            }
+            if needed <= fee_bps {
+                return Some(fee_bps);
+            }
+            fee_bps = needed;
+            i += 1;
+        }
+        None
+    }
+}
+
 pub mod processor {
     use super::*;
     use crate::{
@@ -1033,6 +1698,28 @@ pub mod processor {
     pub const AUTHORITY_HYPERP_MARK: u8 = 1;
     pub const AUTHORITY_INSURANCE: u8 = 2;
     pub const AUTHORITY_INSURANCE_OPERATOR: u8 = 4;
+
+    fn authenticated_slot_or_fallback(fallback_slot: u64) -> u64 {
+        Clock::get().map(|c| c.slot).unwrap_or(fallback_slot)
+    }
+
+    fn authenticated_market_slot_or_fallback(group: &MarketGroupV13) -> u64 {
+        Clock::get().map(|c| c.slot).unwrap_or(group.current_slot)
+    }
+
+    fn permissionless_resolve_matured_now(cfg: &WrapperConfigV13, group: &MarketGroupV13) -> bool {
+        oracle_v13::permissionless_stale_matured(cfg, authenticated_market_slot_or_fallback(group))
+    }
+
+    fn reject_permissionless_resolve_matured_live(
+        cfg: &WrapperConfigV13,
+        group: &MarketGroupV13,
+    ) -> ProgramResult {
+        if group.mode == MarketModeV13::Live && permissionless_resolve_matured_now(cfg, group) {
+            return Err(PercolatorError::OracleStale.into());
+        }
+        Ok(())
+    }
 
     pub fn process_instruction<'a>(
         program_id: &Pubkey,
@@ -1097,20 +1784,18 @@ pub mod processor {
                 close_q,
                 fee_bps,
                 recovery_reason,
-            } => with_one_portfolio(program_id, accounts, false, |group, portfolio, _cfg| {
-                crank_one_portfolio(
-                    group,
-                    portfolio,
-                    action,
-                    asset_index,
-                    now_slot,
-                    effective_price,
-                    funding_rate_e9,
-                    close_q,
-                    fee_bps,
-                    recovery_reason,
-                )
-            }),
+            } => handle_permissionless_crank(
+                program_id,
+                accounts,
+                action,
+                asset_index,
+                now_slot,
+                effective_price,
+                funding_rate_e9,
+                close_q,
+                fee_bps,
+                recovery_reason,
+            ),
             Instruction::TradeNoCpi {
                 asset_index,
                 size_q,
@@ -1154,6 +1839,64 @@ pub mod processor {
             }
             Instruction::UpdateAuthority { kind, new_pubkey } => {
                 handle_update_authority(program_id, accounts, kind, new_pubkey)
+            }
+            Instruction::UpdateInsurancePolicy {
+                max_bps,
+                deposits_only,
+                cooldown_slots,
+            } => handle_update_insurance_policy(
+                program_id,
+                accounts,
+                max_bps,
+                deposits_only,
+                cooldown_slots,
+            ),
+            Instruction::UpdateLiquidationFeePolicy { cranker_share_bps } => {
+                handle_update_liquidation_fee_policy(program_id, accounts, cranker_share_bps)
+            }
+            Instruction::ConfigurePermissionlessResolve {
+                stale_slots,
+                force_close_delay_slots,
+            } => handle_configure_permissionless_resolve(
+                program_id,
+                accounts,
+                stale_slots,
+                force_close_delay_slots,
+            ),
+            Instruction::ResolveStalePermissionless { now_slot } => {
+                handle_resolve_stale_permissionless(program_id, accounts, now_slot)
+            }
+            Instruction::ConfigureHybridOracle {
+                now_slot,
+                now_unix_ts,
+                oracle_leg_count,
+                oracle_leg_flags,
+                max_staleness_secs,
+                hybrid_soft_stale_slots,
+                mark_ewma_halflife_slots,
+                mark_min_fee,
+                invert,
+                unit_scale,
+                conf_filter_bps,
+                oracle_leg_feeds,
+            } => handle_configure_hybrid_oracle(
+                program_id,
+                accounts,
+                now_slot,
+                now_unix_ts,
+                oracle_leg_count,
+                oracle_leg_flags,
+                max_staleness_secs,
+                hybrid_soft_stale_slots,
+                mark_ewma_halflife_slots,
+                mark_min_fee,
+                invert,
+                unit_scale,
+                conf_filter_bps,
+                oracle_leg_feeds,
+            ),
+            Instruction::ConfigureHyperpMark { .. } | Instruction::PushHyperpMark { .. } => {
+                Err(ProgramError::InvalidInstructionData)
             }
         }
     }
@@ -1226,6 +1969,31 @@ pub mod processor {
             last_good_oracle_slot: Clock::get().map(|c| c.slot).unwrap_or(0),
             insurance_authority: admin.key.to_bytes(),
             insurance_operator: admin.key.to_bytes(),
+            hyperp_mark_authority: admin.key.to_bytes(),
+            insurance_withdraw_deposit_remaining: 0,
+            insurance_withdraw_max_bps: 10_000,
+            liquidation_cranker_fee_share_bps: 0,
+            unit_scale: 0,
+            conf_filter_bps: 0,
+            insurance_withdraw_deposits_only: 0,
+            oracle_mode: constants::ORACLE_MODE_MANUAL,
+            oracle_leg_count: 0,
+            oracle_leg_flags: 0,
+            invert: 0,
+            _padding0: 0,
+            insurance_withdraw_cooldown_slots: 0,
+            last_insurance_withdraw_slot: 0,
+            max_staleness_secs: 0,
+            hybrid_soft_stale_slots: 0,
+            mark_ewma_e6: initial_price,
+            mark_ewma_last_slot: Clock::get().map(|c| c.slot).unwrap_or(0),
+            mark_ewma_halflife_slots: constants::DEFAULT_MARK_EWMA_HALFLIFE_SLOTS,
+            mark_min_fee: 0,
+            oracle_target_price_e6: initial_price,
+            oracle_target_publish_time: 0,
+            oracle_leg_feeds: [[0u8; 32]; constants::ORACLE_LEG_CAP],
+            oracle_leg_prices_e6: [0u64; constants::ORACLE_LEG_CAP],
+            oracle_leg_publish_times: [0i64; constants::ORACLE_LEG_CAP],
         };
         state::init_market_account(
             &mut market_ai.try_borrow_mut_data()?,
@@ -1254,6 +2022,7 @@ pub mod processor {
         if group.mode != MarketModeV13::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
+        reject_permissionless_resolve_matured_live(&cfg, group.as_ref())?;
         let account = new_portfolio_boxed(ProvenanceHeaderV13::new(
             market_ai.key.to_bytes(),
             portfolio_ai.key.to_bytes(),
@@ -1291,6 +2060,7 @@ pub mod processor {
         if group.mode != MarketModeV13::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
+        reject_permissionless_resolve_matured_live(&cfg, group.as_ref())?;
         let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
         expect_portfolio_account_key(portfolio.as_ref(), portfolio_ai.key)?;
         expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
@@ -1335,6 +2105,7 @@ pub mod processor {
         if group.mode != MarketModeV13::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
+        reject_permissionless_resolve_matured_live(&cfg, group.as_ref())?;
         let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
         expect_portfolio_account_key(portfolio.as_ref(), portfolio_ai.key)?;
         expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
@@ -1389,9 +2160,10 @@ pub mod processor {
         if account_a_ai.key == account_b_ai.key {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         let mut account_a = state::read_portfolio_boxed(&account_a_ai.try_borrow_data()?)?;
         let mut account_b = state::read_portfolio_boxed(&account_b_ai.try_borrow_data()?)?;
+        reject_permissionless_resolve_matured_live(&cfg, group.as_ref())?;
         expect_portfolio_account_key(account_a.as_ref(), account_a_ai.key)?;
         expect_portfolio_account_key(account_b.as_ref(), account_b_ai.key)?;
         expect_portfolio_owner(account_a.as_ref(), signer_a.key)?;
@@ -1402,14 +2174,21 @@ pub mod processor {
             size_q.unsigned_abs()
         };
         let prices = effective_prices(group.as_ref());
-        let fee_bps = core::cmp::max(fee_bps, cfg.trade_fee_base_bps);
+        let fee_bps = hybrid_trade_fee_bps(
+            &cfg,
+            group.as_ref(),
+            asset_index as usize,
+            size_abs,
+            exec_price,
+            fee_bps,
+        )?;
         let req = TradeRequestV13 {
             asset_index: asset_index as usize,
             size_q: size_abs,
             exec_price,
             fee_bps,
         };
-        if size_q > 0 {
+        let outcome = if size_q > 0 {
             execute_trade_svm_aware(
                 group.as_mut(),
                 account_a.as_mut(),
@@ -1417,7 +2196,7 @@ pub mod processor {
                 req,
                 &prices,
             )
-            .map_err(map_v13_error)?;
+            .map_err(map_v13_error)?
         } else {
             execute_trade_svm_aware(
                 group.as_mut(),
@@ -1426,8 +2205,18 @@ pub mod processor {
                 req,
                 &prices,
             )
-            .map_err(map_v13_error)?;
-        }
+            .map_err(map_v13_error)?
+        };
+        update_hybrid_mark_after_trade(
+            &mut cfg,
+            group.as_ref(),
+            asset_index as usize,
+            exec_price,
+            outcome
+                .fee_a
+                .checked_add(outcome.fee_b)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?,
+        )?;
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
         state::write_portfolio(&mut account_a_ai.try_borrow_mut_data()?, account_a.as_ref())?;
         state::write_portfolio(&mut account_b_ai.try_borrow_mut_data()?, account_b.as_ref())
@@ -1489,9 +2278,18 @@ pub mod processor {
         );
         expect_key(matcher_delegate, &delegate)?;
 
-        let (_cfg_pre, group_pre) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let (cfg_pre, group_pre) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         let account_a_pre = state::read_portfolio_boxed(&account_a_ai.try_borrow_data()?)?;
         let account_b_pre = state::read_portfolio_boxed(&account_b_ai.try_borrow_data()?)?;
+        if group_pre.mode != MarketModeV13::Live {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        reject_permissionless_resolve_matured_live(&cfg_pre, group_pre.as_ref())?;
+        if core::cmp::max(fee_bps, cfg_pre.trade_fee_base_bps)
+            > group_pre.config.max_trading_fee_bps
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
         expect_portfolio_account_key(account_a_pre.as_ref(), account_a_ai.key)?;
         expect_portfolio_account_key(account_b_pre.as_ref(), account_b_ai.key)?;
         expect_portfolio_owner(account_a_pre.as_ref(), signer_a.key)?;
@@ -1552,7 +2350,7 @@ pub mod processor {
             return Ok(());
         }
 
-        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         let mut account_a = state::read_portfolio_boxed(&account_a_ai.try_borrow_data()?)?;
         let mut account_b = state::read_portfolio_boxed(&account_b_ai.try_borrow_data()?)?;
         expect_portfolio_account_key(account_a.as_ref(), account_a_ai.key)?;
@@ -1561,14 +2359,21 @@ pub mod processor {
         expect_portfolio_owner(account_b.as_ref(), signer_b.key)?;
 
         let prices = effective_prices(group.as_ref());
-        let fee_bps = core::cmp::max(fee_bps, cfg.trade_fee_base_bps);
+        let fee_bps = hybrid_trade_fee_bps(
+            &cfg,
+            group.as_ref(),
+            asset_index as usize,
+            ret.exec_size.unsigned_abs(),
+            ret.exec_price_e6,
+            fee_bps,
+        )?;
         let req = TradeRequestV13 {
             asset_index: asset_index as usize,
             size_q: ret.exec_size.unsigned_abs(),
             exec_price: ret.exec_price_e6,
             fee_bps,
         };
-        if ret.exec_size > 0 {
+        let outcome = if ret.exec_size > 0 {
             execute_trade_svm_aware(
                 group.as_mut(),
                 account_a.as_mut(),
@@ -1576,7 +2381,7 @@ pub mod processor {
                 req,
                 &prices,
             )
-            .map_err(map_v13_error)?;
+            .map_err(map_v13_error)?
         } else {
             execute_trade_svm_aware(
                 group.as_mut(),
@@ -1585,8 +2390,18 @@ pub mod processor {
                 req,
                 &prices,
             )
-            .map_err(map_v13_error)?;
-        }
+            .map_err(map_v13_error)?
+        };
+        update_hybrid_mark_after_trade(
+            &mut cfg,
+            group.as_ref(),
+            asset_index as usize,
+            ret.exec_price_e6,
+            outcome
+                .fee_a
+                .checked_add(outcome.fee_b)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?,
+        )?;
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
         state::write_portfolio(&mut account_a_ai.try_borrow_mut_data()?, account_a.as_ref())?;
         state::write_portfolio(&mut account_b_ai.try_borrow_mut_data()?, account_b.as_ref())
@@ -1636,7 +2451,7 @@ pub mod processor {
         expect_writable(vault_token)?;
         expect_owner(market_ai, program_id)?;
         verify_token_program(token_program)?;
-        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         if group.mode != MarketModeV13::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
@@ -1657,6 +2472,12 @@ pub mod processor {
             .vault
             .checked_add(amount)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        if cfg.insurance_withdraw_deposits_only != 0 {
+            cfg.insurance_withdraw_deposit_remaining = cfg
+                .insurance_withdraw_deposit_remaining
+                .checked_add(amount)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        }
         group.assert_public_invariants().map_err(map_v13_error)?;
         transfer_tokens(token_program, source_token, vault_token, signer, amount_u64)?;
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
@@ -1770,13 +2591,14 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
 
-        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         if cfg.insurance_operator != operator.key.to_bytes() {
             return Err(PercolatorError::Unauthorized.into());
         }
 
         match group.mode {
             MarketModeV13::Live => {
+                reject_permissionless_resolve_matured_live(&cfg, group.as_ref())?;
                 if group.bankruptcy_hlock_active
                     || group.threshold_stress_active
                     || group.active_bankrupt_close_present
@@ -1794,11 +2616,40 @@ pub mod processor {
             MarketModeV13::Recovery => return Err(PercolatorError::EngineLockActive.into()),
         }
 
-        if amount > group.insurance || amount > group.vault {
+        let clock_slot = Clock::get().map(|c| c.slot).unwrap_or(group.current_slot);
+        if cfg.insurance_withdraw_max_bps == 0 {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        if cfg.last_insurance_withdraw_slot != 0
+            && cfg.insurance_withdraw_cooldown_slots != 0
+            && clock_slot.saturating_sub(cfg.last_insurance_withdraw_slot)
+                < cfg.insurance_withdraw_cooldown_slots
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        let mut cap = group
+            .insurance
+            .checked_mul(cfg.insurance_withdraw_max_bps as u128)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?
+            / 10_000;
+        if cap == 0 && group.insurance >= constants::MIN_INSURANCE_WITHDRAW_FLOOR_UNITS {
+            cap = constants::MIN_INSURANCE_WITHDRAW_FLOOR_UNITS;
+        }
+        if cfg.insurance_withdraw_deposits_only != 0 {
+            cap = core::cmp::min(cap, cfg.insurance_withdraw_deposit_remaining);
+        }
+        if amount > cap || amount > group.insurance || amount > group.vault {
             return Err(PercolatorError::EngineLockActive.into());
         }
         group.insurance -= amount;
         group.vault -= amount;
+        if cfg.insurance_withdraw_deposits_only != 0 {
+            cfg.insurance_withdraw_deposit_remaining = cfg
+                .insurance_withdraw_deposit_remaining
+                .checked_sub(amount)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?;
+        }
+        cfg.last_insurance_withdraw_slot = clock_slot;
         group.assert_public_invariants().map_err(map_v13_error)?;
 
         let mint = Pubkey::new_from_array(cfg.collateral_mint);
@@ -1830,8 +2681,11 @@ pub mod processor {
         if amount == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        with_one_portfolio(program_id, accounts, true, |group, portfolio, _cfg| {
+        with_one_portfolio(program_id, accounts, true, |group, portfolio, cfg| {
             if group.mode != MarketModeV13::Live {
+                return Err(V13Error::LockActive);
+            }
+            if permissionless_resolve_matured_now(cfg, group) {
                 return Err(V13Error::LockActive);
             }
             // The v13 engine converts the currently released residual-bounded
@@ -1927,55 +2781,420 @@ pub mod processor {
     }
 
     #[inline(never)]
+    fn handle_update_insurance_policy<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        max_bps: u16,
+        deposits_only: u8,
+        cooldown_slots: u64,
+    ) -> ProgramResult {
+        let admin = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        expect_signer(admin)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+        if max_bps > 10_000 || deposits_only > 1 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let (mut cfg, group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if cfg.admin != admin.key.to_bytes() {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        cfg.insurance_withdraw_max_bps = max_bps;
+        cfg.insurance_withdraw_deposits_only = deposits_only;
+        cfg.insurance_withdraw_cooldown_slots = cooldown_slots;
+        if deposits_only == 0 {
+            cfg.insurance_withdraw_deposit_remaining = 0;
+        }
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+    }
+
+    #[inline(never)]
+    fn handle_update_liquidation_fee_policy<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        cranker_share_bps: u16,
+    ) -> ProgramResult {
+        let admin = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        expect_signer(admin)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+        if cranker_share_bps > 10_000 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let (mut cfg, group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if cfg.admin != admin.key.to_bytes() {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        cfg.liquidation_cranker_fee_share_bps = cranker_share_bps;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+    }
+
+    #[inline(never)]
+    fn handle_configure_permissionless_resolve<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        stale_slots: u64,
+        force_close_delay_slots: u64,
+    ) -> ProgramResult {
+        let admin = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        expect_signer(admin)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+        if stale_slots == 0
+            || stale_slots > constants::MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS
+            || force_close_delay_slots == 0
+            || force_close_delay_slots > constants::MAX_FORCE_CLOSE_DELAY_SLOTS
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let (mut cfg, group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if cfg.admin != admin.key.to_bytes() {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        if group.mode != MarketModeV13::Live {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        cfg.permissionless_resolve_stale_slots = stale_slots;
+        cfg.force_close_delay_slots = force_close_delay_slots;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+    }
+
+    #[inline(never)]
+    fn handle_resolve_stale_permissionless<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        now_slot: u64,
+    ) -> ProgramResult {
+        let market_ai = account(accounts, 0)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if group.mode != MarketModeV13::Live {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        let authenticated_slot = authenticated_slot_or_fallback(now_slot);
+        if authenticated_slot < group.current_slot {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        if !oracle_v13::permissionless_stale_matured(&cfg, authenticated_slot) {
+            return Err(PercolatorError::OracleStale.into());
+        }
+        group
+            .resolve_market_not_atomic(authenticated_slot)
+            .map_err(map_v13_error)?;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn handle_configure_hybrid_oracle<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        now_slot: u64,
+        now_unix_ts: i64,
+        oracle_leg_count: u8,
+        oracle_leg_flags: u8,
+        max_staleness_secs: u64,
+        hybrid_soft_stale_slots: u64,
+        mark_ewma_halflife_slots: u64,
+        mark_min_fee: u64,
+        invert: u8,
+        unit_scale: u32,
+        conf_filter_bps: u16,
+        oracle_leg_feeds: [[u8; 32]; constants::ORACLE_LEG_CAP],
+    ) -> ProgramResult {
+        let admin = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        expect_signer(admin)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+        if oracle_leg_count == 0
+            || oracle_leg_count as usize > constants::ORACLE_LEG_CAP
+            || !oracle_v13::oracle_leg_config_ok(
+                oracle_leg_count,
+                oracle_leg_flags,
+                &oracle_leg_feeds,
+            )
+            || max_staleness_secs == 0
+            || hybrid_soft_stale_slots == 0
+            || invert > 1
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let oracle_accounts = accounts
+            .get(2..2 + oracle_leg_count as usize)
+            .ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if cfg.admin != admin.key.to_bytes() {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        let authenticated_slot = authenticated_slot_or_fallback(now_slot);
+        let authenticated_unix_ts = Clock::get()
+            .map(|c| c.unix_timestamp)
+            .unwrap_or(now_unix_ts);
+        if authenticated_slot < group.current_slot {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        if group.mode != MarketModeV13::Live || group_has_position_or_loss_state(group.as_ref()) {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+
+        let mut next = cfg;
+        next.oracle_mode = constants::ORACLE_MODE_HYBRID_AFTER_HOURS;
+        next.oracle_leg_count = oracle_leg_count;
+        next.oracle_leg_flags = oracle_leg_flags;
+        next.invert = invert;
+        next.unit_scale = unit_scale;
+        next.conf_filter_bps = conf_filter_bps;
+        next.max_staleness_secs = max_staleness_secs;
+        next.hybrid_soft_stale_slots = hybrid_soft_stale_slots;
+        next.mark_ewma_halflife_slots = mark_ewma_halflife_slots;
+        next.mark_min_fee = mark_min_fee;
+        next.oracle_leg_feeds = oracle_leg_feeds;
+        next.oracle_leg_prices_e6 = [0u64; constants::ORACLE_LEG_CAP];
+        next.oracle_leg_publish_times = [0i64; constants::ORACLE_LEG_CAP];
+
+        let (price, publish_time, advanced) =
+            oracle_v13::read_external_price_e6(&mut next, oracle_accounts, authenticated_unix_ts)?;
+        if !advanced || price == 0 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        next.last_good_oracle_slot = authenticated_slot;
+        next.oracle_target_price_e6 = price;
+        next.oracle_target_publish_time = publish_time;
+        next.mark_ewma_e6 = price;
+        next.mark_ewma_last_slot = authenticated_slot;
+        group.assets[0].raw_oracle_target_price = price;
+        group.assets[0].effective_price = price;
+        group.assets[0].fund_px_last = price;
+        group.current_slot = authenticated_slot;
+        group.slot_last = authenticated_slot;
+        group.assert_public_invariants().map_err(map_v13_error)?;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &next, group.as_ref())
+    }
+
+    #[inline(never)]
     fn handle_close_resolved<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        fee_rate_per_slot: u128,
+        _fee_rate_per_slot: u128,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
         let portfolio_ai = account(accounts, 2)?;
-        let dest_token = account(accounts, 3)?;
-        let vault_token = account(accounts, 4)?;
-        let vault_authority_ai = account(accounts, 5)?;
-        let token_program = account(accounts, 6)?;
         expect_writable(market_ai)?;
         expect_writable(portfolio_ai)?;
-        expect_writable(dest_token)?;
-        expect_writable(vault_token)?;
         expect_owner(market_ai, program_id)?;
         expect_owner(portfolio_ai, program_id)?;
-        verify_token_program(token_program)?;
 
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
         expect_portfolio_account_key(portfolio.as_ref(), portfolio_ai.key)?;
         expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
-        let mint = Pubkey::new_from_array(cfg.collateral_mint);
-        let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
-        expect_key(vault_authority_ai, &vault_authority)?;
-        verify_user_token_account(dest_token, owner.key, &mint)?;
-        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
 
         let outcome = group
-            .close_resolved_account_not_atomic(portfolio.as_mut(), fee_rate_per_slot)
+            .close_resolved_account_not_atomic(portfolio.as_mut(), cfg.maintenance_fee_per_slot)
             .map_err(map_v13_error)?;
         if let ResolvedCloseOutcomeV13::Closed { payout } = outcome {
-            let payout_u64 = amount_to_u64(payout)?;
-            require_token_balance(vault_token, payout_u64)?;
-            let bump_arr = [bump];
-            let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
-            transfer_tokens_signed(
-                token_program,
-                vault_token,
-                dest_token,
-                vault_authority_ai,
-                payout_u64,
-                signer_seeds,
-            )?;
+            if payout != 0 {
+                let dest_token = account(accounts, 3)?;
+                let vault_token = account(accounts, 4)?;
+                let vault_authority_ai = account(accounts, 5)?;
+                let token_program = account(accounts, 6)?;
+                expect_writable(dest_token)?;
+                expect_writable(vault_token)?;
+                verify_token_program(token_program)?;
+                let mint = Pubkey::new_from_array(cfg.collateral_mint);
+                let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
+                expect_key(vault_authority_ai, &vault_authority)?;
+                verify_user_token_account(dest_token, owner.key, &mint)?;
+                verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+                let payout_u64 = amount_to_u64(payout)?;
+                require_token_balance(vault_token, payout_u64)?;
+                let bump_arr = [bump];
+                let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+                transfer_tokens_signed(
+                    token_program,
+                    vault_token,
+                    dest_token,
+                    vault_authority_ai,
+                    payout_u64,
+                    signer_seeds,
+                )?;
+            }
         }
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
         state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn handle_permissionless_crank<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        action: u8,
+        asset_index: u8,
+        now_slot: u64,
+        effective_price: u64,
+        funding_rate_e9: i128,
+        close_q: u128,
+        fee_bps: u64,
+        recovery_reason: u8,
+    ) -> ProgramResult {
+        let owner = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let portfolio_ai = account(accounts, 2)?;
+        expect_writable(market_ai)?;
+        expect_writable(portfolio_ai)?;
+        expect_owner(market_ai, program_id)?;
+        expect_owner(portfolio_ai, program_id)?;
+        let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
+        expect_portfolio_account_key(portfolio.as_ref(), portfolio_ai.key)?;
+        reject_permissionless_resolve_matured_live(&cfg, group.as_ref())?;
+        let authenticated_now_slot = authenticated_slot_or_fallback(now_slot);
+        let now_unix_ts = Clock::get().map(|c| c.unix_timestamp).unwrap_or_else(|_| {
+            let elapsed_slots = authenticated_now_slot.saturating_sub(cfg.last_good_oracle_slot);
+            cfg.oracle_target_publish_time
+                .saturating_add(i64::try_from(elapsed_slots).unwrap_or(i64::MAX))
+        });
+        let reward_accounts_required = action == 1 && cfg.liquidation_cranker_fee_share_bps != 0;
+        let reward_accounts = if reward_accounts_required {
+            expect_signer(owner)?;
+            let cranker_token = account(accounts, 3)?;
+            let vault_token = account(accounts, 4)?;
+            let vault_authority_ai = account(accounts, 5)?;
+            let token_program = account(accounts, 6)?;
+            expect_writable(cranker_token)?;
+            expect_writable(vault_token)?;
+            let mint = Pubkey::new_from_array(cfg.collateral_mint);
+            let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
+            expect_key(vault_authority_ai, &vault_authority)?;
+            verify_token_program(token_program)?;
+            verify_user_token_account(cranker_token, owner.key, &mint)?;
+            verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+            Some((
+                cranker_token,
+                vault_token,
+                vault_authority_ai,
+                token_program,
+            ))
+        } else {
+            None
+        };
+        let oracle_tail_start = if reward_accounts_required { 7 } else { 3 };
+        let tail = accounts.get(oracle_tail_start..).unwrap_or(&[]);
+        let asset_index_usize = asset_index as usize;
+        if asset_index_usize >= group.config.max_portfolio_assets as usize {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        if funding_rate_e9 != 0 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        if action == 1 && fee_bps != 0 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        if action == 3 {
+            // Engine recovery is a terminal/conservative mode, not ordinary
+            // keeper progress. Until the wrapper exposes a proof-bearing
+            // recovery/forfeit path, do not let a public caller brick a healthy
+            // live market by selecting a recovery reason.
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let crank_price = hybrid_effective_price_for_crank(
+            &mut cfg,
+            group.as_ref(),
+            asset_index_usize,
+            authenticated_now_slot,
+            now_unix_ts,
+            tail,
+            effective_price,
+        )?;
+        group.assets[asset_index as usize].raw_oracle_target_price = if oracle_v13::is_hybrid(&cfg)
+        {
+            cfg.oracle_target_price_e6
+        } else {
+            crank_price
+        };
+        if action == 1 && cfg.liquidation_cranker_fee_share_bps != 0 {
+            let insurance_before = group.insurance;
+            let prices = effective_prices_with(group.as_ref(), asset_index as usize, crank_price);
+            let outcome = group
+                .liquidate_account_not_atomic(
+                    portfolio.as_mut(),
+                    percolator::LiquidationRequestV13 {
+                        asset_index: asset_index as usize,
+                        close_q,
+                        fee_bps: group.config.liquidation_fee_bps,
+                    },
+                    &prices,
+                )
+                .map_err(map_v13_error)?;
+            group
+                .accrue_asset_to_not_atomic(
+                    asset_index as usize,
+                    authenticated_now_slot,
+                    crank_price,
+                    funding_rate_e9,
+                    true,
+                )
+                .map_err(map_v13_error)?;
+            let retained_fee = core::cmp::min(
+                outcome.fee_charged,
+                group.insurance.saturating_sub(insurance_before),
+            );
+            let reward = retained_fee
+                .checked_mul(cfg.liquidation_cranker_fee_share_bps as u128)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?
+                / 10_000;
+            let reward = core::cmp::min(reward, retained_fee);
+            if reward != 0 {
+                let (cranker_token, vault_token, vault_authority_ai, token_program) =
+                    reward_accounts.ok_or(ProgramError::NotEnoughAccountKeys)?;
+                let reward_u64 = amount_to_u64(reward)?;
+                require_token_balance(vault_token, reward_u64)?;
+                group.insurance = group
+                    .insurance
+                    .checked_sub(reward)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                group.vault = group
+                    .vault
+                    .checked_sub(reward)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                let (_, bump) = derive_vault_authority(program_id, market_ai.key);
+                let bump_arr = [bump];
+                let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+                transfer_tokens_signed(
+                    token_program,
+                    vault_token,
+                    cranker_token,
+                    vault_authority_ai,
+                    reward_u64,
+                    signer_seeds,
+                )?;
+            }
+        } else {
+            crank_one_portfolio(
+                group.as_mut(),
+                portfolio.as_mut(),
+                action,
+                asset_index,
+                authenticated_now_slot,
+                crank_price,
+                funding_rate_e9,
+                close_q,
+                0,
+                recovery_reason,
+            )
+            .map_err(map_v13_error)?;
+        }
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
+        state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())?;
+        let _ = owner;
+        Ok(())
     }
 
     #[inline(never)]
@@ -1988,20 +3207,19 @@ pub mod processor {
         effective_price: u64,
         funding_rate_e9: i128,
         close_q: u128,
-        fee_bps: u64,
-        recovery_reason: u8,
+        _fee_bps: u64,
+        _recovery_reason: u8,
     ) -> Result<(), V13Error> {
         let action = match action {
             0 => PermissionlessCrankActionV13::Refresh,
             1 => PermissionlessCrankActionV13::Liquidate(percolator::LiquidationRequestV13 {
                 asset_index: asset_index as usize,
                 close_q,
-                fee_bps,
+                fee_bps: group.config.liquidation_fee_bps,
             }),
             2 => PermissionlessCrankActionV13::SettleB {
                 asset_index: asset_index as usize,
             },
-            3 => PermissionlessCrankActionV13::Recover(recovery_reason_from_u8(recovery_reason)?),
             _ => return Err(V13Error::InvalidConfig),
         };
         let prices = effective_prices_with(group, asset_index as usize, effective_price);
@@ -2218,6 +3436,244 @@ pub mod processor {
         prices
     }
 
+    fn group_has_position_or_loss_state(group: &MarketGroupV13) -> bool {
+        if group.pnl_pos_tot != 0
+            || group.stale_certificate_count != 0
+            || group.b_stale_account_count != 0
+            || group.negative_pnl_account_count != 0
+            || group.bankruptcy_hlock_active
+            || group.threshold_stress_active
+            || group.active_bankrupt_close_present
+            || group.loss_stale_active
+            || group.recovery_reason.is_some()
+        {
+            return true;
+        }
+        let n = group.config.max_portfolio_assets as usize;
+        let mut i = 0;
+        while i < n {
+            let asset = group.assets[i];
+            if asset.oi_eff_long_q != 0
+                || asset.oi_eff_short_q != 0
+                || asset.stored_pos_count_long != 0
+                || asset.stored_pos_count_short != 0
+                || asset.stale_account_count_long != 0
+                || asset.stale_account_count_short != 0
+                || asset.b_long_num != 0
+                || asset.b_short_num != 0
+                || asset.b_epoch_start_long_num != 0
+                || asset.b_epoch_start_short_num != 0
+                || asset.loss_weight_sum_long != 0
+                || asset.loss_weight_sum_short != 0
+                || asset.social_loss_remainder_long_num != 0
+                || asset.social_loss_remainder_short_num != 0
+                || asset.social_loss_dust_long_num != 0
+                || asset.social_loss_dust_short_num != 0
+                || asset.explicit_unallocated_loss_long != 0
+                || asset.explicit_unallocated_loss_short != 0
+                || asset.mode_long != SideModeV13::Normal
+                || asset.mode_short != SideModeV13::Normal
+            {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    fn trade_notional_floor(size_q: u128, price: u64) -> Result<u128, ProgramError> {
+        Ok(size_q
+            .checked_mul(price as u128)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?
+            / percolator::POS_SCALE)
+    }
+
+    fn risk_notional_ceil(size_q: u128, price: u64) -> Result<u128, ProgramError> {
+        let num = size_q
+            .checked_mul(price as u128)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        Ok(num
+            .checked_add(percolator::POS_SCALE - 1)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?
+            / percolator::POS_SCALE)
+    }
+
+    fn hybrid_segment_dt(group: &MarketGroupV13, now_slot: u64) -> Result<u64, ProgramError> {
+        if now_slot < group.slot_last {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        Ok(core::cmp::min(
+            now_slot - group.slot_last,
+            group.config.max_accrual_dt_slots,
+        ))
+    }
+
+    fn hybrid_effective_price_for_crank(
+        cfg: &mut WrapperConfigV13,
+        group: &MarketGroupV13,
+        asset_index: usize,
+        now_slot: u64,
+        now_unix_ts: i64,
+        oracle_accounts: &[AccountInfo],
+        fallback_price: u64,
+    ) -> Result<u64, ProgramError> {
+        if !oracle_v13::is_hybrid(cfg) {
+            return Ok(fallback_price);
+        }
+        if asset_index >= group.config.max_portfolio_assets as usize {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        if oracle_v13::hard_stale_matured(cfg, now_slot) {
+            return Err(PercolatorError::EngineRecoveryRequired.into());
+        }
+        let count = cfg.oracle_leg_count as usize;
+        let read = if oracle_accounts.len() >= count {
+            oracle_v13::read_external_price_e6(cfg, oracle_accounts, now_unix_ts)
+        } else {
+            Err(ProgramError::NotEnoughAccountKeys)
+        };
+        let target = match read {
+            Ok((price, publish_time, advanced)) => {
+                cfg.oracle_target_price_e6 = price;
+                cfg.oracle_target_publish_time = publish_time;
+                if advanced {
+                    cfg.last_good_oracle_slot = now_slot;
+                }
+                price
+            }
+            Err(e)
+                if e == ProgramError::from(PercolatorError::OracleStale)
+                    || e == ProgramError::NotEnoughAccountKeys =>
+            {
+                if !oracle_v13::hybrid_soft_stale_matured(cfg, now_slot) {
+                    return Err(e);
+                }
+                cfg.mark_ewma_e6
+            }
+            Err(e) => return Err(e),
+        };
+        if target == 0 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let asset = group.assets[asset_index];
+        let exposed = asset.oi_eff_long_q != 0 || asset.oi_eff_short_q != 0;
+        let price = oracle_v13::effective_price_from_target(
+            asset.effective_price,
+            target,
+            group.config.max_price_move_bps_per_slot,
+            hybrid_segment_dt(group, now_slot)?,
+            exposed,
+        );
+        cfg.oracle_target_price_e6 = target;
+        if !oracle_v13::hybrid_soft_stale_matured(cfg, now_slot) {
+            cfg.mark_ewma_e6 = price;
+            cfg.mark_ewma_last_slot = now_slot;
+        }
+        Ok(price)
+    }
+
+    fn hybrid_trade_fee_bps(
+        cfg: &WrapperConfigV13,
+        group: &MarketGroupV13,
+        asset_index: usize,
+        size_q_abs: u128,
+        exec_price: u64,
+        caller_fee_bps: u64,
+    ) -> Result<u64, ProgramError> {
+        let base = core::cmp::max(caller_fee_bps, cfg.trade_fee_base_bps);
+        if base > group.config.max_trading_fee_bps {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        if !oracle_v13::is_hybrid(cfg) {
+            return Ok(base);
+        }
+        let now_slot = Clock::get().map(|c| c.slot).unwrap_or(group.current_slot);
+        if !oracle_v13::hybrid_soft_stale_matured(cfg, now_slot) {
+            return Ok(base);
+        }
+        if asset_index >= group.config.max_portfolio_assets as usize || cfg.mark_ewma_e6 == 0 {
+            return Ok(base);
+        }
+        let trade_notional = trade_notional_floor(size_q_abs, exec_price)?;
+        let clamped_exec = oracle_v13::clamp_toward_engine_dt(
+            group.assets[asset_index].effective_price,
+            exec_price,
+            group.config.max_price_move_bps_per_slot,
+            1,
+        );
+        let asset = group.assets[asset_index];
+        let max_side_oi_q = core::cmp::max(asset.oi_eff_long_q, asset.oi_eff_short_q);
+        let max_side_notional =
+            risk_notional_ceil(max_side_oi_q, group.assets[asset_index].effective_price)?;
+        let mark_externality_notional = core::cmp::max(max_side_notional, trade_notional)
+            .checked_mul(2)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let segment_dt = core::cmp::max(1, hybrid_segment_dt(group, now_slot)?);
+        let min_externality_bps = group
+            .config
+            .max_price_move_bps_per_slot
+            .checked_mul(segment_dt)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let required = policy_v13::dynamic_fee_bps_with_externality_floor(
+            base,
+            cfg.mark_ewma_e6,
+            clamped_exec,
+            cfg.mark_ewma_halflife_slots,
+            cfg.mark_ewma_last_slot,
+            now_slot,
+            trade_notional,
+            mark_externality_notional,
+            cfg.mark_min_fee,
+            min_externality_bps,
+        )
+        .ok_or(PercolatorError::EngineInvalidConfig)?;
+        let fee = core::cmp::max(base, required);
+        if fee > group.config.max_trading_fee_bps {
+            return Err(PercolatorError::EngineInvalidConfig.into());
+        }
+        Ok(fee)
+    }
+
+    fn update_hybrid_mark_after_trade(
+        cfg: &mut WrapperConfigV13,
+        group: &MarketGroupV13,
+        asset_index: usize,
+        exec_price: u64,
+        fee_paid: u128,
+    ) -> Result<(), ProgramError> {
+        if !oracle_v13::is_hybrid(cfg) {
+            return Ok(());
+        }
+        let now_slot = Clock::get().map(|c| c.slot).unwrap_or(group.current_slot);
+        if !oracle_v13::hybrid_soft_stale_matured(cfg, now_slot)
+            || asset_index >= group.config.max_portfolio_assets as usize
+        {
+            return Ok(());
+        }
+        let fee_paid = u64::try_from(fee_paid).unwrap_or(u64::MAX);
+        let clamped_exec = oracle_v13::clamp_toward_engine_dt(
+            group.assets[asset_index].effective_price,
+            exec_price,
+            group.config.max_price_move_bps_per_slot,
+            1,
+        );
+        let old = cfg.mark_ewma_e6;
+        let new_mark = policy_v13::ewma_update(
+            old,
+            clamped_exec,
+            cfg.mark_ewma_halflife_slots,
+            cfg.mark_ewma_last_slot,
+            now_slot,
+            fee_paid,
+            cfg.mark_min_fee,
+        );
+        if new_mark != 0 && new_mark != old {
+            cfg.mark_ewma_e6 = new_mark;
+            cfg.mark_ewma_last_slot = now_slot;
+        }
+        Ok(())
+    }
+
     #[inline(never)]
     fn execute_trade_svm_aware(
         group: &mut MarketGroupV13,
@@ -2256,22 +3712,6 @@ pub mod processor {
             prices[asset_index] = effective_price;
         }
         prices
-    }
-
-    fn recovery_reason_from_u8(v: u8) -> Result<PermissionlessRecoveryReasonV13, V13Error> {
-        match v {
-            0 => Ok(PermissionlessRecoveryReasonV13::BelowProgressFloor),
-            1 => Ok(PermissionlessRecoveryReasonV13::BlockedSegmentHeadroomOrRepresentability),
-            2 => Ok(PermissionlessRecoveryReasonV13::AccountBSettlementCannotProgress),
-            3 => Ok(PermissionlessRecoveryReasonV13::BIndexHeadroomExhausted),
-            4 => Ok(PermissionlessRecoveryReasonV13::ActiveBankruptCloseCannotProgress),
-            5 => Ok(PermissionlessRecoveryReasonV13::ExplicitLossOrDustAuditOverflow),
-            6 => {
-                Ok(PermissionlessRecoveryReasonV13::OracleOrTargetUnavailableByAuthenticatedPolicy)
-            }
-            7 => Ok(PermissionlessRecoveryReasonV13::CounterOrEpochOverflowDeclaredRecovery),
-            _ => Err(V13Error::InvalidConfig),
-        }
     }
 
     fn derive_matcher_delegate(

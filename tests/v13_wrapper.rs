@@ -4,11 +4,12 @@ use percolator::{
 };
 use percolator_prog::{
     constants::{
-        MARKET_ACCOUNT_LEN, MARKET_GROUP_LEN, PORTFOLIO_ACCOUNT_LEN, PORTFOLIO_STATE_LEN,
-        WRAPPER_CONFIG_LEN,
+        HEADER_LEN, MARKET_ACCOUNT_LEN, MARKET_GROUP_LEN, ORACLE_LEG_FLAG_DIVIDE_LEG2,
+        ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_HYBRID_AFTER_HOURS, PORTFOLIO_ACCOUNT_LEN,
+        PORTFOLIO_STATE_LEN, WRAPPER_CONFIG_LEN,
     },
     ix::Instruction,
-    processor, state,
+    oracle_v13, policy_v13, processor, state,
 };
 use solana_program::{
     account_info::AccountInfo, program_error::ProgramError, program_option::COption,
@@ -293,12 +294,62 @@ fn matcher_delegate_account(
     )
 }
 
+fn write_matcher_return(
+    matcher_context: &mut TestAccount,
+    exec_price_e6: u64,
+    exec_size: i128,
+    req_id: u64,
+    lp_account_id: u64,
+    oracle_price_e6: u64,
+) {
+    matcher_context.data[0..4].copy_from_slice(&2u32.to_le_bytes());
+    matcher_context.data[4..8].copy_from_slice(&3u32.to_le_bytes());
+    matcher_context.data[8..16].copy_from_slice(&exec_price_e6.to_le_bytes());
+    matcher_context.data[16..32].copy_from_slice(&exec_size.to_le_bytes());
+    matcher_context.data[32..40].copy_from_slice(&req_id.to_le_bytes());
+    matcher_context.data[40..48].copy_from_slice(&lp_account_id.to_le_bytes());
+    matcher_context.data[48..56].copy_from_slice(&oracle_price_e6.to_le_bytes());
+    matcher_context.data[56..64].copy_from_slice(&0u64.to_le_bytes());
+}
+
 fn token_program_account() -> TestAccount {
     TestAccount::new(spl_token::ID, Pubkey::default(), 0).executable()
 }
 
 fn non_executable_token_program_account() -> TestAccount {
     TestAccount::new(spl_token::ID, Pubkey::default(), 0)
+}
+
+fn make_pyth(feed_id: &[u8; 32], price: i64, expo: i32, conf: u64, publish_time: i64) -> Vec<u8> {
+    let mut data = vec![0u8; 134];
+    data[0..8].copy_from_slice(&[0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd]);
+    data[40] = 1;
+    data[41..73].copy_from_slice(feed_id);
+    data[73..81].copy_from_slice(&price.to_le_bytes());
+    data[81..89].copy_from_slice(&conf.to_le_bytes());
+    data[89..93].copy_from_slice(&expo.to_le_bytes());
+    data[93..101].copy_from_slice(&publish_time.to_le_bytes());
+    data
+}
+
+fn pyth_account(
+    feed_id: &[u8; 32],
+    price: i64,
+    expo: i32,
+    conf: u64,
+    publish_time: i64,
+) -> TestAccount {
+    TestAccount::new_with_data(
+        Pubkey::new_unique(),
+        oracle_v13::PYTH_RECEIVER_PROGRAM_ID,
+        make_pyth(feed_id, price, expo, conf, publish_time),
+    )
+}
+
+fn two_sided_fee(size_q: u128, price: u64, fee_bps: u64) -> u128 {
+    let notional = size_q * price as u128 / POS_SCALE;
+    let one_side = (notional * fee_bps as u128 + 9_999) / 10_000;
+    one_side * 2
 }
 
 fn run_ix(ix: Instruction, accounts: &mut [&mut TestAccount]) -> Result<(), ProgramError> {
@@ -396,6 +447,38 @@ fn withdraw(
             &mut vault_auth,
             &mut token_program,
         ],
+    )
+    .unwrap();
+}
+
+fn configure_three_leg_hybrid(
+    admin: &mut TestAccount,
+    market: &mut TestAccount,
+    feeds: [[u8; 32]; 3],
+    leg0: &mut TestAccount,
+    leg1: &mut TestAccount,
+    leg2: &mut TestAccount,
+    now_slot: u64,
+    now_unix_ts: i64,
+    soft_stale_slots: u64,
+    mark_min_fee: u64,
+) {
+    run_ix(
+        Instruction::ConfigureHybridOracle {
+            now_slot,
+            now_unix_ts,
+            oracle_leg_count: 3,
+            oracle_leg_flags: ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: soft_stale_slots,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: feeds,
+        },
+        &mut [admin, market, leg0, leg1, leg2],
     )
     .unwrap();
 }
@@ -621,6 +704,72 @@ fn v13_wrapper_account_layout_constants_match_serialized_state() {
         state::read_portfolio(&corrupt_portfolio),
         Err(ProgramError::InvalidAccountData),
         "serialized portfolio bool fields must be validated before engine state is materialized"
+    );
+}
+
+#[test]
+fn v13_wrapper_raw_wrapper_config_invalid_values_fail_closed() {
+    let mut admin = signer();
+    let mut market = market_account();
+    init_market(&mut admin, &mut market);
+
+    let (cfg, _group) = state::read_market(&market.data).unwrap();
+    let assert_bad_cfg = |bad_cfg: state::WrapperConfigV13, label: &str| {
+        let mut corrupt = market.data.clone();
+        corrupt[HEADER_LEN..HEADER_LEN + WRAPPER_CONFIG_LEN]
+            .copy_from_slice(bytemuck::bytes_of(&bad_cfg));
+        assert_eq!(
+            state::read_market(&corrupt),
+            Err(ProgramError::InvalidAccountData),
+            "{}",
+            label
+        );
+    };
+
+    let mut bad_reward = cfg;
+    bad_reward.liquidation_cranker_fee_share_bps = 10_001;
+    assert_bad_cfg(
+        bad_reward,
+        "corrupt liquidation reward share must not be trusted on read",
+    );
+
+    let mut bad_oracle_mode = cfg;
+    bad_oracle_mode.oracle_mode = 2;
+    assert_bad_cfg(
+        bad_oracle_mode,
+        "retired or unknown oracle modes must fail closed",
+    );
+
+    let mut bad_manual_legs = cfg;
+    bad_manual_legs.oracle_leg_count = 1;
+    assert_bad_cfg(
+        bad_manual_legs,
+        "manual oracle mode must not carry stale hybrid leg metadata",
+    );
+
+    let mut bad_hybrid_leg = cfg;
+    bad_hybrid_leg.oracle_mode = ORACLE_MODE_HYBRID_AFTER_HOURS;
+    bad_hybrid_leg.oracle_leg_count = 1;
+    bad_hybrid_leg.max_staleness_secs = 60;
+    bad_hybrid_leg.hybrid_soft_stale_slots = 1;
+    bad_hybrid_leg.mark_ewma_e6 = 100;
+    assert_bad_cfg(
+        bad_hybrid_leg,
+        "hybrid oracle mode must reject malformed persisted leg metadata",
+    );
+
+    let mut bad_bool = cfg;
+    bad_bool.insurance_withdraw_deposits_only = 2;
+    assert_bad_cfg(
+        bad_bool,
+        "persistent wrapper booleans must reject invalid byte patterns",
+    );
+
+    let mut bad_padding = cfg;
+    bad_padding._padding0 = 1;
+    assert_bad_cfg(
+        bad_padding,
+        "wrapper config padding must stay canonical zero bytes",
     );
 }
 
@@ -934,6 +1083,160 @@ fn v13_wrapper_top_up_insurance_rejects_wrong_mint_and_insufficient_source_balan
         ],
     );
     assert_err_and_market_unchanged(short_balance, &market, &before);
+}
+
+#[test]
+fn v13_wrapper_insurance_policy_deposit_only_leaves_fee_growth_behind() {
+    let mut admin = signer();
+    let mut market = market_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    run_ix(
+        Instruction::UpdateInsurancePolicy {
+            max_bps: 10_000,
+            deposits_only: 1,
+            cooldown_slots: 0,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let mut source = user_token_account(admin.key, mint, 100);
+    let mut vault = vault_token_account(&market, mint, 150);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpInsurance { amount: 100 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        assert_eq!(cfg.insurance_withdraw_deposit_remaining, 100);
+        group.insurance += 50;
+        group.vault += 50;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let mut dest = user_token_account(admin.key, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    run_ix(
+        Instruction::WithdrawInsuranceLimited { amount: 100 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.insurance_withdraw_deposit_remaining, 0);
+    assert_eq!(group.insurance, 50);
+    assert_eq!(group.vault, 50);
+
+    let before = market.data.clone();
+    let fee_growth_withdraw = run_ix(
+        Instruction::WithdrawInsuranceLimited { amount: 1 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(fee_growth_withdraw, &market, &before);
+}
+
+#[test]
+fn v13_wrapper_insurance_policy_enforces_bps_cap_and_cooldown() {
+    let mut admin = signer();
+    let mut market = market_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    run_ix(
+        Instruction::UpdateInsurancePolicy {
+            max_bps: 5_000,
+            deposits_only: 0,
+            cooldown_slots: 5,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    let mut source = user_token_account(admin.key, mint, 100);
+    let mut vault = vault_token_account(&market, mint, 100);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpInsurance { amount: 100 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group.current_slot = 10;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let mut dest = user_token_account(admin.key, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    let before = market.data.clone();
+    let over_cap = run_ix(
+        Instruction::WithdrawInsuranceLimited { amount: 51 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(over_cap, &market, &before);
+
+    run_ix(
+        Instruction::WithdrawInsuranceLimited { amount: 50 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let cooldown = run_ix(
+        Instruction::WithdrawInsuranceLimited { amount: 1 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert!(
+        cooldown.is_err(),
+        "same-slot second withdrawal must hit cooldown"
+    );
 }
 
 #[test]
@@ -1390,6 +1693,63 @@ fn v13_wrapper_update_authority_rejects_unsupported_kind_and_live_admin_burn() {
         &mut [&mut admin, &mut new_key, &mut market],
     );
     assert_err_and_market_unchanged(live_admin_burn, &market, &initialized);
+}
+
+#[test]
+fn v13_wrapper_permissionless_resolve_policy_is_admin_gated_and_enables_admin_burn() {
+    let mut admin = signer();
+    let mut attacker = signer();
+    let mut market = market_account();
+    let mut new_key = signer();
+
+    init_market(&mut admin, &mut market);
+    let initialized = market.data.clone();
+
+    let attacker_update = run_ix(
+        Instruction::ConfigurePermissionlessResolve {
+            stale_slots: 5,
+            force_close_delay_slots: 1,
+        },
+        &mut [&mut attacker, &mut market],
+    );
+    assert_err_and_market_unchanged(attacker_update, &market, &initialized);
+
+    for (stale_slots, force_close_delay_slots) in [(0, 1), (1, 0)] {
+        let before = market.data.clone();
+        let rejected = run_ix(
+            Instruction::ConfigurePermissionlessResolve {
+                stale_slots,
+                force_close_delay_slots,
+            },
+            &mut [&mut admin, &mut market],
+        );
+        assert_err_and_market_unchanged(rejected, &market, &before);
+    }
+
+    run_ix(
+        Instruction::ConfigurePermissionlessResolve {
+            stale_slots: 5,
+            force_close_delay_slots: 1,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.mode, MarketModeV13::Live);
+    assert_eq!(cfg.permissionless_resolve_stale_slots, 5);
+    assert_eq!(cfg.force_close_delay_slots, 1);
+
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_ADMIN,
+            new_pubkey: [0u8; 32],
+        },
+        &mut [&mut admin, &mut new_key, &mut market],
+    )
+    .unwrap();
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.mode, MarketModeV13::Live);
+    assert_eq!(cfg.admin, [0u8; 32]);
 }
 
 #[test]
@@ -2520,8 +2880,13 @@ fn v13_wrapper_tradenocpi_accepts_consented_wide_exec_price_without_moving_index
     init_market(&mut admin, &mut market);
     init_portfolio(&mut long_owner, &mut market, &mut long_account);
     init_portfolio(&mut short_owner, &mut market, &mut short_account);
-    deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
-    deposit(&mut short_owner, &mut market, &mut short_account, 1_000_000);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000_000);
+    deposit(
+        &mut short_owner,
+        &mut market,
+        &mut short_account,
+        10_000_000,
+    );
 
     let (_, before) = state::read_market(&market.data).unwrap();
     assert_eq!(before.assets[0].effective_price, 100);
@@ -2558,6 +2923,817 @@ fn v13_wrapper_tradenocpi_accepts_consented_wide_exec_price_without_moving_index
         group.insurance, 30,
         "notional=1500 and 100 bps charges 15 to each side"
     );
+}
+
+#[test]
+fn v13_wrapper_configure_hybrid_oracle_composes_toto_sol_cross_and_rejects_rollbacks() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_price_move_bps_per_slot,
+                ..
+            } = ix
+            {
+                *max_price_move_bps_per_slot = 500;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    let feeds = [[0x11u8; 32], [0x22u8; 32], [0x33u8; 32]];
+    let mut toto_jpy = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 100);
+    let mut usd_jpy = pyth_account(&feeds[1], 150_000_000, -6, 1, 101);
+    let mut sol_usd = pyth_account(&feeds[2], 200_000_000, -6, 1, 102);
+    configure_three_leg_hybrid(
+        &mut admin,
+        &mut market,
+        feeds,
+        &mut toto_jpy,
+        &mut usd_jpy,
+        &mut sol_usd,
+        5,
+        102,
+        10,
+        0,
+    );
+
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.oracle_leg_count, 3);
+    assert_eq!(
+        cfg.oracle_leg_prices_e6,
+        [4_000_000_000, 150_000_000, 200_000_000]
+    );
+    assert_eq!(cfg.mark_ewma_e6, 133_333);
+    assert_eq!(cfg.oracle_target_price_e6, 133_333);
+    assert_eq!(group.assets[0].effective_price, 133_333);
+
+    let mut keeper = signer();
+    let mut portfolio = portfolio_account();
+    init_portfolio(&mut keeper, &mut market, &mut portfolio);
+    usd_jpy.data = make_pyth(&feeds[1], 150_000_000, -6, 1, 99);
+    let before = market.data.clone();
+    let rollback = run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 6,
+            effective_price: 133_333,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [
+            &mut keeper,
+            &mut market,
+            &mut portfolio,
+            &mut toto_jpy,
+            &mut usd_jpy,
+            &mut sol_usd,
+        ],
+    );
+    assert_err_and_market_unchanged(rollback, &market, &before);
+}
+
+#[test]
+fn v13_wrapper_configure_hybrid_oracle_allows_empty_portfolio_grief_without_blocking_setup() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    let mut griefer = signer();
+    let mut empty_portfolio = portfolio_account();
+    run_ix(
+        default_init_market_ix(),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+    init_portfolio(&mut griefer, &mut market, &mut empty_portfolio);
+    assert_eq!(
+        state::read_market(&market.data)
+            .unwrap()
+            .1
+            .materialized_portfolio_count,
+        1,
+        "test must model a public empty portfolio created before oracle setup"
+    );
+
+    let feeds = [[0xb1u8; 32], [0xb2u8; 32], [0xb3u8; 32]];
+    let mut toto_jpy = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 100);
+    let mut usd_jpy = pyth_account(&feeds[1], 150_000_000, -6, 1, 100);
+    let mut sol_usd = pyth_account(&feeds[2], 200_000_000, -6, 1, 100);
+    configure_three_leg_hybrid(
+        &mut admin,
+        &mut market,
+        feeds,
+        &mut toto_jpy,
+        &mut usd_jpy,
+        &mut sol_usd,
+        1,
+        100,
+        10,
+        0,
+    );
+
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.oracle_leg_count, 3);
+    assert_eq!(cfg.mark_ewma_e6, 133_333);
+    assert_eq!(group.materialized_portfolio_count, 1);
+    assert_eq!(group.c_tot, 0);
+}
+
+#[test]
+fn v13_wrapper_configure_hybrid_oracle_allows_prefunded_flat_portfolio_without_blocking_setup() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    run_ix(
+        default_init_market_ix(),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 1);
+
+    let feeds = [[0xc1u8; 32], [0xc2u8; 32], [0xc3u8; 32]];
+    let mut toto_jpy = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 100);
+    let mut usd_jpy = pyth_account(&feeds[1], 150_000_000, -6, 1, 100);
+    let mut sol_usd = pyth_account(&feeds[2], 200_000_000, -6, 1, 100);
+    configure_three_leg_hybrid(
+        &mut admin,
+        &mut market,
+        feeds,
+        &mut toto_jpy,
+        &mut usd_jpy,
+        &mut sol_usd,
+        1,
+        100,
+        10,
+        0,
+    );
+
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.oracle_leg_count, 3);
+    assert_eq!(group.c_tot, 1);
+    assert_eq!(
+        group.assets[0].oi_eff_long_q, 0,
+        "test must keep the prefunded account flat"
+    );
+}
+
+#[test]
+fn v13_wrapper_configure_hybrid_oracle_rejects_after_positions_enter_market() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+    run_ix(
+        default_init_market_ix(),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 1_000_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+
+    let feeds = [[0xd4u8; 32], [0xd5u8; 32], [0xd6u8; 32]];
+    let mut toto_jpy = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 100);
+    let mut usd_jpy = pyth_account(&feeds[1], 150_000_000, -6, 1, 100);
+    let mut sol_usd = pyth_account(&feeds[2], 200_000_000, -6, 1, 100);
+    let before = market.data.clone();
+    let result = run_ix(
+        Instruction::ConfigureHybridOracle {
+            now_slot: 1,
+            now_unix_ts: 100,
+            oracle_leg_count: 3,
+            oracle_leg_flags: ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 10,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: feeds,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut toto_jpy,
+            &mut usd_jpy,
+            &mut sol_usd,
+        ],
+    );
+    assert_err_and_market_unchanged(result, &market, &before);
+}
+
+#[test]
+fn v13_wrapper_hybrid_fresh_crank_tracks_external_composite_then_after_hours_trade_moves_mark() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_trading_fee_bps,
+                trade_fee_base_bps,
+                max_price_move_bps_per_slot,
+                ..
+            } = ix
+            {
+                *max_trading_fee_bps = 10_000;
+                *trade_fee_base_bps = 1;
+                *max_price_move_bps_per_slot = 500;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    let feeds = [[0x44u8; 32], [0x55u8; 32], [0x66u8; 32]];
+    let mut toto_jpy = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 100);
+    let mut usd_jpy = pyth_account(&feeds[1], 150_000_000, -6, 1, 100);
+    let mut sol_usd = pyth_account(&feeds[2], 200_000_000, -6, 1, 100);
+    configure_three_leg_hybrid(
+        &mut admin,
+        &mut market,
+        feeds,
+        &mut toto_jpy,
+        &mut usd_jpy,
+        &mut sol_usd,
+        1,
+        100,
+        3,
+        0,
+    );
+
+    let mut keeper = signer();
+    let mut keeper_portfolio = portfolio_account();
+    init_portfolio(&mut keeper, &mut market, &mut keeper_portfolio);
+    toto_jpy.data = make_pyth(&feeds[0], 4_200_000_000, -6, 1, 101);
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            effective_price: 133_333,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [
+            &mut keeper,
+            &mut market,
+            &mut keeper_portfolio,
+            &mut toto_jpy,
+            &mut usd_jpy,
+            &mut sol_usd,
+        ],
+    )
+    .unwrap();
+    let (cfg_after_fresh, group_after_fresh) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        group_after_fresh.assets[0].effective_price, 140_000,
+        "flat markets accept the fresh composite target directly"
+    );
+    assert_eq!(cfg_after_fresh.mark_ewma_e6, 140_000);
+    assert_eq!(cfg_after_fresh.last_good_oracle_slot, 2);
+
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000_000);
+    deposit(
+        &mut short_owner,
+        &mut market,
+        &mut short_account,
+        10_000_000,
+    );
+    {
+        let (mut cfg, mut group) = state::read_market(&market.data).unwrap();
+        cfg.last_good_oracle_slot = 0;
+        cfg.mark_ewma_last_slot = 0;
+        group.current_slot = 10;
+        group.slot_last = 10;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+    let (before_cfg, before_group) = state::read_market(&market.data).unwrap();
+    let size_q = 10 * POS_SCALE;
+    let exec_price = before_group.assets[0].effective_price * 150 / 100;
+    let base_only_fee = two_sided_fee(size_q, exec_price, 1);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: size_q as i128,
+            exec_price,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    let (after_cfg, after_group) = state::read_market(&market.data).unwrap();
+    assert!(
+        after_group.insurance > base_only_fee,
+        "after-hours hybrid trade must pay dynamic mark-movement surcharge"
+    );
+    assert!(
+        after_cfg.mark_ewma_e6 > before_cfg.mark_ewma_e6,
+        "after-hours execution must move the fallback EWMA mark"
+    );
+    assert_eq!(
+        after_group.assets[0].effective_price, before_group.assets[0].effective_price,
+        "execution price flexibility must not rewrite the accepted oracle index"
+    );
+}
+
+#[test]
+fn v13_wrapper_hybrid_regular_hours_wide_trade_keeps_mark_pinned_to_external_oracle() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_trading_fee_bps,
+                trade_fee_base_bps,
+                max_price_move_bps_per_slot,
+                ..
+            } = ix
+            {
+                *max_trading_fee_bps = 10_000;
+                *trade_fee_base_bps = 1;
+                *max_price_move_bps_per_slot = 500;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    let feeds = [[0x77u8; 32], [0x88u8; 32], [0x99u8; 32]];
+    let mut toto_jpy = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 100);
+    let mut usd_jpy = pyth_account(&feeds[1], 150_000_000, -6, 1, 100);
+    let mut sol_usd = pyth_account(&feeds[2], 200_000_000, -6, 1, 100);
+    configure_three_leg_hybrid(
+        &mut admin,
+        &mut market,
+        feeds,
+        &mut toto_jpy,
+        &mut usd_jpy,
+        &mut sol_usd,
+        1,
+        100,
+        100,
+        0,
+    );
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000_000);
+    deposit(
+        &mut short_owner,
+        &mut market,
+        &mut short_account,
+        10_000_000,
+    );
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group.current_slot = 10;
+        group.slot_last = 10;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+    let (before_cfg, before_group) = state::read_market(&market.data).unwrap();
+    let size_q = 10 * POS_SCALE;
+    let exec_price = before_group.assets[0].effective_price * 150 / 100;
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: size_q as i128,
+            exec_price,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    let (after_cfg, after_group) = state::read_market(&market.data).unwrap();
+    assert_eq!(after_cfg.mark_ewma_e6, before_cfg.mark_ewma_e6);
+    assert_eq!(
+        after_cfg.mark_ewma_last_slot,
+        before_cfg.mark_ewma_last_slot
+    );
+    assert_eq!(
+        after_group.insurance,
+        two_sided_fee(size_q, exec_price, 1),
+        "regular-hours hybrid pays only the static 1 bp two-sided fee"
+    );
+}
+
+#[test]
+fn v13_wrapper_hybrid_after_hours_downward_mark_moves_effective_price() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_trading_fee_bps,
+                trade_fee_base_bps,
+                max_price_move_bps_per_slot,
+                ..
+            } = ix
+            {
+                *max_trading_fee_bps = 10_000;
+                *trade_fee_base_bps = 1;
+                *max_price_move_bps_per_slot = 500;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    let feeds = [[0xd1u8; 32], [0xd2u8; 32], [0xd3u8; 32]];
+    let mut toto_jpy = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 100);
+    let mut usd_jpy = pyth_account(&feeds[1], 150_000_000, -6, 1, 100);
+    let mut sol_usd = pyth_account(&feeds[2], 200_000_000, -6, 1, 100);
+    configure_three_leg_hybrid(
+        &mut admin,
+        &mut market,
+        feeds,
+        &mut toto_jpy,
+        &mut usd_jpy,
+        &mut sol_usd,
+        1,
+        100,
+        3,
+        0,
+    );
+
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(
+        &mut long_owner,
+        &mut market,
+        &mut long_account,
+        1_000_000_000,
+    );
+    deposit(
+        &mut short_owner,
+        &mut market,
+        &mut short_account,
+        1_000_000_000,
+    );
+    {
+        let (mut cfg, mut group) = state::read_market(&market.data).unwrap();
+        cfg.last_good_oracle_slot = 0;
+        cfg.mark_ewma_last_slot = 0;
+        group.current_slot = 10;
+        group.slot_last = 10;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let (before_cfg, before_group) = state::read_market(&market.data).unwrap();
+    let size_q = 10 * POS_SCALE;
+    let exec_price = before_group.assets[0].effective_price / 2;
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: size_q as i128,
+            exec_price,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    let (after_trade_cfg, after_trade_group) = state::read_market(&market.data).unwrap();
+    assert!(
+        after_trade_cfg.mark_ewma_e6 < before_cfg.mark_ewma_e6,
+        "after-hours below-mark trade should move fallback EWMA down"
+    );
+    assert_eq!(
+        after_trade_group.assets[0].effective_price, before_group.assets[0].effective_price,
+        "trades update fallback mark, not the accepted engine price"
+    );
+
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 11,
+            effective_price: after_trade_group.assets[0].effective_price,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut admin, &mut market, &mut long_account],
+    )
+    .unwrap();
+    let (_, after_crank_group) = state::read_market(&market.data).unwrap();
+    let expected = oracle_v13::effective_price_from_target(
+        after_trade_group.assets[0].effective_price,
+        after_trade_cfg.mark_ewma_e6,
+        after_trade_group.config.max_price_move_bps_per_slot,
+        1,
+        true,
+    );
+    assert!(
+        expected < after_trade_group.assets[0].effective_price,
+        "test must select a fallback mark below the accepted engine price"
+    );
+    assert_eq!(after_crank_group.assets[0].effective_price, expected);
+}
+
+#[test]
+fn v13_wrapper_hybrid_after_hours_fee_floor_scales_with_next_crank_segment_budget() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_trading_fee_bps,
+                trade_fee_base_bps,
+                max_price_move_bps_per_slot,
+                max_accrual_dt_slots,
+                min_funding_lifetime_slots,
+                ..
+            } = ix
+            {
+                *max_trading_fee_bps = 10_000;
+                *trade_fee_base_bps = 1;
+                *max_price_move_bps_per_slot = 500;
+                *max_accrual_dt_slots = 10;
+                *min_funding_lifetime_slots = 10;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    let feeds = [[0xf1u8; 32], [0xf2u8; 32], [0xf3u8; 32]];
+    let mut toto_jpy = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 100);
+    let mut usd_jpy = pyth_account(&feeds[1], 150_000_000, -6, 1, 100);
+    let mut sol_usd = pyth_account(&feeds[2], 200_000_000, -6, 1, 100);
+    configure_three_leg_hybrid(
+        &mut admin,
+        &mut market,
+        feeds,
+        &mut toto_jpy,
+        &mut usd_jpy,
+        &mut sol_usd,
+        1,
+        100,
+        3,
+        0,
+    );
+
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000_000);
+    deposit(
+        &mut short_owner,
+        &mut market,
+        &mut short_account,
+        10_000_000,
+    );
+    {
+        let (mut cfg, mut group) = state::read_market(&market.data).unwrap();
+        cfg.last_good_oracle_slot = 0;
+        cfg.mark_ewma_last_slot = 0;
+        group.current_slot = 11;
+        group.slot_last = 1;
+        group.loss_stale_active = false;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let (_, before_group) = state::read_market(&market.data).unwrap();
+    let size_q = 10 * POS_SCALE;
+    let exec_price = before_group.assets[0].effective_price;
+    let before_insurance = before_group.insurance;
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: size_q as i128,
+            exec_price,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    let (_, after_group) = state::read_market(&market.data).unwrap();
+    let fee_delta = after_group.insurance - before_insurance;
+    let one_slot_floor = two_sided_fee(size_q, exec_price, 1 + 500);
+    let full_segment_floor = two_sided_fee(size_q, exec_price, 1 + 500 * 10);
+    assert!(
+        fee_delta >= full_segment_floor,
+        "stale fallback fee must cover the full price movement budget the next honest crank can consume"
+    );
+    assert!(
+        full_segment_floor > one_slot_floor,
+        "test must distinguish a one-slot fee floor from the full bounded segment floor"
+    );
+}
+
+#[test]
+fn v13_wrapper_hybrid_after_hours_max_caller_fee_does_not_bypass_dynamic_fee_rejection() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_trading_fee_bps,
+                trade_fee_base_bps,
+                max_price_move_bps_per_slot,
+                ..
+            } = ix
+            {
+                *max_trading_fee_bps = 10_000;
+                *trade_fee_base_bps = 1;
+                *max_price_move_bps_per_slot = 500;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    let feeds = [[0xe1u8; 32], [0xe2u8; 32], [0xe3u8; 32]];
+    let mut toto_jpy = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 100);
+    let mut usd_jpy = pyth_account(&feeds[1], 150_000_000, -6, 1, 100);
+    let mut sol_usd = pyth_account(&feeds[2], 200_000_000, -6, 1, 100);
+    configure_three_leg_hybrid(
+        &mut admin,
+        &mut market,
+        feeds,
+        &mut toto_jpy,
+        &mut usd_jpy,
+        &mut sol_usd,
+        1,
+        100,
+        3,
+        0,
+    );
+
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(
+        &mut long_owner,
+        &mut market,
+        &mut long_account,
+        1_000_000_000,
+    );
+    deposit(
+        &mut short_owner,
+        &mut market,
+        &mut short_account,
+        1_000_000_000,
+    );
+
+    let initial_price = state::read_market(&market.data).unwrap().1.assets[0].effective_price;
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: (100 * POS_SCALE) as i128,
+            exec_price: initial_price,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    {
+        let (mut cfg, mut group) = state::read_market(&market.data).unwrap();
+        cfg.last_good_oracle_slot = 0;
+        cfg.mark_ewma_last_slot = 0;
+        group.current_slot = 10;
+        group.slot_last = 10;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let before_market = market.data.clone();
+    let before_long = long_account.data.clone();
+    let before_short = short_account.data.clone();
+    let (_, before_group) = state::read_market(&market.data).unwrap();
+    let probe_size = POS_SCALE / 100;
+    let probe_price = before_group.assets[0].effective_price * 2;
+    let max_side_q = core::cmp::max(
+        before_group.assets[0].oi_eff_long_q,
+        before_group.assets[0].oi_eff_short_q,
+    );
+    let max_side_notional =
+        (max_side_q * before_group.assets[0].effective_price as u128 + POS_SCALE - 1) / POS_SCALE;
+    let required = policy_v13::dynamic_fee_bps_with_externality_floor(
+        10_000,
+        state::read_market(&market.data).unwrap().0.mark_ewma_e6,
+        oracle_v13::clamp_toward_engine_dt(
+            before_group.assets[0].effective_price,
+            probe_price,
+            before_group.config.max_price_move_bps_per_slot,
+            1,
+        ),
+        1,
+        0,
+        before_group.current_slot,
+        probe_size * probe_price as u128 / POS_SCALE,
+        max_side_notional.checked_mul(2).unwrap(),
+        0,
+        before_group.config.max_price_move_bps_per_slot,
+    );
+    assert!(
+        required.is_none(),
+        "test must select a trade whose dynamic externality fee exceeds the market cap"
+    );
+
+    let result = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: probe_size as i128,
+            exec_price: probe_price,
+            fee_bps: 10_000,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    );
+    assert_err_and_market_unchanged(result, &market, &before_market);
+    assert_eq!(long_account.data, before_long);
+    assert_eq!(short_account.data, before_short);
 }
 
 #[test]
@@ -3118,6 +4294,108 @@ fn v13_wrapper_tradecpi_rejects_wrong_delegate_and_unsafe_tail_before_cpi() {
 }
 
 #[test]
+fn v13_wrapper_tradecpi_zero_fill_rejects_resolved_market_before_success() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut account_a = portfolio_account();
+    let mut account_b = portfolio_account();
+    let mut matcher_program = matcher_program_account();
+    let mut matcher_context = matcher_context_account(&matcher_program);
+    let mut delegate =
+        matcher_delegate_account(&market, &account_b, &matcher_program, &matcher_context);
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner_a, &mut market, &mut account_a);
+    init_portfolio(&mut owner_b, &mut market, &mut account_b);
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let req_id = group.current_slot.wrapping_add(1);
+    let lp_account_id = {
+        let bytes = delegate.key.to_bytes();
+        u64::from_le_bytes(bytes[0..8].try_into().unwrap())
+    };
+    write_matcher_return(&mut matcher_context, 100, 0, req_id, lp_account_id, 100);
+
+    let before_market = market.data.clone();
+    let before_a = account_a.data.clone();
+    let before_b = account_b.data.clone();
+    let rejected = run_ix(
+        Instruction::TradeCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            fee_bps: 0,
+            limit_price: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+            &mut matcher_program,
+            &mut matcher_context,
+            &mut delegate,
+        ],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before_market);
+    assert_eq!(account_a.data, before_a);
+    assert_eq!(account_b.data, before_b);
+}
+
+#[test]
+fn v13_wrapper_tradecpi_zero_fill_rejects_fee_above_cap_before_success() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut account_a = portfolio_account();
+    let mut account_b = portfolio_account();
+    let mut matcher_program = matcher_program_account();
+    let mut matcher_context = matcher_context_account(&matcher_program);
+    let mut delegate =
+        matcher_delegate_account(&market, &account_b, &matcher_program, &matcher_context);
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner_a, &mut market, &mut account_a);
+    init_portfolio(&mut owner_b, &mut market, &mut account_b);
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let req_id = group.current_slot.wrapping_add(1);
+    let lp_account_id = {
+        let bytes = delegate.key.to_bytes();
+        u64::from_le_bytes(bytes[0..8].try_into().unwrap())
+    };
+    write_matcher_return(&mut matcher_context, 100, 0, req_id, lp_account_id, 100);
+
+    let before_market = market.data.clone();
+    let before_a = account_a.data.clone();
+    let before_b = account_b.data.clone();
+    let rejected = run_ix(
+        Instruction::TradeCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            fee_bps: 10_001,
+            limit_price: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+            &mut matcher_program,
+            &mut matcher_context,
+            &mut delegate,
+        ],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before_market);
+    assert_eq!(account_a.data, before_a);
+    assert_eq!(account_b.data, before_b);
+}
+
+#[test]
 fn v13_wrapper_permissionless_crank_advances_account_local_market_progress() {
     let mut admin = signer();
     let mut market = market_account();
@@ -3309,6 +4587,361 @@ fn v13_wrapper_permissionless_crank_can_liquidate_unhealthy_candidate() {
 }
 
 #[test]
+fn v13_wrapper_liquidation_uses_configured_fee_not_permissionless_caller_fee() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_margin_bps,
+                initial_margin_bps,
+                min_nonzero_mm_req,
+                min_nonzero_im_req,
+                liquidation_fee_bps,
+                liquidation_fee_cap,
+                max_price_move_bps_per_slot,
+                max_accrual_dt_slots,
+                max_abs_funding_e9_per_slot,
+                min_funding_lifetime_slots,
+                ..
+            } = ix
+            {
+                *maintenance_margin_bps = 500;
+                *initial_margin_bps = 600;
+                *min_nonzero_mm_req = 100;
+                *min_nonzero_im_req = 101;
+                *liquidation_fee_bps = 100;
+                *liquidation_fee_cap = percolator::MAX_PROTOCOL_FEE_ABS;
+                *max_price_move_bps_per_slot = 3;
+                *max_accrual_dt_slots = 100;
+                *max_abs_funding_e9_per_slot = 10_000;
+                *min_funding_lifetime_slots = 100;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 101);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        let mut short = state::read_portfolio(&short_account.data).unwrap();
+        short.capital = 99;
+        group.c_tot -= 2;
+        group.vault -= 2;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut short_account.data, &short).unwrap();
+    }
+
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 1,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut admin, &mut market, &mut short_account],
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let short = state::read_portfolio(&short_account.data).unwrap();
+    assert_eq!(short.active_bitmap, 0);
+    assert_eq!(
+        group.insurance, 1,
+        "1% configured liquidation fee on 100 notional must be charged even if caller supplies zero"
+    );
+}
+
+#[test]
+fn v13_wrapper_liquidation_fee_policy_splits_retained_penalty_to_cranker() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    let mint_key = mint.key;
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_margin_bps,
+                initial_margin_bps,
+                min_nonzero_mm_req,
+                min_nonzero_im_req,
+                liquidation_fee_bps,
+                liquidation_fee_cap,
+                max_price_move_bps_per_slot,
+                max_accrual_dt_slots,
+                max_abs_funding_e9_per_slot,
+                min_funding_lifetime_slots,
+                ..
+            } = ix
+            {
+                *maintenance_margin_bps = 500;
+                *initial_margin_bps = 600;
+                *min_nonzero_mm_req = 100;
+                *min_nonzero_im_req = 101;
+                *liquidation_fee_bps = 100;
+                *liquidation_fee_cap = percolator::MAX_PROTOCOL_FEE_ABS;
+                *max_price_move_bps_per_slot = 3;
+                *max_accrual_dt_slots = 100;
+                *max_abs_funding_e9_per_slot = 10_000;
+                *min_funding_lifetime_slots = 100;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 601);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: (100 * POS_SCALE) as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        let mut short = state::read_portfolio(&short_account.data).unwrap();
+        short.capital = 499;
+        group.c_tot -= 102;
+        group.vault -= 102;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut short_account.data, &short).unwrap();
+    }
+    run_ix(
+        Instruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: 4_000,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let mut cranker_token = user_token_account(admin.key, mint_key, 0);
+    let vault_before = state::read_market(&market.data).unwrap().1.vault;
+    let mut vault_token =
+        vault_token_account(&market, mint_key, u64::try_from(vault_before).unwrap());
+    let mut vault_auth = vault_authority_account(&market);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 1,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 100 * POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut short_account,
+            &mut cranker_token,
+            &mut vault_token,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let short = state::read_portfolio(&short_account.data).unwrap();
+    assert_eq!(short.active_bitmap, 0);
+    assert_eq!(
+        group.insurance, 60,
+        "1% liquidation fee on 10,000 notional is 100; 40% retained-fee share pays 40 to the cranker"
+    );
+    assert_eq!(
+        group.vault,
+        vault_before - 40,
+        "cranker reward exits custody and must reduce the wrapper vault ledger"
+    );
+}
+
+#[test]
+fn v13_wrapper_liquidation_reward_never_spends_insurance_needed_for_losses() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    let mint_key = mint.key;
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                liquidation_fee_bps,
+                liquidation_fee_cap,
+                ..
+            } = ix
+            {
+                *liquidation_fee_bps = 0;
+                *liquidation_fee_cap = 10_000;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 100);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        let mut short = state::read_portfolio(&short_account.data).unwrap();
+        short.capital = 0;
+        group.c_tot -= 100;
+        group.vault -= 100;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut short_account.data, &short).unwrap();
+    }
+    run_ix(
+        Instruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: 4_000,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let mut cranker_token = user_token_account(admin.key, mint_key, 0);
+    let mut vault_token = vault_token_account(&market, mint_key, 1_000_100);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 1,
+            effective_price: 200,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut short_account,
+            &mut cranker_token,
+            &mut vault_token,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let short = state::read_portfolio(&short_account.data).unwrap();
+    assert_eq!(short.active_bitmap, 0);
+    assert_eq!(
+        group.insurance, 0,
+        "the liquidation did not increase retained insurance, so no cranker reward is paid"
+    );
+    assert_eq!(
+        group.vault, 1_000_000,
+        "loss paths must not leak pre-existing custody out as rewards"
+    );
+}
+
+#[test]
+fn v13_wrapper_liquidation_fee_policy_is_admin_gated_and_bounds_share() {
+    let mut admin = signer();
+    let mut attacker = signer();
+    let mut market = market_account();
+
+    init_market(&mut admin, &mut market);
+    let before = market.data.clone();
+    let rejected = run_ix(
+        Instruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: 10_001,
+        },
+        &mut [&mut admin, &mut market],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before);
+
+    let rejected = run_ix(
+        Instruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: 4_000,
+        },
+        &mut [&mut attacker, &mut market],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before);
+
+    run_ix(
+        Instruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: 4_000,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.liquidation_cranker_fee_share_bps, 4_000);
+}
+
+#[test]
 fn v13_wrapper_permissionless_settle_b_without_b_state_is_fail_closed() {
     let mut admin = signer();
     let mut market = market_account();
@@ -3384,7 +5017,7 @@ fn v13_wrapper_permissionless_crank_rejects_invalid_asset_and_price_without_muta
 }
 
 #[test]
-fn v13_wrapper_permissionless_recovery_is_public_progress() {
+fn v13_wrapper_permissionless_recovery_action_is_not_public_kill_switch() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -3393,7 +5026,9 @@ fn v13_wrapper_permissionless_recovery_is_public_progress() {
     init_market(&mut admin, &mut market);
     init_portfolio(&mut owner, &mut market, &mut portfolio);
 
-    run_ix(
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let result = run_ix(
         Instruction::PermissionlessCrank {
             action: 3,
             asset_index: 0,
@@ -3405,19 +5040,21 @@ fn v13_wrapper_permissionless_recovery_is_public_progress() {
             recovery_reason: 0,
         },
         &mut [&mut owner, &mut market, &mut portfolio],
-    )
-    .unwrap();
+    );
 
+    assert_err_and_market_unchanged(result, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
     let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.mode, MarketModeV13::Live);
     assert_eq!(
-        group.recovery_reason,
-        Some(PermissionlessRecoveryReasonV13::BelowProgressFloor)
+        group.recovery_reason, None,
+        "a caller-selected recovery reason must not terminal-lock a healthy market"
     );
 }
 
 #[test]
-fn v13_wrapper_permissionless_recovery_accepts_every_public_reason() {
-    let expected = [
+fn v13_wrapper_permissionless_recovery_rejects_every_caller_selected_reason() {
+    let reasons = [
         PermissionlessRecoveryReasonV13::BelowProgressFloor,
         PermissionlessRecoveryReasonV13::BlockedSegmentHeadroomOrRepresentability,
         PermissionlessRecoveryReasonV13::AccountBSettlementCannotProgress,
@@ -3428,7 +5065,7 @@ fn v13_wrapper_permissionless_recovery_accepts_every_public_reason() {
         PermissionlessRecoveryReasonV13::CounterOrEpochOverflowDeclaredRecovery,
     ];
 
-    for (reason, expected_reason) in expected.iter().copied().enumerate() {
+    for (reason, _) in reasons.iter().copied().enumerate() {
         let mut admin = signer();
         let mut market = market_account();
         let mut owner = signer();
@@ -3436,7 +5073,9 @@ fn v13_wrapper_permissionless_recovery_accepts_every_public_reason() {
         init_market(&mut admin, &mut market);
         init_portfolio(&mut owner, &mut market, &mut portfolio);
 
-        run_ix(
+        let before_market = market.data.clone();
+        let before_portfolio = portfolio.data.clone();
+        let result = run_ix(
             Instruction::PermissionlessCrank {
                 action: 3,
                 asset_index: 0,
@@ -3448,10 +5087,12 @@ fn v13_wrapper_permissionless_recovery_accepts_every_public_reason() {
                 recovery_reason: reason as u8,
             },
             &mut [&mut owner, &mut market, &mut portfolio],
-        )
-        .unwrap();
+        );
+        assert_err_and_market_unchanged(result, &market, &before_market);
+        assert_eq!(portfolio.data, before_portfolio);
         let (_, group) = state::read_market(&market.data).unwrap();
-        assert_eq!(group.recovery_reason, Some(expected_reason));
+        assert_eq!(group.mode, MarketModeV13::Live);
+        assert_eq!(group.recovery_reason, None);
     }
 }
 
@@ -3501,6 +5142,50 @@ fn v13_wrapper_permissionless_crank_rejects_invalid_action_and_recovery_reason()
 }
 
 #[test]
+fn v13_wrapper_permissionless_crank_rejects_caller_supplied_funding_rate() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_abs_funding_e9_per_slot,
+                max_price_move_bps_per_slot,
+                ..
+            } = ix
+            {
+                *max_abs_funding_e9_per_slot = 1;
+                *max_price_move_bps_per_slot = 4_999;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let result = run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            effective_price: 100,
+            funding_rate_e9: 1,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    );
+    assert_err_and_market_unchanged(result, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+}
+
+#[test]
 fn v13_wrapper_resolve_market_is_admin_only_and_blocks_live_trade() {
     let mut admin = signer();
     let mut attacker = signer();
@@ -3545,6 +5230,209 @@ fn v13_wrapper_resolve_market_is_admin_only_and_blocks_live_trade() {
     assert_err_and_market_unchanged(trade_after_resolve, &market, &resolved_market);
     assert_eq!(portfolio_a.data, before_a);
     assert_eq!(portfolio_b.data, before_b);
+}
+
+#[test]
+fn v13_wrapper_permissionless_stale_resolve_requires_hard_stale_maturity() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut portfolio_a = portfolio_account();
+    let mut portfolio_b = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner_a, &mut market, &mut portfolio_a);
+    init_portfolio(&mut owner_b, &mut market, &mut portfolio_b);
+    deposit(&mut owner_a, &mut market, &mut portfolio_a, 1_000_000);
+    deposit(&mut owner_b, &mut market, &mut portfolio_b, 1_000_000);
+    run_ix(
+        Instruction::ConfigurePermissionlessResolve {
+            stale_slots: 5,
+            force_close_delay_slots: 1,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let before = market.data.clone();
+    let early = run_ix(
+        Instruction::ResolveStalePermissionless { now_slot: 4 },
+        &mut [&mut market],
+    );
+    assert_err_and_market_unchanged(early, &market, &before);
+
+    run_ix(
+        Instruction::ResolveStalePermissionless { now_slot: 5 },
+        &mut [&mut market],
+    )
+    .unwrap();
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.last_good_oracle_slot, 0);
+    assert_eq!(group.mode, MarketModeV13::Resolved);
+
+    let resolved_market = market.data.clone();
+    let before_a = portfolio_a.data.clone();
+    let before_b = portfolio_b.data.clone();
+    let trade_after_resolve = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut portfolio_a,
+            &mut portfolio_b,
+        ],
+    );
+    assert_err_and_market_unchanged(trade_after_resolve, &market, &resolved_market);
+    assert_eq!(portfolio_a.data, before_a);
+    assert_eq!(portfolio_b.data, before_b);
+}
+
+#[test]
+fn v13_wrapper_permissionless_stale_resolve_uses_stamped_liveness_not_oracle_tail() {
+    let feed = [11u8; 32];
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut fresh_oracle = pyth_account(&feed, 100, 0, 0, 1_000);
+    let mut stale_oracle = pyth_account(&feed, 100, 0, 0, 1);
+
+    init_market(&mut admin, &mut market);
+    run_ix(
+        Instruction::ConfigureHybridOracle {
+            now_slot: 10,
+            now_unix_ts: 1_000,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 2,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: [feed, [0u8; 32], [0u8; 32]],
+        },
+        &mut [&mut admin, &mut market, &mut fresh_oracle],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::ConfigurePermissionlessResolve {
+            stale_slots: 5,
+            force_close_delay_slots: 1,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let before = market.data.clone();
+    let caller_chosen_stale_tail = run_ix(
+        Instruction::ResolveStalePermissionless { now_slot: 14 },
+        &mut [&mut market, &mut stale_oracle],
+    );
+    assert_err_and_market_unchanged(caller_chosen_stale_tail, &market, &before);
+
+    run_ix(
+        Instruction::ResolveStalePermissionless { now_slot: 15 },
+        &mut [&mut market, &mut stale_oracle],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.mode, MarketModeV13::Resolved);
+    assert_eq!(group.resolved_slot, 15);
+}
+
+#[test]
+fn v13_wrapper_permissionless_resolve_maturity_blocks_manual_live_trade_race() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut portfolio_a = portfolio_account();
+    let mut portfolio_b = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner_a, &mut market, &mut portfolio_a);
+    init_portfolio(&mut owner_b, &mut market, &mut portfolio_b);
+    deposit(&mut owner_a, &mut market, &mut portfolio_a, 1_000_000);
+    deposit(&mut owner_b, &mut market, &mut portfolio_b, 1_000_000);
+    run_ix(
+        Instruction::ConfigurePermissionlessResolve {
+            stale_slots: 5,
+            force_close_delay_slots: 1,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group.current_slot = 5;
+        group.slot_last = 5;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let before_market = market.data.clone();
+    let before_a = portfolio_a.data.clone();
+    let before_b = portfolio_b.data.clone();
+    let trade_after_resolve_maturity = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut portfolio_a,
+            &mut portfolio_b,
+        ],
+    );
+    assert_err_and_market_unchanged(trade_after_resolve_maturity, &market, &before_market);
+    assert_eq!(portfolio_a.data, before_a);
+    assert_eq!(portfolio_b.data, before_b);
+
+    let mut late_owner = signer();
+    let mut late_portfolio = portfolio_account();
+    let late_init = run_ix(
+        Instruction::InitPortfolio,
+        &mut [&mut late_owner, &mut market, &mut late_portfolio],
+    );
+    assert_err_and_market_unchanged(late_init, &market, &before_market);
+    assert!(
+        late_portfolio.data.iter().all(|b| *b == 0),
+        "terminal-resolvable live market must not admit new empty accounts that can grief final cleanup"
+    );
+
+    let crank_after_resolve_maturity = run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 5,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut owner_a, &mut market, &mut portfolio_a],
+    );
+    assert_err_and_market_unchanged(crank_after_resolve_maturity, &market, &before_market);
+    assert_eq!(portfolio_a.data, before_a);
+
+    run_ix(
+        Instruction::ResolveStalePermissionless { now_slot: 5 },
+        &mut [&mut market],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.mode, MarketModeV13::Resolved);
 }
 
 #[test]
@@ -3643,6 +5531,36 @@ fn v13_wrapper_resolved_close_uses_engine_loss_and_fee_ordering_path() {
     assert_eq!(group.mode, MarketModeV13::Resolved);
     assert_eq!(acct.capital, 0);
     assert_eq!(group.vault, 0);
+}
+
+#[test]
+fn v13_wrapper_close_resolved_uses_configured_fee_not_permissionless_caller_fee() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 1_000);
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group.current_slot = 10;
+        group.slot_last = 10;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+
+    close_resolved(&mut owner, &mut market, &mut portfolio, 100);
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let acct = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(
+        group.insurance, 0,
+        "permissionless resolved close must not let caller redirect payout into fees"
+    );
+    assert_eq!(group.vault, 0);
+    assert_eq!(acct.capital, 0);
 }
 
 #[test]
@@ -3829,6 +5747,56 @@ fn v13_wrapper_close_resolved_progress_only_does_not_pay_active_position() {
 }
 
 #[test]
+fn v13_wrapper_close_resolved_progress_only_does_not_require_token_accounts() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 1_000_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+
+    run_ix(
+        Instruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        &mut [&mut long_owner, &mut market, &mut long_account],
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let long = state::read_portfolio(&long_account.data).unwrap();
+    assert_eq!(
+        group.vault, 2_000_000,
+        "progress-only resolved close must not require or perform token payout"
+    );
+    assert_ne!(long.active_bitmap, 0);
+    assert_eq!(long.capital, 1_000_000);
+}
+
+#[test]
 fn v13_wrapper_close_resolved_requires_recipient_and_vault_accounts_for_payout() {
     let mut admin = signer();
     let mut market = market_account();
@@ -3850,4 +5818,208 @@ fn v13_wrapper_close_resolved_requires_recipient_and_vault_accounts_for_payout()
     );
     assert_err_and_market_unchanged(missing_token_accounts, &market, &before_market);
     assert_eq!(portfolio.data, before_portfolio);
+}
+
+#[test]
+fn v13_wrapper_hybrid_hard_stale_uses_permissionless_resolve_not_recovery_kill_switch() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_trading_fee_bps,
+                trade_fee_base_bps,
+                max_price_move_bps_per_slot,
+                ..
+            } = ix
+            {
+                *max_trading_fee_bps = 10_000;
+                *trade_fee_base_bps = 1;
+                *max_price_move_bps_per_slot = 500;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+    let feeds = [[0xc1u8; 32], [0xc2u8; 32], [0xc3u8; 32]];
+    let mut toto_jpy = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 100);
+    let mut usd_jpy = pyth_account(&feeds[1], 150_000_000, -6, 1, 100);
+    let mut sol_usd = pyth_account(&feeds[2], 200_000_000, -6, 1, 100);
+    configure_three_leg_hybrid(
+        &mut admin,
+        &mut market,
+        feeds,
+        &mut toto_jpy,
+        &mut usd_jpy,
+        &mut sol_usd,
+        1,
+        100,
+        3,
+        0,
+    );
+    run_ix(
+        Instruction::ConfigurePermissionlessResolve {
+            stale_slots: 4,
+            force_close_delay_slots: 1,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    {
+        let (mut cfg, mut group) = state::read_market(&market.data).unwrap();
+        cfg.last_good_oracle_slot = 1;
+        cfg.oracle_target_publish_time = 100;
+        group.current_slot = 1;
+        group.slot_last = 1;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let before_recovery = market.data.clone();
+    let rejected_recovery = run_ix(
+        Instruction::PermissionlessCrank {
+            action: 3,
+            asset_index: 0,
+            now_slot: 5,
+            effective_price: 133_333,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 6,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    );
+    assert_err_and_market_unchanged(rejected_recovery, &market, &before_recovery);
+
+    run_ix(
+        Instruction::ResolveStalePermissionless { now_slot: 5 },
+        &mut [&mut market],
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        group.mode,
+        MarketModeV13::Resolved,
+        "hard-stale hybrid markets exit through the proof-free stamped stale resolver"
+    );
+}
+
+#[test]
+fn v13_wrapper_hybrid_hard_stale_blocks_live_value_movement_until_resolved() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    let mint_key = mint.key;
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_trading_fee_bps,
+                trade_fee_base_bps,
+                max_price_move_bps_per_slot,
+                ..
+            } = ix
+            {
+                *max_trading_fee_bps = 10_000;
+                *trade_fee_base_bps = 1;
+                *max_price_move_bps_per_slot = 500;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    let feeds = [[0xd1u8; 32], [0xd2u8; 32], [0xd3u8; 32]];
+    let mut toto_jpy = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 100);
+    let mut usd_jpy = pyth_account(&feeds[1], 150_000_000, -6, 1, 100);
+    let mut sol_usd = pyth_account(&feeds[2], 200_000_000, -6, 1, 100);
+    configure_three_leg_hybrid(
+        &mut admin,
+        &mut market,
+        feeds,
+        &mut toto_jpy,
+        &mut usd_jpy,
+        &mut sol_usd,
+        1,
+        100,
+        3,
+        0,
+    );
+    run_ix(
+        Instruction::ConfigurePermissionlessResolve {
+            stale_slots: 4,
+            force_close_delay_slots: 1,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 1_000_000);
+    {
+        let (mut cfg, mut group) = state::read_market(&market.data).unwrap();
+        cfg.last_good_oracle_slot = 1;
+        cfg.oracle_target_publish_time = 100;
+        group.current_slot = 5;
+        group.slot_last = 5;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let before_market = market.data.clone();
+    let before_long = long_account.data.clone();
+    let before_short = short_account.data.clone();
+    let trade_after_hard_stale = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 133_333,
+            fee_bps: 10_000,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    );
+    assert_err_and_market_unchanged(trade_after_hard_stale, &market, &before_market);
+    assert_eq!(long_account.data, before_long);
+    assert_eq!(short_account.data, before_short);
+
+    let mut dest = user_token_account(long_owner.key, mint_key, 0);
+    let mut vault = vault_token_account(&market, mint_key, 2_000_000);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut token_program = token_program_account();
+    let withdraw_after_hard_stale = run_ix(
+        Instruction::Withdraw { amount: 1 },
+        &mut [
+            &mut long_owner,
+            &mut market,
+            &mut long_account,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(withdraw_after_hard_stale, &market, &before_market);
+    assert_eq!(long_account.data, before_long);
+
+    run_ix(
+        Instruction::ResolveStalePermissionless { now_slot: 5 },
+        &mut [&mut market],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.mode, MarketModeV13::Resolved);
 }

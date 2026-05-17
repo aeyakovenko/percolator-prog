@@ -323,16 +323,16 @@ This is the A/K/B design goal: worst-case bankruptcies and stale accounts are ha
 
 `KeeperCrank` is the public progress entrypoint for live markets. The wrapper authenticates accounts, time, oracle input, and policy bounds, then calls the engine's permissionless progress API.
 
-The engine may choose a recovery-priority branch, including:
+The engine may choose a progress-priority branch, including:
 
 - resolved-market cursor close/reconciliation
 - active close continuation
-- account-B or global P-last recovery
+- account-B settlement
 - ordinary bounded keeper crank
 
 The important product invariant is that a public crank should either commit bounded progress or return a clear terminal/recovery error. It should not depend on a privileged operator to handle ordinary stale-account, residual, or catchup work.
 
-Recovery is not normal live trading. It is a policy-bound terminal or conservative progress path used when the market cannot safely continue ordinary accrual.
+Recovery is not normal live trading. It is a policy-bound terminal or conservative progress path used when the market cannot safely continue ordinary accrual. The wrapper does not expose a caller-selected recovery action because selecting a recovery reason is not itself a proof. Stale-oracle terminal exit uses `ResolveStalePermissionless`, which is based on the market's stamped `last_good_oracle_slot`.
 
 ### Insurance withdrawal policy
 

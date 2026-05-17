@@ -334,6 +334,164 @@ fn kani_v13_update_authority_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v13_update_insurance_policy_decode_preserves_wire_fields() {
+    let max_bps: u16 = kani::any();
+    let deposits_only: u8 = kani::any();
+    let cooldown_raw: u16 = kani::any();
+    let cooldown_slots = cooldown_raw as u64;
+
+    let mut data = [0u8; 12];
+    data[0] = 33;
+    data[1..3].copy_from_slice(&max_bps.to_le_bytes());
+    data[3] = deposits_only;
+    data[4..12].copy_from_slice(&cooldown_slots.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::UpdateInsurancePolicy {
+            max_bps: got_max_bps,
+            deposits_only: got_deposits_only,
+            cooldown_slots: got_cooldown,
+        } => {
+            assert_eq!(got_max_bps, max_bps);
+            assert_eq!(got_deposits_only, deposits_only);
+            assert_eq!(got_cooldown, cooldown_slots);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v13_update_liquidation_fee_policy_decode_preserves_wire_fields() {
+    let cranker_share_bps: u16 = kani::any();
+
+    let mut data = [0u8; 3];
+    data[0] = 37;
+    data[1..3].copy_from_slice(&cranker_share_bps.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: got,
+        } => assert_eq!(got, cranker_share_bps),
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v13_permissionless_resolve_decode_preserves_wire_fields() {
+    let stale_slots_raw: u16 = kani::any();
+    let delay_raw: u16 = kani::any();
+    let now_slot_raw: u16 = kani::any();
+    let stale_slots = stale_slots_raw as u64;
+    let force_close_delay_slots = delay_raw as u64;
+    let now_slot = now_slot_raw as u64;
+
+    let mut configure = [0u8; 17];
+    configure[0] = 38;
+    configure[1..9].copy_from_slice(&stale_slots.to_le_bytes());
+    configure[9..17].copy_from_slice(&force_close_delay_slots.to_le_bytes());
+    match Instruction::decode(&configure).unwrap() {
+        Instruction::ConfigurePermissionlessResolve {
+            stale_slots: got_stale,
+            force_close_delay_slots: got_delay,
+        } => {
+            assert_eq!(got_stale, stale_slots);
+            assert_eq!(got_delay, force_close_delay_slots);
+        }
+        _ => unreachable!(),
+    }
+
+    let mut resolve = [0u8; 9];
+    resolve[0] = 39;
+    resolve[1..9].copy_from_slice(&now_slot.to_le_bytes());
+    match Instruction::decode(&resolve).unwrap() {
+        Instruction::ResolveStalePermissionless { now_slot: got } => {
+            assert_eq!(got, now_slot);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v13_configure_hybrid_oracle_decode_preserves_wire_fields() {
+    let now_slot_raw: u16 = kani::any();
+    let now_unix_raw: i16 = kani::any();
+    let oracle_leg_count: u8 = kani::any();
+    let oracle_leg_flags: u8 = kani::any();
+    let max_staleness_raw: u16 = kani::any();
+    let soft_stale_raw: u16 = kani::any();
+    let halflife_raw: u16 = kani::any();
+    let mark_min_fee_raw: u16 = kani::any();
+    let invert: u8 = kani::any();
+    let unit_scale_raw: u16 = kani::any();
+    let conf_filter_bps: u16 = kani::any();
+    let now_slot = now_slot_raw as u64;
+    let now_unix_ts = now_unix_raw as i64;
+    let max_staleness_secs = max_staleness_raw as u64;
+    let hybrid_soft_stale_slots = soft_stale_raw as u64;
+    let mark_ewma_halflife_slots = halflife_raw as u64;
+    let mark_min_fee = mark_min_fee_raw as u64;
+    let unit_scale = unit_scale_raw as u32;
+    let mut feeds = [[0u8; 32]; 3];
+    let mut i = 0;
+    while i < 3 {
+        let mut j = 0;
+        while j < 32 {
+            feeds[i][j] = kani::any();
+            j += 1;
+        }
+        i += 1;
+    }
+
+    let mut data = [0u8; 154];
+    data[0] = 34;
+    data[1..9].copy_from_slice(&now_slot.to_le_bytes());
+    data[9..17].copy_from_slice(&now_unix_ts.to_le_bytes());
+    data[17] = oracle_leg_count;
+    data[18] = oracle_leg_flags;
+    data[19..27].copy_from_slice(&max_staleness_secs.to_le_bytes());
+    data[27..35].copy_from_slice(&hybrid_soft_stale_slots.to_le_bytes());
+    data[35..43].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
+    data[43..51].copy_from_slice(&mark_min_fee.to_le_bytes());
+    data[51] = invert;
+    data[52..56].copy_from_slice(&unit_scale.to_le_bytes());
+    data[56..58].copy_from_slice(&conf_filter_bps.to_le_bytes());
+    data[58..90].copy_from_slice(&feeds[0]);
+    data[90..122].copy_from_slice(&feeds[1]);
+    data[122..154].copy_from_slice(&feeds[2]);
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::ConfigureHybridOracle {
+            now_slot: got_now_slot,
+            now_unix_ts: got_now_unix,
+            oracle_leg_count: got_count,
+            oracle_leg_flags: got_flags,
+            max_staleness_secs: got_max_staleness,
+            hybrid_soft_stale_slots: got_soft,
+            mark_ewma_halflife_slots: got_halflife,
+            mark_min_fee: got_min_fee,
+            invert: got_invert,
+            unit_scale: got_unit_scale,
+            conf_filter_bps: got_conf,
+            oracle_leg_feeds: got_feeds,
+        } => {
+            assert_eq!(got_now_slot, now_slot);
+            assert_eq!(got_now_unix, now_unix_ts);
+            assert_eq!(got_count, oracle_leg_count);
+            assert_eq!(got_flags, oracle_leg_flags);
+            assert_eq!(got_max_staleness, max_staleness_secs);
+            assert_eq!(got_soft, hybrid_soft_stale_slots);
+            assert_eq!(got_halflife, mark_ewma_halflife_slots);
+            assert_eq!(got_min_fee, mark_min_fee);
+            assert_eq!(got_invert, invert);
+            assert_eq!(got_unit_scale, unit_scale);
+            assert_eq!(got_conf, conf_filter_bps);
+            assert_eq!(got_feeds, feeds);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
 fn kani_v13_decode_rejects_trailing_bytes() {
     let extra: u8 = kani::any();
     let data = [1u8, extra];
@@ -454,6 +612,53 @@ fn kani_v13_every_active_payload_rejects_trailing_byte() {
     .encode();
     update_authority.push(extra);
     assert!(Instruction::decode(&update_authority).is_err());
+
+    let mut update_insurance = Instruction::UpdateInsurancePolicy {
+        max_bps: 10_000,
+        deposits_only: 1,
+        cooldown_slots: 1,
+    }
+    .encode();
+    update_insurance.push(extra);
+    assert!(Instruction::decode(&update_insurance).is_err());
+
+    let mut update_liquidation = Instruction::UpdateLiquidationFeePolicy {
+        cranker_share_bps: 4_000,
+    }
+    .encode();
+    update_liquidation.push(extra);
+    assert!(Instruction::decode(&update_liquidation).is_err());
+
+    let mut configure_permissionless = Instruction::ConfigurePermissionlessResolve {
+        stale_slots: 5,
+        force_close_delay_slots: 1,
+    }
+    .encode();
+    configure_permissionless.push(extra);
+    assert!(Instruction::decode(&configure_permissionless).is_err());
+
+    let mut resolve_permissionless =
+        Instruction::ResolveStalePermissionless { now_slot: 5 }.encode();
+    resolve_permissionless.push(extra);
+    assert!(Instruction::decode(&resolve_permissionless).is_err());
+
+    let mut configure_hybrid = Instruction::ConfigureHybridOracle {
+        now_slot: 1,
+        now_unix_ts: 1,
+        oracle_leg_count: 1,
+        oracle_leg_flags: 0,
+        max_staleness_secs: 60,
+        hybrid_soft_stale_slots: 10,
+        mark_ewma_halflife_slots: 1,
+        mark_min_fee: 0,
+        invert: 0,
+        unit_scale: 0,
+        conf_filter_bps: 500,
+        oracle_leg_feeds: [[1u8; 32], [0u8; 32], [0u8; 32]],
+    }
+    .encode();
+    configure_hybrid.push(extra);
+    assert!(Instruction::decode(&configure_hybrid).is_err());
 }
 
 #[kani::proof]
@@ -474,6 +679,13 @@ fn kani_v13_unknown_or_truncated_tags_reject() {
     kani::assume(tag != 28);
     kani::assume(tag != 30);
     kani::assume(tag != 32);
+    kani::assume(tag != 33);
+    kani::assume(tag != 34);
+    kani::assume(tag != 35);
+    kani::assume(tag != 36);
+    kani::assume(tag != 37);
+    kani::assume(tag != 38);
+    kani::assume(tag != 39);
     assert!(Instruction::decode(&[tag]).is_err());
 
     let deposit_tag_only = [3u8];
@@ -520,4 +732,25 @@ fn kani_v13_every_active_payload_rejects_one_byte_truncation() {
 
     let update_authority = [32u8; 33];
     assert!(Instruction::decode(&update_authority).is_err());
+
+    let update_insurance = [33u8; 11];
+    assert!(Instruction::decode(&update_insurance).is_err());
+
+    let configure_hybrid = [34u8; 153];
+    assert!(Instruction::decode(&configure_hybrid).is_err());
+
+    let configure_hyperp = [35u8; 24];
+    assert!(Instruction::decode(&configure_hyperp).is_err());
+
+    let push_hyperp = [36u8; 16];
+    assert!(Instruction::decode(&push_hyperp).is_err());
+
+    let update_liquidation = [37u8; 2];
+    assert!(Instruction::decode(&update_liquidation).is_err());
+
+    let configure_permissionless = [38u8; 16];
+    assert!(Instruction::decode(&configure_permissionless).is_err());
+
+    let resolve_permissionless = [39u8; 8];
+    assert!(Instruction::decode(&resolve_permissionless).is_err());
 }

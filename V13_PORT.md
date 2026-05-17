@@ -2,7 +2,7 @@
 
 Engine branch tested: `aeyakovenko/percolator@v13`
 
-Pinned engine SHA: `a6d510651b4d2c423314dffa85c383f9c1911925`
+Pinned engine SHA: `4b3ea79f81d449d6b7cacb4cfbeeaa7ec7a2347d`
 
 ## Current Retest Result
 
@@ -21,31 +21,38 @@ mechanically reused. `V13_TEST_PORT_COVERAGE.md` tracks the retired v12 test
 classes and the active v13 wrapper/engine coverage that replaces each class.
 The replacement suite is:
 
-- `tests/v13_wrapper.rs`: 61 native account-local wrapper tests
-- `tests/v13_cu.rs`: 6 LiteSVM BPF wrapper/CU tests
-- `tests/v13_kani.rs`: 10 wrapper ABI Kani proofs
+- `tests/v13_wrapper.rs`: 86 native account-local wrapper tests
+- `tests/v13_cu.rs`: 12 LiteSVM BPF wrapper/CU tests
+- `tests/v13_kani.rs`: 16 wrapper ABI Kani proofs
 
 `tests/v13_cu.rs` currently measures:
 
-- init portfolio: 3,443 CU
-- deposit: 13,369 CU
-- withdraw: 20,690 CU
-- top-up insurance: 11,372 CU
-- withdraw insurance: 11,596 CU
-- resolve: 1,531 CU
-- close resolved: 18,696 CU
-- TradeNoCpi: 59,860 CU
-- refresh crank: 9,091 CU
-- recovery crank: 3,342 CU
-- refresh crank before 64 extra portfolios: 9,089 CU
-- refresh crank after 64 extra portfolios: 9,089 CU
+- init portfolio: 14,814 CU
+- deposit: 28,268 CU
+- withdraw: 35,742 CU
+- top-up insurance: 21,449 CU
+- withdraw insurance: 22,220 CU
+- resolve: 11,617 CU
+- configure permissionless stale resolve: 11,196 CU
+- permissionless stale resolve: 11,448 CU
+- close resolved: 33,769 CU
+- liquidation crank: 71,730 CU
+- TradeNoCpi: 80,469 CU
+- TradeCpi: 101,013 CU
+- refresh crank: 24,529 CU
+- refresh crank before 64 extra portfolios: 24,527 CU
+- refresh crank after 64 extra portfolios: 24,529 CU
 
 It also verifies that BPF `Deposit`, `Withdraw`, `TopUpInsurance`,
-`WithdrawInsuranceLimited`, and `CloseResolved` move real SPL Token balances in
-lockstep with `group.vault`, user capital, resolved payout, and insurance. The
-v13 wrapper ABI now binds
-markets to a collateral mint at `InitMarket`, validates user/vault token
-accounts, and wraps public ledger mutations with SPL Token CPIs.
+`WithdrawInsuranceLimited`, `CloseResolved`, `TradeNoCpi`, `TradeCpi`,
+permissionless liquidation, permissionless stale resolution, authenticated
+permissionless crank time, and authenticated hybrid-oracle configuration time
+move, bound, or transition real SPL Token and market state in lockstep with
+`group.vault`, user capital, resolved payout, insurance, and resolved-market
+mode. The v13 wrapper
+ABI now binds markets to a collateral mint at `InitMarket`, validates
+user/vault token accounts, and wraps public ledger mutations with SPL Token
+CPIs.
 
 The v12 `UpdateAuthority` tag is restored for the v13-backed authority fields:
 admin, insurance authority, and insurance operator. Nonzero handoffs require
@@ -65,8 +72,45 @@ The v12 bounded insurance withdrawal surface is restored as
 allows live withdrawal only while the market is healthy and not in h-lock,
 stress, loss-stale, active-bankrupt, or recovery state, and allows terminal
 resolved withdrawal only after all portfolio claims/capital are closed. The
-handler debits group insurance/vault accounting, asserts public senior
-invariants, then moves SPL tokens from the vault PDA.
+handler enforces the wrapper insurance policy (`max_bps`, optional
+deposit-only budget, and cooldown), debits group insurance/vault accounting,
+asserts public senior invariants, then moves SPL tokens from the vault PDA.
+`UpdateInsurancePolicy` is admin-gated; deposit-only budgets increase only from
+later `TopUpInsurance` calls and are decremented by live withdrawals so fee
+growth stays behind once explicit top-up principal is withdrawn.
+
+The v13 wrapper also exposes `UpdateLiquidationFeePolicy`, an admin-gated
+market policy for splitting retained liquidation penalties between insurance
+and the crank submitter. The engine remains the source of truth for the total
+liquidation fee charged by a liquidation. The wrapper computes the cranker
+reward only from the fee amount that actually increased insurance after the
+liquidation, so bankrupt/liquidation-loss paths cannot pay rewards out of
+protective insurance needed for losses. A `cranker_share_bps` of `4_000` means
+40% of the retained liquidation penalty exits custody to the submitter and 60%
+stays in insurance.
+
+The v12 hybrid after-hours/Toto oracle surface is restored as
+`ConfigureHybridOracle` plus hybrid-aware `PermissionlessCrank` and trade
+handling. The wrapper supports one to three Pyth Pull `PriceUpdateV2` legs, for
+example `TOTO/SOL = TOTO/JPY / USD/JPY / SOL/USD`. Fresh external composites
+own the index and pin the fallback EWMA mark to the accepted effective price.
+After the market's soft-stale slot window elapses, the same trade surfaces
+remain live at any consenting execution price; trades charge the static base
+fee plus the dynamic mark-movement externality floor and update the fallback
+EWMA. Caller-selected crank recovery is not exposed by the wrapper because a
+recovery reason alone is not a proof. Hard-stale markets exit through the native
+`ResolveStalePermissionless` path described below.
+
+The v13 wrapper now has a native stale-oracle public exit instead of the old
+v12 resolve ABI. `ConfigurePermissionlessResolve` is admin-gated and records
+the hard-stale slot window plus the resolved-close policy knob required before
+admin burn. `ResolveStalePermissionless` is permissionless and takes only the
+market account plus an authenticated slot argument used as the host-test
+fallback for `Clock`; it never consumes caller-supplied oracle accounts. The
+stale proof is therefore the market's stamped `last_good_oracle_slot` plus the
+configured hard-stale window, not a chosen stale or confidence-wide Pyth
+account. Once resolved, the existing v13 `CloseResolved` path remains
+permissionless but pays only to the portfolio owner's token account.
 
 The v12 released-PnL conversion surface is restored as `ConvertReleasedPnl`.
 The v13 engine conversion primitive converts the released residual-bounded
@@ -98,14 +142,14 @@ wrapper uses the staged engine API in native tests, but switches to the
 in-place API under `target_os = "solana"` where SVM rollback supplies
 instruction atomicity.
 
-LiteSVM now executes `TradeNoCpi` through the BPF program and measures it at
-59,731 CU in the current regression. Liquidation CU is no longer blocked by the
-trade stack frame; it still needs a dedicated BPF liquidation fixture with an
-unhealthy position.
+LiteSVM executes `TradeNoCpi`, `TradeCpi`, liquidation, custody, resolution,
+and stale-oracle permissionless resolution through the BPF program. The
+account-local crank CU test confirms refresh cost does not scale with unrelated
+materialized portfolio count.
 
 Engine proof sweep status for the same SHA:
 
-- Wrapper Kani proofs: PASS, 10/10.
+- Wrapper Kani proofs: PASS, 16/16.
 - Engine `scripts/run_kani_full_audit.sh`: started against
   `/home/anatoly/percolator` at the same SHA. It produced PASS results through
   the early v13 harnesses but hit 10-minute timeouts on:
