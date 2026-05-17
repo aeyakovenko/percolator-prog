@@ -8,7 +8,7 @@ use percolator_prog::matcher_abi::{
 };
 
 #[kani::proof]
-fn kani_v13_init_market_decode_preserves_wire_fields() {
+fn kani_v14_init_market_decode_preserves_wire_fields() {
     let h_min_raw: u16 = kani::any();
     let h_max_raw: u16 = kani::any();
     let initial_price_raw: u16 = kani::any();
@@ -122,7 +122,7 @@ fn kani_v13_init_market_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v13_amount_instructions_decode_preserves_wire_fields() {
+fn kani_v14_amount_instructions_decode_preserves_wire_fields() {
     let tag: u8 = kani::any();
     kani::assume(tag == 3 || tag == 4 || tag == 9 || tag == 23 || tag == 28 || tag == 30);
     let amount_raw: u16 = kani::any();
@@ -148,7 +148,7 @@ fn kani_v13_amount_instructions_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v13_tradenocpi_decode_preserves_wire_fields() {
+fn kani_v14_tradenocpi_decode_preserves_wire_fields() {
     let asset_index: u8 = kani::any();
     let size_raw: i16 = kani::any();
     let exec_price_raw: u16 = kani::any();
@@ -181,7 +181,7 @@ fn kani_v13_tradenocpi_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v13_tradecpi_decode_preserves_wire_fields() {
+fn kani_v14_tradecpi_decode_preserves_wire_fields() {
     let asset_index: u8 = kani::any();
     let size_raw: i16 = kani::any();
     let fee_bps_raw: u16 = kani::any();
@@ -214,7 +214,7 @@ fn kani_v13_tradecpi_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v13_matcher_return_accepts_only_bound_echoed_fills() {
+fn kani_v14_matcher_return_accepts_only_bound_echoed_fills() {
     let req_raw: i16 = kani::any();
     let exec_raw: i16 = kani::any();
     let price_raw: u16 = kani::any();
@@ -256,7 +256,7 @@ fn kani_v13_matcher_return_accepts_only_bound_echoed_fills() {
 }
 
 #[kani::proof]
-fn kani_v13_permissionless_crank_decode_preserves_wire_fields() {
+fn kani_v14_permissionless_crank_decode_preserves_wire_fields() {
     let action: u8 = kani::any();
     let asset_index: u8 = kani::any();
     let now_slot_raw: u16 = kani::any();
@@ -307,7 +307,7 @@ fn kani_v13_permissionless_crank_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v13_update_authority_decode_preserves_wire_fields() {
+fn kani_v14_update_authority_decode_preserves_wire_fields() {
     let kind: u8 = kani::any();
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
@@ -334,7 +334,7 @@ fn kani_v13_update_authority_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v13_update_insurance_policy_decode_preserves_wire_fields() {
+fn kani_v14_update_insurance_policy_decode_preserves_wire_fields() {
     let max_bps: u16 = kani::any();
     let deposits_only: u8 = kani::any();
     let cooldown_raw: u16 = kani::any();
@@ -361,7 +361,7 @@ fn kani_v13_update_insurance_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v13_update_liquidation_fee_policy_decode_preserves_wire_fields() {
+fn kani_v14_update_liquidation_fee_policy_decode_preserves_wire_fields() {
     let cranker_share_bps: u16 = kani::any();
 
     let mut data = [0u8; 3];
@@ -377,7 +377,7 @@ fn kani_v13_update_liquidation_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v13_permissionless_resolve_decode_preserves_wire_fields() {
+fn kani_v14_permissionless_resolve_decode_preserves_wire_fields() {
     let stale_slots_raw: u16 = kani::any();
     let delay_raw: u16 = kani::any();
     let now_slot_raw: u16 = kani::any();
@@ -412,7 +412,7 @@ fn kani_v13_permissionless_resolve_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v13_configure_hybrid_oracle_decode_preserves_wire_fields() {
+fn kani_v14_configure_hybrid_oracle_decode_preserves_wire_fields() {
     let now_slot_raw: u16 = kani::any();
     let now_unix_raw: i16 = kani::any();
     let oracle_leg_count: u8 = kani::any();
@@ -492,14 +492,14 @@ fn kani_v13_configure_hybrid_oracle_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v13_decode_rejects_trailing_bytes() {
+fn kani_v14_decode_rejects_trailing_bytes() {
     let extra: u8 = kani::any();
     let data = [1u8, extra];
     assert!(Instruction::decode(&data).is_err());
 }
 
 #[kani::proof]
-fn kani_v13_every_active_payload_rejects_trailing_byte() {
+fn kani_v14_every_active_payload_rejects_trailing_byte() {
     let extra: u8 = kani::any();
 
     let mut init_market = Instruction::InitMarket {
@@ -662,7 +662,7 @@ fn kani_v13_every_active_payload_rejects_trailing_byte() {
 }
 
 #[kani::proof]
-fn kani_v13_unknown_or_truncated_tags_reject() {
+fn kani_v14_unknown_or_truncated_tags_reject() {
     let tag: u8 = kani::any();
     kani::assume(tag != 0);
     kani::assume(tag != 1);
@@ -693,13 +693,13 @@ fn kani_v13_unknown_or_truncated_tags_reject() {
 }
 
 #[kani::proof]
-fn kani_v13_zero_length_decode_rejects() {
+fn kani_v14_zero_length_decode_rejects() {
     let data: [u8; 0] = [];
     assert!(Instruction::decode(&data).is_err());
 }
 
 #[kani::proof]
-fn kani_v13_every_active_payload_rejects_one_byte_truncation() {
+fn kani_v14_every_active_payload_rejects_one_byte_truncation() {
     let init_market = [0u8; 80];
     assert!(Instruction::decode(&init_market).is_err());
 

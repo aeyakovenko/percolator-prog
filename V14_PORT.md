@@ -1,13 +1,13 @@
-# v13 Wrapper Port Notes
+# v14 Wrapper Port Notes
 
-Engine branch tested: `aeyakovenko/percolator@v13`
+Engine branch tested: `aeyakovenko/percolator@v14`
 
-Pinned engine SHA: `4b3ea79f81d449d6b7cacb4cfbeeaa7ec7a2347d`
+Pinned engine SHA: `1ed807e387738674471970d9dcc3d95da8f68659`
 
 ## Current Retest Result
 
-The branch now builds natively against the v13 engine with a dedicated v13
-wrapper entrypoint at `src/v13_program.rs`.
+The branch now builds natively against the v14 engine with a dedicated v14
+wrapper entrypoint at `src/v14_program.rs`.
 
 Passing:
 
@@ -17,15 +17,15 @@ Passing:
 
 The old v12 integration tests are compiled out on this branch with
 `#![cfg(any())]`; they target the removed global slab ABI and cannot be
-mechanically reused. `V13_TEST_PORT_COVERAGE.md` tracks the retired v12 test
-classes and the active v13 wrapper/engine coverage that replaces each class.
+mechanically reused. `V14_TEST_PORT_COVERAGE.md` tracks the retired v12 test
+classes and the active v14 wrapper/engine coverage that replaces each class.
 The replacement suite is:
 
-- `tests/v13_wrapper.rs`: 86 native account-local wrapper tests
-- `tests/v13_cu.rs`: 12 LiteSVM BPF wrapper/CU tests
-- `tests/v13_kani.rs`: 16 wrapper ABI Kani proofs
+- `tests/v14_wrapper.rs`: 86 native account-local wrapper tests
+- `tests/v14_cu.rs`: 12 LiteSVM BPF wrapper/CU tests
+- `tests/v14_kani.rs`: 16 wrapper ABI Kani proofs
 
-`tests/v13_cu.rs` currently measures:
+`tests/v14_cu.rs` currently measures:
 
 - init portfolio: 14,814 CU
 - deposit: 28,268 CU
@@ -49,12 +49,12 @@ permissionless liquidation, permissionless stale resolution, authenticated
 permissionless crank time, and authenticated hybrid-oracle configuration time
 move, bound, or transition real SPL Token and market state in lockstep with
 `group.vault`, user capital, resolved payout, insurance, and resolved-market
-mode. The v13 wrapper
+mode. The v14 wrapper
 ABI now binds markets to a collateral mint at `InitMarket`, validates
 user/vault token accounts, and wraps public ledger mutations with SPL Token
 CPIs.
 
-The v12 `UpdateAuthority` tag is restored for the v13-backed authority fields:
+The v12 `UpdateAuthority` tag is restored for the v14-backed authority fields:
 admin, insurance authority, and insurance operator. Nonzero handoffs require
 both the current authority and destination key to sign; scoped zero-key burns
 are allowed for insurance roles. Live admin burn is rejected until a
@@ -79,7 +79,7 @@ asserts public senior invariants, then moves SPL tokens from the vault PDA.
 later `TopUpInsurance` calls and are decremented by live withdrawals so fee
 growth stays behind once explicit top-up principal is withdrawn.
 
-The v13 wrapper also exposes `UpdateLiquidationFeePolicy`, an admin-gated
+The v14 wrapper also exposes `UpdateLiquidationFeePolicy`, an admin-gated
 market policy for splitting retained liquidation penalties between insurance
 and the crank submitter. The engine remains the source of truth for the total
 liquidation fee charged by a liquidation. The wrapper computes the cranker
@@ -101,7 +101,7 @@ EWMA. Caller-selected crank recovery is not exposed by the wrapper because a
 recovery reason alone is not a proof. Hard-stale markets exit through the native
 `ResolveStalePermissionless` path described below.
 
-The v13 wrapper now has a native stale-oracle public exit instead of the old
+The v14 wrapper now has a native stale-oracle public exit instead of the old
 v12 resolve ABI. `ConfigurePermissionlessResolve` is admin-gated and records
 the hard-stale slot window plus the resolved-close policy knob required before
 admin burn. `ResolveStalePermissionless` is permissionless and takes only the
@@ -109,20 +109,20 @@ market account plus an authenticated slot argument used as the host-test
 fallback for `Clock`; it never consumes caller-supplied oracle accounts. The
 stale proof is therefore the market's stamped `last_good_oracle_slot` plus the
 configured hard-stale window, not a chosen stale or confidence-wide Pyth
-account. Once resolved, the existing v13 `CloseResolved` path remains
+account. Once resolved, the existing v14 `CloseResolved` path remains
 permissionless but pays only to the portfolio owner's token account.
 
 The v12 released-PnL conversion surface is restored as `ConvertReleasedPnl`.
-The v13 engine conversion primitive converts the released residual-bounded
+The v14 engine conversion primitive converts the released residual-bounded
 amount in one call, so the wrapper treats the instruction amount as a maximum:
 if the released amount would exceed the caller's cap, the instruction fails
 without persisting the staged engine mutation. Resolved markets still use the
 terminal `CloseResolved` payout path instead of live conversion.
 
-`InitMarket` now exposes the full v13 public-fund engine envelope instead of
+`InitMarket` now exposes the full v14 public-fund engine envelope instead of
 hardcoding the non-default fields in the wrapper. The engine remains the source
 of truth for config validation; the wrapper decodes the exact wire fields,
-builds `V13Config`, and only persists the market if `validate_public_user_fund`
+builds `V14Config`, and only persists the market if `validate_public_user_fund`
 accepts the shape.
 
 `TradeNoCpi` restores the v12 static-fee floor as a wrapper-owned base fee:
@@ -132,7 +132,7 @@ still submit a higher fee, while zero-fee callers cannot bypass a configured
 base fee.
 
 This confirms the wrapper crank path is account-local and does not scale with
-materialized portfolio count. The v13 engine no longer has a global slab scan,
+materialized portfolio count. The v14 engine no longer has a global slab scan,
 so the old dense 4096-account crank benchmark is not the relevant worst case.
 
 `cargo build-sbf --no-default-features` exits successfully with no SBF stack
@@ -152,25 +152,25 @@ Engine proof sweep status for the same SHA:
 - Wrapper Kani proofs: PASS, 16/16.
 - Engine `scripts/run_kani_full_audit.sh`: started against
   `/home/anatoly/percolator` at the same SHA. It produced PASS results through
-  the early v13 harnesses but hit 10-minute timeouts on:
-  - `proof_v13_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_once`
-  - `proof_v13_funding_accrual_refresh_matches_sign_and_floor`
+  the early v14 harnesses but hit 10-minute timeouts on:
+  - `proof_v14_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_once`
+  - `proof_v14_funding_accrual_refresh_matches_sign_and_floor`
 
 Those are proof-time blockers in the engine checkout under the requested
 10-minute cap, not wrapper test failures.
 
 ## Original API Break
 
-The initial `cargo check --release --lib` after moving the pin to v13 failed
+The initial `cargo check --release --lib` after moving the pin to v14 failed
 architecturally, not as a small rename set:
 
 - v12 exported a global slab engine: `RiskEngine`, `RiskParams`, indexed
   accounts, risk-buffer candidates, round-robin cursor progress, and global
   keeper request types.
-- v13 exports an account-local model: `MarketGroupV13`,
-  `PortfolioAccountV13`, `V13Config`, and per-account crank/trade/liquidation
+- v14 exports an account-local model: `MarketGroupV14`,
+  `PortfolioAccountV14`, `V14Config`, and per-account crank/trade/liquidation
   requests.
-- v13 intentionally removes the old finite `MAX_ACCOUNTS` slab surface and the
+- v14 intentionally removes the old finite `MAX_ACCOUNTS` slab surface and the
   old global account array APIs.
 
 The first compile pass reported 66 unresolved old-engine symbols, including:
@@ -190,23 +190,23 @@ The first compile pass reported 66 unresolved old-engine symbols, including:
 
 ## Wrapper Port Shape
 
-The v13 program wrapper uses the account-local shape:
+The v14 program wrapper uses the account-local shape:
 
 1. Replaced the single global slab account with a market-group account plus
    independently supplied portfolio accounts.
 2. Replaced `InitUser` / `InitLP` indexed slots with portfolio account creation
-   using `ProvenanceHeaderV13`.
+   using `ProvenanceHeaderV14`.
 3. Replaced global indexed user operations with account metas carrying the
-   relevant `PortfolioAccountV13` objects.
-4. Replaced keeper global scans/risk-buffer cursors with the v13
+   relevant `PortfolioAccountV14` objects.
+4. Replaced keeper global scans/risk-buffer cursors with the v14
    `permissionless_crank_not_atomic` account-local API.
 5. Replaced trade execution with `execute_trade_with_fee_not_atomic` over two
    explicit portfolio accounts and an effective-price array.
-6. Replaced liquidation and resolved close handlers with the v13
+6. Replaced liquidation and resolved close handlers with the v14
    account-local liquidation and close APIs.
 7. Rebuilt tests around account-local crank progress rather than global
    `MAX_ACCOUNTS` sweeps.
 
 Do not implement a compatibility shim that recreates the v12 slab inside the
-wrapper. That would defeat the v13 engine boundary and would be harder to audit
-than an explicit v13 wrapper ABI.
+wrapper. That would defeat the v14 engine boundary and would be harder to audit
+than an explicit v14 wrapper ABI.
