@@ -2,7 +2,7 @@
 //!
 //! v16 is account-local: a market-group account stores `MarketGroupV16`, and
 //! each trader/LP is an independently supplied `PortfolioAccountV16`. The
-//! wrapper deliberately does not recreate the v12 global account slab.
+//! wrapper deliberately does not recreate the legacy global account slab.
 
 #![no_std]
 
@@ -2849,7 +2849,7 @@ pub mod processor {
                 return Err(V16Error::LockActive);
             }
             // The v16 engine converts the currently released residual-bounded
-            // amount atomically. Preserve the v12 caller cap by staging the
+            // amount atomically. Preserve the wrapper caller cap by staging the
             // conversion and only committing it when the converted amount fits.
             let converted = group.convert_released_pnl_to_capital_not_atomic(portfolio)?;
             if converted == 0 || converted > amount {
