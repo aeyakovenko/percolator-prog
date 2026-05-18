@@ -5,9 +5,8 @@ use percolator::{
 use percolator_prog::{
     constants::{
         HEADER_LEN, MARKET_ACCOUNT_LEN, MARKET_GROUP_LEN, ORACLE_LEG_CAP,
-        ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
-        ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_HYPERP, PORTFOLIO_ACCOUNT_LEN,
-        PORTFOLIO_STATE_LEN, WRAPPER_CONFIG_LEN,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_HYBRID_AFTER_HOURS,
+        ORACLE_MODE_HYPERP, PORTFOLIO_ACCOUNT_LEN, PORTFOLIO_STATE_LEN, WRAPPER_CONFIG_LEN,
     },
     ix::Instruction,
     oracle_v16, policy_v16, processor, state,
@@ -311,6 +310,57 @@ fn write_matcher_return(
     matcher_context.data[40..48].copy_from_slice(&lp_account_id.to_le_bytes());
     matcher_context.data[48..56].copy_from_slice(&oracle_price_e6.to_le_bytes());
     matcher_context.data[56..64].copy_from_slice(&0u64.to_le_bytes());
+}
+
+fn run_trade_cpi_with_matcher(
+    owner_a: &mut TestAccount,
+    owner_b: &mut TestAccount,
+    market: &mut TestAccount,
+    account_a: &mut TestAccount,
+    account_b: &mut TestAccount,
+    asset_index: u8,
+    req_size: i128,
+    exec_size: i128,
+    exec_price: u64,
+    fee_bps: u64,
+    limit_price: u64,
+) -> Result<(), ProgramError> {
+    let mut matcher_program = matcher_program_account();
+    let mut matcher_context = matcher_context_account(&matcher_program);
+    let mut delegate =
+        matcher_delegate_account(market, account_b, &matcher_program, &matcher_context);
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let req_id = group.current_slot.wrapping_add(1);
+    let lp_account_id = {
+        let bytes = delegate.key.to_bytes();
+        u64::from_le_bytes(bytes[0..8].try_into().unwrap())
+    };
+    write_matcher_return(
+        &mut matcher_context,
+        exec_price,
+        exec_size,
+        req_id,
+        lp_account_id,
+        group.assets[asset_index as usize].effective_price,
+    );
+    run_ix(
+        Instruction::TradeCpi {
+            asset_index,
+            size_q: req_size,
+            fee_bps,
+            limit_price,
+        },
+        &mut [
+            owner_a,
+            owner_b,
+            market,
+            account_a,
+            account_b,
+            &mut matcher_program,
+            &mut matcher_context,
+            &mut delegate,
+        ],
+    )
 }
 
 fn token_program_account() -> TestAccount {
@@ -4416,6 +4466,260 @@ fn v16_wrapper_tradenocpi_rejects_wrong_owner_fee_cap_and_invalid_asset() {
     assert_err_and_market_unchanged(above_max_price, &market, &before_market);
     assert_eq!(account_a.data, before_a);
     assert_eq!(account_b.data, before_b);
+}
+
+#[test]
+fn v16_wrapper_tradecpi_executes_manual_consented_wide_price() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut account_a = portfolio_account();
+    let mut account_b = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner_a, &mut market, &mut account_a);
+    init_portfolio(&mut owner_b, &mut market, &mut account_b);
+    deposit(&mut owner_a, &mut market, &mut account_a, 1_000_000);
+    deposit(&mut owner_b, &mut market, &mut account_b, 1_000_000);
+
+    let (_, before_group) = state::read_market(&market.data).unwrap();
+    let size_q = POS_SCALE;
+    let exec_price = before_group.assets[0].effective_price * 150 / 100;
+    run_trade_cpi_with_matcher(
+        &mut owner_a,
+        &mut owner_b,
+        &mut market,
+        &mut account_a,
+        &mut account_b,
+        0,
+        size_q as i128,
+        size_q as i128,
+        exec_price,
+        0,
+        0,
+    )
+    .unwrap();
+
+    let (_, after_group) = state::read_market(&market.data).unwrap();
+    let after_a = state::read_portfolio(&account_a.data).unwrap();
+    let after_b = state::read_portfolio(&account_b.data).unwrap();
+    assert_eq!(
+        after_group.assets[0].effective_price, before_group.assets[0].effective_price,
+        "consented execution price must not rewrite the accepted engine price"
+    );
+    assert_eq!(after_a.legs[0].basis_pos_q, size_q as i128);
+    assert_eq!(after_b.legs[0].basis_pos_q, -(size_q as i128));
+}
+
+#[test]
+fn v16_wrapper_tradecpi_hybrid_regular_and_after_hours_follow_mark_policy() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_trading_fee_bps,
+                trade_fee_base_bps,
+                max_price_move_bps_per_slot,
+                ..
+            } = ix
+            {
+                *max_trading_fee_bps = 10_000;
+                *trade_fee_base_bps = 1;
+                *max_price_move_bps_per_slot = 500;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    let feeds = [[0xc1u8; 32], [0xc2u8; 32], [0xc3u8; 32]];
+    let mut toto_jpy = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 100);
+    let mut usd_jpy = pyth_account(&feeds[1], 150_000_000, -6, 1, 100);
+    let mut sol_usd = pyth_account(&feeds[2], 200_000_000, -6, 1, 100);
+    configure_three_leg_hybrid(
+        &mut admin,
+        &mut market,
+        feeds,
+        &mut toto_jpy,
+        &mut usd_jpy,
+        &mut sol_usd,
+        1,
+        100,
+        100,
+        0,
+    );
+
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut account_a = portfolio_account();
+    let mut account_b = portfolio_account();
+    init_portfolio(&mut owner_a, &mut market, &mut account_a);
+    init_portfolio(&mut owner_b, &mut market, &mut account_b);
+    deposit(&mut owner_a, &mut market, &mut account_a, 100_000_000);
+    deposit(&mut owner_b, &mut market, &mut account_b, 100_000_000);
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group.current_slot = 10;
+        group.slot_last = 10;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let (regular_cfg_before, regular_group_before) = state::read_market(&market.data).unwrap();
+    let size_q = 10 * POS_SCALE;
+    let regular_exec_price = regular_group_before.assets[0].effective_price * 150 / 100;
+    run_trade_cpi_with_matcher(
+        &mut owner_a,
+        &mut owner_b,
+        &mut market,
+        &mut account_a,
+        &mut account_b,
+        0,
+        size_q as i128,
+        size_q as i128,
+        regular_exec_price,
+        0,
+        0,
+    )
+    .unwrap();
+    let (regular_cfg_after, regular_group_after) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        regular_cfg_after.mark_ewma_e6,
+        regular_cfg_before.mark_ewma_e6
+    );
+    assert_eq!(
+        regular_cfg_after.mark_ewma_last_slot,
+        regular_cfg_before.mark_ewma_last_slot
+    );
+    assert_eq!(
+        regular_group_after.insurance,
+        two_sided_fee(size_q, regular_exec_price, 1),
+        "regular-hours hybrid CPI trades pay only the static fee floor"
+    );
+
+    {
+        let (mut cfg, mut group) = state::read_market(&market.data).unwrap();
+        cfg.last_good_oracle_slot = 0;
+        cfg.mark_ewma_last_slot = 0;
+        cfg.hybrid_soft_stale_slots = 3;
+        group.current_slot = 10;
+        group.slot_last = 10;
+        group.loss_stale_active = false;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+    let (stale_cfg_before, stale_group_before) = state::read_market(&market.data).unwrap();
+    let stale_exec_price = stale_group_before.assets[0].effective_price * 150 / 100;
+    let insurance_before = stale_group_before.insurance;
+    run_trade_cpi_with_matcher(
+        &mut owner_a,
+        &mut owner_b,
+        &mut market,
+        &mut account_a,
+        &mut account_b,
+        0,
+        size_q as i128,
+        size_q as i128,
+        stale_exec_price,
+        0,
+        0,
+    )
+    .unwrap();
+    let (stale_cfg_after, stale_group_after) = state::read_market(&market.data).unwrap();
+    assert!(
+        stale_cfg_after.mark_ewma_e6 > stale_cfg_before.mark_ewma_e6,
+        "after-hours CPI execution must move the fallback EWMA mark"
+    );
+    assert!(
+        stale_group_after.insurance - insurance_before > two_sided_fee(size_q, stale_exec_price, 1),
+        "after-hours CPI execution must pay dynamic mark-movement surcharge"
+    );
+    assert_eq!(
+        stale_group_after.assets[0].effective_price, stale_group_before.assets[0].effective_price,
+        "CPI execution price flexibility must not rewrite the accepted index"
+    );
+}
+
+#[test]
+fn v16_wrapper_tradecpi_hyperp_trade_moves_mark_without_refreshing_liveness() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_trading_fee_bps,
+                trade_fee_base_bps,
+                max_price_move_bps_per_slot,
+                ..
+            } = ix
+            {
+                *max_trading_fee_bps = 10_000;
+                *trade_fee_base_bps = 1;
+                *max_price_move_bps_per_slot = 500;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::ConfigureHyperpMark {
+            now_slot: 5,
+            initial_mark_e6: 100,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut account_a = portfolio_account();
+    let mut account_b = portfolio_account();
+    init_portfolio(&mut owner_a, &mut market, &mut account_a);
+    init_portfolio(&mut owner_b, &mut market, &mut account_b);
+    deposit(&mut owner_a, &mut market, &mut account_a, 10_000_000);
+    deposit(&mut owner_b, &mut market, &mut account_b, 10_000_000);
+    {
+        let (mut cfg, mut group) = state::read_market(&market.data).unwrap();
+        cfg.mark_ewma_last_slot = 0;
+        group.current_slot = 10;
+        group.slot_last = 10;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let (before_cfg, before_group) = state::read_market(&market.data).unwrap();
+    let size_q = 10 * POS_SCALE;
+    let exec_price = before_group.assets[0].effective_price * 150 / 100;
+    run_trade_cpi_with_matcher(
+        &mut owner_a,
+        &mut owner_b,
+        &mut market,
+        &mut account_a,
+        &mut account_b,
+        0,
+        size_q as i128,
+        size_q as i128,
+        exec_price,
+        0,
+        0,
+    )
+    .unwrap();
+    let (after_cfg, after_group) = state::read_market(&market.data).unwrap();
+    assert!(
+        after_cfg.mark_ewma_e6 > before_cfg.mark_ewma_e6,
+        "direct Hyperp CPI trades must use the same dynamic mark path as TradeNoCpi"
+    );
+    assert_eq!(
+        after_cfg.last_good_oracle_slot, before_cfg.last_good_oracle_slot,
+        "trade-flow mark movement must not refresh the permissionless stale-resolution liveness stamp"
+    );
+    assert_eq!(
+        after_group.assets[0].effective_price, before_group.assets[0].effective_price,
+        "direct Hyperp CPI trades must not rewrite the accepted effective index"
+    );
 }
 
 #[test]
