@@ -20,11 +20,9 @@ test-sbf = []
 cu-audit = []  # Enable compute unit checkpoints for CU auditing
 kani = []
 anchor-v2 = ["dep:anchor-lang-v2"]
-# Deployment-size tiers — forward to the engine crate. Only one of
-# `small` / `medium` should be set; leaving both off uses the engine's
-# default (MAX_ACCOUNTS=4096). Both the BPF binary and the test
-# harness honor these flags so tests run against the same size tier
-# as the deployed program.
+# v16 is account-local and has no slab-wide account-count tier. These
+# feature names are no-ops so old local commands continue to build without
+# changing the deployed code shape.
 small = []
 medium = []
 
@@ -52,7 +50,7 @@ pinocchio = "0.6"
 arrayref = "0.3"
 num-derive = "0.4"
 num-traits = "0.2"
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "a37eb5f896b8e86ef92553eb2ff6cbfa89375218" }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "4f1ff206af249cbf7862f049dabf36418e99a771" }
 anchor-lang-v2 = { git = "https://github.com/solana-foundation/anchor", rev = "e3cf760826fa0a60f247635ea0572e59861ec9b5", package = "anchor-lang-v2", default-features = false, features = ["alloc", "guardrails"], optional = true }
 
 [dev-dependencies]

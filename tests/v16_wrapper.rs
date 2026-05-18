@@ -4255,6 +4255,32 @@ fn v16_wrapper_convert_released_pnl_respects_cap_and_unlocks_withdrawal() {
 }
 
 #[test]
+fn v16_wrapper_portfolio_wire_preserves_source_converted_capital_lock() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+
+    let mut account = state::read_portfolio(&portfolio.data).unwrap();
+    account.capital = 10;
+    account.source_converted_capital_lock[0] = 7;
+    state::write_portfolio(&mut portfolio.data, &account).unwrap();
+    let roundtrip = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(roundtrip.source_converted_capital_lock[0], 7);
+    assert_eq!(roundtrip.capital, 10);
+
+    account.source_converted_capital_lock[1] = 4;
+    state::write_portfolio(&mut portfolio.data, &account).unwrap();
+    assert!(
+        state::read_portfolio(&portfolio.data).is_err(),
+        "converted-capital locks above capital must fail closed before engine use"
+    );
+}
+
+#[test]
 fn v16_wrapper_convert_released_pnl_rejects_resolved_market_without_mutation() {
     let mut admin = signer();
     let mut market = market_account();

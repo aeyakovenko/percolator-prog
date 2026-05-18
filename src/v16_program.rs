@@ -581,8 +581,18 @@ pub mod state {
         let fee_credits = wire.fee_credits.get();
         validate_non_min_i128(pnl)?;
         validate_fee_credits(fee_credits)?;
+        let capital = wire.capital.get();
         let reserved_pnl = wire.reserved_pnl.get();
         if reserved_pnl > pnl.max(0) as u128 {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let mut converted_lock_sum = 0u128;
+        for d in 0..V16_DOMAIN_COUNT {
+            converted_lock_sum = converted_lock_sum
+                .checked_add(wire.source_converted_capital_lock[d].get())
+                .ok_or(ProgramError::InvalidAccountData)?;
+        }
+        if converted_lock_sum > capital {
             return Err(ProgramError::InvalidAccountData);
         }
 
@@ -591,7 +601,7 @@ pub mod state {
         unsafe {
             addr_of_mut!((*ptr).provenance_header).write(provenance_header);
             addr_of_mut!((*ptr).owner).write(wire.owner);
-            addr_of_mut!((*ptr).capital).write(wire.capital.get());
+            addr_of_mut!((*ptr).capital).write(capital);
             addr_of_mut!((*ptr).pnl).write(pnl);
             addr_of_mut!((*ptr).reserved_pnl).write(reserved_pnl);
             for d in 0..V16_DOMAIN_COUNT {
@@ -613,6 +623,8 @@ pub mod state {
                     .write(wire.source_claim_impaired_num[d].get());
                 addr_of_mut!((*ptr).source_lien_impaired_effective_reserved[d])
                     .write(wire.source_lien_impaired_effective_reserved[d].get());
+                addr_of_mut!((*ptr).source_converted_capital_lock[d])
+                    .write(wire.source_converted_capital_lock[d].get());
             }
             addr_of_mut!((*ptr).fee_credits).write(fee_credits);
             addr_of_mut!((*ptr).cancel_deposit_escrow).write(wire.cancel_deposit_escrow.get());
@@ -672,6 +684,8 @@ pub mod state {
                 V16PodU128::new(account.source_claim_impaired_num[d]);
             wire.source_lien_impaired_effective_reserved[d] =
                 V16PodU128::new(account.source_lien_impaired_effective_reserved[d]);
+            wire.source_converted_capital_lock[d] =
+                V16PodU128::new(account.source_converted_capital_lock[d]);
         }
         wire.fee_credits = V16PodI128::new(account.fee_credits);
         wire.cancel_deposit_escrow = V16PodU128::new(account.cancel_deposit_escrow);
@@ -3676,6 +3690,8 @@ pub mod processor {
             let source_lien_impaired_effective_reserved =
                 core::ptr::addr_of_mut!((*raw).source_lien_impaired_effective_reserved)
                     as *mut u128;
+            let source_converted_capital_lock =
+                core::ptr::addr_of_mut!((*raw).source_converted_capital_lock) as *mut u128;
             let mut d = 0;
             while d < V16_DOMAIN_COUNT {
                 source_claim_bound_num.add(d).write(0);
@@ -3687,6 +3703,7 @@ pub mod processor {
                 source_lien_insurance_backing_num.add(d).write(0);
                 source_claim_impaired_num.add(d).write(0);
                 source_lien_impaired_effective_reserved.add(d).write(0);
+                source_converted_capital_lock.add(d).write(0);
                 d += 1;
             }
             core::ptr::addr_of_mut!((*raw).fee_credits).write(0);
