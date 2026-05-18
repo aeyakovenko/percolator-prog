@@ -1,6 +1,6 @@
 use percolator::{
-    MarketGroupV14, MarketGroupV14Account, MarketModeV14, PermissionlessRecoveryReasonV14,
-    PortfolioAccountV14Account, V14Config, POS_SCALE,
+    MarketGroupV16, MarketGroupV16Account, MarketModeV16, PermissionlessRecoveryReasonV16,
+    PortfolioAccountV16Account, V16Config, POS_SCALE,
 };
 use percolator_prog::{
     constants::{
@@ -9,7 +9,7 @@ use percolator_prog::{
         PORTFOLIO_STATE_LEN, WRAPPER_CONFIG_LEN,
     },
     ix::Instruction,
-    oracle_v14, policy_v14, processor, state,
+    oracle_v16, policy_v16, processor, state,
 };
 use solana_program::{
     account_info::AccountInfo, program_error::ProgramError, program_option::COption,
@@ -341,7 +341,7 @@ fn pyth_account(
 ) -> TestAccount {
     TestAccount::new_with_data(
         Pubkey::new_unique(),
-        oracle_v14::PYTH_RECEIVER_PROGRAM_ID,
+        oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
         make_pyth(feed_id, price, expo, conf, publish_time),
     )
 }
@@ -524,7 +524,7 @@ fn assert_err_and_market_unchanged(
 }
 
 #[test]
-fn v14_wrapper_init_binds_market_and_portfolio_provenance() {
+fn v16_wrapper_init_binds_market_and_portfolio_provenance() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -548,14 +548,14 @@ fn v14_wrapper_init_binds_market_and_portfolio_provenance() {
     assert_eq!(acct.owner, owner.key.to_bytes());
     assert_eq!(group.validate_account_shape(&acct), Ok(()));
 
-    let mut cfg = V14Config::public_user_fund(1, 0, 10);
+    let mut cfg = V16Config::public_user_fund(1, 0, 10);
     cfg.maintenance_margin_bps = 10_000;
     cfg.initial_margin_bps = 10_000;
     cfg.max_trading_fee_bps = 10_000;
     cfg.max_price_move_bps_per_slot = 10_000;
     cfg.max_accrual_dt_slots = 1;
     cfg.min_funding_lifetime_slots = 1;
-    let mut expected = MarketGroupV14::new(market.key.to_bytes(), cfg).unwrap();
+    let mut expected = MarketGroupV16::new(market.key.to_bytes(), cfg).unwrap();
     expected.assets[0].raw_oracle_target_price = 100;
     expected.assets[0].effective_price = 100;
     expected.assets[0].fund_px_last = 100;
@@ -567,7 +567,7 @@ fn v14_wrapper_init_binds_market_and_portfolio_provenance() {
 }
 
 #[test]
-fn v14_wrapper_init_market_ports_full_engine_config_fields() {
+fn v16_wrapper_init_market_ports_full_engine_config_fields() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -642,21 +642,21 @@ fn v14_wrapper_init_market_ports_full_engine_config_fields() {
 }
 
 #[test]
-fn v14_wrapper_account_layout_constants_match_serialized_state() {
+fn v16_wrapper_account_layout_constants_match_serialized_state() {
     assert_eq!(
         MARKET_GROUP_LEN,
-        core::mem::size_of::<MarketGroupV14Account>()
+        core::mem::size_of::<MarketGroupV16Account>()
     );
     assert_eq!(
         PORTFOLIO_STATE_LEN,
-        core::mem::size_of::<PortfolioAccountV14Account>()
+        core::mem::size_of::<PortfolioAccountV16Account>()
     );
     assert_eq!(
         WRAPPER_CONFIG_LEN,
-        core::mem::size_of::<state::WrapperConfigV14>()
+        core::mem::size_of::<state::WrapperConfigV16>()
     );
-    assert_eq!(core::mem::align_of::<MarketGroupV14Account>(), 1);
-    assert_eq!(core::mem::align_of::<PortfolioAccountV14Account>(), 1);
+    assert_eq!(core::mem::align_of::<MarketGroupV16Account>(), 1);
+    assert_eq!(core::mem::align_of::<PortfolioAccountV16Account>(), 1);
     assert_eq!(
         MARKET_ACCOUNT_LEN,
         16 + WRAPPER_CONFIG_LEN + MARKET_GROUP_LEN,
@@ -700,8 +700,8 @@ fn v14_wrapper_account_layout_constants_match_serialized_state() {
     );
     let mut corrupt_portfolio = portfolio.data.clone();
     let close_progress_active_off = HEADER_LEN
-        + core::mem::offset_of!(PortfolioAccountV14Account, close_progress)
-        + core::mem::offset_of!(percolator::CloseProgressLedgerV14Account, active);
+        + core::mem::offset_of!(PortfolioAccountV16Account, close_progress)
+        + core::mem::offset_of!(percolator::CloseProgressLedgerV16Account, active);
     corrupt_portfolio[close_progress_active_off] = 2;
     assert_eq!(
         state::read_portfolio(&corrupt_portfolio),
@@ -711,13 +711,13 @@ fn v14_wrapper_account_layout_constants_match_serialized_state() {
 }
 
 #[test]
-fn v14_wrapper_raw_wrapper_config_invalid_values_fail_closed() {
+fn v16_wrapper_raw_wrapper_config_invalid_values_fail_closed() {
     let mut admin = signer();
     let mut market = market_account();
     init_market(&mut admin, &mut market);
 
     let (cfg, _group) = state::read_market(&market.data).unwrap();
-    let assert_bad_cfg = |bad_cfg: state::WrapperConfigV14, label: &str| {
+    let assert_bad_cfg = |bad_cfg: state::WrapperConfigV16, label: &str| {
         let mut corrupt = market.data.clone();
         corrupt[HEADER_LEN..HEADER_LEN + WRAPPER_CONFIG_LEN]
             .copy_from_slice(bytemuck::bytes_of(&bad_cfg));
@@ -777,7 +777,7 @@ fn v14_wrapper_raw_wrapper_config_invalid_values_fail_closed() {
 }
 
 #[test]
-fn v14_wrapper_init_market_rejects_invalid_mint_and_double_init() {
+fn v16_wrapper_init_market_rejects_invalid_mint_and_double_init() {
     let mut admin = signer();
     let mut market = market_account();
     let mut bad_mint = invalid_mint_account();
@@ -804,7 +804,7 @@ fn v14_wrapper_init_market_rejects_invalid_mint_and_double_init() {
 }
 
 #[test]
-fn v14_wrapper_init_and_account_meta_guards_fail_before_mutation() {
+fn v16_wrapper_init_and_account_meta_guards_fail_before_mutation() {
     let mut admin = signer();
     let mut unsigned_admin = TestAccount::new(admin.key, Pubkey::new_unique(), 0);
     let mut market = market_account();
@@ -858,7 +858,7 @@ fn v14_wrapper_init_and_account_meta_guards_fail_before_mutation() {
 }
 
 #[test]
-fn v14_wrapper_init_market_rejects_invalid_engine_params_without_mutation() {
+fn v16_wrapper_init_market_rejects_invalid_engine_params_without_mutation() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -977,7 +977,7 @@ fn v14_wrapper_init_market_rejects_invalid_engine_params_without_mutation() {
 }
 
 #[test]
-fn v14_wrapper_init_portfolio_requires_signer_and_rejects_double_init_without_mutation() {
+fn v16_wrapper_init_portfolio_requires_signer_and_rejects_double_init_without_mutation() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -1010,7 +1010,7 @@ fn v14_wrapper_init_portfolio_requires_signer_and_rejects_double_init_without_mu
 }
 
 #[test]
-fn v14_wrapper_top_up_insurance_requires_authority_and_updates_vault() {
+fn v16_wrapper_top_up_insurance_requires_authority_and_updates_vault() {
     let mut admin = signer();
     let mut market = market_account();
     let mut attacker = signer();
@@ -1052,7 +1052,7 @@ fn v14_wrapper_top_up_insurance_requires_authority_and_updates_vault() {
 }
 
 #[test]
-fn v14_wrapper_top_up_insurance_rejects_wrong_mint_and_insufficient_source_balance() {
+fn v16_wrapper_top_up_insurance_rejects_wrong_mint_and_insufficient_source_balance() {
     let mut admin = signer();
     let mut market = market_account();
 
@@ -1089,7 +1089,7 @@ fn v14_wrapper_top_up_insurance_rejects_wrong_mint_and_insufficient_source_balan
 }
 
 #[test]
-fn v14_wrapper_insurance_policy_deposit_only_leaves_fee_growth_behind() {
+fn v16_wrapper_insurance_policy_deposit_only_leaves_fee_growth_behind() {
     let mut admin = signer();
     let mut market = market_account();
 
@@ -1163,7 +1163,7 @@ fn v14_wrapper_insurance_policy_deposit_only_leaves_fee_growth_behind() {
 }
 
 #[test]
-fn v14_wrapper_insurance_policy_enforces_bps_cap_and_cooldown() {
+fn v16_wrapper_insurance_policy_enforces_bps_cap_and_cooldown() {
     let mut admin = signer();
     let mut market = market_account();
 
@@ -1243,7 +1243,7 @@ fn v14_wrapper_insurance_policy_enforces_bps_cap_and_cooldown() {
 }
 
 #[test]
-fn v14_wrapper_withdraw_insurance_requires_operator_and_healthy_market() {
+fn v16_wrapper_withdraw_insurance_requires_operator_and_healthy_market() {
     let mut admin = signer();
     let mut market = market_account();
     let mut attacker = signer();
@@ -1293,11 +1293,11 @@ fn v14_wrapper_withdraw_insurance_requires_operator_and_healthy_market() {
     );
     assert_err_and_market_unchanged(zero, &market, &topped_up);
 
-    let stress_cases: &[fn(&mut MarketGroupV14)] = &[
+    let stress_cases: &[fn(&mut MarketGroupV16)] = &[
         |group| group.bankruptcy_hlock_active = true,
         |group| group.threshold_stress_active = true,
         |group| group.loss_stale_active = true,
-        |group| group.recovery_reason = Some(PermissionlessRecoveryReasonV14::BelowProgressFloor),
+        |group| group.recovery_reason = Some(PermissionlessRecoveryReasonV16::BelowProgressFloor),
     ];
     for set_stress in stress_cases {
         let (cfg, mut group) = state::read_market(&topped_up).unwrap();
@@ -1371,7 +1371,7 @@ fn v14_wrapper_withdraw_insurance_requires_operator_and_healthy_market() {
 }
 
 #[test]
-fn v14_wrapper_withdraw_insurance_uses_rotated_operator_and_terminal_drain() {
+fn v16_wrapper_withdraw_insurance_uses_rotated_operator_and_terminal_drain() {
     let mut admin = signer().writable();
     let mut market = market_account();
     let mut operator = signer();
@@ -1451,7 +1451,7 @@ fn v14_wrapper_withdraw_insurance_uses_rotated_operator_and_terminal_drain() {
 }
 
 #[test]
-fn v14_wrapper_withdraw_insurance_resolved_requires_all_portfolios_closed() {
+fn v16_wrapper_withdraw_insurance_resolved_requires_all_portfolios_closed() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -1494,7 +1494,7 @@ fn v14_wrapper_withdraw_insurance_resolved_requires_all_portfolios_closed() {
 }
 
 #[test]
-fn v14_wrapper_update_authority_rotates_admin_with_dual_signature() {
+fn v16_wrapper_update_authority_rotates_admin_with_dual_signature() {
     let mut admin = signer();
     let mut market = market_account();
     let mut new_admin = signer();
@@ -1544,11 +1544,11 @@ fn v14_wrapper_update_authority_rotates_admin_with_dual_signature() {
     )
     .unwrap();
     let (_, group) = state::read_market(&market.data).unwrap();
-    assert_eq!(group.mode, MarketModeV14::Resolved);
+    assert_eq!(group.mode, MarketModeV16::Resolved);
 }
 
 #[test]
-fn v14_wrapper_update_authority_rotates_insurance_keys_and_supports_operator_burn() {
+fn v16_wrapper_update_authority_rotates_insurance_keys_and_supports_operator_burn() {
     let mut admin = signer();
     let mut market = market_account();
     let mut insurance = signer();
@@ -1661,7 +1661,7 @@ fn v14_wrapper_update_authority_rotates_insurance_keys_and_supports_operator_bur
 }
 
 #[test]
-fn v14_wrapper_update_authority_rejects_unsupported_kind_and_live_admin_burn() {
+fn v16_wrapper_update_authority_rejects_unsupported_kind_and_live_admin_burn() {
     let mut admin = signer();
     let mut market = market_account();
     let mut new_key = signer();
@@ -1698,7 +1698,7 @@ fn v14_wrapper_update_authority_rejects_unsupported_kind_and_live_admin_burn() {
 }
 
 #[test]
-fn v14_wrapper_permissionless_resolve_policy_is_admin_gated_and_enables_admin_burn() {
+fn v16_wrapper_permissionless_resolve_policy_is_admin_gated_and_enables_admin_burn() {
     let mut admin = signer();
     let mut attacker = signer();
     let mut market = market_account();
@@ -1737,7 +1737,7 @@ fn v14_wrapper_permissionless_resolve_policy_is_admin_gated_and_enables_admin_bu
     )
     .unwrap();
     let (cfg, group) = state::read_market(&market.data).unwrap();
-    assert_eq!(group.mode, MarketModeV14::Live);
+    assert_eq!(group.mode, MarketModeV16::Live);
     assert_eq!(cfg.permissionless_resolve_stale_slots, 5);
     assert_eq!(cfg.force_close_delay_slots, 1);
 
@@ -1750,12 +1750,12 @@ fn v14_wrapper_permissionless_resolve_policy_is_admin_gated_and_enables_admin_bu
     )
     .unwrap();
     let (cfg, group) = state::read_market(&market.data).unwrap();
-    assert_eq!(group.mode, MarketModeV14::Live);
+    assert_eq!(group.mode, MarketModeV16::Live);
     assert_eq!(cfg.admin, [0u8; 32]);
 }
 
 #[test]
-fn v14_wrapper_update_authority_allows_chained_admin_rotation_without_old_key_reuse() {
+fn v16_wrapper_update_authority_allows_chained_admin_rotation_without_old_key_reuse() {
     let mut admin = signer();
     let mut market = market_account();
     let mut admin_b = signer();
@@ -1788,7 +1788,7 @@ fn v14_wrapper_update_authority_allows_chained_admin_rotation_without_old_key_re
 }
 
 #[test]
-fn v14_wrapper_close_portfolio_rejects_non_empty_and_closes_empty() {
+fn v16_wrapper_close_portfolio_rejects_non_empty_and_closes_empty() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -1822,7 +1822,7 @@ fn v14_wrapper_close_portfolio_rejects_non_empty_and_closes_empty() {
 }
 
 #[test]
-fn v14_wrapper_close_slab_requires_admin_resolved_empty_market() {
+fn v16_wrapper_close_slab_requires_admin_resolved_empty_market() {
     let mut admin = signer().writable();
     let mut market = market_account();
     let mut attacker = signer().writable();
@@ -1907,7 +1907,7 @@ fn v14_wrapper_close_slab_requires_admin_resolved_empty_market() {
 }
 
 #[test]
-fn v14_wrapper_close_slab_rejects_nonzero_engine_vault_or_insurance() {
+fn v16_wrapper_close_slab_rejects_nonzero_engine_vault_or_insurance() {
     let mut admin = signer().writable();
     let mut market = market_account();
 
@@ -1946,7 +1946,7 @@ fn v14_wrapper_close_slab_rejects_nonzero_engine_vault_or_insurance() {
 }
 
 #[test]
-fn v14_wrapper_close_slab_rejects_uninitialized_market_without_rent_drain() {
+fn v16_wrapper_close_slab_rejects_uninitialized_market_without_rent_drain() {
     let mut admin = signer().writable();
     let mut market = market_account();
     let mint = Pubkey::new_unique();
@@ -1973,7 +1973,7 @@ fn v14_wrapper_close_slab_rejects_uninitialized_market_without_rent_drain() {
 }
 
 #[test]
-fn v14_wrapper_deposit_withdraw_roundtrip_preserves_accounting() {
+fn v16_wrapper_deposit_withdraw_roundtrip_preserves_accounting() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -1994,7 +1994,7 @@ fn v14_wrapper_deposit_withdraw_roundtrip_preserves_accounting() {
 }
 
 #[test]
-fn v14_wrapper_multiple_portfolios_same_owner_stay_isolated_and_totals_match() {
+fn v16_wrapper_multiple_portfolios_same_owner_stay_isolated_and_totals_match() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -2053,7 +2053,7 @@ fn v14_wrapper_multiple_portfolios_same_owner_stay_isolated_and_totals_match() {
 }
 
 #[test]
-fn v14_wrapper_deposit_rejects_without_token_accounts() {
+fn v16_wrapper_deposit_rejects_without_token_accounts() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -2076,7 +2076,7 @@ fn v14_wrapper_deposit_rejects_without_token_accounts() {
 }
 
 #[test]
-fn v14_wrapper_deposit_rejects_wrong_mint_and_insufficient_source_balance() {
+fn v16_wrapper_deposit_rejects_wrong_mint_and_insufficient_source_balance() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -2121,7 +2121,7 @@ fn v14_wrapper_deposit_rejects_wrong_mint_and_insufficient_source_balance() {
 }
 
 #[test]
-fn v14_wrapper_deposit_rejects_wrong_owner_and_bad_token_program() {
+fn v16_wrapper_deposit_rejects_wrong_owner_and_bad_token_program() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -2168,7 +2168,7 @@ fn v14_wrapper_deposit_rejects_wrong_owner_and_bad_token_program() {
 }
 
 #[test]
-fn v14_wrapper_vault_accounts_reject_delegate_and_close_authority() {
+fn v16_wrapper_vault_accounts_reject_delegate_and_close_authority() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -2244,7 +2244,7 @@ fn v14_wrapper_vault_accounts_reject_delegate_and_close_authority() {
 }
 
 #[test]
-fn v14_wrapper_token_accounts_must_be_initialized_for_custody_paths() {
+fn v16_wrapper_token_accounts_must_be_initialized_for_custody_paths() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -2341,7 +2341,7 @@ fn v14_wrapper_token_accounts_must_be_initialized_for_custody_paths() {
 }
 
 #[test]
-fn v14_wrapper_spl_u64_amount_limit_rejects_before_mutation() {
+fn v16_wrapper_spl_u64_amount_limit_rejects_before_mutation() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -2405,7 +2405,7 @@ fn v14_wrapper_spl_u64_amount_limit_rejects_before_mutation() {
 }
 
 #[test]
-fn v14_wrapper_zero_amount_custody_paths_are_noop_without_state_drift() {
+fn v16_wrapper_zero_amount_custody_paths_are_noop_without_state_drift() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -2471,7 +2471,7 @@ fn v14_wrapper_zero_amount_custody_paths_are_noop_without_state_drift() {
 }
 
 #[test]
-fn v14_wrapper_withdraw_rejects_wrong_vault_authority_and_wrong_destination_mint() {
+fn v16_wrapper_withdraw_rejects_wrong_vault_authority_and_wrong_destination_mint() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -2521,7 +2521,7 @@ fn v14_wrapper_withdraw_rejects_wrong_vault_authority_and_wrong_destination_mint
 }
 
 #[test]
-fn v14_wrapper_withdraw_rejects_wrong_owner_without_mutation() {
+fn v16_wrapper_withdraw_rejects_wrong_owner_without_mutation() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -2555,7 +2555,7 @@ fn v14_wrapper_withdraw_rejects_wrong_owner_without_mutation() {
 }
 
 #[test]
-fn v14_wrapper_withdraw_rejects_over_capital_and_insufficient_vault_without_mutation() {
+fn v16_wrapper_withdraw_rejects_over_capital_and_insufficient_vault_without_mutation() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -2604,7 +2604,7 @@ fn v14_wrapper_withdraw_rejects_over_capital_and_insufficient_vault_without_muta
 }
 
 #[test]
-fn v14_wrapper_close_portfolio_rejects_wrong_owner_without_mutation() {
+fn v16_wrapper_close_portfolio_rejects_wrong_owner_without_mutation() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -2625,7 +2625,7 @@ fn v14_wrapper_close_portfolio_rejects_wrong_owner_without_mutation() {
 }
 
 #[test]
-fn v14_wrapper_cross_market_portfolio_provenance_is_fail_closed() {
+fn v16_wrapper_cross_market_portfolio_provenance_is_fail_closed() {
     let mut admin_a = signer();
     let mut admin_b = signer();
     let mut market_a = market_account();
@@ -2708,7 +2708,7 @@ fn v14_wrapper_cross_market_portfolio_provenance_is_fail_closed() {
 }
 
 #[test]
-fn v14_wrapper_account_kind_confusion_is_rejected_before_mutation() {
+fn v16_wrapper_account_kind_confusion_is_rejected_before_mutation() {
     let mut admin = signer();
     let mut admin_b = signer();
     let mut market = market_account();
@@ -2769,7 +2769,7 @@ fn v14_wrapper_account_kind_confusion_is_rejected_before_mutation() {
 }
 
 #[test]
-fn v14_wrapper_portfolio_key_mismatch_and_self_trade_are_rejected() {
+fn v16_wrapper_portfolio_key_mismatch_and_self_trade_are_rejected() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner_a = signer();
@@ -2833,7 +2833,7 @@ fn v14_wrapper_portfolio_key_mismatch_and_self_trade_are_rejected() {
 }
 
 #[test]
-fn v14_wrapper_tradenocpi_negative_size_flips_long_short_roles() {
+fn v16_wrapper_tradenocpi_negative_size_flips_long_short_roles() {
     let mut admin = signer();
     let mut market = market_account();
     let mut signer_a = signer();
@@ -2871,7 +2871,7 @@ fn v14_wrapper_tradenocpi_negative_size_flips_long_short_roles() {
 }
 
 #[test]
-fn v14_wrapper_tradenocpi_accepts_consented_wide_exec_price_without_moving_index() {
+fn v16_wrapper_tradenocpi_accepts_consented_wide_exec_price_without_moving_index() {
     let mut admin = signer();
     let mut market = market_account();
     let mut long_owner = signer();
@@ -2928,7 +2928,7 @@ fn v14_wrapper_tradenocpi_accepts_consented_wide_exec_price_without_moving_index
 }
 
 #[test]
-fn v14_wrapper_configure_hybrid_oracle_composes_toto_sol_cross_and_rejects_rollbacks() {
+fn v16_wrapper_configure_hybrid_oracle_composes_toto_sol_cross_and_rejects_rollbacks() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -3002,7 +3002,7 @@ fn v14_wrapper_configure_hybrid_oracle_composes_toto_sol_cross_and_rejects_rollb
 }
 
 #[test]
-fn v14_wrapper_configure_hybrid_oracle_allows_empty_portfolio_grief_without_blocking_setup() {
+fn v16_wrapper_configure_hybrid_oracle_allows_empty_portfolio_grief_without_blocking_setup() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -3048,7 +3048,7 @@ fn v14_wrapper_configure_hybrid_oracle_allows_empty_portfolio_grief_without_bloc
 }
 
 #[test]
-fn v14_wrapper_configure_hybrid_oracle_allows_prefunded_flat_portfolio_without_blocking_setup() {
+fn v16_wrapper_configure_hybrid_oracle_allows_prefunded_flat_portfolio_without_blocking_setup() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -3089,7 +3089,7 @@ fn v14_wrapper_configure_hybrid_oracle_allows_prefunded_flat_portfolio_without_b
 }
 
 #[test]
-fn v14_wrapper_configure_hybrid_oracle_rejects_after_positions_enter_market() {
+fn v16_wrapper_configure_hybrid_oracle_rejects_after_positions_enter_market() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -3155,7 +3155,7 @@ fn v14_wrapper_configure_hybrid_oracle_rejects_after_positions_enter_market() {
 }
 
 #[test]
-fn v14_wrapper_hybrid_fresh_crank_tracks_external_composite_then_after_hours_trade_moves_mark() {
+fn v16_wrapper_hybrid_fresh_crank_tracks_external_composite_then_after_hours_trade_moves_mark() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -3287,7 +3287,7 @@ fn v14_wrapper_hybrid_fresh_crank_tracks_external_composite_then_after_hours_tra
 }
 
 #[test]
-fn v14_wrapper_hybrid_regular_hours_wide_trade_keeps_mark_pinned_to_external_oracle() {
+fn v16_wrapper_hybrid_regular_hours_wide_trade_keeps_mark_pinned_to_external_oracle() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -3377,7 +3377,7 @@ fn v14_wrapper_hybrid_regular_hours_wide_trade_keeps_mark_pinned_to_external_ora
 }
 
 #[test]
-fn v14_wrapper_hybrid_after_hours_downward_mark_moves_effective_price() {
+fn v16_wrapper_hybrid_after_hours_downward_mark_moves_effective_price() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -3487,7 +3487,7 @@ fn v14_wrapper_hybrid_after_hours_downward_mark_moves_effective_price() {
     )
     .unwrap();
     let (_, after_crank_group) = state::read_market(&market.data).unwrap();
-    let expected = oracle_v14::effective_price_from_target(
+    let expected = oracle_v16::effective_price_from_target(
         after_trade_group.assets[0].effective_price,
         after_trade_cfg.mark_ewma_e6,
         after_trade_group.config.max_price_move_bps_per_slot,
@@ -3502,7 +3502,7 @@ fn v14_wrapper_hybrid_after_hours_downward_mark_moves_effective_price() {
 }
 
 #[test]
-fn v14_wrapper_hybrid_after_hours_fee_floor_scales_with_next_crank_segment_budget() {
+fn v16_wrapper_hybrid_after_hours_fee_floor_scales_with_next_crank_segment_budget() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -3603,7 +3603,7 @@ fn v14_wrapper_hybrid_after_hours_fee_floor_scales_with_next_crank_segment_budge
 }
 
 #[test]
-fn v14_wrapper_hybrid_after_hours_max_caller_fee_does_not_bypass_dynamic_fee_rejection() {
+fn v16_wrapper_hybrid_after_hours_max_caller_fee_does_not_bypass_dynamic_fee_rejection() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -3699,10 +3699,10 @@ fn v14_wrapper_hybrid_after_hours_max_caller_fee_does_not_bypass_dynamic_fee_rej
     );
     let max_side_notional =
         (max_side_q * before_group.assets[0].effective_price as u128 + POS_SCALE - 1) / POS_SCALE;
-    let required = policy_v14::dynamic_fee_bps_with_externality_floor(
+    let required = policy_v16::dynamic_fee_bps_with_externality_floor(
         10_000,
         state::read_market(&market.data).unwrap().0.mark_ewma_e6,
-        oracle_v14::clamp_toward_engine_dt(
+        oracle_v16::clamp_toward_engine_dt(
             before_group.assets[0].effective_price,
             probe_price,
             before_group.config.max_price_move_bps_per_slot,
@@ -3742,7 +3742,7 @@ fn v14_wrapper_hybrid_after_hours_max_caller_fee_does_not_bypass_dynamic_fee_rej
 }
 
 #[test]
-fn v14_wrapper_tradenocpi_applies_static_base_fee_floor() {
+fn v16_wrapper_tradenocpi_applies_static_base_fee_floor() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -3796,7 +3796,7 @@ fn v14_wrapper_tradenocpi_applies_static_base_fee_floor() {
 }
 
 #[test]
-fn v14_wrapper_tradenocpi_rejects_when_consented_price_would_break_margin() {
+fn v16_wrapper_tradenocpi_rejects_when_consented_price_would_break_margin() {
     let mut admin = signer();
     let mut market = market_account();
     let mut long_owner = signer();
@@ -3837,7 +3837,7 @@ fn v14_wrapper_tradenocpi_rejects_when_consented_price_would_break_margin() {
 }
 
 #[test]
-fn v14_wrapper_convert_released_pnl_respects_cap_and_unlocks_withdrawal() {
+fn v16_wrapper_convert_released_pnl_respects_cap_and_unlocks_withdrawal() {
     let mut admin = signer();
     let mut market = market_account();
     let mut long_owner = signer();
@@ -3933,7 +3933,7 @@ fn v14_wrapper_convert_released_pnl_respects_cap_and_unlocks_withdrawal() {
 }
 
 #[test]
-fn v14_wrapper_convert_released_pnl_rejects_resolved_market_without_mutation() {
+fn v16_wrapper_convert_released_pnl_rejects_resolved_market_without_mutation() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -3955,7 +3955,7 @@ fn v14_wrapper_convert_released_pnl_rejects_resolved_market_without_mutation() {
 }
 
 #[test]
-fn v14_wrapper_tradenocpi_rejects_bad_size_and_missing_signer_before_mutation() {
+fn v16_wrapper_tradenocpi_rejects_bad_size_and_missing_signer_before_mutation() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner_a = signer();
@@ -4032,7 +4032,7 @@ fn v14_wrapper_tradenocpi_rejects_bad_size_and_missing_signer_before_mutation() 
 }
 
 #[test]
-fn v14_wrapper_tradenocpi_rejects_wrong_owner_fee_cap_and_invalid_asset() {
+fn v16_wrapper_tradenocpi_rejects_wrong_owner_fee_cap_and_invalid_asset() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner_a = signer();
@@ -4147,7 +4147,7 @@ fn v14_wrapper_tradenocpi_rejects_wrong_owner_fee_cap_and_invalid_asset() {
 }
 
 #[test]
-fn v14_wrapper_tradecpi_requires_bilateral_signatures_before_matcher_cpi() {
+fn v16_wrapper_tradecpi_requires_bilateral_signatures_before_matcher_cpi() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner_a = signer();
@@ -4198,7 +4198,7 @@ fn v14_wrapper_tradecpi_requires_bilateral_signatures_before_matcher_cpi() {
 }
 
 #[test]
-fn v14_wrapper_tradecpi_rejects_wrong_delegate_and_unsafe_tail_before_cpi() {
+fn v16_wrapper_tradecpi_rejects_wrong_delegate_and_unsafe_tail_before_cpi() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner_a = signer();
@@ -4299,7 +4299,7 @@ fn v14_wrapper_tradecpi_rejects_wrong_delegate_and_unsafe_tail_before_cpi() {
 }
 
 #[test]
-fn v14_wrapper_tradecpi_zero_fill_rejects_resolved_market_before_success() {
+fn v16_wrapper_tradecpi_zero_fill_rejects_resolved_market_before_success() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner_a = signer();
@@ -4351,7 +4351,7 @@ fn v14_wrapper_tradecpi_zero_fill_rejects_resolved_market_before_success() {
 }
 
 #[test]
-fn v14_wrapper_tradecpi_zero_fill_rejects_fee_above_cap_before_success() {
+fn v16_wrapper_tradecpi_zero_fill_rejects_fee_above_cap_before_success() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner_a = signer();
@@ -4401,7 +4401,7 @@ fn v14_wrapper_tradecpi_zero_fill_rejects_fee_above_cap_before_success() {
 }
 
 #[test]
-fn v14_wrapper_permissionless_crank_advances_account_local_market_progress() {
+fn v16_wrapper_permissionless_crank_advances_account_local_market_progress() {
     let mut admin = signer();
     let mut market = market_account();
     let mut long_owner = signer();
@@ -4455,7 +4455,7 @@ fn v14_wrapper_permissionless_crank_advances_account_local_market_progress() {
 }
 
 #[test]
-fn v14_wrapper_permissionless_crank_does_not_require_owner_signature() {
+fn v16_wrapper_permissionless_crank_does_not_require_owner_signature() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -4488,7 +4488,7 @@ fn v14_wrapper_permissionless_crank_does_not_require_owner_signature() {
 }
 
 #[test]
-fn v14_wrapper_permissionless_crank_rejects_stale_now_without_mutation() {
+fn v16_wrapper_permissionless_crank_rejects_stale_now_without_mutation() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -4536,7 +4536,7 @@ fn v14_wrapper_permissionless_crank_rejects_stale_now_without_mutation() {
 }
 
 #[test]
-fn v14_wrapper_permissionless_crank_can_liquidate_unhealthy_candidate() {
+fn v16_wrapper_permissionless_crank_can_liquidate_unhealthy_candidate() {
     let mut admin = signer();
     let mut market = market_account();
     let mut long_owner = signer();
@@ -4592,7 +4592,7 @@ fn v14_wrapper_permissionless_crank_can_liquidate_unhealthy_candidate() {
 }
 
 #[test]
-fn v14_wrapper_liquidation_uses_configured_fee_not_permissionless_caller_fee() {
+fn v16_wrapper_liquidation_uses_configured_fee_not_permissionless_caller_fee() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -4687,7 +4687,7 @@ fn v14_wrapper_liquidation_uses_configured_fee_not_permissionless_caller_fee() {
 }
 
 #[test]
-fn v14_wrapper_liquidation_fee_policy_splits_retained_penalty_to_cranker() {
+fn v16_wrapper_liquidation_fee_policy_splits_retained_penalty_to_cranker() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -4809,7 +4809,7 @@ fn v14_wrapper_liquidation_fee_policy_splits_retained_penalty_to_cranker() {
 }
 
 #[test]
-fn v14_wrapper_liquidation_reward_never_spends_insurance_needed_for_losses() {
+fn v16_wrapper_liquidation_reward_never_spends_insurance_needed_for_losses() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -4912,7 +4912,7 @@ fn v14_wrapper_liquidation_reward_never_spends_insurance_needed_for_losses() {
 }
 
 #[test]
-fn v14_wrapper_liquidation_fee_policy_is_admin_gated_and_bounds_share() {
+fn v16_wrapper_liquidation_fee_policy_is_admin_gated_and_bounds_share() {
     let mut admin = signer();
     let mut attacker = signer();
     let mut market = market_account();
@@ -4947,7 +4947,7 @@ fn v14_wrapper_liquidation_fee_policy_is_admin_gated_and_bounds_share() {
 }
 
 #[test]
-fn v14_wrapper_permissionless_settle_b_without_b_state_is_fail_closed() {
+fn v16_wrapper_permissionless_settle_b_without_b_state_is_fail_closed() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -4977,7 +4977,7 @@ fn v14_wrapper_permissionless_settle_b_without_b_state_is_fail_closed() {
 }
 
 #[test]
-fn v14_wrapper_permissionless_crank_rejects_invalid_asset_and_price_without_mutation() {
+fn v16_wrapper_permissionless_crank_rejects_invalid_asset_and_price_without_mutation() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -5022,7 +5022,7 @@ fn v14_wrapper_permissionless_crank_rejects_invalid_asset_and_price_without_muta
 }
 
 #[test]
-fn v14_wrapper_permissionless_recovery_action_is_not_public_kill_switch() {
+fn v16_wrapper_permissionless_recovery_action_is_not_public_kill_switch() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -5050,7 +5050,7 @@ fn v14_wrapper_permissionless_recovery_action_is_not_public_kill_switch() {
     assert_err_and_market_unchanged(result, &market, &before_market);
     assert_eq!(portfolio.data, before_portfolio);
     let (_, group) = state::read_market(&market.data).unwrap();
-    assert_eq!(group.mode, MarketModeV14::Live);
+    assert_eq!(group.mode, MarketModeV16::Live);
     assert_eq!(
         group.recovery_reason, None,
         "a caller-selected recovery reason must not terminal-lock a healthy market"
@@ -5058,16 +5058,16 @@ fn v14_wrapper_permissionless_recovery_action_is_not_public_kill_switch() {
 }
 
 #[test]
-fn v14_wrapper_permissionless_recovery_rejects_every_caller_selected_reason() {
+fn v16_wrapper_permissionless_recovery_rejects_every_caller_selected_reason() {
     let reasons = [
-        PermissionlessRecoveryReasonV14::BelowProgressFloor,
-        PermissionlessRecoveryReasonV14::BlockedSegmentHeadroomOrRepresentability,
-        PermissionlessRecoveryReasonV14::AccountBSettlementCannotProgress,
-        PermissionlessRecoveryReasonV14::BIndexHeadroomExhausted,
-        PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress,
-        PermissionlessRecoveryReasonV14::ExplicitLossOrDustAuditOverflow,
-        PermissionlessRecoveryReasonV14::OracleOrTargetUnavailableByAuthenticatedPolicy,
-        PermissionlessRecoveryReasonV14::CounterOrEpochOverflowDeclaredRecovery,
+        PermissionlessRecoveryReasonV16::BelowProgressFloor,
+        PermissionlessRecoveryReasonV16::BlockedSegmentHeadroomOrRepresentability,
+        PermissionlessRecoveryReasonV16::AccountBSettlementCannotProgress,
+        PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted,
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+        PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy,
+        PermissionlessRecoveryReasonV16::CounterOrEpochOverflowDeclaredRecovery,
     ];
 
     for (reason, _) in reasons.iter().copied().enumerate() {
@@ -5096,13 +5096,13 @@ fn v14_wrapper_permissionless_recovery_rejects_every_caller_selected_reason() {
         assert_err_and_market_unchanged(result, &market, &before_market);
         assert_eq!(portfolio.data, before_portfolio);
         let (_, group) = state::read_market(&market.data).unwrap();
-        assert_eq!(group.mode, MarketModeV14::Live);
+        assert_eq!(group.mode, MarketModeV16::Live);
         assert_eq!(group.recovery_reason, None);
     }
 }
 
 #[test]
-fn v14_wrapper_permissionless_crank_rejects_invalid_action_and_recovery_reason() {
+fn v16_wrapper_permissionless_crank_rejects_invalid_action_and_recovery_reason() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -5147,7 +5147,7 @@ fn v14_wrapper_permissionless_crank_rejects_invalid_action_and_recovery_reason()
 }
 
 #[test]
-fn v14_wrapper_permissionless_crank_rejects_caller_supplied_funding_rate() {
+fn v16_wrapper_permissionless_crank_rejects_caller_supplied_funding_rate() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -5191,7 +5191,7 @@ fn v14_wrapper_permissionless_crank_rejects_caller_supplied_funding_rate() {
 }
 
 #[test]
-fn v14_wrapper_resolve_market_is_admin_only_and_blocks_live_trade() {
+fn v16_wrapper_resolve_market_is_admin_only_and_blocks_live_trade() {
     let mut admin = signer();
     let mut attacker = signer();
     let mut market = market_account();
@@ -5238,7 +5238,7 @@ fn v14_wrapper_resolve_market_is_admin_only_and_blocks_live_trade() {
 }
 
 #[test]
-fn v14_wrapper_permissionless_stale_resolve_requires_hard_stale_maturity() {
+fn v16_wrapper_permissionless_stale_resolve_requires_hard_stale_maturity() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner_a = signer();
@@ -5274,7 +5274,7 @@ fn v14_wrapper_permissionless_stale_resolve_requires_hard_stale_maturity() {
     .unwrap();
     let (cfg, group) = state::read_market(&market.data).unwrap();
     assert_eq!(cfg.last_good_oracle_slot, 0);
-    assert_eq!(group.mode, MarketModeV14::Resolved);
+    assert_eq!(group.mode, MarketModeV16::Resolved);
 
     let resolved_market = market.data.clone();
     let before_a = portfolio_a.data.clone();
@@ -5300,7 +5300,7 @@ fn v14_wrapper_permissionless_stale_resolve_requires_hard_stale_maturity() {
 }
 
 #[test]
-fn v14_wrapper_permissionless_stale_resolve_uses_stamped_liveness_not_oracle_tail() {
+fn v16_wrapper_permissionless_stale_resolve_uses_stamped_liveness_not_oracle_tail() {
     let feed = [11u8; 32];
     let mut admin = signer();
     let mut market = market_account();
@@ -5348,12 +5348,12 @@ fn v14_wrapper_permissionless_stale_resolve_uses_stamped_liveness_not_oracle_tai
     )
     .unwrap();
     let (_, group) = state::read_market(&market.data).unwrap();
-    assert_eq!(group.mode, MarketModeV14::Resolved);
+    assert_eq!(group.mode, MarketModeV16::Resolved);
     assert_eq!(group.resolved_slot, 15);
 }
 
 #[test]
-fn v14_wrapper_permissionless_resolve_maturity_blocks_manual_live_trade_race() {
+fn v16_wrapper_permissionless_resolve_maturity_blocks_manual_live_trade_race() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner_a = signer();
@@ -5437,11 +5437,11 @@ fn v14_wrapper_permissionless_resolve_maturity_blocks_manual_live_trade_race() {
     )
     .unwrap();
     let (_, group) = state::read_market(&market.data).unwrap();
-    assert_eq!(group.mode, MarketModeV14::Resolved);
+    assert_eq!(group.mode, MarketModeV16::Resolved);
 }
 
 #[test]
-fn v14_wrapper_resolved_market_blocks_new_activity_and_double_resolution() {
+fn v16_wrapper_resolved_market_blocks_new_activity_and_double_resolution() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -5519,7 +5519,7 @@ fn v14_wrapper_resolved_market_blocks_new_activity_and_double_resolution() {
 }
 
 #[test]
-fn v14_wrapper_resolved_close_uses_engine_loss_and_fee_ordering_path() {
+fn v16_wrapper_resolved_close_uses_engine_loss_and_fee_ordering_path() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -5533,13 +5533,13 @@ fn v14_wrapper_resolved_close_uses_engine_loss_and_fee_ordering_path() {
 
     let (_, group) = state::read_market(&market.data).unwrap();
     let acct = state::read_portfolio(&portfolio.data).unwrap();
-    assert_eq!(group.mode, MarketModeV14::Resolved);
+    assert_eq!(group.mode, MarketModeV16::Resolved);
     assert_eq!(acct.capital, 0);
     assert_eq!(group.vault, 0);
 }
 
 #[test]
-fn v14_wrapper_close_resolved_uses_configured_fee_not_permissionless_caller_fee() {
+fn v16_wrapper_close_resolved_uses_configured_fee_not_permissionless_caller_fee() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -5569,7 +5569,7 @@ fn v14_wrapper_close_resolved_uses_configured_fee_not_permissionless_caller_fee(
 }
 
 #[test]
-fn v14_wrapper_close_resolved_does_not_double_pay_after_closed_payout() {
+fn v16_wrapper_close_resolved_does_not_double_pay_after_closed_payout() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -5595,7 +5595,7 @@ fn v14_wrapper_close_resolved_does_not_double_pay_after_closed_payout() {
 }
 
 #[test]
-fn v14_wrapper_close_resolved_is_permissionless_but_pays_only_owner_token_account() {
+fn v16_wrapper_close_resolved_is_permissionless_but_pays_only_owner_token_account() {
     let mut admin = signer();
     let mut market = market_account();
     let owner = signer();
@@ -5655,7 +5655,7 @@ fn v14_wrapper_close_resolved_is_permissionless_but_pays_only_owner_token_accoun
 }
 
 #[test]
-fn v14_wrapper_close_resolved_rejects_before_resolution_without_mutation() {
+fn v16_wrapper_close_resolved_rejects_before_resolution_without_mutation() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -5690,7 +5690,7 @@ fn v14_wrapper_close_resolved_rejects_before_resolution_without_mutation() {
 }
 
 #[test]
-fn v14_wrapper_close_resolved_progress_only_does_not_pay_active_position() {
+fn v16_wrapper_close_resolved_progress_only_does_not_pay_active_position() {
     let mut admin = signer();
     let mut market = market_account();
     let mut long_owner = signer();
@@ -5752,7 +5752,7 @@ fn v14_wrapper_close_resolved_progress_only_does_not_pay_active_position() {
 }
 
 #[test]
-fn v14_wrapper_close_resolved_progress_only_does_not_require_token_accounts() {
+fn v16_wrapper_close_resolved_progress_only_does_not_require_token_accounts() {
     let mut admin = signer();
     let mut market = market_account();
     let mut long_owner = signer();
@@ -5802,7 +5802,7 @@ fn v14_wrapper_close_resolved_progress_only_does_not_require_token_accounts() {
 }
 
 #[test]
-fn v14_wrapper_close_resolved_requires_recipient_and_vault_accounts_for_payout() {
+fn v16_wrapper_close_resolved_requires_recipient_and_vault_accounts_for_payout() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -5826,7 +5826,7 @@ fn v14_wrapper_close_resolved_requires_recipient_and_vault_accounts_for_payout()
 }
 
 #[test]
-fn v14_wrapper_hybrid_hard_stale_uses_permissionless_resolve_not_recovery_kill_switch() {
+fn v16_wrapper_hybrid_hard_stale_uses_permissionless_resolve_not_recovery_kill_switch() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -5908,13 +5908,13 @@ fn v14_wrapper_hybrid_hard_stale_uses_permissionless_resolve_not_recovery_kill_s
     let (_, group) = state::read_market(&market.data).unwrap();
     assert_eq!(
         group.mode,
-        MarketModeV14::Resolved,
+        MarketModeV16::Resolved,
         "hard-stale hybrid markets exit through the proof-free stamped stale resolver"
     );
 }
 
 #[test]
-fn v14_wrapper_hybrid_hard_stale_blocks_live_value_movement_until_resolved() {
+fn v16_wrapper_hybrid_hard_stale_blocks_live_value_movement_until_resolved() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -6026,5 +6026,5 @@ fn v14_wrapper_hybrid_hard_stale_blocks_live_value_movement_until_resolved() {
     )
     .unwrap();
     let (_, group) = state::read_market(&market.data).unwrap();
-    assert_eq!(group.mode, MarketModeV14::Resolved);
+    assert_eq!(group.mode, MarketModeV16::Resolved);
 }

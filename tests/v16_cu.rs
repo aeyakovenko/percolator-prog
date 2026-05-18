@@ -6,7 +6,7 @@ use percolator_prog::{
         PORTFOLIO_ACCOUNT_LEN,
     },
     ix::Instruction as ProgInstruction,
-    oracle_v14, state,
+    oracle_v16, state,
 };
 use solana_sdk::{
     account::Account,
@@ -155,7 +155,11 @@ fn cu_ix() -> Instruction {
     ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)
 }
 
-struct V14CuEnv {
+fn heap_ix() -> Instruction {
+    ComputeBudgetInstruction::request_heap_frame(128 * 1024)
+}
+
+struct V16CuEnv {
     svm: LiteSVM,
     program_id: Pubkey,
     payer: Keypair,
@@ -166,7 +170,7 @@ struct V14CuEnv {
     vault_authority: Pubkey,
 }
 
-impl V14CuEnv {
+impl V16CuEnv {
     fn new() -> Self {
         let mut svm = LiteSVM::new();
         let program_id = percolator_prog::id();
@@ -546,7 +550,7 @@ impl V14CuEnv {
                 Account {
                     lamports: 1_000_000_000,
                     data: make_pyth_data(feed, price, expo, 1, publish_time),
-                    owner: oracle_v14::PYTH_RECEIVER_PROGRAM_ID,
+                    owner: oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
                     executable: false,
                     rent_epoch: 0,
                 },
@@ -778,7 +782,7 @@ fn send_tx(
     signer_refs.push(payer);
     signer_refs.extend_from_slice(extra_signers);
     let tx = Transaction::new_signed_with_payer(
-        &[cu_ix(), instruction],
+        &[heap_ix(), cu_ix(), instruction],
         Some(&payer.pubkey()),
         &signer_refs,
         svm.latest_blockhash(),
@@ -798,7 +802,7 @@ fn send_raw_tx(
     signer_refs.push(payer);
     signer_refs.extend_from_slice(extra_signers);
     let tx = Transaction::new_signed_with_payer(
-        &[cu_ix(), instruction],
+        &[heap_ix(), cu_ix(), instruction],
         Some(&payer.pubkey()),
         &signer_refs,
         svm.latest_blockhash(),
@@ -809,8 +813,8 @@ fn send_raw_tx(
 }
 
 #[test]
-fn v14_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
-    let mut env = V14CuEnv::new();
+fn v16_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
+    let mut env = V16CuEnv::new();
     let owner = Keypair::new();
     let portfolio = env.create_portfolio(&owner);
 
@@ -855,8 +859,8 @@ fn v14_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
 }
 
 #[test]
-fn v14_bpf_tradenocpi_executes_and_is_bounded() {
-    let mut env = V14CuEnv::new();
+fn v16_bpf_tradenocpi_executes_and_is_bounded() {
+    let mut env = V16CuEnv::new();
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
     let long_account = env.create_portfolio(&long_owner);
@@ -873,7 +877,7 @@ fn v14_bpf_tradenocpi_executes_and_is_bounded() {
         150,
         100,
     );
-    println!("v14 TradeNoCpi BPF CU: {trade_cu}");
+    println!("v16 TradeNoCpi BPF CU: {trade_cu}");
     assert!(
         trade_cu <= TRADE_CU_LIMIT,
         "TradeNoCpi CU {} exceeded limit {}",
@@ -908,8 +912,8 @@ fn v14_bpf_tradenocpi_executes_and_is_bounded() {
 }
 
 #[test]
-fn v14_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
-    let mut env = V14CuEnv::new();
+fn v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
+    let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
     env.svm.add_program(matcher_program, &matcher_bytes);
@@ -934,7 +938,7 @@ fn v14_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
         (10 * POS_SCALE) as i128,
         100,
     );
-    println!("v14 matcher init CU: {init_matcher_cu}, TradeCpi BPF CU: {trade_cpi_cu}");
+    println!("v16 matcher init CU: {init_matcher_cu}, TradeCpi BPF CU: {trade_cpi_cu}");
     assert!(
         trade_cpi_cu <= TRADE_CU_LIMIT,
         "TradeCpi CU {} exceeded limit {}",
@@ -963,8 +967,8 @@ fn v14_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
 }
 
 #[test]
-fn v14_bpf_permissionless_liquidation_is_bounded() {
-    let mut env = V14CuEnv::new();
+fn v16_bpf_permissionless_liquidation_is_bounded() {
+    let mut env = V16CuEnv::new();
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
     let long_account = env.create_portfolio(&long_owner);
@@ -995,7 +999,7 @@ fn v14_bpf_permissionless_liquidation_is_bounded() {
             recovery_reason: 0,
         },
     );
-    println!("v14 liquidation crank CU: {liquidation_cu}");
+    println!("v16 liquidation crank CU: {liquidation_cu}");
     assert!(
         liquidation_cu <= CRANK_CU_LIMIT,
         "liquidation CU {} exceeded limit {}",
@@ -1013,8 +1017,8 @@ fn v14_bpf_permissionless_liquidation_is_bounded() {
 }
 
 #[test]
-fn v14_bpf_close_resolved_moves_payout_tokens_with_ledger() {
-    let mut env = V14CuEnv::new();
+fn v16_bpf_close_resolved_moves_payout_tokens_with_ledger() {
+    let mut env = V16CuEnv::new();
     let owner = Keypair::new();
     let portfolio = env.create_portfolio(&owner);
     env.deposit(&owner, portfolio, 1_000);
@@ -1034,12 +1038,12 @@ fn v14_bpf_close_resolved_moves_payout_tokens_with_ledger() {
 }
 
 #[test]
-fn v14_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free() {
-    let mut env = V14CuEnv::new();
+fn v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free() {
+    let mut env = V16CuEnv::new();
     let configure_cu = env.configure_permissionless_resolve_with_cu(5, 1);
     let stale_resolve_cu = env.resolve_stale_permissionless_with_cu(5);
     println!(
-        "v14 permissionless stale resolve CU configure={configure_cu}, resolve={stale_resolve_cu}"
+        "v16 permissionless stale resolve CU configure={configure_cu}, resolve={stale_resolve_cu}"
     );
     assert!(
         configure_cu <= CUSTODY_CU_LIMIT,
@@ -1058,13 +1062,13 @@ fn v14_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free() {
     let (cfg, group) = state::read_market(&market_data).unwrap();
     assert_eq!(cfg.permissionless_resolve_stale_slots, 5);
     assert_eq!(cfg.force_close_delay_slots, 1);
-    assert_eq!(group.mode, percolator::MarketModeV14::Resolved);
+    assert_eq!(group.mode, percolator::MarketModeV16::Resolved);
     assert_eq!(group.resolved_slot, 5);
 }
 
 #[test]
-fn v14_cu_custody_and_resolution_paths_are_bounded() {
-    let mut env = V14CuEnv::new();
+fn v16_cu_custody_and_resolution_paths_are_bounded() {
+    let mut env = V16CuEnv::new();
     let owner = Keypair::new();
     let (portfolio, init_portfolio_cu) = env.create_portfolio_with_cu(&owner);
     let (_source, deposit_cu) = env.deposit_with_cu(&owner, portfolio, 1_000);
@@ -1075,7 +1079,7 @@ fn v14_cu_custody_and_resolution_paths_are_bounded() {
     let (_resolved_dest, close_resolved_cu) = env.close_resolved_with_cu(&owner, portfolio);
 
     println!(
-        "v14 custody CU init_portfolio={init_portfolio_cu}, deposit={deposit_cu}, withdraw={withdraw_cu}, top_up={top_up_cu}, withdraw_insurance={withdraw_insurance_cu}, resolve={resolve_cu}, close_resolved={close_resolved_cu}"
+        "v16 custody CU init_portfolio={init_portfolio_cu}, deposit={deposit_cu}, withdraw={withdraw_cu}, top_up={top_up_cu}, withdraw_insurance={withdraw_insurance_cu}, resolve={resolve_cu}, close_resolved={close_resolved_cu}"
     );
     for (name, cu) in [
         ("init_portfolio", init_portfolio_cu),
@@ -1097,8 +1101,8 @@ fn v14_cu_custody_and_resolution_paths_are_bounded() {
 }
 
 #[test]
-fn v14_cu_permissionless_crank_refresh_is_bounded() {
-    let mut env = V14CuEnv::new();
+fn v16_cu_permissionless_crank_refresh_is_bounded() {
+    let mut env = V16CuEnv::new();
     let owner = Keypair::new();
     let portfolio = env.create_portfolio(&owner);
     env.deposit(&owner, portfolio, 1_000_000);
@@ -1116,13 +1120,13 @@ fn v14_cu_permissionless_crank_refresh_is_bounded() {
             recovery_reason: 0,
         },
     );
-    println!("v14 refresh crank CU: {refresh_cu}");
+    println!("v16 refresh crank CU: {refresh_cu}");
     assert!(refresh_cu <= CRANK_CU_LIMIT);
 }
 
 #[test]
-fn v14_bpf_permissionless_crank_uses_authenticated_clock_slot_not_caller_slot() {
-    let mut env = V14CuEnv::new();
+fn v16_bpf_permissionless_crank_uses_authenticated_clock_slot_not_caller_slot() {
+    let mut env = V16CuEnv::new();
     let owner = Keypair::new();
     let portfolio = env.create_portfolio(&owner);
     env.deposit(&owner, portfolio, 1_000_000);
@@ -1159,8 +1163,8 @@ fn v14_bpf_permissionless_crank_uses_authenticated_clock_slot_not_caller_slot() 
 }
 
 #[test]
-fn v14_bpf_configure_hybrid_oracle_uses_authenticated_clock_slot_not_caller_slot() {
-    let mut env = V14CuEnv::new();
+fn v16_bpf_configure_hybrid_oracle_uses_authenticated_clock_slot_not_caller_slot() {
+    let mut env = V16CuEnv::new();
     let real_slot = 10;
     let spoofed_slot = 1_000_000;
     env.svm.warp_to_slot(real_slot);
@@ -1198,8 +1202,8 @@ fn v14_bpf_configure_hybrid_oracle_uses_authenticated_clock_slot_not_caller_slot
 }
 
 #[test]
-fn v14_bpf_configure_hybrid_oracle_uses_authenticated_unix_time_not_caller_time() {
-    let mut env = V14CuEnv::new();
+fn v16_bpf_configure_hybrid_oracle_uses_authenticated_unix_time_not_caller_time() {
+    let mut env = V16CuEnv::new();
     env.svm.warp_to_slot(10);
     let mut clock = env.svm.get_sysvar::<Clock>();
     clock.unix_timestamp = 1_000;
@@ -1228,8 +1232,8 @@ fn v14_bpf_configure_hybrid_oracle_uses_authenticated_unix_time_not_caller_time(
 }
 
 #[test]
-fn v14_cu_crank_cost_is_account_local_after_many_portfolios() {
-    let mut env = V14CuEnv::new();
+fn v16_cu_crank_cost_is_account_local_after_many_portfolios() {
+    let mut env = V16CuEnv::new();
     let owner = Keypair::new();
     let portfolio = env.create_portfolio(&owner);
     env.deposit(&owner, portfolio, 1_000_000);
@@ -1269,12 +1273,12 @@ fn v14_cu_crank_cost_is_account_local_after_many_portfolios() {
         },
     );
     println!(
-        "v14 refresh crank CU before extra portfolios: {before_extra}, after 64 extras: {after_extra}"
+        "v16 refresh crank CU before extra portfolios: {before_extra}, after 64 extras: {after_extra}"
     );
 
     assert!(after_extra <= CRANK_CU_LIMIT);
     assert!(
         after_extra.saturating_sub(before_extra) < 10_000,
-        "v14 crank should stay account-local rather than scaling with materialized portfolio count"
+        "v16 crank should stay account-local rather than scaling with materialized portfolio count"
     );
 }

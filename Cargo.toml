@@ -7,7 +7,7 @@ publish = false
 [lib]
 crate-type = ["cdylib", "lib"]
 name = "percolator_prog"
-path = "src/v14_program.rs"
+path = "src/v16_program.rs"
 
 [features]
 # Keep the deployable default compatible with Solana's bundled cargo-build-sbf
@@ -52,7 +52,7 @@ pinocchio = "0.6"
 arrayref = "0.3"
 num-derive = "0.4"
 num-traits = "0.2"
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "1ed807e387738674471970d9dcc3d95da8f68659" }
+percolator = { path = "../percolator" }
 anchor-lang-v2 = { git = "https://github.com/solana-foundation/anchor", rev = "e3cf760826fa0a60f247635ea0572e59861ec9b5", package = "anchor-lang-v2", default-features = false, features = ["alloc", "guardrails"], optional = true }
 
 [dev-dependencies]
