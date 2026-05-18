@@ -1,5 +1,5 @@
 use litesvm::LiteSVM;
-use percolator::POS_SCALE;
+use percolator::{BackingBucketStatusV16, BOUND_SCALE, POS_SCALE};
 use percolator_prog::{
     constants::{
         MARKET_ACCOUNT_LEN, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
@@ -706,6 +706,11 @@ impl V16CuEnv {
         self.top_up_insurance_with_cu(amount).0
     }
 
+    fn top_up_backing_bucket(&mut self, domain: u8, amount: u128, expiry_slot: u64) -> Pubkey {
+        self.top_up_backing_bucket_with_cu(domain, amount, expiry_slot)
+            .0
+    }
+
     fn top_up_insurance_with_cu(&mut self, amount: u128) -> (Pubkey, u64) {
         let source = Pubkey::new_unique();
         self.svm
@@ -735,6 +740,47 @@ impl V16CuEnv {
             &[&self.admin],
         )
         .expect("top up insurance");
+        (source, cu)
+    }
+
+    fn top_up_backing_bucket_with_cu(
+        &mut self,
+        domain: u8,
+        amount: u128,
+        expiry_slot: u64,
+    ) -> (Pubkey, u64) {
+        let source = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                source,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(self.mint, self.admin.pubkey(), amount as u64),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let cu = send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::TopUpBackingBucket {
+                domain,
+                amount,
+                expiry_slot,
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("top up backing bucket");
         (source, cu)
     }
 
@@ -889,13 +935,35 @@ fn v16_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
     assert_eq!(group.insurance, 250);
     assert_eq!(group.vault, 850);
 
+    let backing_source = env.top_up_backing_bucket(1, 300, 10);
+    assert_eq!(env.token_amount(backing_source), 0);
+    assert_eq!(env.token_amount(env.vault), 1_150);
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    assert_eq!(group.insurance, 250);
+    assert_eq!(group.vault, 1_150);
+    assert_eq!(group.c_tot, 600);
+    assert_eq!(
+        group.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Fresh
+    );
+    assert_eq!(group.source_backing_buckets[1].expiry_slot, 10);
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num,
+        300 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.source_credit[1].fresh_reserved_backing_num,
+        300 * BOUND_SCALE
+    );
+
     let (insurance_dest, _withdraw_insurance_cu) = env.withdraw_insurance_with_cu(100);
     assert_eq!(env.token_amount(insurance_dest), 100);
-    assert_eq!(env.token_amount(env.vault), 750);
+    assert_eq!(env.token_amount(env.vault), 1_050);
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let (_, group) = state::read_market(&market_data).unwrap();
     assert_eq!(group.insurance, 150);
-    assert_eq!(group.vault, 750);
+    assert_eq!(group.vault, 1_050);
     assert_eq!(group.c_tot, 600);
 }
 

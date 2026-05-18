@@ -14,8 +14,8 @@ use percolator::{
     InsuranceCreditReservationV16, MarketGroupV16, MarketModeV16, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PortfolioAccountV16, PortfolioLegV16, ProvenanceHeaderV16,
     ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16,
-    SourceCreditStateV16, TradeOutcomeV16, TradeRequestV16, V16Config, V16Error, V16_DOMAIN_COUNT,
-    V16_MAX_PORTFOLIO_ASSETS_N,
+    SourceCreditStateV16, TradeOutcomeV16, TradeRequestV16, V16Config, V16Error, BOUND_SCALE,
+    V16_DOMAIN_COUNT, V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use solana_program::{
     account_info::AccountInfo,
@@ -42,7 +42,7 @@ pub mod constants {
     pub const KIND_PORTFOLIO: u8 = 2;
 
     pub const HEADER_LEN: usize = 16;
-    pub const WRAPPER_CONFIG_LEN: usize = 464;
+    pub const WRAPPER_CONFIG_LEN: usize = 496;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16Account>();
     pub const PORTFOLIO_STATE_LEN: usize = size_of::<PortfolioAccountV16Account>();
     pub const MARKET_GROUP_OFF: usize = HEADER_LEN + WRAPPER_CONFIG_LEN;
@@ -163,6 +163,7 @@ pub mod state {
         pub last_good_oracle_slot: u64,
         pub insurance_authority: [u8; 32],
         pub insurance_operator: [u8; 32],
+        pub backing_bucket_authority: [u8; 32],
         pub hyperp_mark_authority: [u8; 32],
         pub insurance_withdraw_deposit_remaining: u128,
         pub insurance_withdraw_max_bps: u16,
@@ -926,6 +927,11 @@ pub mod ix {
         WithdrawInsuranceLimited {
             amount: u128,
         },
+        TopUpBackingBucket {
+            domain: u8,
+            amount: u128,
+            expiry_slot: u64,
+        },
         ConvertReleasedPnl {
             amount: u128,
         },
@@ -1042,6 +1048,11 @@ pub mod ix {
                 19 => Self::ResolveMarket,
                 23 => Self::WithdrawInsuranceLimited {
                     amount: read_u128(&mut rest)?,
+                },
+                24 => Self::TopUpBackingBucket {
+                    domain: read_u8(&mut rest)?,
+                    amount: read_u128(&mut rest)?,
+                    expiry_slot: read_u64(&mut rest)?,
                 },
                 28 => Self::ConvertReleasedPnl {
                     amount: read_u128(&mut rest)?,
@@ -1214,6 +1225,16 @@ pub mod ix {
                 Self::WithdrawInsuranceLimited { amount } => {
                     out.push(23);
                     push_u128(&mut out, amount);
+                }
+                Self::TopUpBackingBucket {
+                    domain,
+                    amount,
+                    expiry_slot,
+                } => {
+                    out.push(24);
+                    out.push(domain);
+                    push_u128(&mut out, amount);
+                    push_u64(&mut out, expiry_slot);
                 }
                 Self::ConvertReleasedPnl { amount } => {
                     out.push(28);
@@ -1889,6 +1910,7 @@ pub mod processor {
     pub const AUTHORITY_ADMIN: u8 = 0;
     pub const AUTHORITY_HYPERP_MARK: u8 = 1;
     pub const AUTHORITY_INSURANCE: u8 = 2;
+    pub const AUTHORITY_BACKING_BUCKET: u8 = 3;
     pub const AUTHORITY_INSURANCE_OPERATOR: u8 = 4;
 
     fn authenticated_slot_or_fallback(fallback_slot: u64) -> u64 {
@@ -2023,6 +2045,11 @@ pub mod processor {
             Instruction::WithdrawInsuranceLimited { amount } => {
                 handle_withdraw_insurance_limited(program_id, accounts, amount)
             }
+            Instruction::TopUpBackingBucket {
+                domain,
+                amount,
+                expiry_slot,
+            } => handle_top_up_backing_bucket(program_id, accounts, domain, amount, expiry_slot),
             Instruction::ConvertReleasedPnl { amount } => {
                 handle_convert_released_pnl(program_id, accounts, amount)
             }
@@ -2174,6 +2201,7 @@ pub mod processor {
             last_good_oracle_slot: Clock::get().map(|c| c.slot).unwrap_or(0),
             insurance_authority: admin.key.to_bytes(),
             insurance_operator: admin.key.to_bytes(),
+            backing_bucket_authority: admin.key.to_bytes(),
             hyperp_mark_authority: admin.key.to_bytes(),
             insurance_withdraw_deposit_remaining: 0,
             insurance_withdraw_max_bps: 10_000,
@@ -2695,6 +2723,59 @@ pub mod processor {
     }
 
     #[inline(never)]
+    fn handle_top_up_backing_bucket<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        domain: u8,
+        amount: u128,
+        expiry_slot: u64,
+    ) -> ProgramResult {
+        let signer = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let source_token = account(accounts, 2)?;
+        let vault_token = account(accounts, 3)?;
+        let token_program = account(accounts, 4)?;
+        expect_signer(signer)?;
+        expect_writable(market_ai)?;
+        expect_writable(source_token)?;
+        expect_writable(vault_token)?;
+        expect_owner(market_ai, program_id)?;
+        verify_token_program(token_program)?;
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if group.mode != MarketModeV16::Live {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        if cfg.backing_bucket_authority != signer.key.to_bytes() {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        let mint = Pubkey::new_from_array(cfg.collateral_mint);
+        let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
+        verify_user_token_account(source_token, signer.key, &mint)?;
+        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+        let amount_u64 = amount_to_u64(amount)?;
+        require_token_balance(source_token, amount_u64)?;
+        if amount != 0 {
+            let backing_num = amount
+                .checked_mul(BOUND_SCALE)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            group.vault = group
+                .vault
+                .checked_add(amount)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            group
+                .add_fresh_counterparty_backing_not_atomic(
+                    domain as usize,
+                    backing_num,
+                    expiry_slot,
+                )
+                .map_err(map_v16_error)?;
+            group.assert_public_invariants().map_err(map_v16_error)?;
+        }
+        transfer_tokens(token_program, source_token, vault_token, signer, amount_u64)?;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+    }
+
+    #[inline(never)]
     fn handle_close_slab<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
@@ -2982,6 +3063,12 @@ pub mod processor {
                     return Err(PercolatorError::Unauthorized.into());
                 }
                 cfg.insurance_authority = new_pubkey;
+            }
+            AUTHORITY_BACKING_BUCKET => {
+                if cfg.backing_bucket_authority != current.key.to_bytes() {
+                    return Err(PercolatorError::Unauthorized.into());
+                }
+                cfg.backing_bucket_authority = new_pubkey;
             }
             AUTHORITY_INSURANCE_OPERATOR => {
                 if cfg.insurance_operator != current.key.to_bytes() {

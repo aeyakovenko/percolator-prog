@@ -148,6 +148,34 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
+    let domain: u8 = kani::any();
+    let amount_raw: u16 = kani::any();
+    let expiry_raw: u16 = kani::any();
+    let amount = amount_raw as u128;
+    let expiry_slot = expiry_raw as u64;
+
+    let mut data = [0u8; 26];
+    data[0] = 24;
+    data[1] = domain;
+    data[2..18].copy_from_slice(&amount.to_le_bytes());
+    data[18..26].copy_from_slice(&expiry_slot.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::TopUpBackingBucket {
+            domain: got_domain,
+            amount: got_amount,
+            expiry_slot: got_expiry,
+        } => {
+            assert_eq!(got_domain, domain);
+            assert_eq!(got_amount, amount);
+            assert_eq!(got_expiry, expiry_slot);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
 fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
     let asset_index: u8 = kani::any();
     let size_raw: i16 = kani::any();
@@ -633,6 +661,15 @@ fn kani_v16_every_active_payload_rejects_trailing_byte() {
     top_up.push(extra);
     assert!(Instruction::decode(&top_up).is_err());
 
+    let mut top_up_backing = Instruction::TopUpBackingBucket {
+        domain: 1,
+        amount: 1,
+        expiry_slot: 10,
+    }
+    .encode();
+    top_up_backing.push(extra);
+    assert!(Instruction::decode(&top_up_backing).is_err());
+
     let mut close_slab = Instruction::CloseSlab.encode();
     close_slab.push(extra);
     assert!(Instruction::decode(&close_slab).is_err());
@@ -745,6 +782,7 @@ fn kani_v16_unknown_or_truncated_tags_reject() {
     kani::assume(tag != 13);
     kani::assume(tag != 19);
     kani::assume(tag != 23);
+    kani::assume(tag != 24);
     kani::assume(tag != 28);
     kani::assume(tag != 30);
     kani::assume(tag != 32);
@@ -789,6 +827,9 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
 
     let top_up = [9u8; 16];
     assert!(Instruction::decode(&top_up).is_err());
+
+    let top_up_backing = [24u8; 25];
+    assert!(Instruction::decode(&top_up_backing).is_err());
 
     let withdraw_insurance = [23u8; 16];
     assert!(Instruction::decode(&withdraw_insurance).is_err());

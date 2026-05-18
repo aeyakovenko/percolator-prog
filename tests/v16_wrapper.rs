@@ -1,6 +1,6 @@
 use percolator::{
-    MarketGroupV16, MarketGroupV16Account, MarketModeV16, PermissionlessRecoveryReasonV16,
-    PortfolioAccountV16Account, V16Config, POS_SCALE,
+    BackingBucketStatusV16, MarketGroupV16, MarketGroupV16Account, MarketModeV16,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, V16Config, BOUND_SCALE, POS_SCALE,
 };
 use percolator_prog::{
     constants::{
@@ -1147,6 +1147,164 @@ fn v16_wrapper_top_up_insurance_rejects_wrong_mint_and_insufficient_source_balan
         ],
     );
     assert_err_and_market_unchanged(short_balance, &market, &before);
+}
+
+#[test]
+fn v16_wrapper_top_up_backing_bucket_uses_separate_authority_and_domain_ledger() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut bucket_authority = signer();
+    let mut attacker = signer();
+
+    let mint = init_market(&mut admin, &mut market);
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_BACKING_BUCKET,
+            new_pubkey: bucket_authority.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut bucket_authority, &mut market],
+    )
+    .unwrap();
+
+    let before = market.data.clone();
+    let mut attacker_src = user_token_account(attacker.key, mint, 100);
+    let mut vault = vault_token_account(&market, mint, 0);
+    let mut token_program = token_program_account();
+    let unauthorized = run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 100,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut attacker,
+            &mut market,
+            &mut attacker_src,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(unauthorized, &market, &before);
+
+    let mut source = user_token_account(bucket_authority.key, mint, 100);
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 100,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut bucket_authority,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        cfg.backing_bucket_authority,
+        bucket_authority.key.to_bytes()
+    );
+    assert_eq!(group.insurance, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(group.vault, 100);
+    assert_eq!(
+        group.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Fresh
+    );
+    assert_eq!(group.source_backing_buckets[1].expiry_slot, 10);
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num,
+        100 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.source_credit[1].fresh_reserved_backing_num,
+        100 * BOUND_SCALE
+    );
+
+    let before_bad_domain = market.data.clone();
+    let mut source = user_token_account(bucket_authority.key, mint, 1);
+    let bad_domain = run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 32,
+            amount: 1,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut bucket_authority,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(bad_domain, &market, &before_bad_domain);
+
+    let before_inactive_domain = market.data.clone();
+    let mut source = user_token_account(bucket_authority.key, mint, 1);
+    let inactive_domain = run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 2,
+            amount: 1,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut bucket_authority,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(inactive_domain, &market, &before_inactive_domain);
+
+    let before_bad_expiry = market.data.clone();
+    let mut source = user_token_account(bucket_authority.key, mint, 1);
+    let bad_expiry = run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 1,
+            expiry_slot: 0,
+        },
+        &mut [
+            &mut bucket_authority,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(bad_expiry, &market, &before_bad_expiry);
+
+    let mut zero_new = TestAccount::new(Pubkey::default(), Pubkey::new_unique(), 0);
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_BACKING_BUCKET,
+            new_pubkey: [0u8; 32],
+        },
+        &mut [&mut bucket_authority, &mut zero_new, &mut market],
+    )
+    .unwrap();
+    let burned = market.data.clone();
+    let mut source = user_token_account(bucket_authority.key, mint, 1);
+    let after_burn = run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 1,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut bucket_authority,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(after_burn, &market, &burned);
 }
 
 #[test]
@@ -2660,6 +2818,24 @@ fn v16_wrapper_token_accounts_must_be_initialized_for_custody_paths() {
     );
     assert_err_and_market_unchanged(frozen_topup_vault, &market, &before_market);
     assert_eq!(portfolio.data, before_portfolio);
+
+    let mut admin_source = user_token_account(admin.key, mint, 1_000);
+    let frozen_backing_vault = run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 1,
+            expiry_slot: 1,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut admin_source,
+            &mut frozen_vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(frozen_backing_vault, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
 }
 
 #[test]
@@ -2724,6 +2900,24 @@ fn v16_wrapper_spl_u64_amount_limit_rejects_before_mutation() {
     );
     assert_err_and_market_unchanged(topup_too_large, &market, &before_market);
     assert_eq!(portfolio.data, before_portfolio);
+
+    let mut admin_source = user_token_account(admin.key, mint, u64::MAX);
+    let backing_too_large = run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 1,
+            amount: too_large,
+            expiry_slot: 1,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut admin_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(backing_too_large, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
 }
 
 #[test]
@@ -2779,6 +2973,25 @@ fn v16_wrapper_zero_amount_custody_paths_are_noop_without_state_drift() {
     let mut admin_source = user_token_account(admin.key, mint, 0);
     run_ix(
         Instruction::TopUpInsurance { amount: 0 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut admin_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    assert_eq!(market.data, before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+
+    let mut admin_source = user_token_account(admin.key, mint, 0);
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 0,
+            expiry_slot: 1,
+        },
         &mut [
             &mut admin,
             &mut market,
