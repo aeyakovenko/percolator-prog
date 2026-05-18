@@ -300,16 +300,17 @@ fn write_matcher_return(
     exec_size: i128,
     req_id: u64,
     lp_account_id: u64,
+    asset_index: u8,
     oracle_price_e6: u64,
 ) {
-    matcher_context.data[0..4].copy_from_slice(&2u32.to_le_bytes());
+    matcher_context.data[0..4].copy_from_slice(&3u32.to_le_bytes());
     matcher_context.data[4..8].copy_from_slice(&3u32.to_le_bytes());
     matcher_context.data[8..16].copy_from_slice(&exec_price_e6.to_le_bytes());
     matcher_context.data[16..32].copy_from_slice(&exec_size.to_le_bytes());
     matcher_context.data[32..40].copy_from_slice(&req_id.to_le_bytes());
     matcher_context.data[40..48].copy_from_slice(&lp_account_id.to_le_bytes());
     matcher_context.data[48..56].copy_from_slice(&oracle_price_e6.to_le_bytes());
-    matcher_context.data[56..64].copy_from_slice(&0u64.to_le_bytes());
+    matcher_context.data[56..64].copy_from_slice(&(asset_index as u64).to_le_bytes());
 }
 
 fn run_trade_cpi_with_matcher(
@@ -341,6 +342,7 @@ fn run_trade_cpi_with_matcher(
         exec_size,
         req_id,
         lp_account_id,
+        asset_index,
         group.assets[asset_index as usize].effective_price,
     );
     run_ix(
@@ -395,6 +397,43 @@ fn pyth_account(
         oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
         make_pyth(feed_id, price, expo, conf, publish_time),
     )
+}
+
+fn switchboard_account(
+    key: Pubkey,
+    price_e6: u64,
+    std_dev_e6: u64,
+    publish_time: i64,
+) -> TestAccount {
+    let mut data = vec![0u8; 3_208];
+    data[0..8].copy_from_slice(&[196, 27, 108, 196, 10, 215, 219, 40]);
+    data[2_120..2_152].copy_from_slice(&[0x5au8; 32]);
+    data[2_215] = 1;
+    data[2_216..2_224].copy_from_slice(&publish_time.to_le_bytes());
+    let value = (price_e6 as i128) * 1_000_000_000_000i128;
+    let std_dev = (std_dev_e6 as i128) * 1_000_000_000_000i128;
+    data[2_264..2_280].copy_from_slice(&value.to_le_bytes());
+    data[2_280..2_296].copy_from_slice(&std_dev.to_le_bytes());
+    data[2_360] = 1;
+    data[2_368..2_376].copy_from_slice(&1u64.to_le_bytes());
+    TestAccount::new_with_data(
+        key,
+        oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+        data,
+    )
+}
+
+fn chainlink_account(key: Pubkey, answer: i128, decimals: u8, publish_time: u32) -> TestAccount {
+    let mut data = vec![0u8; 248];
+    data[0..8].copy_from_slice(&[96, 179, 69, 66, 128, 129, 73, 117]);
+    data[8] = 1;
+    data[138] = decimals;
+    data[143..147].copy_from_slice(&1u32.to_le_bytes());
+    data[148..152].copy_from_slice(&1u32.to_le_bytes());
+    data[200..208].copy_from_slice(&1u64.to_le_bytes());
+    data[208..212].copy_from_slice(&publish_time.to_le_bytes());
+    data[216..232].copy_from_slice(&answer.to_le_bytes());
+    TestAccount::new_with_data(key, oracle_v16::CHAINLINK_STORE_PROGRAM_ID, data)
 }
 
 fn two_sided_fee(size_q: u128, price: u64, fee_bps: u64) -> u128 {
@@ -3619,6 +3658,199 @@ fn v16_wrapper_configure_hybrid_oracle_composes_toto_sol_cross_and_rejects_rollb
 }
 
 #[test]
+fn v16_wrapper_hybrid_oracle_accepts_switchboard_and_chainlink_legs() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        default_init_market_ix(),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    let switchboard_key = Pubkey::new_unique();
+    let chainlink_key = Pubkey::new_unique();
+    let mut switchboard = switchboard_account(switchboard_key, 4_000_000_000, 10_000, 100);
+    let mut chainlink = chainlink_account(chainlink_key, 150_000_000_000, 8, 100);
+    run_ix(
+        Instruction::ConfigureHybridOracle {
+            now_slot: 1,
+            now_unix_ts: 100,
+            oracle_leg_count: 2,
+            oracle_leg_flags: ORACLE_LEG_FLAG_DIVIDE_LEG2,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 10,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: [
+                switchboard_key.to_bytes(),
+                chainlink_key.to_bytes(),
+                [0u8; 32],
+            ],
+        },
+        &mut [&mut admin, &mut market, &mut switchboard, &mut chainlink],
+    )
+    .unwrap();
+
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.oracle_leg_count, 2);
+    assert_eq!(cfg.oracle_leg_prices_e6, [4_000_000_000, 1_500_000_000, 0]);
+    assert_eq!(cfg.oracle_target_price_e6, 2_666_666);
+    assert_eq!(group.assets[0].effective_price, 2_666_666);
+}
+
+#[test]
+fn v16_wrapper_switchboard_oracle_rejects_wrong_key_stale_and_conf_wide() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        default_init_market_ix(),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    let feed_key = Pubkey::new_unique();
+    let before = market.data.clone();
+    let mut wrong_key = switchboard_account(Pubkey::new_unique(), 100_000_000, 0, 100);
+    let wrong_key_result = run_ix(
+        Instruction::ConfigureHybridOracle {
+            now_slot: 1,
+            now_unix_ts: 100,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 10,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: [feed_key.to_bytes(), [0u8; 32], [0u8; 32]],
+        },
+        &mut [&mut admin, &mut market, &mut wrong_key],
+    );
+    assert_err_and_market_unchanged(wrong_key_result, &market, &before);
+
+    let mut stale = switchboard_account(feed_key, 100_000_000, 0, 39);
+    let stale_result = run_ix(
+        Instruction::ConfigureHybridOracle {
+            now_slot: 1,
+            now_unix_ts: 100,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 10,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: [feed_key.to_bytes(), [0u8; 32], [0u8; 32]],
+        },
+        &mut [&mut admin, &mut market, &mut stale],
+    );
+    assert_err_and_market_unchanged(stale_result, &market, &before);
+
+    let mut wide = switchboard_account(feed_key, 100_000_000, 6_000_000, 100);
+    let conf_result = run_ix(
+        Instruction::ConfigureHybridOracle {
+            now_slot: 1,
+            now_unix_ts: 100,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 10,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: [feed_key.to_bytes(), [0u8; 32], [0u8; 32]],
+        },
+        &mut [&mut admin, &mut market, &mut wide],
+    );
+    assert_err_and_market_unchanged(conf_result, &market, &before);
+}
+
+#[test]
+fn v16_wrapper_chainlink_oracle_rejects_wrong_key_stale_and_bad_answer() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        default_init_market_ix(),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    let feed_key = Pubkey::new_unique();
+    let before = market.data.clone();
+    let mut wrong_key = chainlink_account(Pubkey::new_unique(), 100_000_000, 6, 100);
+    let wrong_key_result = run_ix(
+        Instruction::ConfigureHybridOracle {
+            now_slot: 1,
+            now_unix_ts: 100,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 10,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: [feed_key.to_bytes(), [0u8; 32], [0u8; 32]],
+        },
+        &mut [&mut admin, &mut market, &mut wrong_key],
+    );
+    assert_err_and_market_unchanged(wrong_key_result, &market, &before);
+
+    let mut stale = chainlink_account(feed_key, 100_000_000, 6, 39);
+    let stale_result = run_ix(
+        Instruction::ConfigureHybridOracle {
+            now_slot: 1,
+            now_unix_ts: 100,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 10,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: [feed_key.to_bytes(), [0u8; 32], [0u8; 32]],
+        },
+        &mut [&mut admin, &mut market, &mut stale],
+    );
+    assert_err_and_market_unchanged(stale_result, &market, &before);
+
+    let mut bad_answer = chainlink_account(feed_key, 0, 6, 100);
+    let bad_result = run_ix(
+        Instruction::ConfigureHybridOracle {
+            now_slot: 1,
+            now_unix_ts: 100,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 10,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: [feed_key.to_bytes(), [0u8; 32], [0u8; 32]],
+        },
+        &mut [&mut admin, &mut market, &mut bad_answer],
+    );
+    assert_err_and_market_unchanged(bad_result, &market, &before);
+}
+
+#[test]
 fn v16_wrapper_configure_hybrid_oracle_allows_empty_portfolio_grief_without_blocking_setup() {
     let mut admin = signer();
     let mut market = market_account();
@@ -5170,6 +5402,67 @@ fn v16_wrapper_tradecpi_rejects_wrong_delegate_and_unsafe_tail_before_cpi() {
 }
 
 #[test]
+fn v16_wrapper_tradecpi_rejects_wrong_asset_echo_from_matcher() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut account_a = portfolio_account();
+    let mut account_b = portfolio_account();
+    let mut matcher_program = matcher_program_account();
+    let mut matcher_context = matcher_context_account(&matcher_program);
+    let mut delegate =
+        matcher_delegate_account(&market, &account_b, &matcher_program, &matcher_context);
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner_a, &mut market, &mut account_a);
+    init_portfolio(&mut owner_b, &mut market, &mut account_b);
+    deposit(&mut owner_a, &mut market, &mut account_a, 1_000_000);
+    deposit(&mut owner_b, &mut market, &mut account_b, 1_000_000);
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let req_id = group.current_slot.wrapping_add(1);
+    let lp_account_id = {
+        let bytes = delegate.key.to_bytes();
+        u64::from_le_bytes(bytes[0..8].try_into().unwrap())
+    };
+    write_matcher_return(
+        &mut matcher_context,
+        100,
+        POS_SCALE as i128,
+        req_id,
+        lp_account_id,
+        1,
+        100,
+    );
+
+    let before_market = market.data.clone();
+    let before_a = account_a.data.clone();
+    let before_b = account_b.data.clone();
+    let rejected = run_ix(
+        Instruction::TradeCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            fee_bps: 0,
+            limit_price: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+            &mut matcher_program,
+            &mut matcher_context,
+            &mut delegate,
+        ],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before_market);
+    assert_eq!(account_a.data, before_a);
+    assert_eq!(account_b.data, before_b);
+}
+
+#[test]
 fn v16_wrapper_tradecpi_zero_fill_rejects_resolved_market_before_success() {
     let mut admin = signer();
     let mut market = market_account();
@@ -5193,7 +5486,7 @@ fn v16_wrapper_tradecpi_zero_fill_rejects_resolved_market_before_success() {
         let bytes = delegate.key.to_bytes();
         u64::from_le_bytes(bytes[0..8].try_into().unwrap())
     };
-    write_matcher_return(&mut matcher_context, 100, 0, req_id, lp_account_id, 100);
+    write_matcher_return(&mut matcher_context, 100, 0, req_id, lp_account_id, 0, 100);
 
     let before_market = market.data.clone();
     let before_a = account_a.data.clone();
@@ -5243,7 +5536,7 @@ fn v16_wrapper_tradecpi_zero_fill_rejects_fee_above_cap_before_success() {
         let bytes = delegate.key.to_bytes();
         u64::from_le_bytes(bytes[0..8].try_into().unwrap())
     };
-    write_matcher_return(&mut matcher_context, 100, 0, req_id, lp_account_id, 100);
+    write_matcher_return(&mut matcher_context, 100, 0, req_id, lp_account_id, 0, 100);
 
     let before_market = market.data.clone();
     let before_a = account_a.data.clone();

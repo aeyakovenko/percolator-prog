@@ -248,6 +248,7 @@ fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
     let price_raw: u16 = kani::any();
     let req_id_raw: u16 = kani::any();
     let lp_raw: u16 = kani::any();
+    let asset_index: u8 = kani::any();
     let flags: u32 = kani::any();
     kani::assume(req_raw != 0);
     kani::assume(req_raw != i16::MIN);
@@ -265,10 +266,19 @@ fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
         req_id,
         lp_account_id,
         oracle_price_e6: oracle_price,
-        reserved: 0,
+        asset_index: asset_index as u64,
     };
 
-    if validate_matcher_return(&ret, lp_account_id, oracle_price, req_size, req_id).is_ok() {
+    if validate_matcher_return(
+        &ret,
+        lp_account_id,
+        asset_index,
+        oracle_price,
+        req_size,
+        req_id,
+    )
+    .is_ok()
+    {
         assert!((flags & FLAG_VALID) != 0);
         assert!((flags & FLAG_REJECTED) == 0);
         if exec_size == 0 {

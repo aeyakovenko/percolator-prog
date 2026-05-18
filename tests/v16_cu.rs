@@ -2,8 +2,8 @@ use litesvm::LiteSVM;
 use percolator::{BackingBucketStatusV16, BOUND_SCALE, POS_SCALE};
 use percolator_prog::{
     constants::{
-        MARKET_ACCOUNT_LEN, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
-        PORTFOLIO_ACCOUNT_LEN,
+        MARKET_ACCOUNT_LEN, MATCHER_ABI_VERSION, ORACLE_LEG_FLAG_DIVIDE_LEG2,
+        ORACLE_LEG_FLAG_DIVIDE_LEG3, PORTFOLIO_ACCOUNT_LEN,
     },
     ix::Instruction as ProgInstruction,
     oracle_v16, state,
@@ -1058,6 +1058,7 @@ fn v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let taker_data = env.svm.get_account(&taker_account).unwrap().data;
     let maker_data = env.svm.get_account(&maker_account).unwrap().data;
+    let matcher_data = env.svm.get_account(&matcher_ctx).unwrap().data;
     let (_, group) = state::read_market(&market_data).unwrap();
     let taker = state::read_portfolio(&taker_data).unwrap();
     let maker = state::read_portfolio(&maker_data).unwrap();
@@ -1071,6 +1072,16 @@ fn v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
     assert_eq!(
         group.insurance, 20,
         "passive matcher fills at oracle price; 100 bps charges 10 to each side"
+    );
+    assert_eq!(
+        u32::from_le_bytes(matcher_data[0..4].try_into().unwrap()),
+        MATCHER_ABI_VERSION,
+        "LiteSVM matcher path must use the same ABI version as the wrapper"
+    );
+    assert_eq!(
+        u64::from_le_bytes(matcher_data[56..64].try_into().unwrap()),
+        0,
+        "matcher must echo the requested asset index in the v3 return slot"
     );
     assert_eq!(group.c_tot + group.insurance, group.vault);
 }

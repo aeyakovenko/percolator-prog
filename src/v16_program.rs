@@ -49,7 +49,7 @@ pub mod constants {
     pub const MARKET_ACCOUNT_LEN: usize = MARKET_GROUP_OFF + MARKET_GROUP_LEN;
     pub const PORTFOLIO_ACCOUNT_LEN: usize = HEADER_LEN + PORTFOLIO_STATE_LEN;
     pub const MAX_MATCHER_TAIL_ACCOUNTS: usize = 32;
-    pub const MATCHER_ABI_VERSION: u32 = 2;
+    pub const MATCHER_ABI_VERSION: u32 = 3;
     pub const MATCHER_CONTEXT_MIN_LEN: usize = 64;
     pub const ORACLE_LEG_CAP: usize = 3;
     pub const ORACLE_MODE_MANUAL: u8 = 0;
@@ -58,6 +58,7 @@ pub mod constants {
     pub const ORACLE_LEG_FLAG_DIVIDE_LEG2: u8 = 1 << 0;
     pub const ORACLE_LEG_FLAG_DIVIDE_LEG3: u8 = 1 << 1;
     pub const ORACLE_LEG_FLAGS_MASK: u8 = ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3;
+    pub const SWITCHBOARD_RESULT_SCALE: u128 = 1_000_000_000_000;
     pub const DEFAULT_MARK_EWMA_HALFLIFE_SLOTS: u64 = 600;
     pub const MAX_DYNAMIC_TRADE_FEE_BPS: u64 = 10_000;
     pub const MIN_INSURANCE_WITHDRAW_FLOOR_UNITS: u128 = 10;
@@ -1426,7 +1427,7 @@ pub mod matcher_abi {
         pub req_id: u64,
         pub lp_account_id: u64,
         pub oracle_price_e6: u64,
-        pub reserved: u64,
+        pub asset_index: u64,
     }
 
     pub fn read_matcher_return(ctx: &[u8]) -> Result<MatcherReturn, ProgramError> {
@@ -1441,13 +1442,14 @@ pub mod matcher_abi {
             req_id: u64::from_le_bytes(ctx[32..40].try_into().unwrap()),
             lp_account_id: u64::from_le_bytes(ctx[40..48].try_into().unwrap()),
             oracle_price_e6: u64::from_le_bytes(ctx[48..56].try_into().unwrap()),
-            reserved: u64::from_le_bytes(ctx[56..64].try_into().unwrap()),
+            asset_index: u64::from_le_bytes(ctx[56..64].try_into().unwrap()),
         })
     }
 
     pub fn validate_matcher_return(
         ret: &MatcherReturn,
         lp_account_id: u64,
+        asset_index: u8,
         oracle_price_e6: u64,
         req_size: i128,
         req_id: u64,
@@ -1464,7 +1466,7 @@ pub mod matcher_abi {
         }
         if ret.lp_account_id != lp_account_id
             || ret.oracle_price_e6 != oracle_price_e6
-            || ret.reserved != 0
+            || ret.asset_index != asset_index as u64
             || ret.req_id != req_id
             || ret.exec_price_e6 == 0
         {
@@ -1499,7 +1501,7 @@ pub mod oracle_v16 {
         constants::{
             ORACLE_LEG_CAP, ORACLE_LEG_FLAGS_MASK, ORACLE_LEG_FLAG_DIVIDE_LEG2,
             ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_HYPERP,
-            ORACLE_MODE_MANUAL,
+            ORACLE_MODE_MANUAL, SWITCHBOARD_RESULT_SCALE,
         },
         error::PercolatorError,
         state::WrapperConfigV16,
@@ -1513,6 +1515,12 @@ pub mod oracle_v16 {
         0x90, 0x57, 0xcb, 0x02, 0x47, 0x74, 0xfa, 0xfe, 0x01, 0xe6, 0xc4, 0xdf, 0x98, 0xcc, 0x38,
         0x58, 0x81,
     ]);
+    pub const SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID: Pubkey =
+        solana_program::pubkey!("SBondMDrcV3K4kxZR1HNVT7osZxAHVHgYXL5Ze1oMUv");
+    pub const SWITCHBOARD_ON_DEMAND_DEVNET_PROGRAM_ID: Pubkey =
+        solana_program::pubkey!("Aio4gaXjXzJNVLtzwtNVmSqGKpANtXhybbkhtAC94ji2");
+    pub const CHAINLINK_STORE_PROGRAM_ID: Pubkey =
+        solana_program::pubkey!("HEvSKofvBgfaexv23kMabbYqxasxU3mQ4ibBMEmJWHny");
     const PRICE_UPDATE_V2_MIN_LEN: usize = 134;
     const OFF_VERIFICATION_LEVEL: usize = 40;
     const OFF_PRICE_FEED_MESSAGE: usize = 41;
@@ -1520,6 +1528,26 @@ pub mod oracle_v16 {
         [0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd];
     const PYTH_VERIFICATION_FULL_TAG: u8 = 1;
     const MAX_EXPO_ABS: i32 = 18;
+    const SWITCHBOARD_PULL_FEED_DISCRIMINATOR: [u8; 8] = [196, 27, 108, 196, 10, 215, 219, 40];
+    const SWITCHBOARD_PULL_FEED_MIN_LEN: usize = 3_208;
+    const SB_OFF_FEED_HASH: usize = 8 + 2_112;
+    const SB_OFF_MIN_SAMPLE_SIZE: usize = 8 + 2_207;
+    const SB_OFF_LAST_UPDATE_TIMESTAMP: usize = 8 + 2_208;
+    const SB_OFF_RESULT_VALUE: usize = 8 + 2_256;
+    const SB_OFF_RESULT_STD_DEV: usize = 8 + 2_272;
+    const SB_OFF_RESULT_NUM_SAMPLES: usize = 8 + 2_352;
+    const SB_OFF_RESULT_SLOT: usize = 8 + 2_360;
+    const CHAINLINK_TRANSMISSIONS_DISCRIMINATOR: [u8; 8] = [96, 179, 69, 66, 128, 129, 73, 117];
+    const CHAINLINK_HEADER_SIZE: usize = 192;
+    const CHAINLINK_FEED_MIN_LEN: usize = 8 + CHAINLINK_HEADER_SIZE + 48;
+    const CL_OFF_VERSION: usize = 8;
+    const CL_OFF_DECIMALS: usize = 138;
+    const CL_OFF_LATEST_ROUND_ID: usize = 143;
+    const CL_OFF_LIVE_LENGTH: usize = 148;
+    const CL_OFF_TRANSMISSION: usize = 8 + CHAINLINK_HEADER_SIZE;
+    const CL_TRANS_OFF_SLOT: usize = 0;
+    const CL_TRANS_OFF_TIMESTAMP: usize = 8;
+    const CL_TRANS_OFF_ANSWER: usize = 16;
 
     pub fn is_hybrid(config: &WrapperConfigV16) -> bool {
         config.oracle_mode == ORACLE_MODE_HYBRID_AFTER_HOURS
@@ -1628,6 +1656,194 @@ pub mod oracle_v16 {
         Ok((out as u64, msg.publish_time))
     }
 
+    #[inline]
+    fn read_u32_le(data: &[u8], off: usize) -> Result<u32, ProgramError> {
+        let bytes: [u8; 4] = data
+            .get(off..off + 4)
+            .ok_or(ProgramError::InvalidAccountData)?
+            .try_into()
+            .unwrap();
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    #[inline]
+    fn read_u64_le(data: &[u8], off: usize) -> Result<u64, ProgramError> {
+        let bytes: [u8; 8] = data
+            .get(off..off + 8)
+            .ok_or(ProgramError::InvalidAccountData)?
+            .try_into()
+            .unwrap();
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    #[inline]
+    fn read_i64_le(data: &[u8], off: usize) -> Result<i64, ProgramError> {
+        let bytes: [u8; 8] = data
+            .get(off..off + 8)
+            .ok_or(ProgramError::InvalidAccountData)?
+            .try_into()
+            .unwrap();
+        Ok(i64::from_le_bytes(bytes))
+    }
+
+    #[inline]
+    fn read_i128_le(data: &[u8], off: usize) -> Result<i128, ProgramError> {
+        let bytes: [u8; 16] = data
+            .get(off..off + 16)
+            .ok_or(ProgramError::InvalidAccountData)?
+            .try_into()
+            .unwrap();
+        Ok(i128::from_le_bytes(bytes))
+    }
+
+    fn scale_decimal_to_e6(mantissa: i128, scale: u32) -> Result<u64, ProgramError> {
+        if mantissa <= 0 || scale > MAX_EXPO_ABS as u32 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let mantissa = mantissa as u128;
+        let out = if scale >= 6 {
+            mantissa / 10u128.pow(scale - 6)
+        } else {
+            mantissa
+                .checked_mul(10u128.pow(6 - scale))
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?
+        };
+        if out == 0 || out > percolator::MAX_ORACLE_PRICE as u128 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        Ok(out as u64)
+    }
+
+    pub fn read_switchboard_price_e6(
+        price_ai: &AccountInfo,
+        expected_feed_key: &[u8; 32],
+        now_unix_ts: i64,
+        max_staleness_secs: u64,
+        conf_bps: u16,
+    ) -> Result<(u64, i64), ProgramError> {
+        if *price_ai.owner != SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID
+            && *price_ai.owner != SWITCHBOARD_ON_DEMAND_DEVNET_PROGRAM_ID
+        {
+            return Err(ProgramError::IllegalOwner);
+        }
+        if price_ai.key.to_bytes() != *expected_feed_key {
+            return Err(PercolatorError::InvalidOracleKey.into());
+        }
+        let data = price_ai.try_borrow_data()?;
+        if data.len() < SWITCHBOARD_PULL_FEED_MIN_LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if data[..8] != SWITCHBOARD_PULL_FEED_DISCRIMINATOR {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let feed_hash: [u8; 32] = data[SB_OFF_FEED_HASH..SB_OFF_FEED_HASH + 32]
+            .try_into()
+            .unwrap();
+        let min_sample_size = data[SB_OFF_MIN_SAMPLE_SIZE];
+        let publish_time = read_i64_le(&data, SB_OFF_LAST_UPDATE_TIMESTAMP)?;
+        let value = read_i128_le(&data, SB_OFF_RESULT_VALUE)?;
+        let std_dev = read_i128_le(&data, SB_OFF_RESULT_STD_DEV)?;
+        let num_samples = data[SB_OFF_RESULT_NUM_SAMPLES];
+        let result_slot = read_u64_le(&data, SB_OFF_RESULT_SLOT)?;
+        if feed_hash == [0u8; 32]
+            || min_sample_size == 0
+            || num_samples < min_sample_size
+            || result_slot == 0
+            || publish_time <= 0
+            || value <= 0
+            || std_dev < 0
+        {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let age = now_unix_ts.saturating_sub(publish_time);
+        if age < 0 || age as u64 > max_staleness_secs {
+            return Err(PercolatorError::OracleStale.into());
+        }
+        let value_u = value as u128;
+        if conf_bps != 0 && (std_dev as u128).saturating_mul(10_000) > value_u * conf_bps as u128 {
+            return Err(PercolatorError::OracleConfTooWide.into());
+        }
+        let out = value_u / SWITCHBOARD_RESULT_SCALE;
+        if out == 0 || out > percolator::MAX_ORACLE_PRICE as u128 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        Ok((out as u64, publish_time))
+    }
+
+    pub fn read_chainlink_price_e6(
+        price_ai: &AccountInfo,
+        expected_feed_key: &[u8; 32],
+        now_unix_ts: i64,
+        max_staleness_secs: u64,
+    ) -> Result<(u64, i64), ProgramError> {
+        if *price_ai.owner != CHAINLINK_STORE_PROGRAM_ID {
+            return Err(ProgramError::IllegalOwner);
+        }
+        if price_ai.key.to_bytes() != *expected_feed_key {
+            return Err(PercolatorError::InvalidOracleKey.into());
+        }
+        let data = price_ai.try_borrow_data()?;
+        if data.len() < CHAINLINK_FEED_MIN_LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if data[..8] != CHAINLINK_TRANSMISSIONS_DISCRIMINATOR {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let version = data[CL_OFF_VERSION];
+        let decimals = data[CL_OFF_DECIMALS];
+        let latest_round_id = read_u32_le(&data, CL_OFF_LATEST_ROUND_ID)?;
+        let live_length = read_u32_le(&data, CL_OFF_LIVE_LENGTH)?;
+        let tx = CL_OFF_TRANSMISSION;
+        let result_slot = read_u64_le(&data, tx + CL_TRANS_OFF_SLOT)?;
+        let publish_time = read_u32_le(&data, tx + CL_TRANS_OFF_TIMESTAMP)? as i64;
+        let answer = read_i128_le(&data, tx + CL_TRANS_OFF_ANSWER)?;
+        if version == 0
+            || latest_round_id == 0
+            || live_length != 1
+            || result_slot == 0
+            || publish_time <= 0
+        {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let age = now_unix_ts.saturating_sub(publish_time);
+        if age < 0 || age as u64 > max_staleness_secs {
+            return Err(PercolatorError::OracleStale.into());
+        }
+        scale_decimal_to_e6(answer, decimals as u32).map(|p| (p, publish_time))
+    }
+
+    pub fn read_oracle_price_e6(
+        price_ai: &AccountInfo,
+        expected_feed_id: &[u8; 32],
+        now_unix_ts: i64,
+        max_staleness_secs: u64,
+        conf_bps: u16,
+    ) -> Result<(u64, i64), ProgramError> {
+        if *price_ai.owner == PYTH_RECEIVER_PROGRAM_ID {
+            read_pyth_price_e6(
+                price_ai,
+                expected_feed_id,
+                now_unix_ts,
+                max_staleness_secs,
+                conf_bps,
+            )
+        } else if *price_ai.owner == SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID
+            || *price_ai.owner == SWITCHBOARD_ON_DEMAND_DEVNET_PROGRAM_ID
+        {
+            read_switchboard_price_e6(
+                price_ai,
+                expected_feed_id,
+                now_unix_ts,
+                max_staleness_secs,
+                conf_bps,
+            )
+        } else if *price_ai.owner == CHAINLINK_STORE_PROGRAM_ID {
+            read_chainlink_price_e6(price_ai, expected_feed_id, now_unix_ts, max_staleness_secs)
+        } else {
+            Err(ProgramError::IllegalOwner)
+        }
+    }
+
     fn apply_transform(raw_price: u64, invert: u8, unit_scale: u32) -> Result<u64, ProgramError> {
         let mut price = raw_price;
         if invert != 0 {
@@ -1689,7 +1905,7 @@ pub mod oracle_v16 {
         let mut max_publish_time = i64::MIN;
         let mut i = 0usize;
         while i < count {
-            let (price, publish_time) = read_pyth_price_e6(
+            let (price, publish_time) = read_oracle_price_e6(
                 &oracle_accounts[i],
                 &config.oracle_leg_feeds[i],
                 now_unix_ts,
@@ -2560,7 +2776,14 @@ pub mod processor {
             let data = matcher_ctx.try_borrow_data()?;
             matcher_abi::read_matcher_return(&data)?
         };
-        matcher_abi::validate_matcher_return(&ret, lp_account_id, oracle_price, size_q, req_id)?;
+        matcher_abi::validate_matcher_return(
+            &ret,
+            lp_account_id,
+            asset_index,
+            oracle_price,
+            size_q,
+            req_id,
+        )?;
         if limit_price != 0 {
             let limit_ok = if size_q > 0 {
                 ret.exec_price_e6 <= limit_price
