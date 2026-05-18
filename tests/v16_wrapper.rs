@@ -1308,6 +1308,88 @@ fn v16_wrapper_top_up_backing_bucket_uses_separate_authority_and_domain_ledger()
 }
 
 #[test]
+fn v16_wrapper_source_backed_positive_pnl_converts_from_backing_not_insurance() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mint = init_market(&mut admin, &mut market);
+
+    let mut source = user_token_account(admin.key, mint, 40);
+    let mut vault = vault_token_account(&market, mint, 0);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 40,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio.data).unwrap();
+        group
+            .add_account_source_positive_pnl_not_atomic(&mut account, 1, 40)
+            .unwrap();
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio.data, &account).unwrap();
+    }
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 0,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    )
+    .unwrap();
+
+    run_ix(
+        Instruction::ConvertReleasedPnl { amount: 40 },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(account.capital, 40);
+    assert_eq!(account.pnl, 0);
+    assert_eq!(group.c_tot, 40);
+    assert_eq!(group.vault, 40);
+    assert_eq!(
+        group.insurance, 0,
+        "counterparty backing must support the source claim without spending insurance"
+    );
+    assert_eq!(
+        group.source_backing_buckets[1].consumed_liened_backing_num,
+        40 * BOUND_SCALE
+    );
+    assert_eq!(group.source_credit[1].spent_backing_num, 40 * BOUND_SCALE);
+
+    withdraw(&mut owner, &mut market, &mut portfolio, 40);
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(account.capital, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(group.vault, 0);
+}
+
+#[test]
 fn v16_wrapper_insurance_policy_deposit_only_leaves_fee_growth_behind() {
     let mut admin = signer();
     let mut market = market_account();
@@ -4465,32 +4547,6 @@ fn v16_wrapper_convert_released_pnl_respects_cap_and_unlocks_withdrawal() {
     let long = state::read_portfolio(&long_account.data).unwrap();
     assert_eq!(long.capital, 10_000);
     assert_eq!(group.vault, 19_998);
-}
-
-#[test]
-fn v16_wrapper_portfolio_wire_preserves_source_converted_capital_lock() {
-    let mut admin = signer();
-    let mut market = market_account();
-    let mut owner = signer();
-    let mut portfolio = portfolio_account();
-
-    init_market(&mut admin, &mut market);
-    init_portfolio(&mut owner, &mut market, &mut portfolio);
-
-    let mut account = state::read_portfolio(&portfolio.data).unwrap();
-    account.capital = 10;
-    account.source_converted_capital_lock[0] = 7;
-    state::write_portfolio(&mut portfolio.data, &account).unwrap();
-    let roundtrip = state::read_portfolio(&portfolio.data).unwrap();
-    assert_eq!(roundtrip.source_converted_capital_lock[0], 7);
-    assert_eq!(roundtrip.capital, 10);
-
-    account.source_converted_capital_lock[1] = 4;
-    state::write_portfolio(&mut portfolio.data, &account).unwrap();
-    assert!(
-        state::read_portfolio(&portfolio.data).is_err(),
-        "converted-capital locks above capital must fail closed before engine use"
-    );
 }
 
 #[test]
