@@ -9,6 +9,7 @@ use percolator_prog::matcher_abi::{
 
 #[kani::proof]
 fn kani_v16_init_market_decode_preserves_wire_fields() {
+    let max_portfolio_assets: u8 = kani::any();
     let h_min_raw: u16 = kani::any();
     let h_max_raw: u16 = kani::any();
     let initial_price_raw: u16 = kani::any();
@@ -50,31 +51,33 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
     let public_b_chunk_atoms = public_b_chunk_atoms_raw as u128;
     let maintenance_fee_per_slot = maintenance_fee_raw as u128;
 
-    let mut data = [0u8; 209];
+    let mut data = [0u8; 210];
     data[0] = 0;
-    data[1..9].copy_from_slice(&h_min.to_le_bytes());
-    data[9..17].copy_from_slice(&h_max.to_le_bytes());
-    data[17..25].copy_from_slice(&initial_price.to_le_bytes());
-    data[25..41].copy_from_slice(&min_nonzero_mm_req.to_le_bytes());
-    data[41..57].copy_from_slice(&min_nonzero_im_req.to_le_bytes());
-    data[57..65].copy_from_slice(&maintenance_margin_bps.to_le_bytes());
-    data[65..73].copy_from_slice(&initial_margin_bps.to_le_bytes());
-    data[73..81].copy_from_slice(&max_trading_fee_bps.to_le_bytes());
-    data[81..89].copy_from_slice(&trade_fee_base_bps.to_le_bytes());
-    data[89..97].copy_from_slice(&liquidation_fee_bps.to_le_bytes());
-    data[97..113].copy_from_slice(&liquidation_fee_cap.to_le_bytes());
-    data[113..129].copy_from_slice(&min_liquidation_abs.to_le_bytes());
-    data[129..137].copy_from_slice(&max_price_move_bps_per_slot.to_le_bytes());
-    data[137..145].copy_from_slice(&max_accrual_dt_slots.to_le_bytes());
-    data[145..153].copy_from_slice(&max_abs_funding_e9_per_slot.to_le_bytes());
-    data[153..161].copy_from_slice(&min_funding_lifetime_slots.to_le_bytes());
-    data[161..169].copy_from_slice(&max_account_b_settlement_chunks.to_le_bytes());
-    data[169..177].copy_from_slice(&max_bankrupt_close_chunks.to_le_bytes());
-    data[177..193].copy_from_slice(&public_b_chunk_atoms.to_le_bytes());
-    data[193..209].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
+    data[1] = max_portfolio_assets;
+    data[2..10].copy_from_slice(&h_min.to_le_bytes());
+    data[10..18].copy_from_slice(&h_max.to_le_bytes());
+    data[18..26].copy_from_slice(&initial_price.to_le_bytes());
+    data[26..42].copy_from_slice(&min_nonzero_mm_req.to_le_bytes());
+    data[42..58].copy_from_slice(&min_nonzero_im_req.to_le_bytes());
+    data[58..66].copy_from_slice(&maintenance_margin_bps.to_le_bytes());
+    data[66..74].copy_from_slice(&initial_margin_bps.to_le_bytes());
+    data[74..82].copy_from_slice(&max_trading_fee_bps.to_le_bytes());
+    data[82..90].copy_from_slice(&trade_fee_base_bps.to_le_bytes());
+    data[90..98].copy_from_slice(&liquidation_fee_bps.to_le_bytes());
+    data[98..114].copy_from_slice(&liquidation_fee_cap.to_le_bytes());
+    data[114..130].copy_from_slice(&min_liquidation_abs.to_le_bytes());
+    data[130..138].copy_from_slice(&max_price_move_bps_per_slot.to_le_bytes());
+    data[138..146].copy_from_slice(&max_accrual_dt_slots.to_le_bytes());
+    data[146..154].copy_from_slice(&max_abs_funding_e9_per_slot.to_le_bytes());
+    data[154..162].copy_from_slice(&min_funding_lifetime_slots.to_le_bytes());
+    data[162..170].copy_from_slice(&max_account_b_settlement_chunks.to_le_bytes());
+    data[170..178].copy_from_slice(&max_bankrupt_close_chunks.to_le_bytes());
+    data[178..194].copy_from_slice(&public_b_chunk_atoms.to_le_bytes());
+    data[194..210].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::InitMarket {
+            max_portfolio_assets: got_max_assets,
             h_min: got_h_min,
             h_max: got_h_max,
             initial_price: got_initial_price,
@@ -96,6 +99,7 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
             public_b_chunk_atoms: got_public_b,
             maintenance_fee_per_slot: got_maintenance_fee,
         } => {
+            assert_eq!(got_max_assets, max_portfolio_assets);
             assert_eq!(got_h_min, h_min);
             assert_eq!(got_h_max, h_max);
             assert_eq!(got_initial_price, initial_price);
@@ -170,6 +174,39 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
             assert_eq!(got_domain, domain);
             assert_eq!(got_amount, amount);
             assert_eq!(got_expiry, expiry_slot);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
+    let action: u8 = kani::any();
+    let asset_index: u8 = kani::any();
+    let now_slot_raw: u16 = kani::any();
+    let initial_price_raw: u16 = kani::any();
+    let now_slot = now_slot_raw as u64;
+    let initial_price = initial_price_raw as u64;
+
+    let data = Instruction::UpdateAssetLifecycle {
+        action,
+        asset_index,
+        now_slot,
+        initial_price,
+    }
+    .encode();
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::UpdateAssetLifecycle {
+            action: got_action,
+            asset_index: got_asset_index,
+            now_slot: got_now_slot,
+            initial_price: got_initial_price,
+        } => {
+            assert_eq!(got_action, action);
+            assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_now_slot, now_slot);
+            assert_eq!(got_initial_price, initial_price);
         }
         _ => unreachable!(),
     }
@@ -592,6 +629,7 @@ fn kani_v16_every_active_payload_rejects_trailing_byte() {
     let extra: u8 = kani::any();
 
     let mut init_market = Instruction::InitMarket {
+        max_portfolio_assets: 1,
         h_min: 1,
         h_max: 2,
         initial_price: 100,
@@ -775,6 +813,16 @@ fn kani_v16_every_active_payload_rejects_trailing_byte() {
     .encode();
     push_hyperp.push(extra);
     assert!(Instruction::decode(&push_hyperp).is_err());
+
+    let mut asset_lifecycle = Instruction::UpdateAssetLifecycle {
+        action: 0,
+        asset_index: 1,
+        now_slot: 2,
+        initial_price: 100,
+    }
+    .encode();
+    asset_lifecycle.push(extra);
+    assert!(Instruction::decode(&asset_lifecycle).is_err());
 }
 
 #[kani::proof]
@@ -803,6 +851,7 @@ fn kani_v16_unknown_or_truncated_tags_reject() {
     kani::assume(tag != 37);
     kani::assume(tag != 38);
     kani::assume(tag != 39);
+    kani::assume(tag != 40);
     assert!(Instruction::decode(&[tag]).is_err());
 
     let deposit_tag_only = [3u8];
@@ -828,6 +877,9 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
 
     let crank = [5u8; 59];
     assert!(Instruction::decode(&crank).is_err());
+
+    let asset_lifecycle = [40u8; 18];
+    assert!(Instruction::decode(&asset_lifecycle).is_err());
 
     let trade = [6u8; 33];
     assert!(Instruction::decode(&trade).is_err());

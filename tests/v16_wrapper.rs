@@ -1,6 +1,7 @@
 use percolator::{
-    BackingBucketStatusV16, MarketGroupV16, MarketGroupV16Account, MarketModeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, V16Config, BOUND_SCALE, POS_SCALE,
+    AssetLifecycleV16, BackingBucketStatusV16, MarketGroupV16, MarketGroupV16Account,
+    MarketModeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, V16Config,
+    BOUND_SCALE, POS_SCALE,
 };
 use percolator_prog::{
     constants::{
@@ -449,6 +450,7 @@ fn run_ix(ix: Instruction, accounts: &mut [&mut TestAccount]) -> Result<(), Prog
 
 fn default_init_market_ix() -> Instruction {
     Instruction::InitMarket {
+        max_portfolio_assets: 1,
         h_min: 0,
         h_max: 10,
         initial_price: 100,
@@ -483,6 +485,36 @@ fn init_market(admin: &mut TestAccount, market: &mut TestAccount) -> Pubkey {
     let mint_key = mint.key;
     run_ix(default_init_market_ix(), &mut [admin, market, &mut mint]).unwrap();
     mint_key
+}
+
+fn init_market_with_ix(
+    admin: &mut TestAccount,
+    market: &mut TestAccount,
+    ix: Instruction,
+) -> Pubkey {
+    let mut mint = mint_account();
+    let mint_key = mint.key;
+    run_ix(ix, &mut [admin, market, &mut mint]).unwrap();
+    mint_key
+}
+
+fn update_asset_lifecycle(
+    authority: &mut TestAccount,
+    market: &mut TestAccount,
+    action: u8,
+    asset_index: u8,
+    now_slot: u64,
+    initial_price: u64,
+) -> Result<(), ProgramError> {
+    run_ix(
+        Instruction::UpdateAssetLifecycle {
+            action,
+            asset_index,
+            now_slot,
+            initial_price,
+        },
+        &mut [authority, market],
+    )
 }
 
 fn init_portfolio(owner: &mut TestAccount, market: &mut TestAccount, portfolio: &mut TestAccount) {
@@ -649,6 +681,9 @@ fn v16_wrapper_init_binds_market_and_portfolio_provenance() {
     expected.assets[0].raw_oracle_target_price = 100;
     expected.assets[0].effective_price = 100;
     expected.assets[0].fund_px_last = 100;
+    for asset in &mut expected.assets[1..] {
+        asset.lifecycle = AssetLifecycleV16::Disabled;
+    }
     expected.materialized_portfolio_count = 1;
     assert_eq!(
         group, expected,
@@ -729,6 +764,293 @@ fn v16_wrapper_init_market_ports_full_engine_config_fields() {
     assert_eq!(group.config.max_account_b_settlement_chunks, 3);
     assert_eq!(group.config.max_bankrupt_close_chunks, 4);
     assert_eq!(group.config.public_b_chunk_atoms, 12_345);
+}
+
+#[test]
+fn v16_wrapper_asset_authority_can_add_activate_and_trade_sparse_assets() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 1;
+            }
+        }),
+    );
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
+
+    let before = market.data.clone();
+    let rejected_before_add = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 2,
+            size_q: POS_SCALE as i128,
+            exec_price: 250,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    );
+    assert_err_and_market_unchanged(rejected_before_add, &market, &before);
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        2,
+        1,
+        250,
+    )
+    .unwrap();
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.asset_authority, admin.key.to_bytes());
+    assert_eq!(group.config.max_portfolio_assets, 3);
+    assert_eq!(group.assets[1].lifecycle, AssetLifecycleV16::Disabled);
+    assert_eq!(group.assets[2].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(group.assets[2].effective_price, 250);
+
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 2,
+            size_q: POS_SCALE as i128,
+            exec_price: 250,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    let long = state::read_portfolio(&long_account.data).unwrap();
+    let short = state::read_portfolio(&short_account.data).unwrap();
+    assert_eq!(long.active_bitmap, 1 << 2);
+    assert_eq!(short.active_bitmap, 1 << 2);
+    assert_eq!(long.legs[2].basis_pos_q, POS_SCALE as i128);
+    assert_eq!(short.legs[2].basis_pos_q, -(POS_SCALE as i128));
+}
+
+#[test]
+fn v16_wrapper_asset_authority_rotation_and_burn_gate_lifecycle_updates() {
+    let mut admin = signer();
+    let mut new_asset_authority = signer();
+    let mut attacker = signer();
+    let mut market = market_account();
+
+    init_market(&mut admin, &mut market);
+    let initialized = market.data.clone();
+    assert_err_and_market_unchanged(
+        update_asset_lifecycle(
+            &mut attacker,
+            &mut market,
+            processor::ASSET_ACTION_ACTIVATE,
+            1,
+            1,
+            101,
+        ),
+        &market,
+        &initialized,
+    );
+
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_ASSET,
+            new_pubkey: new_asset_authority.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut new_asset_authority, &mut market],
+    )
+    .unwrap();
+    let rotated = market.data.clone();
+    assert_err_and_market_unchanged(
+        update_asset_lifecycle(
+            &mut admin,
+            &mut market,
+            processor::ASSET_ACTION_ACTIVATE,
+            1,
+            1,
+            101,
+        ),
+        &market,
+        &rotated,
+    );
+    update_asset_lifecycle(
+        &mut new_asset_authority,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        1,
+        101,
+    )
+    .unwrap();
+
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_ASSET,
+            new_pubkey: [0u8; 32],
+        },
+        &mut [&mut new_asset_authority, &mut attacker, &mut market],
+    )
+    .unwrap();
+    let burned = market.data.clone();
+    assert_err_and_market_unchanged(
+        update_asset_lifecycle(
+            &mut new_asset_authority,
+            &mut market,
+            processor::ASSET_ACTION_ACTIVATE,
+            2,
+            2,
+            102,
+        ),
+        &market,
+        &burned,
+    );
+}
+
+#[test]
+fn v16_wrapper_asset_drain_only_and_retire_enforce_engine_lifecycle() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 2;
+            }
+        }),
+    );
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        1,
+        150,
+    )
+    .unwrap();
+
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: POS_SCALE as i128,
+            exec_price: 150,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+
+    let before_retire_nonempty = market.data.clone();
+    assert_err_and_market_unchanged(
+        update_asset_lifecycle(
+            &mut admin,
+            &mut market,
+            processor::ASSET_ACTION_RETIRE,
+            1,
+            0,
+            0,
+        ),
+        &market,
+        &before_retire_nonempty,
+    );
+
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: -(POS_SCALE as i128),
+            exec_price: 150,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_DRAIN_ONLY,
+        1,
+        0,
+        0,
+    )
+    .unwrap();
+    let drained = state::read_market(&market.data).unwrap().1;
+    assert_eq!(drained.assets[1].lifecycle, AssetLifecycleV16::DrainOnly);
+
+    let before_new_position = market.data.clone();
+    let new_position = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: POS_SCALE as i128,
+            exec_price: 150,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    );
+    assert_err_and_market_unchanged(new_position, &market, &before_new_position);
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        1,
+        0,
+        0,
+    )
+    .unwrap();
+    let retired = state::read_market(&market.data).unwrap().1;
+    assert_eq!(retired.assets[1].lifecycle, AssetLifecycleV16::Retired);
 }
 
 #[test]

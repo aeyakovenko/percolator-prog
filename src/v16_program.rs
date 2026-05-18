@@ -10,7 +10,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use percolator::{
-    AssetStateV16, BackingBucketV16, CloseProgressLedgerV16, HealthCertV16,
+    AssetLifecycleV16, AssetStateV16, BackingBucketV16, CloseProgressLedgerV16, HealthCertV16,
     InsuranceCreditReservationV16, MarketGroupV16, MarketModeV16, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PortfolioAccountV16, PortfolioLegV16, ProvenanceHeaderV16,
     ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16,
@@ -42,7 +42,7 @@ pub mod constants {
     pub const KIND_PORTFOLIO: u8 = 2;
 
     pub const HEADER_LEN: usize = 16;
-    pub const WRAPPER_CONFIG_LEN: usize = 496;
+    pub const WRAPPER_CONFIG_LEN: usize = 528;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16Account>();
     pub const PORTFOLIO_STATE_LEN: usize = size_of::<PortfolioAccountV16Account>();
     pub const MARKET_GROUP_OFF: usize = HEADER_LEN + WRAPPER_CONFIG_LEN;
@@ -165,6 +165,7 @@ pub mod state {
         pub insurance_authority: [u8; 32],
         pub insurance_operator: [u8; 32],
         pub backing_bucket_authority: [u8; 32],
+        pub asset_authority: [u8; 32],
         pub hyperp_mark_authority: [u8; 32],
         pub insurance_withdraw_deposit_remaining: u128,
         pub insurance_withdraw_max_bps: u16,
@@ -855,6 +856,7 @@ pub mod ix {
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum Instruction {
         InitMarket {
+            max_portfolio_assets: u8,
             h_min: u64,
             h_max: u64,
             initial_price: u64,
@@ -968,6 +970,12 @@ pub mod ix {
             now_slot: u64,
             mark_e6: u64,
         },
+        UpdateAssetLifecycle {
+            action: u8,
+            asset_index: u8,
+            now_slot: u64,
+            initial_price: u64,
+        },
     }
 
     impl Instruction {
@@ -977,6 +985,7 @@ pub mod ix {
                 .ok_or(ProgramError::InvalidInstructionData)?;
             let ix = match tag {
                 0 => Self::InitMarket {
+                    max_portfolio_assets: read_u8(&mut rest)?,
                     h_min: read_u64(&mut rest)?,
                     h_max: read_u64(&mut rest)?,
                     initial_price: read_u64(&mut rest)?,
@@ -1094,6 +1103,12 @@ pub mod ix {
                     now_slot: read_u64(&mut rest)?,
                     mark_e6: read_u64(&mut rest)?,
                 },
+                40 => Self::UpdateAssetLifecycle {
+                    action: read_u8(&mut rest)?,
+                    asset_index: read_u8(&mut rest)?,
+                    now_slot: read_u64(&mut rest)?,
+                    initial_price: read_u64(&mut rest)?,
+                },
                 _ => return Err(ProgramError::InvalidInstructionData),
             };
             if !rest.is_empty() {
@@ -1106,6 +1121,7 @@ pub mod ix {
             let mut out = Vec::new();
             match *self {
                 Self::InitMarket {
+                    max_portfolio_assets,
                     h_min,
                     h_max,
                     initial_price,
@@ -1128,6 +1144,7 @@ pub mod ix {
                     maintenance_fee_per_slot,
                 } => {
                     out.push(0);
+                    out.push(max_portfolio_assets);
                     push_u64(&mut out, h_min);
                     push_u64(&mut out, h_max);
                     push_u64(&mut out, initial_price);
@@ -1308,6 +1325,18 @@ pub mod ix {
                     out.push(36);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, mark_e6);
+                }
+                Self::UpdateAssetLifecycle {
+                    action,
+                    asset_index,
+                    now_slot,
+                    initial_price,
+                } => {
+                    out.push(40);
+                    out.push(action);
+                    out.push(asset_index);
+                    push_u64(&mut out, now_slot);
+                    push_u64(&mut out, initial_price);
                 }
             }
             out
@@ -2114,6 +2143,11 @@ pub mod processor {
     pub const AUTHORITY_INSURANCE: u8 = 2;
     pub const AUTHORITY_BACKING_BUCKET: u8 = 3;
     pub const AUTHORITY_INSURANCE_OPERATOR: u8 = 4;
+    pub const AUTHORITY_ASSET: u8 = 5;
+
+    pub const ASSET_ACTION_ACTIVATE: u8 = 0;
+    pub const ASSET_ACTION_DRAIN_ONLY: u8 = 1;
+    pub const ASSET_ACTION_RETIRE: u8 = 2;
 
     fn authenticated_slot_or_fallback(fallback_slot: u64) -> u64 {
         Clock::get().map(|c| c.slot).unwrap_or(fallback_slot)
@@ -2144,6 +2178,7 @@ pub mod processor {
     ) -> ProgramResult {
         match Instruction::decode(instruction_data)? {
             Instruction::InitMarket {
+                max_portfolio_assets,
                 h_min,
                 h_max,
                 initial_price,
@@ -2167,6 +2202,7 @@ pub mod processor {
             } => handle_init_market(
                 program_id,
                 accounts,
+                max_portfolio_assets,
                 h_min,
                 h_max,
                 initial_price,
@@ -2332,6 +2368,19 @@ pub mod processor {
             Instruction::PushHyperpMark { now_slot, mark_e6 } => {
                 handle_push_hyperp_mark(program_id, accounts, now_slot, mark_e6)
             }
+            Instruction::UpdateAssetLifecycle {
+                action,
+                asset_index,
+                now_slot,
+                initial_price,
+            } => handle_update_asset_lifecycle(
+                program_id,
+                accounts,
+                action,
+                asset_index,
+                now_slot,
+                initial_price,
+            ),
         }
     }
 
@@ -2339,6 +2388,7 @@ pub mod processor {
     fn handle_init_market<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        max_portfolio_assets: u8,
         h_min: u64,
         h_max: u64,
         initial_price: u64,
@@ -2370,7 +2420,7 @@ pub mod processor {
         if trade_fee_base_bps > max_trading_fee_bps {
             return Err(PercolatorError::EngineInvalidConfig.into());
         }
-        let mut cfg = V16Config::public_user_fund(1, h_min, h_max);
+        let mut cfg = V16Config::public_user_fund(max_portfolio_assets, h_min, h_max);
         cfg.min_nonzero_mm_req = min_nonzero_mm_req;
         cfg.min_nonzero_im_req = min_nonzero_im_req;
         cfg.maintenance_margin_bps = maintenance_margin_bps;
@@ -2393,6 +2443,12 @@ pub mod processor {
         group.assets[0].raw_oracle_target_price = initial_price;
         group.assets[0].effective_price = initial_price;
         group.assets[0].fund_px_last = initial_price;
+        let mut i = 1;
+        while i < V16_MAX_PORTFOLIO_ASSETS_N {
+            group.assets[i] = disabled_empty_asset();
+            i += 1;
+        }
+        group.assert_public_invariants().map_err(map_v16_error)?;
         let wrapper = WrapperConfigV16 {
             admin: admin.key.to_bytes(),
             collateral_mint: mint_ai.key.to_bytes(),
@@ -2404,6 +2460,7 @@ pub mod processor {
             insurance_authority: admin.key.to_bytes(),
             insurance_operator: admin.key.to_bytes(),
             backing_bucket_authority: admin.key.to_bytes(),
+            asset_authority: admin.key.to_bytes(),
             hyperp_mark_authority: admin.key.to_bytes(),
             insurance_withdraw_deposit_remaining: 0,
             insurance_withdraw_max_bps: 10_000,
@@ -3279,11 +3336,72 @@ pub mod processor {
                 }
                 cfg.backing_bucket_authority = new_pubkey;
             }
+            AUTHORITY_ASSET => {
+                if cfg.asset_authority != current.key.to_bytes() {
+                    return Err(PercolatorError::Unauthorized.into());
+                }
+                cfg.asset_authority = new_pubkey;
+            }
             AUTHORITY_INSURANCE_OPERATOR => {
                 if cfg.insurance_operator != current.key.to_bytes() {
                     return Err(PercolatorError::Unauthorized.into());
                 }
                 cfg.insurance_operator = new_pubkey;
+            }
+            _ => return Err(PercolatorError::InvalidInstruction.into()),
+        }
+
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+    }
+
+    #[inline(never)]
+    fn handle_update_asset_lifecycle<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        action: u8,
+        asset_index: u8,
+        now_slot: u64,
+        initial_price: u64,
+    ) -> ProgramResult {
+        let authority = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        expect_signer(authority)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if cfg.asset_authority == [0u8; 32] || cfg.asset_authority != authority.key.to_bytes() {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        let asset_index = asset_index as usize;
+        if asset_index >= V16_MAX_PORTFOLIO_ASSETS_N {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+
+        match action {
+            ASSET_ACTION_ACTIVATE => {
+                if asset_index >= group.config.max_portfolio_assets as usize {
+                    grow_configured_asset_capacity(group.as_mut(), asset_index)?;
+                }
+                group
+                    .activate_empty_asset_not_atomic(asset_index, initial_price, now_slot)
+                    .map_err(map_v16_error)?;
+            }
+            ASSET_ACTION_DRAIN_ONLY => {
+                if now_slot != 0 || initial_price != 0 {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                group
+                    .mark_asset_drain_only_not_atomic(asset_index)
+                    .map_err(map_v16_error)?;
+            }
+            ASSET_ACTION_RETIRE => {
+                if now_slot != 0 || initial_price != 0 {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                group
+                    .retire_empty_asset_not_atomic(asset_index)
+                    .map_err(map_v16_error)?;
             }
             _ => return Err(PercolatorError::InvalidInstruction.into()),
         }
@@ -3951,6 +4069,41 @@ pub mod processor {
             group.assert_public_invariants().map_err(map_v16_error)?;
             Ok(group)
         }
+    }
+
+    fn disabled_empty_asset() -> AssetStateV16 {
+        let mut asset = AssetStateV16::default();
+        asset.lifecycle = AssetLifecycleV16::Disabled;
+        asset
+    }
+
+    fn grow_configured_asset_capacity(
+        group: &mut MarketGroupV16,
+        asset_index: usize,
+    ) -> ProgramResult {
+        if asset_index >= V16_MAX_PORTFOLIO_ASSETS_N {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let old_n = group.config.max_portfolio_assets as usize;
+        let new_n = asset_index
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        if new_n <= old_n {
+            return Ok(());
+        }
+        let mut i = old_n;
+        while i < new_n {
+            group.assets[i] = disabled_empty_asset();
+            i += 1;
+        }
+        group.config.max_portfolio_assets =
+            u8::try_from(new_n).map_err(|_| PercolatorError::InvalidInstruction)?;
+        group
+            .config
+            .validate_public_user_fund()
+            .map_err(map_v16_error)?;
+        group.assert_public_invariants().map_err(map_v16_error)?;
+        Ok(())
     }
 
     #[allow(unsafe_code)]

@@ -227,6 +227,7 @@ impl V16CuEnv {
             program_id,
             &payer,
             ProgInstruction::InitMarket {
+                max_portfolio_assets: 1,
                 h_min: 0,
                 h_max: 10,
                 initial_price: 100,
