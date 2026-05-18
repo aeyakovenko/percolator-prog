@@ -306,6 +306,26 @@ impl V16CuEnv {
         self.deposit_with_cu(owner, portfolio, amount).0
     }
 
+    fn activate_asset(&mut self, asset_index: u8, now_slot: u64, initial_price: u64) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+                asset_index,
+                now_slot,
+                initial_price,
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("activate asset")
+    }
+
     fn deposit_with_cu(
         &mut self,
         owner: &Keypair,
@@ -437,9 +457,36 @@ impl V16CuEnv {
         size_q: i128,
         fee_bps: u64,
     ) -> u64 {
+        self.trade_cpi_with_cu_on_asset(
+            owner_a,
+            account_a,
+            owner_b,
+            account_b,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            0,
+            size_q,
+            fee_bps,
+        )
+    }
+
+    fn trade_cpi_with_cu_on_asset(
+        &mut self,
+        owner_a: &Keypair,
+        account_a: Pubkey,
+        owner_b: &Keypair,
+        account_b: Pubkey,
+        matcher_program: Pubkey,
+        matcher_context: Pubkey,
+        matcher_delegate: Pubkey,
+        asset_index: u8,
+        size_q: i128,
+        fee_bps: u64,
+    ) -> u64 {
         self.send(
             ProgInstruction::TradeCpi {
-                asset_index: 0,
+                asset_index,
                 size_q,
                 fee_bps,
                 limit_price: 0,
@@ -1083,6 +1130,72 @@ fn v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
         u64::from_le_bytes(matcher_data[56..64].try_into().unwrap()),
         0,
         "matcher must echo the requested asset index in the v3 return slot"
+    );
+    assert_eq!(group.c_tot + group.insurance, group.vault);
+}
+
+#[test]
+fn v16_bpf_tradecpi_external_matcher_executes_on_added_asset() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    env.activate_asset(2, 1, 250);
+
+    let taker_owner = Keypair::new();
+    let maker_owner = Keypair::new();
+    let taker_account = env.create_portfolio(&taker_owner);
+    let maker_account = env.create_portfolio(&maker_owner);
+    env.deposit(&taker_owner, taker_account, 1_000_000);
+    env.deposit(&maker_owner, maker_account, 1_000_000);
+
+    let (matcher_ctx, matcher_delegate, _) =
+        env.init_matcher_context(matcher_program, maker_account);
+    let trade_cpi_cu = env.trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker_account,
+        &maker_owner,
+        maker_account,
+        matcher_program,
+        matcher_ctx,
+        matcher_delegate,
+        2,
+        (10 * POS_SCALE) as i128,
+        100,
+    );
+    println!("v16 TradeCpi BPF nonzero-asset CU: {trade_cpi_cu}");
+    assert!(
+        trade_cpi_cu <= TRADE_CU_LIMIT,
+        "TradeCpi nonzero-asset CU {} exceeded limit {}",
+        trade_cpi_cu,
+        TRADE_CU_LIMIT
+    );
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let taker_data = env.svm.get_account(&taker_account).unwrap().data;
+    let maker_data = env.svm.get_account(&maker_account).unwrap().data;
+    let matcher_data = env.svm.get_account(&matcher_ctx).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    let taker = state::read_portfolio(&taker_data).unwrap();
+    let maker = state::read_portfolio(&maker_data).unwrap();
+
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group.assets[0].oi_eff_short_q, 0);
+    assert_eq!(group.assets[2].effective_price, 250);
+    assert_eq!(group.assets[2].oi_eff_long_q, 10 * POS_SCALE);
+    assert_eq!(group.assets[2].oi_eff_short_q, 10 * POS_SCALE);
+    assert_eq!(taker.active_bitmap, 1 << 2);
+    assert_eq!(maker.active_bitmap, 1 << 2);
+    assert_eq!(taker.legs[2].basis_pos_q, (10 * POS_SCALE) as i128);
+    assert_eq!(maker.legs[2].basis_pos_q, -((10 * POS_SCALE) as i128));
+    assert_eq!(
+        group.insurance, 50,
+        "passive matcher fills asset 2 at 250; notional=2500 and 100 bps charges 25 to each side"
+    );
+    assert_eq!(
+        u64::from_le_bytes(matcher_data[56..64].try_into().unwrap()),
+        2,
+        "external matcher must echo the requested nonzero asset index"
     );
     assert_eq!(group.c_tot + group.insurance, group.vault);
 }
