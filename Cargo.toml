@@ -50,7 +50,7 @@ pinocchio = "0.6"
 arrayref = "0.3"
 num-derive = "0.4"
 num-traits = "0.2"
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "ad246cbe0aab23b10b39b4dd4e268d011318ac47" }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "6660de8030272345925c7cd5d9b52878551aec6f" }
 anchor-lang-v2 = { git = "https://github.com/solana-foundation/anchor", rev = "e3cf760826fa0a60f247635ea0572e59861ec9b5", package = "anchor-lang-v2", default-features = false, features = ["alloc", "guardrails"], optional = true }
 
 [dev-dependencies]

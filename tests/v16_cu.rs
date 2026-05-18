@@ -451,6 +451,49 @@ impl V16CuEnv {
         self.svm.set_account(short_account, short_data).unwrap();
     }
 
+    fn seed_current_n_leg_position_for_benchmark(
+        &mut self,
+        long_account: Pubkey,
+        short_account: Pubkey,
+        n: usize,
+    ) {
+        let mut market_account = self.svm.get_account(&self.market).expect("market account");
+        let mut long_data = self.svm.get_account(&long_account).expect("long account");
+        let mut short_data = self.svm.get_account(&short_account).expect("short account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut long = state::read_portfolio(&long_data.data).unwrap();
+        let mut short = state::read_portfolio(&short_data.data).unwrap();
+
+        for asset_index in 1..n {
+            group
+                .activate_empty_asset_not_atomic(asset_index, 100, asset_index as u64)
+                .unwrap();
+        }
+        let prices = [100u64; percolator::V16_MAX_PORTFOLIO_ASSETS_N];
+        for asset_index in 0..n {
+            group
+                .execute_trade_with_fee_in_place_not_atomic(
+                    &mut long,
+                    &mut short,
+                    TradeRequestV16 {
+                        asset_index,
+                        size_q: 10 * POS_SCALE,
+                        exec_price: 100,
+                        fee_bps: 0,
+                    },
+                    &prices,
+                )
+                .unwrap();
+        }
+
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut long_data.data, &long).unwrap();
+        state::write_portfolio(&mut short_data.data, &short).unwrap();
+        self.svm.set_account(self.market, market_account).unwrap();
+        self.svm.set_account(long_account, long_data).unwrap();
+        self.svm.set_account(short_account, short_data).unwrap();
+    }
+
     fn force_portfolio_capital_for_benchmark(&mut self, portfolio_key: Pubkey, new_capital: u128) {
         let mut market_account = self.svm.get_account(&self.market).expect("market account");
         let mut portfolio_data = self.svm.get_account(&portfolio_key).expect("portfolio account");
@@ -1427,6 +1470,81 @@ fn v16_bpf_full_16_leg_liquidation_crank_is_under_tx_limit() {
     assert!(!long.legs[0].active);
     assert_eq!(group.assets[0].oi_eff_long_q, 0);
     assert_eq!(group.assets[0].oi_eff_short_q, 0);
+}
+
+#[test]
+fn v16_bpf_current_full_16_leg_tradenocpi_is_under_tx_limit() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(16, 1_000, 1_000, 500);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 20_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    env.seed_current_n_leg_position_for_benchmark(long_account, short_account, 16);
+    let trade_cu = env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        -(POS_SCALE as i128),
+        100,
+        0,
+    );
+    println!("v16 current full-16-leg TradeNoCpi CU: {trade_cu}");
+    assert!(
+        trade_cu <= 1_100_000,
+        "current full-16-leg TradeNoCpi CU {} exceeded limit {}",
+        trade_cu,
+        1_100_000
+    );
+
+    let long_data = env.svm.get_account(&long_account).unwrap().data;
+    let short_data = env.svm.get_account(&short_account).unwrap().data;
+    let long = state::read_portfolio(&long_data).unwrap();
+    let short = state::read_portfolio(&short_data).unwrap();
+    assert_eq!(long.active_bitmap.count_ones(), 16);
+    assert_eq!(short.active_bitmap.count_ones(), 16);
+    assert_eq!(long.legs[0].basis_pos_q, (9 * POS_SCALE) as i128);
+    assert_eq!(short.legs[0].basis_pos_q, -((9 * POS_SCALE) as i128));
+}
+
+#[test]
+fn v16_bpf_stale_full_16_leg_tradenocpi_is_under_tx_limit() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(16, 1_000, 1_000, 500);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 20_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    env.seed_n_leg_position_for_benchmark(long_account, short_account, 16);
+    env.svm.warp_to_slot(16);
+    let trade_cu = env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        -(POS_SCALE as i128),
+        95,
+        0,
+    );
+    println!("v16 stale full-16-leg TradeNoCpi CU: {trade_cu}");
+    assert!(
+        trade_cu <= 1_350_000,
+        "stale full-16-leg TradeNoCpi CU {} exceeded limit {}",
+        trade_cu,
+        1_350_000
+    );
+
+    let long_data = env.svm.get_account(&long_account).unwrap().data;
+    let short_data = env.svm.get_account(&short_account).unwrap().data;
+    let long = state::read_portfolio(&long_data).unwrap();
+    let short = state::read_portfolio(&short_data).unwrap();
+    assert_eq!(long.active_bitmap.count_ones(), 16);
+    assert_eq!(short.active_bitmap.count_ones(), 16);
+    assert_eq!(long.legs[0].basis_pos_q, (9 * POS_SCALE) as i128);
+    assert_eq!(short.legs[0].basis_pos_q, -((9 * POS_SCALE) as i128));
 }
 
 #[test]
