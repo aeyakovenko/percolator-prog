@@ -298,6 +298,9 @@ pub mod state {
             ORACLE_MODE_HYPERP => {
                 if config.oracle_leg_count != 0
                     || config.oracle_leg_flags != 0
+                    || config.invert != 0
+                    || config.unit_scale != 0
+                    || config.conf_filter_bps != 0
                     || config.max_staleness_secs != 0
                     || config.hybrid_soft_stale_slots != 0
                     || config.mark_ewma_e6 == 0
@@ -3208,6 +3211,8 @@ pub mod processor {
         next.oracle_leg_count = 0;
         next.oracle_leg_flags = 0;
         next.invert = 0;
+        next.unit_scale = 0;
+        next.conf_filter_bps = 0;
         next.max_staleness_secs = 0;
         next.hybrid_soft_stale_slots = 0;
         next.mark_ewma_e6 = initial_mark_e6;

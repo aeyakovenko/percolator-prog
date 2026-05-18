@@ -4,8 +4,9 @@ use percolator::{
 };
 use percolator_prog::{
     constants::{
-        HEADER_LEN, MARKET_ACCOUNT_LEN, MARKET_GROUP_LEN, ORACLE_LEG_FLAG_DIVIDE_LEG2,
-        ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_HYBRID_AFTER_HOURS, PORTFOLIO_ACCOUNT_LEN,
+        HEADER_LEN, MARKET_ACCOUNT_LEN, MARKET_GROUP_LEN, ORACLE_LEG_CAP,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_HYPERP, PORTFOLIO_ACCOUNT_LEN,
         PORTFOLIO_STATE_LEN, WRAPPER_CONFIG_LEN,
     },
     ix::Instruction,
@@ -759,6 +760,16 @@ fn v16_wrapper_raw_wrapper_config_invalid_values_fail_closed() {
     assert_bad_cfg(
         bad_hybrid_leg,
         "hybrid oracle mode must reject malformed persisted leg metadata",
+    );
+
+    let mut bad_hyperp_stale_hybrid_knob = cfg;
+    bad_hyperp_stale_hybrid_knob.oracle_mode = ORACLE_MODE_HYPERP;
+    bad_hyperp_stale_hybrid_knob.mark_ewma_e6 = 100;
+    bad_hyperp_stale_hybrid_knob.mark_ewma_halflife_slots = 1;
+    bad_hyperp_stale_hybrid_knob.unit_scale = 6;
+    assert_bad_cfg(
+        bad_hyperp_stale_hybrid_knob,
+        "Hyperp oracle mode must not carry stale hybrid conversion knobs",
     );
 
     let mut bad_bool = cfg;
@@ -1795,6 +1806,76 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
         group.assets[0].effective_price, 110,
         "Hyperp crank ignores caller-selected price and walks to the internal mark"
     );
+}
+
+#[test]
+fn v16_wrapper_configure_hyperp_mark_clears_prior_hybrid_oracle_metadata() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        default_init_market_ix(),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    let feeds = [[1u8; 32], [2u8; 32], [3u8; 32]];
+    let mut leg0 = pyth_account(&feeds[0], 200, 0, 0, 1_000);
+    let mut leg1 = pyth_account(&feeds[1], 2, 0, 0, 1_000);
+    let mut leg2 = pyth_account(&feeds[2], 4, 0, 0, 1_000);
+    run_ix(
+        Instruction::ConfigureHybridOracle {
+            now_slot: 10,
+            now_unix_ts: 1_000,
+            oracle_leg_count: 3,
+            oracle_leg_flags: ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 3,
+            mark_ewma_halflife_slots: 11,
+            mark_min_fee: 7,
+            invert: 1,
+            unit_scale: 6,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: feeds,
+        },
+        &mut [&mut admin, &mut market, &mut leg0, &mut leg1, &mut leg2],
+    )
+    .unwrap();
+
+    let (hybrid_cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(hybrid_cfg.oracle_mode, ORACLE_MODE_HYBRID_AFTER_HOURS);
+    assert_eq!(hybrid_cfg.invert, 1);
+    assert_eq!(hybrid_cfg.unit_scale, 6);
+    assert_eq!(hybrid_cfg.conf_filter_bps, 500);
+    assert_eq!(hybrid_cfg.oracle_leg_count, 3);
+
+    run_ix(
+        Instruction::ConfigureHyperpMark {
+            now_slot: 11,
+            initial_mark_e6: 123,
+            mark_ewma_halflife_slots: 5,
+            mark_min_fee: 9,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.oracle_mode, ORACLE_MODE_HYPERP);
+    assert_eq!(cfg.oracle_leg_count, 0);
+    assert_eq!(cfg.oracle_leg_flags, 0);
+    assert_eq!(cfg.oracle_leg_feeds, [[0u8; 32]; ORACLE_LEG_CAP]);
+    assert_eq!(cfg.oracle_leg_prices_e6, [0u64; ORACLE_LEG_CAP]);
+    assert_eq!(cfg.oracle_leg_publish_times, [0i64; ORACLE_LEG_CAP]);
+    assert_eq!(cfg.max_staleness_secs, 0);
+    assert_eq!(cfg.hybrid_soft_stale_slots, 0);
+    assert_eq!(cfg.invert, 0);
+    assert_eq!(cfg.unit_scale, 0);
+    assert_eq!(cfg.conf_filter_bps, 0);
+    assert_eq!(cfg.mark_ewma_e6, 123);
+    assert_eq!(cfg.mark_ewma_halflife_slots, 5);
+    assert_eq!(cfg.mark_min_fee, 9);
+    assert_eq!(group.assets[0].effective_price, 123);
 }
 
 #[test]
