@@ -852,6 +852,93 @@ fn v16_wrapper_asset_authority_can_add_activate_and_trade_sparse_assets() {
 }
 
 #[test]
+fn v16_wrapper_one_portfolio_can_hold_multiple_asset_positions_independently() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 3;
+            }
+        }),
+    );
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        2,
+        1,
+        250,
+    )
+    .unwrap();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 1_000_000);
+
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 2,
+            size_q: (2 * POS_SCALE) as i128,
+            exec_price: 250,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let long = state::read_portfolio(&long_account.data).unwrap();
+    let short = state::read_portfolio(&short_account.data).unwrap();
+    assert_eq!(long.active_bitmap, (1 << 0) | (1 << 2));
+    assert_eq!(short.active_bitmap, (1 << 0) | (1 << 2));
+    assert_eq!(long.legs[0].basis_pos_q, POS_SCALE as i128);
+    assert_eq!(short.legs[0].basis_pos_q, -(POS_SCALE as i128));
+    assert_eq!(long.legs[2].basis_pos_q, (2 * POS_SCALE) as i128);
+    assert_eq!(short.legs[2].basis_pos_q, -((2 * POS_SCALE) as i128));
+    assert_eq!(group.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(group.assets[0].oi_eff_short_q, POS_SCALE);
+    assert_eq!(group.assets[1].lifecycle, AssetLifecycleV16::Disabled);
+    assert_eq!(group.assets[1].oi_eff_long_q, 0);
+    assert_eq!(group.assets[1].oi_eff_short_q, 0);
+    assert_eq!(group.assets[2].oi_eff_long_q, 2 * POS_SCALE);
+    assert_eq!(group.assets[2].oi_eff_short_q, 2 * POS_SCALE);
+}
+
+#[test]
 fn v16_wrapper_asset_authority_rotation_and_burn_gate_lifecycle_updates() {
     let mut admin = signer();
     let mut new_asset_authority = signer();
@@ -3686,6 +3773,115 @@ fn v16_wrapper_cross_market_portfolio_provenance_is_fail_closed() {
 }
 
 #[test]
+fn v16_wrapper_same_owner_can_trade_independent_positions_across_markets() {
+    let mut admin_a = signer();
+    let mut admin_b = signer();
+    let mut market_a = market_account();
+    let mut market_b = market_account();
+    let mut owner = signer();
+    let mut counterparty_owner_a = signer();
+    let mut counterparty_owner_b = signer();
+    let mut owner_account_a = portfolio_account();
+    let mut owner_account_b = portfolio_account();
+    let mut counterparty_a = portfolio_account();
+    let mut counterparty_b = portfolio_account();
+
+    init_market(&mut admin_a, &mut market_a);
+    init_market(&mut admin_b, &mut market_b);
+    init_portfolio(&mut owner, &mut market_a, &mut owner_account_a);
+    init_portfolio(&mut owner, &mut market_b, &mut owner_account_b);
+    init_portfolio(
+        &mut counterparty_owner_a,
+        &mut market_a,
+        &mut counterparty_a,
+    );
+    init_portfolio(
+        &mut counterparty_owner_b,
+        &mut market_b,
+        &mut counterparty_b,
+    );
+    deposit(&mut owner, &mut market_a, &mut owner_account_a, 1_000_000);
+    deposit(&mut owner, &mut market_b, &mut owner_account_b, 2_000_000);
+    deposit(
+        &mut counterparty_owner_a,
+        &mut market_a,
+        &mut counterparty_a,
+        1_000_000,
+    );
+    deposit(
+        &mut counterparty_owner_b,
+        &mut market_b,
+        &mut counterparty_b,
+        2_000_000,
+    );
+
+    let market_b_before_a_trade = market_b.data.clone();
+    let owner_b_before_a_trade = owner_account_b.data.clone();
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut owner,
+            &mut counterparty_owner_a,
+            &mut market_a,
+            &mut owner_account_a,
+            &mut counterparty_a,
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        market_b.data, market_b_before_a_trade,
+        "valid trade in market A must not mutate market B"
+    );
+    assert_eq!(
+        owner_account_b.data, owner_b_before_a_trade,
+        "valid trade in market A must not mutate owner's market-B portfolio"
+    );
+
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: -(2 * POS_SCALE as i128),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut owner,
+            &mut counterparty_owner_b,
+            &mut market_b,
+            &mut owner_account_b,
+            &mut counterparty_b,
+        ],
+    )
+    .unwrap();
+
+    let (_, group_a) = state::read_market(&market_a.data).unwrap();
+    let (_, group_b) = state::read_market(&market_b.data).unwrap();
+    let owner_a = state::read_portfolio(&owner_account_a.data).unwrap();
+    let owner_b = state::read_portfolio(&owner_account_b.data).unwrap();
+    assert_eq!(
+        owner_a.provenance_header.market_group_id,
+        market_a.key.to_bytes()
+    );
+    assert_eq!(
+        owner_b.provenance_header.market_group_id,
+        market_b.key.to_bytes()
+    );
+    assert_eq!(owner_a.owner, owner.key.to_bytes());
+    assert_eq!(owner_b.owner, owner.key.to_bytes());
+    assert_eq!(owner_a.legs[0].basis_pos_q, POS_SCALE as i128);
+    assert_eq!(owner_b.legs[0].basis_pos_q, -(2 * POS_SCALE as i128));
+    assert_eq!(group_a.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(group_a.assets[0].oi_eff_short_q, POS_SCALE);
+    assert_eq!(group_b.assets[0].oi_eff_long_q, 2 * POS_SCALE);
+    assert_eq!(group_b.assets[0].oi_eff_short_q, 2 * POS_SCALE);
+}
+
+#[test]
 fn v16_wrapper_account_kind_confusion_is_rejected_before_mutation() {
     let mut admin = signer();
     let mut admin_b = signer();
@@ -5359,6 +5555,75 @@ fn v16_wrapper_tradecpi_executes_manual_consented_wide_price() {
     );
     assert_eq!(after_a.legs[0].basis_pos_q, size_q as i128);
     assert_eq!(after_b.legs[0].basis_pos_q, -(size_q as i128));
+}
+
+#[test]
+fn v16_wrapper_tradecpi_executes_on_added_asset_and_binds_matcher_asset_echo() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut account_a = portfolio_account();
+    let mut account_b = portfolio_account();
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 3;
+            }
+        }),
+    );
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        2,
+        1,
+        250,
+    )
+    .unwrap();
+    init_portfolio(&mut owner_a, &mut market, &mut account_a);
+    init_portfolio(&mut owner_b, &mut market, &mut account_b);
+    deposit(&mut owner_a, &mut market, &mut account_a, 1_000_000);
+    deposit(&mut owner_b, &mut market, &mut account_b, 1_000_000);
+
+    let (_, before_group) = state::read_market(&market.data).unwrap();
+    run_trade_cpi_with_matcher(
+        &mut owner_a,
+        &mut owner_b,
+        &mut market,
+        &mut account_a,
+        &mut account_b,
+        2,
+        POS_SCALE as i128,
+        POS_SCALE as i128,
+        275,
+        0,
+        0,
+    )
+    .unwrap();
+
+    let (_, after_group) = state::read_market(&market.data).unwrap();
+    let after_a = state::read_portfolio(&account_a.data).unwrap();
+    let after_b = state::read_portfolio(&account_b.data).unwrap();
+    assert_eq!(
+        after_group.assets[2].effective_price, before_group.assets[2].effective_price,
+        "CPI execution price for an added asset must not rewrite the accepted index"
+    );
+    assert_eq!(after_group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(after_group.assets[0].oi_eff_short_q, 0);
+    assert_eq!(after_group.assets[2].oi_eff_long_q, POS_SCALE);
+    assert_eq!(after_group.assets[2].oi_eff_short_q, POS_SCALE);
+    assert_eq!(after_a.active_bitmap, 1 << 2);
+    assert_eq!(after_b.active_bitmap, 1 << 2);
+    assert_eq!(after_a.legs[2].basis_pos_q, POS_SCALE as i128);
+    assert_eq!(after_b.legs[2].basis_pos_q, -(POS_SCALE as i128));
 }
 
 #[test]
