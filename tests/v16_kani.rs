@@ -492,6 +492,57 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_hyperp_mark_decode_preserves_wire_fields() {
+    let now_slot_raw: u16 = kani::any();
+    let mark_raw: u16 = kani::any();
+    let halflife_raw: u16 = kani::any();
+    let mark_min_fee_raw: u16 = kani::any();
+    let push_mark_raw: u16 = kani::any();
+
+    let now_slot = now_slot_raw as u64;
+    let initial_mark_e6 = mark_raw as u64;
+    let mark_ewma_halflife_slots = halflife_raw as u64;
+    let mark_min_fee = mark_min_fee_raw as u64;
+    let push_mark_e6 = push_mark_raw as u64;
+
+    let mut configure = [0u8; 33];
+    configure[0] = 35;
+    configure[1..9].copy_from_slice(&now_slot.to_le_bytes());
+    configure[9..17].copy_from_slice(&initial_mark_e6.to_le_bytes());
+    configure[17..25].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
+    configure[25..33].copy_from_slice(&mark_min_fee.to_le_bytes());
+    match Instruction::decode(&configure).unwrap() {
+        Instruction::ConfigureHyperpMark {
+            now_slot: got_now,
+            initial_mark_e6: got_mark,
+            mark_ewma_halflife_slots: got_halflife,
+            mark_min_fee: got_min_fee,
+        } => {
+            assert_eq!(got_now, now_slot);
+            assert_eq!(got_mark, initial_mark_e6);
+            assert_eq!(got_halflife, mark_ewma_halflife_slots);
+            assert_eq!(got_min_fee, mark_min_fee);
+        }
+        _ => unreachable!(),
+    }
+
+    let mut push = [0u8; 17];
+    push[0] = 36;
+    push[1..9].copy_from_slice(&now_slot.to_le_bytes());
+    push[9..17].copy_from_slice(&push_mark_e6.to_le_bytes());
+    match Instruction::decode(&push).unwrap() {
+        Instruction::PushHyperpMark {
+            now_slot: got_now,
+            mark_e6: got_mark,
+        } => {
+            assert_eq!(got_now, now_slot);
+            assert_eq!(got_mark, push_mark_e6);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
 fn kani_v16_decode_rejects_trailing_bytes() {
     let extra: u8 = kani::any();
     let data = [1u8, extra];
@@ -659,6 +710,24 @@ fn kani_v16_every_active_payload_rejects_trailing_byte() {
     .encode();
     configure_hybrid.push(extra);
     assert!(Instruction::decode(&configure_hybrid).is_err());
+
+    let mut configure_hyperp = Instruction::ConfigureHyperpMark {
+        now_slot: 1,
+        initial_mark_e6: 100,
+        mark_ewma_halflife_slots: 1,
+        mark_min_fee: 0,
+    }
+    .encode();
+    configure_hyperp.push(extra);
+    assert!(Instruction::decode(&configure_hyperp).is_err());
+
+    let mut push_hyperp = Instruction::PushHyperpMark {
+        now_slot: 2,
+        mark_e6: 101,
+    }
+    .encode();
+    push_hyperp.push(extra);
+    assert!(Instruction::decode(&push_hyperp).is_err());
 }
 
 #[kani::proof]

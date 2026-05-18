@@ -610,6 +610,47 @@ impl V16CuEnv {
         )
     }
 
+    fn configure_hyperp_mark_with_cu(
+        &mut self,
+        now_slot: u64,
+        initial_mark_e6: u64,
+        halflife_slots: u64,
+        mark_min_fee: u64,
+    ) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::ConfigureHyperpMark {
+                now_slot,
+                initial_mark_e6,
+                mark_ewma_halflife_slots: halflife_slots,
+                mark_min_fee,
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("configure hyperp mark")
+    }
+
+    fn push_hyperp_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::PushHyperpMark { now_slot, mark_e6 },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("push hyperp mark")
+    }
+
     fn resolve_stale_permissionless_with_cu(&mut self, now_slot: u64) -> u64 {
         self.svm.warp_to_slot(now_slot);
         send_tx(
@@ -1228,6 +1269,49 @@ fn v16_bpf_configure_hybrid_oracle_uses_authenticated_unix_time_not_caller_time(
     assert_eq!(
         after, before,
         "rejected stale-oracle configuration must not mutate the market"
+    );
+}
+
+#[test]
+fn v16_bpf_configure_and_push_hyperp_mark_are_bounded_and_clock_authenticated() {
+    let mut env = V16CuEnv::new();
+    let configure_real_slot = 8;
+    let push_real_slot = 9;
+    let spoofed_slot = 1_000_000;
+    env.svm.warp_to_slot(configure_real_slot);
+    let configure_cu = env.configure_hyperp_mark_with_cu(spoofed_slot, 100, 1, 0);
+    env.svm.warp_to_slot(push_real_slot);
+    let push_cu = env.push_hyperp_mark_with_cu(spoofed_slot, 120);
+    println!("v16 Hyperp configure CU: {configure_cu}, push CU: {push_cu}");
+    assert!(
+        configure_cu <= CUSTODY_CU_LIMIT,
+        "Hyperp configure CU {} exceeded limit {}",
+        configure_cu,
+        CUSTODY_CU_LIMIT
+    );
+    assert!(
+        push_cu <= CUSTODY_CU_LIMIT,
+        "Hyperp push CU {} exceeded limit {}",
+        push_cu,
+        CUSTODY_CU_LIMIT
+    );
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let (cfg, group) = state::read_market(&market_data).unwrap();
+    assert_eq!(
+        cfg.oracle_mode,
+        percolator_prog::constants::ORACLE_MODE_HYPERP
+    );
+    assert_eq!(group.current_slot, configure_real_slot);
+    assert_eq!(group.slot_last, configure_real_slot);
+    assert_eq!(cfg.mark_ewma_last_slot, push_real_slot);
+    assert_eq!(
+        cfg.mark_ewma_e6, 110,
+        "authority mark push should update the EWMA using authenticated slot time"
+    );
+    assert_ne!(
+        cfg.mark_ewma_last_slot, spoofed_slot,
+        "caller-supplied PushHyperpMark now_slot must not authenticate mark liveness"
     );
 }
 
