@@ -1,5 +1,5 @@
 use litesvm::LiteSVM;
-use percolator::{BackingBucketStatusV16, BOUND_SCALE, POS_SCALE};
+use percolator::{BackingBucketStatusV16, TradeRequestV16, BOUND_SCALE, POS_SCALE};
 use percolator_prog::{
     constants::{
         MARKET_ACCOUNT_LEN, MATCHER_ABI_VERSION, ORACLE_LEG_FLAG_DIVIDE_LEG2,
@@ -172,6 +172,15 @@ struct V16CuEnv {
 
 impl V16CuEnv {
     fn new() -> Self {
+        Self::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000)
+    }
+
+    fn new_with_market_params_and_price_move(
+        max_portfolio_assets: u8,
+        maintenance_margin_bps: u64,
+        initial_margin_bps: u64,
+        max_price_move_bps_per_slot: u64,
+    ) -> Self {
         let mut svm = LiteSVM::new();
         let program_id = percolator_prog::id();
         let program_bytes = std::fs::read(program_path()).expect("read BPF");
@@ -227,20 +236,20 @@ impl V16CuEnv {
             program_id,
             &payer,
             ProgInstruction::InitMarket {
-                max_portfolio_assets: 1,
+                max_portfolio_assets,
                 h_min: 0,
                 h_max: 10,
                 initial_price: 100,
                 min_nonzero_mm_req: 1,
                 min_nonzero_im_req: 2,
-                maintenance_margin_bps: 10_000,
-                initial_margin_bps: 10_000,
+                maintenance_margin_bps,
+                initial_margin_bps,
                 max_trading_fee_bps: 10_000,
                 trade_fee_base_bps: 0,
                 liquidation_fee_bps: 0,
                 liquidation_fee_cap: 0,
                 min_liquidation_abs: 0,
-                max_price_move_bps_per_slot: 10_000,
+                max_price_move_bps_per_slot,
                 max_accrual_dt_slots: 1,
                 max_abs_funding_e9_per_slot: 0,
                 min_funding_lifetime_slots: 1,
@@ -389,6 +398,80 @@ impl V16CuEnv {
             &[owner_a, owner_b],
         )
         .expect("trade")
+    }
+
+    fn seed_n_leg_position_for_benchmark(
+        &mut self,
+        long_account: Pubkey,
+        short_account: Pubkey,
+        n: usize,
+    ) {
+        let mut market_account = self.svm.get_account(&self.market).expect("market account");
+        let mut long_data = self.svm.get_account(&long_account).expect("long account");
+        let mut short_data = self.svm.get_account(&short_account).expect("short account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut long = state::read_portfolio(&long_data.data).unwrap();
+        let mut short = state::read_portfolio(&short_data.data).unwrap();
+
+        for asset_index in 1..n {
+            group
+                .activate_empty_asset_not_atomic(asset_index, 100, asset_index as u64)
+                .unwrap();
+        }
+        let mut prices = [1u64; percolator::V16_MAX_PORTFOLIO_ASSETS_N];
+        for price in prices.iter_mut().take(n) {
+            *price = 100;
+        }
+        for asset_index in 0..n {
+            group
+                .execute_trade_with_fee_in_place_not_atomic(
+                    &mut long,
+                    &mut short,
+                    TradeRequestV16 {
+                        asset_index,
+                        size_q: 10 * POS_SCALE,
+                        exec_price: 100,
+                        fee_bps: 0,
+                    },
+                    &prices,
+                )
+                .unwrap();
+        }
+        for asset_index in 0..n {
+            group
+                .accrue_asset_to_not_atomic(asset_index, 16, 95, 0, true)
+                .unwrap();
+        }
+
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut long_data.data, &long).unwrap();
+        state::write_portfolio(&mut short_data.data, &short).unwrap();
+        self.svm.set_account(self.market, market_account).unwrap();
+        self.svm.set_account(long_account, long_data).unwrap();
+        self.svm.set_account(short_account, short_data).unwrap();
+    }
+
+    fn force_portfolio_capital_for_benchmark(&mut self, portfolio_key: Pubkey, new_capital: u128) {
+        let mut market_account = self.svm.get_account(&self.market).expect("market account");
+        let mut portfolio_data = self.svm.get_account(&portfolio_key).expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut portfolio = state::read_portfolio(&portfolio_data.data).unwrap();
+        let old_capital = portfolio.capital;
+        if new_capital < old_capital {
+            let delta = old_capital - new_capital;
+            group.c_tot -= delta;
+            group.vault -= delta;
+        } else {
+            let delta = new_capital - old_capital;
+            group.c_tot += delta;
+            group.vault += delta;
+        }
+        portfolio.capital = new_capital;
+        portfolio.health_cert.valid = false;
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_data.data, &portfolio).unwrap();
+        self.svm.set_account(self.market, market_account).unwrap();
+        self.svm.set_account(portfolio_key, portfolio_data).unwrap();
     }
 
     fn init_matcher_context(
@@ -1248,6 +1331,102 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
     assert_eq!(group.slot_last, 1);
     assert_eq!(group.assets[0].effective_price, 200);
     assert_eq!(short.active_bitmap, 0);
+}
+
+#[test]
+fn v16_bpf_full_16_leg_refresh_crank_is_under_tx_limit() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(16, 1_000, 1_000, 500);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 2_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    env.seed_n_leg_position_for_benchmark(long_account, short_account, 16);
+    let before_slot_last = {
+        let market_data = env.svm.get_account(&env.market).unwrap().data;
+        let (_, group) = state::read_market(&market_data).unwrap();
+        group.assets[0].slot_last
+    };
+
+    env.svm.warp_to_slot(16);
+    let refresh_cu = env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 16,
+            effective_price: 95,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    println!("v16 full-16-leg refresh crank CU: {refresh_cu}");
+    assert!(
+        refresh_cu <= 900_000,
+        "full-16-leg refresh CU {} exceeded limit {}",
+        refresh_cu,
+        900_000
+    );
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let long_data = env.svm.get_account(&long_account).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    let long = state::read_portfolio(&long_data).unwrap();
+    assert_eq!(group.config.max_portfolio_assets, 16);
+    assert_eq!(long.active_bitmap.count_ones(), 16);
+    assert!(
+        group.assets[0].slot_last > before_slot_last,
+        "full-16 refresh crank must commit bounded asset progress"
+    );
+    assert_eq!(group.assets[0].effective_price, 95);
+}
+
+#[test]
+fn v16_bpf_full_16_leg_liquidation_crank_is_under_tx_limit() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(16, 1_000, 1_000, 500);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 2_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    env.seed_n_leg_position_for_benchmark(long_account, short_account, 16);
+    env.force_portfolio_capital_for_benchmark(long_account, 1_000);
+
+    env.svm.warp_to_slot(16);
+    let liquidation_cu = env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 16,
+            effective_price: 95,
+            funding_rate_e9: 0,
+            close_q: 10 * POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    println!("v16 full-16-leg liquidation crank CU: {liquidation_cu}");
+    assert!(
+        liquidation_cu <= 1_350_000,
+        "full-16-leg liquidation CU {} exceeded limit {}",
+        liquidation_cu,
+        1_350_000
+    );
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let long_data = env.svm.get_account(&long_account).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    let long = state::read_portfolio(&long_data).unwrap();
+    assert_eq!(group.config.max_portfolio_assets, 16);
+    assert_eq!(long.active_bitmap.count_ones(), 15);
+    assert!(!long.legs[0].active);
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group.assets[0].oi_eff_short_q, 0);
 }
 
 #[test]
