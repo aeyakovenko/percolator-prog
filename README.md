@@ -157,6 +157,9 @@ This section describes intent and operational ordering, not argument-by-argument
   - authenticates clock/oracle state in the wrapper, then delegates bounded public progress to the engine
   - candidate accounts are untrusted hints, not a liveness precondition; honest keepers should include the worst known stale/bankrupt/liquidatable accounts, but the engine also makes cursored progress
   - may perform bounded catchup/recovery, liquidation, touch-only settlement, round-robin lifecycle progress, empty-account reclaim, and post-touch maintenance-fee realization
+- **FinalizeResetSide** (tag 45)
+  - permissionless side-reset finalization for engine-ready asset sides
+  - validates side encoding and engine readiness; it is not an admin override
 - **TopUpInsurance**
   - transfers collateral into vault; credits insurance fund in engine
 
@@ -168,19 +171,31 @@ This section describes intent and operational ordering, not argument-by-argument
 
 ### Oracle / mark management
 - External-oracle markets read configured oracle account(s) directly in live price-taking instructions.
-- Hyperp markets use **PushHyperpMark** (tag 17), signed by the Hyperp mark authority, to update the mark input.
+- Hyperp markets use **PushHyperpMark** (tag 36), signed by the Hyperp mark authority, to update the mark input.
 - The per-slot effective-price movement cap is a risk parameter set at init; there is no standalone `SetOraclePriceCap` instruction in the current ABI.
 
 ### Insurance management
-- **WithdrawInsurance** (tag 20)
+- **WithdrawInsurance** (tag 41)
   - unbounded resolved-market insurance withdrawal
   - gated by `insurance_authority`
   - requires market resolved and all accounts closed
 - **WithdrawInsuranceLimited** (tag 23)
   - rate-limited insurance withdrawal with immutable per-market caps (`insurance_withdraw_max_bps`, `insurance_withdraw_cooldown_slots`)
   - gated by `insurance_operator`, which is disjoint from `insurance_authority`
-  - live-market only; resolved markets use tag 20
+  - live-market only; resolved markets use tag 41
   - rejected while the market is unhealthy, lagged, h-lock/stress-active, or has negative senior residual
+
+### Close / recovery progress
+- **CureAndCancelClose** (tag 42)
+  - owner-signed close recovery path; optional deposit is transferred first, then the engine cancels the pending close if the cure succeeds
+- **ForfeitRecoveryLeg** (tag 43)
+  - owner-signed recovery-leg forfeit for a selected asset and bounded B-delta budget
+- **RebalanceReduce** (tag 44)
+  - owner-signed risk-reducing rebalance against the wrapper-authenticated effective price vector
+- **ClaimResolvedPayoutTopup** (tag 46)
+  - permissionless resolved-payout top-up claim; pays only the stored owner receipt token account
+- **RefineResolvedUnreceiptedBound** (tag 47)
+  - admin-gated monotonic decrease of the resolved unreceipted bound; cannot increase obligations
 
 ### Post-resolution admin
 - **AdminForceCloseAccount**

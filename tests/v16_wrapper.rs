@@ -1,7 +1,8 @@
 use percolator::{
-    AssetLifecycleV16, BackingBucketStatusV16, MarketGroupV16, MarketGroupV16Account,
-    MarketModeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, V16Config,
-    BOUND_SCALE, POS_SCALE,
+    AssetLifecycleV16, BackingBucketStatusV16, CloseProgressLedgerV16, MarketGroupV16,
+    MarketGroupV16Account, MarketModeV16, PermissionlessRecoveryReasonV16,
+    PortfolioAccountV16Account, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16,
+    SideV16, V16Config, BOUND_SCALE, POS_SCALE,
 };
 use percolator_prog::{
     constants::{
@@ -1595,6 +1596,124 @@ fn v16_wrapper_top_up_insurance_rejects_wrong_mint_and_insufficient_source_balan
         ],
     );
     assert_err_and_market_unchanged(short_balance, &market, &before);
+}
+
+#[test]
+fn v16_wrapper_resolved_insurance_authority_can_withdraw_all_remaining_insurance() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mint = init_market(&mut admin, &mut market);
+    let mut source = user_token_account(admin.key, mint, 100);
+    let mut vault = vault_token_account(&market, mint, 100);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpInsurance { amount: 100 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+    run_ix(
+        Instruction::UpdateInsurancePolicy {
+            max_bps: 1,
+            deposits_only: 0,
+            cooldown_slots: 100,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let mut dest = user_token_account(admin.key, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    run_ix(
+        Instruction::WithdrawInsurance { amount: 100 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.insurance, 0);
+    assert_eq!(group.vault, 0);
+}
+
+#[test]
+fn v16_wrapper_resolved_insurance_withdraw_rejects_live_wrong_authority_and_open_accounts() {
+    let mut admin = signer();
+    let mut attacker = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    let mint = init_market(&mut admin, &mut market);
+    let mut source = user_token_account(admin.key, mint, 100);
+    let mut vault = vault_token_account(&market, mint, 100);
+    let mut dest = user_token_account(admin.key, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpInsurance { amount: 100 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let live = market.data.clone();
+    let live_reject = run_ix(
+        Instruction::WithdrawInsurance { amount: 1 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(live_reject, &market, &live);
+
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+    let resolved_with_open = market.data.clone();
+    let open_reject = run_ix(
+        Instruction::WithdrawInsurance { amount: 1 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(open_reject, &market, &resolved_with_open);
+
+    let wrong_auth = run_ix(
+        Instruction::WithdrawInsurance { amount: 1 },
+        &mut [
+            &mut attacker,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert!(wrong_auth.is_err());
 }
 
 #[test]
@@ -6939,6 +7058,442 @@ fn v16_wrapper_permissionless_crank_rejects_caller_supplied_funding_rate() {
     );
     assert_err_and_market_unchanged(result, &market, &before_market);
     assert_eq!(portfolio.data, before_portfolio);
+}
+
+#[test]
+fn v16_wrapper_permissionless_recovery_declares_below_progress_floor_when_proven() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                initial_price,
+                max_price_move_bps_per_slot,
+                max_trading_fee_bps,
+                ..
+            } = ix
+            {
+                *initial_price = 1;
+                *max_price_move_bps_per_slot = 1;
+                *max_trading_fee_bps = 10_000;
+            }
+        }),
+    );
+    run_ix(
+        Instruction::ConfigureHyperpMark {
+            now_slot: 0,
+            initial_mark_e6: 1,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 1_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 1,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::PushHyperpMark {
+            now_slot: 1,
+            mark_e6: 3,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 3,
+            asset_index: 0,
+            now_slot: 1,
+            effective_price: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut long_owner, &mut market, &mut long_account],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.mode, MarketModeV16::Recovery);
+    assert_eq!(
+        group.recovery_reason,
+        Some(PermissionlessRecoveryReasonV16::BelowProgressFloor)
+    );
+}
+
+#[test]
+fn v16_wrapper_rebalance_reduce_is_owner_signed_and_strictly_reduces_risk() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut attacker = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: (2 * POS_SCALE) as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+
+    let before_market = market.data.clone();
+    let before_account = long_account.data.clone();
+    let unauthorized = run_ix(
+        Instruction::RebalanceReduce {
+            asset_index: 0,
+            reduce_q: POS_SCALE,
+        },
+        &mut [&mut attacker, &mut market, &mut long_account],
+    );
+    assert_err_and_market_unchanged(unauthorized, &market, &before_market);
+    assert_eq!(long_account.data, before_account);
+
+    run_ix(
+        Instruction::RebalanceReduce {
+            asset_index: 0,
+            reduce_q: POS_SCALE,
+        },
+        &mut [&mut long_owner, &mut market, &mut long_account],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let long = state::read_portfolio(&long_account.data).unwrap();
+    assert_eq!(long.legs[0].basis_pos_q, POS_SCALE as i128);
+    assert_eq!(group.assets[0].oi_eff_long_q, POS_SCALE);
+}
+
+#[test]
+fn v16_wrapper_dead_leg_forfeit_is_owner_signed_and_detaches_recovery_leg() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut attacker = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    init_market(&mut admin, &mut market);
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group.mode = MarketModeV16::Recovery;
+        group.recovery_reason = Some(PermissionlessRecoveryReasonV16::BelowProgressFloor);
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let before_market = market.data.clone();
+    let before_account = long_account.data.clone();
+    let unauthorized = run_ix(
+        Instruction::ForfeitRecoveryLeg {
+            asset_index: 0,
+            b_delta_budget: 1,
+        },
+        &mut [&mut attacker, &mut market, &mut long_account],
+    );
+    assert_err_and_market_unchanged(unauthorized, &market, &before_market);
+    assert_eq!(long_account.data, before_account);
+
+    run_ix(
+        Instruction::ForfeitRecoveryLeg {
+            asset_index: 0,
+            b_delta_budget: 1,
+        },
+        &mut [&mut long_owner, &mut market, &mut long_account],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let long = state::read_portfolio(&long_account.data).unwrap();
+    assert_eq!(long.active_bitmap, 0);
+    assert_eq!(long.legs[0].basis_pos_q, 0);
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+}
+
+#[test]
+fn v16_wrapper_cure_and_cancel_close_uses_owner_deposit_before_support_is_consumed() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    let mint = init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio.data).unwrap();
+        account.close_progress = CloseProgressLedgerV16 {
+            active: true,
+            finalized: false,
+            canceled: false,
+            close_id: 1,
+            asset_index: 0,
+            domain_side: SideV16::Long,
+            gross_loss_at_close_start: 10,
+            drift_reference_slot: 0,
+            max_close_slot: 10,
+            residual_remaining: 10,
+            ..CloseProgressLedgerV16::EMPTY
+        };
+        group.pending_domain_loss_barriers[0] = 1;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio.data, &account).unwrap();
+    }
+    let mut source = user_token_account(owner.key, mint, 20);
+    let mut vault = vault_token_account(&market, mint, 20);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::CureAndCancelClose {
+            optional_deposit: 20,
+        },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert!(account.close_progress.canceled);
+    assert_eq!(account.capital, 20);
+    assert_eq!(group.c_tot, 20);
+    assert_eq!(group.vault, 20);
+    assert_eq!(group.pending_domain_loss_barriers[0], 0);
+}
+
+#[test]
+fn v16_wrapper_finalize_reset_side_is_permissionless_but_validates_side_and_readiness() {
+    let mut admin = signer();
+    let mut market = market_account();
+    init_market(&mut admin, &mut market);
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group.assets[0].mode_long = SideModeV16::ResetPending;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let bad_side = run_ix(
+        Instruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 2,
+        },
+        &mut [&mut market],
+    );
+    assert!(bad_side.is_err());
+
+    run_ix(
+        Instruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 0,
+        },
+        &mut [&mut market],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.assets[0].mode_long, SideModeV16::Normal);
+}
+
+#[test]
+fn v16_wrapper_claim_resolved_payout_topup_pays_only_stored_owner_receipt() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut attacker_owner = signer();
+    let mut portfolio = portfolio_account();
+    let mint = init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 100 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 100,
+            paid_effective: 40,
+            finalized: false,
+        };
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio.data, &account).unwrap();
+    }
+    let mut dest = user_token_account(owner.key, mint, 0);
+    let mut vault = vault_token_account(&market, mint, 60);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut token_program = token_program_account();
+
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let wrong_owner = run_ix(
+        Instruction::ClaimResolvedPayoutTopup,
+        &mut [
+            &mut attacker_owner,
+            &mut market,
+            &mut portfolio,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(wrong_owner, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+
+    run_ix(
+        Instruction::ClaimResolvedPayoutTopup,
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(group.vault, 0);
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
+    assert!(account.resolved_payout_receipt.finalized);
+}
+
+#[test]
+fn v16_wrapper_refine_resolved_unreceipted_bound_is_admin_only_and_monotonic() {
+    let mut admin = signer();
+    let mut attacker = signer();
+    let mut market = market_account();
+    init_market(&mut admin, &mut market);
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 0,
+            terminal_claim_bound_unreceipted_num: 100 * BOUND_SCALE,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let before = market.data.clone();
+    let unauthorized = run_ix(
+        Instruction::RefineResolvedUnreceiptedBound {
+            decrease_num: 10 * BOUND_SCALE,
+        },
+        &mut [&mut attacker, &mut market],
+    );
+    assert_err_and_market_unchanged(unauthorized, &market, &before);
+
+    run_ix(
+        Instruction::RefineResolvedUnreceiptedBound {
+            decrease_num: 10 * BOUND_SCALE,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        group
+            .resolved_payout_ledger
+            .terminal_claim_bound_unreceipted_num,
+        90 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.resolved_payout_ledger.current_payout_rate_num,
+        90 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.resolved_payout_ledger.current_payout_rate_den,
+        90 * BOUND_SCALE
+    );
 }
 
 #[test]

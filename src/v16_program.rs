@@ -12,10 +12,11 @@ use alloc::vec::Vec;
 use percolator::{
     AssetLifecycleV16, AssetStateV16, BackingBucketV16, CloseProgressLedgerV16, HealthCertV16,
     InsuranceCreditReservationV16, MarketGroupV16, MarketModeV16, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PortfolioAccountV16, PortfolioLegV16, ProvenanceHeaderV16,
-    ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16,
-    SourceCreditStateV16, TradeOutcomeV16, TradeRequestV16, V16Config, V16Error, BOUND_SCALE,
-    V16_DOMAIN_COUNT, V16_MAX_PORTFOLIO_ASSETS_N,
+    PermissionlessCrankRequestV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16,
+    PortfolioLegV16, ProvenanceHeaderV16, RebalanceRequestV16, ResolvedCloseOutcomeV16,
+    ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16, SideV16, SourceCreditStateV16,
+    TradeOutcomeV16, TradeRequestV16, V16Config, V16Error, BOUND_SCALE, V16_DOMAIN_COUNT,
+    V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use solana_program::{
     account_info::AccountInfo,
@@ -976,6 +977,28 @@ pub mod ix {
             now_slot: u64,
             initial_price: u64,
         },
+        WithdrawInsurance {
+            amount: u128,
+        },
+        CureAndCancelClose {
+            optional_deposit: u128,
+        },
+        ForfeitRecoveryLeg {
+            asset_index: u8,
+            b_delta_budget: u128,
+        },
+        RebalanceReduce {
+            asset_index: u8,
+            reduce_q: u128,
+        },
+        FinalizeResetSide {
+            asset_index: u8,
+            side: u8,
+        },
+        ClaimResolvedPayoutTopup,
+        RefineResolvedUnreceiptedBound {
+            decrease_num: u128,
+        },
     }
 
     impl Instruction {
@@ -1108,6 +1131,28 @@ pub mod ix {
                     asset_index: read_u8(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     initial_price: read_u64(&mut rest)?,
+                },
+                41 => Self::WithdrawInsurance {
+                    amount: read_u128(&mut rest)?,
+                },
+                42 => Self::CureAndCancelClose {
+                    optional_deposit: read_u128(&mut rest)?,
+                },
+                43 => Self::ForfeitRecoveryLeg {
+                    asset_index: read_u8(&mut rest)?,
+                    b_delta_budget: read_u128(&mut rest)?,
+                },
+                44 => Self::RebalanceReduce {
+                    asset_index: read_u8(&mut rest)?,
+                    reduce_q: read_u128(&mut rest)?,
+                },
+                45 => Self::FinalizeResetSide {
+                    asset_index: read_u8(&mut rest)?,
+                    side: read_u8(&mut rest)?,
+                },
+                46 => Self::ClaimResolvedPayoutTopup,
+                47 => Self::RefineResolvedUnreceiptedBound {
+                    decrease_num: read_u128(&mut rest)?,
                 },
                 _ => return Err(ProgramError::InvalidInstructionData),
             };
@@ -1337,6 +1382,40 @@ pub mod ix {
                     out.push(asset_index);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, initial_price);
+                }
+                Self::WithdrawInsurance { amount } => {
+                    out.push(41);
+                    push_u128(&mut out, amount);
+                }
+                Self::CureAndCancelClose { optional_deposit } => {
+                    out.push(42);
+                    push_u128(&mut out, optional_deposit);
+                }
+                Self::ForfeitRecoveryLeg {
+                    asset_index,
+                    b_delta_budget,
+                } => {
+                    out.push(43);
+                    out.push(asset_index);
+                    push_u128(&mut out, b_delta_budget);
+                }
+                Self::RebalanceReduce {
+                    asset_index,
+                    reduce_q,
+                } => {
+                    out.push(44);
+                    out.push(asset_index);
+                    push_u128(&mut out, reduce_q);
+                }
+                Self::FinalizeResetSide { asset_index, side } => {
+                    out.push(45);
+                    out.push(asset_index);
+                    out.push(side);
+                }
+                Self::ClaimResolvedPayoutTopup => out.push(46),
+                Self::RefineResolvedUnreceiptedBound { decrease_num } => {
+                    out.push(47);
+                    push_u128(&mut out, decrease_num);
                 }
             }
             out
@@ -2157,6 +2236,30 @@ pub mod processor {
         Clock::get().map(|c| c.slot).unwrap_or(group.current_slot)
     }
 
+    fn decode_side(value: u8) -> Result<SideV16, ProgramError> {
+        match value {
+            0 => Ok(SideV16::Long),
+            1 => Ok(SideV16::Short),
+            _ => Err(PercolatorError::InvalidInstruction.into()),
+        }
+    }
+
+    fn decode_recovery_reason(value: u8) -> Result<PermissionlessRecoveryReasonV16, ProgramError> {
+        match value {
+            0 => Ok(PermissionlessRecoveryReasonV16::BelowProgressFloor),
+            1 => Ok(PermissionlessRecoveryReasonV16::BlockedSegmentHeadroomOrRepresentability),
+            2 => Ok(PermissionlessRecoveryReasonV16::AccountBSettlementCannotProgress),
+            3 => Ok(PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted),
+            4 => Ok(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress),
+            5 => Ok(PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow),
+            6 => {
+                Ok(PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy)
+            }
+            7 => Ok(PermissionlessRecoveryReasonV16::CounterOrEpochOverflowDeclaredRecovery),
+            _ => Err(PercolatorError::InvalidInstruction.into()),
+        }
+    }
+
     fn permissionless_resolve_matured_now(cfg: &WrapperConfigV16, group: &MarketGroupV16) -> bool {
         oracle_v16::permissionless_stale_matured(cfg, authenticated_market_slot_or_fallback(group))
     }
@@ -2381,6 +2484,29 @@ pub mod processor {
                 now_slot,
                 initial_price,
             ),
+            Instruction::WithdrawInsurance { amount } => {
+                handle_withdraw_insurance(program_id, accounts, amount)
+            }
+            Instruction::CureAndCancelClose { optional_deposit } => {
+                handle_cure_and_cancel_close(program_id, accounts, optional_deposit)
+            }
+            Instruction::ForfeitRecoveryLeg {
+                asset_index,
+                b_delta_budget,
+            } => handle_forfeit_recovery_leg(program_id, accounts, asset_index, b_delta_budget),
+            Instruction::RebalanceReduce {
+                asset_index,
+                reduce_q,
+            } => handle_rebalance_reduce(program_id, accounts, asset_index, reduce_q),
+            Instruction::FinalizeResetSide { asset_index, side } => {
+                handle_finalize_reset_side(program_id, accounts, asset_index, side)
+            }
+            Instruction::ClaimResolvedPayoutTopup => {
+                handle_claim_resolved_payout_topup(program_id, accounts)
+            }
+            Instruction::RefineResolvedUnreceiptedBound { decrease_num } => {
+                handle_refine_resolved_unreceipted_bound(program_id, accounts, decrease_num)
+            }
         }
     }
 
@@ -3042,6 +3168,71 @@ pub mod processor {
     }
 
     #[inline(never)]
+    fn handle_withdraw_insurance<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        amount: u128,
+    ) -> ProgramResult {
+        let authority = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let dest_token = account(accounts, 2)?;
+        let vault_token = account(accounts, 3)?;
+        let vault_authority_ai = account(accounts, 4)?;
+        let token_program = account(accounts, 5)?;
+        expect_signer(authority)?;
+        expect_writable(market_ai)?;
+        expect_writable(dest_token)?;
+        expect_writable(vault_token)?;
+        expect_owner(market_ai, program_id)?;
+        verify_token_program(token_program)?;
+        if amount == 0 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if cfg.insurance_authority != authority.key.to_bytes() {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        if group.mode != MarketModeV16::Resolved
+            || group.materialized_portfolio_count != 0
+            || group.c_tot != 0
+            || amount > group.insurance
+            || amount > group.vault
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+
+        group.insurance = group
+            .insurance
+            .checked_sub(amount)
+            .ok_or(PercolatorError::EngineCounterUnderflow)?;
+        group.vault = group
+            .vault
+            .checked_sub(amount)
+            .ok_or(PercolatorError::EngineCounterUnderflow)?;
+        group.assert_public_invariants().map_err(map_v16_error)?;
+
+        let mint = Pubkey::new_from_array(cfg.collateral_mint);
+        let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
+        expect_key(vault_authority_ai, &vault_authority)?;
+        verify_user_token_account(dest_token, authority.key, &mint)?;
+        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+        let amount_u64 = amount_to_u64(amount)?;
+        require_token_balance(vault_token, amount_u64)?;
+        let bump_arr = [bump];
+        let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+        transfer_tokens_signed(
+            token_program,
+            vault_token,
+            dest_token,
+            vault_authority_ai,
+            amount_u64,
+            signer_seeds,
+        )?;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+    }
+
+    #[inline(never)]
     fn handle_close_slab<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
@@ -3257,6 +3448,99 @@ pub mod processor {
     }
 
     #[inline(never)]
+    fn handle_cure_and_cancel_close<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        optional_deposit: u128,
+    ) -> ProgramResult {
+        let owner = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let portfolio_ai = account(accounts, 2)?;
+        expect_signer(owner)?;
+        expect_writable(market_ai)?;
+        expect_writable(portfolio_ai)?;
+        expect_owner(market_ai, program_id)?;
+        expect_owner(portfolio_ai, program_id)?;
+
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
+        expect_portfolio_account_key(portfolio.as_ref(), portfolio_ai.key)?;
+        expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
+
+        let amount_u64 = if optional_deposit != 0 {
+            let source_token = account(accounts, 3)?;
+            let vault_token = account(accounts, 4)?;
+            let token_program = account(accounts, 5)?;
+            expect_writable(source_token)?;
+            expect_writable(vault_token)?;
+            verify_token_program(token_program)?;
+            let mint = Pubkey::new_from_array(cfg.collateral_mint);
+            let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
+            verify_user_token_account(source_token, owner.key, &mint)?;
+            verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+            let amount_u64 = amount_to_u64(optional_deposit)?;
+            require_token_balance(source_token, amount_u64)?;
+            Some((amount_u64, source_token, vault_token, token_program))
+        } else {
+            None
+        };
+
+        let prices = effective_prices(group.as_ref());
+        group
+            .cure_and_cancel_close_not_atomic(portfolio.as_mut(), optional_deposit, &prices)
+            .map_err(map_v16_error)?;
+
+        if let Some((amount_u64, source_token, vault_token, token_program)) = amount_u64 {
+            transfer_tokens(token_program, source_token, vault_token, owner, amount_u64)?;
+        }
+
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
+        state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())
+    }
+
+    #[inline(never)]
+    fn handle_forfeit_recovery_leg<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        asset_index: u8,
+        b_delta_budget: u128,
+    ) -> ProgramResult {
+        if b_delta_budget == 0 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        with_one_portfolio(program_id, accounts, true, |group, portfolio, _cfg| {
+            group
+                .forfeit_recovery_leg_not_atomic(portfolio, asset_index as usize, b_delta_budget)
+                .map(|_| ())
+        })
+    }
+
+    #[inline(never)]
+    fn handle_rebalance_reduce<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        asset_index: u8,
+        reduce_q: u128,
+    ) -> ProgramResult {
+        if reduce_q == 0 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        with_one_portfolio(program_id, accounts, true, |group, portfolio, _cfg| {
+            let prices = effective_prices(group);
+            group
+                .rebalance_reduce_position_not_atomic(
+                    portfolio,
+                    RebalanceRequestV16 {
+                        asset_index: asset_index as usize,
+                        reduce_q,
+                    },
+                    &prices,
+                )
+                .map(|_| ())
+        })
+    }
+
+    #[inline(never)]
     fn handle_resolve_market<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
@@ -3406,6 +3690,48 @@ pub mod processor {
             _ => return Err(PercolatorError::InvalidInstruction.into()),
         }
 
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+    }
+
+    #[inline(never)]
+    fn handle_finalize_reset_side<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        asset_index: u8,
+        side: u8,
+    ) -> ProgramResult {
+        let market_ai = account(accounts, 0)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+        let side = decode_side(side)?;
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        group
+            .finalize_ready_reset_side(asset_index as usize, side)
+            .map_err(map_v16_error)?;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+    }
+
+    #[inline(never)]
+    fn handle_refine_resolved_unreceipted_bound<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        decrease_num: u128,
+    ) -> ProgramResult {
+        let admin = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        expect_signer(admin)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+        if decrease_num == 0 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if cfg.admin != admin.key.to_bytes() {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        group
+            .refine_resolved_unreceipted_bound_not_atomic(decrease_num)
+            .map_err(map_v16_error)?;
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
     }
 
@@ -3768,6 +4094,95 @@ pub mod processor {
         state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())
     }
 
+    #[inline(never)]
+    fn handle_claim_resolved_payout_topup<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+    ) -> ProgramResult {
+        let owner = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let portfolio_ai = account(accounts, 2)?;
+        expect_writable(market_ai)?;
+        expect_writable(portfolio_ai)?;
+        expect_owner(market_ai, program_id)?;
+        expect_owner(portfolio_ai, program_id)?;
+
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
+        expect_portfolio_account_key(portfolio.as_ref(), portfolio_ai.key)?;
+        expect_portfolio_owner(portfolio.as_ref(), owner.key)?;
+
+        let payout = group
+            .claim_resolved_payout_topup_not_atomic(portfolio.as_mut())
+            .map_err(map_v16_error)?;
+        if payout != 0 {
+            let dest_token = account(accounts, 3)?;
+            let vault_token = account(accounts, 4)?;
+            let vault_authority_ai = account(accounts, 5)?;
+            let token_program = account(accounts, 6)?;
+            expect_writable(dest_token)?;
+            expect_writable(vault_token)?;
+            verify_token_program(token_program)?;
+            let mint = Pubkey::new_from_array(cfg.collateral_mint);
+            let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
+            expect_key(vault_authority_ai, &vault_authority)?;
+            verify_user_token_account(dest_token, owner.key, &mint)?;
+            verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+            let payout_u64 = amount_to_u64(payout)?;
+            require_token_balance(vault_token, payout_u64)?;
+            let bump_arr = [bump];
+            let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+            transfer_tokens_signed(
+                token_program,
+                vault_token,
+                dest_token,
+                vault_authority_ai,
+                payout_u64,
+                signer_seeds,
+            )?;
+        }
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
+        state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())
+    }
+
+    fn public_recovery_reason_proven(
+        cfg: &WrapperConfigV16,
+        group: &MarketGroupV16,
+        asset_index: usize,
+        now_slot: u64,
+        effective_price: u64,
+        reason: PermissionlessRecoveryReasonV16,
+    ) -> Result<(), ProgramError> {
+        match reason {
+            PermissionlessRecoveryReasonV16::BelowProgressFloor => {
+                if asset_index >= group.config.max_portfolio_assets as usize {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                let asset = group.assets[asset_index];
+                let exposed = asset.oi_eff_long_q != 0 || asset.oi_eff_short_q != 0;
+                let target = if oracle_v16::is_hybrid(cfg) || oracle_v16::is_hyperp(cfg) {
+                    cfg.oracle_target_price_e6
+                } else {
+                    asset.raw_oracle_target_price
+                };
+                if exposed
+                    && target != 0
+                    && target != asset.effective_price
+                    && effective_price == asset.effective_price
+                    && hybrid_segment_dt(group, now_slot)? > 0
+                {
+                    Ok(())
+                } else {
+                    Err(PercolatorError::InvalidInstruction.into())
+                }
+            }
+            // These reasons are discovered by engine-owned progress routines or
+            // by stale-resolution policy. A public caller cannot select them as
+            // a proof; doing so would make recovery a kill switch.
+            _ => Err(PercolatorError::InvalidInstruction.into()),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn handle_permissionless_crank<'a>(
@@ -3833,13 +4248,6 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         if action == 1 && fee_bps != 0 {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
-        if action == 3 {
-            // Engine recovery is a terminal/conservative mode, not ordinary
-            // keeper progress. Until the wrapper exposes a proof-bearing
-            // recovery/forfeit path, do not let a public caller brick a healthy
-            // live market by selecting a recovery reason.
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let crank_price = hybrid_effective_price_for_crank(
@@ -3915,6 +4323,22 @@ pub mod processor {
                 )?;
             }
         } else {
+            if action == 3 {
+                if close_q != 0 || fee_bps != 0 {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                let reason = decode_recovery_reason(recovery_reason)?;
+                public_recovery_reason_proven(
+                    &cfg,
+                    group.as_ref(),
+                    asset_index_usize,
+                    authenticated_now_slot,
+                    crank_price,
+                    reason,
+                )?;
+            } else if recovery_reason != 0 {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
             crank_one_portfolio(
                 group.as_mut(),
                 portfolio.as_mut(),
@@ -3958,6 +4382,9 @@ pub mod processor {
             2 => PermissionlessCrankActionV16::SettleB {
                 asset_index: asset_index as usize,
             },
+            3 => PermissionlessCrankActionV16::Recover(
+                decode_recovery_reason(_recovery_reason).map_err(|_| V16Error::InvalidConfig)?,
+            ),
             _ => return Err(V16Error::InvalidConfig),
         };
         let prices = effective_prices_with(group, asset_index as usize, effective_price);

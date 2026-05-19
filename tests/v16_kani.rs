@@ -128,7 +128,17 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
     let tag: u8 = kani::any();
-    kani::assume(tag == 3 || tag == 4 || tag == 9 || tag == 23 || tag == 28 || tag == 30);
+    kani::assume(
+        tag == 3
+            || tag == 4
+            || tag == 9
+            || tag == 23
+            || tag == 28
+            || tag == 30
+            || tag == 41
+            || tag == 42
+            || tag == 47,
+    );
     let amount_raw: u16 = kani::any();
     let amount = amount_raw as u128;
 
@@ -147,6 +157,75 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
         (30, Instruction::CloseResolved { fee_rate_per_slot }) => {
             assert_eq!(fee_rate_per_slot, amount)
         }
+        (41, Instruction::WithdrawInsurance { amount: got }) => assert_eq!(got, amount),
+        (
+            42,
+            Instruction::CureAndCancelClose {
+                optional_deposit: got,
+            },
+        ) => assert_eq!(got, amount),
+        (47, Instruction::RefineResolvedUnreceiptedBound { decrease_num }) => {
+            assert_eq!(decrease_num, amount)
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
+    let asset_index: u8 = kani::any();
+    let side: u8 = kani::any();
+    let budget_raw: u16 = kani::any();
+    let reduce_raw: u16 = kani::any();
+    let b_delta_budget = budget_raw as u128;
+    let reduce_q = reduce_raw as u128;
+
+    let forfeit = Instruction::ForfeitRecoveryLeg {
+        asset_index,
+        b_delta_budget,
+    }
+    .encode();
+    match Instruction::decode(&forfeit).unwrap() {
+        Instruction::ForfeitRecoveryLeg {
+            asset_index: got_asset,
+            b_delta_budget: got_budget,
+        } => {
+            assert_eq!(got_asset, asset_index);
+            assert_eq!(got_budget, b_delta_budget);
+        }
+        _ => unreachable!(),
+    }
+
+    let rebalance = Instruction::RebalanceReduce {
+        asset_index,
+        reduce_q,
+    }
+    .encode();
+    match Instruction::decode(&rebalance).unwrap() {
+        Instruction::RebalanceReduce {
+            asset_index: got_asset,
+            reduce_q: got_reduce,
+        } => {
+            assert_eq!(got_asset, asset_index);
+            assert_eq!(got_reduce, reduce_q);
+        }
+        _ => unreachable!(),
+    }
+
+    let finalize = Instruction::FinalizeResetSide { asset_index, side }.encode();
+    match Instruction::decode(&finalize).unwrap() {
+        Instruction::FinalizeResetSide {
+            asset_index: got_asset,
+            side: got_side,
+        } => {
+            assert_eq!(got_asset, asset_index);
+            assert_eq!(got_side, side);
+        }
+        _ => unreachable!(),
+    }
+
+    match Instruction::decode(&Instruction::ClaimResolvedPayoutTopup.encode()).unwrap() {
+        Instruction::ClaimResolvedPayoutTopup => {}
         _ => unreachable!(),
     }
 }
@@ -823,6 +902,49 @@ fn kani_v16_every_active_payload_rejects_trailing_byte() {
     .encode();
     asset_lifecycle.push(extra);
     assert!(Instruction::decode(&asset_lifecycle).is_err());
+
+    let mut withdraw_insurance_full = Instruction::WithdrawInsurance { amount: 1 }.encode();
+    withdraw_insurance_full.push(extra);
+    assert!(Instruction::decode(&withdraw_insurance_full).is_err());
+
+    let mut cure = Instruction::CureAndCancelClose {
+        optional_deposit: 1,
+    }
+    .encode();
+    cure.push(extra);
+    assert!(Instruction::decode(&cure).is_err());
+
+    let mut forfeit = Instruction::ForfeitRecoveryLeg {
+        asset_index: 0,
+        b_delta_budget: 1,
+    }
+    .encode();
+    forfeit.push(extra);
+    assert!(Instruction::decode(&forfeit).is_err());
+
+    let mut rebalance = Instruction::RebalanceReduce {
+        asset_index: 0,
+        reduce_q: 1,
+    }
+    .encode();
+    rebalance.push(extra);
+    assert!(Instruction::decode(&rebalance).is_err());
+
+    let mut finalize = Instruction::FinalizeResetSide {
+        asset_index: 0,
+        side: 0,
+    }
+    .encode();
+    finalize.push(extra);
+    assert!(Instruction::decode(&finalize).is_err());
+
+    let mut topup = Instruction::ClaimResolvedPayoutTopup.encode();
+    topup.push(extra);
+    assert!(Instruction::decode(&topup).is_err());
+
+    let mut refine = Instruction::RefineResolvedUnreceiptedBound { decrease_num: 1 }.encode();
+    refine.push(extra);
+    assert!(Instruction::decode(&refine).is_err());
 }
 
 #[kani::proof]
@@ -852,6 +974,13 @@ fn kani_v16_unknown_or_truncated_tags_reject() {
     kani::assume(tag != 38);
     kani::assume(tag != 39);
     kani::assume(tag != 40);
+    kani::assume(tag != 41);
+    kani::assume(tag != 42);
+    kani::assume(tag != 43);
+    kani::assume(tag != 44);
+    kani::assume(tag != 45);
+    kani::assume(tag != 46);
+    kani::assume(tag != 47);
     assert!(Instruction::decode(&[tag]).is_err());
 
     let deposit_tag_only = [3u8];
@@ -925,4 +1054,22 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
 
     let resolve_permissionless = [39u8; 8];
     assert!(Instruction::decode(&resolve_permissionless).is_err());
+
+    let withdraw_insurance_full = [41u8; 16];
+    assert!(Instruction::decode(&withdraw_insurance_full).is_err());
+
+    let cure = [42u8; 16];
+    assert!(Instruction::decode(&cure).is_err());
+
+    let forfeit = [43u8; 16];
+    assert!(Instruction::decode(&forfeit).is_err());
+
+    let rebalance = [44u8; 16];
+    assert!(Instruction::decode(&rebalance).is_err());
+
+    let finalize = [45u8; 2];
+    assert!(Instruction::decode(&finalize).is_err());
+
+    let refine = [47u8; 16];
+    assert!(Instruction::decode(&refine).is_err());
 }
