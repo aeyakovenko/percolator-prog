@@ -1322,6 +1322,240 @@ fn v16_wrapper_asset_drain_only_and_retire_enforce_engine_lifecycle() {
 }
 
 #[test]
+fn v16_wrapper_prediction_asset_can_drain_retire_and_reactivate_without_closing_other_legs() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 3;
+            }
+        }),
+    );
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        2,
+        1,
+        1_000_000,
+    )
+    .unwrap();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000_000);
+    deposit(
+        &mut short_owner,
+        &mut market,
+        &mut short_account,
+        10_000_000,
+    );
+    let prediction_q = POS_SCALE / 100;
+
+    // Keep another market leg live while the prediction-style asset is cycled.
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 2,
+            size_q: prediction_q as i128,
+            exec_price: 1_000_000,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_DRAIN_ONLY,
+        2,
+        0,
+        0,
+    )
+    .unwrap();
+    let before_blocked_risk_increase = market.data.clone();
+    let blocked_risk_increase = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 2,
+            size_q: prediction_q as i128,
+            exec_price: 1_000_000,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    );
+    assert_err_and_market_unchanged(
+        blocked_risk_increase,
+        &market,
+        &before_blocked_risk_increase,
+    );
+
+    let before_retire_with_open_legs = market.data.clone();
+    let retire_with_open_legs = update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        2,
+        0,
+        0,
+    );
+    assert_err_and_market_unchanged(
+        retire_with_open_legs,
+        &market,
+        &before_retire_with_open_legs,
+    );
+
+    run_ix(
+        Instruction::RebalanceReduce {
+            asset_index: 2,
+            reduce_q: prediction_q,
+        },
+        &mut [&mut long_owner, &mut market, &mut long_account],
+    )
+    .unwrap();
+    let after_unilateral_reduce = state::read_portfolio(&short_account.data).unwrap();
+    assert!(
+        after_unilateral_reduce.legs[2].active,
+        "counterparty leg is stale/dead after unilateral reduction and must be explicitly cleared"
+    );
+    let second_unilateral_reduce = run_ix(
+        Instruction::RebalanceReduce {
+            asset_index: 2,
+            reduce_q: prediction_q,
+        },
+        &mut [&mut short_owner, &mut market, &mut short_account],
+    );
+    assert!(
+        second_unilateral_reduce.is_err(),
+        "once the opposite side is reset-pending, cleanup uses the dead-leg forfeit path"
+    );
+    run_ix(
+        Instruction::ForfeitRecoveryLeg {
+            asset_index: 2,
+            b_delta_budget: 1,
+        },
+        &mut [&mut short_owner, &mut market, &mut short_account],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::FinalizeResetSide {
+            asset_index: 2,
+            side: 0,
+        },
+        &mut [&mut market],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::FinalizeResetSide {
+            asset_index: 2,
+            side: 1,
+        },
+        &mut [&mut market],
+    )
+    .unwrap();
+
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    let long = state::read_portfolio(&long_account.data).unwrap();
+    let short = state::read_portfolio(&short_account.data).unwrap();
+    assert_eq!(long.active_bitmap, 1 << 0);
+    assert_eq!(short.active_bitmap, 1 << 0);
+    assert_eq!(group.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(group.assets[0].oi_eff_short_q, POS_SCALE);
+    assert_eq!(group.assets[2].oi_eff_long_q, 0);
+    assert_eq!(group.assets[2].oi_eff_short_q, 0);
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        2,
+        0,
+        0,
+    )
+    .unwrap();
+    let retired = state::read_market(&market.data).unwrap().1;
+    assert_eq!(retired.assets[2].lifecycle, AssetLifecycleV16::Retired);
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        2,
+        group.current_slot + 1,
+        500_000,
+    )
+    .unwrap();
+    let reactivated = state::read_market(&market.data).unwrap().1;
+    assert_eq!(reactivated.assets[2].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(reactivated.assets[2].effective_price, 500_000);
+
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 2,
+            size_q: prediction_q as i128,
+            exec_price: 500_000,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    let (_, final_group) = state::read_market(&market.data).unwrap();
+    let long = state::read_portfolio(&long_account.data).unwrap();
+    let short = state::read_portfolio(&short_account.data).unwrap();
+    assert_eq!(long.active_bitmap, (1 << 0) | (1 << 2));
+    assert_eq!(short.active_bitmap, (1 << 0) | (1 << 2));
+    assert_eq!(final_group.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(final_group.assets[0].oi_eff_short_q, POS_SCALE);
+    assert_eq!(final_group.assets[2].oi_eff_long_q, prediction_q);
+    assert_eq!(final_group.assets[2].oi_eff_short_q, prediction_q);
+    assert_eq!(cfg.admin, state::read_market(&market.data).unwrap().0.admin);
+}
+
+#[test]
 fn v16_wrapper_account_layout_constants_match_serialized_state() {
     assert_eq!(
         MARKET_GROUP_LEN,
