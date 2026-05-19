@@ -496,7 +496,10 @@ impl V16CuEnv {
 
     fn force_portfolio_capital_for_benchmark(&mut self, portfolio_key: Pubkey, new_capital: u128) {
         let mut market_account = self.svm.get_account(&self.market).expect("market account");
-        let mut portfolio_data = self.svm.get_account(&portfolio_key).expect("portfolio account");
+        let mut portfolio_data = self
+            .svm
+            .get_account(&portfolio_key)
+            .expect("portfolio account");
         let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
         let mut portfolio = state::read_portfolio(&portfolio_data.data).unwrap();
         let old_capital = portfolio.capital;

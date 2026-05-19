@@ -156,7 +156,12 @@ This section describes intent and operational ordering, not argument-by-argument
   - permissionless global maintenance entrypoint
   - authenticates clock/oracle state in the wrapper, then delegates bounded public progress to the engine
   - candidate accounts are untrusted hints, not a liveness precondition; honest keepers should include the worst known stale/bankrupt/liquidatable accounts, but the engine also makes cursored progress
-  - may perform bounded catchup/recovery, liquidation, touch-only settlement, round-robin lifecycle progress, empty-account reclaim, and post-touch maintenance-fee realization
+  - may perform bounded catchup/recovery, liquidation, touch-only settlement, round-robin lifecycle progress, and empty-account reclaim
+- **SyncMaintenanceFee** (tag 48)
+  - permissionless per-portfolio maintenance-fee realization for the supplied portfolio account
+  - charges `maintenance_fee_per_slot * elapsed_slots`, capped by remaining capital, into insurance after engine-side loss settlement
+  - live nonflat accounts are anchored to the loss-accrued market slot, so fees cannot run ahead of settled losses
+  - the rate is configured at `InitMarket` in collateral atoms per slot; a "$0.50 per 24h" anti-dust policy is an operator/client conversion from collateral atoms per day to atoms per expected slot
 - **FinalizeResetSide** (tag 45)
   - permissionless side-reset finalization for engine-ready asset sides
   - validates side encoding and engine readiness; it is not an admin override

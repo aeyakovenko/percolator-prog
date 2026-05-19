@@ -999,6 +999,9 @@ pub mod ix {
         RefineResolvedUnreceiptedBound {
             decrease_num: u128,
         },
+        SyncMaintenanceFee {
+            now_slot: u64,
+        },
     }
 
     impl Instruction {
@@ -1153,6 +1156,9 @@ pub mod ix {
                 46 => Self::ClaimResolvedPayoutTopup,
                 47 => Self::RefineResolvedUnreceiptedBound {
                     decrease_num: read_u128(&mut rest)?,
+                },
+                48 => Self::SyncMaintenanceFee {
+                    now_slot: read_u64(&mut rest)?,
                 },
                 _ => return Err(ProgramError::InvalidInstructionData),
             };
@@ -1416,6 +1422,10 @@ pub mod ix {
                 Self::RefineResolvedUnreceiptedBound { decrease_num } => {
                     out.push(47);
                     push_u128(&mut out, decrease_num);
+                }
+                Self::SyncMaintenanceFee { now_slot } => {
+                    out.push(48);
+                    push_u64(&mut out, now_slot);
                 }
             }
             out
@@ -2507,6 +2517,9 @@ pub mod processor {
             Instruction::RefineResolvedUnreceiptedBound { decrease_num } => {
                 handle_refine_resolved_unreceipted_bound(program_id, accounts, decrease_num)
             }
+            Instruction::SyncMaintenanceFee { now_slot } => {
+                handle_sync_maintenance_fee(program_id, accounts, now_slot)
+            }
         }
     }
 
@@ -3538,6 +3551,38 @@ pub mod processor {
                 )
                 .map(|_| ())
         })
+    }
+
+    #[inline(never)]
+    fn handle_sync_maintenance_fee<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        now_slot: u64,
+    ) -> ProgramResult {
+        let market_ai = account(accounts, 0)?;
+        let portfolio_ai = account(accounts, 1)?;
+        expect_writable(market_ai)?;
+        expect_writable(portfolio_ai)?;
+        expect_owner(market_ai, program_id)?;
+        expect_owner(portfolio_ai, program_id)?;
+
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if group.mode == MarketModeV16::Live {
+            reject_permissionless_resolve_matured_live(&cfg, group.as_ref())?;
+        }
+        let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
+        expect_portfolio_account_key(portfolio.as_ref(), portfolio_ai.key)?;
+        let authenticated_now_slot = authenticated_slot_or_fallback(now_slot);
+
+        group
+            .sync_account_fee_to_slot_not_atomic(
+                portfolio.as_mut(),
+                authenticated_now_slot,
+                cfg.maintenance_fee_per_slot,
+            )
+            .map_err(map_v16_error)?;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
+        state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())
     }
 
     #[inline(never)]

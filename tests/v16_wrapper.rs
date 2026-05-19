@@ -522,6 +522,17 @@ fn init_portfolio(owner: &mut TestAccount, market: &mut TestAccount, portfolio: 
     run_ix(Instruction::InitPortfolio, &mut [owner, market, portfolio]).unwrap();
 }
 
+fn sync_maintenance_fee(
+    market: &mut TestAccount,
+    portfolio: &mut TestAccount,
+    now_slot: u64,
+) -> Result<(), ProgramError> {
+    run_ix(
+        Instruction::SyncMaintenanceFee { now_slot },
+        &mut [market, portfolio],
+    )
+}
+
 fn deposit(
     owner: &mut TestAccount,
     market: &mut TestAccount,
@@ -765,6 +776,175 @@ fn v16_wrapper_init_market_ports_full_engine_config_fields() {
     assert_eq!(group.config.max_account_b_settlement_chunks, 3);
     assert_eq!(group.config.max_bankrupt_close_chunks, 4);
     assert_eq!(group.config.public_b_chunk_atoms, 12_345);
+}
+
+#[test]
+fn v16_wrapper_permissionless_maintenance_fee_charges_flat_portfolio_to_insurance() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *maintenance_fee_per_slot = 5;
+            }
+        }),
+    );
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 100);
+
+    sync_maintenance_fee(&mut market, &mut portfolio, 10).unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(account.capital, 50);
+    assert_eq!(account.last_fee_slot, 10);
+    assert_eq!(group.insurance, 50);
+    assert_eq!(group.c_tot, 50);
+
+    let market_after_first = market.data.clone();
+    let portfolio_after_first = portfolio.data.clone();
+    sync_maintenance_fee(&mut market, &mut portfolio, 10).unwrap();
+    assert_eq!(
+        market.data, market_after_first,
+        "same-slot fee sync must be idempotent"
+    );
+    assert_eq!(portfolio.data, portfolio_after_first);
+}
+
+#[test]
+fn v16_wrapper_maintenance_fee_is_permissionless_and_capital_capped() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *maintenance_fee_per_slot = 40;
+            }
+        }),
+    );
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 75);
+
+    owner.is_signer = false;
+    sync_maintenance_fee(&mut market, &mut portfolio, 2).unwrap();
+    owner.is_signer = true;
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(account.capital, 0);
+    assert_eq!(account.last_fee_slot, 2);
+    assert_eq!(group.insurance, 75);
+    assert_eq!(group.c_tot, 0);
+}
+
+#[test]
+fn v16_wrapper_maintenance_fee_settles_losses_before_charging_nonflat_account() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *maintenance_fee_per_slot = 10;
+            }
+        }),
+    );
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 1_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group.accrue_asset_to_not_atomic(0, 1, 50, 0, true).unwrap();
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    sync_maintenance_fee(&mut market, &mut long_account, 1).unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&long_account.data).unwrap();
+    assert_eq!(account.pnl, 0, "lazy mark loss must be settled first");
+    assert_eq!(
+        account.capital, 940,
+        "capital should lose 50 to mark loss, then 10 to maintenance"
+    );
+    assert_eq!(account.last_fee_slot, 1);
+    assert_eq!(group.insurance, 10);
+}
+
+#[test]
+fn v16_wrapper_maintenance_fee_rejects_recovery_mode_without_mutation() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *maintenance_fee_per_slot = 5;
+            }
+        }),
+    );
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 100);
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group.mode = MarketModeV16::Recovery;
+        group.recovery_reason = Some(PermissionlessRecoveryReasonV16::BelowProgressFloor);
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let result = sync_maintenance_fee(&mut market, &mut portfolio, 10);
+    assert_err_and_market_unchanged(result, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
 }
 
 #[test]

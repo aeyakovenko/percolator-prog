@@ -177,8 +177,10 @@ fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
     let side: u8 = kani::any();
     let budget_raw: u16 = kani::any();
     let reduce_raw: u16 = kani::any();
+    let now_slot_raw: u16 = kani::any();
     let b_delta_budget = budget_raw as u128;
     let reduce_q = reduce_raw as u128;
+    let now_slot = now_slot_raw as u64;
 
     let forfeit = Instruction::ForfeitRecoveryLeg {
         asset_index,
@@ -226,6 +228,12 @@ fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
 
     match Instruction::decode(&Instruction::ClaimResolvedPayoutTopup.encode()).unwrap() {
         Instruction::ClaimResolvedPayoutTopup => {}
+        _ => unreachable!(),
+    }
+
+    let sync_fee = Instruction::SyncMaintenanceFee { now_slot }.encode();
+    match Instruction::decode(&sync_fee).unwrap() {
+        Instruction::SyncMaintenanceFee { now_slot: got } => assert_eq!(got, now_slot),
         _ => unreachable!(),
     }
 }
@@ -945,6 +953,10 @@ fn kani_v16_every_active_payload_rejects_trailing_byte() {
     let mut refine = Instruction::RefineResolvedUnreceiptedBound { decrease_num: 1 }.encode();
     refine.push(extra);
     assert!(Instruction::decode(&refine).is_err());
+
+    let mut sync_fee = Instruction::SyncMaintenanceFee { now_slot: 1 }.encode();
+    sync_fee.push(extra);
+    assert!(Instruction::decode(&sync_fee).is_err());
 }
 
 #[kani::proof]
@@ -981,6 +993,7 @@ fn kani_v16_unknown_or_truncated_tags_reject() {
     kani::assume(tag != 45);
     kani::assume(tag != 46);
     kani::assume(tag != 47);
+    kani::assume(tag != 48);
     assert!(Instruction::decode(&[tag]).is_err());
 
     let deposit_tag_only = [3u8];
@@ -1072,4 +1085,7 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
 
     let refine = [47u8; 16];
     assert!(Instruction::decode(&refine).is_err());
+
+    let sync_fee = [48u8; 8];
+    assert!(Instruction::decode(&sync_fee).is_err());
 }
