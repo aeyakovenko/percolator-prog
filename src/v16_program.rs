@@ -4875,6 +4875,9 @@ pub mod processor {
         oracle_accounts: &[AccountInfo],
         fallback_price: u64,
     ) -> Result<u64, ProgramError> {
+        if asset_index != 0 {
+            return Ok(fallback_price);
+        }
         if oracle_v16::is_hyperp(cfg) {
             let target = cfg.mark_ewma_e6;
             if target == 0 {
@@ -4959,6 +4962,9 @@ pub mod processor {
         if base > group.config.max_trading_fee_bps {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        if asset_index != 0 {
+            return Ok(base);
+        }
         if !oracle_v16::is_hybrid(cfg) && !oracle_v16::is_hyperp(cfg) {
             return Ok(base);
         }
@@ -5016,6 +5022,9 @@ pub mod processor {
         exec_price: u64,
         fee_paid: u128,
     ) -> Result<(), ProgramError> {
+        if asset_index != 0 {
+            return Ok(());
+        }
         if !oracle_v16::is_hybrid(cfg) && !oracle_v16::is_hyperp(cfg) {
             return Ok(());
         }

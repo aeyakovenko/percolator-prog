@@ -1,3 +1,60 @@
+# Security findings — 2026-05-19 v16 three-asset shutdown/reuse sweep
+
+## F11 — Hybrid oracle mode must not price nonzero asset slots (High)
+
+**Status:** fixed locally by scoping the wrapper's configured hybrid/Hyperp
+oracle lane to asset index `0`. Nonzero asset slots now use the per-asset
+effective price supplied to `PermissionlessCrank` and pay only their configured
+base trade fee; they do not inherit asset `0`'s composite/EWMA mark.
+
+Regression coverage:
+
+```bash
+cargo test --release \
+  v16_wrapper_three_asset_hybrid_prediction_shutdown_reuses_only_prediction_slot \
+  -- --test-threads=1 --nocapture
+cargo test --release v16_wrapper_security_sweep_ -- --test-threads=1
+```
+
+**Attacker/UX model:** one market group hosts three assets:
+
+- asset 0: external hybrid index, e.g. `1306/JPY / USD/JPY / SOL/USD`
+- asset 1: prediction-style market that resolves, drains, retires, and is
+  reused for the next prediction
+- asset 2: independent manual/other asset
+
+After asset 1 resolves, accounts may still hold asset-1 positions while also
+holding asset-0 and asset-2 positions. The operator wants to drain only asset 1,
+retire the slot, then reactivate that slot with a fresh monotonic `market_id`.
+
+**Original issue:** the wrapper stored hybrid oracle configuration at
+market-group scope. A soft-stale `PermissionlessCrank` on asset 1 could route
+through the hybrid fallback branch and use asset 0's EWMA/composite mark instead
+of asset 1's supplied effective price. That could corrupt the prediction
+shutdown/reuse flow and make asset 1 dependent on unrelated asset-0 oracle
+state.
+
+**Fix invariant:**
+
+```text
+Configured hybrid/Hyperp oracle policy:
+  applies to asset_index == 0 only.
+
+For asset_index != 0:
+  PermissionlessCrank effective price = caller supplied per-asset price;
+  TradeCpi/TradeNoCpi fee = max(caller_fee_bps, trade_fee_base_bps);
+  asset-0 mark_ewma_e6/last_good_oracle_slot are not mutated.
+```
+
+The retained test also verifies the full prediction-slot lifecycle: risk
+increase is blocked after `DrainOnly`, both sides can be cleared while other
+assets stay open, retirement is only allowed after OI is zero, reactivation
+assigns a new `market_id`, and a stale old-id leg cannot trade on the reused
+slot.
+
+**Disposition:** `PASS_SAFE` after fix. No cross-asset fund leak or market
+brick was found in the three-asset shutdown/reuse path.
+
 # Security findings — 2026-05-13 hybrid after-hours sweep
 
 ## F10 — Hybrid stale-fallback fee floor must scale with the next crank segment (Medium)

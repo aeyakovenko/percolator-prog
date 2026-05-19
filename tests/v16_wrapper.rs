@@ -1628,6 +1628,315 @@ fn v16_wrapper_prediction_asset_can_drain_retire_and_reactivate_without_closing_
 }
 
 #[test]
+fn v16_wrapper_three_asset_hybrid_prediction_shutdown_reuses_only_prediction_slot() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                max_trading_fee_bps,
+                trade_fee_base_bps,
+                max_price_move_bps_per_slot,
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 3;
+                *max_trading_fee_bps = 10_000;
+                *trade_fee_base_bps = 1;
+                *max_price_move_bps_per_slot = 500;
+                *maintenance_fee_per_slot = 3;
+            }
+        }),
+    );
+
+    let feeds = [[0xe1u8; 32], [0xe2u8; 32], [0xe3u8; 32]];
+    let mut stoxx_jpy = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 100);
+    let mut usd_jpy = pyth_account(&feeds[1], 150_000_000, -6, 1, 100);
+    let mut sol_usd = pyth_account(&feeds[2], 200_000_000, -6, 1, 100);
+    configure_three_leg_hybrid(
+        &mut admin,
+        &mut market,
+        feeds,
+        &mut stoxx_jpy,
+        &mut usd_jpy,
+        &mut sol_usd,
+        1,
+        100,
+        2,
+        0,
+    );
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        2,
+        1_000_000,
+    )
+    .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        2,
+        3,
+        250,
+    )
+    .unwrap();
+
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000_000);
+    deposit(
+        &mut short_owner,
+        &mut market,
+        &mut short_account,
+        10_000_000,
+    );
+    let prediction_q = POS_SCALE / 100;
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 133_333,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: prediction_q as i128,
+            exec_price: 1_000_000,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 2,
+            size_q: (2 * POS_SCALE) as i128,
+            exec_price: 250,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+
+    let (before_cfg, before_group) = state::read_market(&market.data).unwrap();
+    assert_eq!(before_cfg.oracle_mode, ORACLE_MODE_HYBRID_AFTER_HOURS);
+    assert_eq!(before_group.assets[0].effective_price, 133_333);
+    assert_eq!(before_group.assets[1].effective_price, 1_000_000);
+    assert_eq!(before_group.assets[2].effective_price, 250);
+
+    // Once the external asset-0 oracle is soft-stale, a prediction-asset
+    // crank must still use the prediction asset's own supplied price. The
+    // asset-0 hybrid EWMA/composite is not a valid price for asset 1.
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: before_group.current_slot + 3,
+            effective_price: 1_000_000,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut admin, &mut market, &mut long_account],
+    )
+    .unwrap();
+    let (after_prediction_crank_cfg, after_prediction_crank) =
+        state::read_market(&market.data).unwrap();
+    assert_eq!(
+        after_prediction_crank.assets[1].effective_price, 1_000_000,
+        "asset-1 prediction crank must not inherit the asset-0 hybrid fallback mark"
+    );
+    assert_eq!(
+        after_prediction_crank_cfg.mark_ewma_e6, before_cfg.mark_ewma_e6,
+        "nonzero-asset crank must not mutate the asset-0 hybrid mark"
+    );
+    assert_eq!(
+        after_prediction_crank.assets[0].effective_price,
+        before_group.assets[0].effective_price
+    );
+    assert_eq!(
+        after_prediction_crank.assets[2].effective_price,
+        before_group.assets[2].effective_price
+    );
+
+    // Drain and clear the prediction slot while the other two assets remain
+    // open. This models a resolved prediction market being removed so the slot
+    // can host the next prediction market.
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_DRAIN_ONLY,
+        1,
+        0,
+        0,
+    )
+    .unwrap();
+    let blocked_new_prediction_risk = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: prediction_q as i128,
+            exec_price: 1_000_000,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    );
+    assert!(blocked_new_prediction_risk.is_err());
+
+    run_ix(
+        Instruction::RebalanceReduce {
+            asset_index: 1,
+            reduce_q: prediction_q,
+        },
+        &mut [&mut long_owner, &mut market, &mut long_account],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::ForfeitRecoveryLeg {
+            asset_index: 1,
+            b_delta_budget: 1,
+        },
+        &mut [&mut short_owner, &mut market, &mut short_account],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::FinalizeResetSide {
+            asset_index: 1,
+            side: 0,
+        },
+        &mut [&mut market],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::FinalizeResetSide {
+            asset_index: 1,
+            side: 1,
+        },
+        &mut [&mut market],
+    )
+    .unwrap();
+
+    let (_, cleared_group) = state::read_market(&market.data).unwrap();
+    let long_after_clear = state::read_portfolio(&long_account.data).unwrap();
+    let short_after_clear = state::read_portfolio(&short_account.data).unwrap();
+    assert_eq!(long_after_clear.active_bitmap, active_bitmap_with(&[0, 2]));
+    assert_eq!(short_after_clear.active_bitmap, active_bitmap_with(&[0, 2]));
+    assert_eq!(cleared_group.assets[1].oi_eff_long_q, 0);
+    assert_eq!(cleared_group.assets[1].oi_eff_short_q, 0);
+    assert_eq!(cleared_group.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(cleared_group.assets[2].oi_eff_long_q, 2 * POS_SCALE);
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        1,
+        cleared_group.current_slot + 1,
+        0,
+    )
+    .unwrap();
+    let retired = state::read_market(&market.data).unwrap().1;
+    let old_prediction_market_id = retired.assets[1].market_id;
+    let next_market_id = retired.next_market_id;
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        retired.current_slot + 1,
+        750_000,
+    )
+    .unwrap();
+    let (_, reused_group) = state::read_market(&market.data).unwrap();
+    assert_eq!(reused_group.assets[1].market_id, next_market_id);
+    assert!(reused_group.assets[1].market_id > old_prediction_market_id);
+    assert_eq!(reused_group.assets[1].effective_price, 750_000);
+    assert_eq!(
+        reused_group.assets[0].effective_price,
+        before_group.assets[0].effective_price
+    );
+    assert_eq!(reused_group.assets[2].effective_price, 250);
+
+    let mut stale_prediction_leg = state::read_portfolio(&long_account.data).unwrap();
+    stale_prediction_leg.legs[1] = PortfolioLegV16 {
+        active: true,
+        market_id: old_prediction_market_id,
+        side: SideV16::Long,
+        basis_pos_q: prediction_q as i128,
+        a_basis: percolator::ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: prediction_q,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+    stale_prediction_leg.active_bitmap = active_bitmap_with(&[0, 1, 2]);
+    state::write_portfolio(&mut long_account.data, &stale_prediction_leg).unwrap();
+    let before_stale_trade = market.data.clone();
+    let stale_reuse_trade = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: prediction_q as i128,
+            exec_price: 750_000,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    );
+    assert_err_and_market_unchanged(stale_reuse_trade, &market, &before_stale_trade);
+}
+
+#[test]
 fn v16_wrapper_security_sweep_reused_asset_market_ids_fail_closed() {
     let mut admin = signer();
     let mut market = market_account();

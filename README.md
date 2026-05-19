@@ -285,6 +285,8 @@ Hybrid after-hours mode is a single external-oracle configuration with dynamic m
 - `RiskParams.max_trading_fee_bps = 10_000`
 - `trade_fee_base_bps < max_trading_fee_bps`
 
+In the v16 multi-asset wrapper, this configured hybrid/Hyperp oracle lane is scoped to asset index `0`. Additional asset slots can be activated, drained, retired, and reused independently; their public cranks use their own supplied per-asset effective price and do not inherit asset `0`'s EWMA/composite mark. Reused slots get a new monotonic `market_id`, and stale portfolio legs/source claims/close ledgers from the retired id fail closed.
+
 While the external oracle is fresh, the wrapper uses the external composite as the index and refreshes the fallback mark baseline to that accepted external price. If the supplied Pyth update is stale but the market's own `last_good_oracle_slot` has not crossed the soft-stale window, the wrapper rejects instead of falling back; a caller-chosen stale account is not proof that the feed is after-hours. Once the soft-stale window has elapsed, price-taking paths fall back to the fee-weighted EWMA mark and `TradeCpi`/`TradeNoCpi` charge:
 
 ```text
