@@ -4,7 +4,7 @@
 >
 > This code has **NOT been audited**. Do NOT use in production or with real funds. This is experimental software provided for learning and testing purposes only. Use at your own risk.
 
-Percolator is a minimal Solana program that wraps the `percolator` crate's `RiskEngine` inside a single on-chain **slab** account and exposes a small, composable instruction set for deploying and operating perpetual markets.
+Percolator is a Solana program that wraps the `percolator` crate's v16 account-local risk engine and exposes a composable instruction set for deploying and operating perpetual markets.
 
 This README is intentionally **high-level**: it explains the trust model, account layout, operational flows, and the parts that are easy to get wrong (CPI binding, nonce discipline, oracle usage, and side-mode gating). It does **not** restate code structure or obvious Rust/Solana boilerplate.
 
@@ -31,18 +31,18 @@ This README is intentionally **high-level**: it explains the trust model, accoun
 
 ## Concepts
 
-### One market = one slab account
-A market is represented by a single **program-owned** account ("slab") containing:
+### One market group + account-local portfolios
+A v16 market is represented by a **program-owned market-group account** plus independently supplied **program-owned portfolio accounts**:
 
 - **Header**: magic/version/admin + scoped insurance authorities + reserved nonce bytes
-- **MarketConfig**: mint/vault/oracle keys + policy knobs
-- **RiskEngine**: stored in-place (zero-copy)
+- **Wrapper config**: mint/vault/oracle keys + policy knobs
+- **MarketGroupV16Account / PortfolioAccountV16Account**: Pod account-state layouts used for account-byte access
 
 Benefits:
-- one canonical state address per market (simple address model)
-- deterministic, auditable layout
-- easy snapshotting / archival
-- minimizes CPI/state scattering
+- one canonical market address plus explicit portfolio accounts
+- deterministic, auditable Pod account layouts
+- account-local cranks and trades that do not scan a global slab
+- straightforward snapshotting / archival
 
 ### Native 128-bit arithmetic
 Positions and PnL use native `i128`/`u128` (`POS_SCALE = 1_000_000`, `ADL_ONE = 1_000_000_000_000_000`). There are no I256/U256 wrapper types for positions or PnL. Positions use the ADL A/K coefficient mechanism defined in the spec.
@@ -84,17 +84,24 @@ Percolator enforces three layers with distinct responsibilities:
 
 ## Account model
 
-### Slab account (market state)
+### Market group account
 - **Owner**: Percolator program id
-- **Size**: fixed `SLAB_LEN`
-- **Layout**: header + config + aligned `RiskEngine`
+- **Layout**: header + wrapper config + `MarketGroupV16Account`
+- Holds market-level totals, insurance, oracle/asset state, source-domain credit state, and asset lifecycle state.
 
-Header authority fields are:
+The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-capacity Pod market-group layout, but asset indices are treated as reusable logical slots. A retired asset slot can only be reactivated after the configured shutdown/activation timeout, and reactivation assigns a new monotonic `u64` `market_id` from the market group. `market_id` values are never reused. Portfolio legs and close-progress ledgers carry that id, so stale state from an old shutdown market cannot bind to a reused slot.
+
+### Portfolio account
+- **Owner**: Percolator program id
+- **Layout**: header + `PortfolioAccountV16Account`
+- Holds one user's capital, PnL, source claims/liens, health certificate, close progress, and active legs.
+
+Market header authority fields are:
 - **admin**: market governance/config authority
 - **insurance_authority**: resolved-market, unbounded insurance withdrawal authority
 - **insurance_operator**: live, bounded `WithdrawInsuranceLimited` authority
 
-Reserved header bytes are used for:
+Reserved market header bytes are used for:
 - **request nonce**: monotonic `u64` used to bind matcher responses to a specific request
 
 ### Vault token account (market collateral)
@@ -103,13 +110,13 @@ Reserved header bytes are used for:
 - **Owner**: the vault authority PDA
 
 Vault authority PDA:
-- seeds: `["vault", slab_pubkey]`
+- seeds: `["vault", market_group_pubkey]`
 
 ### LP PDA (TradeCpi-only signer identity)
 A per-LP PDA is used only as a CPI signer to the matcher.
 
 LP PDA:
-- seeds: `["lp", slab_pubkey, lp_idx_le]`
+- seeds: `["lp", market_group_pubkey, lp_idx_le]`
 - required **shape constraints**:
   - system-owned
   - empty data
@@ -607,13 +614,13 @@ Recovery is "by design impossible" (this is a one-way governance lock).
 ## Build & test
 
 ```bash
-# Current clean SBF verification build used by the LiteSVM/CU harness.
-cargo build-sbf --no-default-features
-
-# Default Anchor v2 / Pinocchio entrypoint.
+# Default deployable Anchor v2 / Pinocchio entrypoint.
 # Requires platform-tools v1.52 or newer; review any stack-frame diagnostics
 # before treating this artifact as deployable.
 cargo build-sbf --tools-version v1.52
+
+# Legacy local compatibility build without the Anchor v2 entrypoint.
+cargo build-sbf --no-default-features
 
 # All tests (integration, unit, alignment)
 cargo test

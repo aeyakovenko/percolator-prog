@@ -9,7 +9,7 @@ use percolator_prog::matcher_abi::{
 
 #[kani::proof]
 fn kani_v16_init_market_decode_preserves_wire_fields() {
-    let max_portfolio_assets: u8 = kani::any();
+    let max_portfolio_assets: u16 = kani::any();
     let h_min_raw: u16 = kani::any();
     let h_max_raw: u16 = kani::any();
     let initial_price_raw: u16 = kani::any();
@@ -51,29 +51,29 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
     let public_b_chunk_atoms = public_b_chunk_atoms_raw as u128;
     let maintenance_fee_per_slot = maintenance_fee_raw as u128;
 
-    let mut data = [0u8; 210];
+    let mut data = [0u8; 211];
     data[0] = 0;
-    data[1] = max_portfolio_assets;
-    data[2..10].copy_from_slice(&h_min.to_le_bytes());
-    data[10..18].copy_from_slice(&h_max.to_le_bytes());
-    data[18..26].copy_from_slice(&initial_price.to_le_bytes());
-    data[26..42].copy_from_slice(&min_nonzero_mm_req.to_le_bytes());
-    data[42..58].copy_from_slice(&min_nonzero_im_req.to_le_bytes());
-    data[58..66].copy_from_slice(&maintenance_margin_bps.to_le_bytes());
-    data[66..74].copy_from_slice(&initial_margin_bps.to_le_bytes());
-    data[74..82].copy_from_slice(&max_trading_fee_bps.to_le_bytes());
-    data[82..90].copy_from_slice(&trade_fee_base_bps.to_le_bytes());
-    data[90..98].copy_from_slice(&liquidation_fee_bps.to_le_bytes());
-    data[98..114].copy_from_slice(&liquidation_fee_cap.to_le_bytes());
-    data[114..130].copy_from_slice(&min_liquidation_abs.to_le_bytes());
-    data[130..138].copy_from_slice(&max_price_move_bps_per_slot.to_le_bytes());
-    data[138..146].copy_from_slice(&max_accrual_dt_slots.to_le_bytes());
-    data[146..154].copy_from_slice(&max_abs_funding_e9_per_slot.to_le_bytes());
-    data[154..162].copy_from_slice(&min_funding_lifetime_slots.to_le_bytes());
-    data[162..170].copy_from_slice(&max_account_b_settlement_chunks.to_le_bytes());
-    data[170..178].copy_from_slice(&max_bankrupt_close_chunks.to_le_bytes());
-    data[178..194].copy_from_slice(&public_b_chunk_atoms.to_le_bytes());
-    data[194..210].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
+    data[1..3].copy_from_slice(&max_portfolio_assets.to_le_bytes());
+    data[3..11].copy_from_slice(&h_min.to_le_bytes());
+    data[11..19].copy_from_slice(&h_max.to_le_bytes());
+    data[19..27].copy_from_slice(&initial_price.to_le_bytes());
+    data[27..43].copy_from_slice(&min_nonzero_mm_req.to_le_bytes());
+    data[43..59].copy_from_slice(&min_nonzero_im_req.to_le_bytes());
+    data[59..67].copy_from_slice(&maintenance_margin_bps.to_le_bytes());
+    data[67..75].copy_from_slice(&initial_margin_bps.to_le_bytes());
+    data[75..83].copy_from_slice(&max_trading_fee_bps.to_le_bytes());
+    data[83..91].copy_from_slice(&trade_fee_base_bps.to_le_bytes());
+    data[91..99].copy_from_slice(&liquidation_fee_bps.to_le_bytes());
+    data[99..115].copy_from_slice(&liquidation_fee_cap.to_le_bytes());
+    data[115..131].copy_from_slice(&min_liquidation_abs.to_le_bytes());
+    data[131..139].copy_from_slice(&max_price_move_bps_per_slot.to_le_bytes());
+    data[139..147].copy_from_slice(&max_accrual_dt_slots.to_le_bytes());
+    data[147..155].copy_from_slice(&max_abs_funding_e9_per_slot.to_le_bytes());
+    data[155..163].copy_from_slice(&min_funding_lifetime_slots.to_le_bytes());
+    data[163..171].copy_from_slice(&max_account_b_settlement_chunks.to_le_bytes());
+    data[171..179].copy_from_slice(&max_bankrupt_close_chunks.to_le_bytes());
+    data[179..195].copy_from_slice(&public_b_chunk_atoms.to_le_bytes());
+    data[195..211].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::InitMarket {
@@ -173,7 +173,7 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
-    let asset_index: u8 = kani::any();
+    let asset_index: u16 = kani::any();
     let side: u8 = kani::any();
     let budget_raw: u16 = kani::any();
     let reduce_raw: u16 = kani::any();
@@ -269,7 +269,7 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
     let action: u8 = kani::any();
-    let asset_index: u8 = kani::any();
+    let asset_index: u16 = kani::any();
     let now_slot_raw: u16 = kani::any();
     let initial_price_raw: u16 = kani::any();
     let now_slot = now_slot_raw as u64;
@@ -301,7 +301,7 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
-    let asset_index: u8 = kani::any();
+    let asset_index: u16 = kani::any();
     let size_raw: i16 = kani::any();
     let exec_price_raw: u16 = kani::any();
     let fee_bps_raw: u16 = kani::any();
@@ -309,12 +309,12 @@ fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
     let exec_price = exec_price_raw as u64;
     let fee_bps = fee_bps_raw as u64;
 
-    let mut data = [0u8; 34];
+    let mut data = [0u8; 35];
     data[0] = 6;
-    data[1] = asset_index;
-    data[2..18].copy_from_slice(&size_q.to_le_bytes());
-    data[18..26].copy_from_slice(&exec_price.to_le_bytes());
-    data[26..34].copy_from_slice(&fee_bps.to_le_bytes());
+    data[1..3].copy_from_slice(&asset_index.to_le_bytes());
+    data[3..19].copy_from_slice(&size_q.to_le_bytes());
+    data[19..27].copy_from_slice(&exec_price.to_le_bytes());
+    data[27..35].copy_from_slice(&fee_bps.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::TradeNoCpi {
@@ -334,7 +334,7 @@ fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_tradecpi_decode_preserves_wire_fields() {
-    let asset_index: u8 = kani::any();
+    let asset_index: u16 = kani::any();
     let size_raw: i16 = kani::any();
     let fee_bps_raw: u16 = kani::any();
     let limit_price_raw: u16 = kani::any();
@@ -342,12 +342,12 @@ fn kani_v16_tradecpi_decode_preserves_wire_fields() {
     let fee_bps = fee_bps_raw as u64;
     let limit_price = limit_price_raw as u64;
 
-    let mut data = [0u8; 34];
+    let mut data = [0u8; 35];
     data[0] = 10;
-    data[1] = asset_index;
-    data[2..18].copy_from_slice(&size_q.to_le_bytes());
-    data[18..26].copy_from_slice(&fee_bps.to_le_bytes());
-    data[26..34].copy_from_slice(&limit_price.to_le_bytes());
+    data[1..3].copy_from_slice(&asset_index.to_le_bytes());
+    data[3..19].copy_from_slice(&size_q.to_le_bytes());
+    data[19..27].copy_from_slice(&fee_bps.to_le_bytes());
+    data[27..35].copy_from_slice(&limit_price.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::TradeCpi {
@@ -372,7 +372,7 @@ fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
     let price_raw: u16 = kani::any();
     let req_id_raw: u16 = kani::any();
     let lp_raw: u16 = kani::any();
-    let asset_index: u8 = kani::any();
+    let asset_index: u16 = kani::any();
     let flags: u32 = kani::any();
     kani::assume(req_raw != 0);
     kani::assume(req_raw != i16::MIN);
@@ -420,7 +420,7 @@ fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
 #[kani::proof]
 fn kani_v16_permissionless_crank_decode_preserves_wire_fields() {
     let action: u8 = kani::any();
-    let asset_index: u8 = kani::any();
+    let asset_index: u16 = kani::any();
     let now_slot_raw: u16 = kani::any();
     let effective_price_raw: u16 = kani::any();
     let funding_rate_raw: i16 = kani::any();
@@ -433,16 +433,16 @@ fn kani_v16_permissionless_crank_decode_preserves_wire_fields() {
     let close_q = close_q_raw as u128;
     let fee_bps = fee_bps_raw as u64;
 
-    let mut data = [0u8; 60];
+    let mut data = [0u8; 61];
     data[0] = 5;
     data[1] = action;
-    data[2] = asset_index;
-    data[3..11].copy_from_slice(&now_slot.to_le_bytes());
-    data[11..19].copy_from_slice(&effective_price.to_le_bytes());
-    data[19..35].copy_from_slice(&funding_rate_e9.to_le_bytes());
-    data[35..51].copy_from_slice(&close_q.to_le_bytes());
-    data[51..59].copy_from_slice(&fee_bps.to_le_bytes());
-    data[59] = recovery_reason;
+    data[2..4].copy_from_slice(&asset_index.to_le_bytes());
+    data[4..12].copy_from_slice(&now_slot.to_le_bytes());
+    data[12..20].copy_from_slice(&effective_price.to_le_bytes());
+    data[20..36].copy_from_slice(&funding_rate_e9.to_le_bytes());
+    data[36..52].copy_from_slice(&close_q.to_le_bytes());
+    data[52..60].copy_from_slice(&fee_bps.to_le_bytes());
+    data[60] = recovery_reason;
 
     match Instruction::decode(&data).unwrap() {
         Instruction::PermissionlessCrank {

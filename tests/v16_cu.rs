@@ -27,6 +27,14 @@ const CUSTODY_CU_LIMIT: u64 = 300_000;
 const TRADE_CU_LIMIT: u64 = 300_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 
+fn active_bitmap_with(indices: &[usize]) -> percolator::V16ActiveBitmap {
+    let mut bitmap = percolator::active_bitmap_empty();
+    for &idx in indices {
+        percolator::active_bitmap_set(&mut bitmap, idx).unwrap();
+    }
+    bitmap
+}
+
 fn program_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("target/deploy/percolator_prog.so");
@@ -176,7 +184,7 @@ impl V16CuEnv {
     }
 
     fn new_with_market_params_and_price_move(
-        max_portfolio_assets: u8,
+        max_portfolio_assets: u16,
         maintenance_margin_bps: u64,
         initial_margin_bps: u64,
         max_price_move_bps_per_slot: u64,
@@ -315,7 +323,7 @@ impl V16CuEnv {
         self.deposit_with_cu(owner, portfolio, amount).0
     }
 
-    fn activate_asset(&mut self, asset_index: u8, now_slot: u64, initial_price: u64) -> u64 {
+    fn activate_asset(&mut self, asset_index: u16, now_slot: u64, initial_price: u64) -> u64 {
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -609,7 +617,7 @@ impl V16CuEnv {
         matcher_program: Pubkey,
         matcher_context: Pubkey,
         matcher_delegate: Pubkey,
-        asset_index: u8,
+        asset_index: u16,
         size_q: i128,
         fee_bps: u64,
     ) -> u64 {
@@ -1313,8 +1321,8 @@ fn v16_bpf_tradecpi_external_matcher_executes_on_added_asset() {
     assert_eq!(group.assets[2].effective_price, 250);
     assert_eq!(group.assets[2].oi_eff_long_q, 10 * POS_SCALE);
     assert_eq!(group.assets[2].oi_eff_short_q, 10 * POS_SCALE);
-    assert_eq!(taker.active_bitmap, 1 << 2);
-    assert_eq!(maker.active_bitmap, 1 << 2);
+    assert_eq!(taker.active_bitmap, active_bitmap_with(&[2]));
+    assert_eq!(maker.active_bitmap, active_bitmap_with(&[2]));
     assert_eq!(taker.legs[2].basis_pos_q, (10 * POS_SCALE) as i128);
     assert_eq!(maker.legs[2].basis_pos_q, -((10 * POS_SCALE) as i128));
     assert_eq!(
@@ -1376,7 +1384,7 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
     let short = state::read_portfolio(&short_data).unwrap();
     assert_eq!(group.slot_last, 1);
     assert_eq!(group.assets[0].effective_price, 200);
-    assert_eq!(short.active_bitmap, 0);
+    assert!(percolator::active_bitmap_is_empty(short.active_bitmap));
 }
 
 #[test]
@@ -1422,7 +1430,7 @@ fn v16_bpf_full_16_leg_refresh_crank_is_under_tx_limit() {
     let (_, group) = state::read_market(&market_data).unwrap();
     let long = state::read_portfolio(&long_data).unwrap();
     assert_eq!(group.config.max_portfolio_assets, 16);
-    assert_eq!(long.active_bitmap.count_ones(), 16);
+    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 16);
     assert!(
         group.assets[0].slot_last > before_slot_last,
         "full-16 refresh crank must commit bounded asset progress"
@@ -1469,7 +1477,7 @@ fn v16_bpf_full_16_leg_liquidation_crank_is_under_tx_limit() {
     let (_, group) = state::read_market(&market_data).unwrap();
     let long = state::read_portfolio(&long_data).unwrap();
     assert_eq!(group.config.max_portfolio_assets, 16);
-    assert_eq!(long.active_bitmap.count_ones(), 15);
+    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 15);
     assert!(!long.legs[0].active);
     assert_eq!(group.assets[0].oi_eff_long_q, 0);
     assert_eq!(group.assets[0].oi_eff_short_q, 0);
@@ -1506,8 +1514,11 @@ fn v16_bpf_current_full_16_leg_tradenocpi_is_under_tx_limit() {
     let short_data = env.svm.get_account(&short_account).unwrap().data;
     let long = state::read_portfolio(&long_data).unwrap();
     let short = state::read_portfolio(&short_data).unwrap();
-    assert_eq!(long.active_bitmap.count_ones(), 16);
-    assert_eq!(short.active_bitmap.count_ones(), 16);
+    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 16);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(short.active_bitmap),
+        16
+    );
     assert_eq!(long.legs[0].basis_pos_q, (9 * POS_SCALE) as i128);
     assert_eq!(short.legs[0].basis_pos_q, -((9 * POS_SCALE) as i128));
 }
@@ -1544,8 +1555,11 @@ fn v16_bpf_stale_full_16_leg_tradenocpi_is_under_tx_limit() {
     let short_data = env.svm.get_account(&short_account).unwrap().data;
     let long = state::read_portfolio(&long_data).unwrap();
     let short = state::read_portfolio(&short_data).unwrap();
-    assert_eq!(long.active_bitmap.count_ones(), 16);
-    assert_eq!(short.active_bitmap.count_ones(), 16);
+    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 16);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(short.active_bitmap),
+        16
+    );
     assert_eq!(long.legs[0].basis_pos_q, (9 * POS_SCALE) as i128);
     assert_eq!(short.legs[0].basis_pos_q, -((9 * POS_SCALE) as i128));
 }

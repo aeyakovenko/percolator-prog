@@ -1,8 +1,8 @@
 use percolator::{
     AssetLifecycleV16, BackingBucketStatusV16, CloseProgressLedgerV16, MarketGroupV16,
     MarketGroupV16Account, MarketModeV16, PermissionlessRecoveryReasonV16,
-    PortfolioAccountV16Account, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16,
-    SideV16, V16Config, BOUND_SCALE, POS_SCALE,
+    PortfolioAccountV16Account, PortfolioLegV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16,
+    SideModeV16, SideV16, V16Config, BOUND_SCALE, POS_SCALE,
 };
 use percolator_prog::{
     constants::{
@@ -86,6 +86,14 @@ impl TestAccount {
 
 fn program_id() -> Pubkey {
     percolator_prog::id()
+}
+
+fn active_bitmap_with(indices: &[usize]) -> percolator::V16ActiveBitmap {
+    let mut bitmap = percolator::active_bitmap_empty();
+    for &idx in indices {
+        percolator::active_bitmap_set(&mut bitmap, idx).unwrap();
+    }
+    bitmap
 }
 
 fn signer() -> TestAccount {
@@ -302,7 +310,7 @@ fn write_matcher_return(
     exec_size: i128,
     req_id: u64,
     lp_account_id: u64,
-    asset_index: u8,
+    asset_index: u16,
     oracle_price_e6: u64,
 ) {
     matcher_context.data[0..4].copy_from_slice(&3u32.to_le_bytes());
@@ -321,7 +329,7 @@ fn run_trade_cpi_with_matcher(
     market: &mut TestAccount,
     account_a: &mut TestAccount,
     account_b: &mut TestAccount,
-    asset_index: u8,
+    asset_index: u16,
     req_size: i128,
     exec_size: i128,
     exec_price: u64,
@@ -503,7 +511,7 @@ fn update_asset_lifecycle(
     authority: &mut TestAccount,
     market: &mut TestAccount,
     action: u8,
-    asset_index: u8,
+    asset_index: u16,
     now_slot: u64,
     initial_price: u64,
 ) -> Result<(), ProgramError> {
@@ -1026,8 +1034,8 @@ fn v16_wrapper_asset_authority_can_add_activate_and_trade_sparse_assets() {
     .unwrap();
     let long = state::read_portfolio(&long_account.data).unwrap();
     let short = state::read_portfolio(&short_account.data).unwrap();
-    assert_eq!(long.active_bitmap, 1 << 2);
-    assert_eq!(short.active_bitmap, 1 << 2);
+    assert_eq!(long.active_bitmap, active_bitmap_with(&[2]));
+    assert_eq!(short.active_bitmap, active_bitmap_with(&[2]));
     assert_eq!(long.legs[2].basis_pos_q, POS_SCALE as i128);
     assert_eq!(short.legs[2].basis_pos_q, -(POS_SCALE as i128));
 }
@@ -1104,8 +1112,8 @@ fn v16_wrapper_one_portfolio_can_hold_multiple_asset_positions_independently() {
     let (_, group) = state::read_market(&market.data).unwrap();
     let long = state::read_portfolio(&long_account.data).unwrap();
     let short = state::read_portfolio(&short_account.data).unwrap();
-    assert_eq!(long.active_bitmap, (1 << 0) | (1 << 2));
-    assert_eq!(short.active_bitmap, (1 << 0) | (1 << 2));
+    assert_eq!(long.active_bitmap, active_bitmap_with(&[0, 2]));
+    assert_eq!(short.active_bitmap, active_bitmap_with(&[0, 2]));
     assert_eq!(long.legs[0].basis_pos_q, POS_SCALE as i128);
     assert_eq!(short.legs[0].basis_pos_q, -(POS_SCALE as i128));
     assert_eq!(long.legs[2].basis_pos_q, (2 * POS_SCALE) as i128);
@@ -1255,7 +1263,7 @@ fn v16_wrapper_asset_drain_only_and_retire_enforce_engine_lifecycle() {
             &mut market,
             processor::ASSET_ACTION_RETIRE,
             1,
-            0,
+            2,
             0,
         ),
         &market,
@@ -1313,7 +1321,7 @@ fn v16_wrapper_asset_drain_only_and_retire_enforce_engine_lifecycle() {
         &mut market,
         processor::ASSET_ACTION_RETIRE,
         1,
-        0,
+        2,
         0,
     )
     .unwrap();
@@ -1434,7 +1442,7 @@ fn v16_wrapper_prediction_asset_can_drain_retire_and_reactivate_without_closing_
         &mut market,
         processor::ASSET_ACTION_RETIRE,
         2,
-        0,
+        2,
         0,
     );
     assert_err_and_market_unchanged(
@@ -1495,8 +1503,8 @@ fn v16_wrapper_prediction_asset_can_drain_retire_and_reactivate_without_closing_
     let (cfg, group) = state::read_market(&market.data).unwrap();
     let long = state::read_portfolio(&long_account.data).unwrap();
     let short = state::read_portfolio(&short_account.data).unwrap();
-    assert_eq!(long.active_bitmap, 1 << 0);
-    assert_eq!(short.active_bitmap, 1 << 0);
+    assert_eq!(long.active_bitmap, active_bitmap_with(&[0]));
+    assert_eq!(short.active_bitmap, active_bitmap_with(&[0]));
     assert_eq!(group.assets[0].oi_eff_long_q, POS_SCALE);
     assert_eq!(group.assets[0].oi_eff_short_q, POS_SCALE);
     assert_eq!(group.assets[2].oi_eff_long_q, 0);
@@ -1507,25 +1515,89 @@ fn v16_wrapper_prediction_asset_can_drain_retire_and_reactivate_without_closing_
         &mut market,
         processor::ASSET_ACTION_RETIRE,
         2,
-        0,
+        group.current_slot + 1,
         0,
     )
     .unwrap();
     let retired = state::read_market(&market.data).unwrap().1;
     assert_eq!(retired.assets[2].lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(retired.assets[2].retired_slot, group.current_slot + 1);
+    let old_market_id = retired.assets[2].market_id;
+    let next_market_id_before = retired.next_market_id;
+
+    let before_early_reuse = market.data.clone();
+    assert_err_and_market_unchanged(
+        update_asset_lifecycle(
+            &mut admin,
+            &mut market,
+            processor::ASSET_ACTION_ACTIVATE,
+            2,
+            retired.current_slot,
+            500_000,
+        ),
+        &market,
+        &before_early_reuse,
+    );
 
     update_asset_lifecycle(
         &mut admin,
         &mut market,
         processor::ASSET_ACTION_ACTIVATE,
         2,
-        group.current_slot + 1,
+        retired.current_slot + 1,
         500_000,
     )
     .unwrap();
     let reactivated = state::read_market(&market.data).unwrap().1;
     assert_eq!(reactivated.assets[2].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(reactivated.assets[2].market_id, next_market_id_before);
+    assert!(reactivated.assets[2].market_id > old_market_id);
+    assert_eq!(reactivated.next_market_id, next_market_id_before + 1);
     assert_eq!(reactivated.assets[2].effective_price, 500_000);
+
+    let mut stale_long = state::read_portfolio(&long_account.data).unwrap();
+    stale_long.legs[2] = PortfolioLegV16 {
+        active: true,
+        market_id: old_market_id,
+        side: SideV16::Long,
+        basis_pos_q: prediction_q as i128,
+        a_basis: percolator::ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: prediction_q,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+    stale_long.active_bitmap = active_bitmap_with(&[0, 2]);
+    state::write_portfolio(&mut long_account.data, &stale_long).unwrap();
+    let before_stale_market_id = market.data.clone();
+    let stale_market_id_deposit = {
+        let mint =
+            Pubkey::new_from_array(state::read_market(&market.data).unwrap().0.collateral_mint);
+        let mut source_token = user_token_account(long_owner.key, mint, 1);
+        let mut vault_token = vault_token_account(&market, mint, 0);
+        let mut token_program = token_program_account();
+        run_ix(
+            Instruction::Deposit { amount: 1 },
+            &mut [
+                &mut long_owner,
+                &mut market,
+                &mut long_account,
+                &mut source_token,
+                &mut vault_token,
+                &mut token_program,
+            ],
+        )
+    };
+    assert_err_and_market_unchanged(stale_market_id_deposit, &market, &before_stale_market_id);
+    let mut clean_long = state::read_portfolio(&long_account.data).unwrap();
+    clean_long.legs[2] = percolator::PortfolioLegV16::EMPTY;
+    clean_long.active_bitmap = active_bitmap_with(&[0]);
+    state::write_portfolio(&mut long_account.data, &clean_long).unwrap();
 
     run_ix(
         Instruction::TradeNoCpi {
@@ -1546,13 +1618,389 @@ fn v16_wrapper_prediction_asset_can_drain_retire_and_reactivate_without_closing_
     let (_, final_group) = state::read_market(&market.data).unwrap();
     let long = state::read_portfolio(&long_account.data).unwrap();
     let short = state::read_portfolio(&short_account.data).unwrap();
-    assert_eq!(long.active_bitmap, (1 << 0) | (1 << 2));
-    assert_eq!(short.active_bitmap, (1 << 0) | (1 << 2));
+    assert_eq!(long.active_bitmap, active_bitmap_with(&[0, 2]));
+    assert_eq!(short.active_bitmap, active_bitmap_with(&[0, 2]));
     assert_eq!(final_group.assets[0].oi_eff_long_q, POS_SCALE);
     assert_eq!(final_group.assets[0].oi_eff_short_q, POS_SCALE);
     assert_eq!(final_group.assets[2].oi_eff_long_q, prediction_q);
     assert_eq!(final_group.assets[2].oi_eff_short_q, prediction_q);
     assert_eq!(cfg.admin, state::read_market(&market.data).unwrap().0.admin);
+}
+
+#[test]
+fn v16_wrapper_security_sweep_reused_asset_market_ids_fail_closed() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 1;
+            }
+        }),
+    );
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
+
+    let invalid_index = percolator::V16_MAX_PORTFOLIO_ASSETS_N as u16;
+    let last_asset = invalid_index - 1;
+    let before_invalid = market.data.clone();
+    assert_err_and_market_unchanged(
+        update_asset_lifecycle(
+            &mut admin,
+            &mut market,
+            processor::ASSET_ACTION_ACTIVATE,
+            invalid_index,
+            1,
+            200,
+        ),
+        &market,
+        &before_invalid,
+    );
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        last_asset,
+        1,
+        200,
+    )
+    .unwrap();
+    let activated = state::read_market(&market.data).unwrap().1;
+    assert_eq!(
+        activated.config.max_portfolio_assets as usize,
+        percolator::V16_MAX_PORTFOLIO_ASSETS_N,
+        "activating the last fixed slot grows the configured capacity only inside the fixed zero-copy account"
+    );
+    for i in 1..last_asset as usize {
+        assert_eq!(activated.assets[i].lifecycle, AssetLifecycleV16::Disabled);
+    }
+    let old_market_id = activated.assets[last_asset as usize].market_id;
+    let next_market_id_before = activated.next_market_id;
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        last_asset,
+        2,
+        0,
+    )
+    .unwrap();
+    let retired = state::read_market(&market.data).unwrap().1;
+    assert_eq!(
+        retired.assets[last_asset as usize].lifecycle,
+        AssetLifecycleV16::Retired
+    );
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        last_asset,
+        retired.current_slot + 1,
+        250,
+    )
+    .unwrap();
+    let reactivated = state::read_market(&market.data).unwrap().1;
+    let new_market_id = reactivated.assets[last_asset as usize].market_id;
+    assert_eq!(new_market_id, next_market_id_before);
+    assert!(new_market_id > old_market_id);
+    assert_eq!(reactivated.next_market_id, next_market_id_before + 1);
+
+    let mut pass_count = 1usize; // invalid fixed-capacity grow rejection above.
+    let mut stale = state::read_portfolio(&long_account.data).unwrap();
+    stale.legs[last_asset as usize] = PortfolioLegV16 {
+        active: true,
+        market_id: old_market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: percolator::ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: POS_SCALE,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+    stale.active_bitmap = active_bitmap_with(&[last_asset as usize]);
+    state::write_portfolio(&mut long_account.data, &stale).unwrap();
+    let stale_market = market.data.clone();
+    let stale_portfolio = long_account.data.clone();
+
+    let mint = Pubkey::new_from_array(state::read_market(&market.data).unwrap().0.collateral_mint);
+    let mut source = user_token_account(long_owner.key, mint, 1);
+    let mut vault = vault_token_account(&market, mint, 1);
+    let mut token_program = token_program_account();
+    let deposit_stale = run_ix(
+        Instruction::Deposit { amount: 1 },
+        &mut [
+            &mut long_owner,
+            &mut market,
+            &mut long_account,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(deposit_stale, &market, &stale_market);
+    assert_eq!(long_account.data, stale_portfolio);
+    pass_count += 1;
+
+    let mut dest = user_token_account(long_owner.key, mint, 0);
+    let mut vault = vault_token_account(&market, mint, 1);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut token_program = token_program_account();
+    let withdraw_stale = run_ix(
+        Instruction::Withdraw { amount: 1 },
+        &mut [
+            &mut long_owner,
+            &mut market,
+            &mut long_account,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(withdraw_stale, &market, &stale_market);
+    assert_eq!(long_account.data, stale_portfolio);
+    pass_count += 1;
+
+    let sync_stale = sync_maintenance_fee(&mut market, &mut long_account, 10);
+    assert_err_and_market_unchanged(sync_stale, &market, &stale_market);
+    assert_eq!(long_account.data, stale_portfolio);
+    pass_count += 1;
+
+    let refresh_stale = run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: last_asset,
+            now_slot: 10,
+            effective_price: 250,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut admin, &mut market, &mut long_account],
+    );
+    assert_err_and_market_unchanged(refresh_stale, &market, &stale_market);
+    assert_eq!(long_account.data, stale_portfolio);
+    pass_count += 1;
+
+    let trade_stale = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: last_asset,
+            size_q: POS_SCALE as i128,
+            exec_price: 250,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    );
+    assert_err_and_market_unchanged(trade_stale, &market, &stale_market);
+    assert_eq!(long_account.data, stale_portfolio);
+    pass_count += 1;
+
+    let reduce_stale = run_ix(
+        Instruction::RebalanceReduce {
+            asset_index: last_asset,
+            reduce_q: 1,
+        },
+        &mut [&mut long_owner, &mut market, &mut long_account],
+    );
+    assert_err_and_market_unchanged(reduce_stale, &market, &stale_market);
+    assert_eq!(long_account.data, stale_portfolio);
+    pass_count += 1;
+
+    let forfeit_stale = run_ix(
+        Instruction::ForfeitRecoveryLeg {
+            asset_index: last_asset,
+            b_delta_budget: 1,
+        },
+        &mut [&mut long_owner, &mut market, &mut long_account],
+    );
+    assert_err_and_market_unchanged(forfeit_stale, &market, &stale_market);
+    assert_eq!(long_account.data, stale_portfolio);
+    pass_count += 1;
+
+    let close_stale = run_ix(
+        Instruction::ClosePortfolio,
+        &mut [&mut long_owner, &mut market, &mut long_account],
+    );
+    assert_err_and_market_unchanged(close_stale, &market, &stale_market);
+    assert_eq!(long_account.data, stale_portfolio);
+    pass_count += 1;
+
+    let mut source_claim_stale = state::read_portfolio(&long_account.data).unwrap();
+    source_claim_stale.legs[last_asset as usize] = PortfolioLegV16::EMPTY;
+    source_claim_stale.active_bitmap = active_bitmap_with(&[]);
+    let domain = last_asset as usize * 2;
+    source_claim_stale.source_claim_market_id[domain] = old_market_id;
+    source_claim_stale.source_claim_bound_num[domain] = BOUND_SCALE;
+    state::write_portfolio(&mut long_account.data, &source_claim_stale).unwrap();
+    let source_claim_portfolio = long_account.data.clone();
+    let source_claim_sync = sync_maintenance_fee(&mut market, &mut long_account, 10);
+    assert_err_and_market_unchanged(source_claim_sync, &market, &stale_market);
+    assert_eq!(long_account.data, source_claim_portfolio);
+    pass_count += 1;
+
+    let mut close_progress_stale = state::read_portfolio(&long_account.data).unwrap();
+    close_progress_stale.source_claim_market_id[domain] = 0;
+    close_progress_stale.source_claim_bound_num[domain] = 0;
+    close_progress_stale.close_progress = CloseProgressLedgerV16 {
+        active: true,
+        finalized: false,
+        canceled: false,
+        close_id: 1,
+        asset_index: last_asset,
+        market_id: old_market_id,
+        domain_side: SideV16::Long,
+        gross_loss_at_close_start: 1,
+        drift_reference_slot: reactivated.current_slot,
+        max_close_slot: reactivated.current_slot + 10,
+        residual_remaining: 1,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    state::write_portfolio(&mut long_account.data, &close_progress_stale).unwrap();
+    let close_progress_portfolio = long_account.data.clone();
+    let close_progress_sync = sync_maintenance_fee(&mut market, &mut long_account, 10);
+    assert_err_and_market_unchanged(close_progress_sync, &market, &stale_market);
+    assert_eq!(long_account.data, close_progress_portfolio);
+    pass_count += 1;
+
+    let mut clean = state::read_portfolio(&long_account.data).unwrap();
+    clean.close_progress = CloseProgressLedgerV16::EMPTY;
+    state::write_portfolio(&mut long_account.data, &clean).unwrap();
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: last_asset,
+            size_q: POS_SCALE as i128,
+            exec_price: 250,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    pass_count += 1;
+
+    assert!(
+        pass_count >= 10,
+        "security sweep must retain at least ten fail-closed/pass-safe probes for reused market ids"
+    );
+}
+
+#[test]
+fn v16_wrapper_security_sweep_resolved_market_and_fee_branches() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 2;
+                *maintenance_fee_per_slot = 5;
+            }
+        }),
+    );
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        1,
+        125,
+    )
+    .unwrap();
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 100);
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 10,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    )
+    .unwrap();
+
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+    let resolved = state::read_market(&market.data).unwrap().1;
+    assert_eq!(resolved.mode, MarketModeV16::Resolved);
+    assert_eq!(resolved.resolved_slot, 10);
+
+    let before_asset_mutation = market.data.clone();
+    let lifecycle_after_resolve = update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        1,
+        11,
+        0,
+    );
+    assert_err_and_market_unchanged(lifecycle_after_resolve, &market, &before_asset_mutation);
+
+    sync_maintenance_fee(&mut market, &mut portfolio, 100).unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(
+        account.last_fee_slot, 10,
+        "resolved fee sync must anchor at resolved_slot, not caller-supplied now_slot"
+    );
+    assert_eq!(account.capital, 50);
+    assert_eq!(group.insurance, 50);
+    assert_eq!(group.c_tot, 50);
+
+    let after_fee = market.data.clone();
+    let after_fee_portfolio = portfolio.data.clone();
+    sync_maintenance_fee(&mut market, &mut portfolio, 200).unwrap();
+    assert_eq!(
+        market.data, after_fee,
+        "resolved fee sync must be idempotent after resolved_slot is reached"
+    );
+    assert_eq!(portfolio.data, after_fee_portfolio);
 }
 
 #[test]
@@ -4624,8 +5072,8 @@ fn v16_wrapper_tradenocpi_accepts_consented_wide_exec_price_without_moving_index
         group.assets[0].effective_price, 100,
         "execution price must not move the oracle/index state"
     );
-    assert_ne!(long.active_bitmap, 0);
-    assert_ne!(short.active_bitmap, 0);
+    assert!(!percolator::active_bitmap_is_empty(long.active_bitmap));
+    assert!(!percolator::active_bitmap_is_empty(short.active_bitmap));
     assert_eq!(long.legs[0].basis_pos_q, (10 * POS_SCALE) as i128);
     assert_eq!(short.legs[0].basis_pos_q, -((10 * POS_SCALE) as i128));
     assert_eq!(
@@ -5732,8 +6180,8 @@ fn v16_wrapper_tradenocpi_rejects_when_consented_price_would_break_margin() {
     );
     let long = state::read_portfolio(&long_account.data).unwrap();
     let short = state::read_portfolio(&short_account.data).unwrap();
-    assert_eq!(long.active_bitmap, 0);
-    assert_eq!(short.active_bitmap, 0);
+    assert!(percolator::active_bitmap_is_empty(long.active_bitmap));
+    assert!(percolator::active_bitmap_is_empty(short.active_bitmap));
 }
 
 #[test]
@@ -5802,7 +6250,7 @@ fn v16_wrapper_convert_released_pnl_respects_cap_and_unlocks_withdrawal() {
     let before_long = long_account.data.clone();
     let before_short = short_account.data.clone();
     let long = state::read_portfolio(&long_account.data).unwrap();
-    assert_eq!(long.active_bitmap, 0);
+    assert!(percolator::active_bitmap_is_empty(long.active_bitmap));
     assert_eq!(long.pnl, 2);
     assert_eq!(long.capital, 10_000);
 
@@ -6153,8 +6601,8 @@ fn v16_wrapper_tradecpi_executes_on_added_asset_and_binds_matcher_asset_echo() {
     assert_eq!(after_group.assets[0].oi_eff_short_q, 0);
     assert_eq!(after_group.assets[2].oi_eff_long_q, POS_SCALE);
     assert_eq!(after_group.assets[2].oi_eff_short_q, POS_SCALE);
-    assert_eq!(after_a.active_bitmap, 1 << 2);
-    assert_eq!(after_b.active_bitmap, 1 << 2);
+    assert_eq!(after_a.active_bitmap, active_bitmap_with(&[2]));
+    assert_eq!(after_b.active_bitmap, active_bitmap_with(&[2]));
     assert_eq!(after_a.legs[2].basis_pos_q, POS_SCALE as i128);
     assert_eq!(after_b.legs[2].basis_pos_q, -(POS_SCALE as i128));
 }
@@ -6869,8 +7317,8 @@ fn v16_wrapper_permissionless_crank_can_liquidate_unhealthy_candidate() {
     let short = state::read_portfolio(&short_account.data).unwrap();
     assert_eq!(group.slot_last, 1);
     assert_eq!(group.assets[0].effective_price, 200);
-    assert_eq!(
-        short.active_bitmap, 0,
+    assert!(
+        percolator::active_bitmap_is_empty(short.active_bitmap),
         "liquidation should close the unhealthy short through the public crank path"
     );
 }
@@ -6963,7 +7411,7 @@ fn v16_wrapper_liquidation_uses_configured_fee_not_permissionless_caller_fee() {
 
     let (_, group) = state::read_market(&market.data).unwrap();
     let short = state::read_portfolio(&short_account.data).unwrap();
-    assert_eq!(short.active_bitmap, 0);
+    assert!(percolator::active_bitmap_is_empty(short.active_bitmap));
     assert_eq!(
         group.insurance, 1,
         "1% configured liquidation fee on 100 notional must be charged even if caller supplies zero"
@@ -7080,7 +7528,7 @@ fn v16_wrapper_liquidation_fee_policy_splits_retained_penalty_to_cranker() {
 
     let (_, group) = state::read_market(&market.data).unwrap();
     let short = state::read_portfolio(&short_account.data).unwrap();
-    assert_eq!(short.active_bitmap, 0);
+    assert!(percolator::active_bitmap_is_empty(short.active_bitmap));
     assert_eq!(
         group.insurance, 60,
         "1% liquidation fee on 10,000 notional is 100; 40% retained-fee share pays 40 to the cranker"
@@ -7184,7 +7632,7 @@ fn v16_wrapper_liquidation_reward_never_spends_insurance_needed_for_losses() {
 
     let (_, group) = state::read_market(&market.data).unwrap();
     let short = state::read_portfolio(&short_account.data).unwrap();
-    assert_eq!(short.active_bitmap, 0);
+    assert!(percolator::active_bitmap_is_empty(short.active_bitmap));
     assert_eq!(
         group.insurance, 0,
         "the liquidation did not increase retained insurance, so no cranker reward is paid"
@@ -7679,7 +8127,7 @@ fn v16_wrapper_dead_leg_forfeit_is_owner_signed_and_detaches_recovery_leg() {
     .unwrap();
     let (_, group) = state::read_market(&market.data).unwrap();
     let long = state::read_portfolio(&long_account.data).unwrap();
-    assert_eq!(long.active_bitmap, 0);
+    assert!(percolator::active_bitmap_is_empty(long.active_bitmap));
     assert_eq!(long.legs[0].basis_pos_q, 0);
     assert_eq!(group.assets[0].oi_eff_long_q, 0);
 }
@@ -7701,6 +8149,7 @@ fn v16_wrapper_cure_and_cancel_close_uses_owner_deposit_before_support_is_consum
             canceled: false,
             close_id: 1,
             asset_index: 0,
+            market_id: group.assets[0].market_id,
             domain_side: SideV16::Long,
             gross_loss_at_close_start: 10,
             drift_reference_slot: 0,
@@ -8467,7 +8916,7 @@ fn v16_wrapper_close_resolved_progress_only_does_not_pay_active_position() {
         group.vault, 2_000_000,
         "progress-only resolved close must not pay before account exposure is cleared"
     );
-    assert_ne!(long.active_bitmap, 0);
+    assert!(!percolator::active_bitmap_is_empty(long.active_bitmap));
     assert_eq!(long.capital, 1_000_000);
 }
 
@@ -8517,7 +8966,7 @@ fn v16_wrapper_close_resolved_progress_only_does_not_require_token_accounts() {
         group.vault, 2_000_000,
         "progress-only resolved close must not require or perform token payout"
     );
-    assert_ne!(long.active_bitmap, 0);
+    assert!(!percolator::active_bitmap_is_empty(long.active_bitmap));
     assert_eq!(long.capital, 1_000_000);
 }
 

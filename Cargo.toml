@@ -10,11 +10,11 @@ name = "percolator_prog"
 path = "src/v16_program.rs"
 
 [features]
-# Keep the deployable default compatible with Solana's bundled cargo-build-sbf
-# toolchain. `anchor-v2` is available as an opt-in entrypoint adapter, but the
-# current Anchor v2 crate pulls wincode 0.5, whose manifest requires newer Cargo
-# than the Solana 1.18 SBF toolchain ships.
-default = []
+# v16 deploys through the Anchor v2 / Pinocchio entrypoint by default. The
+# Solana 1.18 bundled SBF toolchain cannot parse the current Anchor v2
+# dependency graph; use platform-tools v1.52 or newer for deployable builds.
+# `--no-default-features` remains available for legacy local compatibility.
+default = ["anchor-v2"]
 no-entrypoint = []
 test-sbf = []
 cu-audit = []  # Enable compute unit checkpoints for CU auditing
@@ -50,7 +50,7 @@ pinocchio = "0.6"
 arrayref = "0.3"
 num-derive = "0.4"
 num-traits = "0.2"
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "6660de8030272345925c7cd5d9b52878551aec6f" }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "7fc25ce7ed829fc63538c2888f69f75c947d3d43" }
 anchor-lang-v2 = { git = "https://github.com/solana-foundation/anchor", rev = "e3cf760826fa0a60f247635ea0572e59861ec9b5", package = "anchor-lang-v2", default-features = false, features = ["alloc", "guardrails"], optional = true }
 
 [dev-dependencies]

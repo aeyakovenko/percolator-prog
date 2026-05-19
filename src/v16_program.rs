@@ -15,8 +15,8 @@ use percolator::{
     PermissionlessCrankRequestV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16,
     PortfolioLegV16, ProvenanceHeaderV16, RebalanceRequestV16, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16, SideV16, SourceCreditStateV16,
-    TradeOutcomeV16, TradeRequestV16, V16Config, V16Error, BOUND_SCALE, V16_DOMAIN_COUNT,
-    V16_MAX_PORTFOLIO_ASSETS_N,
+    TradeOutcomeV16, TradeRequestV16, V16Config, V16Error, V16Result, BOUND_SCALE,
+    V16_DOMAIN_COUNT, V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use solana_program::{
     account_info::AccountInfo,
@@ -148,8 +148,8 @@ pub mod state {
         PortfolioAccountV16, PortfolioAccountV16Account, PortfolioLegV16Account,
         ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16Account,
         ResolvedPayoutReceiptV16Account, SourceCreditStateV16Account, V16ConfigAccount, V16Error,
-        V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
-        V16_DOMAIN_COUNT, V16_MAX_PORTFOLIO_ASSETS_N,
+        V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU64, V16_DOMAIN_COUNT,
+        V16_MAX_PORTFOLIO_ASSETS_N,
     };
     use solana_program::program_error::ProgramError;
 
@@ -477,6 +477,7 @@ pub mod state {
             addr_of_mut!((*ptr).asset_activation_count).write(wire.asset_activation_count.get());
             addr_of_mut!((*ptr).last_asset_activation_slot)
                 .write(wire.last_asset_activation_slot.get());
+            addr_of_mut!((*ptr).next_market_id).write(wire.next_market_id.get());
             addr_of_mut!((*ptr).oracle_epoch).write(wire.oracle_epoch.get());
             addr_of_mut!((*ptr).funding_epoch).write(wire.funding_epoch.get());
             addr_of_mut!((*ptr).slot_last).write(wire.slot_last.get());
@@ -550,6 +551,7 @@ pub mod state {
         wire.asset_set_epoch = V16PodU64::new(group.asset_set_epoch);
         wire.asset_activation_count = V16PodU64::new(group.asset_activation_count);
         wire.last_asset_activation_slot = V16PodU64::new(group.last_asset_activation_slot);
+        wire.next_market_id = V16PodU64::new(group.next_market_id);
         wire.oracle_epoch = V16PodU64::new(group.oracle_epoch);
         wire.funding_epoch = V16PodU64::new(group.funding_epoch);
         wire.slot_last = V16PodU64::new(group.slot_last);
@@ -599,6 +601,8 @@ pub mod state {
             addr_of_mut!((*ptr).pnl).write(pnl);
             addr_of_mut!((*ptr).reserved_pnl).write(reserved_pnl);
             for d in 0..V16_DOMAIN_COUNT {
+                addr_of_mut!((*ptr).source_claim_market_id[d])
+                    .write(wire.source_claim_market_id[d].get());
                 addr_of_mut!((*ptr).source_claim_bound_num[d])
                     .write(wire.source_claim_bound_num[d].get());
                 addr_of_mut!((*ptr).source_claim_liened_num[d])
@@ -621,7 +625,7 @@ pub mod state {
             addr_of_mut!((*ptr).fee_credits).write(fee_credits);
             addr_of_mut!((*ptr).cancel_deposit_escrow).write(wire.cancel_deposit_escrow.get());
             addr_of_mut!((*ptr).last_fee_slot).write(wire.last_fee_slot.get());
-            addr_of_mut!((*ptr).active_bitmap).write(wire.active_bitmap.get());
+            addr_of_mut!((*ptr).active_bitmap).write(wire.active_bitmap.map(|v| v.get()));
             for i in 0..V16_MAX_PORTFOLIO_ASSETS_N {
                 addr_of_mut!((*ptr).legs[i]).write(
                     wire.legs[i]
@@ -660,6 +664,7 @@ pub mod state {
         wire.pnl = V16PodI128::new(account.pnl);
         wire.reserved_pnl = V16PodU128::new(account.reserved_pnl);
         for d in 0..V16_DOMAIN_COUNT {
+            wire.source_claim_market_id[d] = V16PodU64::new(account.source_claim_market_id[d]);
             wire.source_claim_bound_num[d] = V16PodU128::new(account.source_claim_bound_num[d]);
             wire.source_claim_liened_num[d] = V16PodU128::new(account.source_claim_liened_num[d]);
             wire.source_claim_counterparty_liened_num[d] =
@@ -680,7 +685,7 @@ pub mod state {
         wire.fee_credits = V16PodI128::new(account.fee_credits);
         wire.cancel_deposit_escrow = V16PodU128::new(account.cancel_deposit_escrow);
         wire.last_fee_slot = V16PodU64::new(account.last_fee_slot);
-        wire.active_bitmap = V16PodU32::new(account.active_bitmap);
+        wire.active_bitmap = account.active_bitmap.map(V16PodU64::new);
         for i in 0..V16_MAX_PORTFOLIO_ASSETS_N {
             wire.legs[i] = PortfolioLegV16Account::from_runtime(&account.legs[i]);
         }
@@ -857,7 +862,7 @@ pub mod ix {
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum Instruction {
         InitMarket {
-            max_portfolio_assets: u8,
+            max_portfolio_assets: u16,
             h_min: u64,
             h_max: u64,
             initial_price: u64,
@@ -888,7 +893,7 @@ pub mod ix {
         },
         PermissionlessCrank {
             action: u8,
-            asset_index: u8,
+            asset_index: u16,
             now_slot: u64,
             effective_price: u64,
             funding_rate_e9: i128,
@@ -897,13 +902,13 @@ pub mod ix {
             recovery_reason: u8,
         },
         TradeNoCpi {
-            asset_index: u8,
+            asset_index: u16,
             size_q: i128,
             exec_price: u64,
             fee_bps: u64,
         },
         TradeCpi {
-            asset_index: u8,
+            asset_index: u16,
             size_q: i128,
             fee_bps: u64,
             limit_price: u64,
@@ -973,7 +978,7 @@ pub mod ix {
         },
         UpdateAssetLifecycle {
             action: u8,
-            asset_index: u8,
+            asset_index: u16,
             now_slot: u64,
             initial_price: u64,
         },
@@ -984,15 +989,15 @@ pub mod ix {
             optional_deposit: u128,
         },
         ForfeitRecoveryLeg {
-            asset_index: u8,
+            asset_index: u16,
             b_delta_budget: u128,
         },
         RebalanceReduce {
-            asset_index: u8,
+            asset_index: u16,
             reduce_q: u128,
         },
         FinalizeResetSide {
-            asset_index: u8,
+            asset_index: u16,
             side: u8,
         },
         ClaimResolvedPayoutTopup,
@@ -1011,7 +1016,7 @@ pub mod ix {
                 .ok_or(ProgramError::InvalidInstructionData)?;
             let ix = match tag {
                 0 => Self::InitMarket {
-                    max_portfolio_assets: read_u8(&mut rest)?,
+                    max_portfolio_assets: read_u16(&mut rest)?,
                     h_min: read_u64(&mut rest)?,
                     h_max: read_u64(&mut rest)?,
                     initial_price: read_u64(&mut rest)?,
@@ -1042,7 +1047,7 @@ pub mod ix {
                 },
                 5 => Self::PermissionlessCrank {
                     action: read_u8(&mut rest)?,
-                    asset_index: read_u8(&mut rest)?,
+                    asset_index: read_u16(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     effective_price: read_u64(&mut rest)?,
                     funding_rate_e9: read_i128(&mut rest)?,
@@ -1051,13 +1056,13 @@ pub mod ix {
                     recovery_reason: read_u8(&mut rest)?,
                 },
                 6 => Self::TradeNoCpi {
-                    asset_index: read_u8(&mut rest)?,
+                    asset_index: read_u16(&mut rest)?,
                     size_q: read_i128(&mut rest)?,
                     exec_price: read_u64(&mut rest)?,
                     fee_bps: read_u64(&mut rest)?,
                 },
                 10 => Self::TradeCpi {
-                    asset_index: read_u8(&mut rest)?,
+                    asset_index: read_u16(&mut rest)?,
                     size_q: read_i128(&mut rest)?,
                     fee_bps: read_u64(&mut rest)?,
                     limit_price: read_u64(&mut rest)?,
@@ -1131,7 +1136,7 @@ pub mod ix {
                 },
                 40 => Self::UpdateAssetLifecycle {
                     action: read_u8(&mut rest)?,
-                    asset_index: read_u8(&mut rest)?,
+                    asset_index: read_u16(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     initial_price: read_u64(&mut rest)?,
                 },
@@ -1142,15 +1147,15 @@ pub mod ix {
                     optional_deposit: read_u128(&mut rest)?,
                 },
                 43 => Self::ForfeitRecoveryLeg {
-                    asset_index: read_u8(&mut rest)?,
+                    asset_index: read_u16(&mut rest)?,
                     b_delta_budget: read_u128(&mut rest)?,
                 },
                 44 => Self::RebalanceReduce {
-                    asset_index: read_u8(&mut rest)?,
+                    asset_index: read_u16(&mut rest)?,
                     reduce_q: read_u128(&mut rest)?,
                 },
                 45 => Self::FinalizeResetSide {
-                    asset_index: read_u8(&mut rest)?,
+                    asset_index: read_u16(&mut rest)?,
                     side: read_u8(&mut rest)?,
                 },
                 46 => Self::ClaimResolvedPayoutTopup,
@@ -1195,7 +1200,7 @@ pub mod ix {
                     maintenance_fee_per_slot,
                 } => {
                     out.push(0);
-                    out.push(max_portfolio_assets);
+                    push_u16(&mut out, max_portfolio_assets);
                     push_u64(&mut out, h_min);
                     push_u64(&mut out, h_max);
                     push_u64(&mut out, initial_price);
@@ -1238,7 +1243,7 @@ pub mod ix {
                 } => {
                     out.push(5);
                     out.push(action);
-                    out.push(asset_index);
+                    push_u16(&mut out, asset_index);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, effective_price);
                     push_i128(&mut out, funding_rate_e9);
@@ -1253,7 +1258,7 @@ pub mod ix {
                     fee_bps,
                 } => {
                     out.push(6);
-                    out.push(asset_index);
+                    push_u16(&mut out, asset_index);
                     push_i128(&mut out, size_q);
                     push_u64(&mut out, exec_price);
                     push_u64(&mut out, fee_bps);
@@ -1265,7 +1270,7 @@ pub mod ix {
                     limit_price,
                 } => {
                     out.push(10);
-                    out.push(asset_index);
+                    push_u16(&mut out, asset_index);
                     push_i128(&mut out, size_q);
                     push_u64(&mut out, fee_bps);
                     push_u64(&mut out, limit_price);
@@ -1385,7 +1390,7 @@ pub mod ix {
                 } => {
                     out.push(40);
                     out.push(action);
-                    out.push(asset_index);
+                    push_u16(&mut out, asset_index);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, initial_price);
                 }
@@ -1402,7 +1407,7 @@ pub mod ix {
                     b_delta_budget,
                 } => {
                     out.push(43);
-                    out.push(asset_index);
+                    push_u16(&mut out, asset_index);
                     push_u128(&mut out, b_delta_budget);
                 }
                 Self::RebalanceReduce {
@@ -1410,12 +1415,12 @@ pub mod ix {
                     reduce_q,
                 } => {
                     out.push(44);
-                    out.push(asset_index);
+                    push_u16(&mut out, asset_index);
                     push_u128(&mut out, reduce_q);
                 }
                 Self::FinalizeResetSide { asset_index, side } => {
                     out.push(45);
-                    out.push(asset_index);
+                    push_u16(&mut out, asset_index);
                     out.push(side);
                 }
                 Self::ClaimResolvedPayoutTopup => out.push(46),
@@ -1567,7 +1572,7 @@ pub mod matcher_abi {
     pub fn validate_matcher_return(
         ret: &MatcherReturn,
         lp_account_id: u64,
-        asset_index: u8,
+        asset_index: u16,
         oracle_price_e6: u64,
         req_size: i128,
         req_id: u64,
@@ -2527,7 +2532,7 @@ pub mod processor {
     fn handle_init_market<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        max_portfolio_assets: u8,
+        max_portfolio_assets: u16,
         h_min: u64,
         h_max: u64,
         initial_price: u64,
@@ -2748,7 +2753,7 @@ pub mod processor {
         let amount_u64 = amount_to_u64(amount)?;
         require_token_balance(vault_token, amount_u64)?;
 
-        let prices = effective_prices(group.as_ref());
+        let prices = effective_prices_boxed(group.as_ref()).map_err(map_v16_error)?;
         group
             .withdraw_not_atomic(portfolio.as_mut(), amount, &prices)
             .map_err(map_v16_error)?;
@@ -2770,7 +2775,7 @@ pub mod processor {
     fn handle_trade_nocpi<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        asset_index: u8,
+        asset_index: u16,
         size_q: i128,
         exec_price: u64,
         fee_bps: u64,
@@ -2804,7 +2809,7 @@ pub mod processor {
         } else {
             size_q.unsigned_abs()
         };
-        let prices = effective_prices(group.as_ref());
+        let prices = effective_prices_boxed(group.as_ref()).map_err(map_v16_error)?;
         let fee_bps = hybrid_trade_fee_bps(
             &cfg,
             group.as_ref(),
@@ -2857,7 +2862,7 @@ pub mod processor {
     fn handle_trade_cpi<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        asset_index: u8,
+        asset_index: u16,
         size_q: i128,
         fee_bps: u64,
         limit_price: u64,
@@ -3002,7 +3007,7 @@ pub mod processor {
         expect_portfolio_owner(account_a.as_ref(), signer_a.key)?;
         expect_portfolio_owner(account_b.as_ref(), signer_b.key)?;
 
-        let prices = effective_prices(group.as_ref());
+        let prices = effective_prices_boxed(group.as_ref()).map_err(map_v16_error)?;
         let fee_bps = hybrid_trade_fee_bps(
             &cfg,
             group.as_ref(),
@@ -3498,7 +3503,7 @@ pub mod processor {
             None
         };
 
-        let prices = effective_prices(group.as_ref());
+        let prices = effective_prices_boxed(group.as_ref()).map_err(map_v16_error)?;
         group
             .cure_and_cancel_close_not_atomic(portfolio.as_mut(), optional_deposit, &prices)
             .map_err(map_v16_error)?;
@@ -3515,7 +3520,7 @@ pub mod processor {
     fn handle_forfeit_recovery_leg<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        asset_index: u8,
+        asset_index: u16,
         b_delta_budget: u128,
     ) -> ProgramResult {
         if b_delta_budget == 0 {
@@ -3532,14 +3537,14 @@ pub mod processor {
     fn handle_rebalance_reduce<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        asset_index: u8,
+        asset_index: u16,
         reduce_q: u128,
     ) -> ProgramResult {
         if reduce_q == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         with_one_portfolio(program_id, accounts, true, |group, portfolio, _cfg| {
-            let prices = effective_prices(group);
+            let prices = effective_prices_boxed(group)?;
             group
                 .rebalance_reduce_position_not_atomic(
                     portfolio,
@@ -3688,7 +3693,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         action: u8,
-        asset_index: u8,
+        asset_index: u16,
         now_slot: u64,
         initial_price: u64,
     ) -> ProgramResult {
@@ -3701,6 +3706,9 @@ pub mod processor {
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         if cfg.asset_authority == [0u8; 32] || cfg.asset_authority != authority.key.to_bytes() {
             return Err(PercolatorError::Unauthorized.into());
+        }
+        if group.mode != MarketModeV16::Live {
+            return Err(PercolatorError::EngineLockActive.into());
         }
         let asset_index = asset_index as usize;
         if asset_index >= V16_MAX_PORTFOLIO_ASSETS_N {
@@ -3725,11 +3733,11 @@ pub mod processor {
                     .map_err(map_v16_error)?;
             }
             ASSET_ACTION_RETIRE => {
-                if now_slot != 0 || initial_price != 0 {
+                if now_slot == 0 || initial_price != 0 {
                     return Err(PercolatorError::InvalidInstruction.into());
                 }
                 group
-                    .retire_empty_asset_not_atomic(asset_index)
+                    .retire_empty_asset_not_atomic(asset_index, now_slot)
                     .map_err(map_v16_error)?;
             }
             _ => return Err(PercolatorError::InvalidInstruction.into()),
@@ -3742,7 +3750,7 @@ pub mod processor {
     fn handle_finalize_reset_side<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        asset_index: u8,
+        asset_index: u16,
         side: u8,
     ) -> ProgramResult {
         let market_ai = account(accounts, 0)?;
@@ -4234,7 +4242,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         action: u8,
-        asset_index: u8,
+        asset_index: u16,
         now_slot: u64,
         effective_price: u64,
         funding_rate_e9: i128,
@@ -4312,7 +4320,9 @@ pub mod processor {
         };
         if action == 1 && cfg.liquidation_cranker_fee_share_bps != 0 {
             let insurance_before = group.insurance;
-            let prices = effective_prices_with(group.as_ref(), asset_index as usize, crank_price);
+            let prices =
+                effective_prices_with_boxed(group.as_ref(), asset_index as usize, crank_price)
+                    .map_err(map_v16_error)?;
             let outcome = group
                 .liquidate_account_not_atomic(
                     portfolio.as_mut(),
@@ -4409,7 +4419,7 @@ pub mod processor {
         group: &mut MarketGroupV16,
         portfolio: &mut PortfolioAccountV16,
         action: u8,
-        asset_index: u8,
+        asset_index: u16,
         now_slot: u64,
         effective_price: u64,
         funding_rate_e9: i128,
@@ -4432,7 +4442,7 @@ pub mod processor {
             ),
             _ => return Err(V16Error::InvalidConfig),
         };
-        let prices = effective_prices_with(group, asset_index as usize, effective_price);
+        let prices = effective_prices_with_boxed(group, asset_index as usize, effective_price)?;
         group
             .permissionless_crank_not_atomic(
                 portfolio,
@@ -4455,6 +4465,17 @@ pub mod processor {
         let raw = unsafe { alloc::alloc::alloc(layout) as *mut T };
         if raw.is_null() {
             return Err(ProgramError::InvalidAccountData);
+        }
+        Ok(raw)
+    }
+
+    #[allow(unsafe_code)]
+    #[inline(never)]
+    fn alloc_raw_engine<T>() -> V16Result<*mut T> {
+        let layout = core::alloc::Layout::new::<T>();
+        let raw = unsafe { alloc::alloc::alloc(layout) as *mut T };
+        if raw.is_null() {
+            return Err(V16Error::InvalidConfig);
         }
         Ok(raw)
     }
@@ -4516,6 +4537,8 @@ pub mod processor {
             core::ptr::addr_of_mut!((*raw).asset_set_epoch).write(0);
             core::ptr::addr_of_mut!((*raw).asset_activation_count).write(0);
             core::ptr::addr_of_mut!((*raw).last_asset_activation_slot).write(0);
+            core::ptr::addr_of_mut!((*raw).next_market_id)
+                .write(config.max_portfolio_assets as u64 + 1);
             core::ptr::addr_of_mut!((*raw).oracle_epoch).write(0);
             core::ptr::addr_of_mut!((*raw).funding_epoch).write(0);
             core::ptr::addr_of_mut!((*raw).slot_last).write(0);
@@ -4523,7 +4546,14 @@ pub mod processor {
             let assets = core::ptr::addr_of_mut!((*raw).assets) as *mut AssetStateV16;
             let mut i = 0;
             while i < V16_MAX_PORTFOLIO_ASSETS_N {
-                assets.add(i).write(AssetStateV16::default());
+                let mut asset = AssetStateV16::default();
+                if i < config.max_portfolio_assets as usize {
+                    asset.market_id = i as u64 + 1;
+                } else {
+                    asset.lifecycle = AssetLifecycleV16::Disabled;
+                    asset.market_id = 0;
+                }
+                assets.add(i).write(asset);
                 i += 1;
             }
             core::ptr::addr_of_mut!((*raw).bankruptcy_hlock_active).write(false);
@@ -4569,7 +4599,7 @@ pub mod processor {
             i += 1;
         }
         group.config.max_portfolio_assets =
-            u8::try_from(new_n).map_err(|_| PercolatorError::InvalidInstruction)?;
+            u16::try_from(new_n).map_err(|_| PercolatorError::InvalidInstruction)?;
         group
             .config
             .validate_public_user_fund()
@@ -4592,6 +4622,8 @@ pub mod processor {
             core::ptr::addr_of_mut!((*raw).capital).write(0);
             core::ptr::addr_of_mut!((*raw).pnl).write(0);
             core::ptr::addr_of_mut!((*raw).reserved_pnl).write(0);
+            let source_claim_market_id =
+                core::ptr::addr_of_mut!((*raw).source_claim_market_id) as *mut u64;
             let source_claim_bound_num =
                 core::ptr::addr_of_mut!((*raw).source_claim_bound_num) as *mut u128;
             let source_claim_liened_num =
@@ -4613,6 +4645,7 @@ pub mod processor {
                     as *mut u128;
             let mut d = 0;
             while d < V16_DOMAIN_COUNT {
+                source_claim_market_id.add(d).write(0);
                 source_claim_bound_num.add(d).write(0);
                 source_claim_liened_num.add(d).write(0);
                 source_claim_counterparty_liened_num.add(d).write(0);
@@ -4627,7 +4660,7 @@ pub mod processor {
             core::ptr::addr_of_mut!((*raw).fee_credits).write(0);
             core::ptr::addr_of_mut!((*raw).cancel_deposit_escrow).write(0);
             core::ptr::addr_of_mut!((*raw).last_fee_slot).write(0);
-            core::ptr::addr_of_mut!((*raw).active_bitmap).write(0);
+            core::ptr::addr_of_mut!((*raw).active_bitmap).write(percolator::active_bitmap_empty());
             let legs = core::ptr::addr_of_mut!((*raw).legs) as *mut PortfolioLegV16;
             let mut i = 0;
             while i < V16_MAX_PORTFOLIO_ASSETS_N {
@@ -4644,7 +4677,7 @@ pub mod processor {
                 cert_funding_epoch: 0,
                 cert_risk_epoch: 0,
                 cert_asset_set_epoch: 0,
-                active_bitmap_at_cert: 0,
+                active_bitmap_at_cert: percolator::active_bitmap_empty(),
                 valid: false,
             });
             core::ptr::addr_of_mut!((*raw).stale_state).write(false);
@@ -4740,15 +4773,26 @@ pub mod processor {
         state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())
     }
 
-    fn effective_prices(group: &MarketGroupV16) -> [u64; V16_MAX_PORTFOLIO_ASSETS_N] {
-        let mut prices = [1u64; V16_MAX_PORTFOLIO_ASSETS_N];
-        let n = group.config.max_portfolio_assets as usize;
-        let mut i = 0;
-        while i < n {
-            prices[i] = group.assets[i].effective_price;
-            i += 1;
+    type EffectivePricesBox = alloc::boxed::Box<[u64; V16_MAX_PORTFOLIO_ASSETS_N]>;
+
+    #[allow(unsafe_code)]
+    fn effective_prices_boxed(group: &MarketGroupV16) -> V16Result<EffectivePricesBox> {
+        let raw = alloc_raw_engine::<[u64; V16_MAX_PORTFOLIO_ASSETS_N]>()?;
+        unsafe {
+            let ptr = raw as *mut u64;
+            let mut i = 0;
+            while i < V16_MAX_PORTFOLIO_ASSETS_N {
+                ptr.add(i).write(1);
+                i += 1;
+            }
+            let n = group.config.max_portfolio_assets as usize;
+            let mut j = 0;
+            while j < n {
+                (*raw)[j] = group.assets[j].effective_price;
+                j += 1;
+            }
+            Ok(alloc::boxed::Box::from_raw(raw))
         }
-        prices
     }
 
     fn group_has_position_or_loss_state(group: &MarketGroupV16) -> bool {
@@ -5033,16 +5077,16 @@ pub mod processor {
         }
     }
 
-    fn effective_prices_with(
+    fn effective_prices_with_boxed(
         group: &MarketGroupV16,
         asset_index: usize,
         effective_price: u64,
-    ) -> [u64; V16_MAX_PORTFOLIO_ASSETS_N] {
-        let mut prices = effective_prices(group);
+    ) -> V16Result<EffectivePricesBox> {
+        let mut prices = effective_prices_boxed(group)?;
         if asset_index < V16_MAX_PORTFOLIO_ASSETS_N && effective_price != 0 {
             prices[asset_index] = effective_price;
         }
-        prices
+        Ok(prices)
     }
 
     fn derive_matcher_delegate(
@@ -5075,7 +5119,7 @@ pub mod processor {
         matcher_delegate: &AccountInfo<'a>,
         tail: &[AccountInfo<'a>],
         req_id: u64,
-        asset_index: u8,
+        asset_index: u16,
         lp_account_id: u64,
         oracle_price_e6: u64,
         req_size: i128,
@@ -5282,10 +5326,9 @@ pub mod entrypoint {
         pubkey::Pubkey,
     };
 
-    // v16's account-local runtime materialization can need a market group plus
-    // two portfolio states in memory at once. The default 32 KiB Solana heap is
-    // no longer sufficient for trade/liquidation paths, so clients must include
-    // a ComputeBudget `request_heap_frame` instruction of at least this size.
+    // The processor still materializes engine runtime structs. This remains
+    // bounded at the current fixed asset cap; larger u16-indexed markets need
+    // engine zero-copy/page APIs rather than larger fixed runtime arrays.
     pub const V16_HEAP_FRAME_BYTES: usize = 128 * 1024;
 
     #[cfg(target_os = "solana")]
