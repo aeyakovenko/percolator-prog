@@ -96,6 +96,18 @@ fn active_bitmap_with(indices: &[usize]) -> percolator::V16ActiveBitmap {
     bitmap
 }
 
+fn active_leg_for_asset(
+    account: &percolator::PortfolioAccountV16,
+    asset_index: usize,
+) -> percolator::PortfolioLegV16 {
+    account
+        .legs
+        .iter()
+        .copied()
+        .find(|leg| leg.active && leg.asset_index as usize == asset_index)
+        .unwrap()
+}
+
 fn signer() -> TestAccount {
     TestAccount::new(Pubkey::new_unique(), Pubkey::new_unique(), 0).signer()
 }
@@ -956,7 +968,7 @@ fn v16_wrapper_maintenance_fee_rejects_recovery_mode_without_mutation() {
 }
 
 #[test]
-fn v16_wrapper_asset_authority_can_add_activate_and_trade_sparse_assets() {
+fn v16_wrapper_asset_authority_can_append_activate_and_trade_assets() {
     let mut admin = signer();
     let mut market = market_account();
     let mut long_owner = signer();
@@ -1004,15 +1016,24 @@ fn v16_wrapper_asset_authority_can_add_activate_and_trade_sparse_assets() {
         &mut admin,
         &mut market,
         processor::ASSET_ACTION_ACTIVATE,
-        2,
         1,
+        1,
+        150,
+    )
+    .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        2,
+        2,
         250,
     )
     .unwrap();
     let (cfg, group) = state::read_market(&market.data).unwrap();
     assert_eq!(cfg.asset_authority, admin.key.to_bytes());
-    assert_eq!(group.config.max_portfolio_assets, 3);
-    assert_eq!(group.assets[1].lifecycle, AssetLifecycleV16::Disabled);
+    assert_eq!(group.config.max_market_slots, 3);
+    assert_eq!(group.assets[1].lifecycle, AssetLifecycleV16::Active);
     assert_eq!(group.assets[2].lifecycle, AssetLifecycleV16::Active);
     assert_eq!(group.assets[2].effective_price, 250);
 
@@ -1034,10 +1055,16 @@ fn v16_wrapper_asset_authority_can_add_activate_and_trade_sparse_assets() {
     .unwrap();
     let long = state::read_portfolio(&long_account.data).unwrap();
     let short = state::read_portfolio(&short_account.data).unwrap();
-    assert_eq!(long.active_bitmap, active_bitmap_with(&[2]));
-    assert_eq!(short.active_bitmap, active_bitmap_with(&[2]));
-    assert_eq!(long.legs[2].basis_pos_q, POS_SCALE as i128);
-    assert_eq!(short.legs[2].basis_pos_q, -(POS_SCALE as i128));
+    assert_eq!(long.active_bitmap, active_bitmap_with(&[0]));
+    assert_eq!(short.active_bitmap, active_bitmap_with(&[0]));
+    assert_eq!(
+        active_leg_for_asset(&long, 2).basis_pos_q,
+        POS_SCALE as i128
+    );
+    assert_eq!(
+        active_leg_for_asset(&short, 2).basis_pos_q,
+        -(POS_SCALE as i128)
+    );
 }
 
 #[test]
@@ -1062,15 +1089,6 @@ fn v16_wrapper_one_portfolio_can_hold_multiple_asset_positions_independently() {
             }
         }),
     );
-    update_asset_lifecycle(
-        &mut admin,
-        &mut market,
-        processor::ASSET_ACTION_ACTIVATE,
-        2,
-        1,
-        250,
-    )
-    .unwrap();
     init_portfolio(&mut long_owner, &mut market, &mut long_account);
     init_portfolio(&mut short_owner, &mut market, &mut short_account);
     deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
@@ -1096,7 +1114,7 @@ fn v16_wrapper_one_portfolio_can_hold_multiple_asset_positions_independently() {
         Instruction::TradeNoCpi {
             asset_index: 2,
             size_q: (2 * POS_SCALE) as i128,
-            exec_price: 250,
+            exec_price: 100,
             fee_bps: 0,
         },
         &mut [
@@ -1112,15 +1130,27 @@ fn v16_wrapper_one_portfolio_can_hold_multiple_asset_positions_independently() {
     let (_, group) = state::read_market(&market.data).unwrap();
     let long = state::read_portfolio(&long_account.data).unwrap();
     let short = state::read_portfolio(&short_account.data).unwrap();
-    assert_eq!(long.active_bitmap, active_bitmap_with(&[0, 2]));
-    assert_eq!(short.active_bitmap, active_bitmap_with(&[0, 2]));
-    assert_eq!(long.legs[0].basis_pos_q, POS_SCALE as i128);
-    assert_eq!(short.legs[0].basis_pos_q, -(POS_SCALE as i128));
-    assert_eq!(long.legs[2].basis_pos_q, (2 * POS_SCALE) as i128);
-    assert_eq!(short.legs[2].basis_pos_q, -((2 * POS_SCALE) as i128));
+    assert_eq!(long.active_bitmap, active_bitmap_with(&[0, 1]));
+    assert_eq!(short.active_bitmap, active_bitmap_with(&[0, 1]));
+    assert_eq!(
+        active_leg_for_asset(&long, 0).basis_pos_q,
+        POS_SCALE as i128
+    );
+    assert_eq!(
+        active_leg_for_asset(&short, 0).basis_pos_q,
+        -(POS_SCALE as i128)
+    );
+    assert_eq!(
+        active_leg_for_asset(&long, 2).basis_pos_q,
+        (2 * POS_SCALE) as i128
+    );
+    assert_eq!(
+        active_leg_for_asset(&short, 2).basis_pos_q,
+        -((2 * POS_SCALE) as i128)
+    );
     assert_eq!(group.assets[0].oi_eff_long_q, POS_SCALE);
     assert_eq!(group.assets[0].oi_eff_short_q, POS_SCALE);
-    assert_eq!(group.assets[1].lifecycle, AssetLifecycleV16::Disabled);
+    assert_eq!(group.assets[1].lifecycle, AssetLifecycleV16::Active);
     assert_eq!(group.assets[1].oi_eff_long_q, 0);
     assert_eq!(group.assets[1].oi_eff_short_q, 0);
     assert_eq!(group.assets[2].oi_eff_long_q, 2 * POS_SCALE);
@@ -1221,7 +1251,7 @@ fn v16_wrapper_asset_drain_only_and_retire_enforce_engine_lifecycle() {
                 ..
             } = ix
             {
-                *max_portfolio_assets = 2;
+                *max_portfolio_assets = 1;
             }
         }),
     );
@@ -1347,7 +1377,7 @@ fn v16_wrapper_prediction_asset_can_drain_retire_and_reactivate_without_closing_
                 ..
             } = ix
             {
-                *max_portfolio_assets = 3;
+                *max_portfolio_assets = 2;
             }
         }),
     );
@@ -1461,7 +1491,7 @@ fn v16_wrapper_prediction_asset_can_drain_retire_and_reactivate_without_closing_
     .unwrap();
     let after_unilateral_reduce = state::read_portfolio(&short_account.data).unwrap();
     assert!(
-        after_unilateral_reduce.legs[2].active,
+        active_leg_for_asset(&after_unilateral_reduce, 2).active,
         "counterparty leg is stale/dead after unilateral reduction and must be explicitly cleared"
     );
     let second_unilateral_reduce = run_ix(
@@ -1556,8 +1586,9 @@ fn v16_wrapper_prediction_asset_can_drain_retire_and_reactivate_without_closing_
     assert_eq!(reactivated.assets[2].effective_price, 500_000);
 
     let mut stale_long = state::read_portfolio(&long_account.data).unwrap();
-    stale_long.legs[2] = PortfolioLegV16 {
+    stale_long.legs[1] = PortfolioLegV16 {
         active: true,
+        asset_index: 2,
         market_id: old_market_id,
         side: SideV16::Long,
         basis_pos_q: prediction_q as i128,
@@ -1572,7 +1603,7 @@ fn v16_wrapper_prediction_asset_can_drain_retire_and_reactivate_without_closing_
         b_stale: false,
         stale: false,
     };
-    stale_long.active_bitmap = active_bitmap_with(&[0, 2]);
+    stale_long.active_bitmap = active_bitmap_with(&[0, 1]);
     state::write_portfolio(&mut long_account.data, &stale_long).unwrap();
     let before_stale_market_id = market.data.clone();
     let stale_market_id_deposit = {
@@ -1595,7 +1626,7 @@ fn v16_wrapper_prediction_asset_can_drain_retire_and_reactivate_without_closing_
     };
     assert_err_and_market_unchanged(stale_market_id_deposit, &market, &before_stale_market_id);
     let mut clean_long = state::read_portfolio(&long_account.data).unwrap();
-    clean_long.legs[2] = percolator::PortfolioLegV16::EMPTY;
+    clean_long.legs[1] = percolator::PortfolioLegV16::EMPTY;
     clean_long.active_bitmap = active_bitmap_with(&[0]);
     state::write_portfolio(&mut long_account.data, &clean_long).unwrap();
 
@@ -1618,8 +1649,8 @@ fn v16_wrapper_prediction_asset_can_drain_retire_and_reactivate_without_closing_
     let (_, final_group) = state::read_market(&market.data).unwrap();
     let long = state::read_portfolio(&long_account.data).unwrap();
     let short = state::read_portfolio(&short_account.data).unwrap();
-    assert_eq!(long.active_bitmap, active_bitmap_with(&[0, 2]));
-    assert_eq!(short.active_bitmap, active_bitmap_with(&[0, 2]));
+    assert_eq!(long.active_bitmap, active_bitmap_with(&[0, 1]));
+    assert_eq!(short.active_bitmap, active_bitmap_with(&[0, 1]));
     assert_eq!(final_group.assets[0].oi_eff_long_q, POS_SCALE);
     assert_eq!(final_group.assets[0].oi_eff_short_q, POS_SCALE);
     assert_eq!(final_group.assets[2].oi_eff_long_q, prediction_q);
@@ -1674,25 +1705,6 @@ fn v16_wrapper_three_asset_hybrid_prediction_shutdown_reuses_only_prediction_slo
         2,
         0,
     );
-    update_asset_lifecycle(
-        &mut admin,
-        &mut market,
-        processor::ASSET_ACTION_ACTIVATE,
-        1,
-        2,
-        1_000_000,
-    )
-    .unwrap();
-    update_asset_lifecycle(
-        &mut admin,
-        &mut market,
-        processor::ASSET_ACTION_ACTIVATE,
-        2,
-        3,
-        250,
-    )
-    .unwrap();
-
     init_portfolio(&mut long_owner, &mut market, &mut long_account);
     init_portfolio(&mut short_owner, &mut market, &mut short_account);
     deposit(&mut long_owner, &mut market, &mut long_account, 10_000_000);
@@ -1755,8 +1767,8 @@ fn v16_wrapper_three_asset_hybrid_prediction_shutdown_reuses_only_prediction_slo
     let (before_cfg, before_group) = state::read_market(&market.data).unwrap();
     assert_eq!(before_cfg.oracle_mode, ORACLE_MODE_HYBRID_AFTER_HOURS);
     assert_eq!(before_group.assets[0].effective_price, 133_333);
-    assert_eq!(before_group.assets[1].effective_price, 1_000_000);
-    assert_eq!(before_group.assets[2].effective_price, 250);
+    assert_eq!(before_group.assets[1].effective_price, 100);
+    assert_eq!(before_group.assets[2].effective_price, 100);
 
     // Once the external asset-0 oracle is soft-stale, a prediction-asset
     // crank must still use the prediction asset's own supplied price. The
@@ -1766,7 +1778,7 @@ fn v16_wrapper_three_asset_hybrid_prediction_shutdown_reuses_only_prediction_slo
             action: 0,
             asset_index: 1,
             now_slot: before_group.current_slot + 3,
-            effective_price: 1_000_000,
+            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -1778,7 +1790,7 @@ fn v16_wrapper_three_asset_hybrid_prediction_shutdown_reuses_only_prediction_slo
     let (after_prediction_crank_cfg, after_prediction_crank) =
         state::read_market(&market.data).unwrap();
     assert_eq!(
-        after_prediction_crank.assets[1].effective_price, 1_000_000,
+        after_prediction_crank.assets[1].effective_price, 100,
         "asset-1 prediction crank must not inherit the asset-0 hybrid fallback mark"
     );
     assert_eq!(
@@ -1896,11 +1908,12 @@ fn v16_wrapper_three_asset_hybrid_prediction_shutdown_reuses_only_prediction_slo
         reused_group.assets[0].effective_price,
         before_group.assets[0].effective_price
     );
-    assert_eq!(reused_group.assets[2].effective_price, 250);
+    assert_eq!(reused_group.assets[2].effective_price, 100);
 
     let mut stale_prediction_leg = state::read_portfolio(&long_account.data).unwrap();
     stale_prediction_leg.legs[1] = PortfolioLegV16 {
         active: true,
+        asset_index: 1,
         market_id: old_prediction_market_id,
         side: SideV16::Long,
         basis_pos_q: prediction_q as i128,
@@ -1963,8 +1976,8 @@ fn v16_wrapper_security_sweep_reused_asset_market_ids_fail_closed() {
     deposit(&mut long_owner, &mut market, &mut long_account, 10_000);
     deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
 
-    let invalid_index = percolator::V16_MAX_PORTFOLIO_ASSETS_N as u16;
-    let last_asset = invalid_index - 1;
+    let invalid_index = percolator::V16_MAX_MARKET_SLOTS_N as u16;
+    let last_asset = 1u16;
     let before_invalid = market.data.clone();
     assert_err_and_market_unchanged(
         update_asset_lifecycle(
@@ -1990,13 +2003,9 @@ fn v16_wrapper_security_sweep_reused_asset_market_ids_fail_closed() {
     .unwrap();
     let activated = state::read_market(&market.data).unwrap().1;
     assert_eq!(
-        activated.config.max_portfolio_assets as usize,
-        percolator::V16_MAX_PORTFOLIO_ASSETS_N,
-        "activating the last fixed slot grows the configured capacity only inside the fixed zero-copy account"
+        activated.config.max_market_slots as usize, 2,
+        "activating the next append slot grows the configured market-slot set"
     );
-    for i in 1..last_asset as usize {
-        assert_eq!(activated.assets[i].lifecycle, AssetLifecycleV16::Disabled);
-    }
     let old_market_id = activated.assets[last_asset as usize].market_id;
     let next_market_id_before = activated.next_market_id;
 
@@ -2032,8 +2041,9 @@ fn v16_wrapper_security_sweep_reused_asset_market_ids_fail_closed() {
 
     let mut pass_count = 1usize; // invalid fixed-capacity grow rejection above.
     let mut stale = state::read_portfolio(&long_account.data).unwrap();
-    stale.legs[last_asset as usize] = PortfolioLegV16 {
+    stale.legs[0] = PortfolioLegV16 {
         active: true,
+        asset_index: last_asset as u32,
         market_id: old_market_id,
         side: SideV16::Long,
         basis_pos_q: POS_SCALE as i128,
@@ -2048,7 +2058,7 @@ fn v16_wrapper_security_sweep_reused_asset_market_ids_fail_closed() {
         b_stale: false,
         stale: false,
     };
-    stale.active_bitmap = active_bitmap_with(&[last_asset as usize]);
+    stale.active_bitmap = active_bitmap_with(&[0]);
     state::write_portfolio(&mut long_account.data, &stale).unwrap();
     let stale_market = market.data.clone();
     let stale_portfolio = long_account.data.clone();
@@ -2164,7 +2174,7 @@ fn v16_wrapper_security_sweep_reused_asset_market_ids_fail_closed() {
     pass_count += 1;
 
     let mut source_claim_stale = state::read_portfolio(&long_account.data).unwrap();
-    source_claim_stale.legs[last_asset as usize] = PortfolioLegV16::EMPTY;
+    source_claim_stale.legs[0] = PortfolioLegV16::EMPTY;
     source_claim_stale.active_bitmap = active_bitmap_with(&[]);
     let domain = last_asset as usize * 2;
     source_claim_stale.source_claim_market_id[domain] = old_market_id;
@@ -2184,7 +2194,7 @@ fn v16_wrapper_security_sweep_reused_asset_market_ids_fail_closed() {
         finalized: false,
         canceled: false,
         close_id: 1,
-        asset_index: last_asset,
+        asset_index: last_asset as u32,
         market_id: old_market_id,
         domain_side: SideV16::Long,
         gross_loss_at_close_start: 1,
@@ -2244,7 +2254,7 @@ fn v16_wrapper_security_sweep_resolved_market_and_fee_branches() {
                 ..
             } = ix
             {
-                *max_portfolio_assets = 2;
+                *max_portfolio_assets = 1;
                 *maintenance_fee_per_slot = 5;
             }
         }),
@@ -6865,7 +6875,7 @@ fn v16_wrapper_tradecpi_executes_on_added_asset_and_binds_matcher_asset_echo() {
                 ..
             } = ix
             {
-                *max_portfolio_assets = 3;
+                *max_portfolio_assets = 2;
             }
         }),
     );
@@ -6910,10 +6920,16 @@ fn v16_wrapper_tradecpi_executes_on_added_asset_and_binds_matcher_asset_echo() {
     assert_eq!(after_group.assets[0].oi_eff_short_q, 0);
     assert_eq!(after_group.assets[2].oi_eff_long_q, POS_SCALE);
     assert_eq!(after_group.assets[2].oi_eff_short_q, POS_SCALE);
-    assert_eq!(after_a.active_bitmap, active_bitmap_with(&[2]));
-    assert_eq!(after_b.active_bitmap, active_bitmap_with(&[2]));
-    assert_eq!(after_a.legs[2].basis_pos_q, POS_SCALE as i128);
-    assert_eq!(after_b.legs[2].basis_pos_q, -(POS_SCALE as i128));
+    assert_eq!(after_a.active_bitmap, active_bitmap_with(&[0]));
+    assert_eq!(after_b.active_bitmap, active_bitmap_with(&[0]));
+    assert_eq!(
+        active_leg_for_asset(&after_a, 2).basis_pos_q,
+        POS_SCALE as i128
+    );
+    assert_eq!(
+        active_leg_for_asset(&after_b, 2).basis_pos_q,
+        -(POS_SCALE as i128)
+    );
 }
 
 #[test]

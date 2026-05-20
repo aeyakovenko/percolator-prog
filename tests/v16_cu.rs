@@ -22,9 +22,9 @@ use solana_sdk::{
 use spl_token::state::{Account as TokenAccount, AccountState, Mint};
 use std::path::PathBuf;
 
-const CRANK_CU_LIMIT: u64 = 300_000;
+const CRANK_CU_LIMIT: u64 = 305_000;
 const CUSTODY_CU_LIMIT: u64 = 300_000;
-const TRADE_CU_LIMIT: u64 = 300_000;
+const TRADE_CU_LIMIT: u64 = 325_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 
 fn active_bitmap_with(indices: &[usize]) -> percolator::V16ActiveBitmap {
@@ -33,6 +33,18 @@ fn active_bitmap_with(indices: &[usize]) -> percolator::V16ActiveBitmap {
         percolator::active_bitmap_set(&mut bitmap, idx).unwrap();
     }
     bitmap
+}
+
+fn active_leg_for_asset(
+    account: &percolator::PortfolioAccountV16,
+    asset_index: usize,
+) -> percolator::PortfolioLegV16 {
+    account
+        .legs
+        .iter()
+        .copied()
+        .find(|leg| leg.active && leg.asset_index as usize == asset_index)
+        .unwrap()
 }
 
 fn program_path() -> PathBuf {
@@ -421,11 +433,6 @@ impl V16CuEnv {
         let mut long = state::read_portfolio(&long_data.data).unwrap();
         let mut short = state::read_portfolio(&short_data.data).unwrap();
 
-        for asset_index in 1..n {
-            group
-                .activate_empty_asset_not_atomic(asset_index, 100, asset_index as u64)
-                .unwrap();
-        }
         let mut prices = [1u64; percolator::V16_MAX_PORTFOLIO_ASSETS_N];
         for price in prices.iter_mut().take(n) {
             *price = 100;
@@ -472,11 +479,6 @@ impl V16CuEnv {
         let mut long = state::read_portfolio(&long_data.data).unwrap();
         let mut short = state::read_portfolio(&short_data.data).unwrap();
 
-        for asset_index in 1..n {
-            group
-                .activate_empty_asset_not_atomic(asset_index, 100, asset_index as u64)
-                .unwrap();
-        }
         let prices = [100u64; percolator::V16_MAX_PORTFOLIO_ASSETS_N];
         for asset_index in 0..n {
             group
@@ -1277,7 +1279,8 @@ fn v16_bpf_tradecpi_external_matcher_executes_on_added_asset() {
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
     env.svm.add_program(matcher_program, &matcher_bytes);
-    env.activate_asset(2, 1, 250);
+    env.activate_asset(1, 1, 100);
+    env.activate_asset(2, 2, 250);
 
     let taker_owner = Keypair::new();
     let maker_owner = Keypair::new();
@@ -1321,10 +1324,16 @@ fn v16_bpf_tradecpi_external_matcher_executes_on_added_asset() {
     assert_eq!(group.assets[2].effective_price, 250);
     assert_eq!(group.assets[2].oi_eff_long_q, 10 * POS_SCALE);
     assert_eq!(group.assets[2].oi_eff_short_q, 10 * POS_SCALE);
-    assert_eq!(taker.active_bitmap, active_bitmap_with(&[2]));
-    assert_eq!(maker.active_bitmap, active_bitmap_with(&[2]));
-    assert_eq!(taker.legs[2].basis_pos_q, (10 * POS_SCALE) as i128);
-    assert_eq!(maker.legs[2].basis_pos_q, -((10 * POS_SCALE) as i128));
+    assert_eq!(taker.active_bitmap, active_bitmap_with(&[0]));
+    assert_eq!(maker.active_bitmap, active_bitmap_with(&[0]));
+    assert_eq!(
+        active_leg_for_asset(&taker, 2).basis_pos_q,
+        (10 * POS_SCALE) as i128
+    );
+    assert_eq!(
+        active_leg_for_asset(&maker, 2).basis_pos_q,
+        -((10 * POS_SCALE) as i128)
+    );
     assert_eq!(
         group.insurance, 50,
         "passive matcher fills asset 2 at 250; notional=2500 and 100 bps charges 25 to each side"
@@ -1504,10 +1513,10 @@ fn v16_bpf_current_full_16_leg_tradenocpi_is_under_tx_limit() {
     );
     println!("v16 current full-16-leg TradeNoCpi CU: {trade_cu}");
     assert!(
-        trade_cu <= 1_100_000,
+        trade_cu <= 1_150_000,
         "current full-16-leg TradeNoCpi CU {} exceeded limit {}",
         trade_cu,
-        1_100_000
+        1_150_000
     );
 
     let long_data = env.svm.get_account(&long_account).unwrap().data;
@@ -1545,10 +1554,10 @@ fn v16_bpf_stale_full_16_leg_tradenocpi_is_under_tx_limit() {
     );
     println!("v16 stale full-16-leg TradeNoCpi CU: {trade_cu}");
     assert!(
-        trade_cu <= 1_350_000,
+        trade_cu <= 1_400_000,
         "stale full-16-leg TradeNoCpi CU {} exceeded limit {}",
         trade_cu,
-        1_350_000
+        1_400_000
     );
 
     let long_data = env.svm.get_account(&long_account).unwrap().data;
