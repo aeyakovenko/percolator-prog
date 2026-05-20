@@ -8290,7 +8290,126 @@ fn v16_wrapper_liquidation_fee_policy_splits_retained_penalty_to_cranker() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
-    let mint_key = mint.key;
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut cranker_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+    let mut cranker_account = portfolio_account();
+
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_margin_bps,
+                initial_margin_bps,
+                min_nonzero_mm_req,
+                min_nonzero_im_req,
+                liquidation_fee_bps,
+                liquidation_fee_cap,
+                max_price_move_bps_per_slot,
+                max_accrual_dt_slots,
+                max_abs_funding_e9_per_slot,
+                min_funding_lifetime_slots,
+                ..
+            } = ix
+            {
+                *maintenance_margin_bps = 500;
+                *initial_margin_bps = 600;
+                *min_nonzero_mm_req = 100;
+                *min_nonzero_im_req = 101;
+                *liquidation_fee_bps = 100;
+                *liquidation_fee_cap = percolator::MAX_PROTOCOL_FEE_ABS;
+                *max_price_move_bps_per_slot = 3;
+                *max_accrual_dt_slots = 100;
+                *max_abs_funding_e9_per_slot = 10_000;
+                *min_funding_lifetime_slots = 100;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    init_portfolio(&mut cranker_owner, &mut market, &mut cranker_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 601);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: (100 * POS_SCALE) as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        let mut short = state::read_portfolio(&short_account.data).unwrap();
+        short.capital = 499;
+        group.c_tot -= 102;
+        group.vault -= 102;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut short_account.data, &short).unwrap();
+    }
+    run_ix(
+        Instruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: 4_000,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let vault_before = state::read_market(&market.data).unwrap().1.vault;
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 1,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 100 * POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [
+            &mut cranker_owner,
+            &mut market,
+            &mut short_account,
+            &mut cranker_account,
+        ],
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let short = state::read_portfolio(&short_account.data).unwrap();
+    let cranker = state::read_portfolio(&cranker_account.data).unwrap();
+    assert!(percolator::active_bitmap_is_empty(short.active_bitmap));
+    assert_eq!(
+        group.insurance, 60,
+        "1% liquidation fee on 10,000 notional is 100; 40% retained-fee share pays 40 to the cranker"
+    );
+    assert_eq!(
+        group.vault, vault_before,
+        "internal cranker reward must not withdraw SPL custody from the vault"
+    );
+    assert_eq!(
+        cranker.capital, 40,
+        "cranker reward is credited as Percolator account capital"
+    );
+}
+
+#[test]
+fn v16_wrapper_liquidation_reward_account_is_optional_and_absent_keeps_fee_in_insurance() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
     let mut long_owner = signer();
     let mut short_owner = signer();
     let mut long_account = portfolio_account();
@@ -8364,12 +8483,7 @@ fn v16_wrapper_liquidation_fee_policy_splits_retained_penalty_to_cranker() {
     )
     .unwrap();
 
-    let mut cranker_token = user_token_account(admin.key, mint_key, 0);
     let vault_before = state::read_market(&market.data).unwrap().1.vault;
-    let mut vault_token =
-        vault_token_account(&market, mint_key, u64::try_from(vault_before).unwrap());
-    let mut vault_auth = vault_authority_account(&market);
-    let mut token_program = token_program_account();
     run_ix(
         Instruction::PermissionlessCrank {
             action: 1,
@@ -8381,15 +8495,7 @@ fn v16_wrapper_liquidation_fee_policy_splits_retained_penalty_to_cranker() {
             fee_bps: 0,
             recovery_reason: 0,
         },
-        &mut [
-            &mut admin,
-            &mut market,
-            &mut short_account,
-            &mut cranker_token,
-            &mut vault_token,
-            &mut vault_auth,
-            &mut token_program,
-        ],
+        &mut [&mut admin, &mut market, &mut short_account],
     )
     .unwrap();
 
@@ -8397,14 +8503,10 @@ fn v16_wrapper_liquidation_fee_policy_splits_retained_penalty_to_cranker() {
     let short = state::read_portfolio(&short_account.data).unwrap();
     assert!(percolator::active_bitmap_is_empty(short.active_bitmap));
     assert_eq!(
-        group.insurance, 60,
-        "1% liquidation fee on 10,000 notional is 100; 40% retained-fee share pays 40 to the cranker"
+        group.insurance, 100,
+        "without an optional cranker portfolio, the full liquidation penalty remains in insurance"
     );
-    assert_eq!(
-        group.vault,
-        vault_before - 40,
-        "cranker reward exits custody and must reduce the wrapper vault ledger"
-    );
+    assert_eq!(group.vault, vault_before);
 }
 
 #[test]
@@ -8412,11 +8514,12 @@ fn v16_wrapper_liquidation_reward_never_spends_insurance_needed_for_losses() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
-    let mint_key = mint.key;
     let mut long_owner = signer();
     let mut short_owner = signer();
+    let mut cranker_owner = signer();
     let mut long_account = portfolio_account();
     let mut short_account = portfolio_account();
+    let mut cranker_account = portfolio_account();
 
     run_ix(
         init_market_ix_with(|ix| {
@@ -8435,6 +8538,7 @@ fn v16_wrapper_liquidation_reward_never_spends_insurance_needed_for_losses() {
     .unwrap();
     init_portfolio(&mut long_owner, &mut market, &mut long_account);
     init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    init_portfolio(&mut cranker_owner, &mut market, &mut cranker_account);
     deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
     deposit(&mut short_owner, &mut market, &mut short_account, 100);
     run_ix(
@@ -8470,10 +8574,6 @@ fn v16_wrapper_liquidation_reward_never_spends_insurance_needed_for_losses() {
     )
     .unwrap();
 
-    let mut cranker_token = user_token_account(admin.key, mint_key, 0);
-    let mut vault_token = vault_token_account(&market, mint_key, 1_000_100);
-    let mut vault_auth = vault_authority_account(&market);
-    let mut token_program = token_program_account();
     run_ix(
         Instruction::PermissionlessCrank {
             action: 1,
@@ -8486,19 +8586,17 @@ fn v16_wrapper_liquidation_reward_never_spends_insurance_needed_for_losses() {
             recovery_reason: 0,
         },
         &mut [
-            &mut admin,
+            &mut cranker_owner,
             &mut market,
             &mut short_account,
-            &mut cranker_token,
-            &mut vault_token,
-            &mut vault_auth,
-            &mut token_program,
+            &mut cranker_account,
         ],
     )
     .unwrap();
 
     let (_, group) = state::read_market(&market.data).unwrap();
     let short = state::read_portfolio(&short_account.data).unwrap();
+    let cranker = state::read_portfolio(&cranker_account.data).unwrap();
     assert!(percolator::active_bitmap_is_empty(short.active_bitmap));
     assert_eq!(
         group.insurance, 0,
@@ -8507,6 +8605,10 @@ fn v16_wrapper_liquidation_reward_never_spends_insurance_needed_for_losses() {
     assert_eq!(
         group.vault, 1_000_000,
         "loss paths must not leak pre-existing custody out as rewards"
+    );
+    assert_eq!(
+        cranker.capital, 0,
+        "no retained-fee growth means no internal cranker reward"
     );
 }
 

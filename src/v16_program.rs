@@ -4936,32 +4936,29 @@ pub mod processor {
                 .oracle_target_publish_time
                 .saturating_add(i64::try_from(elapsed_slots).unwrap_or(i64::MAX))
         });
-        let reward_accounts_required = action == 1 && cfg.liquidation_cranker_fee_share_bps != 0;
-        let reward_accounts = if reward_accounts_required {
-            expect_signer(owner)?;
-            let cranker_token = account(accounts, 3)?;
-            let vault_token = account(accounts, 4)?;
-            let vault_authority_ai = account(accounts, 5)?;
-            let token_program = account(accounts, 6)?;
-            expect_writable(cranker_token)?;
-            expect_writable(vault_token)?;
-            let mint = Pubkey::new_from_array(cfg.collateral_mint);
-            let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
-            expect_key(vault_authority_ai, &vault_authority)?;
-            verify_token_program(token_program)?;
-            verify_user_token_account(cranker_token, owner.key, &mint)?;
-            verify_vault_token_account(vault_token, &vault_authority, &mint)?;
-            Some((
-                cranker_token,
-                vault_token,
-                vault_authority_ai,
-                token_program,
-            ))
-        } else {
-            None
-        };
-        let oracle_tail_start = if reward_accounts_required { 7 } else { 3 };
-        let tail = accounts.get(oracle_tail_start..).unwrap_or(&[]);
+        let reward_enabled = action == 1 && cfg.liquidation_cranker_fee_share_bps != 0;
+        let tail = accounts.get(3..).unwrap_or(&[]);
+        let mut oracle_tail = tail;
+        let mut cranker_portfolio_state = None;
+        if reward_enabled {
+            if let Some((last, rest)) = tail.split_last() {
+                if last.owner == program_id {
+                    expect_signer(owner)?;
+                    expect_writable(last)?;
+                    if last.key == portfolio_ai.key {
+                        return Err(PercolatorError::InvalidInstruction.into());
+                    }
+                    let cranker_portfolio = state::read_portfolio_boxed(&last.try_borrow_data()?)?;
+                    expect_portfolio_account_key(cranker_portfolio.as_ref(), last.key)?;
+                    expect_portfolio_owner(cranker_portfolio.as_ref(), owner.key)?;
+                    group
+                        .validate_account_shape(cranker_portfolio.as_ref())
+                        .map_err(map_v16_error)?;
+                    cranker_portfolio_state = Some((last, cranker_portfolio));
+                    oracle_tail = rest;
+                }
+            }
+        }
         if funding_rate_e9 != 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
@@ -4980,7 +4977,7 @@ pub mod processor {
             asset_index_usize,
             authenticated_now_slot,
             now_unix_ts,
-            tail,
+            oracle_tail,
             effective_price,
         )?;
         group.assets[asset_index as usize].raw_oracle_target_price =
@@ -5046,30 +5043,28 @@ pub mod processor {
                 .ok_or(PercolatorError::EngineArithmeticOverflow)?
                 / 10_000;
             let reward = core::cmp::min(reward, retained_fee);
-            if reward != 0 {
-                let (cranker_token, vault_token, vault_authority_ai, token_program) =
-                    reward_accounts.ok_or(ProgramError::NotEnoughAccountKeys)?;
-                let reward_u64 = amount_to_u64(reward)?;
-                require_token_balance(vault_token, reward_u64)?;
+            if let Some((_, cranker_portfolio)) =
+                cranker_portfolio_state.as_mut().filter(|_| reward != 0)
+            {
+                // The cranker reward is paid inside the Percolator ledger, not
+                // by withdrawing SPL tokens from custody. The engine first
+                // books the liquidation penalty into insurance; the wrapper
+                // then reclassifies the configured retained-fee share from
+                // insurance into the signed cranker portfolio's capital.
                 group.insurance = group
                     .insurance
                     .checked_sub(reward)
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-                group.vault = group
-                    .vault
-                    .checked_sub(reward)
+                group.c_tot = group
+                    .c_tot
+                    .checked_add(reward)
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-                let (_, bump) = derive_vault_authority(program_id, market_ai.key);
-                let bump_arr = [bump];
-                let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
-                transfer_tokens_signed(
-                    token_program,
-                    vault_token,
-                    cranker_token,
-                    vault_authority_ai,
-                    reward_u64,
-                    signer_seeds,
-                )?;
+                cranker_portfolio.capital = cranker_portfolio
+                    .capital
+                    .checked_add(reward)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                cranker_portfolio.health_cert.valid = false;
+                group.assert_public_invariants().map_err(map_v16_error)?;
             }
         } else {
             if action == 3 {
@@ -5106,6 +5101,12 @@ pub mod processor {
         state::write_market(&mut market_data, &cfg, group.as_ref())?;
         write_oracle_profile_if_separate(&mut market_data, asset_index_usize, &oracle_profile)?;
         state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())?;
+        if let Some((cranker_portfolio_ai, cranker_portfolio)) = cranker_portfolio_state.as_ref() {
+            state::write_portfolio(
+                &mut cranker_portfolio_ai.try_borrow_mut_data()?,
+                cranker_portfolio.as_ref(),
+            )?;
+        }
         let _ = owner;
         Ok(())
     }
