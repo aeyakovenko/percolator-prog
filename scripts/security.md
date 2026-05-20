@@ -1,3 +1,82 @@
+# Security findings — 2026-05-20 v16 all-public-API sweep
+
+## Ninth pass — every v16 wrapper instruction surface
+
+**Status:** `PASS_SAFE`. I re-enumerated the `Instruction` decoder and the
+dispatcher, then walked every handler against the current v16 tests and Kani
+coverage. No new fund leak, insurance extraction, stale-market brick, authority
+bypass, or cross-asset reuse issue was found.
+
+Scope covered:
+
+- custody and account lifecycle: `InitMarket`, `InitPortfolio`, `Deposit`,
+  `Withdraw`, `ClosePortfolio`, `CloseSlab`;
+- trading: `TradeNoCpi`, `TradeCpi`, matcher return validation, tail-account
+  filtering, arbitrary execution prices, dynamic hybrid/Hyperp fees;
+- permissionless progress: `PermissionlessCrank` refresh, liquidation, B
+  settlement, public recovery evidence, cranker reward splits;
+- insurance and backing: `TopUpInsurance`, `WithdrawInsurance`,
+  `WithdrawInsuranceLimited`, `TopUpBackingBucket`,
+  `UpdateInsurancePolicy`, `UpdateLiquidationFeePolicy`;
+- market authority/config: all `UpdateAuthority` kinds,
+  `ConfigurePermissionlessResolve`, `ConfigureHybridOracle`,
+  `ConfigureHyperpMark`, `PushHyperpMark`, `UpdateAssetLifecycle`;
+- recovery/resolution: `ResolveMarket`, `ResolveStalePermissionless`,
+  `CloseResolved`, `ClaimResolvedPayoutTopup`,
+  `RefineResolvedUnreceiptedBound`, `CureAndCancelClose`,
+  `ForfeitRecoveryLeg`, `RebalanceReduce`, `FinalizeResetSide`,
+  `SyncMaintenanceFee`.
+
+Probe strategy:
+
+- checked signer/writable/owner/provenance boundaries for every token-moving
+  and state-mutating instruction;
+- checked asset-slot lifecycle edges: disabled, active, drain-only, retired,
+  reactivated with a new monotonic market id, stale portfolio legs, stale source
+  claims, and stale close-progress ledgers;
+- checked per-asset oracle profile edges: manual, hybrid, Hyperp, retired
+  profile reset, nonzero asset profile isolation, duplicate oracle publish
+  times, stale fallback, hard stale resolution, and below-floor recovery;
+- checked permissionless crank branches with and without cranker reward
+  accounts, including invalid recovery reasons, stale slots, invalid prices,
+  B settlement without B state, liquidation fee policy, and reward accounting;
+- checked trade branches for both direct bilateral and matcher CPI paths:
+  zero/i128::MIN size rejection, self-trade rejection, matcher asset echo,
+  zero fill, partial fill flags, limit price, fee caps, arbitrary execution
+  prices, stale fallback fees, and non-LP user-to-user matching;
+- checked resolved and terminal exits for zero-payout ATA deferral,
+  owner-token-account payout binding, permissionless close, payout top-up
+  claim receipt handling, terminal insurance drain, and slab close.
+
+Retained regression coverage already exercising these branches includes:
+
+```bash
+cargo test --release --test v16_wrapper v16_wrapper_security_sweep_ -- --test-threads=1
+cargo test --release --lib --tests -- --test-threads=1
+cargo kani --tests
+```
+
+Important design dispositions confirmed during this pass:
+
+- `CloseResolved` and `ClaimResolvedPayoutTopup` are intentionally
+  permissionless, but payouts are bound to the stored portfolio owner token
+  account, so third parties cannot redirect funds.
+- Nonzero asset oracle profiles may refresh global liveness while active or
+  drain-only; retired/reactivated slots reset to manual profiles and cannot
+  keep stale liveness or inherited EWMA state.
+- `WithdrawInsuranceLimited` is allowed in empty/resolved markets and in
+  healthy live markets only; live withdrawal remains blocked while bankruptcy
+  h-lock, threshold stress, loss-stale, or recovery is active.
+- Keeper liquidation with a cranker reward mirrors the engine's permissionless
+  liquidation ordering and only pays from retained liquidation fee growth, not
+  from insurance needed for losses.
+- Zero-amount deposit/top-up/backing paths are no-ops by policy and have
+  retained no-state-drift coverage.
+
+**Disposition:** `PASS_SAFE`. The sweep did not produce a retained new
+regression test because each probe was already covered by an existing wrapper,
+CU, or Kani test, or matched an explicitly accepted product policy.
+
 # Security findings — 2026-05-19 v16 three-asset shutdown/reuse sweep
 
 ## F11 — Hybrid oracle mode must not price nonzero asset slots (High)
