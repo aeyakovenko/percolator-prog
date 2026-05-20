@@ -1,5 +1,50 @@
 # Security findings — 2026-05-20 v16 all-public-API sweep
 
+## Thirteenth pass — deployment permutation feature matrix
+
+**Status:** `PASS_SAFE`. I generated `/tmp/matrix.md` as an exhaustive
+deployment-feature matrix over security-relevant branch combinations, then swept
+each entry against ten probe categories:
+
+1. auth/provenance,
+2. custody/conservation,
+3. oracle/freshness/clamp/recovery,
+4. fee/loss ordering,
+5. trade/risk/margin,
+6. permissionless crank progress,
+7. lifecycle/reuse,
+8. backing/insurance,
+9. decode/layout/overflow,
+10. CU boundedness.
+
+The matrix is exhaustive by equivalence class rather than by raw numeric
+Cartesian product: manual, Hyperp, and hybrid oracle modes; Pyth/Switchboard/
+Chainlink one-, two-, and three-leg profiles; fresh/soft-stale/hard-stale
+states; live/recovery/resolved modes; active/drain-only/retired asset
+lifecycles; flat/single-leg/multi-leg/source-backed/resolved portfolios;
+maintenance, dynamic EWMA, liquidation, and insurance-fee policies; all four
+permissionless crank actions; matcher CPI and no-CPI trade paths; and dense CU
+worst cases.
+
+Regression evidence:
+
+```bash
+cargo test --release --test v16_cu -- --test-threads=1
+cargo test --release -- --test-threads=1
+```
+
+Results:
+
+- `v16_cu`: 18 passed.
+- Full normal cargo suite: 1 unit test, 18 CU tests, 138 v16 wrapper tests, and
+  doctests passed.
+- `tests/v16_kani.rs` is not a normal cargo test target; Kani proofs were not
+  re-run in this pass.
+
+No new deterministic fund-loss, unfair insurance extraction, market-brick,
+stale-market-id reuse, matcher-CPI privilege escalation, or worst-case CU
+regression was found under the one-honest-crank assumption.
+
 ## Twelfth pass — new portfolio maintenance-fee anchor
 
 **Status:** fixed. I confirmed a real wrapper bug in `InitPortfolio`: new
