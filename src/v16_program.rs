@@ -3189,11 +3189,14 @@ pub mod processor {
             return Err(PercolatorError::EngineLockActive.into());
         }
         reject_permissionless_resolve_matured_live(&cfg, group.as_ref())?;
-        let account = new_portfolio_boxed(ProvenanceHeaderV16::new(
-            market_ai.key.to_bytes(),
-            portfolio_ai.key.to_bytes(),
-            owner.key.to_bytes(),
-        ))?;
+        let account = new_portfolio_boxed(
+            ProvenanceHeaderV16::new(
+                market_ai.key.to_bytes(),
+                portfolio_ai.key.to_bytes(),
+                owner.key.to_bytes(),
+            ),
+            authenticated_market_slot_or_fallback(group.as_ref()),
+        )?;
         group
             .create_portfolio_account(account.as_ref())
             .map_err(map_v16_error)?;
@@ -5397,6 +5400,7 @@ pub mod processor {
     #[inline(never)]
     fn new_portfolio_boxed(
         header: ProvenanceHeaderV16,
+        last_fee_slot: u64,
     ) -> Result<alloc::boxed::Box<PortfolioAccountV16>, ProgramError> {
         // Same pattern as market init: avoid a multi-KB stack temporary in the
         // SBF entrypoint while preserving the engine's canonical empty shape.
@@ -5444,7 +5448,7 @@ pub mod processor {
             }
             core::ptr::addr_of_mut!((*raw).fee_credits).write(0);
             core::ptr::addr_of_mut!((*raw).cancel_deposit_escrow).write(0);
-            core::ptr::addr_of_mut!((*raw).last_fee_slot).write(0);
+            core::ptr::addr_of_mut!((*raw).last_fee_slot).write(last_fee_slot);
             core::ptr::addr_of_mut!((*raw).active_bitmap).write(percolator::active_bitmap_empty());
             let legs = core::ptr::addr_of_mut!((*raw).legs) as *mut PortfolioLegV16;
             let mut i = 0;

@@ -853,6 +853,56 @@ fn v16_wrapper_permissionless_maintenance_fee_charges_flat_portfolio_to_insuranc
 }
 
 #[test]
+fn v16_wrapper_init_portfolio_anchors_fee_slot_at_market_current_slot() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *maintenance_fee_per_slot = 5;
+            }
+        }),
+    );
+    run_ix(
+        Instruction::ConfigureHyperpMark {
+            asset_index: 0,
+            now_slot: 100,
+            initial_mark_e6: 100,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    assert_eq!(
+        state::read_market(&market.data).unwrap().1.current_slot,
+        100
+    );
+
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 1_000);
+
+    sync_maintenance_fee(&mut market, &mut portfolio, 110).unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(
+        account.capital, 950,
+        "new portfolios owe maintenance from creation time, not from slot zero"
+    );
+    assert_eq!(account.last_fee_slot, 110);
+    assert_eq!(group.insurance, 50);
+    assert_eq!(group.c_tot, 950);
+}
+
+#[test]
 fn v16_wrapper_maintenance_fee_is_permissionless_and_capital_capped() {
     let mut admin = signer();
     let mut market = market_account();
@@ -2669,9 +2719,12 @@ fn v16_wrapper_security_sweep_resolved_market_and_fee_branches() {
         account.last_fee_slot, 10,
         "resolved fee sync must anchor at resolved_slot, not caller-supplied now_slot"
     );
-    assert_eq!(account.capital, 50);
-    assert_eq!(group.insurance, 50);
-    assert_eq!(group.c_tot, 50);
+    assert_eq!(
+        account.capital, 55,
+        "resolved fees start at the portfolio creation fee slot"
+    );
+    assert_eq!(group.insurance, 45);
+    assert_eq!(group.c_tot, 55);
 
     let after_fee = market.data.clone();
     let after_fee_portfolio = portfolio.data.clone();

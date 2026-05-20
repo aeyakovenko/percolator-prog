@@ -1,5 +1,37 @@
 # Security findings — 2026-05-20 v16 all-public-API sweep
 
+## Twelfth pass — new portfolio maintenance-fee anchor
+
+**Status:** fixed. I confirmed a real wrapper bug in `InitPortfolio`: new
+portfolios were initialized with `last_fee_slot = 0`, so the first
+permissionless maintenance-fee sync could charge from genesis instead of from
+portfolio creation time.
+
+Regression coverage:
+
+```bash
+cargo test --release --test v16_wrapper \
+  v16_wrapper_init_portfolio_anchors_fee_slot_at_market_current_slot \
+  -- --test-threads=1 --nocapture
+```
+
+The regression first advances a live market to slot `100`, initializes a new
+portfolio, deposits capital, then syncs maintenance fees at slot `110`. Before
+the fix, the account paid `110` slots of fees and capital fell to `450`.
+Correct behavior is `10` slots of fees: capital `950`, insurance `50`.
+
+**Fix invariant:**
+
+```text
+InitPortfolio seeds last_fee_slot to the authenticated current slot, falling
+back to the market group's current slot in unit tests. A portfolio never owes
+recurring maintenance fees for slots before the account existed.
+```
+
+**Disposition:** `PASS_SAFE` after fix. The broader v16 wrapper suite now
+covers both live and resolved fee-anchor semantics with this creation-time
+cursor.
+
 ## Eleventh pass — untrusted Lean/spec-abstraction findings
 
 **Status:** one hardening patch, otherwise `PASS_SAFE`. I treated the submitted
