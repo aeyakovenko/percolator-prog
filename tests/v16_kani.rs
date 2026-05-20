@@ -575,6 +575,7 @@ fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
+    let asset_index: u16 = kani::any();
     let now_slot_raw: u16 = kani::any();
     let now_unix_raw: i16 = kani::any();
     let oracle_leg_count: u8 = kani::any();
@@ -604,25 +605,27 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
         i += 1;
     }
 
-    let mut data = [0u8; 154];
+    let mut data = [0u8; 156];
     data[0] = 34;
-    data[1..9].copy_from_slice(&now_slot.to_le_bytes());
-    data[9..17].copy_from_slice(&now_unix_ts.to_le_bytes());
-    data[17] = oracle_leg_count;
-    data[18] = oracle_leg_flags;
-    data[19..27].copy_from_slice(&max_staleness_secs.to_le_bytes());
-    data[27..35].copy_from_slice(&hybrid_soft_stale_slots.to_le_bytes());
-    data[35..43].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
-    data[43..51].copy_from_slice(&mark_min_fee.to_le_bytes());
-    data[51] = invert;
-    data[52..56].copy_from_slice(&unit_scale.to_le_bytes());
-    data[56..58].copy_from_slice(&conf_filter_bps.to_le_bytes());
-    data[58..90].copy_from_slice(&feeds[0]);
-    data[90..122].copy_from_slice(&feeds[1]);
-    data[122..154].copy_from_slice(&feeds[2]);
+    data[1..3].copy_from_slice(&asset_index.to_le_bytes());
+    data[3..11].copy_from_slice(&now_slot.to_le_bytes());
+    data[11..19].copy_from_slice(&now_unix_ts.to_le_bytes());
+    data[19] = oracle_leg_count;
+    data[20] = oracle_leg_flags;
+    data[21..29].copy_from_slice(&max_staleness_secs.to_le_bytes());
+    data[29..37].copy_from_slice(&hybrid_soft_stale_slots.to_le_bytes());
+    data[37..45].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
+    data[45..53].copy_from_slice(&mark_min_fee.to_le_bytes());
+    data[53] = invert;
+    data[54..58].copy_from_slice(&unit_scale.to_le_bytes());
+    data[58..60].copy_from_slice(&conf_filter_bps.to_le_bytes());
+    data[60..92].copy_from_slice(&feeds[0]);
+    data[92..124].copy_from_slice(&feeds[1]);
+    data[124..156].copy_from_slice(&feeds[2]);
 
     match Instruction::decode(&data).unwrap() {
         Instruction::ConfigureHybridOracle {
+            asset_index: got_asset_index,
             now_slot: got_now_slot,
             now_unix_ts: got_now_unix,
             oracle_leg_count: got_count,
@@ -636,6 +639,7 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
             conf_filter_bps: got_conf,
             oracle_leg_feeds: got_feeds,
         } => {
+            assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now_slot, now_slot);
             assert_eq!(got_now_unix, now_unix_ts);
             assert_eq!(got_count, oracle_leg_count);
@@ -655,6 +659,7 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_hyperp_mark_decode_preserves_wire_fields() {
+    let asset_index: u16 = kani::any();
     let now_slot_raw: u16 = kani::any();
     let mark_raw: u16 = kani::any();
     let halflife_raw: u16 = kani::any();
@@ -667,19 +672,22 @@ fn kani_v16_hyperp_mark_decode_preserves_wire_fields() {
     let mark_min_fee = mark_min_fee_raw as u64;
     let push_mark_e6 = push_mark_raw as u64;
 
-    let mut configure = [0u8; 33];
+    let mut configure = [0u8; 35];
     configure[0] = 35;
-    configure[1..9].copy_from_slice(&now_slot.to_le_bytes());
-    configure[9..17].copy_from_slice(&initial_mark_e6.to_le_bytes());
-    configure[17..25].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
-    configure[25..33].copy_from_slice(&mark_min_fee.to_le_bytes());
+    configure[1..3].copy_from_slice(&asset_index.to_le_bytes());
+    configure[3..11].copy_from_slice(&now_slot.to_le_bytes());
+    configure[11..19].copy_from_slice(&initial_mark_e6.to_le_bytes());
+    configure[19..27].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
+    configure[27..35].copy_from_slice(&mark_min_fee.to_le_bytes());
     match Instruction::decode(&configure).unwrap() {
         Instruction::ConfigureHyperpMark {
+            asset_index: got_asset_index,
             now_slot: got_now,
             initial_mark_e6: got_mark,
             mark_ewma_halflife_slots: got_halflife,
             mark_min_fee: got_min_fee,
         } => {
+            assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now, now_slot);
             assert_eq!(got_mark, initial_mark_e6);
             assert_eq!(got_halflife, mark_ewma_halflife_slots);
@@ -688,15 +696,18 @@ fn kani_v16_hyperp_mark_decode_preserves_wire_fields() {
         _ => unreachable!(),
     }
 
-    let mut push = [0u8; 17];
+    let mut push = [0u8; 19];
     push[0] = 36;
-    push[1..9].copy_from_slice(&now_slot.to_le_bytes());
-    push[9..17].copy_from_slice(&push_mark_e6.to_le_bytes());
+    push[1..3].copy_from_slice(&asset_index.to_le_bytes());
+    push[3..11].copy_from_slice(&now_slot.to_le_bytes());
+    push[11..19].copy_from_slice(&push_mark_e6.to_le_bytes());
     match Instruction::decode(&push).unwrap() {
         Instruction::PushHyperpMark {
+            asset_index: got_asset_index,
             now_slot: got_now,
             mark_e6: got_mark,
         } => {
+            assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now, now_slot);
             assert_eq!(got_mark, push_mark_e6);
         }
@@ -866,6 +877,7 @@ fn kani_v16_every_active_payload_rejects_trailing_byte() {
     assert!(Instruction::decode(&resolve_permissionless).is_err());
 
     let mut configure_hybrid = Instruction::ConfigureHybridOracle {
+        asset_index: 0,
         now_slot: 1,
         now_unix_ts: 1,
         oracle_leg_count: 1,
@@ -884,6 +896,7 @@ fn kani_v16_every_active_payload_rejects_trailing_byte() {
     assert!(Instruction::decode(&configure_hybrid).is_err());
 
     let mut configure_hyperp = Instruction::ConfigureHyperpMark {
+        asset_index: 0,
         now_slot: 1,
         initial_mark_e6: 100,
         mark_ewma_halflife_slots: 1,
@@ -894,6 +907,7 @@ fn kani_v16_every_active_payload_rejects_trailing_byte() {
     assert!(Instruction::decode(&configure_hyperp).is_err());
 
     let mut push_hyperp = Instruction::PushHyperpMark {
+        asset_index: 0,
         now_slot: 2,
         mark_e6: 101,
     }
@@ -1050,13 +1064,13 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
     let update_insurance = [33u8; 11];
     assert!(Instruction::decode(&update_insurance).is_err());
 
-    let configure_hybrid = [34u8; 153];
+    let configure_hybrid = [34u8; 155];
     assert!(Instruction::decode(&configure_hybrid).is_err());
 
-    let configure_hyperp = [35u8; 24];
+    let configure_hyperp = [35u8; 34];
     assert!(Instruction::decode(&configure_hyperp).is_err());
 
-    let push_hyperp = [36u8; 16];
+    let push_hyperp = [36u8; 18];
     assert!(Instruction::decode(&push_hyperp).is_err());
 
     let update_liquidation = [37u8; 2];

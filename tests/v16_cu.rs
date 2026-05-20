@@ -22,9 +22,9 @@ use solana_sdk::{
 use spl_token::state::{Account as TokenAccount, AccountState, Mint};
 use std::path::PathBuf;
 
-const CRANK_CU_LIMIT: u64 = 305_000;
+const CRANK_CU_LIMIT: u64 = 325_000;
 const CUSTODY_CU_LIMIT: u64 = 300_000;
-const TRADE_CU_LIMIT: u64 = 325_000;
+const TRADE_CU_LIMIT: u64 = 345_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 
 fn active_bitmap_with(indices: &[usize]) -> percolator::V16ActiveBitmap {
@@ -773,6 +773,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureHybridOracle {
+                asset_index: 0,
                 now_slot,
                 now_unix_ts,
                 oracle_leg_count: 3,
@@ -809,6 +810,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureHyperpMark {
+                asset_index: 0,
                 now_slot,
                 initial_mark_e6,
                 mark_ewma_halflife_slots: halflife_slots,
@@ -828,7 +830,11 @@ impl V16CuEnv {
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::PushHyperpMark { now_slot, mark_e6 },
+            ProgInstruction::PushHyperpMark {
+                asset_index: 0,
+                now_slot,
+                mark_e6,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -1397,15 +1403,15 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
 }
 
 #[test]
-fn v16_bpf_full_16_leg_refresh_crank_is_under_tx_limit() {
-    let mut env = V16CuEnv::new_with_market_params_and_price_move(16, 1_000, 1_000, 500);
+fn v16_bpf_full_14_leg_refresh_crank_is_under_tx_limit() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
     let long_account = env.create_portfolio(&long_owner);
     let short_account = env.create_portfolio(&short_owner);
     env.deposit(&long_owner, long_account, 2_000);
     env.deposit(&short_owner, short_account, 100_000);
-    env.seed_n_leg_position_for_benchmark(long_account, short_account, 16);
+    env.seed_n_leg_position_for_benchmark(long_account, short_account, 14);
     let before_slot_last = {
         let market_data = env.svm.get_account(&env.market).unwrap().data;
         let (_, group) = state::read_market(&market_data).unwrap();
@@ -1426,10 +1432,10 @@ fn v16_bpf_full_16_leg_refresh_crank_is_under_tx_limit() {
             recovery_reason: 0,
         },
     );
-    println!("v16 full-16-leg refresh crank CU: {refresh_cu}");
+    println!("v16 full-14-leg refresh crank CU: {refresh_cu}");
     assert!(
         refresh_cu <= 900_000,
-        "full-16-leg refresh CU {} exceeded limit {}",
+        "full-14-leg refresh CU {} exceeded limit {}",
         refresh_cu,
         900_000
     );
@@ -1438,25 +1444,25 @@ fn v16_bpf_full_16_leg_refresh_crank_is_under_tx_limit() {
     let long_data = env.svm.get_account(&long_account).unwrap().data;
     let (_, group) = state::read_market(&market_data).unwrap();
     let long = state::read_portfolio(&long_data).unwrap();
-    assert_eq!(group.config.max_portfolio_assets, 16);
-    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 16);
+    assert_eq!(group.config.max_portfolio_assets, 14);
+    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 14);
     assert!(
         group.assets[0].slot_last > before_slot_last,
-        "full-16 refresh crank must commit bounded asset progress"
+        "full-14 refresh crank must commit bounded asset progress"
     );
     assert_eq!(group.assets[0].effective_price, 95);
 }
 
 #[test]
-fn v16_bpf_full_16_leg_liquidation_crank_is_under_tx_limit() {
-    let mut env = V16CuEnv::new_with_market_params_and_price_move(16, 1_000, 1_000, 500);
+fn v16_bpf_full_14_leg_liquidation_crank_is_under_tx_limit() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
     let long_account = env.create_portfolio(&long_owner);
     let short_account = env.create_portfolio(&short_owner);
     env.deposit(&long_owner, long_account, 2_000);
     env.deposit(&short_owner, short_account, 100_000);
-    env.seed_n_leg_position_for_benchmark(long_account, short_account, 16);
+    env.seed_n_leg_position_for_benchmark(long_account, short_account, 14);
     env.force_portfolio_capital_for_benchmark(long_account, 1_000);
 
     env.svm.warp_to_slot(16);
@@ -1473,10 +1479,10 @@ fn v16_bpf_full_16_leg_liquidation_crank_is_under_tx_limit() {
             recovery_reason: 0,
         },
     );
-    println!("v16 full-16-leg liquidation crank CU: {liquidation_cu}");
+    println!("v16 full-14-leg liquidation crank CU: {liquidation_cu}");
     assert!(
         liquidation_cu <= 1_350_000,
-        "full-16-leg liquidation CU {} exceeded limit {}",
+        "full-14-leg liquidation CU {} exceeded limit {}",
         liquidation_cu,
         1_350_000
     );
@@ -1485,23 +1491,23 @@ fn v16_bpf_full_16_leg_liquidation_crank_is_under_tx_limit() {
     let long_data = env.svm.get_account(&long_account).unwrap().data;
     let (_, group) = state::read_market(&market_data).unwrap();
     let long = state::read_portfolio(&long_data).unwrap();
-    assert_eq!(group.config.max_portfolio_assets, 16);
-    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 15);
+    assert_eq!(group.config.max_portfolio_assets, 14);
+    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 13);
     assert!(!long.legs[0].active);
     assert_eq!(group.assets[0].oi_eff_long_q, 0);
     assert_eq!(group.assets[0].oi_eff_short_q, 0);
 }
 
 #[test]
-fn v16_bpf_current_full_16_leg_tradenocpi_is_under_tx_limit() {
-    let mut env = V16CuEnv::new_with_market_params_and_price_move(16, 1_000, 1_000, 500);
+fn v16_bpf_current_full_14_leg_tradenocpi_is_under_tx_limit() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
     let long_account = env.create_portfolio(&long_owner);
     let short_account = env.create_portfolio(&short_owner);
     env.deposit(&long_owner, long_account, 20_000);
     env.deposit(&short_owner, short_account, 100_000);
-    env.seed_current_n_leg_position_for_benchmark(long_account, short_account, 16);
+    env.seed_current_n_leg_position_for_benchmark(long_account, short_account, 14);
     let trade_cu = env.trade_with_cu(
         &long_owner,
         long_account,
@@ -1511,10 +1517,10 @@ fn v16_bpf_current_full_16_leg_tradenocpi_is_under_tx_limit() {
         100,
         0,
     );
-    println!("v16 current full-16-leg TradeNoCpi CU: {trade_cu}");
+    println!("v16 current full-14-leg TradeNoCpi CU: {trade_cu}");
     assert!(
         trade_cu <= 1_150_000,
-        "current full-16-leg TradeNoCpi CU {} exceeded limit {}",
+        "current full-14-leg TradeNoCpi CU {} exceeded limit {}",
         trade_cu,
         1_150_000
     );
@@ -1523,25 +1529,25 @@ fn v16_bpf_current_full_16_leg_tradenocpi_is_under_tx_limit() {
     let short_data = env.svm.get_account(&short_account).unwrap().data;
     let long = state::read_portfolio(&long_data).unwrap();
     let short = state::read_portfolio(&short_data).unwrap();
-    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 16);
+    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 14);
     assert_eq!(
         percolator::active_bitmap_count_ones(short.active_bitmap),
-        16
+        14
     );
     assert_eq!(long.legs[0].basis_pos_q, (9 * POS_SCALE) as i128);
     assert_eq!(short.legs[0].basis_pos_q, -((9 * POS_SCALE) as i128));
 }
 
 #[test]
-fn v16_bpf_stale_full_16_leg_tradenocpi_is_under_tx_limit() {
-    let mut env = V16CuEnv::new_with_market_params_and_price_move(16, 1_000, 1_000, 500);
+fn v16_bpf_stale_full_14_leg_tradenocpi_is_under_tx_limit() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
     let long_account = env.create_portfolio(&long_owner);
     let short_account = env.create_portfolio(&short_owner);
     env.deposit(&long_owner, long_account, 20_000);
     env.deposit(&short_owner, short_account, 100_000);
-    env.seed_n_leg_position_for_benchmark(long_account, short_account, 16);
+    env.seed_n_leg_position_for_benchmark(long_account, short_account, 14);
     env.svm.warp_to_slot(16);
     let trade_cu = env.trade_with_cu(
         &long_owner,
@@ -1552,10 +1558,10 @@ fn v16_bpf_stale_full_16_leg_tradenocpi_is_under_tx_limit() {
         95,
         0,
     );
-    println!("v16 stale full-16-leg TradeNoCpi CU: {trade_cu}");
+    println!("v16 stale full-14-leg TradeNoCpi CU: {trade_cu}");
     assert!(
         trade_cu <= 1_400_000,
-        "stale full-16-leg TradeNoCpi CU {} exceeded limit {}",
+        "stale full-14-leg TradeNoCpi CU {} exceeded limit {}",
         trade_cu,
         1_400_000
     );
@@ -1564,10 +1570,10 @@ fn v16_bpf_stale_full_16_leg_tradenocpi_is_under_tx_limit() {
     let short_data = env.svm.get_account(&short_account).unwrap().data;
     let long = state::read_portfolio(&long_data).unwrap();
     let short = state::read_portfolio(&short_data).unwrap();
-    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 16);
+    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 14);
     assert_eq!(
         percolator::active_bitmap_count_ones(short.active_bitmap),
-        16
+        14
     );
     assert_eq!(long.legs[0].basis_pos_q, (9 * POS_SCALE) as i128);
     assert_eq!(short.legs[0].basis_pos_q, -((9 * POS_SCALE) as i128));

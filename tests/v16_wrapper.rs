@@ -6,9 +6,10 @@ use percolator::{
 };
 use percolator_prog::{
     constants::{
-        HEADER_LEN, MARKET_ACCOUNT_LEN, MARKET_GROUP_LEN, ORACLE_LEG_CAP,
-        ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_HYBRID_AFTER_HOURS,
-        ORACLE_MODE_HYPERP, PORTFOLIO_ACCOUNT_LEN, PORTFOLIO_STATE_LEN, WRAPPER_CONFIG_LEN,
+        ASSET_ORACLE_PROFILES_LEN, HEADER_LEN, MARKET_ACCOUNT_LEN, MARKET_GROUP_LEN,
+        ORACLE_LEG_CAP, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_HYPERP, ORACLE_MODE_MANUAL,
+        PORTFOLIO_ACCOUNT_LEN, PORTFOLIO_STATE_LEN, WRAPPER_CONFIG_LEN,
     },
     ix::Instruction,
     oracle_v16, policy_v16, processor, state,
@@ -619,6 +620,7 @@ fn configure_three_leg_hybrid(
 ) {
     run_ix(
         Instruction::ConfigureHybridOracle {
+            asset_index: 0,
             now_slot,
             now_unix_ts,
             oracle_leg_count: 3,
@@ -2340,8 +2342,8 @@ fn v16_wrapper_account_layout_constants_match_serialized_state() {
     assert_eq!(core::mem::align_of::<PortfolioAccountV16Account>(), 1);
     assert_eq!(
         MARKET_ACCOUNT_LEN,
-        16 + WRAPPER_CONFIG_LEN + MARKET_GROUP_LEN,
-        "market account length must exactly cover header + wrapper config + serialized engine state"
+        16 + WRAPPER_CONFIG_LEN + ASSET_ORACLE_PROFILES_LEN + MARKET_GROUP_LEN,
+        "market account length must exactly cover header + wrapper config + per-asset oracle profiles + serialized engine state"
     );
     assert_eq!(
         PORTFOLIO_ACCOUNT_LEN,
@@ -2637,6 +2639,21 @@ fn v16_wrapper_init_market_rejects_invalid_engine_params_without_mutation() {
         &mut [&mut admin, &mut market, &mut mint],
     );
     assert_err_and_market_unchanged(invalid_base_fee, &market, &before);
+
+    let invalid_portfolio_leg_cap = run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets =
+                    percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS + 1;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    );
+    assert_err_and_market_unchanged(invalid_portfolio_leg_cap, &market, &before);
 
     let invalid_funding_cap = run_ix(
         init_market_ix_with(|ix| {
@@ -3716,16 +3733,22 @@ fn v16_wrapper_update_authority_rejects_unsupported_kind_and_live_admin_burn() {
     let mut new_key = signer();
 
     init_market(&mut admin, &mut market);
-    let initialized = market.data.clone();
 
-    let hyperp_wrong_mode = run_ix(
+    run_ix(
         Instruction::UpdateAuthority {
             kind: processor::AUTHORITY_HYPERP_MARK,
             new_pubkey: new_key.key.to_bytes(),
         },
         &mut [&mut admin, &mut new_key, &mut market],
+    )
+    .unwrap();
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        cfg.hyperp_mark_authority,
+        new_key.key.to_bytes(),
+        "the market-wide Hyperp mark authority can be rotated before a specific asset enters Hyperp mode"
     );
-    assert_err_and_market_unchanged(hyperp_wrong_mode, &market, &initialized);
+    let initialized = market.data.clone();
 
     let unknown = run_ix(
         Instruction::UpdateAuthority {
@@ -3767,6 +3790,7 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
 
     run_ix(
         Instruction::ConfigureHyperpMark {
+            asset_index: 0,
             now_slot: 5,
             initial_mark_e6: 100,
             mark_ewma_halflife_slots: 1,
@@ -3799,7 +3823,8 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
     let mut wrong_authority = signer();
     let bad_push = run_ix(
         Instruction::PushHyperpMark {
-            now_slot: 6,
+            asset_index: 0,
+            now_slot: 10,
             mark_e6: 120,
         },
         &mut [&mut wrong_authority, &mut market],
@@ -3808,7 +3833,8 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
 
     run_ix(
         Instruction::PushHyperpMark {
-            now_slot: 6,
+            asset_index: 0,
+            now_slot: 10,
             mark_e6: 120,
         },
         &mut [&mut new_mark_authority, &mut market],
@@ -3816,11 +3842,11 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
     .unwrap();
     let (cfg, _) = state::read_market(&market.data).unwrap();
     assert_eq!(
-        cfg.mark_ewma_e6, 110,
-        "full-weight Hyperp push advances the configured EWMA mark"
+        cfg.mark_ewma_e6, 116,
+        "full-weight Hyperp push advances the configured EWMA mark at the authenticated slot"
     );
-    assert_eq!(cfg.mark_ewma_last_slot, 6);
-    assert_eq!(cfg.last_good_oracle_slot, 6);
+    assert_eq!(cfg.mark_ewma_last_slot, 10);
+    assert_eq!(cfg.last_good_oracle_slot, 10);
 
     let mut caller = signer();
     let mut portfolio = portfolio_account();
@@ -3841,7 +3867,7 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
     .unwrap();
     let (_, group) = state::read_market(&market.data).unwrap();
     assert_eq!(
-        group.assets[0].effective_price, 110,
+        group.assets[0].effective_price, 116,
         "Hyperp crank ignores caller-selected price and walks to the internal mark"
     );
 }
@@ -3863,6 +3889,7 @@ fn v16_wrapper_configure_hyperp_mark_clears_prior_hybrid_oracle_metadata() {
     let mut leg2 = pyth_account(&feeds[2], 4, 0, 0, 1_000);
     run_ix(
         Instruction::ConfigureHybridOracle {
+            asset_index: 0,
             now_slot: 10,
             now_unix_ts: 1_000,
             oracle_leg_count: 3,
@@ -3889,6 +3916,7 @@ fn v16_wrapper_configure_hyperp_mark_clears_prior_hybrid_oracle_metadata() {
 
     run_ix(
         Instruction::ConfigureHyperpMark {
+            asset_index: 0,
             now_slot: 11,
             initial_mark_e6: 123,
             mark_ewma_halflife_slots: 5,
@@ -3940,6 +3968,7 @@ fn v16_wrapper_hyperp_trade_updates_mark_and_charges_dynamic_fee_without_oracle_
     .unwrap();
     run_ix(
         Instruction::ConfigureHyperpMark {
+            asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 100_000,
             mark_ewma_halflife_slots: 1,
@@ -5476,6 +5505,219 @@ fn v16_wrapper_configure_hybrid_oracle_composes_toto_sol_cross_and_rejects_rollb
 }
 
 #[test]
+fn v16_wrapper_non_base_asset_profile_converts_stoxx_eur_to_base_sol() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_price_move_bps_per_slot,
+                initial_price,
+                ..
+            } = ix
+            {
+                *initial_price = 1_000_000;
+                *max_price_move_bps_per_slot = 500;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        1,
+        1_000_000,
+    )
+    .unwrap();
+
+    let feeds = [[0x44u8; 32], [0x45u8; 32], [0x46u8; 32]];
+    let mut stoxx_eur = pyth_account(&feeds[0], 4_500_000_000, -6, 1, 100);
+    let mut eur_usd = pyth_account(&feeds[1], 1_100_000, -6, 1, 101);
+    let mut sol_usd = pyth_account(&feeds[2], 200_000_000, -6, 1, 102);
+    run_ix(
+        Instruction::ConfigureHybridOracle {
+            asset_index: 1,
+            now_slot: 5,
+            now_unix_ts: 102,
+            oracle_leg_count: 3,
+            oracle_leg_flags: ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 10,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: feeds,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut stoxx_eur,
+            &mut eur_usd,
+            &mut sol_usd,
+        ],
+    )
+    .unwrap();
+
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    let base_profile = state::read_asset_oracle_profile(&market.data, 0).unwrap();
+    let stoxx_profile = state::read_asset_oracle_profile(&market.data, 1).unwrap();
+    assert_eq!(
+        cfg.oracle_mode, ORACLE_MODE_MANUAL,
+        "config-level oracle fields are only the asset-0 mirror; non-base profiles are per-asset"
+    );
+    assert_eq!(base_profile.oracle_mode, ORACLE_MODE_MANUAL);
+    assert_eq!(group.assets[0].effective_price, 1_000_000);
+    assert_eq!(stoxx_profile.oracle_leg_count, 3);
+    assert_eq!(stoxx_profile.oracle_leg_flags, ORACLE_LEG_FLAG_DIVIDE_LEG3);
+    assert_eq!(
+        stoxx_profile.oracle_leg_prices_e6,
+        [4_500_000_000, 1_100_000, 200_000_000]
+    );
+    assert_eq!(stoxx_profile.oracle_target_price_e6, 24_750_000);
+    assert_eq!(stoxx_profile.mark_ewma_e6, 24_750_000);
+    assert_eq!(group.assets[1].effective_price, 24_750_000);
+
+    let mut keeper = signer();
+    let mut portfolio = portfolio_account();
+    init_portfolio(&mut keeper, &mut market, &mut portfolio);
+    stoxx_eur.data = make_pyth(&feeds[0], 4_600_000_000, -6, 1, 103);
+    eur_usd.data = make_pyth(&feeds[1], 1_200_000, -6, 1, 104);
+    sol_usd.data = make_pyth(&feeds[2], 200_000_000, -6, 1, 105);
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: 10,
+            effective_price: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [
+            &mut keeper,
+            &mut market,
+            &mut portfolio,
+            &mut stoxx_eur,
+            &mut eur_usd,
+            &mut sol_usd,
+        ],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let stoxx_profile = state::read_asset_oracle_profile(&market.data, 1).unwrap();
+    assert_eq!(group.assets[0].effective_price, 1_000_000);
+    assert_eq!(stoxx_profile.oracle_target_price_e6, 27_600_000);
+    assert_eq!(stoxx_profile.mark_ewma_e6, 27_600_000);
+    assert_eq!(group.assets[1].effective_price, 27_600_000);
+}
+
+#[test]
+fn v16_wrapper_price_managed_asset_above_portfolio_limit_still_updates_mark_after_trade() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut cranker = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+    let mut crank_account = portfolio_account();
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                max_trading_fee_bps,
+                max_price_move_bps_per_slot,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 14;
+                *max_trading_fee_bps = 10_000;
+                *max_price_move_bps_per_slot = 10_000;
+            }
+        }),
+    );
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        14,
+        1,
+        100,
+    )
+    .unwrap();
+    run_ix(
+        Instruction::ConfigureHyperpMark {
+            asset_index: 14,
+            now_slot: 1,
+            initial_mark_e6: 100,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    init_portfolio(&mut cranker, &mut market, &mut crank_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 1_000_000);
+
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 14,
+            now_slot: 2,
+            effective_price: 999,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut cranker, &mut market, &mut crank_account],
+    )
+    .unwrap();
+    let before_profile = state::read_asset_oracle_profile(&market.data, 14).unwrap();
+    assert_eq!(before_profile.mark_ewma_e6, 100);
+    assert_eq!(before_profile.mark_ewma_last_slot, 1);
+
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 14,
+            size_q: POS_SCALE as i128,
+            exec_price: 200,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+
+    let base_profile = state::read_asset_oracle_profile(&market.data, 0).unwrap();
+    let after_profile = state::read_asset_oracle_profile(&market.data, 14).unwrap();
+    assert_eq!(base_profile.oracle_mode, ORACLE_MODE_MANUAL);
+    assert_eq!(
+        after_profile.mark_ewma_e6, 150,
+        "valid market slots above the per-portfolio active-position cap still have their own mark"
+    );
+    assert_eq!(after_profile.mark_ewma_last_slot, 2);
+}
+
+#[test]
 fn v16_wrapper_hybrid_oracle_accepts_switchboard_and_chainlink_legs() {
     let mut admin = signer();
     let mut market = market_account();
@@ -5492,6 +5734,7 @@ fn v16_wrapper_hybrid_oracle_accepts_switchboard_and_chainlink_legs() {
     let mut chainlink = chainlink_account(chainlink_key, 150_000_000_000, 8, 100);
     run_ix(
         Instruction::ConfigureHybridOracle {
+            asset_index: 0,
             now_slot: 1,
             now_unix_ts: 100,
             oracle_leg_count: 2,
@@ -5536,6 +5779,7 @@ fn v16_wrapper_switchboard_oracle_rejects_wrong_key_stale_and_conf_wide() {
     let mut wrong_key = switchboard_account(Pubkey::new_unique(), 100_000_000, 0, 100);
     let wrong_key_result = run_ix(
         Instruction::ConfigureHybridOracle {
+            asset_index: 0,
             now_slot: 1,
             now_unix_ts: 100,
             oracle_leg_count: 1,
@@ -5556,6 +5800,7 @@ fn v16_wrapper_switchboard_oracle_rejects_wrong_key_stale_and_conf_wide() {
     let mut stale = switchboard_account(feed_key, 100_000_000, 0, 39);
     let stale_result = run_ix(
         Instruction::ConfigureHybridOracle {
+            asset_index: 0,
             now_slot: 1,
             now_unix_ts: 100,
             oracle_leg_count: 1,
@@ -5576,6 +5821,7 @@ fn v16_wrapper_switchboard_oracle_rejects_wrong_key_stale_and_conf_wide() {
     let mut wide = switchboard_account(feed_key, 100_000_000, 6_000_000, 100);
     let conf_result = run_ix(
         Instruction::ConfigureHybridOracle {
+            asset_index: 0,
             now_slot: 1,
             now_unix_ts: 100,
             oracle_leg_count: 1,
@@ -5610,6 +5856,7 @@ fn v16_wrapper_chainlink_oracle_rejects_wrong_key_stale_and_bad_answer() {
     let mut wrong_key = chainlink_account(Pubkey::new_unique(), 100_000_000, 6, 100);
     let wrong_key_result = run_ix(
         Instruction::ConfigureHybridOracle {
+            asset_index: 0,
             now_slot: 1,
             now_unix_ts: 100,
             oracle_leg_count: 1,
@@ -5630,6 +5877,7 @@ fn v16_wrapper_chainlink_oracle_rejects_wrong_key_stale_and_bad_answer() {
     let mut stale = chainlink_account(feed_key, 100_000_000, 6, 39);
     let stale_result = run_ix(
         Instruction::ConfigureHybridOracle {
+            asset_index: 0,
             now_slot: 1,
             now_unix_ts: 100,
             oracle_leg_count: 1,
@@ -5650,6 +5898,7 @@ fn v16_wrapper_chainlink_oracle_rejects_wrong_key_stale_and_bad_answer() {
     let mut bad_answer = chainlink_account(feed_key, 0, 6, 100);
     let bad_result = run_ix(
         Instruction::ConfigureHybridOracle {
+            asset_index: 0,
             now_slot: 1,
             now_unix_ts: 100,
             oracle_leg_count: 1,
@@ -5797,6 +6046,7 @@ fn v16_wrapper_configure_hybrid_oracle_rejects_after_positions_enter_market() {
     let before = market.data.clone();
     let result = run_ix(
         Instruction::ConfigureHybridOracle {
+            asset_index: 0,
             now_slot: 1,
             now_unix_ts: 100,
             oracle_leg_count: 3,
@@ -7085,6 +7335,7 @@ fn v16_wrapper_tradecpi_hyperp_trade_moves_mark_without_refreshing_liveness() {
     .unwrap();
     run_ix(
         Instruction::ConfigureHyperpMark {
+            asset_index: 0,
             now_slot: 5,
             initial_mark_e6: 100,
             mark_ewma_halflife_slots: 1,
@@ -8275,6 +8526,7 @@ fn v16_wrapper_permissionless_recovery_declares_below_progress_floor_when_proven
     );
     run_ix(
         Instruction::ConfigureHyperpMark {
+            asset_index: 0,
             now_slot: 0,
             initial_mark_e6: 1,
             mark_ewma_halflife_slots: 1,
@@ -8305,6 +8557,7 @@ fn v16_wrapper_permissionless_recovery_declares_below_progress_floor_when_proven
     .unwrap();
     run_ix(
         Instruction::PushHyperpMark {
+            asset_index: 0,
             now_slot: 1,
             mark_e6: 3,
         },
@@ -8804,6 +9057,7 @@ fn v16_wrapper_permissionless_stale_resolve_uses_stamped_liveness_not_oracle_tai
     init_market(&mut admin, &mut market);
     run_ix(
         Instruction::ConfigureHybridOracle {
+            asset_index: 0,
             now_slot: 10,
             now_unix_ts: 1_000,
             oracle_leg_count: 1,

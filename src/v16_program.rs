@@ -35,7 +35,7 @@ declare_id!("Perco1ator111111111111111111111111111111111");
 
 pub mod constants {
     use core::mem::size_of;
-    use percolator::{MarketGroupV16Account, PortfolioAccountV16Account};
+    use percolator::{MarketGroupV16Account, PortfolioAccountV16Account, V16_MAX_MARKET_SLOTS_N};
 
     pub const MAGIC: u64 = 0x5045_5243_5631_3600; // "PERCV16\0"
     pub const VERSION: u16 = 16;
@@ -44,9 +44,12 @@ pub mod constants {
 
     pub const HEADER_LEN: usize = 16;
     pub const WRAPPER_CONFIG_LEN: usize = 528;
+    pub const ASSET_ORACLE_PROFILE_LEN: usize = 232;
+    pub const ASSET_ORACLE_PROFILES_LEN: usize = ASSET_ORACLE_PROFILE_LEN * V16_MAX_MARKET_SLOTS_N;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16Account>();
     pub const PORTFOLIO_STATE_LEN: usize = size_of::<PortfolioAccountV16Account>();
-    pub const MARKET_GROUP_OFF: usize = HEADER_LEN + WRAPPER_CONFIG_LEN;
+    pub const ASSET_ORACLE_PROFILES_OFF: usize = HEADER_LEN + WRAPPER_CONFIG_LEN;
+    pub const MARKET_GROUP_OFF: usize = ASSET_ORACLE_PROFILES_OFF + ASSET_ORACLE_PROFILES_LEN;
     pub const MARKET_ACCOUNT_LEN: usize = MARKET_GROUP_OFF + MARKET_GROUP_LEN;
     pub const PORTFOLIO_ACCOUNT_LEN: usize = HEADER_LEN + PORTFOLIO_STATE_LEN;
     pub const MAX_MATCHER_TAIL_ACCOUNTS: usize = 32;
@@ -65,6 +68,10 @@ pub mod constants {
     pub const MIN_INSURANCE_WITHDRAW_FLOOR_UNITS: u128 = 10;
     pub const MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS: u64 = 6_480_000;
     pub const MAX_FORCE_CLOSE_DELAY_SLOTS: u64 = 10_000_000;
+    // v16 exposes up to 64 market slots, but one portfolio may only carry the
+    // largest active-leg count that fits the audited stale-trade and crank CU
+    // envelope. Additional markets remain usable through separate portfolios.
+    pub const WRAPPER_MAX_PORTFOLIO_ASSETS: u16 = 14;
 }
 
 pub mod error {
@@ -190,6 +197,30 @@ pub mod state {
         pub mark_min_fee: u64,
         pub oracle_target_price_e6: u64,
         pub oracle_target_publish_time: i64,
+        pub oracle_leg_feeds: [[u8; 32]; ORACLE_LEG_CAP],
+        pub oracle_leg_prices_e6: [u64; ORACLE_LEG_CAP],
+        pub oracle_leg_publish_times: [i64; ORACLE_LEG_CAP],
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+    pub struct AssetOracleProfileV16 {
+        pub oracle_mode: u8,
+        pub oracle_leg_count: u8,
+        pub oracle_leg_flags: u8,
+        pub invert: u8,
+        pub unit_scale: u32,
+        pub conf_filter_bps: u16,
+        pub _padding0: [u8; 6],
+        pub max_staleness_secs: u64,
+        pub hybrid_soft_stale_slots: u64,
+        pub mark_ewma_e6: u64,
+        pub mark_ewma_last_slot: u64,
+        pub mark_ewma_halflife_slots: u64,
+        pub mark_min_fee: u64,
+        pub oracle_target_price_e6: u64,
+        pub oracle_target_publish_time: i64,
+        pub last_good_oracle_slot: u64,
         pub oracle_leg_feeds: [[u8; 32]; ORACLE_LEG_CAP],
         pub oracle_leg_prices_e6: [u64; ORACLE_LEG_CAP],
         pub oracle_leg_publish_times: [i64; ORACLE_LEG_CAP],
@@ -324,6 +355,117 @@ pub mod state {
     }
 
     #[inline]
+    pub fn validate_asset_oracle_profile(
+        profile: &AssetOracleProfileV16,
+    ) -> Result<(), ProgramError> {
+        if profile.conf_filter_bps > 10_000
+            || profile.invert > 1
+            || profile._padding0 != [0u8; 6]
+            || profile.oracle_leg_count as usize > ORACLE_LEG_CAP
+            || (profile.oracle_leg_flags & !ORACLE_LEG_FLAGS_MASK) != 0
+        {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        match profile.oracle_mode {
+            ORACLE_MODE_MANUAL => {
+                if profile.oracle_leg_count != 0
+                    || profile.oracle_leg_flags != 0
+                    || profile.oracle_leg_feeds.iter().any(|f| *f != [0u8; 32])
+                    || profile.oracle_leg_prices_e6.iter().any(|p| *p != 0)
+                    || profile.oracle_leg_publish_times.iter().any(|t| *t != 0)
+                {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+            }
+            ORACLE_MODE_HYBRID_AFTER_HOURS => {
+                if profile.oracle_leg_count == 0
+                    || profile.max_staleness_secs == 0
+                    || profile.hybrid_soft_stale_slots == 0
+                    || profile.mark_ewma_e6 == 0
+                    || profile.mark_ewma_halflife_slots == 0
+                    || !crate::oracle_v16::oracle_leg_config_ok(
+                        profile.oracle_leg_count,
+                        profile.oracle_leg_flags,
+                        &profile.oracle_leg_feeds,
+                    )
+                {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+            }
+            ORACLE_MODE_HYPERP => {
+                if profile.oracle_leg_count != 0
+                    || profile.oracle_leg_flags != 0
+                    || profile.invert != 0
+                    || profile.unit_scale != 0
+                    || profile.conf_filter_bps != 0
+                    || profile.max_staleness_secs != 0
+                    || profile.hybrid_soft_stale_slots != 0
+                    || profile.mark_ewma_e6 == 0
+                    || profile.mark_ewma_halflife_slots == 0
+                    || profile.oracle_leg_feeds.iter().any(|f| *f != [0u8; 32])
+                    || profile.oracle_leg_prices_e6.iter().any(|p| *p != 0)
+                    || profile.oracle_leg_publish_times.iter().any(|t| *t != 0)
+                {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+            }
+            _ => return Err(ProgramError::InvalidAccountData),
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    pub fn manual_asset_oracle_profile(initial_price: u64, slot: u64) -> AssetOracleProfileV16 {
+        AssetOracleProfileV16 {
+            oracle_mode: ORACLE_MODE_MANUAL,
+            oracle_leg_count: 0,
+            oracle_leg_flags: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 0,
+            _padding0: [0u8; 6],
+            max_staleness_secs: 0,
+            hybrid_soft_stale_slots: 0,
+            mark_ewma_e6: initial_price,
+            mark_ewma_last_slot: slot,
+            mark_ewma_halflife_slots: crate::constants::DEFAULT_MARK_EWMA_HALFLIFE_SLOTS,
+            mark_min_fee: 0,
+            oracle_target_price_e6: initial_price,
+            oracle_target_publish_time: 0,
+            last_good_oracle_slot: slot,
+            oracle_leg_feeds: [[0u8; 32]; ORACLE_LEG_CAP],
+            oracle_leg_prices_e6: [0u64; ORACLE_LEG_CAP],
+            oracle_leg_publish_times: [0i64; ORACLE_LEG_CAP],
+        }
+    }
+
+    pub fn asset_oracle_profile_from_config(config: &WrapperConfigV16) -> AssetOracleProfileV16 {
+        AssetOracleProfileV16 {
+            oracle_mode: config.oracle_mode,
+            oracle_leg_count: config.oracle_leg_count,
+            oracle_leg_flags: config.oracle_leg_flags,
+            invert: config.invert,
+            unit_scale: config.unit_scale,
+            conf_filter_bps: config.conf_filter_bps,
+            _padding0: [0u8; 6],
+            max_staleness_secs: config.max_staleness_secs,
+            hybrid_soft_stale_slots: config.hybrid_soft_stale_slots,
+            mark_ewma_e6: config.mark_ewma_e6,
+            mark_ewma_last_slot: config.mark_ewma_last_slot,
+            mark_ewma_halflife_slots: config.mark_ewma_halflife_slots,
+            mark_min_fee: config.mark_min_fee,
+            oracle_target_price_e6: config.oracle_target_price_e6,
+            oracle_target_publish_time: config.oracle_target_publish_time,
+            last_good_oracle_slot: config.last_good_oracle_slot,
+            oracle_leg_feeds: config.oracle_leg_feeds,
+            oracle_leg_prices_e6: config.oracle_leg_prices_e6,
+            oracle_leg_publish_times: config.oracle_leg_publish_times,
+        }
+    }
+
+    #[inline]
     fn write_wrapper_config_to_bytes(
         data: &mut [u8],
         config: &WrapperConfigV16,
@@ -332,6 +474,61 @@ pub mod state {
         data.get_mut(HEADER_LEN..HEADER_LEN + WRAPPER_CONFIG_LEN)
             .ok_or(PercolatorError::InvalidAccountLen)?
             .copy_from_slice(bytemuck::bytes_of(config));
+        Ok(())
+    }
+
+    #[inline]
+    fn asset_oracle_profile_range(
+        asset_index: usize,
+    ) -> Result<core::ops::Range<usize>, ProgramError> {
+        if asset_index >= V16_MAX_MARKET_SLOTS_N {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let start = crate::constants::ASSET_ORACLE_PROFILES_OFF
+            + asset_index * crate::constants::ASSET_ORACLE_PROFILE_LEN;
+        Ok(start..start + crate::constants::ASSET_ORACLE_PROFILE_LEN)
+    }
+
+    pub fn read_asset_oracle_profile(
+        data: &[u8],
+        asset_index: usize,
+    ) -> Result<AssetOracleProfileV16, ProgramError> {
+        check_header(data, KIND_MARKET)?;
+        let range = asset_oracle_profile_range(asset_index)?;
+        let bytes = data.get(range).ok_or(PercolatorError::InvalidAccountLen)?;
+        let profile: AssetOracleProfileV16 = bytemuck::pod_read_unaligned(bytes);
+        validate_asset_oracle_profile(&profile)?;
+        Ok(profile)
+    }
+
+    pub fn write_asset_oracle_profile(
+        data: &mut [u8],
+        asset_index: usize,
+        profile: &AssetOracleProfileV16,
+    ) -> Result<(), ProgramError> {
+        check_header(data, KIND_MARKET)?;
+        validate_asset_oracle_profile(profile)?;
+        let range = asset_oracle_profile_range(asset_index)?;
+        data.get_mut(range)
+            .ok_or(PercolatorError::InvalidAccountLen)?
+            .copy_from_slice(bytemuck::bytes_of(profile));
+        Ok(())
+    }
+
+    fn init_asset_oracle_profiles(
+        data: &mut [u8],
+        profile: &AssetOracleProfileV16,
+    ) -> Result<(), ProgramError> {
+        validate_asset_oracle_profile(profile)?;
+        let bytes = bytemuck::bytes_of(profile);
+        let mut i = 0usize;
+        while i < V16_MAX_MARKET_SLOTS_N {
+            let range = asset_oracle_profile_range(i)?;
+            data.get_mut(range)
+                .ok_or(PercolatorError::InvalidAccountLen)?
+                .copy_from_slice(bytes);
+            i += 1;
+        }
         Ok(())
     }
 
@@ -798,6 +995,11 @@ pub mod state {
         }
         write_header(data, KIND_MARKET)?;
         write_wrapper_config_to_bytes(data, config)?;
+        let base_profile = manual_asset_oracle_profile(
+            config.oracle_target_price_e6,
+            config.last_good_oracle_slot,
+        );
+        init_asset_oracle_profiles(data, &base_profile)?;
         write_market_wire(market_wire_mut(data)?, group);
         Ok(())
     }
@@ -862,6 +1064,10 @@ pub mod state {
         }
         check_header(data, KIND_MARKET)?;
         write_wrapper_config_to_bytes(data, config)?;
+        if config.oracle_mode != ORACLE_MODE_MANUAL {
+            let base_profile = asset_oracle_profile_from_config(config);
+            write_asset_oracle_profile(data, 0, &base_profile)?;
+        }
         write_market_wire(market_wire_mut(data)?, group);
         Ok(())
     }
@@ -1038,6 +1244,7 @@ pub mod ix {
             now_slot: u64,
         },
         ConfigureHybridOracle {
+            asset_index: u16,
             now_slot: u64,
             now_unix_ts: i64,
             oracle_leg_count: u8,
@@ -1052,12 +1259,14 @@ pub mod ix {
             oracle_leg_feeds: [[u8; 32]; 3],
         },
         ConfigureHyperpMark {
+            asset_index: u16,
             now_slot: u64,
             initial_mark_e6: u64,
             mark_ewma_halflife_slots: u64,
             mark_min_fee: u64,
         },
         PushHyperpMark {
+            asset_index: u16,
             now_slot: u64,
             mark_e6: u64,
         },
@@ -1192,6 +1401,7 @@ pub mod ix {
                     now_slot: read_u64(&mut rest)?,
                 },
                 34 => Self::ConfigureHybridOracle {
+                    asset_index: read_u16(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     now_unix_ts: read_i64(&mut rest)?,
                     oracle_leg_count: read_u8(&mut rest)?,
@@ -1210,12 +1420,14 @@ pub mod ix {
                     ],
                 },
                 35 => Self::ConfigureHyperpMark {
+                    asset_index: read_u16(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     initial_mark_e6: read_u64(&mut rest)?,
                     mark_ewma_halflife_slots: read_u64(&mut rest)?,
                     mark_min_fee: read_u64(&mut rest)?,
                 },
                 36 => Self::PushHyperpMark {
+                    asset_index: read_u16(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     mark_e6: read_u64(&mut rest)?,
                 },
@@ -1421,6 +1633,7 @@ pub mod ix {
                     push_u64(&mut out, now_slot);
                 }
                 Self::ConfigureHybridOracle {
+                    asset_index,
                     now_slot,
                     now_unix_ts,
                     oracle_leg_count,
@@ -1435,6 +1648,7 @@ pub mod ix {
                     oracle_leg_feeds,
                 } => {
                     out.push(34);
+                    push_u16(&mut out, asset_index);
                     push_u64(&mut out, now_slot);
                     push_i64(&mut out, now_unix_ts);
                     out.push(oracle_leg_count);
@@ -1451,19 +1665,26 @@ pub mod ix {
                     }
                 }
                 Self::ConfigureHyperpMark {
+                    asset_index,
                     now_slot,
                     initial_mark_e6,
                     mark_ewma_halflife_slots,
                     mark_min_fee,
                 } => {
                     out.push(35);
+                    push_u16(&mut out, asset_index);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, initial_mark_e6);
                     push_u64(&mut out, mark_ewma_halflife_slots);
                     push_u64(&mut out, mark_min_fee);
                 }
-                Self::PushHyperpMark { now_slot, mark_e6 } => {
+                Self::PushHyperpMark {
+                    asset_index,
+                    now_slot,
+                    mark_e6,
+                } => {
                     out.push(36);
+                    push_u16(&mut out, asset_index);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, mark_e6);
                 }
@@ -1712,7 +1933,7 @@ pub mod oracle_v16 {
             ORACLE_MODE_MANUAL, SWITCHBOARD_RESULT_SCALE,
         },
         error::PercolatorError,
-        state::WrapperConfigV16,
+        state::{AssetOracleProfileV16, WrapperConfigV16},
     };
     use borsh::BorshDeserialize;
     use pythnet_sdk::messages::PriceFeedMessage;
@@ -1765,11 +1986,33 @@ pub mod oracle_v16 {
         config.oracle_mode == ORACLE_MODE_HYPERP
     }
 
+    pub fn profile_is_hybrid(profile: &AssetOracleProfileV16) -> bool {
+        profile.oracle_mode == ORACLE_MODE_HYBRID_AFTER_HOURS
+    }
+
+    pub fn profile_is_hyperp(profile: &AssetOracleProfileV16) -> bool {
+        profile.oracle_mode == ORACLE_MODE_HYPERP
+    }
+
+    pub fn profile_is_price_managed(profile: &AssetOracleProfileV16) -> bool {
+        profile_is_hybrid(profile) || profile_is_hyperp(profile)
+    }
+
     pub fn hybrid_soft_stale_matured(config: &WrapperConfigV16, now_slot: u64) -> bool {
         is_hybrid(config)
             && config.hybrid_soft_stale_slots != 0
             && now_slot.saturating_sub(config.last_good_oracle_slot)
                 > config.hybrid_soft_stale_slots
+    }
+
+    pub fn profile_hybrid_soft_stale_matured(
+        profile: &AssetOracleProfileV16,
+        now_slot: u64,
+    ) -> bool {
+        profile_is_hybrid(profile)
+            && profile.hybrid_soft_stale_slots != 0
+            && now_slot.saturating_sub(profile.last_good_oracle_slot)
+                > profile.hybrid_soft_stale_slots
     }
 
     pub fn hard_stale_matured(config: &WrapperConfigV16, now_slot: u64) -> bool {
@@ -1808,6 +2051,14 @@ pub mod oracle_v16 {
         match idx {
             1 => (config.oracle_leg_flags & ORACLE_LEG_FLAG_DIVIDE_LEG2) != 0,
             2 => (config.oracle_leg_flags & ORACLE_LEG_FLAG_DIVIDE_LEG3) != 0,
+            _ => false,
+        }
+    }
+
+    fn profile_leg_divides(profile: &AssetOracleProfileV16, idx: usize) -> bool {
+        match idx {
+            1 => (profile.oracle_leg_flags & ORACLE_LEG_FLAG_DIVIDE_LEG2) != 0,
+            2 => (profile.oracle_leg_flags & ORACLE_LEG_FLAG_DIVIDE_LEG3) != 0,
             _ => false,
         }
     }
@@ -2150,6 +2401,67 @@ pub mod oracle_v16 {
         ))
     }
 
+    pub fn read_external_price_e6_profile(
+        profile: &mut AssetOracleProfileV16,
+        oracle_accounts: &[AccountInfo],
+        now_unix_ts: i64,
+    ) -> Result<(u64, i64, bool), ProgramError> {
+        if profile.oracle_mode == ORACLE_MODE_MANUAL {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let count = profile.oracle_leg_count as usize;
+        if count == 0 || count > ORACLE_LEG_CAP || oracle_accounts.len() < count {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        }
+        if !oracle_leg_config_ok(
+            profile.oracle_leg_count,
+            profile.oracle_leg_flags,
+            &profile.oracle_leg_feeds,
+        ) {
+            return Err(PercolatorError::EngineInvalidConfig.into());
+        }
+        let mut acc = 0u64;
+        let mut advanced = false;
+        let mut max_publish_time = i64::MIN;
+        let mut i = 0usize;
+        while i < count {
+            let (price, publish_time) = read_oracle_price_e6(
+                &oracle_accounts[i],
+                &profile.oracle_leg_feeds[i],
+                now_unix_ts,
+                profile.max_staleness_secs,
+                profile.conf_filter_bps,
+            )?;
+            let prev_time = profile.oracle_leg_publish_times[i];
+            let prev_price = profile.oracle_leg_prices_e6[i];
+            if prev_time != 0 {
+                if publish_time < prev_time {
+                    return Err(PercolatorError::OracleStale.into());
+                }
+                if publish_time == prev_time && prev_price != 0 && price != prev_price {
+                    return Err(PercolatorError::OracleInvalid.into());
+                }
+            }
+            if publish_time > prev_time {
+                profile.oracle_leg_publish_times[i] = publish_time;
+                profile.oracle_leg_prices_e6[i] = price;
+                advanced = true;
+            }
+            max_publish_time = core::cmp::max(max_publish_time, publish_time);
+            acc = if i == 0 {
+                price
+            } else {
+                compose(acc, price, profile_leg_divides(profile, i))?
+            };
+            i += 1;
+        }
+        Ok((
+            apply_transform(acc, profile.invert, profile.unit_scale)?,
+            max_publish_time,
+            advanced,
+        ))
+    }
+
     pub fn clamp_toward_engine_dt(p_last: u64, target: u64, cap_bps: u64, dt_slots: u64) -> u64 {
         if p_last == 0 || target == 0 {
             return target;
@@ -2364,12 +2676,63 @@ pub mod processor {
         oracle_v16::permissionless_stale_matured(cfg, authenticated_market_slot_or_fallback(group))
     }
 
+    fn permissionless_resolve_matured_for_profile(
+        cfg: &WrapperConfigV16,
+        profile: &state::AssetOracleProfileV16,
+        group: &MarketGroupV16,
+    ) -> bool {
+        cfg.permissionless_resolve_stale_slots != 0
+            && profile.last_good_oracle_slot != 0
+            && authenticated_market_slot_or_fallback(group)
+                .saturating_sub(profile.last_good_oracle_slot)
+                >= cfg.permissionless_resolve_stale_slots
+    }
+
     fn reject_permissionless_resolve_matured_live(
         cfg: &WrapperConfigV16,
         group: &MarketGroupV16,
     ) -> ProgramResult {
         if group.mode == MarketModeV16::Live && permissionless_resolve_matured_now(cfg, group) {
             return Err(PercolatorError::OracleStale.into());
+        }
+        Ok(())
+    }
+
+    fn reject_permissionless_resolve_matured_live_for_profile(
+        cfg: &WrapperConfigV16,
+        profile: &state::AssetOracleProfileV16,
+        group: &MarketGroupV16,
+    ) -> ProgramResult {
+        if !oracle_v16::profile_is_price_managed(profile) {
+            return reject_permissionless_resolve_matured_live(cfg, group);
+        }
+        if group.mode == MarketModeV16::Live
+            && permissionless_resolve_matured_for_profile(cfg, profile, group)
+        {
+            return Err(PercolatorError::OracleStale.into());
+        }
+        Ok(())
+    }
+
+    fn read_oracle_profile_for_asset(
+        market_data: &[u8],
+        cfg: &WrapperConfigV16,
+        asset_index: usize,
+    ) -> Result<state::AssetOracleProfileV16, ProgramError> {
+        if asset_index == 0 {
+            Ok(state::asset_oracle_profile_from_config(cfg))
+        } else {
+            state::read_asset_oracle_profile(market_data, asset_index)
+        }
+    }
+
+    fn write_oracle_profile_if_separate(
+        market_data: &mut [u8],
+        asset_index: usize,
+        profile: &state::AssetOracleProfileV16,
+    ) -> ProgramResult {
+        if asset_index != 0 && oracle_v16::profile_is_price_managed(profile) {
+            state::write_asset_oracle_profile(market_data, asset_index, profile)?;
         }
         Ok(())
     }
@@ -2527,6 +2890,7 @@ pub mod processor {
                 handle_resolve_stale_permissionless(program_id, accounts, now_slot)
             }
             Instruction::ConfigureHybridOracle {
+                asset_index,
                 now_slot,
                 now_unix_ts,
                 oracle_leg_count,
@@ -2542,6 +2906,7 @@ pub mod processor {
             } => handle_configure_hybrid_oracle(
                 program_id,
                 accounts,
+                asset_index,
                 now_slot,
                 now_unix_ts,
                 oracle_leg_count,
@@ -2556,6 +2921,7 @@ pub mod processor {
                 oracle_leg_feeds,
             ),
             Instruction::ConfigureHyperpMark {
+                asset_index,
                 now_slot,
                 initial_mark_e6,
                 mark_ewma_halflife_slots,
@@ -2563,14 +2929,17 @@ pub mod processor {
             } => handle_configure_hyperp_mark(
                 program_id,
                 accounts,
+                asset_index,
                 now_slot,
                 initial_mark_e6,
                 mark_ewma_halflife_slots,
                 mark_min_fee,
             ),
-            Instruction::PushHyperpMark { now_slot, mark_e6 } => {
-                handle_push_hyperp_mark(program_id, accounts, now_slot, mark_e6)
-            }
+            Instruction::PushHyperpMark {
+                asset_index,
+                now_slot,
+                mark_e6,
+            } => handle_push_hyperp_mark(program_id, accounts, asset_index, now_slot, mark_e6),
             Instruction::UpdateAssetLifecycle {
                 action,
                 asset_index,
@@ -2646,7 +3015,10 @@ pub mod processor {
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
         verify_mint(mint_ai)?;
-        if trade_fee_base_bps > max_trading_fee_bps {
+        if trade_fee_base_bps > max_trading_fee_bps
+            || max_portfolio_assets == 0
+            || max_portfolio_assets > constants::WRAPPER_MAX_PORTFOLIO_ASSETS
+        {
             return Err(PercolatorError::EngineInvalidConfig.into());
         }
         let mut cfg = V16Config::public_user_fund(max_portfolio_assets, h_min, h_max);
@@ -2884,9 +3256,18 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let mut oracle_profile = read_oracle_profile_for_asset(
+            &market_ai.try_borrow_data()?,
+            &cfg,
+            asset_index as usize,
+        )?;
         let mut account_a = state::read_portfolio_boxed(&account_a_ai.try_borrow_data()?)?;
         let mut account_b = state::read_portfolio_boxed(&account_b_ai.try_borrow_data()?)?;
-        reject_permissionless_resolve_matured_live(&cfg, group.as_ref())?;
+        reject_permissionless_resolve_matured_live_for_profile(
+            &cfg,
+            &oracle_profile,
+            group.as_ref(),
+        )?;
         expect_portfolio_account_key(account_a.as_ref(), account_a_ai.key)?;
         expect_portfolio_account_key(account_b.as_ref(), account_b_ai.key)?;
         expect_portfolio_owner(account_a.as_ref(), signer_a.key)?;
@@ -2899,6 +3280,7 @@ pub mod processor {
         let prices = effective_prices_boxed(group.as_ref()).map_err(map_v16_error)?;
         let fee_bps = hybrid_trade_fee_bps(
             &cfg,
+            &oracle_profile,
             group.as_ref(),
             asset_index as usize,
             size_abs,
@@ -2931,7 +3313,7 @@ pub mod processor {
             .map_err(map_v16_error)?
         };
         update_hybrid_mark_after_trade(
-            &mut cfg,
+            &mut oracle_profile,
             group.as_ref(),
             asset_index as usize,
             exec_price,
@@ -2940,7 +3322,13 @@ pub mod processor {
                 .checked_add(outcome.fee_b)
                 .ok_or(PercolatorError::EngineArithmeticOverflow)?,
         )?;
-        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
+        if asset_index == 0 && oracle_v16::profile_is_price_managed(&oracle_profile) {
+            cfg.mark_ewma_e6 = oracle_profile.mark_ewma_e6;
+            cfg.mark_ewma_last_slot = oracle_profile.mark_ewma_last_slot;
+        }
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        state::write_market(&mut market_data, &cfg, group.as_ref())?;
+        write_oracle_profile_if_separate(&mut market_data, asset_index as usize, &oracle_profile)?;
         state::write_portfolio(&mut account_a_ai.try_borrow_mut_data()?, account_a.as_ref())?;
         state::write_portfolio(&mut account_b_ai.try_borrow_mut_data()?, account_b.as_ref())
     }
@@ -3013,10 +3401,23 @@ pub mod processor {
         if mode_pre != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        if oracle_v16::permissionless_stale_matured(
+        let oracle_profile_pre = read_oracle_profile_for_asset(
+            &market_ai.try_borrow_data()?,
             &cfg_pre,
-            authenticated_slot_or_fallback(current_slot_pre),
-        ) {
+            asset_index as usize,
+        )?;
+        let stale_matured = if oracle_v16::profile_is_price_managed(&oracle_profile_pre) {
+            cfg_pre.permissionless_resolve_stale_slots != 0
+                && authenticated_slot_or_fallback(current_slot_pre)
+                    .saturating_sub(oracle_profile_pre.last_good_oracle_slot)
+                    >= cfg_pre.permissionless_resolve_stale_slots
+        } else {
+            oracle_v16::permissionless_stale_matured(
+                &cfg_pre,
+                authenticated_slot_or_fallback(current_slot_pre),
+            )
+        };
+        if stale_matured {
             return Err(PercolatorError::OracleStale.into());
         }
         if core::cmp::max(fee_bps, cfg_pre.trade_fee_base_bps) > max_trading_fee_bps {
@@ -3087,6 +3488,11 @@ pub mod processor {
         }
 
         let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let mut oracle_profile = read_oracle_profile_for_asset(
+            &market_ai.try_borrow_data()?,
+            &cfg,
+            asset_index as usize,
+        )?;
         let mut account_a = state::read_portfolio_boxed(&account_a_ai.try_borrow_data()?)?;
         let mut account_b = state::read_portfolio_boxed(&account_b_ai.try_borrow_data()?)?;
         expect_portfolio_account_key(account_a.as_ref(), account_a_ai.key)?;
@@ -3097,6 +3503,7 @@ pub mod processor {
         let prices = effective_prices_boxed(group.as_ref()).map_err(map_v16_error)?;
         let fee_bps = hybrid_trade_fee_bps(
             &cfg,
+            &oracle_profile,
             group.as_ref(),
             asset_index as usize,
             ret.exec_size.unsigned_abs(),
@@ -3129,7 +3536,7 @@ pub mod processor {
             .map_err(map_v16_error)?
         };
         update_hybrid_mark_after_trade(
-            &mut cfg,
+            &mut oracle_profile,
             group.as_ref(),
             asset_index as usize,
             ret.exec_price_e6,
@@ -3138,7 +3545,13 @@ pub mod processor {
                 .checked_add(outcome.fee_b)
                 .ok_or(PercolatorError::EngineArithmeticOverflow)?,
         )?;
-        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
+        if asset_index == 0 && oracle_v16::profile_is_price_managed(&oracle_profile) {
+            cfg.mark_ewma_e6 = oracle_profile.mark_ewma_e6;
+            cfg.mark_ewma_last_slot = oracle_profile.mark_ewma_last_slot;
+        }
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        state::write_market(&mut market_data, &cfg, group.as_ref())?;
+        write_oracle_profile_if_separate(&mut market_data, asset_index as usize, &oracle_profile)?;
         state::write_portfolio(&mut account_a_ai.try_borrow_mut_data()?, account_a.as_ref())?;
         state::write_portfolio(&mut account_b_ai.try_borrow_mut_data()?, account_b.as_ref())
     }
@@ -3738,9 +4151,7 @@ pub mod processor {
                 cfg.admin = new_pubkey;
             }
             AUTHORITY_HYPERP_MARK => {
-                if !oracle_v16::is_hyperp(&cfg)
-                    || cfg.hyperp_mark_authority != current.key.to_bytes()
-                {
+                if cfg.hyperp_mark_authority != current.key.to_bytes() {
                     return Err(PercolatorError::Unauthorized.into());
                 }
                 cfg.hyperp_mark_authority = new_pubkey;
@@ -3988,6 +4399,7 @@ pub mod processor {
     fn handle_configure_hybrid_oracle<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        asset_index: u16,
         now_slot: u64,
         now_unix_ts: i64,
         oracle_leg_count: u8,
@@ -4022,9 +4434,13 @@ pub mod processor {
         let oracle_accounts = accounts
             .get(2..2 + oracle_leg_count as usize)
             .ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let asset_index_usize = asset_index as usize;
         if cfg.admin != admin.key.to_bytes() {
             return Err(PercolatorError::Unauthorized.into());
+        }
+        if asset_index_usize >= group.config.max_market_slots as usize {
+            return Err(PercolatorError::InvalidInstruction.into());
         }
         let authenticated_slot = authenticated_slot_or_fallback(now_slot);
         let authenticated_unix_ts = Clock::get()
@@ -4033,48 +4449,83 @@ pub mod processor {
         if authenticated_slot < group.current_slot {
             return Err(PercolatorError::EngineStale.into());
         }
-        if group.mode != MarketModeV16::Live || group_has_position_or_loss_state(group.as_ref()) {
+        if group.mode != MarketModeV16::Live
+            || asset_has_position_or_loss_state(group.as_ref(), asset_index_usize)
+        {
             return Err(PercolatorError::EngineLockActive.into());
         }
 
-        let mut next = cfg;
-        next.oracle_mode = constants::ORACLE_MODE_HYBRID_AFTER_HOURS;
-        next.oracle_leg_count = oracle_leg_count;
-        next.oracle_leg_flags = oracle_leg_flags;
-        next.invert = invert;
-        next.unit_scale = unit_scale;
-        next.conf_filter_bps = conf_filter_bps;
-        next.max_staleness_secs = max_staleness_secs;
-        next.hybrid_soft_stale_slots = hybrid_soft_stale_slots;
-        next.mark_ewma_halflife_slots = mark_ewma_halflife_slots;
-        next.mark_min_fee = mark_min_fee;
-        next.oracle_leg_feeds = oracle_leg_feeds;
-        next.oracle_leg_prices_e6 = [0u64; constants::ORACLE_LEG_CAP];
-        next.oracle_leg_publish_times = [0i64; constants::ORACLE_LEG_CAP];
+        let mut profile = state::AssetOracleProfileV16 {
+            oracle_mode: constants::ORACLE_MODE_HYBRID_AFTER_HOURS,
+            oracle_leg_count,
+            oracle_leg_flags,
+            invert,
+            unit_scale,
+            conf_filter_bps,
+            _padding0: [0u8; 6],
+            max_staleness_secs,
+            hybrid_soft_stale_slots,
+            mark_ewma_e6: 0,
+            mark_ewma_last_slot: 0,
+            mark_ewma_halflife_slots,
+            mark_min_fee,
+            oracle_target_price_e6: 0,
+            oracle_target_publish_time: 0,
+            last_good_oracle_slot: 0,
+            oracle_leg_feeds,
+            oracle_leg_prices_e6: [0u64; constants::ORACLE_LEG_CAP],
+            oracle_leg_publish_times: [0i64; constants::ORACLE_LEG_CAP],
+        };
 
-        let (price, publish_time, advanced) =
-            oracle_v16::read_external_price_e6(&mut next, oracle_accounts, authenticated_unix_ts)?;
+        let (price, publish_time, advanced) = oracle_v16::read_external_price_e6_profile(
+            &mut profile,
+            oracle_accounts,
+            authenticated_unix_ts,
+        )?;
         if !advanced || price == 0 {
             return Err(PercolatorError::OracleInvalid.into());
         }
-        next.last_good_oracle_slot = authenticated_slot;
-        next.oracle_target_price_e6 = price;
-        next.oracle_target_publish_time = publish_time;
-        next.mark_ewma_e6 = price;
-        next.mark_ewma_last_slot = authenticated_slot;
-        group.assets[0].raw_oracle_target_price = price;
-        group.assets[0].effective_price = price;
-        group.assets[0].fund_px_last = price;
+        profile.last_good_oracle_slot = authenticated_slot;
+        profile.oracle_target_price_e6 = price;
+        profile.oracle_target_publish_time = publish_time;
+        profile.mark_ewma_e6 = price;
+        profile.mark_ewma_last_slot = authenticated_slot;
+        group.assets[asset_index_usize].raw_oracle_target_price = price;
+        group.assets[asset_index_usize].effective_price = price;
+        group.assets[asset_index_usize].fund_px_last = price;
+        cfg.last_good_oracle_slot = core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
+        if asset_index_usize == 0 {
+            cfg.oracle_mode = profile.oracle_mode;
+            cfg.oracle_leg_count = profile.oracle_leg_count;
+            cfg.oracle_leg_flags = profile.oracle_leg_flags;
+            cfg.invert = profile.invert;
+            cfg.unit_scale = profile.unit_scale;
+            cfg.conf_filter_bps = profile.conf_filter_bps;
+            cfg.max_staleness_secs = profile.max_staleness_secs;
+            cfg.hybrid_soft_stale_slots = profile.hybrid_soft_stale_slots;
+            cfg.mark_ewma_halflife_slots = profile.mark_ewma_halflife_slots;
+            cfg.mark_min_fee = profile.mark_min_fee;
+            cfg.oracle_leg_feeds = profile.oracle_leg_feeds;
+            cfg.oracle_leg_prices_e6 = profile.oracle_leg_prices_e6;
+            cfg.oracle_leg_publish_times = profile.oracle_leg_publish_times;
+            cfg.oracle_target_price_e6 = profile.oracle_target_price_e6;
+            cfg.oracle_target_publish_time = profile.oracle_target_publish_time;
+            cfg.mark_ewma_e6 = profile.mark_ewma_e6;
+            cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
+        }
         group.current_slot = authenticated_slot;
         group.slot_last = authenticated_slot;
         group.assert_public_invariants().map_err(map_v16_error)?;
-        state::write_market(&mut market_ai.try_borrow_mut_data()?, &next, group.as_ref())
+        let mut data = market_ai.try_borrow_mut_data()?;
+        state::write_market(&mut data, &cfg, group.as_ref())?;
+        state::write_asset_oracle_profile(&mut data, asset_index_usize, &profile)
     }
 
     #[inline(never)]
     fn handle_configure_hyperp_mark<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        asset_index: u16,
         now_slot: u64,
         initial_mark_e6: u64,
         mark_ewma_halflife_slots: u64,
@@ -4088,51 +4539,82 @@ pub mod processor {
         if initial_mark_e6 == 0 || mark_ewma_halflife_slots == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let asset_index_usize = asset_index as usize;
         if cfg.admin != admin.key.to_bytes() {
             return Err(PercolatorError::Unauthorized.into());
+        }
+        if asset_index_usize >= group.config.max_market_slots as usize {
+            return Err(PercolatorError::InvalidInstruction.into());
         }
         let authenticated_slot = authenticated_slot_or_fallback(now_slot);
         if authenticated_slot < group.current_slot {
             return Err(PercolatorError::EngineStale.into());
         }
-        if group.mode != MarketModeV16::Live || group_has_position_or_loss_state(group.as_ref()) {
+        if group.mode != MarketModeV16::Live
+            || asset_has_position_or_loss_state(group.as_ref(), asset_index_usize)
+        {
             return Err(PercolatorError::EngineLockActive.into());
         }
 
-        let mut next = cfg;
-        next.oracle_mode = constants::ORACLE_MODE_HYPERP;
-        next.oracle_leg_count = 0;
-        next.oracle_leg_flags = 0;
-        next.invert = 0;
-        next.unit_scale = 0;
-        next.conf_filter_bps = 0;
-        next.max_staleness_secs = 0;
-        next.hybrid_soft_stale_slots = 0;
-        next.mark_ewma_e6 = initial_mark_e6;
-        next.mark_ewma_last_slot = authenticated_slot;
-        next.mark_ewma_halflife_slots = mark_ewma_halflife_slots;
-        next.mark_min_fee = mark_min_fee;
-        next.oracle_target_price_e6 = initial_mark_e6;
-        next.oracle_target_publish_time = 0;
-        next.last_good_oracle_slot = authenticated_slot;
-        next.oracle_leg_feeds = [[0u8; 32]; constants::ORACLE_LEG_CAP];
-        next.oracle_leg_prices_e6 = [0u64; constants::ORACLE_LEG_CAP];
-        next.oracle_leg_publish_times = [0i64; constants::ORACLE_LEG_CAP];
+        let profile = state::AssetOracleProfileV16 {
+            oracle_mode: constants::ORACLE_MODE_HYPERP,
+            oracle_leg_count: 0,
+            oracle_leg_flags: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 0,
+            _padding0: [0u8; 6],
+            max_staleness_secs: 0,
+            hybrid_soft_stale_slots: 0,
+            mark_ewma_e6: initial_mark_e6,
+            mark_ewma_last_slot: authenticated_slot,
+            mark_ewma_halflife_slots,
+            mark_min_fee,
+            oracle_target_price_e6: initial_mark_e6,
+            oracle_target_publish_time: 0,
+            last_good_oracle_slot: authenticated_slot,
+            oracle_leg_feeds: [[0u8; 32]; constants::ORACLE_LEG_CAP],
+            oracle_leg_prices_e6: [0u64; constants::ORACLE_LEG_CAP],
+            oracle_leg_publish_times: [0i64; constants::ORACLE_LEG_CAP],
+        };
 
-        group.assets[0].raw_oracle_target_price = initial_mark_e6;
-        group.assets[0].effective_price = initial_mark_e6;
-        group.assets[0].fund_px_last = initial_mark_e6;
+        group.assets[asset_index_usize].raw_oracle_target_price = initial_mark_e6;
+        group.assets[asset_index_usize].effective_price = initial_mark_e6;
+        group.assets[asset_index_usize].fund_px_last = initial_mark_e6;
+        cfg.last_good_oracle_slot = core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
+        if asset_index_usize == 0 {
+            cfg.oracle_mode = profile.oracle_mode;
+            cfg.oracle_leg_count = 0;
+            cfg.oracle_leg_flags = 0;
+            cfg.invert = 0;
+            cfg.unit_scale = 0;
+            cfg.conf_filter_bps = 0;
+            cfg.max_staleness_secs = 0;
+            cfg.hybrid_soft_stale_slots = 0;
+            cfg.mark_ewma_e6 = profile.mark_ewma_e6;
+            cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
+            cfg.mark_ewma_halflife_slots = profile.mark_ewma_halflife_slots;
+            cfg.mark_min_fee = profile.mark_min_fee;
+            cfg.oracle_target_price_e6 = profile.oracle_target_price_e6;
+            cfg.oracle_target_publish_time = 0;
+            cfg.oracle_leg_feeds = [[0u8; 32]; constants::ORACLE_LEG_CAP];
+            cfg.oracle_leg_prices_e6 = [0u64; constants::ORACLE_LEG_CAP];
+            cfg.oracle_leg_publish_times = [0i64; constants::ORACLE_LEG_CAP];
+        }
         group.current_slot = authenticated_slot;
         group.slot_last = authenticated_slot;
         group.assert_public_invariants().map_err(map_v16_error)?;
-        state::write_market(&mut market_ai.try_borrow_mut_data()?, &next, group.as_ref())
+        let mut data = market_ai.try_borrow_mut_data()?;
+        state::write_market(&mut data, &cfg, group.as_ref())?;
+        state::write_asset_oracle_profile(&mut data, asset_index_usize, &profile)
     }
 
     #[inline(never)]
     fn handle_push_hyperp_mark<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        asset_index: u16,
         now_slot: u64,
         mark_e6: u64,
     ) -> ProgramResult {
@@ -4145,39 +4627,58 @@ pub mod processor {
             return Err(PercolatorError::OracleInvalid.into());
         }
         let (mut cfg, group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let asset_index_usize = asset_index as usize;
+        if asset_index_usize >= group.config.max_market_slots as usize {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let mut profile =
+            state::read_asset_oracle_profile(&market_ai.try_borrow_data()?, asset_index_usize)?;
         if group.mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        if !oracle_v16::is_hyperp(&cfg) || cfg.hyperp_mark_authority != authority.key.to_bytes() {
+        if !oracle_v16::profile_is_hyperp(&profile)
+            || cfg.hyperp_mark_authority != authority.key.to_bytes()
+        {
             return Err(PercolatorError::Unauthorized.into());
         }
         let authenticated_slot = authenticated_slot_or_fallback(now_slot);
-        if authenticated_slot < cfg.mark_ewma_last_slot || authenticated_slot < group.current_slot {
+        if authenticated_slot < profile.mark_ewma_last_slot
+            || authenticated_slot < group.current_slot
+        {
             return Err(PercolatorError::EngineStale.into());
         }
-        let full_weight_fee = if cfg.mark_min_fee == 0 {
+        let full_weight_fee = if profile.mark_min_fee == 0 {
             0
         } else {
-            cfg.mark_min_fee
+            profile.mark_min_fee
         };
         let next_mark = policy_v16::ewma_update(
-            cfg.mark_ewma_e6,
+            profile.mark_ewma_e6,
             mark_e6,
-            cfg.mark_ewma_halflife_slots,
-            cfg.mark_ewma_last_slot,
+            profile.mark_ewma_halflife_slots,
+            profile.mark_ewma_last_slot,
             authenticated_slot,
             full_weight_fee,
-            cfg.mark_min_fee,
+            profile.mark_min_fee,
         );
         if next_mark == 0 {
             return Err(PercolatorError::OracleInvalid.into());
         }
-        cfg.mark_ewma_e6 = next_mark;
-        cfg.mark_ewma_last_slot = authenticated_slot;
-        cfg.oracle_target_price_e6 = next_mark;
-        cfg.oracle_target_publish_time = 0;
-        cfg.last_good_oracle_slot = authenticated_slot;
-        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+        profile.mark_ewma_e6 = next_mark;
+        profile.mark_ewma_last_slot = authenticated_slot;
+        profile.oracle_target_price_e6 = next_mark;
+        profile.oracle_target_publish_time = 0;
+        profile.last_good_oracle_slot = authenticated_slot;
+        cfg.last_good_oracle_slot = core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
+        if asset_index_usize == 0 {
+            cfg.mark_ewma_e6 = profile.mark_ewma_e6;
+            cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
+            cfg.oracle_target_price_e6 = profile.oracle_target_price_e6;
+            cfg.oracle_target_publish_time = 0;
+        }
+        let mut data = market_ai.try_borrow_mut_data()?;
+        state::write_market(&mut data, &cfg, group.as_ref())?;
+        state::write_asset_oracle_profile(&mut data, asset_index_usize, &profile)
     }
 
     #[inline(never)]
@@ -4286,7 +4787,7 @@ pub mod processor {
     }
 
     fn public_recovery_reason_proven(
-        cfg: &WrapperConfigV16,
+        profile: &state::AssetOracleProfileV16,
         group: &MarketGroupV16,
         asset_index: usize,
         now_slot: u64,
@@ -4300,8 +4801,8 @@ pub mod processor {
                 }
                 let asset = group.assets[asset_index];
                 let exposed = asset.oi_eff_long_q != 0 || asset.oi_eff_short_q != 0;
-                let target = if oracle_v16::is_hybrid(cfg) || oracle_v16::is_hyperp(cfg) {
-                    cfg.oracle_target_price_e6
+                let target = if oracle_v16::profile_is_price_managed(profile) {
+                    profile.oracle_target_price_e6
                 } else {
                     asset.raw_oracle_target_price
                 };
@@ -4347,11 +4848,18 @@ pub mod processor {
         let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
         expect_portfolio_account_key(portfolio.as_ref(), portfolio_ai.key)?;
-        reject_permissionless_resolve_matured_live(&cfg, group.as_ref())?;
         let authenticated_now_slot = authenticated_slot_or_fallback(now_slot);
+        let asset_index_usize = asset_index as usize;
+        if asset_index_usize >= group.config.max_market_slots as usize {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let mut oracle_profile =
+            read_oracle_profile_for_asset(&market_ai.try_borrow_data()?, &cfg, asset_index_usize)?;
         let now_unix_ts = Clock::get().map(|c| c.unix_timestamp).unwrap_or_else(|_| {
-            let elapsed_slots = authenticated_now_slot.saturating_sub(cfg.last_good_oracle_slot);
-            cfg.oracle_target_publish_time
+            let elapsed_slots =
+                authenticated_now_slot.saturating_sub(oracle_profile.last_good_oracle_slot);
+            oracle_profile
+                .oracle_target_publish_time
                 .saturating_add(i64::try_from(elapsed_slots).unwrap_or(i64::MAX))
         });
         let reward_accounts_required = action == 1 && cfg.liquidation_cranker_fee_share_bps != 0;
@@ -4380,18 +4888,20 @@ pub mod processor {
         };
         let oracle_tail_start = if reward_accounts_required { 7 } else { 3 };
         let tail = accounts.get(oracle_tail_start..).unwrap_or(&[]);
-        let asset_index_usize = asset_index as usize;
-        if asset_index_usize >= group.config.max_market_slots as usize {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
         if funding_rate_e9 != 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         if action == 1 && fee_bps != 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        reject_permissionless_resolve_matured_live_for_profile(
+            &cfg,
+            &oracle_profile,
+            group.as_ref(),
+        )?;
         let crank_price = hybrid_effective_price_for_crank(
-            &mut cfg,
+            &cfg,
+            &mut oracle_profile,
             group.as_ref(),
             asset_index_usize,
             authenticated_now_slot,
@@ -4399,12 +4909,35 @@ pub mod processor {
             tail,
             effective_price,
         )?;
-        group.assets[asset_index as usize].raw_oracle_target_price = if oracle_v16::is_hybrid(&cfg)
-        {
-            cfg.oracle_target_price_e6
-        } else {
-            crank_price
-        };
+        group.assets[asset_index as usize].raw_oracle_target_price =
+            if oracle_v16::profile_is_price_managed(&oracle_profile) {
+                oracle_profile.oracle_target_price_e6
+            } else {
+                crank_price
+            };
+        cfg.last_good_oracle_slot = core::cmp::max(
+            cfg.last_good_oracle_slot,
+            oracle_profile.last_good_oracle_slot,
+        );
+        if asset_index_usize == 0 && oracle_v16::profile_is_price_managed(&oracle_profile) {
+            cfg.oracle_mode = oracle_profile.oracle_mode;
+            cfg.oracle_leg_count = oracle_profile.oracle_leg_count;
+            cfg.oracle_leg_flags = oracle_profile.oracle_leg_flags;
+            cfg.invert = oracle_profile.invert;
+            cfg.unit_scale = oracle_profile.unit_scale;
+            cfg.conf_filter_bps = oracle_profile.conf_filter_bps;
+            cfg.max_staleness_secs = oracle_profile.max_staleness_secs;
+            cfg.hybrid_soft_stale_slots = oracle_profile.hybrid_soft_stale_slots;
+            cfg.mark_ewma_e6 = oracle_profile.mark_ewma_e6;
+            cfg.mark_ewma_last_slot = oracle_profile.mark_ewma_last_slot;
+            cfg.mark_ewma_halflife_slots = oracle_profile.mark_ewma_halflife_slots;
+            cfg.mark_min_fee = oracle_profile.mark_min_fee;
+            cfg.oracle_target_price_e6 = oracle_profile.oracle_target_price_e6;
+            cfg.oracle_target_publish_time = oracle_profile.oracle_target_publish_time;
+            cfg.oracle_leg_feeds = oracle_profile.oracle_leg_feeds;
+            cfg.oracle_leg_prices_e6 = oracle_profile.oracle_leg_prices_e6;
+            cfg.oracle_leg_publish_times = oracle_profile.oracle_leg_publish_times;
+        }
         if action == 1 && cfg.liquidation_cranker_fee_share_bps != 0 {
             let insurance_before = group.insurance;
             let prices =
@@ -4471,7 +5004,7 @@ pub mod processor {
                 }
                 let reason = decode_recovery_reason(recovery_reason)?;
                 public_recovery_reason_proven(
-                    &cfg,
+                    &oracle_profile,
                     group.as_ref(),
                     asset_index_usize,
                     authenticated_now_slot,
@@ -4495,7 +5028,9 @@ pub mod processor {
             )
             .map_err(map_v16_error)?;
         }
-        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        state::write_market(&mut market_data, &cfg, group.as_ref())?;
+        write_oracle_profile_if_separate(&mut market_data, asset_index_usize, &oracle_profile)?;
         state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())?;
         let _ = owner;
         Ok(())
@@ -4880,7 +5415,7 @@ pub mod processor {
         }
     }
 
-    fn group_has_position_or_loss_state(group: &MarketGroupV16) -> bool {
+    fn asset_has_position_or_loss_state(group: &MarketGroupV16, asset_index: usize) -> bool {
         if group.pnl_pos_tot != 0
             || group.stale_certificate_count != 0
             || group.b_stale_account_count != 0
@@ -4889,39 +5424,31 @@ pub mod processor {
             || group.threshold_stress_active
             || group.loss_stale_active
             || group.recovery_reason.is_some()
+            || asset_index >= group.config.max_market_slots as usize
         {
             return true;
         }
-        let n = group.config.max_market_slots as usize;
-        let mut i = 0;
-        while i < n {
-            let asset = group.assets[i];
-            if asset.oi_eff_long_q != 0
-                || asset.oi_eff_short_q != 0
-                || asset.stored_pos_count_long != 0
-                || asset.stored_pos_count_short != 0
-                || asset.stale_account_count_long != 0
-                || asset.stale_account_count_short != 0
-                || asset.b_long_num != 0
-                || asset.b_short_num != 0
-                || asset.b_epoch_start_long_num != 0
-                || asset.b_epoch_start_short_num != 0
-                || asset.loss_weight_sum_long != 0
-                || asset.loss_weight_sum_short != 0
-                || asset.social_loss_remainder_long_num != 0
-                || asset.social_loss_remainder_short_num != 0
-                || asset.social_loss_dust_long_num != 0
-                || asset.social_loss_dust_short_num != 0
-                || asset.explicit_unallocated_loss_long != 0
-                || asset.explicit_unallocated_loss_short != 0
-                || asset.mode_long != SideModeV16::Normal
-                || asset.mode_short != SideModeV16::Normal
-            {
-                return true;
-            }
-            i += 1;
-        }
-        false
+        let asset = group.assets[asset_index];
+        asset.oi_eff_long_q != 0
+            || asset.oi_eff_short_q != 0
+            || asset.stored_pos_count_long != 0
+            || asset.stored_pos_count_short != 0
+            || asset.stale_account_count_long != 0
+            || asset.stale_account_count_short != 0
+            || asset.b_long_num != 0
+            || asset.b_short_num != 0
+            || asset.b_epoch_start_long_num != 0
+            || asset.b_epoch_start_short_num != 0
+            || asset.loss_weight_sum_long != 0
+            || asset.loss_weight_sum_short != 0
+            || asset.social_loss_remainder_long_num != 0
+            || asset.social_loss_remainder_short_num != 0
+            || asset.social_loss_dust_long_num != 0
+            || asset.social_loss_dust_short_num != 0
+            || asset.explicit_unallocated_loss_long != 0
+            || asset.explicit_unallocated_loss_short != 0
+            || asset.mode_long != SideModeV16::Normal
+            || asset.mode_short != SideModeV16::Normal
     }
 
     fn trade_notional_floor(size_q: u128, price: u64) -> Result<u128, ProgramError> {
@@ -4952,7 +5479,8 @@ pub mod processor {
     }
 
     fn hybrid_effective_price_for_crank(
-        cfg: &mut WrapperConfigV16,
+        cfg: &WrapperConfigV16,
+        profile: &mut state::AssetOracleProfileV16,
         group: &MarketGroupV16,
         asset_index: usize,
         now_slot: u64,
@@ -4960,11 +5488,8 @@ pub mod processor {
         oracle_accounts: &[AccountInfo],
         fallback_price: u64,
     ) -> Result<u64, ProgramError> {
-        if asset_index != 0 {
-            return Ok(fallback_price);
-        }
-        if oracle_v16::is_hyperp(cfg) {
-            let target = cfg.mark_ewma_e6;
+        if oracle_v16::profile_is_hyperp(profile) {
+            let target = profile.mark_ewma_e6;
             if target == 0 {
                 return Err(PercolatorError::OracleInvalid.into());
             }
@@ -4977,30 +5502,33 @@ pub mod processor {
                 hybrid_segment_dt(group, now_slot)?,
                 exposed,
             );
-            cfg.oracle_target_price_e6 = target;
+            profile.oracle_target_price_e6 = target;
             return Ok(price);
         }
-        if !oracle_v16::is_hybrid(cfg) {
+        if !oracle_v16::profile_is_hybrid(profile) {
             return Ok(fallback_price);
         }
-        if asset_index >= group.config.max_portfolio_assets as usize {
+        if asset_index >= group.config.max_market_slots as usize {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        if oracle_v16::hard_stale_matured(cfg, now_slot) {
+        if cfg.permissionless_resolve_stale_slots != 0
+            && now_slot.saturating_sub(profile.last_good_oracle_slot)
+                >= cfg.permissionless_resolve_stale_slots
+        {
             return Err(PercolatorError::EngineRecoveryRequired.into());
         }
-        let count = cfg.oracle_leg_count as usize;
+        let count = profile.oracle_leg_count as usize;
         let read = if oracle_accounts.len() >= count {
-            oracle_v16::read_external_price_e6(cfg, oracle_accounts, now_unix_ts)
+            oracle_v16::read_external_price_e6_profile(profile, oracle_accounts, now_unix_ts)
         } else {
             Err(ProgramError::NotEnoughAccountKeys)
         };
         let target = match read {
             Ok((price, publish_time, advanced)) => {
-                cfg.oracle_target_price_e6 = price;
-                cfg.oracle_target_publish_time = publish_time;
+                profile.oracle_target_price_e6 = price;
+                profile.oracle_target_publish_time = publish_time;
                 if advanced {
-                    cfg.last_good_oracle_slot = now_slot;
+                    profile.last_good_oracle_slot = now_slot;
                 }
                 price
             }
@@ -5008,10 +5536,10 @@ pub mod processor {
                 if e == ProgramError::from(PercolatorError::OracleStale)
                     || e == ProgramError::NotEnoughAccountKeys =>
             {
-                if !oracle_v16::hybrid_soft_stale_matured(cfg, now_slot) {
+                if !oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot) {
                     return Err(e);
                 }
-                cfg.mark_ewma_e6
+                profile.mark_ewma_e6
             }
             Err(e) => return Err(e),
         };
@@ -5027,16 +5555,17 @@ pub mod processor {
             hybrid_segment_dt(group, now_slot)?,
             exposed,
         );
-        cfg.oracle_target_price_e6 = target;
-        if !oracle_v16::hybrid_soft_stale_matured(cfg, now_slot) {
-            cfg.mark_ewma_e6 = price;
-            cfg.mark_ewma_last_slot = now_slot;
+        profile.oracle_target_price_e6 = target;
+        if !oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot) {
+            profile.mark_ewma_e6 = price;
+            profile.mark_ewma_last_slot = now_slot;
         }
         Ok(price)
     }
 
     fn hybrid_trade_fee_bps(
         cfg: &WrapperConfigV16,
+        profile: &state::AssetOracleProfileV16,
         group: &MarketGroupV16,
         asset_index: usize,
         size_q_abs: u128,
@@ -5047,17 +5576,16 @@ pub mod processor {
         if base > group.config.max_trading_fee_bps {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        if asset_index != 0 {
-            return Ok(base);
-        }
-        if !oracle_v16::is_hybrid(cfg) && !oracle_v16::is_hyperp(cfg) {
+        if !oracle_v16::profile_is_price_managed(profile) {
             return Ok(base);
         }
         let now_slot = Clock::get().map(|c| c.slot).unwrap_or(group.current_slot);
-        if oracle_v16::is_hybrid(cfg) && !oracle_v16::hybrid_soft_stale_matured(cfg, now_slot) {
+        if oracle_v16::profile_is_hybrid(profile)
+            && !oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot)
+        {
             return Ok(base);
         }
-        if asset_index >= group.config.max_market_slots as usize || cfg.mark_ewma_e6 == 0 {
+        if asset_index >= group.config.max_market_slots as usize || profile.mark_ewma_e6 == 0 {
             return Ok(base);
         }
         let trade_notional = trade_notional_floor(size_q_abs, exec_price)?;
@@ -5082,14 +5610,14 @@ pub mod processor {
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         let required = policy_v16::dynamic_fee_bps_with_externality_floor(
             base,
-            cfg.mark_ewma_e6,
+            profile.mark_ewma_e6,
             clamped_exec,
-            cfg.mark_ewma_halflife_slots,
-            cfg.mark_ewma_last_slot,
+            profile.mark_ewma_halflife_slots,
+            profile.mark_ewma_last_slot,
             now_slot,
             trade_notional,
             mark_externality_notional,
-            cfg.mark_min_fee,
+            profile.mark_min_fee,
             min_externality_bps,
         )
         .ok_or(PercolatorError::EngineInvalidConfig)?;
@@ -5101,21 +5629,19 @@ pub mod processor {
     }
 
     fn update_hybrid_mark_after_trade(
-        cfg: &mut WrapperConfigV16,
+        profile: &mut state::AssetOracleProfileV16,
         group: &MarketGroupV16,
         asset_index: usize,
         exec_price: u64,
         fee_paid: u128,
     ) -> Result<(), ProgramError> {
-        if asset_index != 0 {
-            return Ok(());
-        }
-        if !oracle_v16::is_hybrid(cfg) && !oracle_v16::is_hyperp(cfg) {
+        if !oracle_v16::profile_is_price_managed(profile) {
             return Ok(());
         }
         let now_slot = Clock::get().map(|c| c.slot).unwrap_or(group.current_slot);
-        if (oracle_v16::is_hybrid(cfg) && !oracle_v16::hybrid_soft_stale_matured(cfg, now_slot))
-            || asset_index >= group.config.max_portfolio_assets as usize
+        if (oracle_v16::profile_is_hybrid(profile)
+            && !oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot))
+            || asset_index >= group.config.max_market_slots as usize
         {
             return Ok(());
         }
@@ -5126,19 +5652,19 @@ pub mod processor {
             group.config.max_price_move_bps_per_slot,
             1,
         );
-        let old = cfg.mark_ewma_e6;
+        let old = profile.mark_ewma_e6;
         let new_mark = policy_v16::ewma_update(
             old,
             clamped_exec,
-            cfg.mark_ewma_halflife_slots,
-            cfg.mark_ewma_last_slot,
+            profile.mark_ewma_halflife_slots,
+            profile.mark_ewma_last_slot,
             now_slot,
             fee_paid,
-            cfg.mark_min_fee,
+            profile.mark_min_fee,
         );
         if new_mark != 0 && new_mark != old {
-            cfg.mark_ewma_e6 = new_mark;
-            cfg.mark_ewma_last_slot = now_slot;
+            profile.mark_ewma_e6 = new_mark;
+            profile.mark_ewma_last_slot = now_slot;
         }
         Ok(())
     }
