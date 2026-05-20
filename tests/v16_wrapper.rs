@@ -903,6 +903,86 @@ fn v16_wrapper_init_portfolio_anchors_fee_slot_at_market_current_slot() {
 }
 
 #[test]
+fn v16_wrapper_init_portfolio_fee_anchor_tracks_crank_and_asset_lifecycle_time() {
+    let assert_new_portfolio_pays_from_creation_slot =
+        |market: &mut TestAccount, owner: &mut TestAccount, portfolio: &mut TestAccount| {
+            init_portfolio(owner, market, portfolio);
+            deposit(owner, market, portfolio, 1_000);
+            sync_maintenance_fee(market, portfolio, 110).unwrap();
+            let (_, group) = state::read_market(&market.data).unwrap();
+            let account = state::read_portfolio(&portfolio.data).unwrap();
+            assert_eq!(group.current_slot, 100);
+            assert_eq!(account.last_fee_slot, 110);
+            assert_eq!(account.capital, 950);
+            assert_eq!(group.insurance, 50);
+        };
+
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut old_owner = signer();
+    let mut new_owner = signer();
+    let mut old_portfolio = portfolio_account();
+    let mut new_portfolio = portfolio_account();
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *maintenance_fee_per_slot = 5;
+            }
+        }),
+    );
+    init_portfolio(&mut old_owner, &mut market, &mut old_portfolio);
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 100,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut old_owner, &mut market, &mut old_portfolio],
+    )
+    .unwrap();
+    assert_new_portfolio_pays_from_creation_slot(&mut market, &mut new_owner, &mut new_portfolio);
+
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *maintenance_fee_per_slot = 5;
+            }
+        }),
+    );
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        100,
+        125,
+    )
+    .unwrap();
+    assert_new_portfolio_pays_from_creation_slot(&mut market, &mut owner, &mut portfolio);
+}
+
+#[test]
 fn v16_wrapper_maintenance_fee_is_permissionless_and_capital_capped() {
     let mut admin = signer();
     let mut market = market_account();

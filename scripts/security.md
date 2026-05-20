@@ -12,6 +12,7 @@ Regression coverage:
 ```bash
 cargo test --release --test v16_wrapper \
   v16_wrapper_init_portfolio_anchors_fee_slot_at_market_current_slot \
+  v16_wrapper_init_portfolio_fee_anchor_tracks_crank_and_asset_lifecycle_time \
   -- --test-threads=1 --nocapture
 ```
 
@@ -19,6 +20,14 @@ The regression first advances a live market to slot `100`, initializes a new
 portfolio, deposits capital, then syncs maintenance fees at slot `110`. Before
 the fix, the account paid `110` slots of fees and capital fell to `450`.
 Correct behavior is `10` slots of fees: capital `950`, insurance `50`.
+
+The follow-up regression repeats the same invariant after market time advances
+through two independent surfaces:
+
+- `PermissionlessCrank` on an existing portfolio;
+- `UpdateAssetLifecycle` activating a newly appended asset.
+
+Both paths leave the new portfolio owing fees only from its creation slot.
 
 **Fix invariant:**
 
@@ -31,6 +40,37 @@ recurring maintenance fees for slots before the account existed.
 **Disposition:** `PASS_SAFE` after fix. The broader v16 wrapper suite now
 covers both live and resolved fee-anchor semantics with this creation-time
 cursor.
+
+**Why this was missed:** prior sweeps focused on post-creation public handlers
+and most unit fixtures initialized portfolios while the market clock was still
+zero. In that shape, a zero fee cursor is indistinguishable from a valid
+creation-time cursor, so first-sync tests encoded the bad implementation detail
+instead of the product invariant.
+
+**Similar zero-cursor sweep:** I rechecked the other zero-initialized slot and
+timestamp fields against current wrapper/API usage.
+
+- `last_good_oracle_slot`, `mark_ewma_last_slot`, and
+  `oracle_target_publish_time`: stamped by init/configure/read paths and used
+  only for liveness or EWMA transition checks; stale proofs already covered by
+  hybrid and permissionless-resolve tests.
+- `last_insurance_withdraw_slot`: zero means no prior withdrawal, so the first
+  withdrawal is intentionally allowed; cooldown tests cover subsequent
+  withdrawals.
+- `last_asset_activation_slot`: zero means no prior activation and the first
+  activation is intentionally allowed; lifecycle tests cover monotonic market
+  ids and non-reuse.
+- `source_backing_buckets[*].expiry_slot`: zero means no fresh bucket; nonzero
+  topups are engine-validated as `expiry_slot > current_slot`.
+- `resolved_slot`: zero is unreachable for resolved behavior until the engine
+  resolves the market; resolved-close tests cover fee anchoring at the actual
+  resolved slot.
+- `group.slot_last` and per-asset `slot_last`: zero is the engine's
+  no-exposure initial state. Permissionless crank and cross-asset tests cover
+  bounded progress, loss-stale behavior, and no cross-asset fee-anchor aliasing.
+
+No additional user-funds drain, insurance extraction, or market-brick vector was
+found in this class.
 
 ## Eleventh pass — untrusted Lean/spec-abstraction findings
 
