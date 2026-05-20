@@ -43,7 +43,7 @@ pub mod constants {
     pub const KIND_PORTFOLIO: u8 = 2;
 
     pub const HEADER_LEN: usize = 16;
-    pub const WRAPPER_CONFIG_LEN: usize = 528;
+    pub const WRAPPER_CONFIG_LEN: usize = 544;
     pub const ASSET_ORACLE_PROFILE_LEN: usize = 232;
     pub const ASSET_ORACLE_PROFILES_LEN: usize = ASSET_ORACLE_PROFILE_LEN * V16_MAX_MARKET_SLOTS_N;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16Account>();
@@ -179,6 +179,8 @@ pub mod state {
         pub insurance_withdraw_deposit_remaining: u128,
         pub insurance_withdraw_max_bps: u16,
         pub liquidation_cranker_fee_share_bps: u16,
+        pub maintenance_cranker_fee_share_bps: u16,
+        pub _padding_fee_policy: u16,
         pub unit_scale: u32,
         pub conf_filter_bps: u16,
         pub insurance_withdraw_deposits_only: u8,
@@ -187,6 +189,7 @@ pub mod state {
         pub oracle_leg_flags: u8,
         pub invert: u8,
         pub _padding0: u8,
+        pub _padding1: [u8; 4],
         pub insurance_withdraw_cooldown_slots: u64,
         pub last_insurance_withdraw_slot: u64,
         pub max_staleness_secs: u64,
@@ -200,6 +203,7 @@ pub mod state {
         pub oracle_leg_feeds: [[u8; 32]; ORACLE_LEG_CAP],
         pub oracle_leg_prices_e6: [u64; ORACLE_LEG_CAP],
         pub oracle_leg_publish_times: [i64; ORACLE_LEG_CAP],
+        pub _padding_tail: [u8; 8],
     }
 
     #[repr(C)]
@@ -301,10 +305,14 @@ pub mod state {
     fn validate_wrapper_config(config: &WrapperConfigV16) -> Result<(), ProgramError> {
         if config.insurance_withdraw_max_bps > 10_000
             || config.liquidation_cranker_fee_share_bps > 10_000
+            || config.maintenance_cranker_fee_share_bps > 10_000
             || config.conf_filter_bps > 10_000
             || config.insurance_withdraw_deposits_only > 1
             || config.invert > 1
+            || config._padding_fee_policy != 0
             || config._padding0 != 0
+            || config._padding1 != [0u8; 4]
+            || config._padding_tail != [0u8; 8]
             || config.oracle_leg_count as usize > ORACLE_LEG_CAP
             || (config.oracle_leg_flags & !ORACLE_LEG_FLAGS_MASK) != 0
         {
@@ -1236,6 +1244,9 @@ pub mod ix {
         UpdateLiquidationFeePolicy {
             cranker_share_bps: u16,
         },
+        UpdateMaintenanceFeePolicy {
+            cranker_share_bps: u16,
+        },
         ConfigurePermissionlessResolve {
             stale_slots: u64,
             force_close_delay_slots: u64,
@@ -1391,6 +1402,9 @@ pub mod ix {
                     cooldown_slots: read_u64(&mut rest)?,
                 },
                 37 => Self::UpdateLiquidationFeePolicy {
+                    cranker_share_bps: read_u16(&mut rest)?,
+                },
+                49 => Self::UpdateMaintenanceFeePolicy {
                     cranker_share_bps: read_u16(&mut rest)?,
                 },
                 38 => Self::ConfigurePermissionlessResolve {
@@ -1618,6 +1632,10 @@ pub mod ix {
                 }
                 Self::UpdateLiquidationFeePolicy { cranker_share_bps } => {
                     out.push(37);
+                    push_u16(&mut out, cranker_share_bps);
+                }
+                Self::UpdateMaintenanceFeePolicy { cranker_share_bps } => {
+                    out.push(49);
                     push_u16(&mut out, cranker_share_bps);
                 }
                 Self::ConfigurePermissionlessResolve {
@@ -2923,6 +2941,9 @@ pub mod processor {
             Instruction::UpdateLiquidationFeePolicy { cranker_share_bps } => {
                 handle_update_liquidation_fee_policy(program_id, accounts, cranker_share_bps)
             }
+            Instruction::UpdateMaintenanceFeePolicy { cranker_share_bps } => {
+                handle_update_maintenance_fee_policy(program_id, accounts, cranker_share_bps)
+            }
             Instruction::ConfigurePermissionlessResolve {
                 stale_slots,
                 force_close_delay_slots,
@@ -3114,6 +3135,8 @@ pub mod processor {
             insurance_withdraw_deposit_remaining: 0,
             insurance_withdraw_max_bps: 10_000,
             liquidation_cranker_fee_share_bps: 0,
+            maintenance_cranker_fee_share_bps: 0,
+            _padding_fee_policy: 0,
             unit_scale: 0,
             conf_filter_bps: 0,
             insurance_withdraw_deposits_only: 0,
@@ -3122,6 +3145,7 @@ pub mod processor {
             oracle_leg_flags: 0,
             invert: 0,
             _padding0: 0,
+            _padding1: [0u8; 4],
             insurance_withdraw_cooldown_slots: 0,
             last_insurance_withdraw_slot: 0,
             max_staleness_secs: 0,
@@ -3135,6 +3159,7 @@ pub mod processor {
             oracle_leg_feeds: [[0u8; 32]; constants::ORACLE_LEG_CAP],
             oracle_leg_prices_e6: [0u64; constants::ORACLE_LEG_CAP],
             oracle_leg_publish_times: [0i64; constants::ORACLE_LEG_CAP],
+            _padding_tail: [0u8; 8],
         };
         state::init_market_account(
             &mut market_ai.try_borrow_mut_data()?,
@@ -4124,16 +4149,78 @@ pub mod processor {
         let mut portfolio = state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)?;
         expect_portfolio_account_key(portfolio.as_ref(), portfolio_ai.key)?;
         let authenticated_now_slot = authenticated_slot_or_fallback(now_slot);
+        let mut cranker_is_same_portfolio = false;
+        let mut cranker_portfolio_state = None;
+        if let Some(cranker_portfolio_ai) = accounts.get(2) {
+            expect_writable(cranker_portfolio_ai)?;
+            expect_owner(cranker_portfolio_ai, program_id)?;
+            if cranker_portfolio_ai.key == portfolio_ai.key {
+                cranker_is_same_portfolio = true;
+            } else {
+                let cranker_portfolio =
+                    state::read_portfolio_boxed(&cranker_portfolio_ai.try_borrow_data()?)?;
+                expect_portfolio_account_key(cranker_portfolio.as_ref(), cranker_portfolio_ai.key)?;
+                group
+                    .validate_account_shape(cranker_portfolio.as_ref())
+                    .map_err(map_v16_error)?;
+                cranker_portfolio_state = Some((cranker_portfolio_ai, cranker_portfolio));
+            }
+        }
 
-        group
+        let charged = group
             .sync_account_fee_to_slot_not_atomic(
                 portfolio.as_mut(),
                 authenticated_now_slot,
                 cfg.maintenance_fee_per_slot,
             )
             .map_err(map_v16_error)?;
+        let cranker_reward = if cranker_is_same_portfolio || cranker_portfolio_state.is_some() {
+            charged
+                .checked_mul(cfg.maintenance_cranker_fee_share_bps as u128)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?
+                / 10_000
+        } else {
+            0
+        };
+        if cranker_reward != 0 {
+            // SyncMaintenanceFee first uses the engine's loss-senior fee path,
+            // which books charged maintenance into insurance. If a Percolator
+            // cranker portfolio is supplied, the configured share is reclassed
+            // from that newly-collected insurance into cranker capital without
+            // touching SPL custody. The unsplit insurance portion is still real
+            // even when the cranker portfolio is the same as the fee payer.
+            group.insurance = group
+                .insurance
+                .checked_sub(cranker_reward)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            group.c_tot = group
+                .c_tot
+                .checked_add(cranker_reward)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            if cranker_is_same_portfolio {
+                portfolio.capital = portfolio
+                    .capital
+                    .checked_add(cranker_reward)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                portfolio.health_cert.valid = false;
+            } else if let Some((_, cranker_portfolio)) = cranker_portfolio_state.as_mut() {
+                cranker_portfolio.capital = cranker_portfolio
+                    .capital
+                    .checked_add(cranker_reward)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                cranker_portfolio.health_cert.valid = false;
+            }
+            group.assert_public_invariants().map_err(map_v16_error)?;
+        }
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())?;
-        state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())
+        state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())?;
+        if let Some((cranker_portfolio_ai, cranker_portfolio)) = cranker_portfolio_state.as_ref() {
+            state::write_portfolio(
+                &mut cranker_portfolio_ai.try_borrow_mut_data()?,
+                cranker_portfolio.as_ref(),
+            )?;
+        }
+        Ok(())
     }
 
     #[inline(never)]
@@ -4397,6 +4484,28 @@ pub mod processor {
             return Err(PercolatorError::Unauthorized.into());
         }
         cfg.liquidation_cranker_fee_share_bps = cranker_share_bps;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+    }
+
+    #[inline(never)]
+    fn handle_update_maintenance_fee_policy<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        cranker_share_bps: u16,
+    ) -> ProgramResult {
+        let admin = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        expect_signer(admin)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+        if cranker_share_bps > 10_000 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let (mut cfg, group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        if cfg.admin != admin.key.to_bytes() {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        cfg.maintenance_cranker_fee_share_bps = cranker_share_bps;
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
     }
 

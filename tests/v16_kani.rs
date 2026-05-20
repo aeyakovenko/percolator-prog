@@ -539,6 +539,22 @@ fn kani_v16_update_liquidation_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_update_maintenance_fee_policy_decode_preserves_wire_fields() {
+    let cranker_share_bps: u16 = kani::any();
+
+    let mut data = [0u8; 3];
+    data[0] = 49;
+    data[1..3].copy_from_slice(&cranker_share_bps.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: got,
+        } => assert_eq!(got, cranker_share_bps),
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
 fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
     let stale_slots_raw: u16 = kani::any();
     let delay_raw: u16 = kani::any();
@@ -863,6 +879,13 @@ fn kani_v16_every_active_payload_rejects_trailing_byte() {
     update_liquidation.push(extra);
     assert!(Instruction::decode(&update_liquidation).is_err());
 
+    let mut update_maintenance = Instruction::UpdateMaintenanceFeePolicy {
+        cranker_share_bps: 4_000,
+    }
+    .encode();
+    update_maintenance.push(extra);
+    assert!(Instruction::decode(&update_maintenance).is_err());
+
     let mut configure_permissionless = Instruction::ConfigurePermissionlessResolve {
         stale_slots: 5,
         force_close_delay_slots: 1,
@@ -1008,6 +1031,7 @@ fn kani_v16_unknown_or_truncated_tags_reject() {
     kani::assume(tag != 46);
     kani::assume(tag != 47);
     kani::assume(tag != 48);
+    kani::assume(tag != 49);
     assert!(Instruction::decode(&[tag]).is_err());
 
     let deposit_tag_only = [3u8];

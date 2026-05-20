@@ -554,6 +554,18 @@ fn sync_maintenance_fee(
     )
 }
 
+fn sync_maintenance_fee_with_cranker(
+    market: &mut TestAccount,
+    portfolio: &mut TestAccount,
+    cranker: &mut TestAccount,
+    now_slot: u64,
+) -> Result<(), ProgramError> {
+    run_ix(
+        Instruction::SyncMaintenanceFee { now_slot },
+        &mut [market, portfolio, cranker],
+    )
+}
+
 fn deposit(
     owner: &mut TestAccount,
     market: &mut TestAccount,
@@ -872,6 +884,178 @@ fn v16_wrapper_maintenance_fee_is_permissionless_and_capital_capped() {
     assert_eq!(account.last_fee_slot, 2);
     assert_eq!(group.insurance, 75);
     assert_eq!(group.c_tot, 0);
+}
+
+#[test]
+fn v16_wrapper_maintenance_fee_policy_splits_optional_cranker_share() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut payer_owner = signer();
+    let mut cranker_owner = signer();
+    let mut payer = portfolio_account();
+    let mut cranker = portfolio_account();
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *maintenance_fee_per_slot = 5;
+            }
+        }),
+    );
+    init_portfolio(&mut payer_owner, &mut market, &mut payer);
+    init_portfolio(&mut cranker_owner, &mut market, &mut cranker);
+    deposit(&mut payer_owner, &mut market, &mut payer, 100);
+    run_ix(
+        Instruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 4_000,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    sync_maintenance_fee_with_cranker(&mut market, &mut payer, &mut cranker, 10).unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let payer = state::read_portfolio(&payer.data).unwrap();
+    let cranker = state::read_portfolio(&cranker.data).unwrap();
+    assert_eq!(payer.capital, 50);
+    assert_eq!(payer.last_fee_slot, 10);
+    assert_eq!(cranker.capital, 20);
+    assert_eq!(
+        group.insurance, 30,
+        "the configured cranker share is split out and the remaining maintenance fee stays in insurance"
+    );
+    assert_eq!(group.c_tot, 70);
+    assert_eq!(group.vault, 100);
+}
+
+#[test]
+fn v16_wrapper_maintenance_fee_reward_account_absent_keeps_full_fee_in_insurance() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *maintenance_fee_per_slot = 5;
+            }
+        }),
+    );
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 100);
+    run_ix(
+        Instruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 4_000,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    sync_maintenance_fee(&mut market, &mut portfolio, 10).unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(account.capital, 50);
+    assert_eq!(group.insurance, 50);
+    assert_eq!(
+        group.c_tot, 50,
+        "no optional cranker account means no internal cranker reward is minted"
+    );
+}
+
+#[test]
+fn v16_wrapper_maintenance_fee_same_cranker_key_still_leaves_insurance_share() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *maintenance_fee_per_slot = 5;
+            }
+        }),
+    );
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 100);
+    run_ix(
+        Instruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 4_000,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let mut duplicate_same_key = portfolio_account();
+    duplicate_same_key.key = portfolio.key;
+    sync_maintenance_fee_with_cranker(&mut market, &mut portfolio, &mut duplicate_same_key, 10)
+        .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(
+        account.capital, 70,
+        "same-key cranker receives only the configured reward share after paying the full fee"
+    );
+    assert_eq!(
+        group.insurance, 30,
+        "same-key reward is not a noop because the unsplit insurance share remains collected"
+    );
+    assert_eq!(group.c_tot, 70);
+    assert_eq!(group.vault, 100);
+}
+
+#[test]
+fn v16_wrapper_maintenance_fee_policy_is_admin_gated_and_bounds_share() {
+    let mut admin = signer();
+    let mut attacker = signer();
+    let mut market = market_account();
+    init_market(&mut admin, &mut market);
+    let before = market.data.clone();
+
+    let rejected = run_ix(
+        Instruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 10_001,
+        },
+        &mut [&mut admin, &mut market],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before);
+
+    let rejected = run_ix(
+        Instruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 4_000,
+        },
+        &mut [&mut attacker, &mut market],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before);
+
+    run_ix(
+        Instruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 4_000,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.maintenance_cranker_fee_share_bps, 4_000);
 }
 
 #[test]
@@ -2592,6 +2776,13 @@ fn v16_wrapper_raw_wrapper_config_invalid_values_fail_closed() {
     assert_bad_cfg(
         bad_reward,
         "corrupt liquidation reward share must not be trusted on read",
+    );
+
+    let mut bad_maintenance_reward = cfg;
+    bad_maintenance_reward.maintenance_cranker_fee_share_bps = 10_001;
+    assert_bad_cfg(
+        bad_maintenance_reward,
+        "corrupt maintenance reward share must not be trusted on read",
     );
 
     let mut bad_oracle_mode = cfg;

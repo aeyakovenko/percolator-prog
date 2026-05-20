@@ -168,6 +168,7 @@ This section describes intent and operational ordering, not argument-by-argument
 - **SyncMaintenanceFee** (tag 48)
   - permissionless per-portfolio maintenance-fee realization for the supplied portfolio account
   - charges `maintenance_fee_per_slot * elapsed_slots`, capped by remaining capital, into insurance after engine-side loss settlement
+  - optional final account: a writable Percolator cranker portfolio can receive `maintenance_cranker_fee_share_bps` of the fee as internal account capital. If omitted, or if the configured share is zero, the full fee remains in insurance. If the cranker portfolio is the same key as the fee payer, the unsplit insurance share is still collected.
   - live nonflat accounts are anchored to the loss-accrued market slot, so fees cannot run ahead of settled losses
   - the rate is configured at `InitMarket` in collateral atoms per slot; a "$0.50 per 24h" anti-dust policy is an operator/client conversion from collateral atoms per day to atoms per expected slot
 - **FinalizeResetSide** (tag 45)
