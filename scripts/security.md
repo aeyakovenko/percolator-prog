@@ -1,5 +1,57 @@
 # Security findings — 2026-05-20 v16 all-public-API sweep
 
+## Tenth pass — empty-asset oracle configuration vs group loss anchor
+
+**Status:** fixed. I found one wrapper-level cross-asset accounting bug while
+re-walking the market-authority/oracle surfaces.
+
+Regression coverage:
+
+```bash
+cargo test --release --test v16_wrapper \
+  v16_wrapper_configuring_empty_asset_does_not_advance_other_asset_fee_anchor \
+  -- --test-threads=1 --nocapture
+```
+
+**Attacker/UX model:** a market group has asset `0` with live open interest,
+while an operator configures asset `1` before it has positions. Dynamic asset
+setup should be allowed; it must not declare unrelated exposed assets
+loss-current.
+
+**Original issue:** `ConfigureHybridOracle` and `ConfigureHyperpMark` only
+checked that the selected asset was empty. They then set both:
+
+```text
+group.current_slot = authenticated_slot
+group.slot_last = authenticated_slot
+```
+
+Because recurring maintenance fees on nonflat accounts use `group.slot_last` as
+the loss-safe anchor, configuring an empty asset could let a later
+`SyncMaintenanceFee` charge an asset-0 position up to the new slot before
+asset 0 had made its own oracle/funding progress.
+
+**Fix invariant:**
+
+```text
+Configuring an empty asset:
+  may initialize that asset's raw/effective/funding price and asset slot;
+  may advance group.current_slot for authenticated-time monotonicity;
+  may advance group.slot_last only when the entire group has no position or
+    loss state.
+
+If any configured asset has OI, stale state, B/loss state, stress, h-lock, or
+recovery active, the group-wide loss-safe fee anchor is preserved.
+```
+
+The retained test covers both `ConfigureHyperpMark` and `ConfigureHybridOracle`
+on an empty nonzero asset while asset `0` has open OI, then proves a
+permissionless fee sync cannot charge that nonflat asset against the newly
+configured slot.
+
+**Disposition:** `PASS_SAFE` after fix. Dynamic setup of unused assets remains
+available, but it no longer mutates the loss anchor for other assets.
+
 ## Ninth pass — every v16 wrapper instruction surface
 
 **Status:** `PASS_SAFE`. I re-enumerated the `Instruction` decoder and the

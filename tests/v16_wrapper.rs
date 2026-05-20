@@ -6247,6 +6247,122 @@ fn v16_wrapper_configure_hybrid_oracle_rejects_after_positions_enter_market() {
 }
 
 #[test]
+fn v16_wrapper_configuring_empty_asset_does_not_advance_other_asset_fee_anchor() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 2;
+                *maintenance_fee_per_slot = 1;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+
+    let (_, before_configure) = state::read_market(&market.data).unwrap();
+    assert_eq!(before_configure.slot_last, 0);
+    assert_ne!(
+        before_configure.assets[0].oi_eff_long_q, 0,
+        "asset 0 must be exposed for this regression"
+    );
+    assert_eq!(
+        before_configure.assets[1].oi_eff_long_q, 0,
+        "asset 1 must be empty so oracle reconfiguration remains allowed"
+    );
+
+    run_ix(
+        Instruction::ConfigureHyperpMark {
+            asset_index: 1,
+            now_slot: 100,
+            initial_mark_e6: 250,
+            mark_ewma_halflife_slots: 10,
+            mark_min_fee: 0,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    let (_, after_configure) = state::read_market(&market.data).unwrap();
+    assert_eq!(after_configure.current_slot, 100);
+    assert_eq!(after_configure.assets[1].effective_price, 250);
+    assert_eq!(
+        after_configure.slot_last, 0,
+        "configuring an empty asset must not declare other exposed assets loss-current"
+    );
+
+    let feeds = [[0xe1u8; 32], [0xe2u8; 32], [0xe3u8; 32]];
+    let mut leg0 = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 1_000);
+    let mut leg1 = pyth_account(&feeds[1], 150_000_000, -6, 1, 1_000);
+    let mut leg2 = pyth_account(&feeds[2], 200_000_000, -6, 1, 1_000);
+    run_ix(
+        Instruction::ConfigureHybridOracle {
+            asset_index: 1,
+            now_slot: 101,
+            now_unix_ts: 1_000,
+            oracle_leg_count: 3,
+            oracle_leg_flags: ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 10,
+            mark_ewma_halflife_slots: 10,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: feeds,
+        },
+        &mut [&mut admin, &mut market, &mut leg0, &mut leg1, &mut leg2],
+    )
+    .unwrap();
+    let (_, after_hybrid_configure) = state::read_market(&market.data).unwrap();
+    assert_eq!(after_hybrid_configure.current_slot, 101);
+    assert_eq!(
+        after_hybrid_configure.slot_last, 0,
+        "hybrid configuration of an empty asset must preserve the same group loss anchor"
+    );
+
+    let insurance_before_fee = after_hybrid_configure.insurance;
+    sync_maintenance_fee(&mut market, &mut long_account, 101).unwrap();
+    let (_, after_fee) = state::read_market(&market.data).unwrap();
+    let long_after_fee = state::read_portfolio(&long_account.data).unwrap();
+    assert_eq!(
+        after_fee.insurance, insurance_before_fee,
+        "maintenance fees on a nonflat account are loss-safe only up to the unchanged global anchor"
+    );
+    assert_eq!(long_after_fee.last_fee_slot, 0);
+}
+
+#[test]
 fn v16_wrapper_hybrid_fresh_crank_tracks_external_composite_then_after_hours_trade_moves_mark() {
     let mut admin = signer();
     let mut market = market_account();

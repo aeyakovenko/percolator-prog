@@ -4516,6 +4516,7 @@ pub mod processor {
             return Err(PercolatorError::EngineLockActive.into());
         }
         require_asset_active_for_oracle_reconfiguration(group.as_ref(), asset_index_usize)?;
+        let group_had_position_or_loss_state = group_has_position_or_loss_state(group.as_ref());
 
         let mut profile = state::AssetOracleProfileV16 {
             oracle_mode: constants::ORACLE_MODE_HYBRID_AFTER_HOURS,
@@ -4555,6 +4556,7 @@ pub mod processor {
         group.assets[asset_index_usize].raw_oracle_target_price = price;
         group.assets[asset_index_usize].effective_price = price;
         group.assets[asset_index_usize].fund_px_last = price;
+        group.assets[asset_index_usize].slot_last = authenticated_slot;
         cfg.last_good_oracle_slot = core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
         if asset_index_usize == 0 {
             cfg.oracle_mode = profile.oracle_mode;
@@ -4576,7 +4578,11 @@ pub mod processor {
             cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
         }
         group.current_slot = authenticated_slot;
-        group.slot_last = authenticated_slot;
+        // `slot_last` is the group-wide loss-safe fee anchor; do not make
+        // unrelated exposed assets fee-current while configuring one empty slot.
+        if !group_had_position_or_loss_state {
+            group.slot_last = authenticated_slot;
+        }
         group.assert_public_invariants().map_err(map_v16_error)?;
         let mut data = market_ai.try_borrow_mut_data()?;
         state::write_market(&mut data, &cfg, group.as_ref())?;
@@ -4617,6 +4623,7 @@ pub mod processor {
             return Err(PercolatorError::EngineLockActive.into());
         }
         require_asset_active_for_oracle_reconfiguration(group.as_ref(), asset_index_usize)?;
+        let group_had_position_or_loss_state = group_has_position_or_loss_state(group.as_ref());
 
         let profile = state::AssetOracleProfileV16 {
             oracle_mode: constants::ORACLE_MODE_HYPERP,
@@ -4643,6 +4650,7 @@ pub mod processor {
         group.assets[asset_index_usize].raw_oracle_target_price = initial_mark_e6;
         group.assets[asset_index_usize].effective_price = initial_mark_e6;
         group.assets[asset_index_usize].fund_px_last = initial_mark_e6;
+        group.assets[asset_index_usize].slot_last = authenticated_slot;
         cfg.last_good_oracle_slot = core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
         if asset_index_usize == 0 {
             cfg.oracle_mode = profile.oracle_mode;
@@ -4664,7 +4672,11 @@ pub mod processor {
             cfg.oracle_leg_publish_times = [0i64; constants::ORACLE_LEG_CAP];
         }
         group.current_slot = authenticated_slot;
-        group.slot_last = authenticated_slot;
+        // `slot_last` is the group-wide loss-safe fee anchor; do not make
+        // unrelated exposed assets fee-current while configuring one empty slot.
+        if !group_had_position_or_loss_state {
+            group.slot_last = authenticated_slot;
+        }
         group.assert_public_invariants().map_err(map_v16_error)?;
         let mut data = market_ai.try_borrow_mut_data()?;
         state::write_market(&mut data, &cfg, group.as_ref())?;
@@ -5477,8 +5489,8 @@ pub mod processor {
         }
     }
 
-    fn asset_has_position_or_loss_state(group: &MarketGroupV16, asset_index: usize) -> bool {
-        if group.pnl_pos_tot != 0
+    fn group_has_global_loss_state(group: &MarketGroupV16) -> bool {
+        group.pnl_pos_tot != 0
             || group.stale_certificate_count != 0
             || group.b_stale_account_count != 0
             || group.negative_pnl_account_count != 0
@@ -5486,8 +5498,10 @@ pub mod processor {
             || group.threshold_stress_active
             || group.loss_stale_active
             || group.recovery_reason.is_some()
-            || asset_index >= group.config.max_market_slots as usize
-        {
+    }
+
+    fn asset_local_has_position_or_loss_state(group: &MarketGroupV16, asset_index: usize) -> bool {
+        if asset_index >= group.config.max_market_slots as usize {
             return true;
         }
         let asset = group.assets[asset_index];
@@ -5511,6 +5525,26 @@ pub mod processor {
             || asset.explicit_unallocated_loss_short != 0
             || asset.mode_long != SideModeV16::Normal
             || asset.mode_short != SideModeV16::Normal
+    }
+
+    fn asset_has_position_or_loss_state(group: &MarketGroupV16, asset_index: usize) -> bool {
+        group_has_global_loss_state(group)
+            || asset_local_has_position_or_loss_state(group, asset_index)
+    }
+
+    fn group_has_position_or_loss_state(group: &MarketGroupV16) -> bool {
+        if group_has_global_loss_state(group) {
+            return true;
+        }
+        let n = group.config.max_market_slots as usize;
+        let mut i = 0;
+        while i < n {
+            if asset_local_has_position_or_loss_state(group, i) {
+                return true;
+            }
+            i += 1;
+        }
+        false
     }
 
     fn trade_notional_floor(size_q: u128, price: u64) -> Result<u128, ProgramError> {
