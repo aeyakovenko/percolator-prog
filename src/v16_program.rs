@@ -10,13 +10,14 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use percolator::{
-    AssetLifecycleV16, AssetStateV16, BackingBucketV16, CloseProgressLedgerV16, HealthCertV16,
-    InsuranceCreditReservationV16, MarketGroupV16, MarketModeV16, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16,
-    PortfolioLegV16, ProvenanceHeaderV16, RebalanceRequestV16, ResolvedCloseOutcomeV16,
-    ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16, SideV16, SourceCreditStateV16,
-    TradeOutcomeV16, TradeRequestV16, V16Config, V16Error, V16Result, BOUND_SCALE,
-    V16_DOMAIN_COUNT, V16_MAX_MARKET_SLOTS_N, V16_MAX_PORTFOLIO_ASSETS_N,
+    AssetLifecycleV16, AssetStateV16, BackingBucketStatusV16, BackingBucketV16,
+    CloseProgressLedgerV16, HealthCertV16, InsuranceCreditReservationV16, MarketGroupV16,
+    MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16, PortfolioLegV16, ProvenanceHeaderV16,
+    RebalanceRequestV16, ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16,
+    ResolvedPayoutReceiptV16, SideModeV16, SideV16, SourceCreditStateV16, TradeOutcomeV16,
+    TradeRequestV16, V16Config, V16Error, V16Result, BOUND_SCALE, V16_DOMAIN_COUNT,
+    V16_MAX_MARKET_SLOTS_N, V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use solana_program::{
     account_info::AccountInfo,
@@ -48,6 +49,43 @@ pub mod constants {
     pub const ASSET_ORACLE_PROFILES_LEN: usize = ASSET_ORACLE_PROFILE_LEN * V16_MAX_MARKET_SLOTS_N;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16Account>();
     pub const PORTFOLIO_STATE_LEN: usize = size_of::<PortfolioAccountV16Account>();
+    // Runtime engine layout guards for the unsafe heap constructors below.
+    // These are deliberately literal values for the pinned engine revision. If
+    // an engine bump changes MarketGroupV16 or PortfolioAccountV16, compilation
+    // must fail until new_market_group_boxed / new_portfolio_boxed and the
+    // wire materializers are audited field-for-field.
+    #[cfg(not(target_os = "solana"))]
+    pub const MARKET_GROUP_RUNTIME_LEN: usize = 84_624;
+    #[cfg(target_os = "solana")]
+    pub const MARKET_GROUP_RUNTIME_LEN: usize = 80_496;
+    #[cfg(not(target_os = "solana"))]
+    pub const MARKET_GROUP_RUNTIME_ALIGN: usize = 16;
+    #[cfg(target_os = "solana")]
+    pub const MARKET_GROUP_RUNTIME_ALIGN: usize = 8;
+    #[cfg(not(target_os = "solana"))]
+    pub const MARKET_GROUP_RUNTIME_MODE_OFF: usize = 84_468;
+    #[cfg(target_os = "solana")]
+    pub const MARKET_GROUP_RUNTIME_MODE_OFF: usize = 80_348;
+    #[cfg(not(target_os = "solana"))]
+    pub const MARKET_GROUP_RUNTIME_RESOLVED_LEDGER_OFF: usize = 84_528;
+    #[cfg(target_os = "solana")]
+    pub const MARKET_GROUP_RUNTIME_RESOLVED_LEDGER_OFF: usize = 80_400;
+    #[cfg(not(target_os = "solana"))]
+    pub const PORTFOLIO_RUNTIME_LEN: usize = 22_960;
+    #[cfg(target_os = "solana")]
+    pub const PORTFOLIO_RUNTIME_LEN: usize = 22_664;
+    #[cfg(not(target_os = "solana"))]
+    pub const PORTFOLIO_RUNTIME_ALIGN: usize = 16;
+    #[cfg(target_os = "solana")]
+    pub const PORTFOLIO_RUNTIME_ALIGN: usize = 8;
+    #[cfg(not(target_os = "solana"))]
+    pub const PORTFOLIO_RUNTIME_LAST_FEE_SLOT_OFF: usize = 19_680;
+    #[cfg(target_os = "solana")]
+    pub const PORTFOLIO_RUNTIME_LAST_FEE_SLOT_OFF: usize = 19_672;
+    #[cfg(not(target_os = "solana"))]
+    pub const PORTFOLIO_RUNTIME_RESOLVED_RECEIPT_OFF: usize = 22_864;
+    #[cfg(target_os = "solana")]
+    pub const PORTFOLIO_RUNTIME_RESOLVED_RECEIPT_OFF: usize = 22_584;
     pub const ASSET_ORACLE_PROFILES_OFF: usize = HEADER_LEN + WRAPPER_CONFIG_LEN;
     pub const MARKET_GROUP_OFF: usize = ASSET_ORACLE_PROFILES_OFF + ASSET_ORACLE_PROFILES_LEN;
     pub const MARKET_ACCOUNT_LEN: usize = MARKET_GROUP_OFF + MARKET_GROUP_LEN;
@@ -73,6 +111,28 @@ pub mod constants {
     // envelope. Additional markets remain usable through separate portfolios.
     pub const WRAPPER_MAX_PORTFOLIO_ASSETS: u16 = 14;
 }
+
+const _: () = {
+    assert!(core::mem::size_of::<MarketGroupV16>() == constants::MARKET_GROUP_RUNTIME_LEN);
+    assert!(core::mem::align_of::<MarketGroupV16>() == constants::MARKET_GROUP_RUNTIME_ALIGN);
+    assert!(
+        core::mem::offset_of!(MarketGroupV16, mode) == constants::MARKET_GROUP_RUNTIME_MODE_OFF
+    );
+    assert!(
+        core::mem::offset_of!(MarketGroupV16, resolved_payout_ledger)
+            == constants::MARKET_GROUP_RUNTIME_RESOLVED_LEDGER_OFF
+    );
+    assert!(core::mem::size_of::<PortfolioAccountV16>() == constants::PORTFOLIO_RUNTIME_LEN);
+    assert!(core::mem::align_of::<PortfolioAccountV16>() == constants::PORTFOLIO_RUNTIME_ALIGN);
+    assert!(
+        core::mem::offset_of!(PortfolioAccountV16, last_fee_slot)
+            == constants::PORTFOLIO_RUNTIME_LAST_FEE_SLOT_OFF
+    );
+    assert!(
+        core::mem::offset_of!(PortfolioAccountV16, resolved_payout_receipt)
+            == constants::PORTFOLIO_RUNTIME_RESOLVED_RECEIPT_OFF
+    );
+};
 
 pub mod error {
     use percolator::V16Error;
@@ -303,11 +363,13 @@ pub mod state {
 
     #[inline]
     fn validate_wrapper_config(config: &WrapperConfigV16) -> Result<(), ProgramError> {
-        if config.insurance_withdraw_max_bps > 10_000
-            || config.liquidation_cranker_fee_share_bps > 10_000
+        if !insurance_withdraw_policy_shape_ok(
+            config.insurance_withdraw_max_bps,
+            config.insurance_withdraw_deposits_only,
+            config.insurance_withdraw_cooldown_slots,
+        ) || config.liquidation_cranker_fee_share_bps > 10_000
             || config.maintenance_cranker_fee_share_bps > 10_000
             || config.conf_filter_bps > 10_000
-            || config.insurance_withdraw_deposits_only > 1
             || config.invert > 1
             || config._padding_fee_policy != 0
             || config._padding0 != 0
@@ -362,6 +424,21 @@ pub mod state {
         }
 
         Ok(())
+    }
+
+    #[inline]
+    pub(super) fn insurance_withdraw_policy_shape_ok(
+        max_bps: u16,
+        deposits_only: u8,
+        cooldown_slots: u64,
+    ) -> bool {
+        if max_bps > 10_000 || deposits_only > 1 {
+            return false;
+        }
+        if max_bps == 0 || deposits_only != 0 {
+            return true;
+        }
+        max_bps < 10_000 && cooldown_slots != 0
     }
 
     #[inline]
@@ -1235,6 +1312,10 @@ pub mod ix {
             amount: u128,
             expiry_slot: u64,
         },
+        WithdrawBackingBucket {
+            domain: u8,
+            amount: u128,
+        },
         ConvertReleasedPnl {
             amount: u128,
         },
@@ -1394,6 +1475,10 @@ pub mod ix {
                     domain: read_u8(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                     expiry_slot: read_u64(&mut rest)?,
+                },
+                50 => Self::WithdrawBackingBucket {
+                    domain: read_u8(&mut rest)?,
+                    amount: read_u128(&mut rest)?,
                 },
                 28 => Self::ConvertReleasedPnl {
                     amount: read_u128(&mut rest)?,
@@ -1615,6 +1700,11 @@ pub mod ix {
                     out.push(domain);
                     push_u128(&mut out, amount);
                     push_u64(&mut out, expiry_slot);
+                }
+                Self::WithdrawBackingBucket { domain, amount } => {
+                    out.push(50);
+                    out.push(domain);
+                    push_u128(&mut out, amount);
                 }
                 Self::ConvertReleasedPnl { amount } => {
                     out.push(28);
@@ -2927,6 +3017,9 @@ pub mod processor {
                 amount,
                 expiry_slot,
             } => handle_top_up_backing_bucket(program_id, accounts, domain, amount, expiry_slot),
+            Instruction::WithdrawBackingBucket { domain, amount } => {
+                handle_withdraw_backing_bucket(program_id, accounts, domain, amount)
+            }
             Instruction::ConvertReleasedPnl { amount } => {
                 handle_convert_released_pnl(program_id, accounts, amount)
             }
@@ -3142,7 +3235,7 @@ pub mod processor {
             asset_authority: admin.key.to_bytes(),
             hyperp_mark_authority: admin.key.to_bytes(),
             insurance_withdraw_deposit_remaining: 0,
-            insurance_withdraw_max_bps: 10_000,
+            insurance_withdraw_max_bps: 0,
             liquidation_cranker_fee_share_bps: 0,
             maintenance_cranker_fee_share_bps: 0,
             _padding_fee_policy: 0,
@@ -3687,9 +3780,7 @@ pub mod processor {
         if group.mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        if cfg.insurance_authority != signer.key.to_bytes() {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_live_authority(&cfg.insurance_authority, signer.key)?;
         let mint = Pubkey::new_from_array(cfg.collateral_mint);
         let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
         verify_user_token_account(source_token, signer.key, &mint)?;
@@ -3738,9 +3829,7 @@ pub mod processor {
         if group.mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        if cfg.backing_bucket_authority != signer.key.to_bytes() {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_live_authority(&cfg.backing_bucket_authority, signer.key)?;
         let mint = Pubkey::new_from_array(cfg.collateral_mint);
         let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
         verify_user_token_account(source_token, signer.key, &mint)?;
@@ -3769,6 +3858,125 @@ pub mod processor {
     }
 
     #[inline(never)]
+    fn handle_withdraw_backing_bucket<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        domain: u8,
+        amount: u128,
+    ) -> ProgramResult {
+        let authority = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let dest_token = account(accounts, 2)?;
+        let vault_token = account(accounts, 3)?;
+        let vault_authority_ai = account(accounts, 4)?;
+        let token_program = account(accounts, 5)?;
+        expect_signer(authority)?;
+        expect_writable(market_ai)?;
+        expect_writable(dest_token)?;
+        expect_writable(vault_token)?;
+        expect_owner(market_ai, program_id)?;
+        verify_token_program(token_program)?;
+        if amount == 0 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+
+        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        expect_live_authority(&cfg.backing_bucket_authority, authority.key)?;
+        match group.mode {
+            MarketModeV16::Live => {
+                reject_permissionless_resolve_matured_live(&cfg, group.as_ref())?;
+                if group.bankruptcy_hlock_active
+                    || group.threshold_stress_active
+                    || group.loss_stale_active
+                    || group.recovery_reason.is_some()
+                {
+                    return Err(PercolatorError::EngineLockActive.into());
+                }
+            }
+            MarketModeV16::Resolved => {
+                if group.materialized_portfolio_count != 0 || group.c_tot != 0 {
+                    return Err(PercolatorError::EngineLockActive.into());
+                }
+            }
+            MarketModeV16::Recovery => return Err(PercolatorError::EngineLockActive.into()),
+        }
+
+        let domain = domain as usize;
+        if domain >= V16_DOMAIN_COUNT {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        group.assert_public_invariants().map_err(map_v16_error)?;
+        let backing_num = amount
+            .checked_mul(BOUND_SCALE)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let source = group.source_credit[domain];
+        let bucket = group.source_backing_buckets[domain];
+        if source.positive_claim_bound_num != 0
+            || source.exact_positive_claim_num != 0
+            || bucket.status != BackingBucketStatusV16::Fresh
+            || bucket.fresh_unliened_backing_num < backing_num
+            || source.fresh_reserved_backing_num < backing_num
+            || amount > group.vault
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+
+        {
+            let bucket = &mut group.source_backing_buckets[domain];
+            bucket.fresh_unliened_backing_num -= backing_num;
+            if bucket.fresh_unliened_backing_num == 0 && bucket.valid_liened_backing_num == 0 {
+                if bucket.impaired_liened_backing_num != 0 {
+                    bucket.status = BackingBucketStatusV16::Impaired;
+                } else if bucket.consumed_liened_backing_num != 0 {
+                    bucket.status = BackingBucketStatusV16::Expired;
+                } else {
+                    bucket.status = BackingBucketStatusV16::Empty;
+                    bucket.expiry_slot = 0;
+                }
+            }
+        }
+        group.source_credit[domain].fresh_reserved_backing_num -= backing_num;
+        group.source_credit[domain].credit_rate_num = percolator::CREDIT_RATE_SCALE;
+        group.source_credit[domain].credit_epoch = group.source_credit[domain]
+            .credit_epoch
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        group.risk_epoch = group
+            .risk_epoch
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        group.vault = group
+            .vault
+            .checked_sub(amount)
+            .ok_or(PercolatorError::EngineCounterUnderflow)?;
+        group
+            .reservation_encumbrance_proof_for_domain(domain)
+            .map_err(map_v16_error)?
+            .validate()
+            .map_err(map_v16_error)?;
+        group.assert_public_invariants().map_err(map_v16_error)?;
+
+        let mint = Pubkey::new_from_array(cfg.collateral_mint);
+        let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
+        expect_key(vault_authority_ai, &vault_authority)?;
+        verify_user_token_account(dest_token, authority.key, &mint)?;
+        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+        let amount_u64 = amount_to_u64(amount)?;
+        require_token_balance(vault_token, amount_u64)?;
+        let bump_arr = [bump];
+        let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+        transfer_tokens_signed(
+            token_program,
+            vault_token,
+            dest_token,
+            vault_authority_ai,
+            amount_u64,
+            signer_seeds,
+        )?;
+        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+    }
+
+    #[inline(never)]
     fn handle_withdraw_insurance<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
@@ -3791,9 +3999,7 @@ pub mod processor {
         }
 
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
-        if cfg.insurance_authority != authority.key.to_bytes() {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_live_authority(&cfg.insurance_authority, authority.key)?;
         if group.mode != MarketModeV16::Resolved
             || group.materialized_portfolio_count != 0
             || group.c_tot != 0
@@ -3940,9 +4146,7 @@ pub mod processor {
         }
 
         let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
-        if cfg.insurance_operator != operator.key.to_bytes() {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_live_authority(&cfg.insurance_operator, operator.key)?;
 
         match group.mode {
             MarketModeV16::Live => {
@@ -3955,12 +4159,9 @@ pub mod processor {
                     return Err(PercolatorError::EngineLockActive.into());
                 }
             }
-            MarketModeV16::Resolved => {
-                if group.materialized_portfolio_count != 0 || group.c_tot != 0 {
-                    return Err(PercolatorError::EngineLockActive.into());
-                }
+            MarketModeV16::Resolved | MarketModeV16::Recovery => {
+                return Err(PercolatorError::EngineLockActive.into())
             }
-            MarketModeV16::Recovery => return Err(PercolatorError::EngineLockActive.into()),
         }
 
         let clock_slot = Clock::get().map(|c| c.slot).unwrap_or(group.current_slot);
@@ -4290,33 +4491,23 @@ pub mod processor {
                 cfg.admin = new_pubkey;
             }
             AUTHORITY_HYPERP_MARK => {
-                if cfg.hyperp_mark_authority != current.key.to_bytes() {
-                    return Err(PercolatorError::Unauthorized.into());
-                }
+                expect_live_authority(&cfg.hyperp_mark_authority, current.key)?;
                 cfg.hyperp_mark_authority = new_pubkey;
             }
             AUTHORITY_INSURANCE => {
-                if cfg.insurance_authority != current.key.to_bytes() {
-                    return Err(PercolatorError::Unauthorized.into());
-                }
+                expect_live_authority(&cfg.insurance_authority, current.key)?;
                 cfg.insurance_authority = new_pubkey;
             }
             AUTHORITY_BACKING_BUCKET => {
-                if cfg.backing_bucket_authority != current.key.to_bytes() {
-                    return Err(PercolatorError::Unauthorized.into());
-                }
+                expect_live_authority(&cfg.backing_bucket_authority, current.key)?;
                 cfg.backing_bucket_authority = new_pubkey;
             }
             AUTHORITY_ASSET => {
-                if cfg.asset_authority != current.key.to_bytes() {
-                    return Err(PercolatorError::Unauthorized.into());
-                }
+                expect_live_authority(&cfg.asset_authority, current.key)?;
                 cfg.asset_authority = new_pubkey;
             }
             AUTHORITY_INSURANCE_OPERATOR => {
-                if cfg.insurance_operator != current.key.to_bytes() {
-                    return Err(PercolatorError::Unauthorized.into());
-                }
+                expect_live_authority(&cfg.insurance_operator, current.key)?;
                 cfg.insurance_operator = new_pubkey;
             }
             _ => return Err(PercolatorError::InvalidInstruction.into()),
@@ -4341,9 +4532,7 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
 
         let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
-        if cfg.asset_authority == [0u8; 32] || cfg.asset_authority != authority.key.to_bytes() {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_live_authority(&cfg.asset_authority, authority.key)?;
         if group.mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
@@ -4453,7 +4642,7 @@ pub mod processor {
         expect_signer(admin)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
-        if max_bps > 10_000 || deposits_only > 1 {
+        if !state::insurance_withdraw_policy_shape_ok(max_bps, deposits_only, cooldown_slots) {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let (mut cfg, group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
@@ -4814,11 +5003,10 @@ pub mod processor {
             return Err(PercolatorError::EngineLockActive.into());
         }
         require_asset_mark_pushable(group.as_ref(), asset_index_usize)?;
-        if !oracle_v16::profile_is_hyperp(&profile)
-            || cfg.hyperp_mark_authority != authority.key.to_bytes()
-        {
+        if !oracle_v16::profile_is_hyperp(&profile) {
             return Err(PercolatorError::Unauthorized.into());
         }
+        expect_live_authority(&cfg.hyperp_mark_authority, authority.key)?;
         let authenticated_slot = authenticated_slot_or_fallback(now_slot);
         if authenticated_slot < profile.mark_ewma_last_slot
             || authenticated_slot < group.current_slot

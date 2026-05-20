@@ -194,7 +194,8 @@ This section describes intent and operational ordering, not argument-by-argument
   - gated by `insurance_authority`
   - requires market resolved and all accounts closed
 - **WithdrawInsuranceLimited** (tag 23)
-  - rate-limited insurance withdrawal with immutable per-market caps (`insurance_withdraw_max_bps`, `insurance_withdraw_cooldown_slots`)
+  - disabled by default; admin must explicitly opt in with `UpdateInsurancePolicy`
+  - rate-limited insurance withdrawal with per-market caps (`insurance_withdraw_max_bps`, `insurance_withdraw_cooldown_slots`)
   - gated by `insurance_operator`, which is disjoint from `insurance_authority`
   - live-market only; resolved markets use tag 41
   - rejected while the market is unhealthy, lagged, h-lock/stress-active, or has negative senior residual
@@ -375,6 +376,8 @@ There are two different insurance withdrawal surfaces:
 Live insurance withdrawal is intentionally stricter. It is expected to be allowed only when the live market is flat or loss-current, target/effective-lag-free, stress-free, h-lock-free, and has non-negative senior residual. In other words, live insurance can be withdrawn from an empty or fully healthy market, but not while the insurance fund is still protecting unresolved loss or bankruptcy work.
 
 Deposit-only mode limits live withdrawals to explicit `TopUpInsurance` principal. The default mode can withdraw fee-grown insurance too, but only through the same healthy-market gate.
+
+Non-deposit-only live withdrawal cannot be configured as a single-transaction full drain: nonzero policies require a nonzero cooldown and `max_bps < 10_000`. Deposit-only mode may use `max_bps = 10_000` because it is capped to tracked top-up principal rather than fee-grown insurance.
 
 ### Product intuition
 

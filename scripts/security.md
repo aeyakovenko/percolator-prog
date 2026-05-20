@@ -1,5 +1,75 @@
 # Security findings — 2026-05-20 v16 all-public-API sweep
 
+## Sixteenth pass — live insurance policy default and full-drain cap
+
+**Status:** fixed with TDD. I treated the submitted
+`WithdrawInsuranceLimited` report as untrusted and checked the live policy
+against local v16 code. The report was valid in the non-deposit-only live
+withdrawal lane: init enabled `insurance_withdraw_max_bps = 10_000` with
+`cooldown_slots = 0`, so the configured `insurance_operator` could withdraw the
+entire live insurance balance in one instruction while the market was healthy.
+
+Regression coverage:
+
+```bash
+cargo test --release --test v16_wrapper v16_wrapper_insurance -- --test-threads=1 --nocapture
+cargo test --release --test v16_wrapper withdraw_insurance -- --test-threads=1 --nocapture
+```
+
+Policy now enforced:
+
+- live limited insurance withdrawal is disabled by default
+  (`insurance_withdraw_max_bps = 0`);
+- non-deposit-only live policies must have `max_bps < 10_000` and a nonzero
+  cooldown;
+- deposit-only mode may use `max_bps = 10_000` and zero cooldown because the
+  budget is capped to tracked `TopUpInsurance` principal;
+- `WithdrawInsuranceLimited` is live-only. Resolved terminal insurance uses
+  `WithdrawInsurance` and the `insurance_authority` key.
+
+## Fifteenth pass — backing bucket withdrawal API
+
+**Status:** implemented and `PASS_SAFE` under the live-insurance-withdrawal
+threat model. I added `WithdrawBackingBucket { domain, amount }` as tag `50`
+and swept it as a token-custody and source-credit boundary.
+
+TDD coverage:
+
+```bash
+cargo test --release --test v16_wrapper withdraw_backing_bucket -- --test-threads=1 --nocapture
+```
+
+Regression probes:
+
+- wrong signer cannot withdraw from a backing bucket;
+- zero amount rejects;
+- wrong destination owner, wrong vault authority, and wrong vault mint reject
+  without market mutation;
+- partial withdrawal debits only `fresh_unliened_backing_num`,
+  `source_credit.fresh_reserved_backing_num`, and `group.vault`;
+- over-withdraw rejects;
+- withdrawal rejects while any source claim exists for the domain, preventing
+  dilution of backed positive-PnL claims;
+- withdrawal rejects under the same live stress locks used by limited insurance
+  withdrawal: bankruptcy h-lock, threshold stress, loss-stale, or recovery
+  reason;
+- full clean drain leaves the bucket in `Empty` shape with `expiry_slot = 0`;
+- decode/encode coverage added to the v16 Kani harness for the new tag.
+
+Design boundary:
+
+```text
+Backing withdrawals are not a general protocol-surplus withdrawal. They can
+remove only explicit fresh, unencumbered bucket backing for a source domain.
+If the bucket has already been consumed, impaired, liened to claims, or moved
+out of the fresh bucket shape, the withdrawal path fails closed.
+```
+
+The API intentionally mirrors limited live insurance withdrawal for health and
+custody checks, but it does not reuse the insurance bps/cooldown policy because
+the withdrawable amount is already capped to explicit unencumbered backing
+deposits rather than insurance surplus.
+
 ## Fourteenth pass — Hyperp mark upper-bound enforcement
 
 **Status:** fixed. I treated the submitted Hyperp over-limit mark report as
@@ -323,9 +393,10 @@ Important design dispositions confirmed during this pass:
 - Nonzero asset oracle profiles may refresh global liveness while active or
   drain-only; retired/reactivated slots reset to manual profiles and cannot
   keep stale liveness or inherited EWMA state.
-- `WithdrawInsuranceLimited` is allowed in empty/resolved markets and in
-  healthy live markets only; live withdrawal remains blocked while bankruptcy
-  h-lock, threshold stress, loss-stale, or recovery is active.
+- `WithdrawInsuranceLimited` is live-only and disabled by default; after
+  explicit opt-in it remains blocked while bankruptcy h-lock, threshold stress,
+  loss-stale, or recovery is active. Resolved insurance exits use
+  `WithdrawInsurance`.
 - Keeper liquidation with a cranker reward mirrors the engine's permissionless
   liquidation ordering and only pays from retained liquidation fee growth, not
   from insurance needed for losses.

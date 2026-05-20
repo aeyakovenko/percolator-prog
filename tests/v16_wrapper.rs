@@ -7,9 +7,12 @@ use percolator::{
 use percolator_prog::{
     constants::{
         ASSET_ORACLE_PROFILES_LEN, HEADER_LEN, MARKET_ACCOUNT_LEN, MARKET_GROUP_LEN,
-        ORACLE_LEG_CAP, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
-        ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_HYPERP, ORACLE_MODE_MANUAL,
-        PORTFOLIO_ACCOUNT_LEN, PORTFOLIO_STATE_LEN, WRAPPER_CONFIG_LEN,
+        MARKET_GROUP_RUNTIME_ALIGN, MARKET_GROUP_RUNTIME_LEN, MARKET_GROUP_RUNTIME_MODE_OFF,
+        MARKET_GROUP_RUNTIME_RESOLVED_LEDGER_OFF, ORACLE_LEG_CAP, ORACLE_LEG_FLAG_DIVIDE_LEG2,
+        ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_HYPERP,
+        ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN, PORTFOLIO_RUNTIME_ALIGN,
+        PORTFOLIO_RUNTIME_LAST_FEE_SLOT_OFF, PORTFOLIO_RUNTIME_LEN,
+        PORTFOLIO_RUNTIME_RESOLVED_RECEIPT_OFF, PORTFOLIO_STATE_LEN, WRAPPER_CONFIG_LEN,
     },
     ix::Instruction,
     oracle_v16, policy_v16, processor, state,
@@ -2819,6 +2822,38 @@ fn v16_wrapper_security_sweep_resolved_market_and_fee_branches() {
 #[test]
 fn v16_wrapper_account_layout_constants_match_serialized_state() {
     assert_eq!(
+        MARKET_GROUP_RUNTIME_LEN,
+        core::mem::size_of::<MarketGroupV16>()
+    );
+    assert_eq!(
+        MARKET_GROUP_RUNTIME_ALIGN,
+        core::mem::align_of::<MarketGroupV16>()
+    );
+    assert_eq!(
+        MARKET_GROUP_RUNTIME_MODE_OFF,
+        core::mem::offset_of!(MarketGroupV16, mode)
+    );
+    assert_eq!(
+        MARKET_GROUP_RUNTIME_RESOLVED_LEDGER_OFF,
+        core::mem::offset_of!(MarketGroupV16, resolved_payout_ledger)
+    );
+    assert_eq!(
+        PORTFOLIO_RUNTIME_LEN,
+        core::mem::size_of::<percolator::PortfolioAccountV16>()
+    );
+    assert_eq!(
+        PORTFOLIO_RUNTIME_ALIGN,
+        core::mem::align_of::<percolator::PortfolioAccountV16>()
+    );
+    assert_eq!(
+        PORTFOLIO_RUNTIME_LAST_FEE_SLOT_OFF,
+        core::mem::offset_of!(percolator::PortfolioAccountV16, last_fee_slot)
+    );
+    assert_eq!(
+        PORTFOLIO_RUNTIME_RESOLVED_RECEIPT_OFF,
+        core::mem::offset_of!(percolator::PortfolioAccountV16, resolved_payout_receipt)
+    );
+    assert_eq!(
         MARKET_GROUP_LEN,
         core::mem::size_of::<MarketGroupV16Account>()
     );
@@ -2958,6 +2993,24 @@ fn v16_wrapper_raw_wrapper_config_invalid_values_fail_closed() {
     assert_bad_cfg(
         bad_bool,
         "persistent wrapper booleans must reject invalid byte patterns",
+    );
+
+    let mut bad_live_insurance_policy = cfg;
+    bad_live_insurance_policy.insurance_withdraw_max_bps = 10_000;
+    bad_live_insurance_policy.insurance_withdraw_deposits_only = 0;
+    bad_live_insurance_policy.insurance_withdraw_cooldown_slots = 1;
+    assert_bad_cfg(
+        bad_live_insurance_policy,
+        "non-deposit-only live insurance policy must not persist a full-drain cap",
+    );
+
+    let mut bad_live_insurance_cooldown = cfg;
+    bad_live_insurance_cooldown.insurance_withdraw_max_bps = 5_000;
+    bad_live_insurance_cooldown.insurance_withdraw_deposits_only = 0;
+    bad_live_insurance_cooldown.insurance_withdraw_cooldown_slots = 0;
+    assert_bad_cfg(
+        bad_live_insurance_cooldown,
+        "non-deposit-only live insurance policy must not persist a zero cooldown",
     );
 
     let mut bad_padding = cfg;
@@ -3572,6 +3625,328 @@ fn v16_wrapper_top_up_backing_bucket_uses_separate_authority_and_domain_ledger()
 }
 
 #[test]
+fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut bucket_authority = signer();
+    let mut attacker = signer();
+
+    let mint = init_market(&mut admin, &mut market);
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_BACKING_BUCKET,
+            new_pubkey: bucket_authority.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut bucket_authority, &mut market],
+    )
+    .unwrap();
+
+    let mut source = user_token_account(bucket_authority.key, mint, 100);
+    let mut vault = vault_token_account(&market, mint, 100);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 100,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut bucket_authority,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let (_, after_topup_group) = state::read_market(&market.data).unwrap();
+    let risk_epoch_after_topup = after_topup_group.risk_epoch;
+    let source_epoch_after_topup = after_topup_group.source_credit[1].credit_epoch;
+
+    let topped_up = market.data.clone();
+    let mut attacker_dest = user_token_account(attacker.key, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    let unauthorized = run_ix(
+        Instruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 1,
+        },
+        &mut [
+            &mut attacker,
+            &mut market,
+            &mut attacker_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(unauthorized, &market, &topped_up);
+
+    let mut dest = user_token_account(bucket_authority.key, mint, 0);
+    run_ix(
+        Instruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 40,
+        },
+        &mut [
+            &mut bucket_authority,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.vault, 60);
+    assert_eq!(group.insurance, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(
+        group.risk_epoch,
+        risk_epoch_after_topup + 1,
+        "withdrawing fresh backing changes risk inputs and must stale existing health certificates"
+    );
+    assert_eq!(
+        group.source_credit[1].credit_epoch,
+        source_epoch_after_topup + 1,
+        "backing withdrawal must mirror engine source-credit mutation epoch semantics"
+    );
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num,
+        60 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.source_credit[1].fresh_reserved_backing_num,
+        60 * BOUND_SCALE
+    );
+
+    let before_overdraw = market.data.clone();
+    let overdraw = run_ix(
+        Instruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 61,
+        },
+        &mut [
+            &mut bucket_authority,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(overdraw, &market, &before_overdraw);
+
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group.source_credit[1].positive_claim_bound_num = 60 * BOUND_SCALE;
+        group.source_credit[1].exact_positive_claim_num = 60 * BOUND_SCALE;
+        group.source_credit[1].credit_rate_num = percolator::CREDIT_RATE_SCALE;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+    let claim_backed = market.data.clone();
+    let claim_dilution = run_ix(
+        Instruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 1,
+        },
+        &mut [
+            &mut bucket_authority,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(claim_dilution, &market, &claim_backed);
+}
+
+#[test]
+fn v16_wrapper_withdraw_backing_bucket_rejects_stress_and_allows_full_clean_drain() {
+    let mut admin = signer();
+    let mut market = market_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    let mut source = user_token_account(admin.key, mint, 25);
+    let mut vault = vault_token_account(&market, mint, 25);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 25,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let mut dest = user_token_account(admin.key, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    let zero = run_ix(
+        Instruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 0,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert!(zero.is_err());
+
+    let topped_up = market.data.clone();
+    let stress_cases: &[fn(&mut MarketGroupV16)] = &[
+        |group| group.bankruptcy_hlock_active = true,
+        |group| group.threshold_stress_active = true,
+        |group| group.loss_stale_active = true,
+        |group| group.recovery_reason = Some(PermissionlessRecoveryReasonV16::BelowProgressFloor),
+    ];
+    for set_stress in stress_cases {
+        let (cfg, mut group) = state::read_market(&topped_up).unwrap();
+        set_stress(&mut group);
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+        let stressed = market.data.clone();
+        let stressed_withdraw = run_ix(
+            Instruction::WithdrawBackingBucket {
+                domain: 1,
+                amount: 1,
+            },
+            &mut [
+                &mut admin,
+                &mut market,
+                &mut dest,
+                &mut vault,
+                &mut vault_auth,
+                &mut token_program,
+            ],
+        );
+        assert_err_and_market_unchanged(stressed_withdraw, &market, &stressed);
+    }
+    market.data.copy_from_slice(&topped_up);
+
+    run_ix(
+        Instruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 25,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.source_credit[1].fresh_reserved_backing_num, 0);
+    assert_eq!(
+        group.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Empty
+    );
+    assert_eq!(group.source_backing_buckets[1].expiry_slot, 0);
+}
+
+#[test]
+fn v16_wrapper_withdraw_backing_bucket_rejects_bad_custody_accounts() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mint = init_market(&mut admin, &mut market);
+
+    let mut source = user_token_account(admin.key, mint, 10);
+    let mut vault = vault_token_account(&market, mint, 10);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 10,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let attacker = signer();
+    let mut wrong_dest_owner = user_token_account(attacker.key, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    let before_wrong_dest = market.data.clone();
+    let wrong_dest = run_ix(
+        Instruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 1,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut wrong_dest_owner,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(wrong_dest, &market, &before_wrong_dest);
+
+    let mut dest = user_token_account(admin.key, mint, 0);
+    let mut wrong_vault_auth = signer();
+    let before_wrong_auth = market.data.clone();
+    let wrong_auth = run_ix(
+        Instruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 1,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut wrong_vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(wrong_auth, &market, &before_wrong_auth);
+
+    let wrong_mint = Pubkey::new_unique();
+    let mut wrong_vault = vault_token_account(&market, wrong_mint, 10);
+    let before_wrong_vault = market.data.clone();
+    let wrong_vault_result = run_ix(
+        Instruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 1,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut dest,
+            &mut wrong_vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(wrong_vault_result, &market, &before_wrong_vault);
+}
+
+#[test]
 fn v16_wrapper_source_backed_positive_pnl_converts_from_backing_not_insurance() {
     let mut admin = signer();
     let mut market = market_account();
@@ -3728,6 +4103,104 @@ fn v16_wrapper_insurance_policy_deposit_only_leaves_fee_growth_behind() {
 }
 
 #[test]
+fn v16_wrapper_insurance_withdraw_disabled_by_default() {
+    let mut admin = signer();
+    let mut market = market_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    let mut source = user_token_account(admin.key, mint, 100);
+    let mut vault = vault_token_account(&market, mint, 100);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpInsurance { amount: 100 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        cfg.insurance_withdraw_max_bps, 0,
+        "live limited insurance withdrawal must be explicit opt-in"
+    );
+
+    let mut dest = user_token_account(admin.key, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    let before = market.data.clone();
+    let default_withdraw = run_ix(
+        Instruction::WithdrawInsuranceLimited { amount: 1 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(default_withdraw, &market, &before);
+}
+
+#[test]
+fn v16_wrapper_insurance_policy_rejects_live_unbounded_or_zero_cooldown() {
+    let mut admin = signer();
+    let mut market = market_account();
+    init_market(&mut admin, &mut market);
+
+    let cases = [
+        (
+            Instruction::UpdateInsurancePolicy {
+                max_bps: 10_000,
+                deposits_only: 0,
+                cooldown_slots: 0,
+            },
+            "non-deposit-only full drain with no cooldown",
+        ),
+        (
+            Instruction::UpdateInsurancePolicy {
+                max_bps: 10_000,
+                deposits_only: 0,
+                cooldown_slots: 1,
+            },
+            "non-deposit-only full drain is unbounded even with cooldown",
+        ),
+        (
+            Instruction::UpdateInsurancePolicy {
+                max_bps: 5_000,
+                deposits_only: 0,
+                cooldown_slots: 0,
+            },
+            "non-deposit-only live withdrawal needs a real cooldown",
+        ),
+    ];
+    for (ix, why) in cases {
+        let before = market.data.clone();
+        let err = run_ix(ix, &mut [&mut admin, &mut market]);
+        assert!(
+            err.is_err(),
+            "{} must be rejected for live limited insurance withdrawal",
+            why
+        );
+        assert_eq!(market.data, before);
+    }
+
+    run_ix(
+        Instruction::UpdateInsurancePolicy {
+            max_bps: 5_000,
+            deposits_only: 0,
+            cooldown_slots: 1,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+}
+
+#[test]
 fn v16_wrapper_insurance_policy_enforces_bps_cap_and_cooldown() {
     let mut admin = signer();
     let mut market = market_account();
@@ -3814,6 +4287,15 @@ fn v16_wrapper_withdraw_insurance_requires_operator_and_healthy_market() {
     let mut attacker = signer();
 
     let mint = init_market(&mut admin, &mut market);
+    run_ix(
+        Instruction::UpdateInsurancePolicy {
+            max_bps: 5_000,
+            deposits_only: 0,
+            cooldown_slots: 1,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
     let mut source = user_token_account(admin.key, mint, 100);
     let mut vault = vault_token_account(&market, mint, 100);
     let mut token_program = token_program_account();
@@ -3936,7 +4418,7 @@ fn v16_wrapper_withdraw_insurance_requires_operator_and_healthy_market() {
 }
 
 #[test]
-fn v16_wrapper_withdraw_insurance_uses_rotated_operator_and_terminal_drain() {
+fn v16_wrapper_withdraw_insurance_limited_is_live_only_and_terminal_uses_authority() {
     let mut admin = signer().writable();
     let mut market = market_account();
     let mut operator = signer();
@@ -3948,6 +4430,15 @@ fn v16_wrapper_withdraw_insurance_uses_rotated_operator_and_terminal_drain() {
             new_pubkey: operator.key.to_bytes(),
         },
         &mut [&mut admin, &mut operator, &mut market],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::UpdateInsurancePolicy {
+            max_bps: 10_000,
+            deposits_only: 1,
+            cooldown_slots: 0,
+        },
+        &mut [&mut admin, &mut market],
     )
     .unwrap();
     let mut source = user_token_account(admin.key, mint, 50);
@@ -3983,12 +4474,25 @@ fn v16_wrapper_withdraw_insurance_uses_rotated_operator_and_terminal_drain() {
     assert_err_and_market_unchanged(old_operator, &market, &resolved);
 
     let mut operator_dest = user_token_account(operator.key, mint, 0);
-    run_ix(
+    let operator_terminal = run_ix(
         Instruction::WithdrawInsuranceLimited { amount: 50 },
         &mut [
             &mut operator,
             &mut market,
             &mut operator_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(operator_terminal, &market, &resolved);
+
+    run_ix(
+        Instruction::WithdrawInsurance { amount: 50 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut admin_dest,
             &mut vault,
             &mut vault_auth,
             &mut token_program,
@@ -4118,6 +4622,7 @@ fn v16_wrapper_update_authority_rotates_insurance_keys_and_supports_operator_bur
     let mut market = market_account();
     let mut insurance = signer();
     let mut operator = signer();
+    let mut attacker = signer();
 
     let mint = init_market(&mut admin, &mut market);
     let (cfg, _) = state::read_market(&market.data).unwrap();
@@ -4211,6 +4716,16 @@ fn v16_wrapper_update_authority_rotates_insurance_keys_and_supports_operator_bur
     )
     .unwrap();
     let after_burn = market.data.clone();
+    let mut zero_current = TestAccount::new(Pubkey::default(), Pubkey::new_unique(), 0).signer();
+    let zero_key_cannot_revive = run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_INSURANCE,
+            new_pubkey: attacker.key.to_bytes(),
+        },
+        &mut [&mut zero_current, &mut attacker, &mut market],
+    );
+    assert_err_and_market_unchanged(zero_key_cannot_revive, &market, &after_burn);
+
     let mut dead_src = user_token_account(insurance.key, mint, 1);
     let dead_insurance_auth = run_ix(
         Instruction::TopUpInsurance { amount: 1 },

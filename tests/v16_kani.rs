@@ -267,6 +267,26 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_withdraw_backing_bucket_decode_preserves_wire_fields() {
+    let domain: u8 = kani::any();
+    let amount_raw: u16 = kani::any();
+    let amount = amount_raw as u128;
+
+    let data = Instruction::WithdrawBackingBucket { domain, amount }.encode();
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::WithdrawBackingBucket {
+            domain: got_domain,
+            amount: got_amount,
+        } => {
+            assert_eq!(got_domain, domain);
+            assert_eq!(got_amount, amount);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
 fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
     let action: u8 = kani::any();
     let asset_index: u16 = kani::any();
@@ -738,262 +758,249 @@ fn kani_v16_decode_rejects_trailing_bytes() {
     assert!(Instruction::decode(&data).is_err());
 }
 
+fn assert_rejects_trailing_byte(ix: Instruction, extra: u8) {
+    let mut data = ix.encode();
+    data.push(extra);
+    assert!(Instruction::decode(&data).is_err());
+}
+
 #[kani::proof]
-fn kani_v16_every_active_payload_rejects_trailing_byte() {
+fn kani_v16_init_market_payload_rejects_trailing_byte() {
+    let extra: u8 = kani::any();
+    assert_rejects_trailing_byte(
+        Instruction::InitMarket {
+            max_portfolio_assets: 1,
+            h_min: 1,
+            h_max: 2,
+            initial_price: 100,
+            min_nonzero_mm_req: 1,
+            min_nonzero_im_req: 2,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 1_000,
+            max_trading_fee_bps: 10_000,
+            trade_fee_base_bps: 0,
+            liquidation_fee_bps: 0,
+            liquidation_fee_cap: 0,
+            min_liquidation_abs: 0,
+            max_price_move_bps_per_slot: 100,
+            max_accrual_dt_slots: 10,
+            max_abs_funding_e9_per_slot: 0,
+            min_funding_lifetime_slots: 10,
+            max_account_b_settlement_chunks: 1,
+            max_bankrupt_close_chunks: 1,
+            public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
+            maintenance_fee_per_slot: 0,
+        },
+        extra,
+    );
+}
+
+#[kani::proof]
+fn kani_v16_custody_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
-    let mut init_market = Instruction::InitMarket {
-        max_portfolio_assets: 1,
-        h_min: 1,
-        h_max: 2,
-        initial_price: 100,
-        min_nonzero_mm_req: 1,
-        min_nonzero_im_req: 2,
-        maintenance_margin_bps: 500,
-        initial_margin_bps: 1_000,
-        max_trading_fee_bps: 10_000,
-        trade_fee_base_bps: 0,
-        liquidation_fee_bps: 0,
-        liquidation_fee_cap: 0,
-        min_liquidation_abs: 0,
-        max_price_move_bps_per_slot: 100,
-        max_accrual_dt_slots: 10,
-        max_abs_funding_e9_per_slot: 0,
-        min_funding_lifetime_slots: 10,
-        max_account_b_settlement_chunks: 1,
-        max_bankrupt_close_chunks: 1,
-        public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
-        maintenance_fee_per_slot: 0,
-    }
-    .encode();
-    init_market.push(extra);
-    assert!(Instruction::decode(&init_market).is_err());
+    assert_rejects_trailing_byte(Instruction::InitPortfolio, extra);
+    assert_rejects_trailing_byte(Instruction::Deposit { amount: 1 }, extra);
+    assert_rejects_trailing_byte(Instruction::Withdraw { amount: 1 }, extra);
+    assert_rejects_trailing_byte(Instruction::TopUpInsurance { amount: 1 }, extra);
+    assert_rejects_trailing_byte(
+        Instruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 1,
+            expiry_slot: 10,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 1,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(Instruction::WithdrawInsurance { amount: 1 }, extra);
+    assert_rejects_trailing_byte(Instruction::WithdrawInsuranceLimited { amount: 1 }, extra);
+}
 
-    let mut init_portfolio = Instruction::InitPortfolio.encode();
-    init_portfolio.push(extra);
-    assert!(Instruction::decode(&init_portfolio).is_err());
+#[kani::proof]
+fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
+    let extra: u8 = kani::any();
 
-    let mut deposit = Instruction::Deposit { amount: 1 }.encode();
-    deposit.push(extra);
-    assert!(Instruction::decode(&deposit).is_err());
+    assert_rejects_trailing_byte(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: 1,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::TradeCpi {
+            asset_index: 0,
+            size_q: 1,
+            fee_bps: 0,
+            limit_price: 0,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(Instruction::SyncMaintenanceFee { now_slot: 1 }, extra);
+}
 
-    let mut withdraw = Instruction::Withdraw { amount: 1 }.encode();
-    withdraw.push(extra);
-    assert!(Instruction::decode(&withdraw).is_err());
+#[kani::proof]
+fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
+    let extra: u8 = kani::any();
 
-    let mut crank = Instruction::PermissionlessCrank {
-        action: 0,
-        asset_index: 0,
-        now_slot: 1,
-        effective_price: 100,
-        funding_rate_e9: 0,
-        close_q: 0,
-        fee_bps: 0,
-        recovery_reason: 0,
-    }
-    .encode();
-    crank.push(extra);
-    assert!(Instruction::decode(&crank).is_err());
+    assert_rejects_trailing_byte(Instruction::CloseSlab, extra);
+    assert_rejects_trailing_byte(Instruction::ResolveMarket, extra);
+    assert_rejects_trailing_byte(
+        Instruction::UpdateAuthority {
+            kind: 0,
+            new_pubkey: [1u8; 32],
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::UpdateInsurancePolicy {
+            max_bps: 10_000,
+            deposits_only: 1,
+            cooldown_slots: 1,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: 4_000,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 4_000,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::ConfigurePermissionlessResolve {
+            stale_slots: 5,
+            force_close_delay_slots: 1,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::ResolveStalePermissionless { now_slot: 5 },
+        extra,
+    );
+}
 
-    let mut trade = Instruction::TradeNoCpi {
-        asset_index: 0,
-        size_q: 1,
-        exec_price: 100,
-        fee_bps: 0,
-    }
-    .encode();
-    trade.push(extra);
-    assert!(Instruction::decode(&trade).is_err());
+#[kani::proof]
+fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
+    let extra: u8 = kani::any();
 
-    let mut trade_cpi = Instruction::TradeCpi {
-        asset_index: 0,
-        size_q: 1,
-        fee_bps: 0,
-        limit_price: 0,
-    }
-    .encode();
-    trade_cpi.push(extra);
-    assert!(Instruction::decode(&trade_cpi).is_err());
+    assert_rejects_trailing_byte(
+        Instruction::ConfigureHybridOracle {
+            asset_index: 0,
+            now_slot: 1,
+            now_unix_ts: 1,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 10,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: [[1u8; 32], [0u8; 32], [0u8; 32]],
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::ConfigureHyperpMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: 100,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::PushHyperpMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 101,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::UpdateAssetLifecycle {
+            action: 0,
+            asset_index: 1,
+            now_slot: 2,
+            initial_price: 100,
+        },
+        extra,
+    );
+}
 
-    let mut close_portfolio = Instruction::ClosePortfolio.encode();
-    close_portfolio.push(extra);
-    assert!(Instruction::decode(&close_portfolio).is_err());
+#[kani::proof]
+fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
+    let extra: u8 = kani::any();
 
-    let mut top_up = Instruction::TopUpInsurance { amount: 1 }.encode();
-    top_up.push(extra);
-    assert!(Instruction::decode(&top_up).is_err());
-
-    let mut top_up_backing = Instruction::TopUpBackingBucket {
-        domain: 1,
-        amount: 1,
-        expiry_slot: 10,
-    }
-    .encode();
-    top_up_backing.push(extra);
-    assert!(Instruction::decode(&top_up_backing).is_err());
-
-    let mut close_slab = Instruction::CloseSlab.encode();
-    close_slab.push(extra);
-    assert!(Instruction::decode(&close_slab).is_err());
-
-    let mut resolve = Instruction::ResolveMarket.encode();
-    resolve.push(extra);
-    assert!(Instruction::decode(&resolve).is_err());
-
-    let mut withdraw_insurance = Instruction::WithdrawInsuranceLimited { amount: 1 }.encode();
-    withdraw_insurance.push(extra);
-    assert!(Instruction::decode(&withdraw_insurance).is_err());
-
-    let mut convert_pnl = Instruction::ConvertReleasedPnl { amount: 1 }.encode();
-    convert_pnl.push(extra);
-    assert!(Instruction::decode(&convert_pnl).is_err());
-
-    let mut close_resolved = Instruction::CloseResolved {
-        fee_rate_per_slot: 0,
-    }
-    .encode();
-    close_resolved.push(extra);
-    assert!(Instruction::decode(&close_resolved).is_err());
-
-    let mut update_authority = Instruction::UpdateAuthority {
-        kind: 0,
-        new_pubkey: [1u8; 32],
-    }
-    .encode();
-    update_authority.push(extra);
-    assert!(Instruction::decode(&update_authority).is_err());
-
-    let mut update_insurance = Instruction::UpdateInsurancePolicy {
-        max_bps: 10_000,
-        deposits_only: 1,
-        cooldown_slots: 1,
-    }
-    .encode();
-    update_insurance.push(extra);
-    assert!(Instruction::decode(&update_insurance).is_err());
-
-    let mut update_liquidation = Instruction::UpdateLiquidationFeePolicy {
-        cranker_share_bps: 4_000,
-    }
-    .encode();
-    update_liquidation.push(extra);
-    assert!(Instruction::decode(&update_liquidation).is_err());
-
-    let mut update_maintenance = Instruction::UpdateMaintenanceFeePolicy {
-        cranker_share_bps: 4_000,
-    }
-    .encode();
-    update_maintenance.push(extra);
-    assert!(Instruction::decode(&update_maintenance).is_err());
-
-    let mut configure_permissionless = Instruction::ConfigurePermissionlessResolve {
-        stale_slots: 5,
-        force_close_delay_slots: 1,
-    }
-    .encode();
-    configure_permissionless.push(extra);
-    assert!(Instruction::decode(&configure_permissionless).is_err());
-
-    let mut resolve_permissionless =
-        Instruction::ResolveStalePermissionless { now_slot: 5 }.encode();
-    resolve_permissionless.push(extra);
-    assert!(Instruction::decode(&resolve_permissionless).is_err());
-
-    let mut configure_hybrid = Instruction::ConfigureHybridOracle {
-        asset_index: 0,
-        now_slot: 1,
-        now_unix_ts: 1,
-        oracle_leg_count: 1,
-        oracle_leg_flags: 0,
-        max_staleness_secs: 60,
-        hybrid_soft_stale_slots: 10,
-        mark_ewma_halflife_slots: 1,
-        mark_min_fee: 0,
-        invert: 0,
-        unit_scale: 0,
-        conf_filter_bps: 500,
-        oracle_leg_feeds: [[1u8; 32], [0u8; 32], [0u8; 32]],
-    }
-    .encode();
-    configure_hybrid.push(extra);
-    assert!(Instruction::decode(&configure_hybrid).is_err());
-
-    let mut configure_hyperp = Instruction::ConfigureHyperpMark {
-        asset_index: 0,
-        now_slot: 1,
-        initial_mark_e6: 100,
-        mark_ewma_halflife_slots: 1,
-        mark_min_fee: 0,
-    }
-    .encode();
-    configure_hyperp.push(extra);
-    assert!(Instruction::decode(&configure_hyperp).is_err());
-
-    let mut push_hyperp = Instruction::PushHyperpMark {
-        asset_index: 0,
-        now_slot: 2,
-        mark_e6: 101,
-    }
-    .encode();
-    push_hyperp.push(extra);
-    assert!(Instruction::decode(&push_hyperp).is_err());
-
-    let mut asset_lifecycle = Instruction::UpdateAssetLifecycle {
-        action: 0,
-        asset_index: 1,
-        now_slot: 2,
-        initial_price: 100,
-    }
-    .encode();
-    asset_lifecycle.push(extra);
-    assert!(Instruction::decode(&asset_lifecycle).is_err());
-
-    let mut withdraw_insurance_full = Instruction::WithdrawInsurance { amount: 1 }.encode();
-    withdraw_insurance_full.push(extra);
-    assert!(Instruction::decode(&withdraw_insurance_full).is_err());
-
-    let mut cure = Instruction::CureAndCancelClose {
-        optional_deposit: 1,
-    }
-    .encode();
-    cure.push(extra);
-    assert!(Instruction::decode(&cure).is_err());
-
-    let mut forfeit = Instruction::ForfeitRecoveryLeg {
-        asset_index: 0,
-        b_delta_budget: 1,
-    }
-    .encode();
-    forfeit.push(extra);
-    assert!(Instruction::decode(&forfeit).is_err());
-
-    let mut rebalance = Instruction::RebalanceReduce {
-        asset_index: 0,
-        reduce_q: 1,
-    }
-    .encode();
-    rebalance.push(extra);
-    assert!(Instruction::decode(&rebalance).is_err());
-
-    let mut finalize = Instruction::FinalizeResetSide {
-        asset_index: 0,
-        side: 0,
-    }
-    .encode();
-    finalize.push(extra);
-    assert!(Instruction::decode(&finalize).is_err());
-
-    let mut topup = Instruction::ClaimResolvedPayoutTopup.encode();
-    topup.push(extra);
-    assert!(Instruction::decode(&topup).is_err());
-
-    let mut refine = Instruction::RefineResolvedUnreceiptedBound { decrease_num: 1 }.encode();
-    refine.push(extra);
-    assert!(Instruction::decode(&refine).is_err());
-
-    let mut sync_fee = Instruction::SyncMaintenanceFee { now_slot: 1 }.encode();
-    sync_fee.push(extra);
-    assert!(Instruction::decode(&sync_fee).is_err());
+    assert_rejects_trailing_byte(Instruction::ConvertReleasedPnl { amount: 1 }, extra);
+    assert_rejects_trailing_byte(
+        Instruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::CureAndCancelClose {
+            optional_deposit: 1,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::ForfeitRecoveryLeg {
+            asset_index: 0,
+            b_delta_budget: 1,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::RebalanceReduce {
+            asset_index: 0,
+            reduce_q: 1,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 0,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(Instruction::ClaimResolvedPayoutTopup, extra);
+    assert_rejects_trailing_byte(
+        Instruction::RefineResolvedUnreceiptedBound { decrease_num: 1 },
+        extra,
+    );
+    assert_rejects_trailing_byte(Instruction::ClosePortfolio, extra);
 }
 
 #[kani::proof]

@@ -1,0 +1,12 @@
+fn main() {
+    use percolator_prog::constants::{
+        HEADER_LEN, MARKET_ACCOUNT_LEN, MARKET_GROUP_LEN, PORTFOLIO_ACCOUNT_LEN,
+        PORTFOLIO_STATE_LEN, WRAPPER_CONFIG_LEN,
+    };
+    println!("MARKET_ACCOUNT_LEN={}", MARKET_ACCOUNT_LEN);
+    println!("PORTFOLIO_ACCOUNT_LEN={}", PORTFOLIO_ACCOUNT_LEN);
+    println!("MARKET_GROUP_LEN={}", MARKET_GROUP_LEN);
+    println!("PORTFOLIO_STATE_LEN={}", PORTFOLIO_STATE_LEN);
+    println!("WRAPPER_CONFIG_LEN={}", WRAPPER_CONFIG_LEN);
+    println!("HEADER_LEN={}", HEADER_LEN);
+}

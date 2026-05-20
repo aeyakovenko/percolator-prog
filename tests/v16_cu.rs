@@ -723,6 +723,25 @@ impl V16CuEnv {
         .expect("configure permissionless resolve")
     }
 
+    fn enable_live_insurance_withdrawal(&mut self) {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::UpdateInsurancePolicy {
+                max_bps: 5_000,
+                deposits_only: 0,
+                cooldown_slots: 1,
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("enable live insurance withdrawal");
+    }
+
     fn set_pyth_price(
         &mut self,
         feed: &[u8; 32],
@@ -1150,6 +1169,7 @@ fn v16_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
         300 * BOUND_SCALE
     );
 
+    env.enable_live_insurance_withdrawal();
     let (insurance_dest, _withdraw_insurance_cu) = env.withdraw_insurance_with_cu(100);
     assert_eq!(env.token_amount(insurance_dest), 100);
     assert_eq!(env.token_amount(env.vault), 1_050);
@@ -1637,6 +1657,7 @@ fn v16_cu_custody_and_resolution_paths_are_bounded() {
     let (_source, deposit_cu) = env.deposit_with_cu(&owner, portfolio, 1_000);
     let (_dest, withdraw_cu) = env.withdraw_with_cu(&owner, portfolio, 400);
     let (_insurance_source, top_up_cu) = env.top_up_insurance_with_cu(250);
+    env.enable_live_insurance_withdrawal();
     let (_insurance_dest, withdraw_insurance_cu) = env.withdraw_insurance_with_cu(100);
     let resolve_cu = env.resolve();
     let (_resolved_dest, close_resolved_cu) = env.close_resolved_with_cu(&owner, portfolio);
