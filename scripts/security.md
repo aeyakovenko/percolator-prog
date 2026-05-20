@@ -1,5 +1,49 @@
 # Security findings — 2026-05-20 v16 all-public-API sweep
 
+## Seventeenth pass — corrupt-oracle source PnL and cross-margin exit cap
+
+**Status:** `PASS_SAFE` with added wrapper regressions. I scanned the path where
+an admin adds or configures a market whose oracle is later corrupt, causing a
+portfolio to acquire manufactured positive PnL, then attempts to use cross
+margin to convert and withdraw that PnL against unrelated value.
+
+Target invariant:
+
+```text
+For source-attributed positive PnL, exit is capped by support available to that
+same source domain: opposing-side capital/backing for that asset side, or
+explicit backing/insurance credit reserved to that domain. Unrelated backing,
+general insurance, and unrelated cross-margin capital must not make the corrupt
+asset claim withdrawable.
+```
+
+Regression probes added:
+
+```bash
+cargo test --release --test v16_wrapper v16_wrapper_exploited -- --test-threads=1 --nocapture
+cargo test --release --test v16_wrapper cross_margin_source_claims -- --test-threads=1 --nocapture
+```
+
+Coverage:
+
+- a dynamically added asset manufactures source-domain PnL with no same-domain
+  backing; `ConvertReleasedPnl` rejects even when unrelated backing and general
+  insurance exist;
+- the same account can still withdraw only its existing deposited capital, not
+  the unsupported source claim;
+- a corrupt added asset with 100 units of source PnL and only 30 units of
+  same-domain backing converts exactly 30 units; unrelated domain backing stays
+  untouched and over-withdrawal rejects;
+- mixed claims in one cross-margin portfolio convert only the legitimately
+  backed claim and leave the unbacked corrupt-domain claim outstanding and
+  non-withdrawable.
+
+No wrapper bug was found in this class. The relevant engine behavior is the
+source-credit ledger: source claims carry a domain-specific market id, and
+conversion uses `min(global support, account_source_realizable_support(...))`
+before consuming source credit. The wrapper-level tests pin that behavior at
+the public custody boundary.
+
 ## Sixteenth pass — live insurance policy default and full-drain cap
 
 **Status:** fixed with TDD. I treated the submitted

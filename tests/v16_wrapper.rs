@@ -4029,6 +4029,351 @@ fn v16_wrapper_source_backed_positive_pnl_converts_from_backing_not_insurance() 
 }
 
 #[test]
+fn v16_wrapper_exploited_oracle_pnl_cannot_exit_against_unrelated_backing_or_insurance() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mint = init_market(&mut admin, &mut market);
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        1,
+        100,
+    )
+    .unwrap();
+
+    let mut insurance_source = user_token_account(admin.key, mint, 100);
+    let mut vault = vault_token_account(&market, mint, 120);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpInsurance { amount: 100 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut insurance_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let mut unrelated_source = user_token_account(admin.key, mint, 100);
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 0,
+            amount: 100,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut unrelated_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 20);
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio.data).unwrap();
+        group
+            .add_account_source_positive_pnl_not_atomic(&mut account, 2, 50)
+            .unwrap();
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio.data, &account).unwrap();
+    }
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: 1,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    )
+    .unwrap();
+
+    let before_convert_market = market.data.clone();
+    let before_convert_portfolio = portfolio.data.clone();
+    let convert = run_ix(
+        Instruction::ConvertReleasedPnl { amount: 50 },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    );
+    assert_err_and_market_unchanged(convert, &market, &before_convert_market);
+    assert_eq!(portfolio.data, before_convert_portfolio);
+
+    let before_over_withdraw_market = market.data.clone();
+    let before_over_withdraw_portfolio = portfolio.data.clone();
+    let mut dest = user_token_account(owner.key, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    let over_withdraw = run_ix(
+        Instruction::Withdraw { amount: 21 },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(over_withdraw, &market, &before_over_withdraw_market);
+    assert_eq!(portfolio.data, before_over_withdraw_portfolio);
+
+    withdraw(&mut owner, &mut market, &mut portfolio, 20);
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(account.capital, 0);
+    assert_eq!(account.pnl, 50);
+    assert_eq!(group.insurance, 100);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(group.source_credit[2].spent_backing_num, 0);
+    assert_eq!(group.source_credit[0].spent_backing_num, 0);
+    assert_eq!(
+        group.source_backing_buckets[0].fresh_unliened_backing_num,
+        100 * BOUND_SCALE,
+        "unrelated backing must not support an exploited oracle claim"
+    );
+}
+
+#[test]
+fn v16_wrapper_exploited_added_asset_pnl_exit_caps_to_its_source_domain_backing() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mint = init_market(&mut admin, &mut market);
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        1,
+        100,
+    )
+    .unwrap();
+
+    let mut unrelated_source = user_token_account(admin.key, mint, 80);
+    let mut corrupt_domain_source = user_token_account(admin.key, mint, 30);
+    let mut vault = vault_token_account(&market, mint, 110);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 0,
+            amount: 80,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut unrelated_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 2,
+            amount: 30,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut corrupt_domain_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio.data).unwrap();
+        group
+            .add_account_source_positive_pnl_not_atomic(&mut account, 2, 100)
+            .unwrap();
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio.data, &account).unwrap();
+    }
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: 1,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    )
+    .unwrap();
+
+    run_ix(
+        Instruction::ConvertReleasedPnl { amount: 100 },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(
+        account.capital, 30,
+        "manufactured PnL may exit only up to same-domain backing"
+    );
+    assert_eq!(account.pnl, 0);
+    assert_eq!(group.c_tot, 30);
+    assert_eq!(group.vault, 110);
+    assert_eq!(group.insurance, 0);
+    assert_eq!(
+        group.source_backing_buckets[2].consumed_liened_backing_num,
+        30 * BOUND_SCALE
+    );
+    assert_eq!(group.source_credit[2].spent_backing_num, 30 * BOUND_SCALE);
+    assert_eq!(
+        group.source_backing_buckets[0].fresh_unliened_backing_num,
+        80 * BOUND_SCALE,
+        "same-account cross-margin must not consume unrelated source backing"
+    );
+    assert_eq!(group.source_credit[0].spent_backing_num, 0);
+
+    let before_over_withdraw_market = market.data.clone();
+    let before_over_withdraw_portfolio = portfolio.data.clone();
+    let mut dest = user_token_account(owner.key, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    let over_withdraw = run_ix(
+        Instruction::Withdraw { amount: 31 },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(over_withdraw, &market, &before_over_withdraw_market);
+    assert_eq!(portfolio.data, before_over_withdraw_portfolio);
+
+    withdraw(&mut owner, &mut market, &mut portfolio, 30);
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(account.capital, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(group.vault, 80);
+    assert_eq!(
+        group.source_backing_buckets[0].fresh_unliened_backing_num,
+        80 * BOUND_SCALE
+    );
+}
+
+#[test]
+fn v16_wrapper_cross_margin_source_claims_leave_unbacked_corrupt_claim_unconverted() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mint = init_market(&mut admin, &mut market);
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        1,
+        100,
+    )
+    .unwrap();
+
+    let mut legit_source = user_token_account(admin.key, mint, 30);
+    let mut vault = vault_token_account(&market, mint, 30);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 0,
+            amount: 30,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut legit_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio.data).unwrap();
+        group
+            .add_account_source_positive_pnl_not_atomic(&mut account, 0, 30)
+            .unwrap();
+        group
+            .add_account_source_positive_pnl_not_atomic(&mut account, 2, 100)
+            .unwrap();
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio.data, &account).unwrap();
+    }
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: 1,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    )
+    .unwrap();
+
+    run_ix(
+        Instruction::ConvertReleasedPnl { amount: 130 },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(account.capital, 30);
+    assert_eq!(account.pnl, 100);
+    assert_eq!(account.source_claim_bound_num[0], 0);
+    assert_eq!(account.source_claim_bound_num[2], 100 * BOUND_SCALE);
+    assert_eq!(group.source_credit[0].spent_backing_num, 30 * BOUND_SCALE);
+    assert_eq!(group.source_credit[2].spent_backing_num, 0);
+    assert_eq!(
+        group.source_credit[2].credit_rate_num, 0,
+        "unbacked corrupt source claim must remain non-withdrawable"
+    );
+
+    let before_second_convert_market = market.data.clone();
+    let before_second_convert_portfolio = portfolio.data.clone();
+    let second_convert = run_ix(
+        Instruction::ConvertReleasedPnl { amount: 100 },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    );
+    assert_err_and_market_unchanged(second_convert, &market, &before_second_convert_market);
+    assert_eq!(portfolio.data, before_second_convert_portfolio);
+}
+
+#[test]
 fn v16_wrapper_insurance_policy_deposit_only_leaves_fee_growth_behind() {
     let mut admin = signer();
     let mut market = market_account();
