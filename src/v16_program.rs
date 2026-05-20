@@ -3840,9 +3840,7 @@ pub mod processor {
         verify_token_program(token_program)?;
 
         let (cfg, group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
-        if cfg.admin != admin_dest.key.to_bytes() {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_live_authority(&cfg.admin, admin_dest.key)?;
         if group.mode != MarketModeV16::Resolved {
             return Err(PercolatorError::EngineLockActive.into());
         }
@@ -4237,9 +4235,7 @@ pub mod processor {
         if group.mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        if cfg.admin != admin.key.to_bytes() {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_live_authority(&cfg.admin, admin.key)?;
         let slot = Clock::get().map(|c| c.slot).unwrap_or(group.current_slot);
         group
             .resolve_market_not_atomic(slot)
@@ -4271,9 +4267,7 @@ pub mod processor {
         let (mut cfg, group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         match kind {
             AUTHORITY_ADMIN => {
-                if cfg.admin != current.key.to_bytes() {
-                    return Err(PercolatorError::Unauthorized.into());
-                }
+                expect_live_authority(&cfg.admin, current.key)?;
                 if new_pubkey == [0u8; 32]
                     && (group.mode == MarketModeV16::Live
                         && (cfg.permissionless_resolve_stale_slots == 0
@@ -4427,9 +4421,7 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
-        if cfg.admin != admin.key.to_bytes() {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_live_authority(&cfg.admin, admin.key)?;
         group
             .refine_resolved_unreceipted_bound_not_atomic(decrease_num)
             .map_err(map_v16_error)?;
@@ -4453,9 +4445,7 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let (mut cfg, group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
-        if cfg.admin != admin.key.to_bytes() {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_live_authority(&cfg.admin, admin.key)?;
         cfg.insurance_withdraw_max_bps = max_bps;
         cfg.insurance_withdraw_deposits_only = deposits_only;
         cfg.insurance_withdraw_cooldown_slots = cooldown_slots;
@@ -4480,9 +4470,7 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let (mut cfg, group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
-        if cfg.admin != admin.key.to_bytes() {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_live_authority(&cfg.admin, admin.key)?;
         cfg.liquidation_cranker_fee_share_bps = cranker_share_bps;
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
     }
@@ -4502,9 +4490,7 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let (mut cfg, group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
-        if cfg.admin != admin.key.to_bytes() {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_live_authority(&cfg.admin, admin.key)?;
         cfg.maintenance_cranker_fee_share_bps = cranker_share_bps;
         state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
     }
@@ -4529,9 +4515,7 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let (mut cfg, group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
-        if cfg.admin != admin.key.to_bytes() {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_live_authority(&cfg.admin, admin.key)?;
         if group.mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
@@ -4608,9 +4592,7 @@ pub mod processor {
             .ok_or(ProgramError::NotEnoughAccountKeys)?;
         let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         let asset_index_usize = asset_index as usize;
-        if cfg.admin != admin.key.to_bytes() {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_live_authority(&cfg.admin, admin.key)?;
         if asset_index_usize >= group.config.max_market_slots as usize {
             return Err(PercolatorError::InvalidInstruction.into());
         }
@@ -4718,9 +4700,7 @@ pub mod processor {
         }
         let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         let asset_index_usize = asset_index as usize;
-        if cfg.admin != admin.key.to_bytes() {
-            return Err(PercolatorError::Unauthorized.into());
-        }
+        expect_live_authority(&cfg.admin, admin.key)?;
         if asset_index_usize >= group.config.max_market_slots as usize {
             return Err(PercolatorError::InvalidInstruction.into());
         }
@@ -5520,6 +5500,13 @@ pub mod processor {
     fn expect_owner(ai: &AccountInfo, owner: &Pubkey) -> Result<(), ProgramError> {
         if ai.owner != owner {
             return Err(ProgramError::IncorrectProgramId);
+        }
+        Ok(())
+    }
+
+    fn expect_live_authority(expected: &[u8; 32], signer: &Pubkey) -> Result<(), ProgramError> {
+        if *expected == [0u8; 32] || *expected != signer.to_bytes() {
+            return Err(PercolatorError::Unauthorized.into());
         }
         Ok(())
     }

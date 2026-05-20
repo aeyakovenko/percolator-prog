@@ -1,5 +1,49 @@
 # Security findings — 2026-05-20 v16 all-public-API sweep
 
+## Eleventh pass — untrusted Lean/spec-abstraction findings
+
+**Status:** one hardening patch, otherwise `PASS_SAFE`. I treated the submitted
+P11/P12/P6/P7/cooldown notes as untrusted and checked them against the local
+v16 wrapper, not the external model.
+
+Regression coverage:
+
+```bash
+cargo test --release --test v16_wrapper \
+  v16_wrapper_update_authority_rotates_admin_with_dual_signature \
+  v16_wrapper_update_authority_allows_chained_admin_rotation_without_old_key_reuse \
+  v16_wrapper_close_slab_rejects_burned_admin_zero_key \
+  v16_wrapper_liquidation_fee_policy_splits_retained_penalty_to_cranker \
+  v16_wrapper_liquidation_reward_account_is_optional_and_absent_keeps_fee_in_insurance \
+  v16_wrapper_liquidation_reward_never_spends_insurance_needed_for_losses \
+  v16_wrapper_insurance_policy_enforces_bps_cap_and_cooldown \
+  -- --test-threads=1 --nocapture
+```
+
+Findings checked:
+
+- `P11`: local code already rotates authority fields explicitly. The existing
+  update-authority tests prove the old admin cannot keep using admin-only
+  paths after rotation, and chained rotation does not let either prior key
+  recover control.
+- `P12`: the all-zero admin signer is impossible on-chain, but it was worth
+  hardening the source of truth. Admin-gated wrapper checks now reject
+  `admin == 0` explicitly, and the regression forges a zero-key signer in the
+  unit harness to prove `CloseSlab` still rejects.
+- `P6/P7`: permissionless liquidation reward is not a token-custody transfer.
+  The wrapper credits the optional cranker portfolio only from retained
+  liquidation fee already booked into insurance, then reasserts public
+  invariants. Existing tests cover split reward, absent optional reward
+  account, and the case where losses consume the fee so no reward is paid.
+- cooldown: `WithdrawInsuranceLimited` uses the authenticated slot or the
+  engine slot fallback and persists `last_insurance_withdraw_slot`. Existing
+  tests cover the first withdrawal, blocked second withdrawal inside the
+  cooldown, and successful withdrawal once the slot gap is sufficient.
+
+**Disposition:** no v16 fund-loss or liveness bug found in these claims. The
+only accepted change is proof-hardening of admin-burn semantics so local models
+do not need to rely on the SVM fact that the zero pubkey cannot sign.
+
 ## Tenth pass — empty-asset oracle configuration vs group loss anchor
 
 **Status:** fixed. I found one wrapper-level cross-asset accounting bug while

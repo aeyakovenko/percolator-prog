@@ -4612,6 +4612,42 @@ fn v16_wrapper_close_slab_requires_admin_resolved_empty_market() {
 }
 
 #[test]
+fn v16_wrapper_close_slab_rejects_burned_admin_zero_key() {
+    let mut admin = signer().writable();
+    let mut market = market_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+    {
+        let (mut cfg, group) = state::read_market(&market.data).unwrap();
+        cfg.admin = [0u8; 32];
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let mut zero_admin = TestAccount::new(Pubkey::default(), Pubkey::new_unique(), 0)
+        .signer()
+        .writable();
+    let mut vault = vault_token_account(&market, mint, 0);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut dest_token = user_token_account(zero_admin.key, mint, 0);
+    let mut token_program = token_program_account();
+
+    let burned_admin_market = market.data.clone();
+    let rejected = run_ix(
+        Instruction::CloseSlab,
+        &mut [
+            &mut zero_admin,
+            &mut market,
+            &mut vault,
+            &mut vault_auth,
+            &mut dest_token,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &burned_admin_market);
+}
+
+#[test]
 fn v16_wrapper_close_slab_rejects_nonzero_engine_vault_or_insurance() {
     let mut admin = signer().writable();
     let mut market = market_account();
