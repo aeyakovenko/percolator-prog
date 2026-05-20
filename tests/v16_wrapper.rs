@@ -4372,6 +4372,94 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
 }
 
 #[test]
+fn v16_wrapper_hyperp_mark_profiles_reject_prices_above_engine_max() {
+    let mut profile = state::AssetOracleProfileV16 {
+        oracle_mode: ORACLE_MODE_HYPERP,
+        oracle_leg_count: 0,
+        oracle_leg_flags: 0,
+        invert: 0,
+        unit_scale: 0,
+        conf_filter_bps: 0,
+        _padding0: [0u8; 6],
+        max_staleness_secs: 0,
+        hybrid_soft_stale_slots: 0,
+        mark_ewma_e6: percolator::MAX_ORACLE_PRICE + 1,
+        mark_ewma_last_slot: 1,
+        mark_ewma_halflife_slots: 1,
+        mark_min_fee: 0,
+        oracle_target_price_e6: percolator::MAX_ORACLE_PRICE,
+        oracle_target_publish_time: 0,
+        last_good_oracle_slot: 1,
+        oracle_leg_feeds: [[0u8; 32]; ORACLE_LEG_CAP],
+        oracle_leg_prices_e6: [0u64; ORACLE_LEG_CAP],
+        oracle_leg_publish_times: [0i64; ORACLE_LEG_CAP],
+    };
+    assert!(
+        state::validate_asset_oracle_profile(&profile).is_err(),
+        "Hyperp EWMA mark must stay within the engine oracle-price envelope"
+    );
+
+    profile.mark_ewma_e6 = percolator::MAX_ORACLE_PRICE;
+    profile.oracle_target_price_e6 = percolator::MAX_ORACLE_PRICE + 1;
+    assert!(
+        state::validate_asset_oracle_profile(&profile).is_err(),
+        "Hyperp target mark must stay within the engine oracle-price envelope"
+    );
+
+    profile.oracle_mode = ORACLE_MODE_HYBRID_AFTER_HOURS;
+    profile.oracle_leg_count = 1;
+    profile.oracle_leg_feeds[0] = [7u8; 32];
+    profile.max_staleness_secs = 60;
+    profile.hybrid_soft_stale_slots = 5;
+    profile.oracle_target_price_e6 = percolator::MAX_ORACLE_PRICE;
+    profile.mark_ewma_e6 = percolator::MAX_ORACLE_PRICE + 1;
+    assert!(
+        state::validate_asset_oracle_profile(&profile).is_err(),
+        "hybrid fallback EWMA mark must stay within the engine oracle-price envelope"
+    );
+}
+
+#[test]
+fn v16_wrapper_push_hyperp_mark_rejects_over_max_input_and_preserves_state() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        default_init_market_ix(),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    run_ix(
+        Instruction::ConfigureHyperpMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: percolator::MAX_ORACLE_PRICE,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let before = market.data.clone();
+    let rejected = run_ix(
+        Instruction::PushHyperpMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: percolator::MAX_ORACLE_PRICE + 1,
+        },
+        &mut [&mut admin, &mut market],
+    );
+    assert_err_and_market_unchanged(rejected, &market, &before);
+
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    let profile = state::read_asset_oracle_profile(&market.data, 0).unwrap();
+    assert_eq!(cfg.mark_ewma_e6, percolator::MAX_ORACLE_PRICE);
+    assert_eq!(profile.mark_ewma_e6, percolator::MAX_ORACLE_PRICE);
+}
+
+#[test]
 fn v16_wrapper_configure_hyperp_mark_clears_prior_hybrid_oracle_metadata() {
     let mut admin = signer();
     let mut market = market_account();

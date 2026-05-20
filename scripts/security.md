@@ -1,5 +1,51 @@
 # Security findings — 2026-05-20 v16 all-public-API sweep
 
+## Fourteenth pass — Hyperp mark upper-bound enforcement
+
+**Status:** fixed. I treated the submitted Hyperp over-limit mark report as
+untrusted and verified it locally. The report was valid: `PushHyperpMark`
+rejected zero marks but did not reject marks above
+`percolator::MAX_ORACLE_PRICE`, and persisted Hyperp/hybrid profile validation
+only required nonzero `mark_ewma_e6`.
+
+Red tests added first:
+
+```bash
+cargo test --release --test v16_wrapper hyperp_mark -- --test-threads=1 --nocapture
+```
+
+Both new regressions failed before the patch:
+
+- `v16_wrapper_hyperp_mark_profiles_reject_prices_above_engine_max`
+- `v16_wrapper_push_hyperp_mark_rejects_over_max_input_and_preserves_state`
+
+Fix:
+
+- `validate_wrapper_config` and `validate_asset_oracle_profile` now require
+  Hyperp/hybrid `mark_ewma_e6` and `oracle_target_price_e6` to be in the engine
+  oracle-price envelope: `1..=percolator::MAX_ORACLE_PRICE`.
+- `ConfigureHyperpMark` rejects an initial mark above the engine max before
+  mutating engine price state.
+- `PushHyperpMark` rejects both over-limit input marks and over-limit EWMA
+  outputs before persisting the profile.
+
+Impact classification: authority-scoped operational DoS, not arbitrary-user
+theft. A compromised or buggy Hyperp mark authority could previously persist an
+over-limit target that later made crank/trade paths fail against engine price
+invariants. The fix makes the wrapper fail closed at the same boundary enforced
+for external oracle readers and engine effective prices.
+
+Verification:
+
+```bash
+cargo fmt --all -- --check
+cargo test --release --test v16_wrapper -- --test-threads=1
+cargo test --release -- --test-threads=1
+```
+
+Results: formatting check passed, all 140 v16 wrapper tests passed, and the
+full normal cargo suite passed.
+
 ## Thirteenth pass — deployment permutation feature matrix
 
 **Status:** `PASS_SAFE`. I generated `/tmp/matrix.md` as an exhaustive

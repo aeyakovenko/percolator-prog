@@ -329,7 +329,8 @@ pub mod state {
                 if config.oracle_leg_count == 0
                     || config.max_staleness_secs == 0
                     || config.hybrid_soft_stale_slots == 0
-                    || config.mark_ewma_e6 == 0
+                    || !valid_engine_oracle_price(config.mark_ewma_e6)
+                    || !valid_engine_oracle_price(config.oracle_target_price_e6)
                     || !crate::oracle_v16::oracle_leg_config_ok(
                         config.oracle_leg_count,
                         config.oracle_leg_flags,
@@ -347,7 +348,8 @@ pub mod state {
                     || config.conf_filter_bps != 0
                     || config.max_staleness_secs != 0
                     || config.hybrid_soft_stale_slots != 0
-                    || config.mark_ewma_e6 == 0
+                    || !valid_engine_oracle_price(config.mark_ewma_e6)
+                    || !valid_engine_oracle_price(config.oracle_target_price_e6)
                     || config.mark_ewma_halflife_slots == 0
                     || config.oracle_leg_feeds.iter().any(|f| *f != [0u8; 32])
                     || config.oracle_leg_prices_e6.iter().any(|p| *p != 0)
@@ -360,6 +362,11 @@ pub mod state {
         }
 
         Ok(())
+    }
+
+    #[inline]
+    fn valid_engine_oracle_price(price: u64) -> bool {
+        price != 0 && price <= percolator::MAX_ORACLE_PRICE
     }
 
     #[inline]
@@ -390,7 +397,8 @@ pub mod state {
                 if profile.oracle_leg_count == 0
                     || profile.max_staleness_secs == 0
                     || profile.hybrid_soft_stale_slots == 0
-                    || profile.mark_ewma_e6 == 0
+                    || !valid_engine_oracle_price(profile.mark_ewma_e6)
+                    || !valid_engine_oracle_price(profile.oracle_target_price_e6)
                     || profile.mark_ewma_halflife_slots == 0
                     || !crate::oracle_v16::oracle_leg_config_ok(
                         profile.oracle_leg_count,
@@ -409,7 +417,8 @@ pub mod state {
                     || profile.conf_filter_bps != 0
                     || profile.max_staleness_secs != 0
                     || profile.hybrid_soft_stale_slots != 0
-                    || profile.mark_ewma_e6 == 0
+                    || !valid_engine_oracle_price(profile.mark_ewma_e6)
+                    || !valid_engine_oracle_price(profile.oracle_target_price_e6)
                     || profile.mark_ewma_halflife_slots == 0
                     || profile.oracle_leg_feeds.iter().any(|f| *f != [0u8; 32])
                     || profile.oracle_leg_prices_e6.iter().any(|p| *p != 0)
@@ -4698,7 +4707,10 @@ pub mod processor {
         expect_signer(admin)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
-        if initial_mark_e6 == 0 || mark_ewma_halflife_slots == 0 {
+        if initial_mark_e6 == 0
+            || initial_mark_e6 > percolator::MAX_ORACLE_PRICE
+            || mark_ewma_halflife_slots == 0
+        {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
@@ -4788,7 +4800,7 @@ pub mod processor {
         expect_signer(authority)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
-        if mark_e6 == 0 {
+        if mark_e6 == 0 || mark_e6 > percolator::MAX_ORACLE_PRICE {
             return Err(PercolatorError::OracleInvalid.into());
         }
         let (mut cfg, group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
@@ -4827,7 +4839,7 @@ pub mod processor {
             full_weight_fee,
             profile.mark_min_fee,
         );
-        if next_mark == 0 {
+        if next_mark == 0 || next_mark > percolator::MAX_ORACLE_PRICE {
             return Err(PercolatorError::OracleInvalid.into());
         }
         profile.mark_ewma_e6 = next_mark;
