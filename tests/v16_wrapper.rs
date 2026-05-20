@@ -1661,6 +1661,181 @@ fn v16_wrapper_prediction_asset_can_drain_retire_and_reactivate_without_closing_
 }
 
 #[test]
+fn v16_wrapper_reactivated_asset_resets_prior_oracle_profile() {
+    let mut admin = signer();
+    let mut market = market_account();
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 2;
+            }
+        }),
+    );
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        2,
+        1,
+        1_000_000,
+    )
+    .unwrap();
+    run_ix(
+        Instruction::ConfigureHyperpMark {
+            asset_index: 2,
+            now_slot: 2,
+            initial_mark_e6: 123_000,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    assert_eq!(
+        state::read_asset_oracle_profile(&market.data, 2)
+            .unwrap()
+            .oracle_mode,
+        ORACLE_MODE_HYPERP
+    );
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_DRAIN_ONLY,
+        2,
+        0,
+        0,
+    )
+    .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        2,
+        3,
+        0,
+    )
+    .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        2,
+        4,
+        500_000,
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let profile = state::read_asset_oracle_profile(&market.data, 2).unwrap();
+    assert_eq!(group.assets[2].effective_price, 500_000);
+    assert_eq!(
+        profile.oracle_mode, ORACLE_MODE_MANUAL,
+        "reactivating a retired asset slot must not inherit its previous market's price-managed profile"
+    );
+    assert_eq!(profile.oracle_target_price_e6, 500_000);
+    assert_eq!(profile.mark_ewma_e6, 500_000);
+    assert_eq!(profile.last_good_oracle_slot, 4);
+}
+
+#[test]
+fn v16_wrapper_retired_asset_profile_cannot_refresh_market_liveness() {
+    let mut admin = signer();
+    let mut market = market_account();
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 2;
+            }
+        }),
+    );
+    run_ix(
+        Instruction::ConfigurePermissionlessResolve {
+            stale_slots: 5,
+            force_close_delay_slots: 1,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        2,
+        1,
+        1_000_000,
+    )
+    .unwrap();
+    run_ix(
+        Instruction::ConfigureHyperpMark {
+            asset_index: 2,
+            now_slot: 1,
+            initial_mark_e6: 123_000,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_DRAIN_ONLY,
+        2,
+        0,
+        0,
+    )
+    .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        2,
+        2,
+        0,
+    )
+    .unwrap();
+
+    let retired_profile = state::read_asset_oracle_profile(&market.data, 2).unwrap();
+    assert_eq!(
+        retired_profile.oracle_mode, ORACLE_MODE_MANUAL,
+        "retired slots must not keep a price-managed profile that can refresh global liveness"
+    );
+    let before_push = market.data.clone();
+    let stale_refresh = run_ix(
+        Instruction::PushHyperpMark {
+            asset_index: 2,
+            now_slot: 4,
+            mark_e6: 222_000,
+        },
+        &mut [&mut admin, &mut market],
+    );
+    assert_err_and_market_unchanged(stale_refresh, &market, &before_push);
+
+    run_ix(
+        Instruction::ResolveStalePermissionless { now_slot: 6 },
+        &mut [&mut market],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.mode, MarketModeV16::Resolved);
+}
+
+#[test]
 fn v16_wrapper_three_asset_hybrid_prediction_shutdown_reuses_only_prediction_slot() {
     let mut admin = signer();
     let mut market = market_account();

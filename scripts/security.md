@@ -1574,3 +1574,59 @@ RUSTFLAGS='-Awarnings' cargo test --release --test test_envelope_gate -- --nocap
 
 Results:
 - New envelope-gate regression file: PASS (`2` tests).
+
+---
+
+## Eighth pass — 2026-05-20 v16 per-asset oracle profile probes
+
+Sweep targeted the v16 dynamic-asset oracle profile feature:
+
+- asset 0 is the base asset and config-level oracle fields are only the
+  asset-0 mirror;
+- non-base assets store independent manual / Hyperp / hybrid oracle
+  profiles in the market account;
+- retired slots can later be reactivated with fresh monotonic market IDs.
+
+### Finding F8.1 — retired/reactivated slots must not inherit price-managed profiles
+
+**Attacker model:** configure a non-base asset as Hyperp/hybrid, retire
+the empty asset, then reuse the same slot for a new monotonic market ID.
+If the old profile remains, the new asset starts from stale EWMA/target
+state rather than the activation price.
+
+**Regression kept:**
+`tests/v16_wrapper.rs::v16_wrapper_reactivated_asset_resets_prior_oracle_profile`.
+
+**Disposition:** fixed. `UpdateAssetLifecycle::Activate` now writes a
+fresh manual oracle profile for the activated slot.
+
+### Finding F8.2 — retired price-managed assets must not refresh market liveness
+
+**Attacker model:** after a Hyperp asset is retired, continue pushing its
+old mark profile to refresh `last_good_oracle_slot` and delay whole-market
+permissionless stale resolution even though the asset no longer exists as
+an active market.
+
+**Regression kept:**
+`tests/v16_wrapper.rs::v16_wrapper_retired_asset_profile_cannot_refresh_market_liveness`.
+
+**Disposition:** fixed. `UpdateAssetLifecycle::Retire` clears the slot's
+profile to manual, oracle reconfiguration is limited to active empty
+assets, and Hyperp mark pushes are limited to active/drain-only assets.
+
+### Commands run
+
+```text
+cargo fmt
+cargo test --release v16_wrapper_re -- --test-threads=1 --nocapture
+cargo test --release v16_wrapper_hybrid -- --test-threads=1
+cargo test --release v16_wrapper_configure -- --test-threads=1
+cargo test --release --lib --tests -- --test-threads=1
+cargo kani --tests
+```
+
+Results:
+- Reactivation/liveness regressions: PASS.
+- Hybrid/oracle configuration branch probes: PASS.
+- Full release lib/tests: PASS (`1` lib, `18` CU, `129` wrapper).
+- Kani: PASS (`20` harnesses).

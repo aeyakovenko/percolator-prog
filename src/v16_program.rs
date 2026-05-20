@@ -2737,6 +2737,52 @@ pub mod processor {
         Ok(())
     }
 
+    fn mirror_manual_profile_to_base_config(
+        cfg: &mut WrapperConfigV16,
+        profile: &state::AssetOracleProfileV16,
+        refresh_liveness: bool,
+    ) {
+        cfg.oracle_mode = constants::ORACLE_MODE_MANUAL;
+        cfg.oracle_leg_count = 0;
+        cfg.oracle_leg_flags = 0;
+        cfg.invert = 0;
+        cfg.unit_scale = 0;
+        cfg.conf_filter_bps = 0;
+        cfg.max_staleness_secs = 0;
+        cfg.hybrid_soft_stale_slots = 0;
+        cfg.mark_ewma_e6 = profile.mark_ewma_e6;
+        cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
+        cfg.mark_ewma_halflife_slots = profile.mark_ewma_halflife_slots;
+        cfg.mark_min_fee = 0;
+        cfg.oracle_target_price_e6 = profile.oracle_target_price_e6;
+        cfg.oracle_target_publish_time = 0;
+        if refresh_liveness {
+            cfg.last_good_oracle_slot = profile.last_good_oracle_slot;
+        }
+        cfg.oracle_leg_feeds = [[0u8; 32]; constants::ORACLE_LEG_CAP];
+        cfg.oracle_leg_prices_e6 = [0u64; constants::ORACLE_LEG_CAP];
+        cfg.oracle_leg_publish_times = [0i64; constants::ORACLE_LEG_CAP];
+    }
+
+    fn require_asset_active_for_oracle_reconfiguration(
+        group: &MarketGroupV16,
+        asset_index: usize,
+    ) -> ProgramResult {
+        if group.assets[asset_index].lifecycle != AssetLifecycleV16::Active
+            || asset_has_position_or_loss_state(group, asset_index)
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        Ok(())
+    }
+
+    fn require_asset_mark_pushable(group: &MarketGroupV16, asset_index: usize) -> ProgramResult {
+        match group.assets[asset_index].lifecycle {
+            AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly => Ok(()),
+            _ => Err(PercolatorError::EngineLockActive.into()),
+        }
+    }
+
     pub fn process_instruction<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
@@ -4201,7 +4247,7 @@ pub mod processor {
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
 
-        let (cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
+        let (mut cfg, mut group) = state::read_market_boxed(&market_ai.try_borrow_data()?)?;
         if cfg.asset_authority == [0u8; 32] || cfg.asset_authority != authority.key.to_bytes() {
             return Err(PercolatorError::Unauthorized.into());
         }
@@ -4213,6 +4259,7 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
 
+        let mut reset_profile = None;
         match action {
             ASSET_ACTION_ACTIVATE => {
                 if asset_index >= group.config.max_market_slots as usize {
@@ -4221,6 +4268,11 @@ pub mod processor {
                 group
                     .activate_empty_asset_not_atomic(asset_index, initial_price, now_slot)
                     .map_err(map_v16_error)?;
+                let profile = state::manual_asset_oracle_profile(initial_price, now_slot);
+                if asset_index == 0 {
+                    mirror_manual_profile_to_base_config(&mut cfg, &profile, true);
+                }
+                reset_profile = Some(profile);
             }
             ASSET_ACTION_DRAIN_ONLY => {
                 if now_slot != 0 || initial_price != 0 {
@@ -4237,11 +4289,22 @@ pub mod processor {
                 group
                     .retire_empty_asset_not_atomic(asset_index, now_slot)
                     .map_err(map_v16_error)?;
+                let price = group.assets[asset_index].effective_price;
+                let profile = state::manual_asset_oracle_profile(price, now_slot);
+                if asset_index == 0 {
+                    mirror_manual_profile_to_base_config(&mut cfg, &profile, false);
+                }
+                reset_profile = Some(profile);
             }
             _ => return Err(PercolatorError::InvalidInstruction.into()),
         }
 
-        state::write_market(&mut market_ai.try_borrow_mut_data()?, &cfg, group.as_ref())
+        let mut data = market_ai.try_borrow_mut_data()?;
+        state::write_market(&mut data, &cfg, group.as_ref())?;
+        if let Some(profile) = reset_profile {
+            state::write_asset_oracle_profile(&mut data, asset_index, &profile)?;
+        }
+        Ok(())
     }
 
     #[inline(never)]
@@ -4449,11 +4512,10 @@ pub mod processor {
         if authenticated_slot < group.current_slot {
             return Err(PercolatorError::EngineStale.into());
         }
-        if group.mode != MarketModeV16::Live
-            || asset_has_position_or_loss_state(group.as_ref(), asset_index_usize)
-        {
+        if group.mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
+        require_asset_active_for_oracle_reconfiguration(group.as_ref(), asset_index_usize)?;
 
         let mut profile = state::AssetOracleProfileV16 {
             oracle_mode: constants::ORACLE_MODE_HYBRID_AFTER_HOURS,
@@ -4551,11 +4613,10 @@ pub mod processor {
         if authenticated_slot < group.current_slot {
             return Err(PercolatorError::EngineStale.into());
         }
-        if group.mode != MarketModeV16::Live
-            || asset_has_position_or_loss_state(group.as_ref(), asset_index_usize)
-        {
+        if group.mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
+        require_asset_active_for_oracle_reconfiguration(group.as_ref(), asset_index_usize)?;
 
         let profile = state::AssetOracleProfileV16 {
             oracle_mode: constants::ORACLE_MODE_HYPERP,
@@ -4636,6 +4697,7 @@ pub mod processor {
         if group.mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
+        require_asset_mark_pushable(group.as_ref(), asset_index_usize)?;
         if !oracle_v16::profile_is_hyperp(&profile)
             || cfg.hyperp_mark_authority != authority.key.to_bytes()
         {
