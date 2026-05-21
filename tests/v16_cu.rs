@@ -2,8 +2,7 @@ use litesvm::LiteSVM;
 use percolator::{BackingBucketStatusV16, TradeRequestV16, BOUND_SCALE, POS_SCALE};
 use percolator_prog::{
     constants::{
-        MARKET_ACCOUNT_LEN, MATCHER_ABI_VERSION, ORACLE_LEG_FLAG_DIVIDE_LEG2,
-        ORACLE_LEG_FLAG_DIVIDE_LEG3, PORTFOLIO_ACCOUNT_LEN,
+        MATCHER_ABI_VERSION, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
     },
     ix::Instruction as ProgInstruction,
     oracle_v16, state,
@@ -188,6 +187,7 @@ struct V16CuEnv {
     mint: Pubkey,
     vault: Pubkey,
     vault_authority: Pubkey,
+    portfolio_account_len: usize,
 }
 
 impl V16CuEnv {
@@ -243,7 +243,11 @@ impl V16CuEnv {
             market,
             Account {
                 lamports: 1_000_000_000,
-                data: vec![0u8; MARKET_ACCOUNT_LEN],
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(max_portfolio_assets as usize)
+                        .unwrap()
+                ],
                 owner: program_id,
                 executable: false,
                 rent_epoch: 0,
@@ -296,6 +300,10 @@ impl V16CuEnv {
             mint,
             vault,
             vault_authority,
+            portfolio_account_len: state::portfolio_account_len_for_market_slots(
+                max_portfolio_assets as usize,
+            )
+            .unwrap(),
         }
     }
 
@@ -311,7 +319,7 @@ impl V16CuEnv {
                 portfolio,
                 Account {
                     lamports: 1_000_000_000,
-                    data: vec![0u8; PORTFOLIO_ACCOUNT_LEN],
+                    data: vec![0u8; self.portfolio_account_len],
                     owner: self.program_id,
                     executable: false,
                     rent_epoch: 0,

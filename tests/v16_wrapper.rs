@@ -2,18 +2,15 @@ use percolator::{
     AssetLifecycleV16, BackingBucketStatusV16, CloseProgressLedgerV16, MarketGroupV16,
     MarketGroupV16HeaderAccount, MarketModeV16, PermissionlessRecoveryReasonV16,
     PortfolioAccountV16Account, PortfolioLegV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16,
-    SideModeV16, SideV16, V16Config, BOUND_SCALE, POS_SCALE, V16_MAX_MARKET_SLOTS_N,
+    SideModeV16, SideV16, V16Config, BOUND_SCALE, POS_SCALE,
 };
 use percolator_prog::{
     constants::{
         ASSET_ORACLE_PROFILE_LEN, DEFAULT_MARKET_SLOT_CAPACITY, HEADER_LEN, MARKET_ACCOUNT_LEN,
-        MARKET_ASSET_SLOT_LEN, MARKET_GROUP_LEN, MARKET_GROUP_RUNTIME_ALIGN,
-        MARKET_GROUP_RUNTIME_LEN, MARKET_GROUP_RUNTIME_MODE_OFF,
-        MARKET_GROUP_RUNTIME_RESOLVED_LEDGER_OFF, ORACLE_LEG_CAP, ORACLE_LEG_FLAG_DIVIDE_LEG2,
+        MARKET_ASSET_SLOT_LEN, MARKET_GROUP_LEN, ORACLE_LEG_CAP, ORACLE_LEG_FLAG_DIVIDE_LEG2,
         ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_HYPERP,
-        ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN, PORTFOLIO_RUNTIME_ALIGN,
-        PORTFOLIO_RUNTIME_LAST_FEE_SLOT_OFF, PORTFOLIO_RUNTIME_LEN,
-        PORTFOLIO_RUNTIME_RESOLVED_RECEIPT_OFF, PORTFOLIO_STATE_LEN, WRAPPER_CONFIG_LEN,
+        ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN, PORTFOLIO_SOURCE_DOMAIN_LEN,
+        PORTFOLIO_STATE_LEN, WRAPPER_CONFIG_LEN,
     },
     ix::Instruction,
     oracle_v16, policy_v16, processor, state,
@@ -118,7 +115,7 @@ fn signer() -> TestAccount {
 }
 
 fn market_account() -> TestAccount {
-    TestAccount::new(Pubkey::new_unique(), program_id(), MARKET_ACCOUNT_LEN).writable()
+    market_account_with_capacity(percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize)
 }
 
 fn market_account_with_capacity(capacity: usize) -> TestAccount {
@@ -131,7 +128,18 @@ fn market_account_with_capacity(capacity: usize) -> TestAccount {
 }
 
 fn portfolio_account() -> TestAccount {
-    TestAccount::new(Pubkey::new_unique(), program_id(), PORTFOLIO_ACCOUNT_LEN).writable()
+    portfolio_account_for_market_slots(
+        percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize,
+    )
+}
+
+fn portfolio_account_for_market_slots(max_market_slots: usize) -> TestAccount {
+    TestAccount::new(
+        Pubkey::new_unique(),
+        program_id(),
+        state::portfolio_account_len_for_market_slots(max_market_slots).unwrap(),
+    )
+    .writable()
 }
 
 fn make_mint_data() -> Vec<u8> {
@@ -605,6 +613,50 @@ fn deposit(
     .unwrap();
 }
 
+fn top_up_backing_bucket(
+    authority: &mut TestAccount,
+    market: &mut TestAccount,
+    domain: u8,
+    amount: u128,
+    expiry_slot: u64,
+) {
+    let mint = Pubkey::new_from_array(state::read_market(&market.data).unwrap().0.collateral_mint);
+    let amount_u64 = u64::try_from(amount).unwrap();
+    let mut source = user_token_account(authority.key, mint, amount_u64);
+    let mut vault = vault_token_account(market, mint, 0);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain,
+            amount,
+            expiry_slot,
+        },
+        &mut [
+            authority,
+            market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+}
+
+fn add_source_positive_pnl(
+    market: &mut TestAccount,
+    portfolio: &mut TestAccount,
+    domain: usize,
+    amount: u128,
+) {
+    let (cfg, mut group) = state::read_market(&market.data).unwrap();
+    let mut account = state::read_portfolio(&portfolio.data).unwrap();
+    group
+        .add_account_source_positive_pnl_not_atomic(&mut account, domain, amount)
+        .unwrap();
+    state::write_market(&mut market.data, &cfg, &group).unwrap();
+    state::write_portfolio(&mut portfolio.data, &account).unwrap();
+}
+
 fn withdraw(
     owner: &mut TestAccount,
     market: &mut TestAccount,
@@ -764,13 +816,28 @@ fn v16_wrapper_init_binds_market_and_portfolio_provenance() {
     expected.assets[0].raw_oracle_target_price = 100;
     expected.assets[0].effective_price = 100;
     expected.assets[0].fund_px_last = 100;
-    for asset in &mut expected.assets[1..] {
-        asset.lifecycle = AssetLifecycleV16::Disabled;
-    }
     expected.materialized_portfolio_count = 1;
+    assert_eq!(group.config, expected.config);
+    assert_eq!(group.materialized_portfolio_count, 1);
     assert_eq!(
-        group, expected,
-        "wrapper heap init must match canonical engine init shape"
+        group.assets[0], expected.assets[0],
+        "configured asset must match canonical engine init shape"
+    );
+    assert_eq!(
+        &group.insurance_domain_budget[..2],
+        &expected.insurance_domain_budget[..],
+        "configured domain budgets must match canonical engine init shape"
+    );
+    assert_eq!(
+        &group.source_backing_buckets[..2],
+        &expected.source_backing_buckets[..],
+        "configured backing buckets must match canonical engine init shape"
+    );
+    assert!(
+        group.assets[1..]
+            .iter()
+            .all(|asset| asset.market_id == 0 && asset.lifecycle == AssetLifecycleV16::Disabled),
+        "extra account capacity must decode as disabled, unreusable slots"
     );
 }
 
@@ -1258,39 +1325,91 @@ fn v16_wrapper_backing_fee_policy_is_backing_authority_gated_and_bounds_fee() {
     let before = market.data.clone();
 
     let rejected_attacker = run_ix(
-        Instruction::UpdateBackingFeePolicy { fee_bps: 25 },
+        Instruction::UpdateBackingFeePolicy {
+            domain: 1,
+            fee_bps: 25,
+        },
         &mut [&mut attacker, &mut market],
     );
     assert_err_and_market_unchanged(rejected_attacker, &market, &before);
 
     let rejected_admin_after_rotation = run_ix(
-        Instruction::UpdateBackingFeePolicy { fee_bps: 25 },
+        Instruction::UpdateBackingFeePolicy {
+            domain: 1,
+            fee_bps: 25,
+        },
         &mut [&mut admin, &mut market],
     );
     assert_err_and_market_unchanged(rejected_admin_after_rotation, &market, &before);
 
     let rejected_over_engine_cap = run_ix(
-        Instruction::UpdateBackingFeePolicy { fee_bps: 101 },
+        Instruction::UpdateBackingFeePolicy {
+            domain: 1,
+            fee_bps: 101,
+        },
         &mut [&mut backing_authority, &mut market],
     );
     assert_err_and_market_unchanged(rejected_over_engine_cap, &market, &before);
 
+    let rejected_inactive_domain = run_ix(
+        Instruction::UpdateBackingFeePolicy {
+            domain: 2,
+            fee_bps: 25,
+        },
+        &mut [&mut backing_authority, &mut market],
+    );
+    assert_err_and_market_unchanged(rejected_inactive_domain, &market, &before);
+
     run_ix(
-        Instruction::UpdateBackingFeePolicy { fee_bps: 25 },
+        Instruction::UpdateBackingFeePolicy {
+            domain: 1,
+            fee_bps: 25,
+        },
         &mut [&mut backing_authority, &mut market],
     )
     .unwrap();
     let (cfg, _) = state::read_market(&market.data).unwrap();
-    assert_eq!(cfg.backing_trade_fee_bps, 25);
+    assert_eq!(cfg.backing_trade_fee_bps_long, 0);
+    assert_eq!(cfg.backing_trade_fee_bps_short, 25);
+    assert_eq!(cfg.backing_trade_fee_policy_count, 1);
+
+    run_ix(
+        Instruction::UpdateBackingFeePolicy {
+            domain: 0,
+            fee_bps: 33,
+        },
+        &mut [&mut backing_authority, &mut market],
+    )
+    .unwrap();
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.backing_trade_fee_bps_long, 33);
+    assert_eq!(cfg.backing_trade_fee_bps_short, 25);
+    assert_eq!(cfg.backing_trade_fee_policy_count, 2);
+
+    run_ix(
+        Instruction::UpdateBackingFeePolicy {
+            domain: 1,
+            fee_bps: 0,
+        },
+        &mut [&mut backing_authority, &mut market],
+    )
+    .unwrap();
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.backing_trade_fee_bps_long, 33);
+    assert_eq!(cfg.backing_trade_fee_bps_short, 0);
+    assert_eq!(cfg.backing_trade_fee_policy_count, 1);
 }
 
 #[test]
-fn v16_wrapper_backing_fee_policy_sets_minimum_trade_fee_for_nocpi_and_cpi() {
+fn v16_wrapper_backing_fee_policy_does_not_floor_trades_without_new_backing_lien() {
     let mut admin = signer();
     let mut market = market_account();
     init_market(&mut admin, &mut market);
     run_ix(
-        Instruction::UpdateBackingFeePolicy { fee_bps: 25 },
+        Instruction::UpdateBackingFeePolicy {
+            domain: 1,
+            fee_bps: 25,
+        },
         &mut [&mut admin, &mut market],
     )
     .unwrap();
@@ -1322,15 +1441,137 @@ fn v16_wrapper_backing_fee_policy_sets_minimum_trade_fee_for_nocpi_and_cpi() {
     .unwrap();
     let (_, group) = state::read_market(&market.data).unwrap();
     assert_eq!(
-        group.insurance,
-        two_sided_fee(100 * POS_SCALE, 100, 25),
-        "TradeNoCpi must charge the backing authority's minimum fee even when caller supplies zero"
+        group.insurance, 0,
+        "domain backing fees are charged only when a trade locks new counterparty backing"
+    );
+}
+
+#[test]
+fn v16_wrapper_backing_fee_charges_only_new_counterparty_backing_lien_nocpi_and_cpi() {
+    let mut admin = signer();
+    let mut market = market_account();
+    init_market(&mut admin, &mut market);
+    top_up_backing_bucket(&mut admin, &mut market, 1, 1_000, 10);
+    run_ix(
+        Instruction::UpdateBackingFeePolicy {
+            domain: 1,
+            fee_bps: 1_000,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let mut owner_a = signer();
+    let mut owner_b = signer();
+    let mut account_a = portfolio_account();
+    let mut account_b = portfolio_account();
+    init_portfolio(&mut owner_a, &mut market, &mut account_a);
+    init_portfolio(&mut owner_b, &mut market, &mut account_b);
+    deposit(&mut owner_a, &mut market, &mut account_a, 100);
+    deposit(&mut owner_b, &mut market, &mut account_b, 2_000);
+    add_source_positive_pnl(&mut market, &mut account_a, 1, 1_000);
+
+    let before_market = market.data.clone();
+    let before_a = account_a.data.clone();
+    let before_b = account_b.data.clone();
+    let too_expensive = run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: (10 * POS_SCALE) as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+        ],
+    );
+    assert_eq!(
+        too_expensive,
+        Err(percolator_prog::error::PercolatorError::EngineLockActive.into()),
+        "a domain backing fee cannot be charged if it would leave the borrower below initial margin"
+    );
+    assert_eq!(market.data, before_market);
+    assert_eq!(account_a.data, before_a);
+    assert_eq!(account_b.data, before_b);
+
+    run_ix(
+        Instruction::UpdateBackingFeePolicy {
+            domain: 1,
+            fee_bps: 100,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: (10 * POS_SCALE) as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+        ],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&account_a.data).unwrap();
+    assert_eq!(group.insurance, 0);
+    assert_eq!(account.capital, 91);
+    assert_eq!(
+        account.source_lien_counterparty_backing_num[1],
+        900 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.source_backing_buckets[1].valid_liened_backing_num,
+        900 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num,
+        109 * BOUND_SCALE,
+        "900 atoms of backing were newly locked, so the 1% domain fee adds 9 atoms back to the same domain"
+    );
+
+    let fresh_before_reduce = group.source_backing_buckets[1].fresh_unliened_backing_num;
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: -(5 * POS_SCALE as i128),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut owner_a,
+            &mut owner_b,
+            &mut market,
+            &mut account_a,
+            &mut account_b,
+        ],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num, fresh_before_reduce,
+        "risk-reducing trades that do not lock new backing do not pay a backing reservation fee"
     );
 
     let mut cpi_market = market_account();
     init_market(&mut admin, &mut cpi_market);
+    top_up_backing_bucket(&mut admin, &mut cpi_market, 1, 1_000, 10);
     run_ix(
-        Instruction::UpdateBackingFeePolicy { fee_bps: 25 },
+        Instruction::UpdateBackingFeePolicy {
+            domain: 1,
+            fee_bps: 100,
+        },
         &mut [&mut admin, &mut cpi_market],
     )
     .unwrap();
@@ -1340,8 +1581,9 @@ fn v16_wrapper_backing_fee_policy_sets_minimum_trade_fee_for_nocpi_and_cpi() {
     let mut cpi_account_b = portfolio_account();
     init_portfolio(&mut cpi_owner_a, &mut cpi_market, &mut cpi_account_a);
     init_portfolio(&mut cpi_owner_b, &mut cpi_market, &mut cpi_account_b);
-    deposit(&mut cpi_owner_a, &mut cpi_market, &mut cpi_account_a, 20_000);
-    deposit(&mut cpi_owner_b, &mut cpi_market, &mut cpi_account_b, 20_000);
+    deposit(&mut cpi_owner_a, &mut cpi_market, &mut cpi_account_a, 100);
+    deposit(&mut cpi_owner_b, &mut cpi_market, &mut cpi_account_b, 2_000);
+    add_source_positive_pnl(&mut cpi_market, &mut cpi_account_a, 1, 1_000);
 
     run_trade_cpi_with_matcher(
         &mut cpi_owner_a,
@@ -1350,19 +1592,132 @@ fn v16_wrapper_backing_fee_policy_sets_minimum_trade_fee_for_nocpi_and_cpi() {
         &mut cpi_account_a,
         &mut cpi_account_b,
         0,
-        (100 * POS_SCALE) as i128,
-        (100 * POS_SCALE) as i128,
+        (10 * POS_SCALE) as i128,
+        (10 * POS_SCALE) as i128,
         100,
         0,
         100,
     )
     .unwrap();
     let (_, group) = state::read_market(&cpi_market.data).unwrap();
+    let account = state::read_portfolio(&cpi_account_a.data).unwrap();
     assert_eq!(
-        group.insurance,
-        two_sided_fee(100 * POS_SCALE, 100, 25),
-        "TradeCpi must use the same backing fee floor as TradeNoCpi"
+        account.source_lien_counterparty_backing_num[1],
+        900 * BOUND_SCALE
     );
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num,
+        109 * BOUND_SCALE,
+        "TradeCpi must charge the same domain-scoped backing reservation fee as TradeNoCpi"
+    );
+}
+
+#[test]
+fn v16_wrapper_backing_fee_policy_survives_non_base_oracle_reconfiguration() {
+    let mut admin = signer();
+    let mut market = market_account();
+    init_market(&mut admin, &mut market);
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        1,
+        100,
+    )
+    .unwrap();
+
+    run_ix(
+        Instruction::UpdateBackingFeePolicy {
+            domain: 3,
+            fee_bps: 37,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    let before = state::read_asset_oracle_profile(&market.data, 1).unwrap();
+    assert_eq!(before.backing_trade_fee_bps_long, 0);
+    assert_eq!(before.backing_trade_fee_bps_short, 37);
+
+    run_ix(
+        Instruction::ConfigureHyperpMark {
+            asset_index: 1,
+            now_slot: 2,
+            initial_mark_e6: 110,
+            mark_ewma_halflife_slots: 10,
+            mark_min_fee: 0,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    let after_hyperp = state::read_asset_oracle_profile(&market.data, 1).unwrap();
+    assert_eq!(
+        after_hyperp.backing_trade_fee_bps_short, 37,
+        "oracle profile reconfiguration must not erase the backing authority's domain fee"
+    );
+
+    let feeds = [[0x71u8; 32], [0x72u8; 32], [0x73u8; 32]];
+    let mut leg0 = pyth_account(&feeds[0], 4_000_000_000, -6, 1, 1_000);
+    let mut leg1 = pyth_account(&feeds[1], 150_000_000, -6, 1, 1_000);
+    let mut leg2 = pyth_account(&feeds[2], 200_000_000, -6, 1, 1_000);
+    run_ix(
+        Instruction::ConfigureHybridOracle {
+            asset_index: 1,
+            now_slot: 3,
+            now_unix_ts: 1_000,
+            oracle_leg_count: 3,
+            oracle_leg_flags: ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 10,
+            mark_ewma_halflife_slots: 10,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: feeds,
+        },
+        &mut [&mut admin, &mut market, &mut leg0, &mut leg1, &mut leg2],
+    )
+    .unwrap();
+    let after_hybrid = state::read_asset_oracle_profile(&market.data, 1).unwrap();
+    assert_eq!(after_hybrid.backing_trade_fee_bps_short, 37);
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_DRAIN_ONLY,
+        1,
+        0,
+        0,
+    )
+    .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        1,
+        4,
+        0,
+    )
+    .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        5,
+        120,
+    )
+    .unwrap();
+    let after_reactivate = state::read_asset_oracle_profile(&market.data, 1).unwrap();
+    assert_eq!(after_reactivate.oracle_mode, ORACLE_MODE_MANUAL);
+    assert_eq!(after_reactivate.oracle_target_price_e6, 120);
+    assert_eq!(
+        after_reactivate.backing_trade_fee_bps_short, 37,
+        "asset lifecycle resets oracle data but must not erase backing-authority fee policy"
+    );
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.backing_trade_fee_policy_count, 1);
 }
 
 #[test]
@@ -1463,11 +1818,11 @@ fn v16_wrapper_maintenance_fee_rejects_recovery_mode_without_mutation() {
 #[test]
 fn v16_wrapper_asset_authority_can_append_activate_and_trade_assets() {
     let mut admin = signer();
-    let mut market = market_account();
+    let mut market = market_account_with_capacity(3);
     let mut long_owner = signer();
     let mut short_owner = signer();
-    let mut long_account = portfolio_account();
-    let mut short_account = portfolio_account();
+    let mut long_account = portfolio_account_for_market_slots(3);
+    let mut short_account = portfolio_account_for_market_slots(3);
 
     init_market_with_ix(
         &mut admin,
@@ -1563,7 +1918,9 @@ fn v16_wrapper_asset_authority_can_append_activate_and_trade_assets() {
 #[test]
 fn v16_wrapper_dynamic_market_account_can_activate_beyond_fixed_runtime_window() {
     let mut admin = signer();
-    let mut market = market_account_with_capacity(V16_MAX_MARKET_SLOTS_N + 1);
+    let base_capacity = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
+    let grown_capacity = base_capacity + 1;
+    let mut market = market_account_with_capacity(grown_capacity);
 
     init_market_with_ix(
         &mut admin,
@@ -1580,30 +1937,88 @@ fn v16_wrapper_dynamic_market_account_can_activate_beyond_fixed_runtime_window()
     );
     assert_eq!(
         state::market_slot_capacity(&market.data).unwrap(),
-        V16_MAX_MARKET_SLOTS_N + 1
+        grown_capacity
     );
 
-    let mut slot = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
-    while slot <= V16_MAX_MARKET_SLOTS_N {
-        update_asset_lifecycle(
-            &mut admin,
-            &mut market,
-            processor::ASSET_ACTION_ACTIVATE,
-            slot as u16,
-            slot as u64 + 1,
-            1_000 + slot as u64,
-        )
-        .unwrap_or_else(|e| panic!("activation slot {slot} failed: {e:?}"));
-        slot += 1;
-    }
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        base_capacity as u16,
+        grown_capacity as u64,
+        1_000 + base_capacity as u64,
+    )
+    .unwrap();
+    assert_eq!(
+        state::market_slot_capacity(&market.data).unwrap(),
+        grown_capacity,
+        "append activation must consume the next dynamic market slot"
+    );
 
     let (_, mode, current_slot, effective_price, _) =
-        state::read_market_trade_preflight(&market.data, V16_MAX_MARKET_SLOTS_N).unwrap();
+        state::read_market_trade_preflight(&market.data, grown_capacity - 1).unwrap();
     assert_eq!(mode, MarketModeV16::Live);
-    assert_eq!(current_slot, V16_MAX_MARKET_SLOTS_N as u64 + 1);
-    assert_eq!(effective_price, 1_000 + V16_MAX_MARKET_SLOTS_N as u64);
-    let profile = state::read_asset_oracle_profile(&market.data, V16_MAX_MARKET_SLOTS_N).unwrap();
+    assert_eq!(current_slot, grown_capacity as u64);
+    assert_eq!(effective_price, 1_000 + (grown_capacity - 1) as u64);
+    let profile = state::read_asset_oracle_profile(&market.data, grown_capacity - 1).unwrap();
     assert_eq!(profile.oracle_target_price_e6, effective_price);
+}
+
+#[test]
+fn v16_wrapper_existing_portfolio_with_growth_capacity_survives_market_append() {
+    let mut admin = signer();
+    let base_capacity = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
+    let grown_capacity = base_capacity + 1;
+    let mut market = market_account_with_capacity(grown_capacity);
+    let mut owner = signer();
+    let mut portfolio = portfolio_account_for_market_slots(grown_capacity);
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+            }
+        }),
+    );
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    let initial_portfolio_len = portfolio.data.len();
+    let initial_domain_count = state::read_portfolio(&portfolio.data)
+        .unwrap()
+        .source_claim_market_id
+        .len();
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        base_capacity as u16,
+        grown_capacity as u64,
+        1_000 + base_capacity as u64,
+    )
+    .unwrap();
+    assert_eq!(portfolio.data.len(), initial_portfolio_len);
+
+    deposit(&mut owner, &mut market, &mut portfolio, 1);
+    let required_len = state::portfolio_account_len_for_market_slots(grown_capacity).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(
+        portfolio.data.len(),
+        required_len,
+        "portfolio source-domain storage must match the appended market count"
+    );
+    assert_eq!(
+        account.source_claim_market_id.len(),
+        grown_capacity * 2,
+        "portfolio source-domain capacity must track configured markets"
+    );
+    assert_eq!(initial_domain_count, grown_capacity * 2);
+    assert_eq!(account.capital, 1);
 }
 
 #[test]
@@ -2729,7 +3144,7 @@ fn v16_wrapper_security_sweep_reused_asset_market_ids_fail_closed() {
     deposit(&mut long_owner, &mut market, &mut long_account, 10_000);
     deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
 
-    let invalid_index = percolator::V16_MAX_MARKET_SLOTS_N as u16;
+    let invalid_index = 3u16;
     let last_asset = 1u16;
     let before_invalid = market.data.clone();
     assert_err_and_market_unchanged(
@@ -2792,7 +3207,7 @@ fn v16_wrapper_security_sweep_reused_asset_market_ids_fail_closed() {
     assert!(new_market_id > old_market_id);
     assert_eq!(reactivated.next_market_id, next_market_id_before + 1);
 
-    let mut pass_count = 1usize; // invalid fixed-capacity grow rejection above.
+    let mut pass_count = 1usize; // invalid gap append rejection above.
     let mut stale = state::read_portfolio(&long_account.data).unwrap();
     stale.legs[0] = PortfolioLegV16 {
         active: true,
@@ -3081,38 +3496,6 @@ fn v16_wrapper_security_sweep_resolved_market_and_fee_branches() {
 #[test]
 fn v16_wrapper_account_layout_constants_match_serialized_state() {
     assert_eq!(
-        MARKET_GROUP_RUNTIME_LEN,
-        core::mem::size_of::<MarketGroupV16>()
-    );
-    assert_eq!(
-        MARKET_GROUP_RUNTIME_ALIGN,
-        core::mem::align_of::<MarketGroupV16>()
-    );
-    assert_eq!(
-        MARKET_GROUP_RUNTIME_MODE_OFF,
-        core::mem::offset_of!(MarketGroupV16, mode)
-    );
-    assert_eq!(
-        MARKET_GROUP_RUNTIME_RESOLVED_LEDGER_OFF,
-        core::mem::offset_of!(MarketGroupV16, resolved_payout_ledger)
-    );
-    assert_eq!(
-        PORTFOLIO_RUNTIME_LEN,
-        core::mem::size_of::<percolator::PortfolioAccountV16>()
-    );
-    assert_eq!(
-        PORTFOLIO_RUNTIME_ALIGN,
-        core::mem::align_of::<percolator::PortfolioAccountV16>()
-    );
-    assert_eq!(
-        PORTFOLIO_RUNTIME_LAST_FEE_SLOT_OFF,
-        core::mem::offset_of!(percolator::PortfolioAccountV16, last_fee_slot)
-    );
-    assert_eq!(
-        PORTFOLIO_RUNTIME_RESOLVED_RECEIPT_OFF,
-        core::mem::offset_of!(percolator::PortfolioAccountV16, resolved_payout_receipt)
-    );
-    assert_eq!(
         MARKET_GROUP_LEN,
         core::mem::size_of::<MarketGroupV16HeaderAccount>()
     );
@@ -3139,7 +3522,7 @@ fn v16_wrapper_account_layout_constants_match_serialized_state() {
             + DEFAULT_MARKET_SLOT_CAPACITY * MARKET_ASSET_SLOT_LEN,
         "default market account length must cover wrapper header/config + dynamic engine header + default slot table"
     );
-    let grown_capacity = V16_MAX_MARKET_SLOTS_N + 1;
+    let grown_capacity = DEFAULT_MARKET_SLOT_CAPACITY + 1;
     assert_eq!(
         state::market_account_len_for_capacity(grown_capacity).unwrap(),
         HEADER_LEN + WRAPPER_CONFIG_LEN + MARKET_GROUP_LEN + grown_capacity * MARKET_ASSET_SLOT_LEN,
@@ -3147,8 +3530,15 @@ fn v16_wrapper_account_layout_constants_match_serialized_state() {
     );
     assert_eq!(
         PORTFOLIO_ACCOUNT_LEN,
-        16 + PORTFOLIO_STATE_LEN,
-        "portfolio account length must exactly cover header + serialized portfolio state"
+        HEADER_LEN
+            + PORTFOLIO_STATE_LEN
+            + DEFAULT_MARKET_SLOT_CAPACITY * 2 * PORTFOLIO_SOURCE_DOMAIN_LEN,
+        "default portfolio account length must cover fixed state plus one source domain per side per default market"
+    );
+    assert_eq!(
+        state::portfolio_account_len_for_market_slots(grown_capacity).unwrap(),
+        HEADER_LEN + PORTFOLIO_STATE_LEN + grown_capacity * 2 * PORTFOLIO_SOURCE_DOMAIN_LEN,
+        "portfolio account length must grow with market-domain storage"
     );
     assert_eq!(state::alignment_note(), 1);
 
@@ -3229,10 +3619,17 @@ fn v16_wrapper_raw_wrapper_config_invalid_values_fail_closed() {
     );
 
     let mut bad_backing_trade_fee = cfg;
-    bad_backing_trade_fee.backing_trade_fee_bps = 10_001;
+    bad_backing_trade_fee.backing_trade_fee_bps_long = 10_001;
     assert_bad_cfg(
         bad_backing_trade_fee,
-        "corrupt backing trade fee must not be trusted on read",
+        "corrupt long-domain backing trade fee must not be trusted on read",
+    );
+
+    let mut bad_backing_trade_fee = cfg;
+    bad_backing_trade_fee.backing_trade_fee_bps_short = 10_001;
+    assert_bad_cfg(
+        bad_backing_trade_fee,
+        "corrupt short-domain backing trade fee must not be trusted on read",
     );
 
     let mut bad_oracle_mode = cfg;
@@ -3530,6 +3927,30 @@ fn v16_wrapper_init_market_rejects_invalid_engine_params_without_mutation() {
         &mut [&mut admin, &mut market, &mut mint],
     );
     assert_err_and_market_unchanged(invalid_bankrupt_close_lifetime, &market, &before);
+
+    let invalid_h_max = run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket { h_max, .. } = ix {
+                *h_max = (BOUND_SCALE as u64) + 1;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    );
+    assert_err_and_market_unchanged(invalid_h_max, &market, &before);
+
+    let invalid_maintenance_fee = run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *maintenance_fee_per_slot = percolator::MAX_PROTOCOL_FEE_ABS + 1;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    );
+    assert_err_and_market_unchanged(invalid_maintenance_fee, &market, &before);
 }
 
 #[test]
@@ -4483,7 +4904,10 @@ fn v16_wrapper_backing_top_up_refills_provider_receivable_in_engine() {
         group.source_backing_buckets[1].consumed_liened_backing_num,
         30 * BOUND_SCALE
     );
-    assert_eq!(group.source_credit[1].fresh_reserved_backing_num, 10 * BOUND_SCALE);
+    assert_eq!(
+        group.source_credit[1].fresh_reserved_backing_num,
+        10 * BOUND_SCALE
+    );
     assert_eq!(
         group.source_backing_buckets[1].fresh_unliened_backing_num,
         10 * BOUND_SCALE
@@ -5702,7 +6126,9 @@ fn v16_wrapper_hyperp_mark_profiles_reject_prices_above_engine_max() {
         invert: 0,
         unit_scale: 0,
         conf_filter_bps: 0,
-        _padding0: [0u8; 6],
+        backing_trade_fee_bps_long: 0,
+        backing_trade_fee_bps_short: 0,
+        _padding0: [0u8; 2],
         max_staleness_secs: 0,
         hybrid_soft_stale_slots: 0,
         mark_ewma_e6: percolator::MAX_ORACLE_PRICE + 1,
@@ -7566,13 +7992,21 @@ fn v16_wrapper_non_base_asset_profile_converts_stoxx_eur_to_base_sol() {
 #[test]
 fn v16_wrapper_price_managed_asset_above_portfolio_limit_still_updates_mark_after_trade() {
     let mut admin = signer();
-    let mut market = market_account();
+    let mut market = market_account_with_capacity(
+        percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize + 1,
+    );
     let mut long_owner = signer();
     let mut short_owner = signer();
     let mut cranker = signer();
-    let mut long_account = portfolio_account();
-    let mut short_account = portfolio_account();
-    let mut crank_account = portfolio_account();
+    let mut long_account = portfolio_account_for_market_slots(
+        percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize + 1,
+    );
+    let mut short_account = portfolio_account_for_market_slots(
+        percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize + 1,
+    );
+    let mut crank_account = portfolio_account_for_market_slots(
+        percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize + 1,
+    );
 
     init_market_with_ix(
         &mut admin,
@@ -9770,7 +10204,7 @@ fn v16_wrapper_tradecpi_zero_fill_rejects_fee_above_cap_before_success() {
 }
 
 #[test]
-fn v16_wrapper_tradecpi_rejects_corrupt_backing_fee_floor_before_later_checks() {
+fn v16_wrapper_tradecpi_rejects_corrupt_backing_fee_policy_before_later_checks() {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner_a = signer();
@@ -9799,9 +10233,10 @@ fn v16_wrapper_tradecpi_rejects_corrupt_backing_fee_floor_before_later_checks() 
     init_portfolio(&mut owner_a, &mut market, &mut account_a);
     init_portfolio(&mut owner_b, &mut market, &mut account_b);
 
-    let (mut cfg, group) = state::read_market(&market.data).unwrap();
-    cfg.backing_trade_fee_bps = 101;
-    state::write_market(&mut market.data, &cfg, &group).unwrap();
+    let (mut cfg, _group) = state::read_market(&market.data).unwrap();
+    cfg.backing_trade_fee_bps_short = 10_001;
+    market.data[HEADER_LEN..HEADER_LEN + WRAPPER_CONFIG_LEN]
+        .copy_from_slice(bytemuck::bytes_of(&cfg));
     let before_market = market.data.clone();
     let before_a = account_a.data.clone();
     let before_b = account_b.data.clone();
@@ -9826,8 +10261,8 @@ fn v16_wrapper_tradecpi_rejects_corrupt_backing_fee_floor_before_later_checks() 
     );
     assert_eq!(
         rejected,
-        Err(percolator_prog::error::PercolatorError::InvalidInstruction.into()),
-        "the backing fee floor must be included in the cheap pre-CPI fee cap"
+        Err(ProgramError::InvalidAccountData),
+        "corrupt domain backing fee policy must be rejected before matcher CPI"
     );
     assert_eq!(market.data, before_market);
     assert_eq!(account_a.data, before_a);

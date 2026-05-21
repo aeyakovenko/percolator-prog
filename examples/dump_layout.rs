@@ -5,11 +5,14 @@ use core::mem::{align_of, offset_of, size_of};
 use percolator::{
     AssetStateV16Account, BackingBucketV16Account, CloseProgressLedgerV16Account,
     EngineAssetSlotV16Account, HealthCertV16Account, InsuranceCreditReservationV16Account,
-    MarketGroupV16Account, PortfolioAccountV16Account, PortfolioLegV16Account,
-    ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16Account,
-    SourceCreditStateV16Account, V16ConfigAccount,
+    MarketGroupV16HeaderAccount, PortfolioAccountV16Account, PortfolioLegV16Account,
+    PortfolioSourceDomainV16Account, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16Account,
+    ResolvedPayoutReceiptV16Account, SourceCreditStateV16Account, V16ConfigAccount,
 };
-use percolator_prog::constants::{HEADER_LEN, MARKET_GROUP_OFF, WRAPPER_CONFIG_LEN};
+use percolator_prog::constants::{
+    ASSET_ORACLE_PROFILE_LEN, HEADER_LEN, MARKET_ASSET_SLOT_LEN, MARKET_GROUP_OFF,
+    PORTFOLIO_SOURCE_DOMAIN_LEN, WRAPPER_CONFIG_LEN,
+};
 use percolator_prog::state::WrapperConfigV16;
 
 fn main() {
@@ -71,16 +74,16 @@ fn main() {
     wcf!(oracle_leg_publish_times, [i64; 3]);
 
     println!(
-        "\n=== MarketGroupV16Account (size={} align={}) ===",
-        size_of::<MarketGroupV16Account>(),
-        align_of::<MarketGroupV16Account>()
+        "\n=== MarketGroupV16HeaderAccount (size={} align={}) ===",
+        size_of::<MarketGroupV16HeaderAccount>(),
+        align_of::<MarketGroupV16HeaderAccount>()
     );
     println!("  offset  size  field");
     macro_rules! mgf {
         ($f:ident, $t:ty) => {
             println!(
                 "  {:>6}  {:>5}  {}",
-                offset_of!(MarketGroupV16Account, $f),
+                offset_of!(MarketGroupV16HeaderAccount, $f),
                 size_of::<$t>(),
                 stringify!($f)
             );
@@ -88,6 +91,7 @@ fn main() {
     }
     mgf!(market_group_id, [u8; 32]);
     mgf!(config, V16ConfigAccount);
+    mgf!(asset_slot_capacity, u32);
     mgf!(vault, u128);
     mgf!(insurance, u128);
     mgf!(c_tot, u128);
@@ -108,10 +112,10 @@ fn main() {
     mgf!(funding_epoch, u64);
     mgf!(slot_last, u64);
     mgf!(current_slot, u64);
-    mgf!(asset_slots, EngineAssetSlotV16Account);
     mgf!(bankruptcy_hlock_active, u8);
     mgf!(threshold_stress_active, u8);
     mgf!(loss_stale_active, u8);
+    mgf!(recovery_reason, u8);
     mgf!(mode, u8);
     mgf!(resolved_slot, u64);
     mgf!(payout_snapshot, u128);
@@ -140,16 +144,6 @@ fn main() {
     pf!(capital, u128);
     pf!(pnl, i128);
     pf!(reserved_pnl, u128);
-    pf!(source_claim_market_id, u128); // [u64; 32]
-    pf!(source_claim_bound_num, u128);
-    pf!(source_claim_liened_num, u128);
-    pf!(source_claim_counterparty_liened_num, u128);
-    pf!(source_claim_insurance_liened_num, u128);
-    pf!(source_lien_effective_reserved, u128);
-    pf!(source_lien_counterparty_backing_num, u128);
-    pf!(source_lien_insurance_backing_num, u128);
-    pf!(source_claim_impaired_num, u128);
-    pf!(source_lien_impaired_effective_reserved, u128);
     pf!(fee_credits, i128);
     pf!(cancel_deposit_escrow, u128);
     pf!(last_fee_slot, u64);
@@ -162,6 +156,77 @@ fn main() {
     pf!(liquidation_lock, u8);
     pf!(close_progress, CloseProgressLedgerV16Account);
     pf!(resolved_payout_receipt, ResolvedPayoutReceiptV16Account);
+
+    println!(
+        "\n=== Dynamic tails ===\n  market slot stride={} (EngineAssetSlotV16Account {} + oracle profile {})\n  portfolio source domain stride={}",
+        MARKET_ASSET_SLOT_LEN,
+        size_of::<EngineAssetSlotV16Account>(),
+        ASSET_ORACLE_PROFILE_LEN,
+        PORTFOLIO_SOURCE_DOMAIN_LEN
+    );
+
+    println!(
+        "\n=== PortfolioSourceDomainV16Account (size={} align={}) ===",
+        size_of::<PortfolioSourceDomainV16Account>(),
+        align_of::<PortfolioSourceDomainV16Account>()
+    );
+    println!("  offset  size  field");
+    macro_rules! sdf {
+        ($f:ident, $t:ty) => {
+            println!(
+                "  {:>6}  {:>5}  {}",
+                offset_of!(PortfolioSourceDomainV16Account, $f),
+                size_of::<$t>(),
+                stringify!($f)
+            );
+        };
+    }
+    sdf!(source_claim_market_id, u64);
+    sdf!(source_claim_bound_num, u128);
+    sdf!(source_claim_liened_num, u128);
+    sdf!(source_claim_counterparty_liened_num, u128);
+    sdf!(source_claim_insurance_liened_num, u128);
+    sdf!(source_lien_effective_reserved, u128);
+    sdf!(source_lien_counterparty_backing_num, u128);
+    sdf!(source_lien_insurance_backing_num, u128);
+    sdf!(source_claim_impaired_num, u128);
+    sdf!(source_lien_impaired_effective_reserved, u128);
+
+    println!(
+        "\n=== EngineAssetSlotV16Account (size={} align={}) ===",
+        size_of::<EngineAssetSlotV16Account>(),
+        align_of::<EngineAssetSlotV16Account>()
+    );
+    println!("  offset  size  field");
+    macro_rules! esf {
+        ($f:ident, $t:ty) => {
+            println!(
+                "  {:>6}  {:>5}  {}",
+                offset_of!(EngineAssetSlotV16Account, $f),
+                size_of::<$t>(),
+                stringify!($f)
+            );
+        };
+    }
+    esf!(asset, AssetStateV16Account);
+    esf!(insurance_domain_budget_long, u128);
+    esf!(insurance_domain_budget_short, u128);
+    esf!(insurance_domain_spent_long, u128);
+    esf!(insurance_domain_spent_short, u128);
+    esf!(pending_domain_loss_barrier_long, u64);
+    esf!(pending_domain_loss_barrier_short, u64);
+    esf!(source_credit_long, SourceCreditStateV16Account);
+    esf!(source_credit_short, SourceCreditStateV16Account);
+    esf!(backing_long, BackingBucketV16Account);
+    esf!(backing_short, BackingBucketV16Account);
+    esf!(
+        insurance_reservation_long,
+        InsuranceCreditReservationV16Account
+    );
+    esf!(
+        insurance_reservation_short,
+        InsuranceCreditReservationV16Account
+    );
 
     println!(
         "\n=== AssetStateV16Account ({}) ===",
