@@ -14,7 +14,7 @@ use percolator::{
     MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16, ProvenanceHeaderV16, RebalanceRequestV16,
     ResolvedCloseOutcomeV16, SideModeV16, SideV16, TradeOutcomeV16, TradeRequestV16, V16Config,
-    V16Error, V16Result, BOUND_SCALE,
+    V16Error, V16Result, V16_MAX_PORTFOLIO_ASSETS_N, BOUND_SCALE,
 };
 use solana_program::{
     account_info::AccountInfo,
@@ -908,6 +908,21 @@ pub mod state {
         data: &[u8],
     ) -> Result<Vec<PortfolioSourceDomainV16Account>, ProgramError> {
         let capacity = portfolio_source_domain_capacity(data)?;
+        #[cfg(target_os = "solana")]
+        let capacity = {
+            let mut used = 0usize;
+            let mut d = 0usize;
+            while d < capacity {
+                let source = *portfolio_source_domain_wire(data, d)?;
+                if bytemuck::bytes_of(&source).iter().any(|b| *b != 0) {
+                    used = d
+                        .checked_add(1)
+                        .ok_or(PercolatorError::InvalidAccountLen)?;
+                }
+                d += 1;
+            }
+            used
+        };
         let mut out = Vec::with_capacity(capacity);
         let mut d = 0usize;
         while d < capacity {
@@ -5759,14 +5774,47 @@ pub mod processor {
         state::write_portfolio(&mut portfolio_ai.try_borrow_mut_data()?, portfolio.as_ref())
     }
 
-    type EffectivePricesBox = alloc::boxed::Box<[u64]>;
     type SourceBackingSnapshot = alloc::boxed::Box<[u128]>;
     type DomainFeeTotals = alloc::boxed::Box<[u128]>;
+
+    enum EffectivePricesBox {
+        Fixed(Box<[u64; V16_MAX_PORTFOLIO_ASSETS_N]>),
+        Dynamic(alloc::boxed::Box<[u64]>),
+    }
+
+    impl core::ops::Deref for EffectivePricesBox {
+        type Target = [u64];
+
+        fn deref(&self) -> &Self::Target {
+            match self {
+                Self::Fixed(prices) => &prices[..],
+                Self::Dynamic(prices) => prices,
+            }
+        }
+    }
+
+    impl core::ops::DerefMut for EffectivePricesBox {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            match self {
+                Self::Fixed(prices) => &mut prices[..],
+                Self::Dynamic(prices) => prices,
+            }
+        }
+    }
 
     fn effective_prices_boxed(group: &MarketGroupV16) -> V16Result<EffectivePricesBox> {
         let n = group.config.max_market_slots as usize;
         if group.assets.len() < n {
             return Err(V16Error::InvalidConfig);
+        }
+        if n <= V16_MAX_PORTFOLIO_ASSETS_N {
+            let mut prices = Box::new([0u64; V16_MAX_PORTFOLIO_ASSETS_N]);
+            let mut j = 0;
+            while j < n {
+                prices[j] = group.assets[j].effective_price;
+                j += 1;
+            }
+            return Ok(EffectivePricesBox::Fixed(prices));
         }
         let mut prices = Vec::with_capacity(n);
         let mut j = 0;
@@ -5774,7 +5822,7 @@ pub mod processor {
             prices.push(group.assets[j].effective_price);
             j += 1;
         }
-        Ok(prices.into_boxed_slice())
+        Ok(EffectivePricesBox::Dynamic(prices.into_boxed_slice()))
     }
 
     fn source_counterparty_backing_snapshot(
