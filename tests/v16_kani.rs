@@ -581,14 +581,22 @@ fn kani_v16_update_maintenance_fee_policy_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_update_backing_fee_policy_decode_preserves_wire_fields() {
+    let domain: u8 = kani::any();
     let fee_bps: u16 = kani::any();
 
-    let mut data = [0u8; 3];
+    let mut data = [0u8; 4];
     data[0] = 51;
-    data[1..3].copy_from_slice(&fee_bps.to_le_bytes());
+    data[1] = domain;
+    data[2..4].copy_from_slice(&fee_bps.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
-        Instruction::UpdateBackingFeePolicy { fee_bps: got } => assert_eq!(got, fee_bps),
+        Instruction::UpdateBackingFeePolicy {
+            domain: got_domain,
+            fee_bps: got_fee_bps,
+        } => {
+            assert_eq!(got_domain, domain);
+            assert_eq!(got_fee_bps, fee_bps);
+        }
         _ => unreachable!(),
     }
 }
@@ -913,7 +921,13 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
         },
         extra,
     );
-    assert_rejects_trailing_byte(Instruction::UpdateBackingFeePolicy { fee_bps: 25 }, extra);
+    assert_rejects_trailing_byte(
+        Instruction::UpdateBackingFeePolicy {
+            domain: 0,
+            fee_bps: 25,
+        },
+        extra,
+    );
     assert_rejects_trailing_byte(
         Instruction::ConfigurePermissionlessResolve {
             stale_slots: 5,
