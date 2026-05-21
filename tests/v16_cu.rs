@@ -1,9 +1,7 @@
 use litesvm::LiteSVM;
 use percolator::{BackingBucketStatusV16, TradeRequestV16, BOUND_SCALE, POS_SCALE};
 use percolator_prog::{
-    constants::{
-        MATCHER_ABI_VERSION, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
-    },
+    constants::{MATCHER_ABI_VERSION, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3},
     ix::Instruction as ProgInstruction,
     oracle_v16, state,
 };
@@ -24,6 +22,7 @@ use std::path::PathBuf;
 const CRANK_CU_LIMIT: u64 = 325_000;
 const CUSTODY_CU_LIMIT: u64 = 300_000;
 const TRADE_CU_LIMIT: u64 = 345_000;
+const MULTI_ASSET_OPEN_TRADE_CU_LIMIT: u64 = 750_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 
 fn active_bitmap_with(indices: &[usize]) -> percolator::V16ActiveBitmap {
@@ -201,6 +200,22 @@ impl V16CuEnv {
         initial_margin_bps: u64,
         max_price_move_bps_per_slot: u64,
     ) -> Self {
+        Self::new_with_market_params_price_move_and_maintenance_fee(
+            max_portfolio_assets,
+            maintenance_margin_bps,
+            initial_margin_bps,
+            max_price_move_bps_per_slot,
+            0,
+        )
+    }
+
+    fn new_with_market_params_price_move_and_maintenance_fee(
+        max_portfolio_assets: u16,
+        maintenance_margin_bps: u64,
+        initial_margin_bps: u64,
+        max_price_move_bps_per_slot: u64,
+        maintenance_fee_per_slot: u128,
+    ) -> Self {
         let mut svm = LiteSVM::new();
         let program_id = percolator_prog::id();
         let program_bytes = std::fs::read(program_path()).expect("read BPF");
@@ -281,7 +296,7 @@ impl V16CuEnv {
                 max_bankrupt_close_chunks: 1,
                 max_bankrupt_close_lifetime_slots: 100,
                 public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
-                maintenance_fee_per_slot: 0,
+                maintenance_fee_per_slot,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -410,9 +425,25 @@ impl V16CuEnv {
         exec_price: u64,
         fee_bps: u64,
     ) -> u64 {
+        self.trade_asset_with_cu(
+            0, owner_a, account_a, owner_b, account_b, size_q, exec_price, fee_bps,
+        )
+    }
+
+    fn trade_asset_with_cu(
+        &mut self,
+        asset_index: u16,
+        owner_a: &Keypair,
+        account_a: Pubkey,
+        owner_b: &Keypair,
+        account_b: Pubkey,
+        size_q: i128,
+        exec_price: u64,
+        fee_bps: u64,
+    ) -> u64 {
         self.send(
             ProgInstruction::TradeNoCpi {
-                asset_index: 0,
+                asset_index,
                 size_q,
                 exec_price,
                 fee_bps,
@@ -427,6 +458,42 @@ impl V16CuEnv {
             &[owner_a, owner_b],
         )
         .expect("trade")
+    }
+
+    fn update_maintenance_fee_policy_with_cu(&mut self, cranker_share_bps: u16) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::UpdateMaintenanceFeePolicy { cranker_share_bps },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("update maintenance fee policy")
+    }
+
+    fn sync_maintenance_fee_with_cu(
+        &mut self,
+        portfolio: Pubkey,
+        cranker_portfolio: Option<Pubkey>,
+        now_slot: u64,
+    ) -> u64 {
+        let mut accounts = vec![
+            AccountMeta::new(self.market, false),
+            AccountMeta::new(portfolio, false),
+        ];
+        if let Some(cranker_portfolio) = cranker_portfolio {
+            accounts.push(AccountMeta::new(cranker_portfolio, false));
+        }
+        self.send(
+            ProgInstruction::SyncMaintenanceFee { now_slot },
+            accounts,
+            &[],
+        )
+        .expect("sync maintenance fee")
     }
 
     fn seed_n_leg_position_for_benchmark(
@@ -1240,6 +1307,109 @@ fn v16_bpf_tradenocpi_executes_and_is_bounded() {
     );
     assert_eq!(group.vault, 2_000_000);
     assert_eq!(group.c_tot + group.insurance, group.vault);
+}
+
+#[test]
+fn v16_bpf_tradenocpi_fresh_open_on_base_and_added_asset_is_bounded() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000_000);
+
+    let asset0_cu = env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    println!("v16 TradeNoCpi fresh open asset[0] CU: {asset0_cu}");
+    assert!(
+        asset0_cu <= MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+        "fresh asset[0] TradeNoCpi CU {} exceeded limit {}",
+        asset0_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT
+    );
+
+    let asset3_cu = env.trade_asset_with_cu(
+        3,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    println!("v16 TradeNoCpi fresh open asset[3] CU: {asset3_cu}");
+    assert!(
+        asset3_cu <= MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+        "fresh asset[3] TradeNoCpi CU {} exceeded limit {}",
+        asset3_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT
+    );
+
+    let long_data = env.svm.get_account(&long_account).unwrap().data;
+    let short_data = env.svm.get_account(&short_account).unwrap().data;
+    let long = state::read_portfolio(&long_data).unwrap();
+    let short = state::read_portfolio(&short_data).unwrap();
+    assert_eq!(
+        active_leg_for_asset(&long, 0).basis_pos_q,
+        (10 * POS_SCALE) as i128
+    );
+    assert_eq!(
+        active_leg_for_asset(&short, 0).basis_pos_q,
+        -((10 * POS_SCALE) as i128)
+    );
+    assert_eq!(
+        active_leg_for_asset(&long, 3).basis_pos_q,
+        (10 * POS_SCALE) as i128
+    );
+    assert_eq!(
+        active_leg_for_asset(&short, 3).basis_pos_q,
+        -((10 * POS_SCALE) as i128)
+    );
+}
+
+#[test]
+fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    let payer_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.deposit(&payer_owner, payer_portfolio, 100_000_000);
+    env.update_maintenance_fee_policy_with_cu(4_000);
+
+    env.svm.warp_to_slot(10);
+    let sync_cu = env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
+    println!("v16 SyncMaintenanceFee 3-account cranker-share CU: {sync_cu}");
+    assert!(
+        sync_cu <= CUSTODY_CU_LIMIT,
+        "3-account SyncMaintenanceFee CU {} exceeded limit {}",
+        sync_cu,
+        CUSTODY_CU_LIMIT
+    );
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let payer_data = env.svm.get_account(&payer_portfolio).unwrap().data;
+    let cranker_data = env.svm.get_account(&cranker_portfolio).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    let payer = state::read_portfolio(&payer_data).unwrap();
+    let cranker = state::read_portfolio(&cranker_data).unwrap();
+    assert_eq!(payer.last_fee_slot, 10);
+    assert_eq!(payer.capital, 100_000_000 - 580);
+    assert_eq!(cranker.capital, 232);
+    assert_eq!(group.insurance, 348);
 }
 
 #[test]
