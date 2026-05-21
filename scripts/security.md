@@ -1,5 +1,48 @@
 # Security findings — 2026-05-20 v16 all-public-API sweep
 
+## Eighteenth pass — backing trade fee policy API
+
+**Status:** fixed with TDD, then `PASS_SAFE` on the exposed policy and trade
+paths. I swept the new backing-authority-controlled trade fee floor as a
+custody and matcher-CPI boundary.
+
+Target invariant:
+
+```text
+The backing authority may set a bounded trade-fee floor, but it cannot route
+funds outside the normal engine fee lane, bypass the engine's max fee cap, or
+make TradeCpi invoke a matcher when the resulting fee is already impossible.
+```
+
+Regression coverage:
+
+```bash
+cargo test --release --test v16_wrapper v16_wrapper_backing_fee_policy -- --test-threads=1 --nocapture
+cargo test --release --test v16_wrapper v16_wrapper_tradecpi_rejects_corrupt_backing_fee_floor_before_later_checks -- --test-threads=1 --nocapture
+cargo test --release --test v16_wrapper v16_wrapper_tradecpi_zero_fill_rejects_fee_above_cap_before_success -- --test-threads=1 --nocapture
+```
+
+Coverage:
+
+- `UpdateBackingFeePolicy` is gated by the live `backing_bucket_authority`;
+  stale admin and unrelated signers reject after authority rotation;
+- `fee_bps` must be <= 10_000 and <= the engine group's
+  `max_trading_fee_bps`;
+- both `TradeNoCpi` and `TradeCpi` charge at least
+  `max(caller_fee_bps, trade_fee_base_bps, backing_trade_fee_bps)`;
+- the fee remains a normal engine trade fee credited through the existing
+  insurance/residual accounting path; no extra token accounts or wrapper-side
+  fee custody are introduced;
+- corrupted persisted config with `backing_trade_fee_bps >
+  max_trading_fee_bps` now fails the cheap `TradeCpi` pre-CPI fee check before
+  matcher-dependent work or later account-auth checks.
+
+One hardening issue was found and fixed: `TradeCpi`'s pre-CPI fee-cap check
+originally compared only `max(caller_fee_bps, trade_fee_base_bps)` against the
+engine cap. The setter prevented this in normal state, but malformed persisted
+config could still defer rejection until after matcher CPI. The pre-CPI check
+now includes `backing_trade_fee_bps`.
+
 ## Seventeenth pass — corrupt-oracle source PnL and cross-margin exit cap
 
 **Status:** `PASS_SAFE` with added wrapper regressions. I scanned the path where

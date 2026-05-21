@@ -28,6 +28,7 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
     let min_funding_lifetime_raw: u16 = kani::any();
     let max_account_b_chunks_raw: u16 = kani::any();
     let max_bankrupt_close_chunks_raw: u16 = kani::any();
+    let max_bankrupt_close_lifetime_raw: u16 = kani::any();
     let public_b_chunk_atoms_raw: u16 = kani::any();
     let maintenance_fee_raw: u16 = kani::any();
     let h_min = h_min_raw as u64;
@@ -48,10 +49,11 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
     let min_funding_lifetime_slots = min_funding_lifetime_raw as u64;
     let max_account_b_settlement_chunks = max_account_b_chunks_raw as u64;
     let max_bankrupt_close_chunks = max_bankrupt_close_chunks_raw as u64;
+    let max_bankrupt_close_lifetime_slots = max_bankrupt_close_lifetime_raw as u64;
     let public_b_chunk_atoms = public_b_chunk_atoms_raw as u128;
     let maintenance_fee_per_slot = maintenance_fee_raw as u128;
 
-    let mut data = [0u8; 211];
+    let mut data = [0u8; 219];
     data[0] = 0;
     data[1..3].copy_from_slice(&max_portfolio_assets.to_le_bytes());
     data[3..11].copy_from_slice(&h_min.to_le_bytes());
@@ -72,8 +74,9 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
     data[155..163].copy_from_slice(&min_funding_lifetime_slots.to_le_bytes());
     data[163..171].copy_from_slice(&max_account_b_settlement_chunks.to_le_bytes());
     data[171..179].copy_from_slice(&max_bankrupt_close_chunks.to_le_bytes());
-    data[179..195].copy_from_slice(&public_b_chunk_atoms.to_le_bytes());
-    data[195..211].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
+    data[179..187].copy_from_slice(&max_bankrupt_close_lifetime_slots.to_le_bytes());
+    data[187..203].copy_from_slice(&public_b_chunk_atoms.to_le_bytes());
+    data[203..219].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::InitMarket {
@@ -96,6 +99,7 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
             min_funding_lifetime_slots: got_funding_life,
             max_account_b_settlement_chunks: got_b_chunks,
             max_bankrupt_close_chunks: got_bankrupt_chunks,
+            max_bankrupt_close_lifetime_slots: got_bankrupt_lifetime,
             public_b_chunk_atoms: got_public_b,
             maintenance_fee_per_slot: got_maintenance_fee,
         } => {
@@ -118,6 +122,7 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
             assert_eq!(got_funding_life, min_funding_lifetime_slots);
             assert_eq!(got_b_chunks, max_account_b_settlement_chunks);
             assert_eq!(got_bankrupt_chunks, max_bankrupt_close_chunks);
+            assert_eq!(got_bankrupt_lifetime, max_bankrupt_close_lifetime_slots);
             assert_eq!(got_public_b, public_b_chunk_atoms);
             assert_eq!(got_maintenance_fee, maintenance_fee_per_slot);
         }
@@ -575,6 +580,20 @@ fn kani_v16_update_maintenance_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_update_backing_fee_policy_decode_preserves_wire_fields() {
+    let fee_bps: u16 = kani::any();
+
+    let mut data = [0u8; 3];
+    data[0] = 51;
+    data[1..3].copy_from_slice(&fee_bps.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::UpdateBackingFeePolicy { fee_bps: got } => assert_eq!(got, fee_bps),
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
 fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
     let stale_slots_raw: u16 = kani::any();
     let delay_raw: u16 = kani::any();
@@ -788,6 +807,7 @@ fn kani_v16_init_market_payload_rejects_trailing_byte() {
             min_funding_lifetime_slots: 10,
             max_account_b_settlement_chunks: 1,
             max_bankrupt_close_chunks: 1,
+            max_bankrupt_close_lifetime_slots: 100,
             public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
             maintenance_fee_per_slot: 0,
         },
@@ -893,6 +913,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
         },
         extra,
     );
+    assert_rejects_trailing_byte(Instruction::UpdateBackingFeePolicy { fee_bps: 25 }, extra);
     assert_rejects_trailing_byte(
         Instruction::ConfigurePermissionlessResolve {
             stale_slots: 5,
