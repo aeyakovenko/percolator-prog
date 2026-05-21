@@ -1,8 +1,9 @@
 use percolator::{
-    AssetLifecycleV16, BackingBucketStatusV16, CloseProgressLedgerV16, MarketGroupV16,
-    MarketGroupV16HeaderAccount, MarketModeV16, PermissionlessRecoveryReasonV16,
-    PortfolioAccountV16Account, PortfolioLegV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16,
-    SideModeV16, SideV16, V16Config, BOUND_SCALE, POS_SCALE,
+    AssetLifecycleV16, AssetStateV16Account, BackingBucketStatusV16, CloseProgressLedgerV16,
+    EngineAssetSlotV16Account, MarketGroupV16, MarketGroupV16HeaderAccount, MarketModeV16,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
+    ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16, SideV16, V16Config,
+    BOUND_SCALE, POS_SCALE,
 };
 use percolator_prog::{
     constants::{
@@ -1913,6 +1914,72 @@ fn v16_wrapper_asset_authority_can_append_activate_and_trade_assets() {
         active_leg_for_asset(&short, 2).basis_pos_q,
         -(POS_SCALE as i128)
     );
+}
+
+#[test]
+fn v16_wrapper_trade_uses_append_prefix_not_unconfigured_tail_capacity() {
+    let mut admin = signer();
+    let mut market = market_account_with_capacity(2);
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account_for_market_slots(2);
+    let mut short_account = portfolio_account_for_market_slots(2);
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 1;
+            }
+        }),
+    );
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
+
+    let inactive_slot = 1usize;
+    let slot_start = HEADER_LEN
+        + WRAPPER_CONFIG_LEN
+        + MarketGroupV16HeaderAccount::dynamic_asset_slot_offset(
+            inactive_slot,
+            ASSET_ORACLE_PROFILE_LEN,
+        )
+        .unwrap();
+    let market_id_offset = core::mem::offset_of!(EngineAssetSlotV16Account, asset)
+        + core::mem::offset_of!(AssetStateV16Account, market_id);
+    market.data[slot_start + market_id_offset] = 7;
+    assert!(
+        state::read_market(&market.data).is_err(),
+        "full debug decode still rejects corrupt unconfigured tail slots"
+    );
+
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+
+    let long = state::read_portfolio(&long_account.data).unwrap();
+    let short = state::read_portfolio(&short_account.data).unwrap();
+    assert_eq!(long.legs[0].basis_pos_q, POS_SCALE as i128);
+    assert_eq!(short.legs[0].basis_pos_q, -(POS_SCALE as i128));
 }
 
 #[test]

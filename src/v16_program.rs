@@ -816,21 +816,49 @@ pub mod state {
         }
     }
 
-    fn market_slots_from_wire(data: &[u8]) -> Result<Vec<EngineAssetSlotV16Account>, ProgramError> {
-        let capacity = validate_market_dynamic_len(data)?;
-        let mut slots = Vec::with_capacity(capacity);
+    fn market_slots_from_wire(
+        data: &[u8],
+        capacity: usize,
+        slot_count: usize,
+    ) -> Result<Vec<EngineAssetSlotV16Account>, ProgramError> {
+        if slot_count > capacity {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
+        let mut slots = Vec::with_capacity(slot_count);
         let mut i = 0usize;
-        while i < capacity {
+        while i < slot_count {
             slots.push(*asset_slot_wire(data, i)?);
             i += 1;
         }
         Ok(slots)
     }
 
-    fn market_from_wire_boxed(data: &[u8]) -> Result<Box<MarketGroupV16>, ProgramError> {
+    fn market_from_wire_boxed(
+        data: &[u8],
+        read_full_capacity: bool,
+    ) -> Result<Box<MarketGroupV16>, ProgramError> {
         let wire = market_header(data)?;
-        let slots = market_slots_from_wire(data)?;
-        let group = wire
+        let capacity = validate_market_dynamic_len(data)?;
+        let configured = wire.config.max_market_slots.get() as usize;
+        if configured > capacity {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let slot_count = if read_full_capacity {
+            capacity
+        } else {
+            configured
+        };
+        let slots = market_slots_from_wire(data, capacity, slot_count)?;
+        let mut decode_wire = *wire;
+        if !read_full_capacity {
+            // Instruction handlers operate on the append-only configured prefix.
+            // The allocated tail is not part of the live engine state until an
+            // asset append activates exactly that slot, so hot paths must not
+            // deserialize or serialize it.
+            decode_wire.asset_slot_capacity =
+                percolator::V16PodU32::new(wire.config.max_market_slots.get());
+        }
+        let group = decode_wire
             .try_to_runtime_with_market_slots(&slots)
             .map_err(map_account_wire_error)?;
         Ok(Box::new(group))
@@ -906,8 +934,21 @@ pub mod state {
 
     fn portfolio_source_domains_from_wire(
         data: &[u8],
+        source_domain_count: Option<usize>,
     ) -> Result<Vec<PortfolioSourceDomainV16Account>, ProgramError> {
         let capacity = portfolio_source_domain_capacity(data)?;
+        if let Some(count) = source_domain_count {
+            if count > capacity {
+                return Err(PercolatorError::InvalidAccountLen.into());
+            }
+            let mut out = Vec::with_capacity(count);
+            let mut d = 0usize;
+            while d < count {
+                out.push(*portfolio_source_domain_wire(data, d)?);
+                d += 1;
+            }
+            return Ok(out);
+        }
         #[cfg(target_os = "solana")]
         let capacity = {
             let mut used = 0usize;
@@ -1026,9 +1067,12 @@ pub mod state {
         }
     }
 
-    fn portfolio_from_wire_boxed(data: &[u8]) -> Result<Box<PortfolioAccountV16>, ProgramError> {
+    fn portfolio_from_wire_boxed(
+        data: &[u8],
+        source_domain_count: Option<usize>,
+    ) -> Result<Box<PortfolioAccountV16>, ProgramError> {
         let wire = portfolio_wire(data)?;
-        let source_domains = portfolio_source_domains_from_wire(data)?;
+        let source_domains = portfolio_source_domains_from_wire(data, source_domain_count)?;
         let header = wire
             .provenance_header
             .try_to_runtime()
@@ -1139,7 +1183,7 @@ pub mod state {
         }
         check_header(data, KIND_MARKET)?;
         let config = read_wrapper_config_from_bytes(data)?;
-        Ok((config, *market_from_wire_boxed(data)?))
+        Ok((config, *market_from_wire_boxed(data, true)?))
     }
 
     pub fn read_market_boxed(
@@ -1150,7 +1194,7 @@ pub mod state {
         }
         check_header(data, KIND_MARKET)?;
         let config = read_wrapper_config_boxed_from_bytes(data)?;
-        Ok((config, market_from_wire_boxed(data)?))
+        Ok((config, market_from_wire_boxed(data, false)?))
     }
 
     pub fn read_market_trade_preflight(
@@ -1221,7 +1265,7 @@ pub mod state {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         check_header(data, KIND_PORTFOLIO)?;
-        Ok(*portfolio_from_wire_boxed(data)?)
+        Ok(*portfolio_from_wire_boxed(data, None)?)
     }
 
     pub fn read_portfolio_boxed(data: &[u8]) -> Result<Box<PortfolioAccountV16>, ProgramError> {
@@ -1229,7 +1273,22 @@ pub mod state {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         check_header(data, KIND_PORTFOLIO)?;
-        portfolio_from_wire_boxed(data)
+        portfolio_from_wire_boxed(data, None)
+    }
+
+    pub fn read_portfolio_boxed_for_market_slots(
+        data: &[u8],
+        max_market_slots: usize,
+    ) -> Result<Box<PortfolioAccountV16>, ProgramError> {
+        if data.len() < PORTFOLIO_ACCOUNT_LEN {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
+        check_header(data, KIND_PORTFOLIO)?;
+        let domains = v16_domain_count_for_market_slots(
+            u32::try_from(max_market_slots).map_err(|_| PercolatorError::InvalidAccountLen)?,
+        )
+        .map_err(map_account_wire_error)?;
+        portfolio_from_wire_boxed(data, Some(domains))
     }
 
     pub fn read_portfolio_owner_preflight(
@@ -5737,7 +5796,10 @@ pub mod processor {
             state::check_portfolio_kind(&data)?;
         }
         ensure_portfolio_storage_for_group(portfolio_ai, group)?;
-        state::read_portfolio_boxed(&portfolio_ai.try_borrow_data()?)
+        state::read_portfolio_boxed_for_market_slots(
+            &portfolio_ai.try_borrow_data()?,
+            group.config.max_market_slots as usize,
+        )
     }
 
     fn with_one_portfolio<'a, F>(
