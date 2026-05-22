@@ -505,38 +505,36 @@ impl V16CuEnv {
         let mut market_account = self.svm.get_account(&self.market).expect("market account");
         let mut long_data = self.svm.get_account(&long_account).expect("long account");
         let mut short_data = self.svm.get_account(&short_account).expect("short account");
-        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
-        let mut long = state::read_portfolio(&long_data.data).unwrap();
-        let mut short = state::read_portfolio(&short_data.data).unwrap();
-
-        let mut prices = [1u64; percolator::V16_MAX_PORTFOLIO_ASSETS_N];
-        for price in prices.iter_mut().take(n) {
-            *price = 100;
+        let (_, _, max_market_slots, _) =
+            state::read_market_config_mode_and_capacity(&market_account.data).unwrap();
+        {
+            let (_, mut group) = state::market_view_mut(&mut market_account.data).unwrap();
+            let mut long =
+                state::portfolio_view_mut_for_market_slots(&mut long_data.data, max_market_slots)
+                    .unwrap();
+            let mut short =
+                state::portfolio_view_mut_for_market_slots(&mut short_data.data, max_market_slots)
+                    .unwrap();
+            for asset_index in 0..n {
+                group
+                    .execute_trade_with_fee_in_place_not_atomic(
+                        &mut long,
+                        &mut short,
+                        TradeRequestV16 {
+                            asset_index,
+                            size_q: 10 * POS_SCALE,
+                            exec_price: 100,
+                            fee_bps: 0,
+                        },
+                    )
+                    .unwrap();
+            }
+            for asset_index in 0..n {
+                group
+                    .accrue_asset_to_not_atomic(asset_index, 16, 95, 0, true)
+                    .unwrap();
+            }
         }
-        for asset_index in 0..n {
-            group
-                .execute_trade_with_fee_in_place_not_atomic(
-                    &mut long,
-                    &mut short,
-                    TradeRequestV16 {
-                        asset_index,
-                        size_q: 10 * POS_SCALE,
-                        exec_price: 100,
-                        fee_bps: 0,
-                    },
-                    &prices,
-                )
-                .unwrap();
-        }
-        for asset_index in 0..n {
-            group
-                .accrue_asset_to_not_atomic(asset_index, 16, 95, 0, true)
-                .unwrap();
-        }
-
-        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
-        state::write_portfolio(&mut long_data.data, &long).unwrap();
-        state::write_portfolio(&mut short_data.data, &short).unwrap();
         self.svm.set_account(self.market, market_account).unwrap();
         self.svm.set_account(long_account, long_data).unwrap();
         self.svm.set_account(short_account, short_data).unwrap();
@@ -551,30 +549,31 @@ impl V16CuEnv {
         let mut market_account = self.svm.get_account(&self.market).expect("market account");
         let mut long_data = self.svm.get_account(&long_account).expect("long account");
         let mut short_data = self.svm.get_account(&short_account).expect("short account");
-        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
-        let mut long = state::read_portfolio(&long_data.data).unwrap();
-        let mut short = state::read_portfolio(&short_data.data).unwrap();
-
-        let prices = [100u64; percolator::V16_MAX_PORTFOLIO_ASSETS_N];
-        for asset_index in 0..n {
-            group
-                .execute_trade_with_fee_in_place_not_atomic(
-                    &mut long,
-                    &mut short,
-                    TradeRequestV16 {
-                        asset_index,
-                        size_q: 10 * POS_SCALE,
-                        exec_price: 100,
-                        fee_bps: 0,
-                    },
-                    &prices,
-                )
-                .unwrap();
+        let (_, _, max_market_slots, _) =
+            state::read_market_config_mode_and_capacity(&market_account.data).unwrap();
+        {
+            let (_, mut group) = state::market_view_mut(&mut market_account.data).unwrap();
+            let mut long =
+                state::portfolio_view_mut_for_market_slots(&mut long_data.data, max_market_slots)
+                    .unwrap();
+            let mut short =
+                state::portfolio_view_mut_for_market_slots(&mut short_data.data, max_market_slots)
+                    .unwrap();
+            for asset_index in 0..n {
+                group
+                    .execute_trade_with_fee_in_place_not_atomic(
+                        &mut long,
+                        &mut short,
+                        TradeRequestV16 {
+                            asset_index,
+                            size_q: 10 * POS_SCALE,
+                            exec_price: 100,
+                            fee_bps: 0,
+                        },
+                    )
+                    .unwrap();
+            }
         }
-
-        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
-        state::write_portfolio(&mut long_data.data, &long).unwrap();
-        state::write_portfolio(&mut short_data.data, &short).unwrap();
         self.svm.set_account(self.market, market_account).unwrap();
         self.svm.set_account(long_account, long_data).unwrap();
         self.svm.set_account(short_account, short_data).unwrap();
@@ -2057,12 +2056,12 @@ fn v16_cu_crank_cost_is_account_local_after_many_portfolios() {
             recovery_reason: 0,
         },
     );
-
     for _ in 0..64 {
         let owner = Keypair::new();
         let p = env.create_portfolio(&owner);
         let acct = env.svm.get_account(&p).expect("portfolio account exists");
-        assert!(state::read_portfolio(&acct.data).is_ok());
+        let (_header, parsed_owner) = state::read_portfolio_owner_preflight(&acct.data).unwrap();
+        assert_eq!(parsed_owner, owner.pubkey().to_bytes());
     }
 
     let after_extra = env.crank(
