@@ -50,13 +50,13 @@ pinocchio = "0.6"
 arrayref = "0.3"
 num-derive = "0.4"
 num-traits = "0.2"
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "3c109bc5bd91cf4d3650c60a683f9a8e96fcb1a9" }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "23de295039360182338e8675315103b7cf25e15b" }
 anchor-lang-v2 = { git = "https://github.com/solana-foundation/anchor", rev = "e3cf760826fa0a60f247635ea0572e59861ec9b5", package = "anchor-lang-v2", default-features = false, features = ["alloc", "guardrails"], optional = true }
 
 [target.'cfg(not(target_os = "solana"))'.dependencies]
 # Host tests still use owned snapshot helpers. The SBF/program target remains
 # on the engine's zero-copy account/view API and does not enable this feature.
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "3c109bc5bd91cf4d3650c60a683f9a8e96fcb1a9", features = ["runtime-vec-api"] }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "23de295039360182338e8675315103b7cf25e15b", features = ["runtime-vec-api"] }
 
 [dev-dependencies]
 bincode = "1"
