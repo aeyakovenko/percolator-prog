@@ -177,6 +177,43 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_domain_insurance_decode_preserves_wire_fields() {
+    let domain: u8 = kani::any();
+    let amount_raw: u16 = kani::any();
+    let amount = amount_raw as u128;
+
+    let mut top_up = [0u8; 18];
+    top_up[0] = 56;
+    top_up[1] = domain;
+    top_up[2..18].copy_from_slice(&amount.to_le_bytes());
+    match Instruction::decode(&top_up).unwrap() {
+        Instruction::TopUpInsuranceDomain {
+            domain: got_domain,
+            amount: got_amount,
+        } => {
+            assert_eq!(got_domain, domain);
+            assert_eq!(got_amount, amount);
+        }
+        _ => unreachable!(),
+    }
+
+    let mut withdraw = [0u8; 18];
+    withdraw[0] = 57;
+    withdraw[1] = domain;
+    withdraw[2..18].copy_from_slice(&amount.to_le_bytes());
+    match Instruction::decode(&withdraw).unwrap() {
+        Instruction::WithdrawInsuranceDomain {
+            domain: got_domain,
+            amount: got_amount,
+        } => {
+            assert_eq!(got_domain, domain);
+            assert_eq!(got_amount, amount);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
 fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let side: u8 = kani::any();
@@ -299,12 +336,20 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
     let initial_price_raw: u16 = kani::any();
     let now_slot = now_slot_raw as u64;
     let initial_price = initial_price_raw as u64;
+    let insurance_authority: [u8; 32] = kani::any();
+    let insurance_operator: [u8; 32] = kani::any();
+    let backing_bucket_authority: [u8; 32] = kani::any();
+    let oracle_authority: [u8; 32] = kani::any();
 
     let data = Instruction::UpdateAssetLifecycle {
         action,
         asset_index,
         now_slot,
         initial_price,
+        insurance_authority,
+        insurance_operator,
+        backing_bucket_authority,
+        oracle_authority,
     }
     .encode();
 
@@ -314,11 +359,19 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
             asset_index: got_asset_index,
             now_slot: got_now_slot,
             initial_price: got_initial_price,
+            insurance_authority: got_insurance_authority,
+            insurance_operator: got_insurance_operator,
+            backing_bucket_authority: got_backing_bucket_authority,
+            oracle_authority: got_oracle_authority,
         } => {
             assert_eq!(got_action, action);
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now_slot, now_slot);
             assert_eq!(got_initial_price, initial_price);
+            assert_eq!(got_insurance_authority, insurance_authority);
+            assert_eq!(got_insurance_operator, insurance_operator);
+            assert_eq!(got_backing_bucket_authority, backing_bucket_authority);
+            assert_eq!(got_oracle_authority, oracle_authority);
         }
         _ => unreachable!(),
     }
@@ -617,6 +670,37 @@ fn kani_v16_update_trade_fee_policy_decode_preserves_wire_fields() {
         Instruction::UpdateTradeFeePolicy {
             trade_fee_base_bps: got,
         } => assert_eq!(got, trade_fee_base_bps),
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_update_fee_redirect_policy_decode_preserves_wire_fields() {
+    let redirect_bps: u16 = kani::any();
+
+    let mut data = [0u8; 3];
+    data[0] = 58;
+    data[1..3].copy_from_slice(&redirect_bps.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::UpdateFeeRedirectPolicy { redirect_bps: got } => assert_eq!(got, redirect_bps),
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_update_market_init_fee_policy_decode_preserves_wire_fields() {
+    let min_init_fee_raw: u16 = kani::any();
+    let min_init_fee = min_init_fee_raw as u128;
+
+    let mut data = [0u8; 17];
+    data[0] = 59;
+    data[1..17].copy_from_slice(&min_init_fee.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::UpdateMarketInitFeePolicy { min_init_fee: got } => {
+            assert_eq!(got, min_init_fee)
+        }
         _ => unreachable!(),
     }
 }
@@ -956,6 +1040,14 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
         extra,
     );
     assert_rejects_trailing_byte(
+        Instruction::UpdateFeeRedirectPolicy { redirect_bps: 250 },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::UpdateMarketInitFeePolicy { min_init_fee: 50 },
+        extra,
+    );
+    assert_rejects_trailing_byte(
         Instruction::ConfigurePermissionlessResolve {
             stale_slots: 5,
             force_close_delay_slots: 1,
@@ -1014,6 +1106,10 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
             asset_index: 1,
             now_slot: 2,
             initial_price: 100,
+            insurance_authority: [1u8; 32],
+            insurance_operator: [1u8; 32],
+            backing_bucket_authority: [1u8; 32],
+            oracle_authority: [1u8; 32],
         },
         extra,
     );
@@ -1133,7 +1229,7 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
     let crank = [5u8; 59];
     assert!(Instruction::decode(&crank).is_err());
 
-    let asset_lifecycle = [40u8; 18];
+    let asset_lifecycle = [40u8; 147];
     assert!(Instruction::decode(&asset_lifecycle).is_err());
 
     let trade = [6u8; 33];
@@ -1145,11 +1241,17 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
     let top_up = [9u8; 16];
     assert!(Instruction::decode(&top_up).is_err());
 
+    let top_up_domain = [56u8; 17];
+    assert!(Instruction::decode(&top_up_domain).is_err());
+
     let top_up_backing = [24u8; 25];
     assert!(Instruction::decode(&top_up_backing).is_err());
 
     let withdraw_insurance = [23u8; 16];
     assert!(Instruction::decode(&withdraw_insurance).is_err());
+
+    let withdraw_insurance_domain = [57u8; 17];
+    assert!(Instruction::decode(&withdraw_insurance_domain).is_err());
 
     let convert_pnl = [28u8; 16];
     assert!(Instruction::decode(&convert_pnl).is_err());
@@ -1174,6 +1276,9 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
 
     let update_liquidation = [37u8; 2];
     assert!(Instruction::decode(&update_liquidation).is_err());
+
+    let update_redirect = [58u8; 2];
+    assert!(Instruction::decode(&update_redirect).is_err());
 
     let configure_permissionless = [38u8; 16];
     assert!(Instruction::decode(&configure_permissionless).is_err());

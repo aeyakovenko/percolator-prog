@@ -369,6 +369,10 @@ impl V16CuEnv {
                 asset_index,
                 now_slot,
                 initial_price,
+                insurance_authority: self.admin.pubkey().to_bytes(),
+                insurance_operator: self.admin.pubkey().to_bytes(),
+                backing_bucket_authority: self.admin.pubkey().to_bytes(),
+                oracle_authority: self.admin.pubkey().to_bytes(),
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
