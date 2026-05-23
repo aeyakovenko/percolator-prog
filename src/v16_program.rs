@@ -46,7 +46,7 @@ pub mod constants {
     pub const KIND_INSURANCE_LEDGER: u8 = 4;
 
     pub const HEADER_LEN: usize = 16;
-    pub const WRAPPER_CONFIG_LEN: usize = 560;
+    pub const WRAPPER_CONFIG_LEN: usize = 624;
     pub const ASSET_ORACLE_PROFILE_LEN: usize = 368;
     pub const ASSET_ORACLE_WRAPPER_LEN: usize = 512;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16HeaderAccount>();
@@ -180,6 +180,8 @@ pub mod state {
     pub struct WrapperConfigV16 {
         pub admin: [u8; 32],
         pub collateral_mint: [u8; 32],
+        pub secondary_collateral_mint: [u8; 32],
+        pub base_unit_authority: [u8; 32],
         pub maintenance_fee_per_slot: u128,
         pub permissionless_market_init_fee: u128,
         pub trade_fee_base_bps: u64,
@@ -521,6 +523,12 @@ pub mod state {
 
     #[inline]
     fn validate_wrapper_config(config: &WrapperConfigV16) -> Result<(), ProgramError> {
+        if config.collateral_mint == [0u8; 32]
+            || (config.secondary_collateral_mint != [0u8; 32]
+                && config.secondary_collateral_mint == config.collateral_mint)
+        {
+            return Err(ProgramError::InvalidAccountData);
+        }
         if !insurance_withdraw_policy_shape_ok(
             config.insurance_withdraw_max_bps,
             config.insurance_withdraw_deposits_only,
@@ -1961,6 +1969,13 @@ pub mod ix {
         SyncMaintenanceFee {
             now_slot: u64,
         },
+        UpdateBaseUnitMints {
+            primary_mint: [u8; 32],
+            secondary_mint: [u8; 32],
+        },
+        SwapSecondaryForPrimary {
+            amount: u128,
+        },
     }
 
     impl Instruction {
@@ -2078,6 +2093,13 @@ pub mod ix {
                 },
                 59 => Self::UpdateMarketInitFeePolicy {
                     min_init_fee: read_u128(&mut rest)?,
+                },
+                60 => Self::UpdateBaseUnitMints {
+                    primary_mint: read_bytes32(&mut rest)?,
+                    secondary_mint: read_bytes32(&mut rest)?,
+                },
+                61 => Self::SwapSecondaryForPrimary {
+                    amount: read_u128(&mut rest)?,
                 },
                 52 => Self::WithdrawBackingBucketEarnings {
                     domain: read_u8(&mut rest)?,
@@ -2359,6 +2381,18 @@ pub mod ix {
                 Self::UpdateMarketInitFeePolicy { min_init_fee } => {
                     out.push(59);
                     push_u128(&mut out, min_init_fee);
+                }
+                Self::UpdateBaseUnitMints {
+                    primary_mint,
+                    secondary_mint,
+                } => {
+                    out.push(60);
+                    out.extend_from_slice(&primary_mint);
+                    out.extend_from_slice(&secondary_mint);
+                }
+                Self::SwapSecondaryForPrimary { amount } => {
+                    out.push(61);
+                    push_u128(&mut out, amount);
                 }
                 Self::WithdrawBackingBucketEarnings { domain, amount } => {
                     out.push(52);
@@ -3398,6 +3432,7 @@ pub mod processor {
     pub const AUTHORITY_BACKING_BUCKET: u8 = 3;
     pub const AUTHORITY_INSURANCE_OPERATOR: u8 = 4;
     pub const AUTHORITY_ASSET: u8 = 5;
+    pub const AUTHORITY_BASE_UNIT: u8 = 6;
 
     pub const ASSET_ACTION_ACTIVATE: u8 = 0;
     pub const ASSET_ACTION_DRAIN_ONLY: u8 = 1;
@@ -4263,6 +4298,13 @@ pub mod processor {
             Instruction::SyncMaintenanceFee { now_slot } => {
                 handle_sync_maintenance_fee(program_id, accounts, now_slot)
             }
+            Instruction::UpdateBaseUnitMints {
+                primary_mint,
+                secondary_mint,
+            } => handle_update_base_unit_mints(program_id, accounts, primary_mint, secondary_mint),
+            Instruction::SwapSecondaryForPrimary { amount } => {
+                handle_swap_secondary_for_primary(program_id, accounts, amount)
+            }
         }
     }
 
@@ -4332,6 +4374,8 @@ pub mod processor {
         let wrapper = WrapperConfigV16 {
             admin: admin.key.to_bytes(),
             collateral_mint: mint_ai.key.to_bytes(),
+            secondary_collateral_mint: [0u8; 32],
+            base_unit_authority: admin.key.to_bytes(),
             maintenance_fee_per_slot,
             permissionless_market_init_fee: 0,
             trade_fee_base_bps,
@@ -4476,7 +4520,7 @@ pub mod processor {
         if mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        let mint = Pubkey::new_from_array(cfg.collateral_mint);
+        let mint = primary_collateral_mint(&cfg);
         let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
         verify_user_token_account(source_token, owner.key, &mint)?;
         verify_vault_token_account(vault_token, &vault_authority, &mint)?;
@@ -4531,11 +4575,15 @@ pub mod processor {
         if mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        let mint = Pubkey::new_from_array(cfg.collateral_mint);
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
-        verify_user_token_account(dest_token, owner.key, &mint)?;
-        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+        verify_withdrawable_token_accounts(
+            dest_token,
+            owner.key,
+            vault_token,
+            &vault_authority,
+            &cfg,
+        )?;
         let amount_u64 = amount_to_u64(amount)?;
         require_token_balance(vault_token, amount_u64)?;
 
@@ -5008,7 +5056,7 @@ pub mod processor {
             return Err(PercolatorError::EngineLockActive.into());
         }
         expect_live_authority(&cfg_pre.insurance_authority, signer.key)?;
-        let mint = Pubkey::new_from_array(cfg_pre.collateral_mint);
+        let mint = primary_collateral_mint(&cfg_pre);
         let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
         verify_user_token_account(source_token, signer.key, &mint)?;
         verify_vault_token_account(vault_token, &vault_authority, &mint)?;
@@ -5132,7 +5180,7 @@ pub mod processor {
             (cfg, authorities)
         };
         expect_live_authority(&authorities.insurance_authority, signer.key)?;
-        let mint = Pubkey::new_from_array(cfg_pre.collateral_mint);
+        let mint = primary_collateral_mint(&cfg_pre);
         let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
         verify_user_token_account(source_token, signer.key, &mint)?;
         verify_vault_token_account(vault_token, &vault_authority, &mint)?;
@@ -5533,7 +5581,7 @@ pub mod processor {
             (cfg, authorities)
         };
         expect_live_authority(&authorities.backing_bucket_authority, signer.key)?;
-        let mint = Pubkey::new_from_array(cfg_pre.collateral_mint);
+        let mint = primary_collateral_mint(&cfg_pre);
         let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
         verify_user_token_account(source_token, signer.key, &mint)?;
         verify_vault_token_account(vault_token, &vault_authority, &mint)?;
@@ -5646,11 +5694,15 @@ pub mod processor {
             (cfg, authorities)
         };
         expect_live_authority(&authorities_pre.backing_bucket_authority, authority.key)?;
-        let mint = Pubkey::new_from_array(cfg_pre.collateral_mint);
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
-        verify_user_token_account(dest_token, authority.key, &mint)?;
-        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+        verify_withdrawable_token_accounts(
+            dest_token,
+            authority.key,
+            vault_token,
+            &vault_authority,
+            &cfg_pre,
+        )?;
         let amount_u64 = amount_to_u64(amount)?;
         require_token_balance(vault_token, amount_u64)?;
 
@@ -5850,11 +5902,15 @@ pub mod processor {
             (cfg, authorities)
         };
         expect_live_authority(&authorities_pre.backing_bucket_authority, authority.key)?;
-        let mint = Pubkey::new_from_array(cfg_pre.collateral_mint);
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
-        verify_user_token_account(dest_token, authority.key, &mint)?;
-        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+        verify_withdrawable_token_accounts(
+            dest_token,
+            authority.key,
+            vault_token,
+            &vault_authority,
+            &cfg_pre,
+        )?;
         let amount_u64 = amount_to_u64(amount)?;
         require_token_balance(vault_token, amount_u64)?;
 
@@ -6086,11 +6142,15 @@ pub mod processor {
             cfg
         };
 
-        let mint = Pubkey::new_from_array(cfg_pre.collateral_mint);
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
-        verify_user_token_account(dest_token, authority.key, &mint)?;
-        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+        verify_withdrawable_token_accounts(
+            dest_token,
+            authority.key,
+            vault_token,
+            &vault_authority,
+            &cfg_pre,
+        )?;
         let amount_u64 = amount_to_u64(amount)?;
         require_token_balance(vault_token, amount_u64)?;
         let bump_arr = [bump];
@@ -6150,11 +6210,15 @@ pub mod processor {
             (cfg, authorities)
         };
         expect_live_authority(&authorities.insurance_operator, operator.key)?;
-        let mint = Pubkey::new_from_array(cfg_pre.collateral_mint);
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
-        verify_user_token_account(dest_token, operator.key, &mint)?;
-        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+        verify_withdrawable_token_accounts(
+            dest_token,
+            operator.key,
+            vault_token,
+            &vault_authority,
+            &cfg_pre,
+        )?;
         let amount_u64 = amount_to_u64(amount)?;
         require_token_balance(vault_token, amount_u64)?;
         {
@@ -6292,15 +6356,13 @@ pub mod processor {
             cfg
         };
 
-        let mint = Pubkey::new_from_array(cfg_pre.collateral_mint);
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
-        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
-
-        let vault_account = spl_token::state::Account::unpack(&vault_token.try_borrow_data()?)?;
+        let vault_account =
+            verify_withdrawable_vault_token_account(vault_token, &vault_authority, &cfg_pre)?;
         let stranded = vault_account.amount;
         if stranded > 0 {
-            verify_user_token_account(dest_token, admin_dest.key, &mint)?;
+            verify_user_token_account(dest_token, admin_dest.key, &vault_account.mint)?;
             let bump_arr = [bump];
             let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
             transfer_tokens_signed(
@@ -6378,11 +6440,15 @@ pub mod processor {
         if mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        let mint = Pubkey::new_from_array(cfg_pre.collateral_mint);
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
-        verify_user_token_account(dest_token, operator.key, &mint)?;
-        verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+        verify_withdrawable_token_accounts(
+            dest_token,
+            operator.key,
+            vault_token,
+            &vault_authority,
+            &cfg_pre,
+        )?;
         let amount_u64 = amount_to_u64(amount)?;
         require_token_balance(vault_token, amount_u64)?;
         let cfg_after = {
@@ -6558,7 +6624,7 @@ pub mod processor {
             verify_token_program(token_program)?;
             let cfg_pre =
                 state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?.0;
-            let mint = Pubkey::new_from_array(cfg_pre.collateral_mint);
+            let mint = primary_collateral_mint(&cfg_pre);
             let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
             verify_user_token_account(source_token, owner.key, &mint)?;
             verify_vault_token_account(vault_token, &vault_authority, &mint)?;
@@ -6888,10 +6954,108 @@ pub mod processor {
                 expect_live_authority(&cfg.insurance_operator, current.key)?;
                 cfg.insurance_operator = new_pubkey;
             }
+            AUTHORITY_BASE_UNIT => {
+                expect_live_authority(&cfg.base_unit_authority, current.key)?;
+                cfg.base_unit_authority = new_pubkey;
+            }
             _ => return Err(PercolatorError::InvalidInstruction.into()),
         }
 
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
+    }
+
+    #[inline(never)]
+    fn handle_update_base_unit_mints<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        primary_mint: [u8; 32],
+        secondary_mint: [u8; 32],
+    ) -> ProgramResult {
+        let authority = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let primary_mint_ai = account(accounts, 2)?;
+        let secondary_mint_ai = account(accounts, 3)?;
+        expect_signer(authority)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+        if primary_mint == [0u8; 32]
+            || secondary_mint == [0u8; 32]
+            || primary_mint == secondary_mint
+        {
+            return Err(PercolatorError::InvalidMint.into());
+        }
+        let primary_key = Pubkey::new_from_array(primary_mint);
+        let secondary_key = Pubkey::new_from_array(secondary_mint);
+        expect_key(primary_mint_ai, &primary_key)?;
+        expect_key(secondary_mint_ai, &secondary_key)?;
+        verify_mint(primary_mint_ai)?;
+        verify_mint(secondary_mint_ai)?;
+
+        let (mut cfg, _, _, _) =
+            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        expect_live_authority(&cfg.base_unit_authority, authority.key)?;
+        cfg.collateral_mint = primary_mint;
+        cfg.secondary_collateral_mint = secondary_mint;
+        state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
+    }
+
+    #[inline(never)]
+    fn handle_swap_secondary_for_primary<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        amount: u128,
+    ) -> ProgramResult {
+        let authority = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let primary_source_token = account(accounts, 2)?;
+        let primary_vault_token = account(accounts, 3)?;
+        let secondary_dest_token = account(accounts, 4)?;
+        let secondary_vault_token = account(accounts, 5)?;
+        let vault_authority_ai = account(accounts, 6)?;
+        let token_program = account(accounts, 7)?;
+        expect_signer(authority)?;
+        expect_writable(primary_source_token)?;
+        expect_writable(primary_vault_token)?;
+        expect_writable(secondary_dest_token)?;
+        expect_writable(secondary_vault_token)?;
+        expect_owner(market_ai, program_id)?;
+        verify_token_program(token_program)?;
+        if amount == 0 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let amount_u64 = amount_to_u64(amount)?;
+
+        let (cfg, _, _, _) =
+            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        expect_live_authority(&cfg.base_unit_authority, authority.key)?;
+        let primary_mint = primary_collateral_mint(&cfg);
+        let secondary_mint = secondary_collateral_mint(&cfg)?;
+        let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
+        expect_key(vault_authority_ai, &vault_authority)?;
+        verify_user_token_account(primary_source_token, authority.key, &primary_mint)?;
+        verify_vault_token_account(primary_vault_token, &vault_authority, &primary_mint)?;
+        verify_user_token_account(secondary_dest_token, authority.key, &secondary_mint)?;
+        verify_vault_token_account(secondary_vault_token, &vault_authority, &secondary_mint)?;
+        require_token_balance(primary_source_token, amount_u64)?;
+        require_token_balance(secondary_vault_token, amount_u64)?;
+
+        transfer_tokens(
+            token_program,
+            primary_source_token,
+            primary_vault_token,
+            authority,
+            amount_u64,
+        )?;
+        let bump_arr = [bump];
+        let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+        transfer_tokens_signed(
+            token_program,
+            secondary_vault_token,
+            secondary_dest_token,
+            vault_authority_ai,
+            amount_u64,
+            signer_seeds,
+        )
     }
 
     #[inline(never)]
@@ -6939,7 +7103,7 @@ pub mod processor {
                 expect_writable(source_token)?;
                 expect_writable(vault_token)?;
                 verify_token_program(token_program)?;
-                let mint = Pubkey::new_from_array(cfg_pre.collateral_mint);
+                let mint = primary_collateral_mint(&cfg_pre);
                 let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
                 verify_user_token_account(source_token, authority.key, &mint)?;
                 verify_vault_token_account(vault_token, &vault_authority, &mint)?;
@@ -7958,11 +8122,15 @@ pub mod processor {
             expect_writable(dest_token)?;
             expect_writable(vault_token)?;
             verify_token_program(token_program)?;
-            let mint = Pubkey::new_from_array(cfg_after.collateral_mint);
             let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
             expect_key(vault_authority_ai, &vault_authority)?;
-            verify_user_token_account(dest_token, owner.key, &mint)?;
-            verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+            verify_withdrawable_token_accounts(
+                dest_token,
+                owner.key,
+                vault_token,
+                &vault_authority,
+                &cfg_after,
+            )?;
             let payout_u64 = amount_to_u64(payout)?;
             require_token_balance(vault_token, payout_u64)?;
             let bump_arr = [bump];
@@ -8064,11 +8232,15 @@ pub mod processor {
             expect_writable(dest_token)?;
             expect_writable(vault_token)?;
             verify_token_program(token_program)?;
-            let mint = Pubkey::new_from_array(cfg.collateral_mint);
             let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
             expect_key(vault_authority_ai, &vault_authority)?;
-            verify_user_token_account(dest_token, owner.key, &mint)?;
-            verify_vault_token_account(vault_token, &vault_authority, &mint)?;
+            verify_withdrawable_token_accounts(
+                dest_token,
+                owner.key,
+                vault_token,
+                &vault_authority,
+                &cfg,
+            )?;
             let payout_u64 = amount_to_u64(payout)?;
             require_token_balance(vault_token, payout_u64)?;
             let bump_arr = [bump];
@@ -9318,6 +9490,69 @@ pub mod processor {
             || token.state != spl_token::state::AccountState::Initialized
         {
             return Err(PercolatorError::InvalidTokenAccount.into());
+        }
+        Ok(())
+    }
+
+    fn primary_collateral_mint(cfg: &WrapperConfigV16) -> Pubkey {
+        Pubkey::new_from_array(cfg.collateral_mint)
+    }
+
+    fn secondary_collateral_mint(cfg: &WrapperConfigV16) -> Result<Pubkey, ProgramError> {
+        if cfg.secondary_collateral_mint == [0u8; 32] {
+            return Err(PercolatorError::InvalidMint.into());
+        }
+        Ok(Pubkey::new_from_array(cfg.secondary_collateral_mint))
+    }
+
+    fn is_withdrawable_collateral_mint(cfg: &WrapperConfigV16, mint: &Pubkey) -> bool {
+        mint.to_bytes() == cfg.collateral_mint
+            || (cfg.secondary_collateral_mint != [0u8; 32]
+                && mint.to_bytes() == cfg.secondary_collateral_mint)
+    }
+
+    fn verify_withdrawable_vault_token_account(
+        token_ai: &AccountInfo,
+        expected_owner: &Pubkey,
+        cfg: &WrapperConfigV16,
+    ) -> Result<spl_token::state::Account, ProgramError> {
+        let token = unpack_token_account(token_ai)?;
+        if !is_withdrawable_collateral_mint(cfg, &token.mint) {
+            return Err(PercolatorError::InvalidMint.into());
+        }
+        if token.owner != *expected_owner
+            || token.state != spl_token::state::AccountState::Initialized
+            || token.delegate.is_some()
+            || token.close_authority.is_some()
+        {
+            return Err(PercolatorError::InvalidVaultAccount.into());
+        }
+        Ok(token)
+    }
+
+    fn verify_withdrawable_token_accounts(
+        dest_token_ai: &AccountInfo,
+        expected_dest_owner: &Pubkey,
+        vault_token_ai: &AccountInfo,
+        expected_vault_owner: &Pubkey,
+        cfg: &WrapperConfigV16,
+    ) -> Result<(), ProgramError> {
+        let dest = unpack_token_account(dest_token_ai)?;
+        let vault = unpack_token_account(vault_token_ai)?;
+        if dest.mint != vault.mint || !is_withdrawable_collateral_mint(cfg, &dest.mint) {
+            return Err(PercolatorError::InvalidMint.into());
+        }
+        if dest.owner != *expected_dest_owner
+            || dest.state != spl_token::state::AccountState::Initialized
+        {
+            return Err(PercolatorError::InvalidTokenAccount.into());
+        }
+        if vault.owner != *expected_vault_owner
+            || vault.state != spl_token::state::AccountState::Initialized
+            || vault.delegate.is_some()
+            || vault.close_authority.is_some()
+        {
+            return Err(PercolatorError::InvalidVaultAccount.into());
         }
         Ok(())
     }

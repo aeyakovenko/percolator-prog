@@ -574,6 +574,21 @@ fn init_market_with_ix(
     mint_key
 }
 
+fn configure_base_unit_mints(
+    authority: &mut TestAccount,
+    market: &mut TestAccount,
+    primary_mint: &mut TestAccount,
+    secondary_mint: &mut TestAccount,
+) -> Result<(), ProgramError> {
+    run_ix(
+        Instruction::UpdateBaseUnitMints {
+            primary_mint: primary_mint.key.to_bytes(),
+            secondary_mint: secondary_mint.key.to_bytes(),
+        },
+        &mut [authority, market, primary_mint, secondary_mint],
+    )
+}
+
 fn update_asset_lifecycle(
     authority: &mut TestAccount,
     market: &mut TestAccount,
@@ -4109,6 +4124,20 @@ fn v16_wrapper_raw_wrapper_config_invalid_values_fail_closed() {
     assert_bad_cfg(
         bad_reward,
         "corrupt liquidation reward share must not be trusted on read",
+    );
+
+    let mut bad_primary_mint = cfg;
+    bad_primary_mint.collateral_mint = [0u8; 32];
+    assert_bad_cfg(
+        bad_primary_mint,
+        "primary base-unit mint must not be empty in persisted config",
+    );
+
+    let mut bad_secondary_mint = cfg;
+    bad_secondary_mint.secondary_collateral_mint = cfg.collateral_mint;
+    assert_bad_cfg(
+        bad_secondary_mint,
+        "secondary base-unit mint must not alias the primary mint",
     );
 
     let mut bad_maintenance_reward = cfg;
@@ -8478,6 +8507,289 @@ fn v16_wrapper_withdraw_rejects_over_capital_and_insufficient_vault_without_muta
     );
     assert_err_and_market_unchanged(insufficient_vault, &market, &before_market);
     assert_eq!(portfolio.data, before_portfolio);
+}
+
+#[test]
+fn v16_wrapper_base_unit_secondary_withdraws_but_primary_only_deposits() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut primary_mint = mint_account();
+    let primary_key = primary_mint.key;
+    let mut secondary_mint = mint_account();
+    let secondary_key = secondary_mint.key;
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    run_ix(
+        default_init_market_ix(),
+        &mut [&mut admin, &mut market, &mut primary_mint],
+    )
+    .unwrap();
+    configure_base_unit_mints(
+        &mut admin,
+        &mut market,
+        &mut primary_mint,
+        &mut secondary_mint,
+    )
+    .unwrap();
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 1_000);
+
+    let before_market = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let mut secondary_source = user_token_account(owner.key, secondary_key, 1);
+    let mut secondary_vault_for_deposit = vault_token_account(&market, secondary_key, 0);
+    let mut token_program = token_program_account();
+    let secondary_deposit = run_ix(
+        Instruction::Deposit { amount: 1 },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut secondary_source,
+            &mut secondary_vault_for_deposit,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(secondary_deposit, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+
+    let mut secondary_dest = user_token_account(owner.key, secondary_key, 0);
+    let mut primary_vault = vault_token_account(&market, primary_key, 250);
+    let mut vault_auth = vault_authority_account(&market);
+    let mismatched_vault = run_ix(
+        Instruction::Withdraw { amount: 250 },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut secondary_dest,
+            &mut primary_vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(mismatched_vault, &market, &before_market);
+    assert_eq!(portfolio.data, before_portfolio);
+
+    let mut secondary_dest = user_token_account(owner.key, secondary_key, 0);
+    let mut secondary_vault = vault_token_account(&market, secondary_key, 250);
+    run_ix(
+        Instruction::Withdraw { amount: 250 },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut secondary_dest,
+            &mut secondary_vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(group.vault, 750);
+    assert_eq!(account.capital, 750);
+}
+
+#[test]
+fn v16_wrapper_base_unit_authority_changes_primary_and_rotates() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut old_primary_mint = mint_account();
+    let old_primary_key = old_primary_mint.key;
+    let mut new_primary_mint = mint_account();
+    let new_primary_key = new_primary_mint.key;
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    run_ix(
+        default_init_market_ix(),
+        &mut [&mut admin, &mut market, &mut old_primary_mint],
+    )
+    .unwrap();
+    configure_base_unit_mints(
+        &mut admin,
+        &mut market,
+        &mut old_primary_mint,
+        &mut new_primary_mint,
+    )
+    .unwrap();
+
+    let mut base_unit_authority = signer();
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_BASE_UNIT,
+            new_pubkey: base_unit_authority.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut base_unit_authority, &mut market],
+    )
+    .unwrap();
+
+    let before_rotation = market.data.clone();
+    let stale_admin = configure_base_unit_mints(
+        &mut admin,
+        &mut market,
+        &mut new_primary_mint,
+        &mut old_primary_mint,
+    );
+    assert_err_and_market_unchanged(stale_admin, &market, &before_rotation);
+
+    configure_base_unit_mints(
+        &mut base_unit_authority,
+        &mut market,
+        &mut new_primary_mint,
+        &mut old_primary_mint,
+    )
+    .unwrap();
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.collateral_mint, new_primary_key.to_bytes());
+    assert_eq!(cfg.secondary_collateral_mint, old_primary_key.to_bytes());
+    assert_eq!(cfg.base_unit_authority, base_unit_authority.key.to_bytes());
+
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    let before_deposit = market.data.clone();
+    let before_portfolio = portfolio.data.clone();
+    let mut old_primary_source = user_token_account(owner.key, old_primary_key, 1);
+    let mut old_primary_vault = vault_token_account(&market, old_primary_key, 0);
+    let mut token_program = token_program_account();
+    let old_primary_deposit = run_ix(
+        Instruction::Deposit { amount: 1 },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut old_primary_source,
+            &mut old_primary_vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(old_primary_deposit, &market, &before_deposit);
+    assert_eq!(portfolio.data, before_portfolio);
+
+    let mut new_primary_source = user_token_account(owner.key, new_primary_key, 1);
+    let mut new_primary_vault = vault_token_account(&market, new_primary_key, 0);
+    run_ix(
+        Instruction::Deposit { amount: 1 },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut new_primary_source,
+            &mut new_primary_vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(group.vault, 1);
+    assert_eq!(account.capital, 1);
+}
+
+#[test]
+fn v16_wrapper_base_unit_atomic_swap_requires_primary_in_for_secondary_out() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut primary_mint = mint_account();
+    let primary_key = primary_mint.key;
+    let mut secondary_mint = mint_account();
+    let secondary_key = secondary_mint.key;
+
+    run_ix(
+        default_init_market_ix(),
+        &mut [&mut admin, &mut market, &mut primary_mint],
+    )
+    .unwrap();
+    configure_base_unit_mints(
+        &mut admin,
+        &mut market,
+        &mut primary_mint,
+        &mut secondary_mint,
+    )
+    .unwrap();
+
+    let mut attacker = signer();
+    let mut primary_source = user_token_account(attacker.key, primary_key, 50);
+    let mut primary_vault = vault_token_account(&market, primary_key, 0);
+    let mut secondary_dest = user_token_account(attacker.key, secondary_key, 0);
+    let mut secondary_vault = vault_token_account(&market, secondary_key, 50);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut token_program = token_program_account();
+    let before_market = market.data.clone();
+    let zero_swap = run_ix(
+        Instruction::SwapSecondaryForPrimary { amount: 0 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut primary_source,
+            &mut primary_vault,
+            &mut secondary_dest,
+            &mut secondary_vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(zero_swap, &market, &before_market);
+
+    let unauthorized = run_ix(
+        Instruction::SwapSecondaryForPrimary { amount: 50 },
+        &mut [
+            &mut attacker,
+            &mut market,
+            &mut primary_source,
+            &mut primary_vault,
+            &mut secondary_dest,
+            &mut secondary_vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(unauthorized, &market, &before_market);
+
+    let mut short_primary = user_token_account(admin.key, primary_key, 49);
+    let mut primary_vault = vault_token_account(&market, primary_key, 0);
+    let mut secondary_dest = user_token_account(admin.key, secondary_key, 0);
+    let mut secondary_vault = vault_token_account(&market, secondary_key, 50);
+    let short_primary_in = run_ix(
+        Instruction::SwapSecondaryForPrimary { amount: 50 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut short_primary,
+            &mut primary_vault,
+            &mut secondary_dest,
+            &mut secondary_vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(short_primary_in, &market, &before_market);
+
+    let mut primary_source = user_token_account(admin.key, primary_key, 50);
+    let mut primary_vault = vault_token_account(&market, primary_key, 0);
+    let mut secondary_dest = user_token_account(admin.key, secondary_key, 0);
+    let mut secondary_vault = vault_token_account(&market, secondary_key, 50);
+    run_ix(
+        Instruction::SwapSecondaryForPrimary { amount: 50 },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut primary_source,
+            &mut primary_vault,
+            &mut secondary_dest,
+            &mut secondary_vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        market.data, before_market,
+        "base-unit swaps only exchange SPL custody and must not change engine accounting"
+    );
 }
 
 #[test]

@@ -1,5 +1,59 @@
 # Security findings — 2026-05-20 v16 all-public-API sweep
 
+## Nineteenth pass — primary/secondary base-unit SPL custody API
+
+**Status:** fixed with TDD, then `PASS_SAFE` on the new base-unit mint
+configuration, withdrawal mint selection, and authority-only migration swap.
+
+Target invariant:
+
+```text
+Market 0 stores a primary base-unit SPL mint and an optional secondary base-unit
+SPL mint. All inbound custody that increases wrapper accounting must use the
+current primary mint. Outbound custody may pay from either configured mint, but
+destination and vault mints must match. The base-unit authority alone may change
+the primary/secondary mint pair or atomically replace N secondary vault units
+with N primary vault units without changing engine accounting.
+```
+
+TDD and verification:
+
+```bash
+cargo test --test v16_wrapper base_unit -- --nocapture
+cargo test --test v16_wrapper raw_wrapper_config_invalid_values_fail_closed -- --nocapture
+cargo test --no-run --test v16_kani
+cargo build-sbf --no-default-features
+cargo test
+git diff --check
+```
+
+Security pass results:
+
+- PASS 1: persisted config rejects an empty primary mint and rejects a secondary
+  mint equal to the primary mint; unconfigured secondary remains disabled.
+- PASS 2: `UpdateBaseUnitMints` requires the live `base_unit_authority` signer,
+  validates both supplied accounts as SPL mints, and stores distinct primary and
+  secondary mint ids.
+- PASS 3: `AUTHORITY_BASE_UNIT` rotation follows the existing dual-signature
+  authority update pattern, and the stale prior authority cannot change mints.
+- PASS 4: `Deposit`, insurance top-ups, domain insurance top-ups, backing
+  top-ups, cure deposits, and permissionless market init fees still accept only
+  the current primary mint.
+- PASS 5: user withdrawals and resolved payout withdrawals accept either
+  configured mint only when destination and vault token-account mints match.
+- PASS 6: insurance, domain-insurance, backing-principal, backing-earnings, and
+  close-slab withdrawal paths share the same configured-mint outbound checks.
+- PASS 7: outbound vault accounts still require the wrapper vault PDA owner,
+  initialized token state, no delegate, and no close authority.
+- PASS 8: `SwapSecondaryForPrimary` rejects zero amounts, unauthorized signers,
+  short primary source balances, missing secondary configuration, and bad token
+  programs before moving tokens.
+- PASS 9: `SwapSecondaryForPrimary` transfers N primary units into the primary
+  vault and N secondary units out of the secondary vault under PDA signature,
+  without mutating engine vault/capital/insurance accounting.
+- PASS 10: tags `60` and `61` have Kani encode/decode coverage, trailing-byte
+  rejection, and truncation rejection.
+
 ## Eighteenth pass — domain-scoped backing residual fee API
 
 **Status:** fixed with TDD, then `PASS_SAFE` on the exposed policy, lifecycle,

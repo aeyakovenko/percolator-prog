@@ -706,6 +706,37 @@ fn kani_v16_update_market_init_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_base_unit_payloads_decode_preserves_wire_fields() {
+    let primary_mint: [u8; 32] = kani::any();
+    let secondary_mint: [u8; 32] = kani::any();
+    let amount_raw: u16 = kani::any();
+    let amount = amount_raw as u128;
+
+    let mut update = [0u8; 65];
+    update[0] = 60;
+    update[1..33].copy_from_slice(&primary_mint);
+    update[33..65].copy_from_slice(&secondary_mint);
+    match Instruction::decode(&update).unwrap() {
+        Instruction::UpdateBaseUnitMints {
+            primary_mint: got_primary,
+            secondary_mint: got_secondary,
+        } => {
+            assert_eq!(got_primary, primary_mint);
+            assert_eq!(got_secondary, secondary_mint);
+        }
+        _ => unreachable!(),
+    }
+
+    let mut swap = [0u8; 17];
+    swap[0] = 61;
+    swap[1..17].copy_from_slice(&amount.to_le_bytes());
+    match Instruction::decode(&swap).unwrap() {
+        Instruction::SwapSecondaryForPrimary { amount: got } => assert_eq!(got, amount),
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
 fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
     let stale_slots_raw: u16 = kani::any();
     let delay_raw: u16 = kani::any();
@@ -952,6 +983,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
     );
     assert_rejects_trailing_byte(Instruction::WithdrawInsurance { amount: 1 }, extra);
     assert_rejects_trailing_byte(Instruction::WithdrawInsuranceLimited { amount: 1 }, extra);
+    assert_rejects_trailing_byte(Instruction::SwapSecondaryForPrimary { amount: 1 }, extra);
 }
 
 #[kani::proof]
@@ -1045,6 +1077,13 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     );
     assert_rejects_trailing_byte(
         Instruction::UpdateMarketInitFeePolicy { min_init_fee: 50 },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::UpdateBaseUnitMints {
+            primary_mint: [1u8; 32],
+            secondary_mint: [2u8; 32],
+        },
         extra,
     );
     assert_rejects_trailing_byte(
@@ -1279,6 +1318,12 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
 
     let update_redirect = [58u8; 2];
     assert!(Instruction::decode(&update_redirect).is_err());
+
+    let update_base_units = [60u8; 64];
+    assert!(Instruction::decode(&update_base_units).is_err());
+
+    let swap_base_units = [61u8; 16];
+    assert!(Instruction::decode(&swap_base_units).is_err());
 
     let configure_permissionless = [38u8; 16];
     assert!(Instruction::decode(&configure_permissionless).is_err());
