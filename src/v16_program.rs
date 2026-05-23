@@ -7279,6 +7279,7 @@ pub mod processor {
                         | ASSET_LIFECYCLE_DRAIN_ONLY
                         | ASSET_LIFECYCLE_RECOVERY => {
                             require_empty_asset_lifecycle_state_view(&group, asset_index)?;
+                            canonicalize_empty_asset_lifecycle_state_view(&mut group, asset_index);
                             group.markets[asset_index].engine.asset.lifecycle =
                                 ASSET_LIFECYCLE_RETIRED;
                             group.markets[asset_index].engine.asset.retired_slot =
@@ -9037,6 +9038,19 @@ pub mod processor {
                 && bucket.status == BackingBucketStatusV16::Empty
         }
 
+        fn source_credit_empty_amount_shape(source: SourceCreditStateV16) -> bool {
+            source.positive_claim_bound_num == 0
+                && source.exact_positive_claim_num == 0
+                && source.fresh_reserved_backing_num == 0
+                && source.spent_backing_num == 0
+                && source.provider_receivable_num == 0
+                && source.valid_liened_backing_num == 0
+                && source.impaired_liened_backing_num == 0
+                && source.insurance_credit_reserved_num == 0
+                && source.valid_liened_insurance_num == 0
+                && source.impaired_liened_insurance_num == 0
+        }
+
         if asset_index >= group.header.config.max_market_slots.get() as usize
             || asset_index >= group.markets.len()
         {
@@ -9047,6 +9061,14 @@ pub mod processor {
         let market_id = asset.market_id.get();
         let long_bucket = slot.backing_long.try_to_runtime().map_err(map_v16_error)?;
         let short_bucket = slot.backing_short.try_to_runtime().map_err(map_v16_error)?;
+        let source_credit_long = slot
+            .source_credit_long
+            .try_to_runtime()
+            .map_err(map_v16_error)?;
+        let source_credit_short = slot
+            .source_credit_short
+            .try_to_runtime()
+            .map_err(map_v16_error)?;
         if slot.pending_domain_loss_barrier_long.get() != 0
             || slot.pending_domain_loss_barrier_short.get() != 0
             || asset.mode_long != SIDE_MODE_NORMAL
@@ -9086,16 +9108,8 @@ pub mod processor {
             || slot.insurance_domain_budget_short.get() != 0
             || slot.insurance_domain_spent_long.get() != 0
             || slot.insurance_domain_spent_short.get() != 0
-            || slot
-                .source_credit_long
-                .try_to_runtime()
-                .map_err(map_v16_error)?
-                != SourceCreditStateV16::EMPTY
-            || slot
-                .source_credit_short
-                .try_to_runtime()
-                .map_err(map_v16_error)?
-                != SourceCreditStateV16::EMPTY
+            || !source_credit_empty_amount_shape(source_credit_long)
+            || !source_credit_empty_amount_shape(source_credit_short)
             || !backing_bucket_empty_amount_shape(long_bucket)
             || !backing_bucket_empty_amount_shape(short_bucket)
             || long_bucket.market_id != market_id
@@ -9114,6 +9128,17 @@ pub mod processor {
             return Err(PercolatorError::EngineLockActive.into());
         }
         Ok(())
+    }
+
+    fn canonicalize_empty_asset_lifecycle_state_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) {
+        let slot = &mut group.markets[asset_index].engine;
+        slot.source_credit_long =
+            percolator::SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16::EMPTY);
+        slot.source_credit_short =
+            percolator::SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16::EMPTY);
     }
 
     fn group_has_position_or_loss_state_view(group: &state::MarketViewMutV16<'_>) -> bool {

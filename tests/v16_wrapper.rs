@@ -1763,6 +1763,215 @@ fn v16_wrapper_permissionless_market_init_fee_doubles_every_32_markets() {
 }
 
 #[test]
+fn v16_wrapper_permissionless_dynamic_market_drains_after_positions_close() {
+    let mut admin = signer();
+    let mut creator = signer();
+    let mut insurance_authority = signer();
+    let mut insurance_operator = signer();
+    let mut backing_authority = signer();
+    let mut market = market_account_with_capacity(2);
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account_for_market_slots(2);
+    let mut short_account = portfolio_account_for_market_slots(2);
+    let mint = init_market(&mut admin, &mut market);
+
+    run_ix(
+        Instruction::UpdateMarketInitFeePolicy { min_init_fee: 50 },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    let mut init_fee_source = user_token_account(creator.key, mint, 50);
+    let mut vault = vault_token_account(&market, mint, 0);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::UpdateAssetLifecycle {
+            action: processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 150,
+            insurance_authority: insurance_authority.key.to_bytes(),
+            insurance_operator: insurance_operator.key.to_bytes(),
+            backing_bucket_authority: backing_authority.key.to_bytes(),
+            oracle_authority: backing_authority.key.to_bytes(),
+        },
+        &mut [
+            &mut creator,
+            &mut market,
+            &mut init_fee_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let mut insurance_source = user_token_account(insurance_authority.key, mint, 10);
+    let mut vault = vault_token_account(&market, mint, 0);
+    run_ix(
+        Instruction::TopUpInsuranceDomain {
+            domain: 2,
+            amount: 10,
+        },
+        &mut [
+            &mut insurance_authority,
+            &mut market,
+            &mut insurance_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let mut backing_source = user_token_account(backing_authority.key, mint, 25);
+    let mut vault = vault_token_account(&market, mint, 0);
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 2,
+            amount: 25,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut backing_authority,
+            &mut market,
+            &mut backing_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: POS_SCALE as i128,
+            exec_price: 150,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+
+    let before_open_retire = market.data.clone();
+    let open_retire = update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        1,
+        2,
+        0,
+    );
+    assert_err_and_market_unchanged(open_retire, &market, &before_open_retire);
+
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: -(POS_SCALE as i128),
+            exec_price: 150,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    let closed = state::read_market(&market.data).unwrap().1;
+    assert_eq!(closed.assets[1].oi_eff_long_q, 0);
+    assert_eq!(closed.assets[1].oi_eff_short_q, 0);
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_DRAIN_ONLY,
+        1,
+        0,
+        0,
+    )
+    .unwrap();
+    let drained = state::read_market(&market.data).unwrap().1;
+    assert_eq!(drained.assets[1].lifecycle, AssetLifecycleV16::DrainOnly);
+
+    let before_funded_retire = market.data.clone();
+    let funded_retire = update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        1,
+        3,
+        0,
+    );
+    assert_err_and_market_unchanged(funded_retire, &market, &before_funded_retire);
+
+    let mut insurance_dest = user_token_account(insurance_operator.key, mint, 0);
+    let mut vault = vault_token_account(&market, mint, 85);
+    let mut vault_auth = vault_authority_account(&market);
+    run_ix(
+        Instruction::WithdrawInsuranceDomain {
+            domain: 2,
+            amount: 10,
+        },
+        &mut [
+            &mut insurance_operator,
+            &mut market,
+            &mut insurance_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let mut backing_dest = user_token_account(backing_authority.key, mint, 0);
+    run_ix(
+        Instruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: 25,
+        },
+        &mut [
+            &mut backing_authority,
+            &mut market,
+            &mut backing_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        1,
+        3,
+        0,
+    )
+    .unwrap();
+    let retired = state::read_market(&market.data).unwrap().1;
+    assert_eq!(retired.assets[1].lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(retired.assets[1].retired_slot, 3);
+    assert_eq!(retired.insurance_domain_budget[2], 0);
+    assert_eq!(
+        retired.source_backing_buckets[2].fresh_unliened_backing_num,
+        0
+    );
+    assert_eq!(retired.insurance, 50);
+    assert_eq!(retired.vault, 20_050);
+}
+
+#[test]
 fn v16_wrapper_backing_fee_policy_is_insurance_authority_gated_and_bounds_fee() {
     let mut admin = signer();
     let mut attacker = signer();
