@@ -1763,6 +1763,130 @@ fn v16_wrapper_permissionless_market_init_fee_doubles_every_32_markets() {
 }
 
 #[test]
+fn v16_wrapper_permissionless_market_creator_must_reuse_shutdown_slot_before_append() {
+    let mut admin = signer();
+    let mut creator = signer();
+    let mut market = market_account_with_capacity(4);
+    let mint = init_market(&mut admin, &mut market);
+
+    run_ix(
+        Instruction::UpdateMarketInitFeePolicy { min_init_fee: 50 },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        1,
+        101,
+    )
+    .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        2,
+        2,
+        102,
+    )
+    .unwrap();
+    let (_, active_group) = state::read_market(&market.data).unwrap();
+    assert_eq!(active_group.config.max_market_slots, 3);
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        1,
+        3,
+        0,
+    )
+    .unwrap();
+    let (retired_cfg, retired_group) = state::read_market(&market.data).unwrap();
+    assert_eq!(retired_cfg.free_market_slot_count, 1);
+    assert_eq!(
+        retired_group.assets[1].lifecycle,
+        AssetLifecycleV16::Retired
+    );
+    assert_eq!(retired_group.config.max_market_slots, 3);
+    let old_market_id = retired_group.assets[1].market_id;
+    let next_market_id = retired_group.next_market_id;
+
+    let insurance_authority = Pubkey::new_unique().to_bytes();
+    let insurance_operator = Pubkey::new_unique().to_bytes();
+    let backing_bucket_authority = Pubkey::new_unique().to_bytes();
+    let oracle_authority = Pubkey::new_unique().to_bytes();
+    let mut append_source = user_token_account(creator.key, mint, 50);
+    let mut append_vault = vault_token_account(&market, mint, 0);
+    let mut token_program = token_program_account();
+    let before_append = market.data.clone();
+    let append = run_ix(
+        Instruction::UpdateAssetLifecycle {
+            action: processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 3,
+            now_slot: 4,
+            initial_price: 103,
+            insurance_authority,
+            insurance_operator,
+            backing_bucket_authority,
+            oracle_authority,
+        },
+        &mut [
+            &mut creator,
+            &mut market,
+            &mut append_source,
+            &mut append_vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(append, &market, &before_append);
+
+    let mut reuse_source = user_token_account(creator.key, mint, 50);
+    let mut reuse_vault = vault_token_account(&market, mint, 0);
+    run_ix(
+        Instruction::UpdateAssetLifecycle {
+            action: processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 4,
+            initial_price: 201,
+            insurance_authority,
+            insurance_operator,
+            backing_bucket_authority,
+            oracle_authority,
+        },
+        &mut [
+            &mut creator,
+            &mut market,
+            &mut reuse_source,
+            &mut reuse_vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let profile = state::read_asset_oracle_profile(&market.data, 1).unwrap();
+    assert_eq!(profile.insurance_authority, insurance_authority);
+    assert_eq!(profile.insurance_operator, insurance_operator);
+    assert_eq!(profile.backing_bucket_authority, backing_bucket_authority);
+    assert_eq!(profile.oracle_authority, oracle_authority);
+    let (reused_cfg, reused_group) = state::read_market(&market.data).unwrap();
+    assert_eq!(reused_cfg.free_market_slot_count, 0);
+    assert_eq!(reused_group.config.max_market_slots, 3);
+    assert_eq!(reused_group.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(reused_group.assets[1].market_id, next_market_id);
+    assert!(reused_group.assets[1].market_id > old_market_id);
+    assert_eq!(reused_group.insurance, 50);
+    assert_eq!(reused_group.vault, 50);
+    assert_eq!(reused_group.insurance_domain_budget[0], 25);
+    assert_eq!(reused_group.insurance_domain_budget[1], 25);
+    assert_eq!(reused_group.insurance_domain_budget[2], 0);
+    assert_eq!(reused_group.insurance_domain_budget[3], 0);
+}
+
+#[test]
 fn v16_wrapper_permissionless_dynamic_market_drains_after_positions_close() {
     let mut admin = signer();
     let mut creator = signer();
