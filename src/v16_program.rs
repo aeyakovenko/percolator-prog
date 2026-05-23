@@ -3479,6 +3479,25 @@ pub mod processor {
         Ok(lhs >= rhs)
     }
 
+    #[inline(always)]
+    fn permissionless_market_init_fee_for_asset(
+        base_fee: u128,
+        asset_index: usize,
+    ) -> Result<u128, ProgramError> {
+        let mut fee = base_fee;
+        if fee == 0 {
+            return Ok(0);
+        }
+        let mut doublings = asset_index / 32;
+        while doublings != 0 {
+            fee = fee
+                .checked_mul(2)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            doublings -= 1;
+        }
+        Ok(fee)
+    }
+
     fn validate_resolved_payout_receipt_view(
         receipt: percolator::ResolvedPayoutReceiptV16,
     ) -> Result<(), ProgramError> {
@@ -7089,10 +7108,14 @@ pub mod processor {
             let init_fee = if is_asset_authority {
                 0
             } else {
-                if cfg_pre.permissionless_market_init_fee == 0 {
+                let fee = permissionless_market_init_fee_for_asset(
+                    cfg_pre.permissionless_market_init_fee,
+                    asset_index,
+                )?;
+                if fee == 0 {
                     return Err(PercolatorError::Unauthorized.into());
                 }
-                cfg_pre.permissionless_market_init_fee
+                fee
             };
             let transfer_accounts = if init_fee == 0 {
                 None
@@ -7122,9 +7145,11 @@ pub mod processor {
                 let still_asset_authority = cfg.asset_authority != [0u8; 32]
                     && cfg.asset_authority == authority.key.to_bytes();
                 if !still_asset_authority {
-                    if cfg.permissionless_market_init_fee == 0
-                        || cfg.permissionless_market_init_fee != init_fee
-                    {
+                    let expected_fee = permissionless_market_init_fee_for_asset(
+                        cfg.permissionless_market_init_fee,
+                        asset_index,
+                    )?;
+                    if expected_fee == 0 || expected_fee != init_fee {
                         return Err(PercolatorError::Unauthorized.into());
                     }
                 }

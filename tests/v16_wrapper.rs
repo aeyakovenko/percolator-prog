@@ -1667,6 +1667,102 @@ fn v16_wrapper_permissionless_market_init_fee_policy_gates_and_funds_base_market
 }
 
 #[test]
+fn v16_wrapper_permissionless_market_init_fee_doubles_every_32_markets() {
+    let mut admin = signer();
+    let mut creator = signer();
+    let mut market = market_account_with_capacity(33);
+    let mint = init_market(&mut admin, &mut market);
+
+    run_ix(
+        Instruction::UpdateMarketInitFeePolicy { min_init_fee: 50 },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    for asset_index in 1..32 {
+        update_asset_lifecycle(
+            &mut admin,
+            &mut market,
+            processor::ASSET_ACTION_ACTIVATE,
+            asset_index as u16,
+            asset_index as u64,
+            100 + asset_index as u64,
+        )
+        .unwrap();
+    }
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.config.max_market_slots, 32);
+    assert_eq!(group.insurance, 0);
+    assert_eq!(group.vault, 0);
+
+    let insurance_authority = Pubkey::new_unique().to_bytes();
+    let insurance_operator = Pubkey::new_unique().to_bytes();
+    let backing_bucket_authority = Pubkey::new_unique().to_bytes();
+    let oracle_authority = Pubkey::new_unique().to_bytes();
+
+    let mut short_source = user_token_account(creator.key, mint, 50);
+    let mut vault = vault_token_account(&market, mint, 0);
+    let mut token_program = token_program_account();
+    let before_boundary = market.data.clone();
+    let underpaid = run_ix(
+        Instruction::UpdateAssetLifecycle {
+            action: processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 32,
+            now_slot: 32,
+            initial_price: 132,
+            insurance_authority,
+            insurance_operator,
+            backing_bucket_authority,
+            oracle_authority,
+        },
+        &mut [
+            &mut creator,
+            &mut market,
+            &mut short_source,
+            &mut vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(underpaid, &market, &before_boundary);
+
+    let mut source = user_token_account(creator.key, mint, 100);
+    let mut vault = vault_token_account(&market, mint, 0);
+    run_ix(
+        Instruction::UpdateAssetLifecycle {
+            action: processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 32,
+            now_slot: 32,
+            initial_price: 132,
+            insurance_authority,
+            insurance_operator,
+            backing_bucket_authority,
+            oracle_authority,
+        },
+        &mut [
+            &mut creator,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let profile = state::read_asset_oracle_profile(&market.data, 32).unwrap();
+    assert_eq!(profile.insurance_authority, insurance_authority);
+    assert_eq!(profile.insurance_operator, insurance_operator);
+    assert_eq!(profile.backing_bucket_authority, backing_bucket_authority);
+    assert_eq!(profile.oracle_authority, oracle_authority);
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.config.max_market_slots, 33);
+    assert_eq!(group.insurance, 100);
+    assert_eq!(group.vault, 100);
+    assert_eq!(group.insurance_domain_budget[0], 50);
+    assert_eq!(group.insurance_domain_budget[1], 50);
+}
+
+#[test]
 fn v16_wrapper_backing_fee_policy_is_insurance_authority_gated_and_bounds_fee() {
     let mut admin = signer();
     let mut attacker = signer();
