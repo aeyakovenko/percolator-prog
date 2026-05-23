@@ -360,6 +360,27 @@ impl V16CuEnv {
     }
 
     fn activate_asset(&mut self, asset_index: u16, now_slot: u64, initial_price: u64) -> u64 {
+        self.activate_asset_with_authorities(
+            asset_index,
+            now_slot,
+            initial_price,
+            self.admin.pubkey(),
+            self.admin.pubkey(),
+            self.admin.pubkey(),
+            self.admin.pubkey(),
+        )
+    }
+
+    fn activate_asset_with_authorities(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+        initial_price: u64,
+        insurance_authority: Pubkey,
+        insurance_operator: Pubkey,
+        backing_bucket_authority: Pubkey,
+        oracle_authority: Pubkey,
+    ) -> u64 {
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -369,10 +390,10 @@ impl V16CuEnv {
                 asset_index,
                 now_slot,
                 initial_price,
-                insurance_authority: self.admin.pubkey().to_bytes(),
-                insurance_operator: self.admin.pubkey().to_bytes(),
-                backing_bucket_authority: self.admin.pubkey().to_bytes(),
-                oracle_authority: self.admin.pubkey().to_bytes(),
+                insurance_authority: insurance_authority.to_bytes(),
+                insurance_operator: insurance_operator.to_bytes(),
+                backing_bucket_authority: backing_bucket_authority.to_bytes(),
+                oracle_authority: oracle_authority.to_bytes(),
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -728,6 +749,19 @@ impl V16CuEnv {
         self.withdraw_with_cu(owner, portfolio, amount).0
     }
 
+    fn close_portfolio_with_cu(&mut self, owner: &Keypair, portfolio: Pubkey) -> u64 {
+        self.send(
+            ProgInstruction::ClosePortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[owner],
+        )
+        .expect("close portfolio")
+    }
+
     fn withdraw_with_cu(
         &mut self,
         owner: &Keypair,
@@ -778,6 +812,38 @@ impl V16CuEnv {
             &[&self.admin],
         )
         .expect("resolve market")
+    }
+
+    fn close_slab_with_cu(&mut self) -> u64 {
+        let dest = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                dest,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(self.mint, self.admin.pubkey(), 0),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("close slab")
     }
 
     fn configure_permissionless_resolve_with_cu(
@@ -997,6 +1063,16 @@ impl V16CuEnv {
         self.top_up_insurance_with_cu(amount).0
     }
 
+    fn top_up_insurance_domain_with_authority(
+        &mut self,
+        authority: &Keypair,
+        domain: u8,
+        amount: u128,
+    ) -> Pubkey {
+        self.top_up_insurance_domain_with_authority_and_cu(authority, domain, amount)
+            .0
+    }
+
     fn top_up_backing_bucket(&mut self, domain: u8, amount: u128, expiry_slot: u64) -> Pubkey {
         self.top_up_backing_bucket_with_cu(domain, amount, expiry_slot)
             .0
@@ -1031,6 +1107,46 @@ impl V16CuEnv {
             &[&self.admin],
         )
         .expect("top up insurance");
+        (source, cu)
+    }
+
+    fn top_up_insurance_domain_with_authority_and_cu(
+        &mut self,
+        authority: &Keypair,
+        domain: u8,
+        amount: u128,
+    ) -> (Pubkey, u64) {
+        self.svm
+            .airdrop(&authority.pubkey(), 1_000_000_000)
+            .unwrap();
+        let source = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                source,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(self.mint, authority.pubkey(), amount as u64),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let cu = send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::TopUpInsuranceDomain { domain, amount },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
+        )
+        .expect("top up domain insurance");
         (source, cu)
     }
 
@@ -1105,6 +1221,80 @@ impl V16CuEnv {
             &[&self.admin],
         )
         .expect("withdraw insurance");
+        (dest, cu)
+    }
+
+    fn try_withdraw_insurance_domain_with_authority(
+        &mut self,
+        authority: &Keypair,
+        domain: u8,
+        amount: u128,
+    ) -> Result<(Pubkey, u64), String> {
+        let dest = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                dest,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(self.mint, authority.pubkey(), 0),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let cu = send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::WithdrawInsuranceDomain { domain, amount },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
+        )?;
+        Ok((dest, cu))
+    }
+
+    fn withdraw_terminal_insurance_with_authority(
+        &mut self,
+        authority: &Keypair,
+        amount: u128,
+    ) -> (Pubkey, u64) {
+        let dest = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                dest,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(self.mint, authority.pubkey(), 0),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let cu = send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::WithdrawInsurance { amount },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
+        )
+        .expect("withdraw terminal insurance");
         (dest, cu)
     }
 
@@ -1257,6 +1447,112 @@ fn v16_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
     assert_eq!(group.insurance, 150);
     assert_eq!(group.vault, 1_050);
     assert_eq!(group.c_tot, 600);
+}
+
+#[test]
+fn v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_close() {
+    let mut env = V16CuEnv::new();
+    let insurance_authority = Keypair::new();
+    let insurance_operator = Keypair::new();
+    env.svm
+        .airdrop(&insurance_operator.pubkey(), 1_000_000_000)
+        .unwrap();
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        insurance_authority.pubkey(),
+        insurance_operator.pubkey(),
+        env.admin.pubkey(),
+        env.admin.pubkey(),
+    );
+
+    let insurance_source = env.top_up_insurance_domain_with_authority(&insurance_authority, 2, 100);
+    assert_eq!(env.token_amount(insurance_source), 0);
+    assert_eq!(env.token_amount(env.vault), 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000);
+    env.deposit(&short_owner, short_account, 1_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(10);
+    env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: 10,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    assert!(
+        group.loss_stale_active,
+        "advancing SVM Clock must reproduce the live stale-loss gate"
+    );
+    assert_eq!(group.insurance_domain_budget[2], 100);
+
+    assert!(
+        env.try_withdraw_insurance_domain_with_authority(&insurance_operator, 2, 100)
+            .is_err(),
+        "live domain withdrawal remains blocked while loss-stale"
+    );
+    assert_eq!(env.token_amount(env.vault), 2_100);
+
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        -(POS_SCALE as i128),
+        100,
+        0,
+    );
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    assert_eq!(group.assets[1].oi_eff_long_q, 0);
+    assert_eq!(group.assets[1].oi_eff_short_q, 0);
+
+    let long_dest = env.withdraw(&long_owner, long_account, 1_000);
+    let short_dest = env.withdraw(&short_owner, short_account, 1_000);
+    assert_eq!(env.token_amount(long_dest), 1_000);
+    assert_eq!(env.token_amount(short_dest), 1_000);
+    env.close_portfolio_with_cu(&long_owner, long_account);
+    env.close_portfolio_with_cu(&short_owner, short_account);
+
+    env.resolve();
+    let (insurance_dest, _) =
+        env.withdraw_terminal_insurance_with_authority(&insurance_authority, 100);
+    assert_eq!(env.token_amount(insurance_dest), 100);
+    assert_eq!(env.token_amount(env.vault), 0);
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.insurance, 0);
+    assert_eq!(group.insurance_domain_budget[2], 0);
+
+    env.close_slab_with_cu();
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    assert!(market_data.iter().all(|b| *b == 0));
 }
 
 #[test]

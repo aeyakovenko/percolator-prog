@@ -3836,6 +3836,76 @@ pub mod processor {
         Ok(budget.min(group.header.insurance.get()))
     }
 
+    fn terminal_insurance_remaining_for_authority_view(
+        group: &state::MarketViewMutV16<'_>,
+        cfg: &WrapperConfigV16,
+        authority: &Pubkey,
+    ) -> Result<u128, ProgramError> {
+        let authority_bytes = authority.to_bytes();
+        if authority_bytes == [0u8; 32] {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        let domain_count = (group.header.config.max_market_slots.get() as usize)
+            .checked_mul(2)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let mut total = 0u128;
+        let mut domain = 0usize;
+        while domain < domain_count {
+            let authorities = domain_authorities_from_view(group, cfg, domain)?;
+            if authorities.insurance_authority == authority_bytes {
+                total = total
+                    .checked_add(domain_budget_remaining_view(group, domain)?)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            }
+            domain += 1;
+        }
+        Ok(total.min(group.header.insurance.get()))
+    }
+
+    fn debit_terminal_insurance_budgets_for_authority_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        cfg: &WrapperConfigV16,
+        authority: &Pubkey,
+        mut amount: u128,
+    ) -> ProgramResult {
+        if amount == 0 {
+            return Ok(());
+        }
+        let authority_bytes = authority.to_bytes();
+        if authority_bytes == [0u8; 32] {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        let domain_count = (group.header.config.max_market_slots.get() as usize)
+            .checked_mul(2)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let mut domain = 0usize;
+        while domain < domain_count && amount != 0 {
+            let authorities = domain_authorities_from_view(group, cfg, domain)?;
+            if authorities.insurance_authority == authority_bytes {
+                let remaining = domain_budget_remaining_view(group, domain)?;
+                let debit = remaining.min(amount);
+                if debit != 0 {
+                    let (budget, _) = domain_budget_parts_view(group, domain)?;
+                    set_domain_budget_view(
+                        group,
+                        domain,
+                        budget
+                            .checked_sub(debit)
+                            .ok_or(PercolatorError::EngineCounterUnderflow)?,
+                    )?;
+                    amount = amount
+                        .checked_sub(debit)
+                        .ok_or(PercolatorError::EngineCounterUnderflow)?;
+                }
+            }
+            domain += 1;
+        }
+        if amount != 0 {
+            return Err(PercolatorError::EngineCounterUnderflow.into());
+        }
+        Ok(())
+    }
+
     fn debit_market_insurance_budget_view(
         group: &mut state::MarketViewMutV16<'_>,
         asset_index: usize,
@@ -6097,8 +6167,8 @@ pub mod processor {
         let cfg_pre = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
-            expect_live_authority(&cfg.insurance_authority, authority.key)?;
-            let available_insurance = market_insurance_remaining_view(&group, 0)?;
+            let available_insurance =
+                terminal_insurance_remaining_for_authority_view(&group, &cfg, authority.key)?;
             if group.header.mode != 1
                 || group.header.materialized_portfolio_count.get() != 0
                 || group.header.c_tot.get() != 0
@@ -6116,7 +6186,7 @@ pub mod processor {
                 let (mut ledger, initialized) = read_or_new_insurance_ledger(
                     data,
                     market_ai.key.to_bytes(),
-                    cfg.insurance_authority,
+                    authority.key.to_bytes(),
                     available_insurance,
                 )?;
                 sync_insurance_ledger(&mut ledger, available_insurance)?;
@@ -6140,7 +6210,12 @@ pub mod processor {
                     .checked_sub(amount)
                     .ok_or(PercolatorError::EngineCounterUnderflow)?,
             );
-            debit_market_insurance_budget_view(&mut group, 0, amount)?;
+            debit_terminal_insurance_budgets_for_authority_view(
+                &mut group,
+                &cfg,
+                authority.key,
+                amount,
+            )?;
             if let Some((ledger, _)) = ledger_state.as_mut() {
                 ledger.total_withdrawn_atoms = ledger
                     .total_withdrawn_atoms
