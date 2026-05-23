@@ -1328,10 +1328,77 @@ fn v16_wrapper_maintenance_fee_policy_is_admin_gated_and_bounds_share() {
 }
 
 #[test]
-fn v16_wrapper_backing_fee_policy_is_backing_authority_gated_and_bounds_fee() {
+fn v16_wrapper_trade_fee_policy_is_insurance_authority_gated_and_bounds_fee() {
+    let mut admin = signer();
+    let mut attacker = signer();
+    let mut insurance_authority = signer();
+    let mut market = market_account();
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_trading_fee_bps,
+                trade_fee_base_bps,
+                ..
+            } = ix
+            {
+                *max_trading_fee_bps = 100;
+                *trade_fee_base_bps = 1;
+            }
+        }),
+    );
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_INSURANCE,
+            new_pubkey: insurance_authority.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut insurance_authority, &mut market],
+    )
+    .unwrap();
+    let before = market.data.clone();
+
+    let rejected_attacker = run_ix(
+        Instruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 2,
+        },
+        &mut [&mut attacker, &mut market],
+    );
+    assert_err_and_market_unchanged(rejected_attacker, &market, &before);
+
+    let rejected_admin_after_rotation = run_ix(
+        Instruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 2,
+        },
+        &mut [&mut admin, &mut market],
+    );
+    assert_err_and_market_unchanged(rejected_admin_after_rotation, &market, &before);
+
+    let rejected_over_engine_cap = run_ix(
+        Instruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 101,
+        },
+        &mut [&mut insurance_authority, &mut market],
+    );
+    assert_err_and_market_unchanged(rejected_over_engine_cap, &market, &before);
+
+    run_ix(
+        Instruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 25,
+        },
+        &mut [&mut insurance_authority, &mut market],
+    )
+    .unwrap();
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.trade_fee_base_bps, 25);
+}
+
+#[test]
+fn v16_wrapper_backing_fee_policy_is_insurance_authority_gated_and_bounds_fee() {
     let mut admin = signer();
     let mut attacker = signer();
     let mut backing_authority = signer();
+    let mut insurance_authority = signer();
     let mut market = market_account();
     init_market_with_ix(
         &mut admin,
@@ -1354,12 +1421,21 @@ fn v16_wrapper_backing_fee_policy_is_backing_authority_gated_and_bounds_fee() {
         &mut [&mut admin, &mut backing_authority, &mut market],
     )
     .unwrap();
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_INSURANCE,
+            new_pubkey: insurance_authority.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut insurance_authority, &mut market],
+    )
+    .unwrap();
     let before = market.data.clone();
 
     let rejected_attacker = run_ix(
         Instruction::UpdateBackingFeePolicy {
             domain: 1,
             fee_bps: 25,
+            insurance_share_bps: 0,
         },
         &mut [&mut attacker, &mut market],
     );
@@ -1369,17 +1445,29 @@ fn v16_wrapper_backing_fee_policy_is_backing_authority_gated_and_bounds_fee() {
         Instruction::UpdateBackingFeePolicy {
             domain: 1,
             fee_bps: 25,
+            insurance_share_bps: 0,
         },
         &mut [&mut admin, &mut market],
     );
     assert_err_and_market_unchanged(rejected_admin_after_rotation, &market, &before);
 
+    let rejected_backing_authority = run_ix(
+        Instruction::UpdateBackingFeePolicy {
+            domain: 1,
+            fee_bps: 25,
+            insurance_share_bps: 0,
+        },
+        &mut [&mut backing_authority, &mut market],
+    );
+    assert_err_and_market_unchanged(rejected_backing_authority, &market, &before);
+
     let rejected_over_engine_cap = run_ix(
         Instruction::UpdateBackingFeePolicy {
             domain: 1,
             fee_bps: 101,
+            insurance_share_bps: 0,
         },
-        &mut [&mut backing_authority, &mut market],
+        &mut [&mut insurance_authority, &mut market],
     );
     assert_err_and_market_unchanged(rejected_over_engine_cap, &market, &before);
 
@@ -1387,48 +1475,75 @@ fn v16_wrapper_backing_fee_policy_is_backing_authority_gated_and_bounds_fee() {
         Instruction::UpdateBackingFeePolicy {
             domain: 2,
             fee_bps: 25,
+            insurance_share_bps: 0,
         },
-        &mut [&mut backing_authority, &mut market],
+        &mut [&mut insurance_authority, &mut market],
     );
     assert_err_and_market_unchanged(rejected_inactive_domain, &market, &before);
+
+    let rejected_share_without_fee = run_ix(
+        Instruction::UpdateBackingFeePolicy {
+            domain: 1,
+            fee_bps: 0,
+            insurance_share_bps: 1,
+        },
+        &mut [&mut insurance_authority, &mut market],
+    );
+    assert_err_and_market_unchanged(rejected_share_without_fee, &market, &before);
+
+    let rejected_share_over_bps = run_ix(
+        Instruction::UpdateBackingFeePolicy {
+            domain: 1,
+            fee_bps: 25,
+            insurance_share_bps: 10_001,
+        },
+        &mut [&mut insurance_authority, &mut market],
+    );
+    assert_err_and_market_unchanged(rejected_share_over_bps, &market, &before);
 
     run_ix(
         Instruction::UpdateBackingFeePolicy {
             domain: 1,
             fee_bps: 25,
+            insurance_share_bps: 2_500,
         },
-        &mut [&mut backing_authority, &mut market],
+        &mut [&mut insurance_authority, &mut market],
     )
     .unwrap();
     let (cfg, _) = state::read_market(&market.data).unwrap();
     assert_eq!(cfg.backing_trade_fee_bps_long, 0);
     assert_eq!(cfg.backing_trade_fee_bps_short, 25);
+    assert_eq!(cfg.backing_trade_fee_insurance_share_bps_short, 2_500);
     assert_eq!(cfg.backing_trade_fee_policy_count, 1);
 
     run_ix(
         Instruction::UpdateBackingFeePolicy {
             domain: 0,
             fee_bps: 33,
+            insurance_share_bps: 4_000,
         },
-        &mut [&mut backing_authority, &mut market],
+        &mut [&mut insurance_authority, &mut market],
     )
     .unwrap();
     let (cfg, _) = state::read_market(&market.data).unwrap();
     assert_eq!(cfg.backing_trade_fee_bps_long, 33);
     assert_eq!(cfg.backing_trade_fee_bps_short, 25);
+    assert_eq!(cfg.backing_trade_fee_insurance_share_bps_long, 4_000);
     assert_eq!(cfg.backing_trade_fee_policy_count, 2);
 
     run_ix(
         Instruction::UpdateBackingFeePolicy {
             domain: 1,
             fee_bps: 0,
+            insurance_share_bps: 0,
         },
-        &mut [&mut backing_authority, &mut market],
+        &mut [&mut insurance_authority, &mut market],
     )
     .unwrap();
     let (cfg, _) = state::read_market(&market.data).unwrap();
     assert_eq!(cfg.backing_trade_fee_bps_long, 33);
     assert_eq!(cfg.backing_trade_fee_bps_short, 0);
+    assert_eq!(cfg.backing_trade_fee_insurance_share_bps_short, 0);
     assert_eq!(cfg.backing_trade_fee_policy_count, 1);
 }
 
@@ -1441,6 +1556,7 @@ fn v16_wrapper_backing_fee_policy_does_not_floor_trades_without_new_backing_lien
         Instruction::UpdateBackingFeePolicy {
             domain: 1,
             fee_bps: 25,
+            insurance_share_bps: 0,
         },
         &mut [&mut admin, &mut market],
     )
@@ -1488,6 +1604,7 @@ fn v16_wrapper_backing_fee_rejects_unsafe_charge_and_skips_without_new_lien_nocp
         Instruction::UpdateBackingFeePolicy {
             domain: 1,
             fee_bps: 1_000,
+            insurance_share_bps: 0,
         },
         &mut [&mut admin, &mut market],
     )
@@ -1534,6 +1651,7 @@ fn v16_wrapper_backing_fee_rejects_unsafe_charge_and_skips_without_new_lien_nocp
         Instruction::UpdateBackingFeePolicy {
             domain: 1,
             fee_bps: 100,
+            insurance_share_bps: 0,
         },
         &mut [&mut admin, &mut market],
     )
@@ -1600,6 +1718,7 @@ fn v16_wrapper_backing_fee_rejects_unsafe_charge_and_skips_without_new_lien_nocp
         Instruction::UpdateBackingFeePolicy {
             domain: 1,
             fee_bps: 100,
+            insurance_share_bps: 0,
         },
         &mut [&mut admin, &mut cpi_market],
     )
@@ -1659,6 +1778,7 @@ fn v16_wrapper_backing_fee_policy_survives_non_base_oracle_reconfiguration() {
         Instruction::UpdateBackingFeePolicy {
             domain: 3,
             fee_bps: 37,
+            insurance_share_bps: 3_700,
         },
         &mut [&mut admin, &mut market],
     )
@@ -1666,6 +1786,7 @@ fn v16_wrapper_backing_fee_policy_survives_non_base_oracle_reconfiguration() {
     let before = state::read_asset_oracle_profile(&market.data, 1).unwrap();
     assert_eq!(before.backing_trade_fee_bps_long, 0);
     assert_eq!(before.backing_trade_fee_bps_short, 37);
+    assert_eq!(before.backing_trade_fee_insurance_share_bps_short, 3_700);
 
     run_ix(
         Instruction::ConfigureHyperpMark {
@@ -1682,6 +1803,10 @@ fn v16_wrapper_backing_fee_policy_survives_non_base_oracle_reconfiguration() {
     assert_eq!(
         after_hyperp.backing_trade_fee_bps_short, 37,
         "oracle profile reconfiguration must not erase the backing authority's domain fee"
+    );
+    assert_eq!(
+        after_hyperp.backing_trade_fee_insurance_share_bps_short, 3_700,
+        "oracle profile reconfiguration must not erase the insurance fee split"
     );
 
     let feeds = [[0x71u8; 32], [0x72u8; 32], [0x73u8; 32]];
@@ -1709,6 +1834,10 @@ fn v16_wrapper_backing_fee_policy_survives_non_base_oracle_reconfiguration() {
     .unwrap();
     let after_hybrid = state::read_asset_oracle_profile(&market.data, 1).unwrap();
     assert_eq!(after_hybrid.backing_trade_fee_bps_short, 37);
+    assert_eq!(
+        after_hybrid.backing_trade_fee_insurance_share_bps_short,
+        3_700
+    );
 
     update_asset_lifecycle(
         &mut admin,
@@ -1743,6 +1872,10 @@ fn v16_wrapper_backing_fee_policy_survives_non_base_oracle_reconfiguration() {
     assert_eq!(
         after_reactivate.backing_trade_fee_bps_short, 37,
         "asset lifecycle resets oracle data but must not erase backing-authority fee policy"
+    );
+    assert_eq!(
+        after_reactivate.backing_trade_fee_insurance_share_bps_short, 3_700,
+        "asset lifecycle resets oracle data but must not erase backing fee split"
     );
     let (cfg, _) = state::read_market(&market.data).unwrap();
     assert_eq!(cfg.backing_trade_fee_policy_count, 1);
@@ -4939,6 +5072,102 @@ fn v16_wrapper_backing_domain_ledger_tracks_authority_topup_earnings_and_withdra
 }
 
 #[test]
+fn v16_wrapper_backing_domain_ledger_tracks_unavailable_principal_loss_and_recovery() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut ledger = backing_domain_ledger_account();
+    let mint = init_market(&mut admin, &mut market);
+
+    let mut source = user_token_account(admin.key, mint, 50);
+    let mut vault = vault_token_account(&market, mint, 0);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 40,
+            expiry_slot: 10,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+            &mut ledger,
+        ],
+    )
+    .unwrap();
+
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio.data).unwrap();
+        group
+            .add_account_source_positive_pnl_not_atomic(&mut account, 1, 40)
+            .unwrap();
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio.data, &account).unwrap();
+    }
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 0,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::ConvertReleasedPnl { amount: 40 },
+        &mut [&mut owner, &mut market, &mut portfolio],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::SyncBackingDomainLedger { domain: 1 },
+        &mut [&mut admin, &mut market, &mut ledger],
+    )
+    .unwrap();
+    let ledger_state = state::read_backing_domain_ledger(&ledger.data).unwrap();
+    assert_eq!(ledger_state.cumulative_loss_atoms, 40);
+    assert_eq!(ledger_state.cumulative_recovery_atoms, 0);
+    assert_eq!(ledger_state.last_observed_unavailable_principal_atoms, 40);
+
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 10,
+            expiry_slot: 20,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut source,
+            &mut vault,
+            &mut token_program,
+            &mut ledger,
+        ],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::SyncBackingDomainLedger { domain: 1 },
+        &mut [&mut admin, &mut market, &mut ledger],
+    )
+    .unwrap();
+    let ledger_state = state::read_backing_domain_ledger(&ledger.data).unwrap();
+    assert_eq!(ledger_state.total_principal_atoms, 50);
+    assert_eq!(ledger_state.cumulative_loss_atoms, 40);
+    assert_eq!(ledger_state.cumulative_recovery_atoms, 10);
+    assert_eq!(ledger_state.last_observed_unavailable_principal_atoms, 30);
+}
+
+#[test]
 fn v16_wrapper_backing_domain_ledger_rejects_wrong_authority_and_domain() {
     let mut admin = signer();
     let mut attacker = signer();
@@ -6474,7 +6703,9 @@ fn v16_wrapper_hyperp_mark_profiles_reject_prices_above_engine_max() {
         conf_filter_bps: 0,
         backing_trade_fee_bps_long: 0,
         backing_trade_fee_bps_short: 0,
-        _padding0: [0u8; 2],
+        backing_trade_fee_insurance_share_bps_long: 0,
+        backing_trade_fee_insurance_share_bps_short: 0,
+        _padding0: [0u8; 6],
         max_staleness_secs: 0,
         hybrid_soft_stale_slots: 0,
         mark_ewma_e6: percolator::MAX_ORACLE_PRICE + 1,

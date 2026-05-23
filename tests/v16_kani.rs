@@ -583,20 +583,40 @@ fn kani_v16_update_maintenance_fee_policy_decode_preserves_wire_fields() {
 fn kani_v16_update_backing_fee_policy_decode_preserves_wire_fields() {
     let domain: u8 = kani::any();
     let fee_bps: u16 = kani::any();
+    let insurance_share_bps: u16 = kani::any();
 
-    let mut data = [0u8; 4];
+    let mut data = [0u8; 6];
     data[0] = 51;
     data[1] = domain;
     data[2..4].copy_from_slice(&fee_bps.to_le_bytes());
+    data[4..6].copy_from_slice(&insurance_share_bps.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateBackingFeePolicy {
             domain: got_domain,
             fee_bps: got_fee_bps,
+            insurance_share_bps: got_insurance_share_bps,
         } => {
             assert_eq!(got_domain, domain);
             assert_eq!(got_fee_bps, fee_bps);
+            assert_eq!(got_insurance_share_bps, insurance_share_bps);
         }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_update_trade_fee_policy_decode_preserves_wire_fields() {
+    let trade_fee_base_bps: u64 = kani::any();
+
+    let mut data = [0u8; 9];
+    data[0] = 55;
+    data[1..9].copy_from_slice(&trade_fee_base_bps.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: got,
+        } => assert_eq!(got, trade_fee_base_bps),
         _ => unreachable!(),
     }
 }
@@ -925,6 +945,13 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
         Instruction::UpdateBackingFeePolicy {
             domain: 0,
             fee_bps: 25,
+            insurance_share_bps: 0,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 25,
         },
         extra,
     );
@@ -1074,6 +1101,12 @@ fn kani_v16_unknown_or_truncated_tags_reject() {
     kani::assume(tag != 47);
     kani::assume(tag != 48);
     kani::assume(tag != 49);
+    kani::assume(tag != 50);
+    kani::assume(tag != 51);
+    kani::assume(tag != 52);
+    kani::assume(tag != 53);
+    kani::assume(tag != 54);
+    kani::assume(tag != 55);
     assert!(Instruction::decode(&[tag]).is_err());
 
     let deposit_tag_only = [3u8];

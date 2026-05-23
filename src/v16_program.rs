@@ -7,6 +7,8 @@
 #![no_std]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 use alloc::vec::Vec;
 use percolator::{
@@ -45,7 +47,7 @@ pub mod constants {
 
     pub const HEADER_LEN: usize = 16;
     pub const WRAPPER_CONFIG_LEN: usize = 544;
-    pub const ASSET_ORACLE_PROFILE_LEN: usize = 232;
+    pub const ASSET_ORACLE_PROFILE_LEN: usize = 240;
     pub const ASSET_ORACLE_WRAPPER_LEN: usize = 256;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16HeaderAccount>();
     pub const MARKET_ASSET_SLOT_LEN: usize = size_of::<Market<[u8; ASSET_ORACLE_WRAPPER_LEN]>>();
@@ -217,7 +219,9 @@ pub mod state {
         pub oracle_leg_prices_e6: [u64; ORACLE_LEG_CAP],
         pub oracle_leg_publish_times: [i64; ORACLE_LEG_CAP],
         pub backing_trade_fee_policy_count: u16,
-        pub _padding_tail: [u8; 6],
+        pub backing_trade_fee_insurance_share_bps_long: u16,
+        pub backing_trade_fee_insurance_share_bps_short: u16,
+        pub _padding_tail: [u8; 2],
     }
 
     #[repr(C)]
@@ -231,7 +235,9 @@ pub mod state {
         pub conf_filter_bps: u16,
         pub backing_trade_fee_bps_long: u16,
         pub backing_trade_fee_bps_short: u16,
-        pub _padding0: [u8; 2],
+        pub backing_trade_fee_insurance_share_bps_long: u16,
+        pub backing_trade_fee_insurance_share_bps_short: u16,
+        pub _padding0: [u8; 6],
         pub max_staleness_secs: u64,
         pub hybrid_soft_stale_slots: u64,
         pub mark_ewma_e6: u64,
@@ -260,6 +266,9 @@ pub mod state {
         pub total_earnings_atoms: u128,
         pub total_earnings_withdrawn_atoms: u128,
         pub last_observed_bucket_earnings_atoms: u128,
+        pub cumulative_loss_atoms: u128,
+        pub cumulative_recovery_atoms: u128,
+        pub last_observed_unavailable_principal_atoms: u128,
         pub domain: u16,
         pub _padding: [u8; 14],
     }
@@ -513,13 +522,19 @@ pub mod state {
             config.insurance_withdraw_cooldown_slots,
         ) || config.liquidation_cranker_fee_share_bps > 10_000
             || config.maintenance_cranker_fee_share_bps > 10_000
-            || config.backing_trade_fee_bps_long > 10_000
-            || config.backing_trade_fee_bps_short > 10_000
+            || !backing_trade_fee_policy_shape_ok(
+                config.backing_trade_fee_bps_long,
+                config.backing_trade_fee_insurance_share_bps_long,
+            )
+            || !backing_trade_fee_policy_shape_ok(
+                config.backing_trade_fee_bps_short,
+                config.backing_trade_fee_insurance_share_bps_short,
+            )
             || config.conf_filter_bps > 10_000
             || config.invert > 1
             || config._padding0 != 0
             || config._padding1 != [0u8; 2]
-            || config._padding_tail != [0u8; 6]
+            || config._padding_tail != [0u8; 2]
             || config.oracle_leg_count as usize > ORACLE_LEG_CAP
             || (config.oracle_leg_flags & !ORACLE_LEG_FLAGS_MASK) != 0
         {
@@ -592,6 +607,16 @@ pub mod state {
     }
 
     #[inline]
+    pub(crate) fn backing_trade_fee_policy_shape_ok(
+        fee_bps: u16,
+        insurance_share_bps: u16,
+    ) -> bool {
+        fee_bps <= 10_000
+            && insurance_share_bps <= 10_000
+            && (fee_bps != 0 || insurance_share_bps == 0)
+    }
+
+    #[inline]
     fn valid_engine_oracle_price(price: u64) -> bool {
         price != 0 && price <= percolator::MAX_ORACLE_PRICE
     }
@@ -601,10 +626,16 @@ pub mod state {
         profile: &AssetOracleProfileV16,
     ) -> Result<(), ProgramError> {
         if profile.conf_filter_bps > 10_000
-            || profile.backing_trade_fee_bps_long > 10_000
-            || profile.backing_trade_fee_bps_short > 10_000
+            || !backing_trade_fee_policy_shape_ok(
+                profile.backing_trade_fee_bps_long,
+                profile.backing_trade_fee_insurance_share_bps_long,
+            )
+            || !backing_trade_fee_policy_shape_ok(
+                profile.backing_trade_fee_bps_short,
+                profile.backing_trade_fee_insurance_share_bps_short,
+            )
             || profile.invert > 1
-            || profile._padding0 != [0u8; 2]
+            || profile._padding0 != [0u8; 6]
             || profile.oracle_leg_count as usize > ORACLE_LEG_CAP
             || (profile.oracle_leg_flags & !ORACLE_LEG_FLAGS_MASK) != 0
         {
@@ -673,7 +704,9 @@ pub mod state {
             conf_filter_bps: 0,
             backing_trade_fee_bps_long: 0,
             backing_trade_fee_bps_short: 0,
-            _padding0: [0u8; 2],
+            backing_trade_fee_insurance_share_bps_long: 0,
+            backing_trade_fee_insurance_share_bps_short: 0,
+            _padding0: [0u8; 6],
             max_staleness_secs: 0,
             hybrid_soft_stale_slots: 0,
             mark_ewma_e6: initial_price,
@@ -699,7 +732,11 @@ pub mod state {
             conf_filter_bps: config.conf_filter_bps,
             backing_trade_fee_bps_long: config.backing_trade_fee_bps_long,
             backing_trade_fee_bps_short: config.backing_trade_fee_bps_short,
-            _padding0: [0u8; 2],
+            backing_trade_fee_insurance_share_bps_long: config
+                .backing_trade_fee_insurance_share_bps_long,
+            backing_trade_fee_insurance_share_bps_short: config
+                .backing_trade_fee_insurance_share_bps_short,
+            _padding0: [0u8; 6],
             max_staleness_secs: config.max_staleness_secs,
             hybrid_soft_stale_slots: config.hybrid_soft_stale_slots,
             mark_ewma_e6: config.mark_ewma_e6,
@@ -1797,6 +1834,10 @@ pub mod ix {
         UpdateBackingFeePolicy {
             domain: u8,
             fee_bps: u16,
+            insurance_share_bps: u16,
+        },
+        UpdateTradeFeePolicy {
+            trade_fee_base_bps: u64,
         },
         WithdrawBackingBucketEarnings {
             domain: u8,
@@ -1974,6 +2015,10 @@ pub mod ix {
                 51 => Self::UpdateBackingFeePolicy {
                     domain: read_u8(&mut rest)?,
                     fee_bps: read_u16(&mut rest)?,
+                    insurance_share_bps: read_u16(&mut rest)?,
+                },
+                55 => Self::UpdateTradeFeePolicy {
+                    trade_fee_base_bps: read_u64(&mut rest)?,
                 },
                 52 => Self::WithdrawBackingBucketEarnings {
                     domain: read_u8(&mut rest)?,
@@ -2221,10 +2266,19 @@ pub mod ix {
                     out.push(49);
                     push_u16(&mut out, cranker_share_bps);
                 }
-                Self::UpdateBackingFeePolicy { domain, fee_bps } => {
+                Self::UpdateBackingFeePolicy {
+                    domain,
+                    fee_bps,
+                    insurance_share_bps,
+                } => {
                     out.push(51);
                     out.push(domain);
                     push_u16(&mut out, fee_bps);
+                    push_u16(&mut out, insurance_share_bps);
+                }
+                Self::UpdateTradeFeePolicy { trade_fee_base_bps } => {
+                    out.push(55);
+                    push_u64(&mut out, trade_fee_base_bps);
                 }
                 Self::WithdrawBackingBucketEarnings { domain, amount } => {
                     out.push(52);
@@ -3479,6 +3533,10 @@ pub mod processor {
     ) -> state::AssetOracleProfileV16 {
         profile.backing_trade_fee_bps_long = existing.backing_trade_fee_bps_long;
         profile.backing_trade_fee_bps_short = existing.backing_trade_fee_bps_short;
+        profile.backing_trade_fee_insurance_share_bps_long =
+            existing.backing_trade_fee_insurance_share_bps_long;
+        profile.backing_trade_fee_insurance_share_bps_short =
+            existing.backing_trade_fee_insurance_share_bps_short;
         profile
     }
 
@@ -3669,8 +3727,19 @@ pub mod processor {
             Instruction::UpdateMaintenanceFeePolicy { cranker_share_bps } => {
                 handle_update_maintenance_fee_policy(program_id, accounts, cranker_share_bps)
             }
-            Instruction::UpdateBackingFeePolicy { domain, fee_bps } => {
-                handle_update_backing_fee_policy(program_id, accounts, domain, fee_bps)
+            Instruction::UpdateBackingFeePolicy {
+                domain,
+                fee_bps,
+                insurance_share_bps,
+            } => handle_update_backing_fee_policy(
+                program_id,
+                accounts,
+                domain,
+                fee_bps,
+                insurance_share_bps,
+            ),
+            Instruction::UpdateTradeFeePolicy { trade_fee_base_bps } => {
+                handle_update_trade_fee_policy(program_id, accounts, trade_fee_base_bps)
             }
             Instruction::WithdrawBackingBucketEarnings { domain, amount } => {
                 handle_withdraw_backing_bucket_earnings(program_id, accounts, domain, amount)
@@ -3889,7 +3958,9 @@ pub mod processor {
             oracle_leg_prices_e6: [0u64; constants::ORACLE_LEG_CAP],
             oracle_leg_publish_times: [0i64; constants::ORACLE_LEG_CAP],
             backing_trade_fee_policy_count: 0,
-            _padding_tail: [0u8; 6],
+            backing_trade_fee_insurance_share_bps_long: 0,
+            backing_trade_fee_insurance_share_bps_short: 0,
+            _padding_tail: [0u8; 2],
         };
         state::init_market_account_zero_copy(
             &mut market_ai.try_borrow_mut_data()?,
@@ -4733,10 +4804,21 @@ pub mod processor {
         ))
     }
 
+    fn backing_unavailable_principal_atoms(
+        bucket: &percolator::BackingBucketV16,
+    ) -> Result<u128, ProgramError> {
+        bucket
+            .consumed_liened_backing_num
+            .checked_add(bucket.impaired_liened_backing_num)
+            .map(|v| v / BOUND_SCALE)
+            .ok_or(PercolatorError::EngineArithmeticOverflow.into())
+    }
+
     fn sync_backing_domain_ledger(
         ledger: &mut state::BackingDomainLedgerAccountV16,
-        bucket_earnings_atoms: u128,
+        bucket: &percolator::BackingBucketV16,
     ) -> ProgramResult {
+        let bucket_earnings_atoms = bucket.utilization_fee_earnings;
         if bucket_earnings_atoms >= ledger.last_observed_bucket_earnings_atoms {
             ledger.total_earnings_atoms = ledger
                 .total_earnings_atoms
@@ -4744,6 +4826,20 @@ pub mod processor {
                 .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         }
         ledger.last_observed_bucket_earnings_atoms = bucket_earnings_atoms;
+
+        let unavailable_atoms = backing_unavailable_principal_atoms(bucket)?;
+        if unavailable_atoms >= ledger.last_observed_unavailable_principal_atoms {
+            ledger.cumulative_loss_atoms = ledger
+                .cumulative_loss_atoms
+                .checked_add(unavailable_atoms - ledger.last_observed_unavailable_principal_atoms)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        } else {
+            ledger.cumulative_recovery_atoms = ledger
+                .cumulative_recovery_atoms
+                .checked_add(ledger.last_observed_unavailable_principal_atoms - unavailable_atoms)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        }
+        ledger.last_observed_unavailable_principal_atoms = unavailable_atoms;
         Ok(())
     }
 
@@ -4771,7 +4867,7 @@ pub mod processor {
         market_group: [u8; 32],
         authority: [u8; 32],
         domain: u16,
-        bucket_earnings_atoms: u128,
+        bucket: &percolator::BackingBucketV16,
     ) -> Result<(state::BackingDomainLedgerAccountV16, bool), ProgramError> {
         if state::is_initialized(data) {
             let ledger = state::read_backing_domain_ledger(data)?;
@@ -4792,7 +4888,12 @@ pub mod processor {
                     total_principal_withdrawn_atoms: 0,
                     total_earnings_atoms: 0,
                     total_earnings_withdrawn_atoms: 0,
-                    last_observed_bucket_earnings_atoms: bucket_earnings_atoms,
+                    last_observed_bucket_earnings_atoms: bucket.utilization_fee_earnings,
+                    cumulative_loss_atoms: 0,
+                    cumulative_recovery_atoms: 0,
+                    last_observed_unavailable_principal_atoms: backing_unavailable_principal_atoms(
+                        bucket,
+                    )?,
                     domain,
                     _padding: [0u8; 14],
                 },
@@ -4913,9 +5014,9 @@ pub mod processor {
                     market_ai.key.to_bytes(),
                     cfg.backing_bucket_authority,
                     domain as u16,
-                    bucket.utilization_fee_earnings,
+                    &bucket,
                 )?;
-                sync_backing_domain_ledger(&mut ledger, bucket.utilization_fee_earnings)?;
+                sync_backing_domain_ledger(&mut ledger, &bucket)?;
                 Some((ledger, initialized))
             } else {
                 None
@@ -5055,9 +5156,9 @@ pub mod processor {
                     market_ai.key.to_bytes(),
                     cfg.backing_bucket_authority,
                     domain as u16,
-                    bucket.utilization_fee_earnings,
+                    &bucket,
                 )?;
-                sync_backing_domain_ledger(&mut ledger, bucket.utilization_fee_earnings)?;
+                sync_backing_domain_ledger(&mut ledger, &bucket)?;
                 if amount > ledger.total_principal_atoms {
                     return Err(PercolatorError::EngineCounterUnderflow.into());
                 }
@@ -5223,9 +5324,9 @@ pub mod processor {
                 market_ai.key.to_bytes(),
                 cfg.backing_bucket_authority,
                 domain as u16,
-                bucket.utilization_fee_earnings,
+                &bucket,
             )?;
-            sync_backing_domain_ledger(&mut ledger, bucket.utilization_fee_earnings)?;
+            sync_backing_domain_ledger(&mut ledger, &bucket)?;
             group
                 .withdraw_backing_provider_earnings_not_atomic(domain_usize, amount)
                 .map_err(map_v16_error)?;
@@ -5279,9 +5380,9 @@ pub mod processor {
             market_ai.key.to_bytes(),
             cfg.backing_bucket_authority,
             domain as u16,
-            bucket.utilization_fee_earnings,
+            &bucket,
         )?;
-        sync_backing_domain_ledger(&mut ledger, bucket.utilization_fee_earnings)?;
+        sync_backing_domain_ledger(&mut ledger, &bucket)?;
         write_or_init_backing_domain_ledger(&mut ledger_data, &ledger, initialized)
     }
 
@@ -6380,6 +6481,7 @@ pub mod processor {
         accounts: &'a [AccountInfo<'a>],
         domain: u8,
         fee_bps: u16,
+        insurance_share_bps: u16,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -6390,8 +6492,13 @@ pub mod processor {
         let asset_index = domain / 2;
         let (mut cfg, _, _, _, max_trading_fee_bps) =
             state::read_market_trade_preflight(&market_ai.try_borrow_data()?, asset_index)?;
-        expect_live_authority(&cfg.backing_bucket_authority, authority.key)?;
-        if fee_bps > 10_000 || fee_bps as u64 > max_trading_fee_bps {
+        expect_live_authority(&cfg.insurance_authority, authority.key)?;
+        if fee_bps > 10_000
+            || insurance_share_bps > 10_000
+            || (fee_bps == 0 && insurance_share_bps != 0)
+            || fee_bps as u64 > max_trading_fee_bps
+            || fee_bps as u64 > constants::MAX_DYNAMIC_TRADE_FEE_BPS
+        {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let long_side = domain % 2 == 0;
@@ -6420,8 +6527,10 @@ pub mod processor {
             adjust_policy_count(&mut cfg, old_fee, fee_bps)?;
             if long_side {
                 cfg.backing_trade_fee_bps_long = fee_bps;
+                cfg.backing_trade_fee_insurance_share_bps_long = insurance_share_bps;
             } else {
                 cfg.backing_trade_fee_bps_short = fee_bps;
+                cfg.backing_trade_fee_insurance_share_bps_short = insurance_share_bps;
             }
             state::write_wrapper_config(&mut market_data, &cfg)
         } else {
@@ -6434,12 +6543,37 @@ pub mod processor {
             adjust_policy_count(&mut cfg, old_fee, fee_bps)?;
             if long_side {
                 profile.backing_trade_fee_bps_long = fee_bps;
+                profile.backing_trade_fee_insurance_share_bps_long = insurance_share_bps;
             } else {
                 profile.backing_trade_fee_bps_short = fee_bps;
+                profile.backing_trade_fee_insurance_share_bps_short = insurance_share_bps;
             }
             state::write_wrapper_config(&mut market_data, &cfg)?;
             state::write_asset_oracle_profile(&mut market_data, asset_index, &profile)
         }
+    }
+
+    #[inline(never)]
+    fn handle_update_trade_fee_policy<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        trade_fee_base_bps: u64,
+    ) -> ProgramResult {
+        let authority = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        expect_signer(authority)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+        let (mut cfg, _, _, _, max_trading_fee_bps) =
+            state::read_market_trade_preflight(&market_ai.try_borrow_data()?, 0)?;
+        expect_live_authority(&cfg.insurance_authority, authority.key)?;
+        if trade_fee_base_bps > max_trading_fee_bps
+            || trade_fee_base_bps > constants::MAX_DYNAMIC_TRADE_FEE_BPS
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        cfg.trade_fee_base_bps = trade_fee_base_bps;
+        state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
     }
 
     #[inline(never)]
@@ -6572,7 +6706,11 @@ pub mod processor {
                 conf_filter_bps,
                 backing_trade_fee_bps_long: existing_profile.backing_trade_fee_bps_long,
                 backing_trade_fee_bps_short: existing_profile.backing_trade_fee_bps_short,
-                _padding0: [0u8; 2],
+                backing_trade_fee_insurance_share_bps_long: existing_profile
+                    .backing_trade_fee_insurance_share_bps_long,
+                backing_trade_fee_insurance_share_bps_short: existing_profile
+                    .backing_trade_fee_insurance_share_bps_short,
+                _padding0: [0u8; 6],
                 max_staleness_secs,
                 hybrid_soft_stale_slots,
                 mark_ewma_e6: 0,
@@ -6687,7 +6825,11 @@ pub mod processor {
                 conf_filter_bps: 0,
                 backing_trade_fee_bps_long: existing_profile.backing_trade_fee_bps_long,
                 backing_trade_fee_bps_short: existing_profile.backing_trade_fee_bps_short,
-                _padding0: [0u8; 2],
+                backing_trade_fee_insurance_share_bps_long: existing_profile
+                    .backing_trade_fee_insurance_share_bps_long,
+                backing_trade_fee_insurance_share_bps_short: existing_profile
+                    .backing_trade_fee_insurance_share_bps_short,
+                _padding0: [0u8; 6],
                 max_staleness_secs: 0,
                 hybrid_soft_stale_slots: 0,
                 mark_ewma_e6: initial_mark_e6,
@@ -7471,18 +7613,24 @@ pub mod processor {
         Ok(out.into_boxed_slice())
     }
 
-    fn backing_fee_bps_for_domain_view(
+    fn backing_fee_policy_for_domain_view(
         group: &state::MarketViewMutV16<'_>,
         cfg: &WrapperConfigV16,
         domain: usize,
-    ) -> Result<u16, ProgramError> {
+    ) -> Result<(u16, u16), ProgramError> {
         let asset_index = domain / 2;
         let long_side = domain % 2 == 0;
         let profile = read_oracle_profile_from_view(group, cfg, asset_index)?;
         Ok(if long_side {
-            profile.backing_trade_fee_bps_long
+            (
+                profile.backing_trade_fee_bps_long,
+                profile.backing_trade_fee_insurance_share_bps_long,
+            )
         } else {
-            profile.backing_trade_fee_bps_short
+            (
+                profile.backing_trade_fee_bps_short,
+                profile.backing_trade_fee_insurance_share_bps_short,
+            )
         })
     }
 
@@ -7523,7 +7671,7 @@ pub mod processor {
                     return Err(PercolatorError::EngineInvalidLeg.into());
                 }
                 let delta = delta_num / BOUND_SCALE;
-                let bps = backing_fee_bps_for_domain_view(group, cfg, d)?;
+                let (bps, _) = backing_fee_policy_for_domain_view(group, cfg, d)?;
                 let fee = fee_bps_ceil(delta, bps)?;
                 if fee != 0 {
                     fees_by_domain[d] = fees_by_domain[d]
@@ -7537,6 +7685,16 @@ pub mod processor {
             d += 1;
         }
         Ok(total)
+    }
+
+    fn fee_share_floor(amount: u128, share_bps: u16) -> Result<u128, ProgramError> {
+        if amount == 0 || share_bps == 0 {
+            return Ok(0);
+        }
+        amount
+            .checked_mul(share_bps as u128)
+            .map(|v| v / 10_000)
+            .ok_or(PercolatorError::EngineArithmeticOverflow.into())
     }
 
     fn precheck_account_view_can_pay_backing_domain_fee(
@@ -7654,27 +7812,39 @@ pub mod processor {
             let fee = fees_by_domain[d];
             if fee != 0 {
                 let asset_index = d / 2;
-                let bucket = if d % 2 == 0 {
-                    group.markets[asset_index]
-                        .engine
-                        .backing_long
-                        .try_to_runtime()
+                let (_, insurance_share_bps) = backing_fee_policy_for_domain_view(group, cfg, d)?;
+                let insurance_fee = fee_share_floor(fee, insurance_share_bps)?;
+                let provider_fee = fee
+                    .checked_sub(insurance_fee)
+                    .ok_or(PercolatorError::EngineCounterUnderflow)?;
+                let bucket_acc = if d % 2 == 0 {
+                    &mut group.markets[asset_index].engine.backing_long
                 } else {
-                    group.markets[asset_index]
-                        .engine
-                        .backing_short
-                        .try_to_runtime()
-                }
-                .map_err(map_v16_error)?;
+                    &mut group.markets[asset_index].engine.backing_short
+                };
+                let mut bucket = bucket_acc.try_to_runtime().map_err(map_v16_error)?;
                 if bucket.status != BackingBucketStatusV16::Fresh
                     || bucket.expiry_slot <= group.header.current_slot.get()
                 {
                     return Err(PercolatorError::EngineLockActive.into());
                 }
-                let backing_num = fee
-                    .checked_mul(BOUND_SCALE)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-                add_fresh_counterparty_backing_view(group, d, backing_num, bucket.expiry_slot)?;
+                if insurance_fee != 0 {
+                    group.header.insurance = percolator::V16PodU128::new(
+                        group
+                            .header
+                            .insurance
+                            .get()
+                            .checked_add(insurance_fee)
+                            .ok_or(PercolatorError::EngineArithmeticOverflow)?,
+                    );
+                }
+                if provider_fee != 0 {
+                    bucket.utilization_fee_earnings = bucket
+                        .utilization_fee_earnings
+                        .checked_add(provider_fee)
+                        .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                    *bucket_acc = percolator::BackingBucketV16Account::from_runtime(&bucket);
+                }
             }
             d += 1;
         }
@@ -8307,6 +8477,183 @@ pub mod processor {
             ],
             signer_seeds,
         )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use alloc::vec;
+        use percolator::HealthCertV16;
+
+        fn test_wrapper_config(price: u64) -> state::WrapperConfigV16 {
+            let mut cfg = state::WrapperConfigV16::default();
+            cfg.admin = [1u8; 32];
+            cfg.collateral_mint = [2u8; 32];
+            cfg.insurance_authority = [1u8; 32];
+            cfg.insurance_operator = [1u8; 32];
+            cfg.backing_bucket_authority = [1u8; 32];
+            cfg.asset_authority = [1u8; 32];
+            cfg.hyperp_mark_authority = [1u8; 32];
+            cfg.oracle_mode = constants::ORACLE_MODE_MANUAL;
+            cfg.last_good_oracle_slot = 0;
+            cfg.mark_ewma_e6 = price;
+            cfg.mark_ewma_halflife_slots = constants::DEFAULT_MARK_EWMA_HALFLIFE_SLOTS;
+            cfg.oracle_target_price_e6 = price;
+            cfg
+        }
+
+        fn test_engine_config() -> V16Config {
+            let mut cfg = V16Config::public_user_fund(1, 0, 10);
+            cfg.min_nonzero_mm_req = 1;
+            cfg.min_nonzero_im_req = 2;
+            cfg.maintenance_margin_bps = 10_000;
+            cfg.initial_margin_bps = 10_000;
+            cfg.max_trading_fee_bps = 10_000;
+            cfg.max_price_move_bps_per_slot = 10_000;
+            cfg.max_accrual_dt_slots = 1;
+            cfg.min_funding_lifetime_slots = 1;
+            cfg
+        }
+
+        #[test]
+        fn backing_domain_fee_split_routes_to_insurance_and_provider_earnings() {
+            let mut cfg = test_wrapper_config(100);
+            cfg.backing_trade_fee_bps_short = 10;
+            cfg.backing_trade_fee_insurance_share_bps_short = 2_500;
+            cfg.backing_trade_fee_policy_count = 1;
+
+            let mut market_data = vec![0u8; state::market_account_len_for_capacity(1).unwrap()];
+            state::init_market_account_zero_copy(
+                &mut market_data,
+                &cfg,
+                test_engine_config(),
+                [9u8; 32],
+                100,
+                0,
+            )
+            .unwrap();
+            let portfolio_len = state::portfolio_account_len_for_market_slots(1).unwrap();
+            let mut account_a_data = vec![0u8; portfolio_len];
+            let mut account_b_data = vec![0u8; portfolio_len];
+            state::init_portfolio_account_zero_copy(
+                &mut account_a_data,
+                [9u8; 32],
+                [10u8; 32],
+                [11u8; 32],
+                0,
+                1,
+            )
+            .unwrap();
+            state::init_portfolio_account_zero_copy(
+                &mut account_b_data,
+                [9u8; 32],
+                [12u8; 32],
+                [13u8; 32],
+                0,
+                1,
+            )
+            .unwrap();
+
+            {
+                let (cfg_pre, mut group) = state::read_market(&market_data).unwrap();
+                let mut account_a = state::read_portfolio(&account_a_data).unwrap();
+                let mut account_b = state::read_portfolio(&account_b_data).unwrap();
+                group.deposit_not_atomic(&mut account_a, 50_000).unwrap();
+                group.deposit_not_atomic(&mut account_b, 50_000).unwrap();
+                group.vault += 20_000;
+                group
+                    .add_fresh_counterparty_backing_not_atomic(1, 20_000 * BOUND_SCALE, 10)
+                    .unwrap();
+                group
+                    .add_account_source_positive_pnl_not_atomic(&mut account_a, 1, 20_000)
+                    .unwrap();
+
+                let locked_atoms = 10_000u128;
+                let locked_num = locked_atoms * BOUND_SCALE;
+                group
+                    .create_source_credit_lien_from_counterparty_not_atomic(1, locked_num)
+                    .unwrap();
+                account_a.source_claim_liened_num[1] = locked_num;
+                account_a.source_claim_counterparty_liened_num[1] = locked_num;
+                account_a.source_lien_effective_reserved[1] = locked_atoms;
+                account_a.source_lien_counterparty_backing_num[1] = locked_num;
+                account_a.source_lien_fee_last_slot[1] = group.current_slot;
+                account_a.health_cert = HealthCertV16 {
+                    certified_equity: 70_000,
+                    certified_initial_req: 0,
+                    certified_maintenance_req: 0,
+                    certified_liq_deficit: 0,
+                    certified_worst_case_loss: 0,
+                    cert_oracle_epoch: group.oracle_epoch,
+                    cert_funding_epoch: group.funding_epoch,
+                    cert_risk_epoch: group.risk_epoch,
+                    cert_asset_set_epoch: group.asset_set_epoch,
+                    active_bitmap_at_cert: account_a.active_bitmap,
+                    valid: true,
+                };
+                account_b.health_cert = HealthCertV16 {
+                    certified_equity: 50_000,
+                    certified_initial_req: 0,
+                    certified_maintenance_req: 0,
+                    certified_liq_deficit: 0,
+                    certified_worst_case_loss: 0,
+                    cert_oracle_epoch: group.oracle_epoch,
+                    cert_funding_epoch: group.funding_epoch,
+                    cert_risk_epoch: group.risk_epoch,
+                    cert_asset_set_epoch: group.asset_set_epoch,
+                    active_bitmap_at_cert: account_b.active_bitmap,
+                    valid: true,
+                };
+                state::write_market(&mut market_data, &cfg_pre, &group).unwrap();
+                state::write_portfolio(&mut account_a_data, &account_a).unwrap();
+                state::write_portfolio(&mut account_b_data, &account_b).unwrap();
+            }
+
+            let before_a = vec![0u128, 0u128].into_boxed_slice();
+            let before_b = vec![0u128, 0u128].into_boxed_slice();
+            {
+                let (cfg_view, mut group) = state::market_view_mut(&mut market_data).unwrap();
+                let mut account_a =
+                    state::portfolio_view_mut_for_market_slots(&mut account_a_data, 1).unwrap();
+                let mut account_b =
+                    state::portfolio_view_mut_for_market_slots(&mut account_b_data, 1).unwrap();
+                let charged = apply_backing_domain_fees_after_trade_view(
+                    &cfg_view,
+                    &mut group,
+                    &mut account_a,
+                    before_a.as_ref(),
+                    &mut account_b,
+                    before_b.as_ref(),
+                )
+                .unwrap();
+                assert_eq!(charged, 10);
+            }
+
+            let (_, group) = state::read_market(&market_data).unwrap();
+            let account_a = state::read_portfolio(&account_a_data).unwrap();
+            assert_eq!(group.insurance, 2);
+            assert_eq!(group.source_backing_buckets[1].utilization_fee_earnings, 8);
+            assert_eq!(account_a.capital, 49_990);
+            assert_eq!(group.c_tot, 99_990);
+            assert_eq!(
+                group.source_backing_buckets[1].fresh_unliened_backing_num,
+                10_000 * BOUND_SCALE,
+                "provider fee must not be capitalized back into fresh backing principal"
+            );
+            assert_eq!(
+                group.source_backing_buckets[1].valid_liened_backing_num,
+                10_000 * BOUND_SCALE
+            );
+        }
+
+        #[test]
+        fn backing_domain_fee_policy_rejects_share_without_fee() {
+            assert!(state::backing_trade_fee_policy_shape_ok(1, 10_000));
+            assert!(state::backing_trade_fee_policy_shape_ok(10_000, 0));
+            assert!(!state::backing_trade_fee_policy_shape_ok(0, 1));
+            assert!(!state::backing_trade_fee_policy_shape_ok(10_001, 0));
+            assert!(!state::backing_trade_fee_policy_shape_ok(1, 10_001));
+        }
     }
 }
 
