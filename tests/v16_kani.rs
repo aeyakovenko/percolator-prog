@@ -851,7 +851,7 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v16_hyperp_mark_decode_preserves_wire_fields() {
+fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let now_slot_raw: u16 = kani::any();
     let mark_raw: u16 = kani::any();
@@ -873,7 +873,7 @@ fn kani_v16_hyperp_mark_decode_preserves_wire_fields() {
     configure[19..27].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
     configure[27..35].copy_from_slice(&mark_min_fee.to_le_bytes());
     match Instruction::decode(&configure).unwrap() {
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: got_asset_index,
             now_slot: got_now,
             initial_mark_e6: got_mark,
@@ -895,7 +895,43 @@ fn kani_v16_hyperp_mark_decode_preserves_wire_fields() {
     push[3..11].copy_from_slice(&now_slot.to_le_bytes());
     push[11..19].copy_from_slice(&push_mark_e6.to_le_bytes());
     match Instruction::decode(&push).unwrap() {
-        Instruction::PushHyperpMark {
+        Instruction::PushEwmaMark {
+            asset_index: got_asset_index,
+            now_slot: got_now,
+            mark_e6: got_mark,
+        } => {
+            assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_now, now_slot);
+            assert_eq!(got_mark, push_mark_e6);
+        }
+        _ => unreachable!(),
+    }
+
+    let mut configure_auth = [0u8; 19];
+    configure_auth[0] = 62;
+    configure_auth[1..3].copy_from_slice(&asset_index.to_le_bytes());
+    configure_auth[3..11].copy_from_slice(&now_slot.to_le_bytes());
+    configure_auth[11..19].copy_from_slice(&initial_mark_e6.to_le_bytes());
+    match Instruction::decode(&configure_auth).unwrap() {
+        Instruction::ConfigureAuthMark {
+            asset_index: got_asset_index,
+            now_slot: got_now,
+            initial_mark_e6: got_mark,
+        } => {
+            assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_now, now_slot);
+            assert_eq!(got_mark, initial_mark_e6);
+        }
+        _ => unreachable!(),
+    }
+
+    let mut push_auth = [0u8; 19];
+    push_auth[0] = 63;
+    push_auth[1..3].copy_from_slice(&asset_index.to_le_bytes());
+    push_auth[3..11].copy_from_slice(&now_slot.to_le_bytes());
+    push_auth[11..19].copy_from_slice(&push_mark_e6.to_le_bytes());
+    match Instruction::decode(&push_auth).unwrap() {
+        Instruction::PushAuthMark {
             asset_index: got_asset_index,
             now_slot: got_now,
             mark_e6: got_mark,
@@ -1116,7 +1152,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
         extra,
     );
     assert_rejects_trailing_byte(
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 100,
@@ -1126,7 +1162,23 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
         extra,
     );
     assert_rejects_trailing_byte(
-        Instruction::PushHyperpMark {
+        Instruction::PushEwmaMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 101,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::ConfigureAuthMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: 100,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::PushAuthMark {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 101,
@@ -1301,11 +1353,17 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
     let configure_hybrid = [34u8; 155];
     assert!(Instruction::decode(&configure_hybrid).is_err());
 
-    let configure_hyperp = [35u8; 34];
-    assert!(Instruction::decode(&configure_hyperp).is_err());
+    let configure_ewma_mark = [35u8; 34];
+    assert!(Instruction::decode(&configure_ewma_mark).is_err());
 
-    let push_hyperp = [36u8; 18];
-    assert!(Instruction::decode(&push_hyperp).is_err());
+    let push_ewma_mark = [36u8; 18];
+    assert!(Instruction::decode(&push_ewma_mark).is_err());
+
+    let configure_auth_mark = [62u8; 18];
+    assert!(Instruction::decode(&configure_auth_mark).is_err());
+
+    let push_auth_mark = [63u8; 18];
+    assert!(Instruction::decode(&push_auth_mark).is_err());
 
     let update_liquidation = [37u8; 2];
     assert!(Instruction::decode(&update_liquidation).is_err());

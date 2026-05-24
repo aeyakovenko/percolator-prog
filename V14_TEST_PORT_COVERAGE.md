@@ -47,6 +47,6 @@ in the v14 engine repository.
 
 No wrapper-owned v12 feature gap is currently open. Retired v12 surfaces
 (`UpdateConfig`, global risk buffer, global slab, indexed LP registry, legacy
-Hyperp mark pushes) are documented as retired or replaced above; reintroducing
+EwmaMark pushes) are documented as retired or replaced above; reintroducing
 any of them requires adding the corresponding v14 wrapper tests and ABI proofs
 before considering the feature covered.

@@ -234,7 +234,7 @@ Confirms the keeper wrapper adds no extra gates beyond `decide_crank`.
 
 63, 65 are bounded; documented as SAT-tractability. Production MAX_UNIT_SCALE=1e9 — the bounded version still exercises the logic and mathematical guarantee is universal.
 
-## Y. `clamp_toward_with_dt` (Hyperp rate limiting) (8)
+## Y. `clamp_toward_with_dt` (EwmaMark rate limiting) (8)
 
 | # | Proof | Asserts | Class |
 |---|-------|---------|-------|

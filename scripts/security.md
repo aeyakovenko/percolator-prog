@@ -52,8 +52,9 @@ Scope by adversary boundary:
   `WithdrawInsuranceDomain`, `TopUpBackingBucket`,
   `WithdrawBackingBucket`, `WithdrawBackingBucketEarnings`,
   `SyncBackingDomainLedger`, `SyncInsuranceLedger`.
-- Oracle and lifecycle: `ConfigureHybridOracle`, `ConfigureHyperpMark`,
-  `PushHyperpMark`, `UpdateAssetLifecycle`.
+- Oracle and lifecycle: `ConfigureHybridOracle`, `ConfigureAuthMark`,
+  `PushAuthMark`, `ConfigureEwmaMark`, `PushEwmaMark`,
+  `UpdateAssetLifecycle`.
 - Deliberately permissionless progress/recovery: `PermissionlessCrank`,
   `SyncMaintenanceFee`, `ResolveStalePermissionless`, `CloseResolved`,
   `ClaimResolvedPayoutTopup`, `FinalizeResetSide`.
@@ -67,12 +68,12 @@ API-by-API disposition:
   reinterpreted as another field.
 - PASS 2: no permissionless API now accepts a scalar that can directly move an
   oracle price. `PermissionlessCrank` consumes authenticated hybrid feeds,
-  authority-pushed `EwmaMark` state, or the already stored manual/raw engine
-  price. The current ABI names for `EwmaMark` are the legacy
-  `ConfigureHyperpMark`/`PushHyperpMark` tags.
+  authority-pushed `AuthMark`/`EwmaMark` state, or the already stored
+  manual/raw engine price.
 - PASS 3: manual/raw oracle markets cannot be advanced by a public caller's
   price. A market creator who wants operator-pushed prices must use the
-  per-market oracle authority through `EwmaMark` or `ConfigureHybridOracle`.
+  per-market oracle authority through `AuthMark`, `EwmaMark`, or
+  `ConfigureHybridOracle`.
 - PASS 4: external oracle configuration is authority-gated per asset, verifies
   provided feed accounts against stored feed keys, and does not advance the
   group-wide loss accrual anchor while any asset has open position/loss state.
@@ -107,6 +108,66 @@ cargo build-sbf --no-default-features
 cargo kani --tests
 ```
 
+## Twenty-second pass — AuthMark/EwmaMark oracle API split
+
+**Status:** PASS_SAFE. `cargo kani --tests` completed with 33 successfully
+verified harnesses and 0 failures. This pass treats the new AuthMark public APIs
+and the renamed EwmaMark APIs as attacker-reachable oracle-management surfaces.
+
+Target invariant:
+
+```text
+AuthMark is a direct authority-pushed mark with no EWMA or feed-tail
+configuration. EwmaMark is the authority-pushed smoothed mark. Public cranks and
+trades must not be able to rewrite either mark without the configured mark
+authority.
+```
+
+API-by-API disposition:
+
+- PASS 1: `ConfigureAuthMark` and `PushAuthMark` are distinct public tags
+  (`62` and `63`) with strict decoding, truncation rejection, and trailing-byte
+  rejection coverage.
+- PASS 2: `ConfigureAuthMark` exposes only `asset_index`, authenticated slot,
+  and mark. It cannot smuggle EWMA halflife/min-fee, oracle feed ids, unit
+  conversion, confidence filters, or hybrid stale timers.
+- PASS 3: AuthMark profile validation requires the stored direct mark and
+  target mark to match, requires both to remain inside the engine oracle-price
+  envelope, and rejects any nonzero EWMA or external-oracle configuration.
+- PASS 4: AuthMark configuration is authority-gated by the same per-asset oracle
+  authority model as other price-managed modes; base asset configuration remains
+  admin-gated, non-base configuration remains per-asset oracle-authority gated.
+- PASS 5: `PushAuthMark` requires the configured mark authority, authenticates
+  liveness with `Clock::get()` instead of caller `now_slot`, and rejects stale
+  or over-limit marks before mutation.
+- PASS 6: `PermissionlessCrank` consumes only the stored AuthMark/EwmaMark state
+  and has no public price-like scalar. AuthMark and EwmaMark both pass through
+  the same engine price-movement cap on exposed markets.
+- PASS 7: `TradeNoCpi`/`TradeCpi` cannot rewrite AuthMark state or charge
+  EWMA mark-movement fees in AuthMark mode; the mark moves only through
+  `PushAuthMark`.
+- PASS 8: Existing EwmaMark behavior is preserved under the new name:
+  `ConfigureEwmaMark`/`PushEwmaMark` still use halflife/min-fee smoothing and
+  dynamic mark-movement fee tests still pass.
+- PASS 9: Hybrid remains external-oracle-primary with EWMA fallback; it was not
+  collapsed into AuthMark or EwmaMark, so feed-tail/staleness/confidence policy
+  remains isolated to `ConfigureHybridOracle`.
+- PASS 10: Repository terminology now classifies legacy mark-mode references as
+  AuthMark or EwmaMark, and the shared authority is named
+  `mark_authority`/`AUTHORITY_MARK`.
+
+Regression coverage retained for this pass:
+
+```bash
+cargo test --test v16_wrapper auth_mark -- --test-threads=1 --nocapture
+cargo test --test v16_wrapper ewma_mark -- --test-threads=1 --nocapture
+cargo test --test v16_cu auth_mark -- --test-threads=1 --nocapture
+cargo test --test v16_cu ewma_mark -- --test-threads=1 --nocapture
+cargo build-sbf --no-default-features
+cargo test
+cargo kani --tests  # 33 successfully verified harnesses, 0 failures
+```
+
 ## Twentieth pass — public crank price-input audit
 
 **Status:** fixed locally; final proof run is tracked by the Twenty-first pass.
@@ -120,7 +181,7 @@ Corrected invariant:
 Permissionless public crank APIs may advance time, funding, settlement, and
 liquidation work, but they must not contain any unauthenticated price input.
 All price movement must come from either an external verified oracle profile or
-an authority-gated `EwmaMark` update.
+an authority-gated `AuthMark`/`EwmaMark` update.
 ```
 
 Why the old sweep missed it:
@@ -144,8 +205,8 @@ Required retained coverage for this class:
   trailing price bytes.
 - Raw/manual oracle profiles cannot be moved by `PermissionlessCrank`; they can
   only reuse the currently stored engine price.
-- Authorized `EwmaMark` updates remain the path for operator-pushed markets,
-  and public cranks consume only that stored mark state.
+- Authorized `AuthMark`/`EwmaMark` updates remain the path for operator-pushed
+  markets, and public cranks consume only that stored mark state.
 - Liquidation and released-PnL tests that need price movement use an
   authority-gated oracle update before the public crank.
 
@@ -243,7 +304,7 @@ Coverage:
 - The no-CPI and matcher-CPI trade paths are covered with the same lien delta
   and fee-credit behavior.
 - Corrupted persisted fee fields above `10_000` fail closed before matcher CPI.
-- Non-base `ConfigureHyperpMark`, `ConfigureHybridOracle`, and asset
+- Non-base `ConfigureEwmaMark`, `ConfigureHybridOracle`, and asset
   retire/reactivate lifecycle resets preserve the backing authority's domain fee
   policy. Oracle profile changes may reset oracle data, but cannot silently
   erase residual-fee policy or desynchronize `backing_trade_fee_policy_count`.
@@ -253,7 +314,7 @@ reconfiguration and lifecycle profile resets were rebuilding
 `AssetOracleProfileV16` with zero backing-fee fields. That let the asset/oracle
 authority erase a fee set by `backing_bucket_authority`, and it could leave the
 global policy-count optimization inconsistent. The profile reset paths now
-preserve `backing_trade_fee_bps_long/short`, and the regression covers Hyperp,
+preserve `backing_trade_fee_bps_long/short`, and the regression covers EwmaMark,
 hybrid, retire, and reactivation resets.
 
 ## Seventeenth pass — corrupt-oracle source PnL and cross-margin exit cap
@@ -370,37 +431,37 @@ custody checks, but it does not reuse the insurance bps/cooldown policy because
 the withdrawable amount is already capped to explicit unencumbered backing
 deposits rather than insurance surplus.
 
-## Fourteenth pass — Hyperp mark upper-bound enforcement
+## Fourteenth pass — EwmaMark mark upper-bound enforcement
 
-**Status:** fixed. I treated the submitted Hyperp over-limit mark report as
-untrusted and verified it locally. The report was valid: `PushHyperpMark`
+**Status:** fixed. I treated the submitted EwmaMark over-limit mark report as
+untrusted and verified it locally. The report was valid: `PushEwmaMark`
 rejected zero marks but did not reject marks above
-`percolator::MAX_ORACLE_PRICE`, and persisted Hyperp/hybrid profile validation
+`percolator::MAX_ORACLE_PRICE`, and persisted EwmaMark/hybrid profile validation
 only required nonzero `mark_ewma_e6`.
 
 Red tests added first:
 
 ```bash
-cargo test --release --test v16_wrapper hyperp_mark -- --test-threads=1 --nocapture
+cargo test --release --test v16_wrapper ewma_mark -- --test-threads=1 --nocapture
 ```
 
 Both new regressions failed before the patch:
 
-- `v16_wrapper_hyperp_mark_profiles_reject_prices_above_engine_max`
-- `v16_wrapper_push_hyperp_mark_rejects_over_max_input_and_preserves_state`
+- `v16_wrapper_ewma_mark_profiles_reject_prices_above_engine_max`
+- `v16_wrapper_push_ewma_mark_rejects_over_max_input_and_preserves_state`
 
 Fix:
 
 - `validate_wrapper_config` and `validate_asset_oracle_profile` now require
-  Hyperp/hybrid `mark_ewma_e6` and `oracle_target_price_e6` to be in the engine
+  EwmaMark/hybrid `mark_ewma_e6` and `oracle_target_price_e6` to be in the engine
   oracle-price envelope: `1..=percolator::MAX_ORACLE_PRICE`.
-- `ConfigureHyperpMark` rejects an initial mark above the engine max before
+- `ConfigureEwmaMark` rejects an initial mark above the engine max before
   mutating engine price state.
-- `PushHyperpMark` rejects both over-limit input marks and over-limit EWMA
+- `PushEwmaMark` rejects both over-limit input marks and over-limit EWMA
   outputs before persisting the profile.
 
 Impact classification: authority-scoped operational DoS, not arbitrary-user
-theft. A compromised or buggy Hyperp mark authority could previously persist an
+theft. A compromised or buggy mark authority could previously persist an
 over-limit target that later made crank/trade paths fail against engine price
 invariants. The fix makes the wrapper fail closed at the same boundary enforced
 for external oracle readers and engine effective prices.
@@ -434,7 +495,7 @@ each entry against ten probe categories:
 10. CU boundedness.
 
 The matrix is exhaustive by equivalence class rather than by raw numeric
-Cartesian product: manual, Hyperp, and hybrid oracle modes; Pyth/Switchboard/
+Cartesian product: manual, EwmaMark, and hybrid oracle modes; Pyth/Switchboard/
 Chainlink one-, two-, and three-leg profiles; fresh/soft-stale/hard-stale
 states; live/recovery/resolved modes; active/drain-only/retired asset
 lifecycles; flat/single-leg/multi-leg/source-backed/resolved portfolios;
@@ -597,7 +658,7 @@ while an operator configures asset `1` before it has positions. Dynamic asset
 setup should be allowed; it must not declare unrelated exposed assets
 loss-current.
 
-**Original issue:** `ConfigureHybridOracle` and `ConfigureHyperpMark` only
+**Original issue:** `ConfigureHybridOracle` and `ConfigureEwmaMark` only
 checked that the selected asset was empty. They then set both:
 
 ```text
@@ -623,7 +684,7 @@ If any configured asset has OI, stale state, B/loss state, stress, h-lock, or
 recovery active, the group-wide loss-safe fee anchor is preserved.
 ```
 
-The retained test covers both `ConfigureHyperpMark` and `ConfigureHybridOracle`
+The retained test covers both `ConfigureEwmaMark` and `ConfigureHybridOracle`
 on an empty nonzero asset while asset `0` has open OI, then proves a
 permissionless fee sync cannot charge that nonflat asset against the newly
 configured slot.
@@ -643,7 +704,7 @@ Scope covered:
 - custody and account lifecycle: `InitMarket`, `InitPortfolio`, `Deposit`,
   `Withdraw`, `ClosePortfolio`, `CloseSlab`;
 - trading: `TradeNoCpi`, `TradeCpi`, matcher return validation, tail-account
-  filtering, arbitrary execution prices, dynamic hybrid/Hyperp fees;
+  filtering, arbitrary execution prices, dynamic hybrid/EwmaMark fees;
 - permissionless progress: `PermissionlessCrank` refresh, liquidation, B
   settlement, public recovery evidence, cranker reward splits;
 - insurance and backing: `TopUpInsurance`, `WithdrawInsurance`,
@@ -651,7 +712,7 @@ Scope covered:
   `UpdateInsurancePolicy`, `UpdateLiquidationFeePolicy`;
 - market authority/config: all `UpdateAuthority` kinds,
   `ConfigurePermissionlessResolve`, `ConfigureHybridOracle`,
-  `ConfigureHyperpMark`, `PushHyperpMark`, `UpdateAssetLifecycle`;
+  `ConfigureEwmaMark`, `PushEwmaMark`, `UpdateAssetLifecycle`;
 - recovery/resolution: `ResolveMarket`, `ResolveStalePermissionless`,
   `CloseResolved`, `ClaimResolvedPayoutTopup`,
   `RefineResolvedUnreceiptedBound`, `CureAndCancelClose`,
@@ -665,7 +726,7 @@ Probe strategy:
 - checked asset-slot lifecycle edges: disabled, active, drain-only, retired,
   reactivated with a new monotonic market id, stale portfolio legs, stale source
   claims, and stale close-progress ledgers;
-- checked per-asset oracle profile edges: manual, hybrid, Hyperp, retired
+- checked per-asset oracle profile edges: manual, hybrid, EwmaMark, retired
   profile reset, nonzero asset profile isolation, duplicate oracle publish
   times, stale fallback, hard stale resolution, and below-floor recovery;
 - checked permissionless crank branches with and without cranker reward
@@ -713,7 +774,7 @@ CU, or Kani test, or matched an explicitly accepted product policy.
 
 ## F11 — Hybrid oracle mode must not price nonzero asset slots (High)
 
-**Status:** fixed locally by scoping the wrapper's configured hybrid/Hyperp
+**Status:** fixed locally by scoping the wrapper's configured hybrid/EwmaMark
 oracle lane to asset index `0`. Nonzero asset slots now use the per-asset
 oracle profile/engine price seen by `PermissionlessCrank` and pay only their
 configured base trade fee; they do not inherit asset `0`'s composite/EWMA mark.
@@ -750,7 +811,7 @@ state.
 **Fix invariant:**
 
 ```text
-Configured hybrid/Hyperp oracle policy:
+Configured hybrid/EwmaMark oracle policy:
   applies to asset_index == 0 only.
 
 For asset_index != 0:
@@ -874,7 +935,7 @@ while it remains within `max_staleness_secs`; those duplicate reads are not new
 liveness proofs, but they are legitimate continuation steps toward the already
 accepted target.
 
-**Original issue:** the hybrid mark cache (`mark_ewma_e6` / `hyperp_mark_e6`)
+**Original issue:** the hybrid mark cache (`mark_ewma_e6` / `ewma_mark_e6`)
 reset only when the external oracle publish time advanced. During later duplicate
 staircase steps, `last_effective_price_e6` moved while the mark stayed at the
 previous effective price. That created regular-hours mark/index divergence and
@@ -888,7 +949,7 @@ Hybrid regular-hours external branch:
   fresh publish_time advances last_good_oracle_slot and sets target;
   duplicate publish_time never advances last_good_oracle_slot;
   any accepted effective staircase movement updates mark_ewma_e6 and
-  hyperp_mark_e6 to the same effective price.
+  ewma_mark_e6 to the same effective price.
 
 Hybrid after-hours fallback branch:
   unchanged from F5/F7; trade flow owns EWMA and pays dynamic externality fees.
@@ -991,7 +1052,7 @@ permissionless resolve/close path so the position is not stuck.
 Covered weird states and public paths:
 
 - External raw-target/effective-price lag: `TradeCpi` and `TradeNoCpi` still execute consenting fills. Regressions: `test_external_tradecpi_executes_while_oracle_target_lags_effective_price`, `test_external_tradenocpi_executes_while_oracle_target_lags_effective_price`, `test_target_lag_trade_executes_without_external_value_movement`.
-- Hyperp target/effective-index lag: trades still execute while the clamped index catches up. Regression: `test_hyperp_trades_execute_while_target_lags_effective_index`.
+- EwmaMark target/effective-index lag: trades still execute while the clamped index catches up. Regression: `test_ewma_mark_trades_execute_while_target_lags_effective_index`.
 - Exposed market just beyond one max-dt segment: nonzero trades can advance bounded progress; zero-fill cannot be used as a hidden crank. Regressions: `test_trade_nocpi_requires_crank_for_exposed_price_progress`, `test_tradecpi_nonzero_fill_requires_crank_for_exposed_price_progress`, `test_tradecpi_zero_fill_rejects_exposed_price_progress`.
 - Far-behind exposed market: trades reject with `CatchupRequired`, repeated keeper cranks catch up, and trades work after catchup. Regressions: `test_trade_nocpi_far_behind_recovers_after_repeated_keeper_cranks`, `test_tradecpi_far_behind_recovers_after_repeated_keeper_cranks`.
 - Liquidatable bounded-catchup state: honest candidate cranks keep committing progress and liquidate before deferred catchup can drain insurance. Regressions: `test_keeper_crank_partial_catchup_candidate_sequence_does_not_drain_insurance`, `test_crank_dense_same_side_fullclose_candidate_eventually_liquidates`.
@@ -1222,7 +1283,7 @@ one each iteration:
 | Self-referential dispatch (matcher CPI, LP PDA derivation) | HIGH | Identity spoofing, CPI reentrancy |
 | Frozen-time modes (resolved, stale-matured) | MED | Post-freeze writes, zombie state |
 | Permissionless paths callable by anyone (crank, catchup, reclaim) | MED | DoS + grief vectors |
-| Oracle-free paths (hyperp, dead-oracle) | MED | Mark manipulation, liveness spoofing |
+| Oracle-free paths (ewma_mark, dead-oracle) | MED | Mark manipulation, liveness spoofing |
 | Aggregate counters (c_tot, pnl_pos_tot, oi_eff_*) updated across many paths | MED | Drift between aggregate and sum-of-accounts |
 | Bitmap/cursor state (fee sweep cursor, risk buffer scan cursor) | LOW | Consistency under partial progress |
 | Pure functions (no state) | LOW | Already well-covered by Kani |
@@ -1460,25 +1521,25 @@ state::write_config(&mut data, &restored);
 
 ---
 
-## F2 — Hyperp liveness spoofable via cheap self-trades when `mark_min_fee == 0` (HIGH)
+## F2 — EwmaMark liveness spoofable via cheap self-trades when `mark_min_fee == 0` (HIGH)
 
-**Location:** `src/percolator.rs:6205-6209` (TradeCpi Hyperp branch).
+**Location:** `src/percolator.rs:6205-6209` (TradeCpi EwmaMark branch).
 
 **Code:**
 ```rust
 let full_weight = config.mark_min_fee == 0
-    || fee_paid_hyperp >= config.mark_min_fee;
+    || fee_paid_ewma_mark >= config.mark_min_fee;
 if full_weight {
     config.last_mark_push_slot = clock.slot as u128;
 }
 ```
 
 **Bug.** When `mark_min_fee == 0`, the short-circuit OR makes every
-successful Hyperp trade "full-weight" — advances
+successful EwmaMark trade "full-weight" — advances
 `last_mark_push_slot`, which is the ONLY hard-timeout liveness
-signal for Hyperp (see `permissionless_stale_matured`).
+signal for EwmaMark (see `permissionless_stale_matured`).
 
-Default Hyperp init (`encode_init_market_hyperp` → `encode_init_market_full_v2`)
+Default EwmaMark init (`encode_init_market_ewma_mark` → `encode_init_market_full_v2`)
 sets `mark_min_fee = 0`. A permissionless attacker with their own
 LP + matcher can round-trip tiny self-trades (even `trading_fee_bps=0`
 markets work) to refresh `last_mark_push_slot` every slot, blocking
@@ -1494,10 +1555,10 @@ users stuck in a zombie market.
 - Default config ships with the hole open.
 
 **Fix.** Require a nonzero `mark_min_fee` at InitMarket when the
-market is Hyperp AND `permissionless_resolve_stale_slots > 0`. This
+market is EwmaMark AND `permissionless_resolve_stale_slots > 0`. This
 is the config-time gate — simpler than decoupling the trade path,
 operator-visible, doesn't change the EWMA/trade semantics honest
-users rely on. Hyperp markets without perm-resolve (admin-resolve
+users rely on. EwmaMark markets without perm-resolve (admin-resolve
 only) can keep `mark_min_fee = 0` since there's no bricking vector.
 
 ---
@@ -1589,7 +1650,7 @@ All the previously-raised oracle-path issues, re-checked against
   `sweep_maintenance_fees` reclaims flat zero-capital accounts in
   the same pass, so crank-only reclamation works when fees are
   enabled.
-- **Hyperp EWMA clock on sub-threshold trades** — both TradeCpi
+- **EwmaMark EWMA clock on sub-threshold trades** — both TradeCpi
   and TradeNoCpi now gate clock bump on full-weight observation.
 
 That leaves F1–F4 as new findings from this pass. F1/F2/F3 are
@@ -1604,7 +1665,7 @@ then test passes, one commit per finding.
    CatchupAccrue rollback. Test: two successive partial-catchup
    calls with the same Pyth account → `last_good_oracle_slot`
    advances only once.
-2. **F2**: reject Hyperp init when
+2. **F2**: reject EwmaMark init when
    `permissionless_resolve_stale_slots > 0 AND mark_min_fee == 0`.
    Test: init with that combo → rejection.
 3. **F3**: reject InitMarket when `new_account_fee == 0 AND
@@ -1671,7 +1732,7 @@ Coverage map:
 - **Blocks post-resolution**: `InitUser`, `InitLP`,
   `DepositCollateral`, `WithdrawCollateral`, `KeeperCrank`,
   `TradeNoCpi`, `TradeCpi`, `TopUpInsurance`,
-  `UpdateConfig`, `PushHyperpMark`,
+  `UpdateConfig`, `PushEwmaMark`,
   `ResolveMarket` (re-resolve), `WithdrawInsuranceLimited`,
   `DepositFeeCredits`,
   `ConvertReleasedPnl`, `ResolvePermissionless` (re-resolve),
@@ -2003,8 +2064,8 @@ before treating LiteSVM results as authoritative.
   Current partial rollback preserves `last_oracle_publish_time`,
   `oracle_target_price_e6`, and `oracle_target_publish_time` along
   with `last_good_oracle_slot`.
-- **F2 Hyperp cheap-trade liveness spoof** — PASS_SAFE. Current
-  InitMarket rejects Hyperp + permissionless resolution when
+- **F2 EwmaMark cheap-trade liveness spoof** — PASS_SAFE. Current
+  InitMarket rejects EwmaMark + permissionless resolution when
   `mark_min_fee == 0`.
 - **F3 zero account-fee + zero maintenance-fee slot exhaustion** —
   PASS_SAFE under current wrapper policy. InitMarket now rejects the
@@ -2081,7 +2142,7 @@ Results:
    **Probe:** `tests/test_a1_siphon_regression.rs::
    test_a1_external_pyth_raw_gap_move_defended`.
    **Disposition:** PASS_SAFE. The test configures the maximum
-   currently allowed non-Hyperp stale window (`100` slots), performs
+   currently allowed non-EwmaMark stale window (`100` slots), performs
    a live `99`-slot raw no-walk gap, then resumes cranking. The
    wrapper feeds capped effective prices rather than the raw 25%
    target: attacker combined delta was `189` units on `36B`
@@ -2296,13 +2357,13 @@ Sweep targeted the v16 dynamic-asset oracle profile feature:
 
 - asset 0 is the base asset and config-level oracle fields are only the
   asset-0 mirror;
-- non-base assets store independent manual / Hyperp / hybrid oracle
+- non-base assets store independent manual / EwmaMark / hybrid oracle
   profiles in the market account;
 - retired slots can later be reactivated with fresh monotonic market IDs.
 
 ### Finding F8.1 — retired/reactivated slots must not inherit price-managed profiles
 
-**Attacker model:** configure a non-base asset as Hyperp/hybrid, retire
+**Attacker model:** configure a non-base asset as EwmaMark/hybrid, retire
 the empty asset, then reuse the same slot for a new monotonic market ID.
 If the old profile remains, the new asset starts from stale EWMA/target
 state rather than the activation price.
@@ -2315,7 +2376,7 @@ fresh manual oracle profile for the activated slot.
 
 ### Finding F8.2 — retired price-managed assets must not refresh market liveness
 
-**Attacker model:** after a Hyperp asset is retired, continue pushing its
+**Attacker model:** after an EwmaMark asset is retired, continue pushing its
 old mark profile to refresh `last_good_oracle_slot` and delay whole-market
 permissionless stale resolution even though the asset no longer exists as
 an active market.
@@ -2325,7 +2386,7 @@ an active market.
 
 **Disposition:** fixed. `UpdateAssetLifecycle::Retire` clears the slot's
 profile to manual, oracle reconfiguration is limited to active empty
-assets, and Hyperp mark pushes are limited to active/drain-only assets.
+assets, and EwmaMark pushes are limited to active/drain-only assets.
 
 ### Commands run
 

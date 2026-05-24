@@ -48,7 +48,7 @@ fn main() {
     wcf!(insurance_operator, [u8; 32]);
     wcf!(backing_bucket_authority, [u8; 32]);
     wcf!(asset_authority, [u8; 32]);
-    wcf!(hyperp_mark_authority, [u8; 32]);
+    wcf!(mark_authority, [u8; 32]);
     wcf!(insurance_withdraw_deposit_remaining, u128);
     wcf!(insurance_withdraw_max_bps, u16);
     wcf!(liquidation_cranker_fee_share_bps, u16);

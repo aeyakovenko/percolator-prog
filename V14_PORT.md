@@ -58,8 +58,8 @@ The v12 `UpdateAuthority` tag is restored for the v14-backed authority fields:
 admin, insurance authority, and insurance operator. Nonzero handoffs require
 both the current authority and destination key to sign; scoped zero-key burns
 are allowed for insurance roles. Live admin burn is rejected until a
-permissionless resolved-exit profile exists. The old Hyperp mark authority kind
-is rejected until Hyperp wrapper configuration is ported.
+permissionless resolved-exit profile exists. The old mark authority kind
+is rejected until EwmaMark wrapper configuration is ported.
 
 The v12 `CloseSlab` terminal lifecycle path is restored as an account-local
 market close. It requires the admin destination to sign, the market to be

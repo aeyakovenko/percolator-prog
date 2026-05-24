@@ -18,7 +18,7 @@ This README is intentionally **high-level**: it explains the trust model, accoun
 - [Instruction overview](#instruction-overview)
 - [Matcher CPI model](#matcher-cpi-model)
 - [Side-mode gating and insurance](#side-mode-gating-and-insurance)
-- [Hyperp mode](#hyperp-mode)
+- [AuthMark and EwmaMark modes](#authmark-and-ewmamark-modes)
 - [Expected risk engine behavior](#expected-risk-engine-behavior)
 - [Operational runbook](#operational-runbook)
 - [Deployment flow](#deployment-flow)
@@ -141,7 +141,7 @@ This section describes intent and operational ordering, not argument-by-argument
   - binds vault token account + oracle keys into config
   - initializes the matcher nonce to zero
 - **UpdateAuthority** (tag 32)
-  - rotates one scoped authority: admin, Hyperp mark pusher, resolved insurance authority, or live insurance operator
+  - rotates one scoped authority: admin, mark pusher, resolved insurance authority, or live insurance operator
   - setting an authority to all zeros burns that capability permanently
   - burning admin is guarded by permissionless resolution / force-close liveness checks
 
@@ -185,7 +185,8 @@ This section describes intent and operational ordering, not argument-by-argument
 
 ### Oracle / mark management
 - External-oracle markets read configured oracle account(s) directly in live price-taking instructions.
-- Hyperp markets use **PushHyperpMark** (tag 36), signed by the Hyperp mark authority, to update the mark input.
+- AuthMark markets use **ConfigureAuthMark** (tag 62) and **PushAuthMark** (tag 63), signed by the configured mark authority, to store a direct authority mark without EWMA smoothing.
+- EwmaMark markets use **ConfigureEwmaMark** (tag 35) and **PushEwmaMark** (tag 36), signed by the configured mark authority, to update a smoothed EWMA mark input.
 - The per-slot effective-price movement cap is a risk parameter set at init; there is no standalone `SetOraclePriceCap` instruction in the current ABI.
 
 ### Insurance management
@@ -269,15 +270,29 @@ This split is load-bearing: burning or delegating the live operator key does not
 
 ---
 
-## Hyperp mode
+## AuthMark and EwmaMark modes
 
-Hyperp is an alternative pricing mode for markets that use an internal mark/index rather than an external oracle.
+AuthMark and EwmaMark are authority-pushed pricing modes for markets that do not want the wrapper to parse an external oracle account in every price-taking instruction.
+
+### AuthMark mode
+
+AuthMark is the direct authority-mark path:
+
+- **Direct mark API**: `ConfigureAuthMark { asset_index, now_slot, initial_mark_e6 }` and `PushAuthMark { asset_index, now_slot, mark_e6 }`.
+- **No EWMA configuration**: there is no halflife, mark-min-fee, feed id, confidence filter, invert flag, or unit-scale configuration in the AuthMark API.
+- **Authority boundary**: only the configured mark authority can push a new mark; public cranks can only consume the stored mark.
+- **Adapter-friendly**: a separate oracle adapter PDA can verify Pyth, Chainlink, Switchboard, or custom feed policy, then sign `PushAuthMark` with the resulting mark.
+- **Trade isolation**: `TradeCpi` and `TradeNoCpi` do not rewrite the AuthMark target or charge EWMA mark-movement fees.
+
+### EwmaMark mode
+
+EwmaMark is the smoothed authority-mark path for markets that use an internal mark/index rather than an external oracle.
 
 - **Mark and index prices**: maintained entirely within the engine; no external oracle feed required for mark settlement.
 - **Premium-based funding**: funding accrues based on the spread between mark and index (premium), scaled by a K-coefficient. The K-coefficient mechanism replaces direct funding rate computation.
 - **Rate-limited index smoothing**: index price updates are clamped per slot via `clamp_toward_with_dt`, preventing instant mark-to-index jumps. When `dt = 0` or cap is zero, the function returns `index` unchanged (no movement).
 - **Execution-price consent**: `TradeCpi` and `TradeNoCpi` both allow counterparties to agree on an execution price. The wrapper clamps mark/index impact and charges dynamic mark-movement fees; it does not reject solely because the agreed execution is away from the current effective price.
-- **Bilateral no-CPI trading**: `TradeNoCpi` is available in Hyperp and external-oracle markets when both account owners sign. `TradeCpi` adds matcher-program authorization, but the price-flexibility policy is the same.
+- **Bilateral no-CPI trading**: `TradeNoCpi` is available in EwmaMark and external-oracle markets when both account owners sign. `TradeCpi` adds matcher-program authorization, but the price-flexibility policy is the same.
 
 ### Hybrid after-hours mode
 
@@ -288,7 +303,7 @@ Hybrid after-hours mode is a single external-oracle configuration with dynamic m
 - `RiskParams.max_trading_fee_bps = 10_000`
 - `trade_fee_base_bps < max_trading_fee_bps`
 
-In the v16 multi-asset wrapper, this configured hybrid/Hyperp oracle lane is scoped to asset index `0`. Additional asset slots can be activated, drained, retired, and reused independently; their public cranks use their own supplied per-asset effective price and do not inherit asset `0`'s EWMA/composite mark. Reused slots get a new monotonic `market_id`, and stale portfolio legs/source claims/close ledgers from the retired id fail closed.
+In the v16 multi-asset wrapper, this configured hybrid/AuthMark/EwmaMark oracle lane is scoped to asset index `0`. Additional asset slots can be activated, drained, retired, and reused independently; their public cranks use their own stored per-asset oracle profile and do not inherit asset `0`'s mark or composite oracle state. Reused slots get a new monotonic `market_id`, and stale portfolio legs/source claims/close ledgers from the retired id fail closed.
 
 While the external oracle is fresh, the wrapper uses the external composite as the index and refreshes the fallback mark baseline to that accepted external price. If the supplied Pyth update is stale but the market's own `last_good_oracle_slot` has not crossed the soft-stale window, the wrapper rejects instead of falling back; a caller-chosen stale account is not proof that the feed is after-hours. Once the soft-stale window has elapsed, price-taking paths fall back to the fee-weighted EWMA mark and `TradeCpi`/`TradeNoCpi` charge:
 
@@ -437,7 +452,7 @@ At minimum, monitor:
 - `UpdateAuthority` rotates or burns individual capabilities.
 - Non-burn transfers require both the current authority and the new key to sign.
 - Burning admin is irreversible and disables admin-gated config/resolve actions forever.
-- Burning the Hyperp mark, insurance, or live insurance operator authority removes only that capability.
+- Burning the mark, insurance, or live insurance operator authority removes only that capability.
 
 ---
 
@@ -533,9 +548,9 @@ These are governance powers, not bugs:
 2. `UpdateConfig`
    - change funding and TVL:insurance cap policy knobs within validation bounds.
    - impact: economics can become unfavorable to users.
-3. `UpdateAuthority { kind = AUTHORITY_HYPERP_MARK }`
-   - choose or burn who can push Hyperp mark updates.
-   - impact: Hyperp mark input control/censorship surface.
+3. `UpdateAuthority { kind = AUTHORITY_MARK }`
+   - choose or burn who can push AuthMark or EwmaMark updates.
+   - impact: authority mark input control/censorship surface.
 4. `ResolveMarket`
    - transition market to resolved mode using stored authority price.
    - impact: trading/deposits/new accounts are halted; market enters wind-down.
@@ -573,7 +588,7 @@ These are intended hard boundaries enforced in code and test suites:
 6. Cannot withdraw insurance before resolution or while any account still has open position.
    - covered by `test_attack_withdraw_insurance_before_resolution`, `test_attack_withdraw_insurance_with_open_positions`.
 7. Cannot mutate risk/oracle/fee config after resolution.
-   - covered by post-resolution `UpdateConfig`, `PushHyperpMark`, and `UpdateAuthority` rejection tests.
+   - covered by post-resolution `UpdateConfig`, `PushEwmaMark`, and `UpdateAuthority` rejection tests.
 8. Cannot force-close accounts on a live (non-resolved) market.
    - `AdminForceCloseAccount` requires resolved mode.
    - covered by `test_admin_force_close_account_requires_resolved`.
@@ -666,7 +681,7 @@ cargo kani --tests
 - **Initial margin**: 10% (1000 bps)
 - **Trading fee**: 0.1% (10 bps)
 - **Liquidation fee**: 0.5% (50 bps)
-- **Oracle mode**: historical devnet configuration; current code supports external oracle legs and Hyperp `PushHyperpMark`
+- **Oracle mode**: historical devnet configuration; current code supports external oracle legs, AuthMark `PushAuthMark`, and EwmaMark `PushEwmaMark`
 
 ### Using the Devnet Market
 

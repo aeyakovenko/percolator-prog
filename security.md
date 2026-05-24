@@ -58,13 +58,13 @@ LP delegation bounds the matcher's latitude.
 
 ### D4. Market non-resolvable with last_oracle_price = 0
 
-**Hypothesis**: Non-Hyperp market init succeeds but last_oracle_price
+**Hypothesis**: Non-EwmaMark market init succeeds but last_oracle_price
 is never seeded (e.g., oracle read skipped on init). Subsequent
 stale market has no price to settle at; ResolvePermissionless rejects
 (`if p_last == 0 return OracleInvalid`), funds trapped.
 
 **Why discarded**: InitMarket reads the oracle unconditionally for
-non-Hyperp markets (src/percolator.rs:4458-4475) and rejects if the
+non-EwmaMark markets (src/percolator.rs:4458-4475) and rejects if the
 read fails or returns 0. `init_in_place` then seeds
 last_oracle_price with the real price. The "last_oracle_price = 0
 after init" scenario is unreachable.
@@ -489,7 +489,7 @@ within the same block, profiting from the oscillation.
 **Why discarded**:
 - Pyth prices update at most once per slot (deterministic within a
   tx).
-- Hyperp mark updates only on successful trades. One trade per tx
+- EwmaMark mark updates only on successful trades. One trade per tx
   affects the mark for future txs, not the current one.
 - Authority push is admin-initiated, not attacker-controllable in
   the same tx as a trade.
@@ -1006,7 +1006,7 @@ Rounds 1 + 2 together walked:
 - Privilege model: the 4-way authority split (admin / oracle /
   insurance / close), burn guards, zero-address rejection.
 - Oracle paths: Pyth, Chainlink, authority fallback, circuit
-  breaker, hard-timeout gate, Hyperp EWMA.
+  breaker, hard-timeout gate, EwmaMark EWMA.
 - Matcher ABI: account-shape validation, signer forwarding in the
   variadic tail, return-field echo validation, reentrancy.
 - Warmup / reserve mechanics: close-path rejection of any reserve
@@ -1344,7 +1344,7 @@ surfaces.
 
 `clamp_external_price` previously had no ordering guarantee on Pyth /
 Chainlink readings. Once the authority-fallback path was removed
-(commit `86ea41f`), the wrapper's only price source for non-Hyperp
+(commit `86ea41f`), the wrapper's only price source for non-EwmaMark
 markets is the caller-supplied Pyth/Chainlink account. Pyth Pull is
 permissionless: anyone can post a fresher `PriceUpdateV2` for any
 feed at any time. That created a per-call cherry-pick:
@@ -1436,13 +1436,13 @@ Surrendered:
 ### InitMarket bootstrap
 
 InitMarket now seeds `last_oracle_publish_time` from the genesis
-Pyth read (non-Hyperp markets only; Hyperp leaves it at 0). This
+Pyth read (non-EwmaMark markets only; EwmaMark leaves it at 0). This
 prevents an immediate post-init replay of an even-older observation
 from poisoning the baseline before any normal-path crank has run.
 
 ### ResolveMarket
 
-The non-Hyperp admin `ResolveMarket` path also performs a direct
+The non-EwmaMark admin `ResolveMarket` path also performs a direct
 external read (it bypasses `clamp_external_price` because §9.8
 deviation band wants the raw, un-clamped oracle). The same graceful
 fallback applies there: an older observation substitutes the stored

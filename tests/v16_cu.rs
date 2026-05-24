@@ -962,7 +962,7 @@ impl V16CuEnv {
         )
     }
 
-    fn configure_hyperp_mark_with_cu(
+    fn configure_ewma_mark_with_cu(
         &mut self,
         now_slot: u64,
         initial_mark_e6: u64,
@@ -973,7 +973,7 @@ impl V16CuEnv {
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::ConfigureHyperpMark {
+            ProgInstruction::ConfigureEwmaMark {
                 asset_index: 0,
                 now_slot,
                 initial_mark_e6,
@@ -986,15 +986,15 @@ impl V16CuEnv {
             ],
             &[&self.admin],
         )
-        .expect("configure hyperp mark")
+        .expect("configure ewma_mark mark")
     }
 
-    fn push_hyperp_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
+    fn push_ewma_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::PushHyperpMark {
+            ProgInstruction::PushEwmaMark {
                 asset_index: 0,
                 now_slot,
                 mark_e6,
@@ -1005,7 +1005,45 @@ impl V16CuEnv {
             ],
             &[&self.admin],
         )
-        .expect("push hyperp mark")
+        .expect("push ewma_mark mark")
+    }
+
+    fn configure_auth_mark_with_cu(&mut self, now_slot: u64, initial_mark_e6: u64) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::ConfigureAuthMark {
+                asset_index: 0,
+                now_slot,
+                initial_mark_e6,
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("configure auth mark")
+    }
+
+    fn push_auth_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::PushAuthMark {
+                asset_index: 0,
+                now_slot,
+                mark_e6,
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("push auth mark")
     }
 
     fn resolve_stale_permissionless_with_cu(&mut self, now_slot: u64) -> u64 {
@@ -1858,7 +1896,7 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
     let short_account = env.create_portfolio(&short_owner);
     env.deposit(&long_owner, long_account, 1_000_000);
     env.deposit(&short_owner, short_account, 250);
-    env.configure_hyperp_mark_with_cu(0, 100, 1, 0);
+    env.configure_ewma_mark_with_cu(0, 100, 1, 0);
     env.trade_with_cu(
         &long_owner,
         long_account,
@@ -1870,7 +1908,7 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
     );
 
     env.svm.warp_to_slot(1);
-    env.push_hyperp_mark_with_cu(1, 300);
+    env.push_ewma_mark_with_cu(1, 300);
     let liquidation_cu = env.crank(
         short_account,
         ProgInstruction::PermissionlessCrank {
@@ -2290,25 +2328,25 @@ fn v16_bpf_configure_hybrid_oracle_uses_authenticated_unix_time_not_caller_time(
 }
 
 #[test]
-fn v16_bpf_configure_and_push_hyperp_mark_are_bounded_and_clock_authenticated() {
+fn v16_bpf_configure_and_push_ewma_mark_are_bounded_and_clock_authenticated() {
     let mut env = V16CuEnv::new();
     let configure_real_slot = 8;
     let push_real_slot = 9;
     let spoofed_slot = 1_000_000;
     env.svm.warp_to_slot(configure_real_slot);
-    let configure_cu = env.configure_hyperp_mark_with_cu(spoofed_slot, 100, 1, 0);
+    let configure_cu = env.configure_ewma_mark_with_cu(spoofed_slot, 100, 1, 0);
     env.svm.warp_to_slot(push_real_slot);
-    let push_cu = env.push_hyperp_mark_with_cu(spoofed_slot, 120);
-    println!("v16 Hyperp configure CU: {configure_cu}, push CU: {push_cu}");
+    let push_cu = env.push_ewma_mark_with_cu(spoofed_slot, 120);
+    println!("v16 EwmaMark configure CU: {configure_cu}, push CU: {push_cu}");
     assert!(
         configure_cu <= CUSTODY_CU_LIMIT,
-        "Hyperp configure CU {} exceeded limit {}",
+        "EwmaMark configure CU {} exceeded limit {}",
         configure_cu,
         CUSTODY_CU_LIMIT
     );
     assert!(
         push_cu <= CUSTODY_CU_LIMIT,
-        "Hyperp push CU {} exceeded limit {}",
+        "EwmaMark push CU {} exceeded limit {}",
         push_cu,
         CUSTODY_CU_LIMIT
     );
@@ -2317,7 +2355,7 @@ fn v16_bpf_configure_and_push_hyperp_mark_are_bounded_and_clock_authenticated() 
     let (cfg, group) = state::read_market(&market_data).unwrap();
     assert_eq!(
         cfg.oracle_mode,
-        percolator_prog::constants::ORACLE_MODE_HYPERP
+        percolator_prog::constants::ORACLE_MODE_EWMA_MARK
     );
     assert_eq!(group.current_slot, configure_real_slot);
     assert_eq!(group.slot_last, configure_real_slot);
@@ -2328,7 +2366,52 @@ fn v16_bpf_configure_and_push_hyperp_mark_are_bounded_and_clock_authenticated() 
     );
     assert_ne!(
         cfg.mark_ewma_last_slot, spoofed_slot,
-        "caller-supplied PushHyperpMark now_slot must not authenticate mark liveness"
+        "caller-supplied PushEwmaMark now_slot must not authenticate mark liveness"
+    );
+}
+
+#[test]
+fn v16_bpf_configure_and_push_auth_mark_are_bounded_and_clock_authenticated() {
+    let mut env = V16CuEnv::new();
+    let configure_real_slot = 8;
+    let push_real_slot = 9;
+    let spoofed_slot = 1_000_000;
+    env.svm.warp_to_slot(configure_real_slot);
+    let configure_cu = env.configure_auth_mark_with_cu(spoofed_slot, 100);
+    env.svm.warp_to_slot(push_real_slot);
+    let push_cu = env.push_auth_mark_with_cu(spoofed_slot, 120);
+    println!("v16 AuthMark configure CU: {configure_cu}, push CU: {push_cu}");
+    assert!(
+        configure_cu <= CUSTODY_CU_LIMIT,
+        "AuthMark configure CU {} exceeded limit {}",
+        configure_cu,
+        CUSTODY_CU_LIMIT
+    );
+    assert!(
+        push_cu <= CUSTODY_CU_LIMIT,
+        "AuthMark push CU {} exceeded limit {}",
+        push_cu,
+        CUSTODY_CU_LIMIT
+    );
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let (cfg, group) = state::read_market(&market_data).unwrap();
+    assert_eq!(
+        cfg.oracle_mode,
+        percolator_prog::constants::ORACLE_MODE_AUTH_MARK
+    );
+    assert_eq!(group.current_slot, configure_real_slot);
+    assert_eq!(group.slot_last, configure_real_slot);
+    assert_eq!(cfg.mark_ewma_last_slot, push_real_slot);
+    assert_eq!(
+        cfg.mark_ewma_e6, 120,
+        "authority mark push should store the AuthMark value directly"
+    );
+    assert_eq!(cfg.oracle_target_price_e6, 120);
+    assert_eq!(cfg.mark_ewma_halflife_slots, 0);
+    assert_ne!(
+        cfg.mark_ewma_last_slot, spoofed_slot,
+        "caller-supplied PushAuthMark now_slot must not authenticate mark liveness"
     );
 }
 

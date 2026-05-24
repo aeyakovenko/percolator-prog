@@ -9,9 +9,9 @@ use percolator_prog::{
     constants::{
         ASSET_ORACLE_WRAPPER_LEN, DEFAULT_MARKET_SLOT_CAPACITY, HEADER_LEN, MARKET_ACCOUNT_LEN,
         MARKET_ASSET_SLOT_LEN, MARKET_GROUP_LEN, ORACLE_LEG_CAP, ORACLE_LEG_FLAG_DIVIDE_LEG2,
-        ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_HYPERP,
-        ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN, PORTFOLIO_SOURCE_DOMAIN_LEN,
-        PORTFOLIO_STATE_LEN, WRAPPER_CONFIG_LEN,
+        ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
+        ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN,
+        PORTFOLIO_SOURCE_DOMAIN_LEN, PORTFOLIO_STATE_LEN, WRAPPER_CONFIG_LEN,
     },
     ix::Instruction,
     oracle_v16, policy_v16, processor, state,
@@ -527,14 +527,14 @@ fn run_ix(ix: Instruction, accounts: &mut [&mut TestAccount]) -> Result<(), Prog
     run_ix_data(&ix.encode(), accounts)
 }
 
-fn configure_base_hyperp_mark(
+fn configure_base_ewma_mark(
     admin: &mut TestAccount,
     market: &mut TestAccount,
     now_slot: u64,
     mark_e6: u64,
 ) {
     run_ix(
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: 0,
             now_slot,
             initial_mark_e6: mark_e6,
@@ -546,14 +546,48 @@ fn configure_base_hyperp_mark(
     .unwrap();
 }
 
-fn push_base_hyperp_mark(
+fn push_base_ewma_mark(
     admin: &mut TestAccount,
     market: &mut TestAccount,
     now_slot: u64,
     mark_e6: u64,
 ) {
     run_ix(
-        Instruction::PushHyperpMark {
+        Instruction::PushEwmaMark {
+            asset_index: 0,
+            now_slot,
+            mark_e6,
+        },
+        &mut [admin, market],
+    )
+    .unwrap();
+}
+
+fn configure_base_auth_mark(
+    admin: &mut TestAccount,
+    market: &mut TestAccount,
+    now_slot: u64,
+    mark_e6: u64,
+) {
+    run_ix(
+        Instruction::ConfigureAuthMark {
+            asset_index: 0,
+            now_slot,
+            initial_mark_e6: mark_e6,
+        },
+        &mut [admin, market],
+    )
+    .unwrap();
+}
+
+fn push_base_auth_mark(
+    admin: &mut TestAccount,
+    market: &mut TestAccount,
+    now_slot: u64,
+    mark_e6: u64,
+) {
+    run_ix(
+        Instruction::PushAuthMark {
             asset_index: 0,
             now_slot,
             mark_e6,
@@ -1094,7 +1128,7 @@ fn v16_wrapper_init_portfolio_anchors_fee_slot_at_market_current_slot() {
         }),
     );
     run_ix(
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: 0,
             now_slot: 100,
             initial_mark_e6: 100,
@@ -2530,7 +2564,7 @@ fn v16_wrapper_backing_fee_policy_survives_non_base_oracle_reconfiguration() {
     assert_eq!(before.backing_trade_fee_insurance_share_bps_short, 3_700);
 
     run_ix(
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: 1,
             now_slot: 2,
             initial_mark_e6: 110,
@@ -2540,13 +2574,13 @@ fn v16_wrapper_backing_fee_policy_survives_non_base_oracle_reconfiguration() {
         &mut [&mut admin, &mut market],
     )
     .unwrap();
-    let after_hyperp = state::read_asset_oracle_profile(&market.data, 1).unwrap();
+    let after_ewma_mark = state::read_asset_oracle_profile(&market.data, 1).unwrap();
     assert_eq!(
-        after_hyperp.backing_trade_fee_bps_short, 37,
+        after_ewma_mark.backing_trade_fee_bps_short, 37,
         "oracle profile reconfiguration must not erase the backing authority's domain fee"
     );
     assert_eq!(
-        after_hyperp.backing_trade_fee_insurance_share_bps_short, 3_700,
+        after_ewma_mark.backing_trade_fee_insurance_share_bps_short, 3_700,
         "oracle profile reconfiguration must not erase the insurance fee split"
     );
 
@@ -3651,7 +3685,7 @@ fn v16_wrapper_reactivated_asset_resets_prior_oracle_profile() {
     )
     .unwrap();
     run_ix(
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: 2,
             now_slot: 2,
             initial_mark_e6: 123_000,
@@ -3665,7 +3699,7 @@ fn v16_wrapper_reactivated_asset_resets_prior_oracle_profile() {
         state::read_asset_oracle_profile(&market.data, 2)
             .unwrap()
             .oracle_mode,
-        ORACLE_MODE_HYPERP
+        ORACLE_MODE_EWMA_MARK
     );
 
     update_asset_lifecycle(
@@ -3744,7 +3778,7 @@ fn v16_wrapper_retired_asset_profile_cannot_refresh_market_liveness() {
     )
     .unwrap();
     run_ix(
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: 2,
             now_slot: 1,
             initial_mark_e6: 123_000,
@@ -3780,7 +3814,7 @@ fn v16_wrapper_retired_asset_profile_cannot_refresh_market_liveness() {
     );
     let before_push = market.data.clone();
     let stale_refresh = run_ix(
-        Instruction::PushHyperpMark {
+        Instruction::PushEwmaMark {
             asset_index: 2,
             now_slot: 4,
             mark_e6: 222_000,
@@ -4651,14 +4685,14 @@ fn v16_wrapper_raw_wrapper_config_invalid_values_fail_closed() {
         "hybrid oracle mode must reject malformed persisted leg metadata",
     );
 
-    let mut bad_hyperp_stale_hybrid_knob = cfg;
-    bad_hyperp_stale_hybrid_knob.oracle_mode = ORACLE_MODE_HYPERP;
-    bad_hyperp_stale_hybrid_knob.mark_ewma_e6 = 100;
-    bad_hyperp_stale_hybrid_knob.mark_ewma_halflife_slots = 1;
-    bad_hyperp_stale_hybrid_knob.unit_scale = 6;
+    let mut bad_ewma_mark_stale_hybrid_knob = cfg;
+    bad_ewma_mark_stale_hybrid_knob.oracle_mode = ORACLE_MODE_EWMA_MARK;
+    bad_ewma_mark_stale_hybrid_knob.mark_ewma_e6 = 100;
+    bad_ewma_mark_stale_hybrid_knob.mark_ewma_halflife_slots = 1;
+    bad_ewma_mark_stale_hybrid_knob.unit_scale = 6;
     assert_bad_cfg(
-        bad_hyperp_stale_hybrid_knob,
-        "Hyperp oracle mode must not carry stale hybrid conversion knobs",
+        bad_ewma_mark_stale_hybrid_knob,
+        "EwmaMark oracle mode must not carry stale hybrid conversion knobs",
     );
 
     let mut bad_bool = cfg;
@@ -7577,7 +7611,7 @@ fn v16_wrapper_update_authority_rejects_unsupported_kind_and_live_admin_burn() {
 
     run_ix(
         Instruction::UpdateAuthority {
-            kind: processor::AUTHORITY_HYPERP_MARK,
+            kind: processor::AUTHORITY_MARK,
             new_pubkey: new_key.key.to_bytes(),
         },
         &mut [&mut admin, &mut new_key, &mut market],
@@ -7585,9 +7619,9 @@ fn v16_wrapper_update_authority_rejects_unsupported_kind_and_live_admin_burn() {
     .unwrap();
     let (cfg, _) = state::read_market(&market.data).unwrap();
     assert_eq!(
-        cfg.hyperp_mark_authority,
+        cfg.mark_authority,
         new_key.key.to_bytes(),
-        "the market-wide Hyperp mark authority can be rotated before a specific asset enters Hyperp mode"
+        "the market-wide EwmaMark mark authority can be rotated before a specific asset enters EwmaMark mode"
     );
     let initialized = market.data.clone();
 
@@ -7611,7 +7645,7 @@ fn v16_wrapper_update_authority_rejects_unsupported_kind_and_live_admin_burn() {
 }
 
 #[test]
-fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
+fn v16_wrapper_configure_ewma_mark_pushes_and_cranks_from_internal_mark() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -7630,7 +7664,7 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
     .unwrap();
 
     run_ix(
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: 0,
             now_slot: 5,
             initial_mark_e6: 100,
@@ -7643,7 +7677,7 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
     let (cfg, group) = state::read_market(&market.data).unwrap();
     assert_eq!(
         cfg.oracle_mode,
-        percolator_prog::constants::ORACLE_MODE_HYPERP
+        percolator_prog::constants::ORACLE_MODE_EWMA_MARK
     );
     assert_eq!(cfg.mark_ewma_e6, 100);
     assert_eq!(cfg.mark_ewma_last_slot, 5);
@@ -7653,7 +7687,7 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
     let mut new_mark_authority = signer();
     run_ix(
         Instruction::UpdateAuthority {
-            kind: processor::AUTHORITY_HYPERP_MARK,
+            kind: processor::AUTHORITY_MARK,
             new_pubkey: new_mark_authority.key.to_bytes(),
         },
         &mut [&mut admin, &mut new_mark_authority, &mut market],
@@ -7663,7 +7697,7 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
     let before_bad_push = market.data.clone();
     let mut wrong_authority = signer();
     let bad_push = run_ix(
-        Instruction::PushHyperpMark {
+        Instruction::PushEwmaMark {
             asset_index: 0,
             now_slot: 10,
             mark_e6: 120,
@@ -7673,7 +7707,7 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
     assert_err_and_market_unchanged(bad_push, &market, &before_bad_push);
 
     run_ix(
-        Instruction::PushHyperpMark {
+        Instruction::PushEwmaMark {
             asset_index: 0,
             now_slot: 10,
             mark_e6: 120,
@@ -7684,7 +7718,7 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
     let (cfg, _) = state::read_market(&market.data).unwrap();
     assert_eq!(
         cfg.mark_ewma_e6, 116,
-        "full-weight Hyperp push advances the configured EWMA mark at the authenticated slot"
+        "full-weight EwmaMark push advances the configured EWMA mark at the authenticated slot"
     );
     assert_eq!(cfg.mark_ewma_last_slot, 10);
     assert_eq!(cfg.last_good_oracle_slot, 10);
@@ -7708,14 +7742,99 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
     let (_, group) = state::read_market(&market.data).unwrap();
     assert_eq!(
         group.assets[0].effective_price, 116,
-        "Hyperp crank ignores caller-selected price and walks to the internal mark"
+        "EwmaMark crank ignores caller-selected price and walks to the internal mark"
     );
 }
 
 #[test]
-fn v16_wrapper_hyperp_mark_profiles_reject_prices_above_engine_max() {
+fn v16_wrapper_configure_auth_mark_pushes_direct_mark_without_ewma_setup() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_price_move_bps_per_slot,
+                ..
+            } = ix
+            {
+                *max_price_move_bps_per_slot = 1_000;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+
+    configure_base_auth_mark(&mut admin, &mut market, 5, 100);
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.oracle_mode, ORACLE_MODE_AUTH_MARK);
+    assert_eq!(cfg.mark_ewma_e6, 100);
+    assert_eq!(cfg.oracle_target_price_e6, 100);
+    assert_eq!(cfg.mark_ewma_halflife_slots, 0);
+    assert_eq!(cfg.mark_min_fee, 0);
+    assert_eq!(cfg.mark_ewma_last_slot, 5);
+    assert_eq!(cfg.last_good_oracle_slot, 5);
+    assert_eq!(group.assets[0].effective_price, 100);
+
+    let mut new_mark_authority = signer();
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_MARK,
+            new_pubkey: new_mark_authority.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut new_mark_authority, &mut market],
+    )
+    .unwrap();
+
+    let before_bad_push = market.data.clone();
+    let mut wrong_authority = signer();
+    let bad_push = run_ix(
+        Instruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 10,
+            mark_e6: 120,
+        },
+        &mut [&mut wrong_authority, &mut market],
+    );
+    assert_err_and_market_unchanged(bad_push, &market, &before_bad_push);
+
+    push_base_auth_mark(&mut new_mark_authority, &mut market, 10, 120);
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        cfg.mark_ewma_e6, 120,
+        "AuthMark push stores the authority mark directly, without EWMA smoothing"
+    );
+    assert_eq!(cfg.oracle_target_price_e6, 120);
+    assert_eq!(cfg.mark_ewma_last_slot, 10);
+    assert_eq!(cfg.last_good_oracle_slot, 10);
+
+    let mut caller = signer();
+    let mut portfolio = portfolio_account();
+    init_portfolio(&mut caller, &mut market, &mut portfolio);
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 10,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut caller, &mut market, &mut portfolio],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        group.assets[0].effective_price, 120,
+        "AuthMark crank consumes only the stored authority mark"
+    );
+}
+
+#[test]
+fn v16_wrapper_ewma_mark_profiles_reject_prices_above_engine_max() {
     let mut profile = state::AssetOracleProfileV16 {
-        oracle_mode: ORACLE_MODE_HYPERP,
+        oracle_mode: ORACLE_MODE_EWMA_MARK,
         oracle_leg_count: 0,
         oracle_leg_flags: 0,
         invert: 0,
@@ -7745,14 +7864,36 @@ fn v16_wrapper_hyperp_mark_profiles_reject_prices_above_engine_max() {
     };
     assert!(
         state::validate_asset_oracle_profile(&profile).is_err(),
-        "Hyperp EWMA mark must stay within the engine oracle-price envelope"
+        "EwmaMark EWMA mark must stay within the engine oracle-price envelope"
     );
 
     profile.mark_ewma_e6 = percolator::MAX_ORACLE_PRICE;
     profile.oracle_target_price_e6 = percolator::MAX_ORACLE_PRICE + 1;
     assert!(
         state::validate_asset_oracle_profile(&profile).is_err(),
-        "Hyperp target mark must stay within the engine oracle-price envelope"
+        "EwmaMark target mark must stay within the engine oracle-price envelope"
+    );
+
+    profile.oracle_mode = ORACLE_MODE_AUTH_MARK;
+    profile.mark_ewma_e6 = percolator::MAX_ORACLE_PRICE;
+    profile.oracle_target_price_e6 = percolator::MAX_ORACLE_PRICE;
+    profile.mark_ewma_halflife_slots = 1;
+    assert!(
+        state::validate_asset_oracle_profile(&profile).is_err(),
+        "AuthMark must not carry EWMA halflife configuration"
+    );
+
+    profile.mark_ewma_halflife_slots = 0;
+    profile.oracle_target_price_e6 = percolator::MAX_ORACLE_PRICE - 1;
+    assert!(
+        state::validate_asset_oracle_profile(&profile).is_err(),
+        "AuthMark target and stored mark must match"
+    );
+
+    profile.oracle_target_price_e6 = percolator::MAX_ORACLE_PRICE;
+    assert!(
+        state::validate_asset_oracle_profile(&profile).is_ok(),
+        "AuthMark accepts a direct authority mark without EWMA or oracle-leg config"
     );
 
     profile.oracle_mode = ORACLE_MODE_HYBRID_AFTER_HOURS;
@@ -7769,7 +7910,7 @@ fn v16_wrapper_hyperp_mark_profiles_reject_prices_above_engine_max() {
 }
 
 #[test]
-fn v16_wrapper_push_hyperp_mark_rejects_over_max_input_and_preserves_state() {
+fn v16_wrapper_push_ewma_mark_rejects_over_max_input_and_preserves_state() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -7780,7 +7921,7 @@ fn v16_wrapper_push_hyperp_mark_rejects_over_max_input_and_preserves_state() {
     .unwrap();
 
     run_ix(
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: percolator::MAX_ORACLE_PRICE,
@@ -7793,7 +7934,7 @@ fn v16_wrapper_push_hyperp_mark_rejects_over_max_input_and_preserves_state() {
 
     let before = market.data.clone();
     let rejected = run_ix(
-        Instruction::PushHyperpMark {
+        Instruction::PushEwmaMark {
             asset_index: 0,
             now_slot: 2,
             mark_e6: percolator::MAX_ORACLE_PRICE + 1,
@@ -7807,7 +7948,7 @@ fn v16_wrapper_push_hyperp_mark_rejects_over_max_input_and_preserves_state() {
 }
 
 #[test]
-fn v16_wrapper_configure_hyperp_mark_clears_prior_hybrid_oracle_metadata() {
+fn v16_wrapper_configure_ewma_mark_clears_prior_hybrid_oracle_metadata() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -7849,7 +7990,7 @@ fn v16_wrapper_configure_hyperp_mark_clears_prior_hybrid_oracle_metadata() {
     assert_eq!(hybrid_cfg.oracle_leg_count, 3);
 
     run_ix(
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: 0,
             now_slot: 11,
             initial_mark_e6: 123,
@@ -7861,7 +8002,7 @@ fn v16_wrapper_configure_hyperp_mark_clears_prior_hybrid_oracle_metadata() {
     .unwrap();
 
     let (cfg, group) = state::read_market(&market.data).unwrap();
-    assert_eq!(cfg.oracle_mode, ORACLE_MODE_HYPERP);
+    assert_eq!(cfg.oracle_mode, ORACLE_MODE_EWMA_MARK);
     assert_eq!(cfg.oracle_leg_count, 0);
     assert_eq!(cfg.oracle_leg_flags, 0);
     assert_eq!(cfg.oracle_leg_feeds, [[0u8; 32]; ORACLE_LEG_CAP]);
@@ -7879,7 +8020,7 @@ fn v16_wrapper_configure_hyperp_mark_clears_prior_hybrid_oracle_metadata() {
 }
 
 #[test]
-fn v16_wrapper_hyperp_trade_updates_mark_and_charges_dynamic_fee_without_oracle_tail() {
+fn v16_wrapper_ewma_mark_trade_updates_mark_and_charges_dynamic_fee_without_oracle_tail() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -7901,7 +8042,7 @@ fn v16_wrapper_hyperp_trade_updates_mark_and_charges_dynamic_fee_without_oracle_
     )
     .unwrap();
     run_ix(
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 100_000,
@@ -7958,15 +8099,101 @@ fn v16_wrapper_hyperp_trade_updates_mark_and_charges_dynamic_fee_without_oracle_
     let (after_cfg, after_group) = state::read_market(&market.data).unwrap();
     assert!(
         after_group.insurance > before_group.insurance + base_only_fee,
-        "direct Hyperp trades pay dynamic mark-movement surcharge without oracle accounts"
+        "direct EwmaMark trades pay dynamic mark-movement surcharge without oracle accounts"
     );
     assert!(
         after_cfg.mark_ewma_e6 > before_cfg.mark_ewma_e6,
-        "direct Hyperp trades move the fallback EWMA mark"
+        "direct EwmaMark trades move the fallback EWMA mark"
     );
     assert_eq!(
         after_group.assets[0].effective_price, before_group.assets[0].effective_price,
-        "execution price flexibility must not rewrite the accepted Hyperp index"
+        "execution price flexibility must not rewrite the accepted EwmaMark index"
+    );
+}
+
+#[test]
+fn v16_wrapper_auth_mark_trade_cannot_update_authority_mark() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut mint = mint_account();
+    run_ix(
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_trading_fee_bps,
+                trade_fee_base_bps,
+                max_price_move_bps_per_slot,
+                ..
+            } = ix
+            {
+                *max_trading_fee_bps = 10_000;
+                *trade_fee_base_bps = 1;
+                *max_price_move_bps_per_slot = 500;
+            }
+        }),
+        &mut [&mut admin, &mut market, &mut mint],
+    )
+    .unwrap();
+    configure_base_auth_mark(&mut admin, &mut market, 1, 100_000);
+
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000_000);
+    deposit(
+        &mut short_owner,
+        &mut market,
+        &mut short_account,
+        10_000_000,
+    );
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group.current_slot = 10;
+        group.slot_last = 10;
+        group.assets[0].slot_last = 10;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+
+    let (before_cfg, before_group) = state::read_market(&market.data).unwrap();
+    let size_q = 10 * POS_SCALE;
+    let exec_price = before_group.assets[0].effective_price * 150 / 100;
+    let base_only_fee = two_sided_fee(size_q, exec_price, 1);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: size_q as i128,
+            exec_price,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+
+    let (after_cfg, after_group) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        after_group.insurance,
+        before_group.insurance + base_only_fee,
+        "AuthMark trades should not pay EWMA mark-movement surcharge"
+    );
+    assert_eq!(
+        after_cfg.mark_ewma_e6, before_cfg.mark_ewma_e6,
+        "AuthMark trades must not rewrite the authority mark"
+    );
+    assert_eq!(
+        after_cfg.oracle_target_price_e6, before_cfg.oracle_target_price_e6,
+        "AuthMark target only changes through PushAuthMark"
+    );
+    assert_eq!(
+        after_group.assets[0].effective_price, before_group.assets[0].effective_price,
+        "execution price flexibility must not rewrite the accepted AuthMark index"
     );
 }
 
@@ -9913,7 +10140,7 @@ fn v16_wrapper_price_managed_asset_above_portfolio_limit_still_updates_mark_afte
     )
     .unwrap();
     run_ix(
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: 14,
             now_slot: 1,
             initial_mark_e6: 100,
@@ -10384,7 +10611,7 @@ fn v16_wrapper_configuring_empty_asset_does_not_advance_other_asset_fee_anchor()
     );
 
     run_ix(
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: 1,
             now_slot: 100,
             initial_mark_e6: 250,
@@ -11137,7 +11364,7 @@ fn v16_wrapper_convert_released_pnl_respects_cap_and_unlocks_withdrawal() {
     init_portfolio(&mut short_owner, &mut market, &mut short_account);
     deposit(&mut long_owner, &mut market, &mut long_account, 10_000);
     deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
-    configure_base_hyperp_mark(&mut admin, &mut market, 0, 100);
+    configure_base_ewma_mark(&mut admin, &mut market, 0, 100);
 
     run_ix(
         Instruction::TradeNoCpi {
@@ -11155,7 +11382,7 @@ fn v16_wrapper_convert_released_pnl_respects_cap_and_unlocks_withdrawal() {
         ],
     )
     .unwrap();
-    push_base_hyperp_mark(&mut admin, &mut market, 1, 102);
+    push_base_ewma_mark(&mut admin, &mut market, 1, 102);
     run_ix(
         Instruction::PermissionlessCrank {
             action: 0,
@@ -11683,7 +11910,7 @@ fn v16_wrapper_tradecpi_hybrid_regular_and_after_hours_follow_mark_policy() {
 }
 
 #[test]
-fn v16_wrapper_tradecpi_hyperp_trade_moves_mark_without_refreshing_liveness() {
+fn v16_wrapper_tradecpi_ewma_mark_trade_moves_mark_without_refreshing_liveness() {
     let mut admin = signer();
     let mut market = market_account();
     let mut mint = mint_account();
@@ -11705,7 +11932,7 @@ fn v16_wrapper_tradecpi_hyperp_trade_moves_mark_without_refreshing_liveness() {
     )
     .unwrap();
     run_ix(
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: 0,
             now_slot: 5,
             initial_mark_e6: 100,
@@ -11752,7 +11979,7 @@ fn v16_wrapper_tradecpi_hyperp_trade_moves_mark_without_refreshing_liveness() {
     let (after_cfg, after_group) = state::read_market(&market.data).unwrap();
     assert!(
         after_cfg.mark_ewma_e6 > before_cfg.mark_ewma_e6,
-        "direct Hyperp CPI trades must use the same dynamic mark path as TradeNoCpi"
+        "direct EwmaMark CPI trades must use the same dynamic mark path as TradeNoCpi"
     );
     assert_eq!(
         after_cfg.last_good_oracle_slot, before_cfg.last_good_oracle_slot,
@@ -11760,7 +11987,7 @@ fn v16_wrapper_tradecpi_hyperp_trade_moves_mark_without_refreshing_liveness() {
     );
     assert_eq!(
         after_group.assets[0].effective_price, before_group.assets[0].effective_price,
-        "direct Hyperp CPI trades must not rewrite the accepted effective index"
+        "direct EwmaMark CPI trades must not rewrite the accepted effective index"
     );
 }
 
@@ -12159,7 +12386,7 @@ fn v16_wrapper_permissionless_crank_advances_account_local_market_progress() {
     init_portfolio(&mut short_owner, &mut market, &mut short_account);
     deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
     deposit(&mut short_owner, &mut market, &mut short_account, 1_000_000);
-    configure_base_hyperp_mark(&mut admin, &mut market, 0, 100);
+    configure_base_ewma_mark(&mut admin, &mut market, 0, 100);
     run_ix(
         Instruction::TradeNoCpi {
             asset_index: 0,
@@ -12177,7 +12404,7 @@ fn v16_wrapper_permissionless_crank_advances_account_local_market_progress() {
     )
     .unwrap();
 
-    push_base_hyperp_mark(&mut admin, &mut market, 1, 102);
+    push_base_ewma_mark(&mut admin, &mut market, 1, 102);
     run_ix(
         Instruction::PermissionlessCrank {
             action: 0,
@@ -12292,7 +12519,7 @@ fn v16_wrapper_permissionless_crank_can_liquidate_unhealthy_candidate() {
     init_portfolio(&mut short_owner, &mut market, &mut short_account);
     deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
     deposit(&mut short_owner, &mut market, &mut short_account, 250);
-    configure_base_hyperp_mark(&mut admin, &mut market, 0, 100);
+    configure_base_ewma_mark(&mut admin, &mut market, 0, 100);
     run_ix(
         Instruction::TradeNoCpi {
             asset_index: 0,
@@ -12310,7 +12537,7 @@ fn v16_wrapper_permissionless_crank_can_liquidate_unhealthy_candidate() {
     )
     .unwrap();
 
-    push_base_hyperp_mark(&mut admin, &mut market, 1, 300);
+    push_base_ewma_mark(&mut admin, &mut market, 1, 300);
     run_ix(
         Instruction::PermissionlessCrank {
             action: 1,
@@ -13055,7 +13282,7 @@ fn v16_wrapper_permissionless_recovery_rejects_below_progress_floor_kill_switch(
         }),
     );
     run_ix(
-        Instruction::ConfigureHyperpMark {
+        Instruction::ConfigureEwmaMark {
             asset_index: 0,
             now_slot: 0,
             initial_mark_e6: 1,
@@ -13086,7 +13313,7 @@ fn v16_wrapper_permissionless_recovery_rejects_below_progress_floor_kill_switch(
     )
     .unwrap();
     run_ix(
-        Instruction::PushHyperpMark {
+        Instruction::PushEwmaMark {
             asset_index: 0,
             now_slot: 1,
             mark_e6: 3,
