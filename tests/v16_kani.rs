@@ -222,6 +222,7 @@ fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
     let now_slot_raw: u16 = kani::any();
     let b_delta_budget = budget_raw as u128;
     let reduce_q = reduce_raw as u128;
+    let close_q = reduce_raw as u128;
     let now_slot = now_slot_raw as u64;
 
     let forfeit = Instruction::ForfeitRecoveryLeg {
@@ -264,6 +265,25 @@ fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
         } => {
             assert_eq!(got_asset, asset_index);
             assert_eq!(got_side, side);
+        }
+        _ => unreachable!(),
+    }
+
+    let force_close = Instruction::ForceCloseAbandonedAsset {
+        asset_index,
+        now_slot,
+        close_q,
+    }
+    .encode();
+    match Instruction::decode(&force_close).unwrap() {
+        Instruction::ForceCloseAbandonedAsset {
+            asset_index: got_asset,
+            now_slot: got_slot,
+            close_q: got_close,
+        } => {
+            assert_eq!(got_asset, asset_index);
+            assert_eq!(got_slot, now_slot);
+            assert_eq!(got_close, close_q);
         }
         _ => unreachable!(),
     }
@@ -1238,6 +1258,14 @@ fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
         },
         extra,
     );
+    assert_rejects_trailing_byte(
+        Instruction::ForceCloseAbandonedAsset {
+            asset_index: 0,
+            now_slot: 1,
+            close_q: 1,
+        },
+        extra,
+    );
     assert_rejects_trailing_byte(Instruction::ClaimResolvedPayoutTopup, extra);
     assert_rejects_trailing_byte(
         Instruction::RefineResolvedUnreceiptedBound { decrease_num: 1 },
@@ -1403,4 +1431,7 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
 
     let sync_fee = [48u8; 8];
     assert!(Instruction::decode(&sync_fee).is_err());
+
+    let force_close = [64u8; 26];
+    assert!(Instruction::decode(&force_close).is_err());
 }

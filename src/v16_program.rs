@@ -1979,6 +1979,11 @@ pub mod ix {
             now_slot: u64,
             mark_e6: u64,
         },
+        ForceCloseAbandonedAsset {
+            asset_index: u16,
+            now_slot: u64,
+            close_q: u128,
+        },
         UpdateAssetLifecycle {
             action: u8,
             asset_index: u16,
@@ -2158,6 +2163,11 @@ pub mod ix {
                     asset_index: read_u16(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     mark_e6: read_u64(&mut rest)?,
+                },
+                64 => Self::ForceCloseAbandonedAsset {
+                    asset_index: read_u16(&mut rest)?,
+                    now_slot: read_u64(&mut rest)?,
+                    close_q: read_u128(&mut rest)?,
                 },
                 52 => Self::WithdrawBackingBucketEarnings {
                     domain: read_u8(&mut rest)?,
@@ -2547,6 +2557,16 @@ pub mod ix {
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, mark_e6);
+                }
+                Self::ForceCloseAbandonedAsset {
+                    asset_index,
+                    now_slot,
+                    close_q,
+                } => {
+                    out.push(64);
+                    push_u16(&mut out, asset_index);
+                    push_u64(&mut out, now_slot);
+                    push_u128(&mut out, close_q);
                 }
                 Self::UpdateAssetLifecycle {
                     action,
@@ -3521,6 +3541,7 @@ pub mod processor {
     pub const ASSET_ACTION_ACTIVATE: u8 = 0;
     pub const ASSET_ACTION_DRAIN_ONLY: u8 = 1;
     pub const ASSET_ACTION_RETIRE: u8 = 2;
+    pub const ASSET_ACTION_SHUTDOWN: u8 = 3;
     const ASSET_LIFECYCLE_ACTIVE: u8 = 2;
     const ASSET_LIFECYCLE_DRAIN_ONLY: u8 = 3;
     const ASSET_LIFECYCLE_RETIRED: u8 = 4;
@@ -3679,6 +3700,79 @@ pub mod processor {
             return Err(PercolatorError::OracleStale.into());
         }
         Ok(())
+    }
+
+    fn shutdown_asset_matured_at_slot_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> ProgramResult {
+        if group.header.mode != 0
+            || asset_index == 0
+            || cfg.force_close_delay_slots == 0
+            || asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+            || group.markets[asset_index].engine.asset.lifecycle != ASSET_LIFECYCLE_RECOVERY
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        let profile = read_oracle_profile_from_view(group, cfg, asset_index)?;
+        let shutdown_slot = profile.last_good_oracle_slot;
+        if shutdown_slot == 0
+            || now_slot < shutdown_slot
+            || now_slot.saturating_sub(shutdown_slot) < cfg.force_close_delay_slots
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        Ok(())
+    }
+
+    fn shutdown_asset_empty_and_matured_at_slot_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> ProgramResult {
+        shutdown_asset_matured_at_slot_view(cfg, group, asset_index, now_slot)?;
+        if asset_local_has_position_or_loss_state_view(group, asset_index) {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        Ok(())
+    }
+
+    fn shutdown_asset_empty_and_matured_now_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> ProgramResult {
+        let now_slot = authenticated_market_slot_or_fallback_view(group);
+        shutdown_asset_empty_and_matured_at_slot_view(cfg, group, asset_index, now_slot)
+    }
+
+    fn live_domain_withdraw_health_or_shutdown_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+        domain: usize,
+    ) -> Result<bool, ProgramError> {
+        let asset_index = domain / 2;
+        if shutdown_asset_empty_and_matured_now_view(cfg, group, asset_index).is_ok() {
+            return Ok(true);
+        }
+        reject_permissionless_resolve_matured_live_view(cfg, group)?;
+        if group.header.bankruptcy_hlock_active != 0
+            || group.header.threshold_stress_active != 0
+            || group.header.loss_stale_active != 0
+            || group
+                .header
+                .recovery_reason
+                .try_to_runtime()
+                .map_err(map_v16_error)?
+                .is_some()
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        Ok(false)
     }
 
     fn read_oracle_profile_for_asset(
@@ -4450,6 +4544,17 @@ pub mod processor {
                 now_slot,
                 mark_e6,
             } => handle_push_auth_mark(program_id, accounts, asset_index, now_slot, mark_e6),
+            Instruction::ForceCloseAbandonedAsset {
+                asset_index,
+                now_slot,
+                close_q,
+            } => handle_force_close_abandoned_asset(
+                program_id,
+                accounts,
+                asset_index,
+                now_slot,
+                close_q,
+            ),
             Instruction::UpdateAssetLifecycle {
                 action,
                 asset_index,
@@ -4984,6 +5089,134 @@ pub mod processor {
             fee_bps,
             max_market_slots,
         )
+    }
+
+    fn active_leg_for_asset_view(
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> Result<percolator::PortfolioLegV16, ProgramError> {
+        let mut found = None;
+        let mut slot = 0usize;
+        while slot < portfolio.header.legs.len() {
+            let leg = portfolio.header.legs[slot]
+                .try_to_runtime()
+                .map_err(map_v16_error)?;
+            if leg.active && leg.asset_index as usize == asset_index {
+                if found.replace(leg).is_some() {
+                    return Err(PercolatorError::EngineHiddenLeg.into());
+                }
+            }
+            slot += 1;
+        }
+        found.ok_or(PercolatorError::EngineInvalidLeg.into())
+    }
+
+    #[inline(never)]
+    fn handle_force_close_abandoned_asset<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        asset_index: u16,
+        now_slot: u64,
+        close_q: u128,
+    ) -> ProgramResult {
+        let cranker = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let account_a_ai = account(accounts, 2)?;
+        let account_b_ai = account(accounts, 3)?;
+        expect_signer(cranker)?;
+        expect_writable(market_ai)?;
+        expect_writable(account_a_ai)?;
+        expect_writable(account_b_ai)?;
+        expect_owner(market_ai, program_id)?;
+        expect_owner(account_a_ai, program_id)?;
+        expect_owner(account_b_ai, program_id)?;
+        if account_a_ai.key == account_b_ai.key || close_q == 0 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let asset_index_usize = asset_index as usize;
+        let authenticated_slot = authenticated_slot_or_fallback(now_slot);
+        let (_, mode_pre, max_market_slots, _) =
+            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        if mode_pre != MarketModeV16::Live {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        ensure_portfolio_storage_for_market_slots(account_a_ai, max_market_slots)?;
+        ensure_portfolio_storage_for_market_slots(account_b_ai, max_market_slots)?;
+
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+        if group.header.mode != 0
+            || asset_index_usize == 0
+            || asset_index_usize >= group.header.config.max_market_slots.get() as usize
+            || asset_index_usize >= group.markets.len()
+            || cfg.force_close_delay_slots == 0
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        let asset = group.markets[asset_index_usize].engine.asset;
+        if asset.lifecycle != ASSET_LIFECYCLE_RECOVERY {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        let profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
+        let shutdown_slot = profile.last_good_oracle_slot;
+        if shutdown_slot == 0
+            || authenticated_slot < shutdown_slot
+            || authenticated_slot.saturating_sub(shutdown_slot) < cfg.force_close_delay_slots
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        let frozen_mark = asset.effective_price.get();
+        if frozen_mark == 0 || frozen_mark > percolator::MAX_ORACLE_PRICE {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+
+        let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
+        let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
+        let mut account_a =
+            state::portfolio_view_mut_for_market_slots(&mut account_a_data, max_market_slots)?;
+        let mut account_b =
+            state::portfolio_view_mut_for_market_slots(&mut account_b_data, max_market_slots)?;
+        expect_portfolio_view_account_key(&account_a, account_a_ai.key)?;
+        expect_portfolio_view_account_key(&account_b, account_b_ai.key)?;
+        account_a
+            .validate_with_market(&group.as_view())
+            .map_err(map_v16_error)?;
+        account_b
+            .validate_with_market(&group.as_view())
+            .map_err(map_v16_error)?;
+        let leg_a = active_leg_for_asset_view(&account_a, asset_index_usize)?;
+        let leg_b = active_leg_for_asset_view(&account_b, asset_index_usize)?;
+        if leg_a.side == leg_b.side {
+            return Err(PercolatorError::EngineInvalidLeg.into());
+        }
+        let close_q = close_q
+            .min(leg_a.basis_pos_q.unsigned_abs())
+            .min(leg_b.basis_pos_q.unsigned_abs());
+        if close_q == 0 {
+            return Err(PercolatorError::EngineNonProgress.into());
+        }
+        let req = TradeRequestV16 {
+            asset_index: asset_index_usize,
+            size_q: close_q,
+            exec_price: frozen_mark,
+            fee_bps: 0,
+        };
+        if leg_a.side == SideV16::Short {
+            group
+                .execute_trade_with_fee_in_place_not_atomic(&mut account_a, &mut account_b, req)
+                .map_err(map_v16_error)?;
+        } else {
+            group
+                .execute_trade_with_fee_in_place_not_atomic(&mut account_b, &mut account_a, req)
+                .map_err(map_v16_error)?;
+        }
+        group.validate_shape().map_err(map_v16_error)?;
+        account_a
+            .validate_with_market(&group.as_view())
+            .map_err(map_v16_error)?;
+        account_b
+            .validate_with_market(&group.as_view())
+            .map_err(map_v16_error)
     }
 
     #[inline(never)]
@@ -5895,7 +6128,11 @@ pub mod processor {
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
             (cfg, authorities)
         };
-        expect_live_authority(&authorities_pre.backing_bucket_authority, authority.key)?;
+        if !live_authority_matches(&authorities_pre.backing_bucket_authority, authority.key)
+            && !live_authority_matches(&cfg_pre.admin, authority.key)
+        {
+            return Err(PercolatorError::Unauthorized.into());
+        }
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
         verify_withdrawable_token_accounts(
@@ -5915,32 +6152,30 @@ pub mod processor {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, group) = state::market_view_mut(&mut market_data)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain)?;
-            expect_live_authority(&authorities.backing_bucket_authority, authority.key)?;
-            match group.header.mode {
-                0 => {
-                    reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
-                    if group.header.bankruptcy_hlock_active != 0
-                        || group.header.threshold_stress_active != 0
-                        || group.header.loss_stale_active != 0
-                        || group
-                            .header
-                            .recovery_reason
-                            .try_to_runtime()
-                            .map_err(map_v16_error)?
-                            .is_some()
-                    {
-                        return Err(PercolatorError::EngineLockActive.into());
-                    }
-                }
+            let shutdown_drain = match group.header.mode {
+                0 => live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain)?,
                 1 => {
                     if group.header.materialized_portfolio_count.get() != 0
                         || group.header.c_tot.get() != 0
                     {
                         return Err(PercolatorError::EngineLockActive.into());
                     }
+                    false
                 }
                 _ => return Err(PercolatorError::EngineLockActive.into()),
+            };
+            let local_authorized =
+                live_authority_matches(&authorities.backing_bucket_authority, authority.key);
+            let admin_shutdown_authorized =
+                shutdown_drain && live_authority_matches(&cfg.admin, authority.key);
+            if !local_authorized && !admin_shutdown_authorized {
+                return Err(PercolatorError::Unauthorized.into());
             }
+            let ledger_authority = if admin_shutdown_authorized && !local_authorized {
+                cfg.admin
+            } else {
+                authorities.backing_bucket_authority
+            };
 
             let asset_index = domain / 2;
             if asset_index >= group.markets.len()
@@ -5970,7 +6205,7 @@ pub mod processor {
                 let (mut ledger, initialized) = read_or_new_backing_domain_ledger(
                     data,
                     market_ai.key.to_bytes(),
-                    authorities.backing_bucket_authority,
+                    ledger_authority,
                     domain as u16,
                     &bucket,
                 )?;
@@ -6103,7 +6338,11 @@ pub mod processor {
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
             (cfg, authorities)
         };
-        expect_live_authority(&authorities_pre.backing_bucket_authority, authority.key)?;
+        if !live_authority_matches(&authorities_pre.backing_bucket_authority, authority.key)
+            && !live_authority_matches(&cfg_pre.admin, authority.key)
+        {
+            return Err(PercolatorError::Unauthorized.into());
+        }
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
         verify_withdrawable_token_accounts(
@@ -6120,32 +6359,30 @@ pub mod processor {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
-            expect_live_authority(&authorities.backing_bucket_authority, authority.key)?;
-            match group.header.mode {
-                0 => {
-                    reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
-                    if group.header.bankruptcy_hlock_active != 0
-                        || group.header.threshold_stress_active != 0
-                        || group.header.loss_stale_active != 0
-                        || group
-                            .header
-                            .recovery_reason
-                            .try_to_runtime()
-                            .map_err(map_v16_error)?
-                            .is_some()
-                    {
-                        return Err(PercolatorError::EngineLockActive.into());
-                    }
-                }
+            let shutdown_drain = match group.header.mode {
+                0 => live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain_usize)?,
                 1 => {
                     if group.header.materialized_portfolio_count.get() != 0
                         || group.header.c_tot.get() != 0
                     {
                         return Err(PercolatorError::EngineLockActive.into());
                     }
+                    false
                 }
                 _ => return Err(PercolatorError::EngineLockActive.into()),
+            };
+            let local_authorized =
+                live_authority_matches(&authorities.backing_bucket_authority, authority.key);
+            let admin_shutdown_authorized =
+                shutdown_drain && live_authority_matches(&cfg.admin, authority.key);
+            if !local_authorized && !admin_shutdown_authorized {
+                return Err(PercolatorError::Unauthorized.into());
             }
+            let ledger_authority = if admin_shutdown_authorized && !local_authorized {
+                cfg.admin
+            } else {
+                authorities.backing_bucket_authority
+            };
 
             let (_, bucket) = backing_domain_parts_view(&group, domain_usize)?;
             if amount > bucket.utilization_fee_earnings || amount > group.header.vault.get() {
@@ -6155,7 +6392,7 @@ pub mod processor {
             let (mut ledger, initialized) = read_or_new_backing_domain_ledger(
                 &ledger_data,
                 market_ai.key.to_bytes(),
-                authorities.backing_bucket_authority,
+                ledger_authority,
                 domain as u16,
                 &bucket,
             )?;
@@ -6416,7 +6653,11 @@ pub mod processor {
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
             (cfg, authorities)
         };
-        expect_live_authority(&authorities.insurance_operator, operator.key)?;
+        if !live_authority_matches(&authorities.insurance_operator, operator.key)
+            && !live_authority_matches(&cfg_pre.admin, operator.key)
+        {
+            return Err(PercolatorError::Unauthorized.into());
+        }
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
         verify_withdrawable_token_accounts(
@@ -6434,21 +6675,20 @@ pub mod processor {
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
-            reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
-            if group.header.bankruptcy_hlock_active != 0
-                || group.header.threshold_stress_active != 0
-                || group.header.loss_stale_active != 0
-                || group
-                    .header
-                    .recovery_reason
-                    .try_to_runtime()
-                    .map_err(map_v16_error)?
-                    .is_some()
-            {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
+            let shutdown_drain = live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain)?;
-            expect_live_authority(&authorities.insurance_operator, operator.key)?;
+            let local_authorized =
+                live_authority_matches(&authorities.insurance_operator, operator.key);
+            let admin_shutdown_authorized =
+                shutdown_drain && live_authority_matches(&cfg.admin, operator.key);
+            if !local_authorized && !admin_shutdown_authorized {
+                return Err(PercolatorError::Unauthorized.into());
+            }
+            let ledger_authority = if admin_shutdown_authorized && !local_authorized {
+                cfg.admin
+            } else {
+                authorities.insurance_authority
+            };
             let available = domain_budget_remaining_view(&group, domain)?;
             if amount > available
                 || amount > group.header.insurance.get()
@@ -6465,7 +6705,7 @@ pub mod processor {
                 let (mut ledger, initialized) = read_or_new_insurance_ledger(
                     data,
                     market_ai.key.to_bytes(),
-                    authorities.insurance_authority,
+                    ledger_authority,
                     available,
                 )?;
                 sync_insurance_ledger(&mut ledger, available)?;
@@ -7475,12 +7715,91 @@ pub mod processor {
             }
             return Ok(());
         }
-        expect_live_authority(&cfg_pre.asset_authority, authority.key)?;
+        if action == ASSET_ACTION_SHUTDOWN {
+            expect_live_authority(&cfg_pre.admin, authority.key)?;
+            if asset_index == 0
+                || now_slot == 0
+                || initial_price != 0
+                || cfg_pre.force_close_delay_slots == 0
+            {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            let authenticated_slot = authenticated_slot_or_fallback(now_slot);
+            let mut data = market_ai.try_borrow_mut_data()?;
+            let (cfg, mut group) = state::market_view_mut(&mut data)?;
+            expect_live_authority(&cfg.admin, authority.key)?;
+            if group.header.mode != 0 {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
+            let configured_slots = group.header.config.max_market_slots.get() as usize;
+            if asset_index >= configured_slots || asset_index >= group.markets.len() {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            if authenticated_slot < group.header.current_slot.get() {
+                return Err(PercolatorError::EngineStale.into());
+            }
+            match group.markets[asset_index].engine.asset.lifecycle {
+                ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY => {
+                    let frozen_mark = group.markets[asset_index]
+                        .engine
+                        .asset
+                        .effective_price
+                        .get();
+                    if frozen_mark == 0 || frozen_mark > percolator::MAX_ORACLE_PRICE {
+                        return Err(PercolatorError::OracleInvalid.into());
+                    }
+                    group.markets[asset_index].engine.asset.lifecycle = ASSET_LIFECYCLE_RECOVERY;
+                    group.markets[asset_index]
+                        .engine
+                        .asset
+                        .raw_oracle_target_price = percolator::V16PodU64::new(frozen_mark);
+                    let mut profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
+                    profile.mark_ewma_e6 = frozen_mark;
+                    profile.mark_ewma_last_slot = authenticated_slot;
+                    profile.oracle_target_price_e6 = frozen_mark;
+                    profile.oracle_target_publish_time = 0;
+                    profile.last_good_oracle_slot = authenticated_slot;
+                    write_oracle_profile_to_view_if_separate(&mut group, asset_index, &profile)?;
+                    group.header.asset_set_epoch = percolator::V16PodU64::new(
+                        group
+                            .header
+                            .asset_set_epoch
+                            .get()
+                            .checked_add(1)
+                            .ok_or(PercolatorError::EngineCounterOverflow)?,
+                    );
+                    group.header.risk_epoch = percolator::V16PodU64::new(
+                        group
+                            .header
+                            .risk_epoch
+                            .get()
+                            .checked_add(1)
+                            .ok_or(PercolatorError::EngineCounterOverflow)?,
+                    );
+                }
+                ASSET_LIFECYCLE_RECOVERY => {}
+                _ => return Err(PercolatorError::EngineLockActive.into()),
+            }
+            return group.validate_shape().map_err(map_v16_error);
+        }
+        let asset_authorized_pre = live_authority_matches(&cfg_pre.asset_authority, authority.key);
+        let admin_retire_candidate = action == ASSET_ACTION_RETIRE
+            && !asset_authorized_pre
+            && live_authority_matches(&cfg_pre.admin, authority.key);
+        if !asset_authorized_pre && !admin_retire_candidate {
+            return Err(PercolatorError::Unauthorized.into());
+        }
 
         let cfg_after = {
             let mut data = market_ai.try_borrow_mut_data()?;
             let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
-            expect_live_authority(&cfg.asset_authority, authority.key)?;
+            let asset_authorized = live_authority_matches(&cfg.asset_authority, authority.key);
+            let admin_retire = action == ASSET_ACTION_RETIRE
+                && !asset_authorized
+                && live_authority_matches(&cfg.admin, authority.key);
+            if !asset_authorized && !admin_retire {
+                return Err(PercolatorError::Unauthorized.into());
+            }
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
@@ -7549,6 +7868,14 @@ pub mod processor {
                 ASSET_ACTION_RETIRE => {
                     if now_slot == 0 || initial_price != 0 {
                         return Err(PercolatorError::InvalidInstruction.into());
+                    }
+                    if admin_retire {
+                        shutdown_asset_empty_and_matured_at_slot_view(
+                            &cfg,
+                            &group,
+                            asset_index,
+                            authenticated_slot_or_fallback(now_slot),
+                        )?;
                     }
                     if now_slot < group.header.current_slot.get() {
                         return Err(PercolatorError::EngineStale.into());
@@ -9069,10 +9396,14 @@ pub mod processor {
     }
 
     fn expect_live_authority(expected: &[u8; 32], signer: &Pubkey) -> Result<(), ProgramError> {
-        if *expected == [0u8; 32] || *expected != signer.to_bytes() {
+        if !live_authority_matches(expected, signer) {
             return Err(PercolatorError::Unauthorized.into());
         }
         Ok(())
+    }
+
+    fn live_authority_matches(expected: &[u8; 32], signer: &Pubkey) -> bool {
+        *expected != [0u8; 32] && *expected == signer.to_bytes()
     }
 
     fn expect_portfolio_view_owner(

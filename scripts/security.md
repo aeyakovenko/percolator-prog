@@ -28,6 +28,62 @@ pass the right value" as a safety assumption for a public instruction. If a
 public API needs an oracle price, it must consume an authenticated oracle state
 or an authority-gated oracle update, not a caller-supplied price-like argument.
 
+## Twenty-fourth pass — asset shutdown public-API sweep
+
+**Status:** PASS_SAFE. Re-walked the public API surface after adding
+asset-scoped shutdown and abandoned-position force close. The new tag is
+attacker-reachable and is safe only because it is permissionless progress
+against a previously admin-frozen market, not caller-selected price movement.
+
+Updated decoded public API inventory:
+
+```text
+64 ForceCloseAbandonedAsset
+```
+
+API-by-API disposition for the new shutdown flow:
+
+- PASS 1: `UpdateAssetLifecycle(action=SHUTDOWN)` is admin-only, rejects market
+  0, requires a configured nonzero force-close delay, freezes to the stored
+  effective mark, and stores the shutdown slot in the isolated asset profile.
+- PASS 2: shutdown does not resolve the whole slab. It only moves the selected
+  secondary asset into `Recovery`, preserving other asset lifecycles and
+  authorities.
+- PASS 3: user voluntary exits remain owner-signed bilateral trades and are
+  permitted only when they reduce risk against the frozen mark.
+- PASS 4: `ForceCloseAbandonedAsset` is permissionless but requires a cranker
+  signer, two distinct writable portfolio accounts, the target asset in
+  shutdown `Recovery`, and the configured timeout to have elapsed.
+- PASS 5: force close does not accept a caller-selected price. It uses the
+  frozen `effective_price` captured at shutdown and rejects zero/invalid marks.
+- PASS 6: force close only matches opposite-side active legs and caps progress
+  to the minimum abandoned quantity, so it cannot create new exposure or
+  unbalance long/short open interest.
+- PASS 7: forced closure validates both portfolios against the market before
+  and after mutation, including market ids, so a retired/reused slot cannot
+  attach old positions to a new market instance.
+- PASS 8: local insurance/backing authorities and the slab admin can drain a
+  shutdown market only after the timeout and only after local position/loss
+  state is empty; the shutdown drain path is allowed through live stale flags so
+  stale frozen markets are recoverable.
+- PASS 9: admin drain uses admin-owned token destinations and admin-bound
+  optional ledgers; local drain keeps the existing local domain-authority
+  ledger semantics.
+- PASS 10: admin retire is a fallback only when the signer is not the asset
+  authority, the shutdown timeout has elapsed, and the full asset lifecycle
+  state is empty, including insurance budgets and backing buckets.
+- PASS 11: after cleanup and retire, permissionless creators must consume the
+  freed slot before append. Reuse assigns a fresh market id, resets local
+  domain budgets/backing state, installs new per-market authorities, and routes
+  the new init fee back to market 0.
+
+Regression coverage added:
+
+```bash
+cargo test --test v16_wrapper v16_wrapper_shutdown_asset_force_closes_drains_retires_and_reuses_slot -- --nocapture
+cargo test --test v16_wrapper
+```
+
 ## Twenty-third pass — all public API adversary re-sweep
 
 **Status:** PASS_SAFE. Re-walked every decoded v16 instruction tag through the

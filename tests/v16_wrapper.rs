@@ -111,6 +111,13 @@ fn active_leg_for_asset(
         .unwrap()
 }
 
+fn has_active_leg_for_asset(account: &percolator::PortfolioAccountV16, asset_index: usize) -> bool {
+    account
+        .legs
+        .iter()
+        .any(|leg| leg.active && leg.asset_index as usize == asset_index)
+}
+
 fn signer() -> TestAccount {
     TestAccount::new(Pubkey::new_unique(), Pubkey::new_unique(), 0).signer()
 }
@@ -707,6 +714,25 @@ fn update_asset_lifecycle_with_authorities(
             oracle_authority: backing_bucket_authority,
         },
         &mut [authority, market],
+    )
+}
+
+fn force_close_abandoned_asset(
+    cranker: &mut TestAccount,
+    market: &mut TestAccount,
+    account_a: &mut TestAccount,
+    account_b: &mut TestAccount,
+    asset_index: u16,
+    now_slot: u64,
+    close_q: u128,
+) -> Result<(), ProgramError> {
+    run_ix(
+        Instruction::ForceCloseAbandonedAsset {
+            asset_index,
+            now_slot,
+            close_q,
+        },
+        &mut [cranker, market, account_a, account_b],
     )
 }
 
@@ -2166,6 +2192,353 @@ fn v16_wrapper_permissionless_dynamic_market_drains_after_positions_close() {
     );
     assert_eq!(retired.insurance, 50);
     assert_eq!(retired.vault, 20_050);
+}
+
+#[test]
+fn v16_wrapper_shutdown_asset_force_closes_drains_retires_and_reuses_slot() {
+    let mut admin = signer();
+    let mut attacker = signer();
+    let mut creator = signer();
+    let mut asset_authority = signer();
+    let mut insurance_authority = signer();
+    let mut insurance_operator = signer();
+    let mut backing_authority = signer();
+    let mut cranker = signer();
+    let mut market = market_account_with_capacity(2);
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account_for_market_slots(2);
+    let mut short_account = portfolio_account_for_market_slots(2);
+    let mint = init_market(&mut admin, &mut market);
+
+    run_ix(
+        Instruction::ConfigurePermissionlessResolve {
+            stale_slots: 100,
+            force_close_delay_slots: 5,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    run_ix(
+        Instruction::UpdateMarketInitFeePolicy { min_init_fee: 10 },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    update_asset_lifecycle_with_authorities(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        1,
+        150,
+        insurance_authority.key.to_bytes(),
+        insurance_operator.key.to_bytes(),
+        backing_authority.key.to_bytes(),
+    )
+    .unwrap();
+    run_ix(
+        Instruction::UpdateAuthority {
+            kind: processor::AUTHORITY_ASSET,
+            new_pubkey: asset_authority.key.to_bytes(),
+        },
+        &mut [&mut admin, &mut asset_authority, &mut market],
+    )
+    .unwrap();
+
+    let mut token_program = token_program_account();
+    for (domain, amount) in [(2u8, 6u128), (3u8, 4u128)] {
+        let mut source = user_token_account(insurance_authority.key, mint, amount as u64);
+        let mut vault = vault_token_account(&market, mint, 0);
+        run_ix(
+            Instruction::TopUpInsuranceDomain { domain, amount },
+            &mut [
+                &mut insurance_authority,
+                &mut market,
+                &mut source,
+                &mut vault,
+                &mut token_program,
+            ],
+        )
+        .unwrap();
+    }
+    top_up_backing_bucket(&mut backing_authority, &mut market, 2, 20, 20);
+    top_up_backing_bucket(&mut backing_authority, &mut market, 3, 25, 20);
+
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 10_000);
+    deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: (POS_SCALE * 2) as i128,
+            exec_price: 150,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+
+    let before_unauthorized_shutdown = market.data.clone();
+    let unauthorized_shutdown = update_asset_lifecycle(
+        &mut attacker,
+        &mut market,
+        processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        2,
+        0,
+    );
+    assert_err_and_market_unchanged(unauthorized_shutdown, &market, &before_unauthorized_shutdown);
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        2,
+        0,
+    )
+    .unwrap();
+    let shutdown_profile = state::read_asset_oracle_profile(&market.data, 1).unwrap();
+    let (_, shutdown_group) = state::read_market(&market.data).unwrap();
+    assert_eq!(shutdown_group.assets[1].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(shutdown_profile.last_good_oracle_slot, 2);
+    assert_eq!(shutdown_group.assets[1].effective_price, 150);
+
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: -(POS_SCALE as i128),
+            exec_price: 150,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    let long_after_voluntary = state::read_portfolio(&long_account.data).unwrap();
+    let short_after_voluntary = state::read_portfolio(&short_account.data).unwrap();
+    assert_eq!(
+        active_leg_for_asset(&long_after_voluntary, 1)
+            .basis_pos_q
+            .unsigned_abs(),
+        POS_SCALE
+    );
+    assert_eq!(
+        active_leg_for_asset(&short_after_voluntary, 1)
+            .basis_pos_q
+            .unsigned_abs(),
+        POS_SCALE
+    );
+
+    let before_timeout_market = market.data.clone();
+    let before_timeout_long = long_account.data.clone();
+    let before_timeout_short = short_account.data.clone();
+    let too_early = force_close_abandoned_asset(
+        &mut cranker,
+        &mut market,
+        &mut long_account,
+        &mut short_account,
+        1,
+        6,
+        POS_SCALE,
+    );
+    assert_err_and_market_unchanged(too_early, &market, &before_timeout_market);
+    assert_eq!(long_account.data, before_timeout_long);
+    assert_eq!(short_account.data, before_timeout_short);
+
+    force_close_abandoned_asset(
+        &mut cranker,
+        &mut market,
+        &mut long_account,
+        &mut short_account,
+        1,
+        7,
+        POS_SCALE,
+    )
+    .unwrap();
+    let long_closed = state::read_portfolio(&long_account.data).unwrap();
+    let short_closed = state::read_portfolio(&short_account.data).unwrap();
+    assert!(!has_active_leg_for_asset(&long_closed, 1));
+    assert!(!has_active_leg_for_asset(&short_closed, 1));
+    let (cfg, mut group) = state::read_market(&market.data).unwrap();
+    assert_eq!(group.assets[1].oi_eff_long_q, 0);
+    assert_eq!(group.assets[1].oi_eff_short_q, 0);
+    group.current_slot = 7;
+    group.loss_stale_active = true;
+    state::write_market(&mut market.data, &cfg, &group).unwrap();
+
+    let mut vault = vault_token_account(&market, mint, 100_000);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut local_insurance_dest = user_token_account(insurance_operator.key, mint, 0);
+    run_ix(
+        Instruction::WithdrawInsuranceDomain {
+            domain: 2,
+            amount: 6,
+        },
+        &mut [
+            &mut insurance_operator,
+            &mut market,
+            &mut local_insurance_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let mut admin_insurance_dest = user_token_account(admin.key, mint, 0);
+    run_ix(
+        Instruction::WithdrawInsuranceDomain {
+            domain: 3,
+            amount: 4,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut admin_insurance_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let mut local_backing_dest = user_token_account(backing_authority.key, mint, 0);
+    run_ix(
+        Instruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: 20,
+        },
+        &mut [
+            &mut backing_authority,
+            &mut market,
+            &mut local_backing_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let mut admin_backing_dest = user_token_account(admin.key, mint, 0);
+    run_ix(
+        Instruction::WithdrawBackingBucket {
+            domain: 3,
+            amount: 25,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut admin_backing_dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        1,
+        7,
+        0,
+    )
+    .unwrap();
+    let (retired_cfg, retired_group) = state::read_market(&market.data).unwrap();
+    assert_eq!(retired_cfg.free_market_slot_count, 1);
+    assert_eq!(retired_group.assets[1].lifecycle, AssetLifecycleV16::Retired);
+    let retired_market_id = retired_group.assets[1].market_id;
+    let reuse_market_id = retired_group.next_market_id;
+    assert_eq!(retired_group.insurance_domain_budget[2], 0);
+    assert_eq!(retired_group.insurance_domain_budget[3], 0);
+    assert_eq!(
+        retired_group.source_backing_buckets[2].fresh_unliened_backing_num,
+        0
+    );
+    assert_eq!(
+        retired_group.source_backing_buckets[3].fresh_unliened_backing_num,
+        0
+    );
+
+    let new_insurance_authority = Pubkey::new_unique().to_bytes();
+    let new_insurance_operator = Pubkey::new_unique().to_bytes();
+    let new_backing_authority = Pubkey::new_unique().to_bytes();
+    let new_oracle_authority = Pubkey::new_unique().to_bytes();
+    let mut append_source = user_token_account(creator.key, mint, 10);
+    let mut append_vault = vault_token_account(&market, mint, 0);
+    let before_append = market.data.clone();
+    let append = run_ix(
+        Instruction::UpdateAssetLifecycle {
+            action: processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 2,
+            now_slot: 8,
+            initial_price: 250,
+            insurance_authority: new_insurance_authority,
+            insurance_operator: new_insurance_operator,
+            backing_bucket_authority: new_backing_authority,
+            oracle_authority: new_oracle_authority,
+        },
+        &mut [
+            &mut creator,
+            &mut market,
+            &mut append_source,
+            &mut append_vault,
+            &mut token_program,
+        ],
+    );
+    assert_err_and_market_unchanged(append, &market, &before_append);
+
+    let mut reuse_source = user_token_account(creator.key, mint, 10);
+    let mut reuse_vault = vault_token_account(&market, mint, 0);
+    run_ix(
+        Instruction::UpdateAssetLifecycle {
+            action: processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 8,
+            initial_price: 250,
+            insurance_authority: new_insurance_authority,
+            insurance_operator: new_insurance_operator,
+            backing_bucket_authority: new_backing_authority,
+            oracle_authority: new_oracle_authority,
+        },
+        &mut [
+            &mut creator,
+            &mut market,
+            &mut reuse_source,
+            &mut reuse_vault,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let profile = state::read_asset_oracle_profile(&market.data, 1).unwrap();
+    assert_eq!(profile.insurance_authority, new_insurance_authority);
+    assert_eq!(profile.insurance_operator, new_insurance_operator);
+    assert_eq!(profile.backing_bucket_authority, new_backing_authority);
+    assert_eq!(profile.oracle_authority, new_oracle_authority);
+    let (reused_cfg, reused_group) = state::read_market(&market.data).unwrap();
+    assert_eq!(reused_cfg.free_market_slot_count, 0);
+    assert_eq!(reused_group.config.max_market_slots, 2);
+    assert_eq!(reused_group.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(reused_group.assets[1].market_id, reuse_market_id);
+    assert!(reused_group.assets[1].market_id > retired_market_id);
+    assert_eq!(reused_group.assets[1].effective_price, 250);
+    assert_eq!(reused_group.insurance_domain_budget[0], 5);
+    assert_eq!(reused_group.insurance_domain_budget[1], 5);
+    assert_eq!(reused_group.insurance_domain_budget[2], 0);
+    assert_eq!(reused_group.insurance_domain_budget[3], 0);
+    assert_eq!(reused_group.insurance, 10);
+    assert_eq!(reused_group.vault, 20_010);
 }
 
 #[test]
