@@ -28,6 +28,130 @@ pass the right value" as a safety assumption for a public instruction. If a
 public API needs an oracle price, it must consume an authenticated oracle state
 or an authority-gated oracle update, not a caller-supplied price-like argument.
 
+## Twenty-third pass — all public API adversary re-sweep
+
+**Status:** PASS_SAFE. Re-walked every decoded v16 instruction tag through the
+dispatcher and handler families after the AuthMark/EwmaMark split. No new code
+patch was required in this pass.
+
+Decoded public API inventory:
+
+```text
+0 InitMarket
+1 InitPortfolio
+3 Deposit
+4 Withdraw
+5 PermissionlessCrank
+6 TradeNoCpi
+8 ClosePortfolio
+9 TopUpInsurance
+10 TradeCpi
+13 CloseSlab
+19 ResolveMarket
+23 WithdrawInsuranceLimited
+24 TopUpBackingBucket
+28 ConvertReleasedPnl
+30 CloseResolved
+32 UpdateAuthority
+33 UpdateInsurancePolicy
+34 ConfigureHybridOracle
+35 ConfigureEwmaMark
+36 PushEwmaMark
+37 UpdateLiquidationFeePolicy
+38 ConfigurePermissionlessResolve
+39 ResolveStalePermissionless
+40 UpdateAssetLifecycle
+41 WithdrawInsurance
+42 CureAndCancelClose
+43 ForfeitRecoveryLeg
+44 RebalanceReduce
+45 FinalizeResetSide
+46 ClaimResolvedPayoutTopup
+47 RefineResolvedUnreceiptedBound
+48 SyncMaintenanceFee
+49 UpdateMaintenanceFeePolicy
+50 WithdrawBackingBucket
+51 UpdateBackingFeePolicy
+52 WithdrawBackingBucketEarnings
+53 SyncBackingDomainLedger
+54 SyncInsuranceLedger
+55 UpdateTradeFeePolicy
+56 TopUpInsuranceDomain
+57 WithdrawInsuranceDomain
+58 UpdateFeeRedirectPolicy
+59 UpdateMarketInitFeePolicy
+60 UpdateBaseUnitMints
+61 SwapSecondaryForPrimary
+62 ConfigureAuthMark
+63 PushAuthMark
+```
+
+API-by-API disposition:
+
+- PASS 1: ABI decoding is still fail-closed. Unknown tags, truncated payloads,
+  and trailing bytes reject, so legacy/manual-price payloads cannot be
+  reinterpreted as valid public crank input.
+- PASS 2: market creation binds the market account to the program owner,
+  validates the base SPL mint, seeds the base oracle state, and initializes all
+  authorities from the market creator signer. No follow-on public API can use an
+  uninitialized market because account headers and owner checks gate every
+  handler.
+- PASS 3: portfolio and custody APIs bind stored portfolio provenance to both
+  the market id and portfolio account id. Owner-signed flows (`Deposit`,
+  `Withdraw`, `TradeNoCpi`, `TradeCpi`, `ClosePortfolio`,
+  `ConvertReleasedPnl`, recovery helpers) require the stored owner where value
+  or risk can move.
+- PASS 4: inbound token movement is primary-mint-only for deposits, insurance
+  top-ups, backing top-ups, cure deposits, and permissionless market init fees.
+  Outbound token movement accepts only configured withdrawal mints, requires
+  destination/vault mint equality, and requires the vault PDA token account to
+  have no delegate or close authority.
+- PASS 5: `TradeNoCpi` requires both portfolio owners to sign and rejects same
+  account self-trades. `TradeCpi` derives a matcher delegate PDA, validates the
+  matcher return against request id/account/asset/oracle price/size, enforces
+  the caller limit price, and rejects tail accounts that alias wrapper-owned
+  core state.
+- PASS 6: `PermissionlessCrank`, `SyncMaintenanceFee`, `FinalizeResetSide`,
+  `CloseResolved`, and `ClaimResolvedPayoutTopup` are intentionally public, but
+  each output is bounded by stored market/portfolio state. Rewards are optional,
+  capped by configured bps, and either retained by insurance or credited to a
+  verified cranker/owner portfolio.
+- PASS 7: no public API accepts an unauthenticated oracle price. Hybrid reads
+  verify oracle account owner, feed key, staleness, monotonic publish time, and
+  confidence. AuthMark and EwmaMark updates require the configured mark/oracle
+  authority. Raw manual mode is only a stored engine price path and cannot be
+  advanced by `PermissionlessCrank`.
+- PASS 8: asset lifecycle APIs keep dynamic markets isolated. The asset
+  authority controls normal lifecycle changes; permissionless activation is
+  available only when the base init fee is nonzero, the expected integer fee is
+  paid, and any retired free slot is consumed before append.
+- PASS 9: insurance and backing APIs resolve authorities from the target asset
+  profile, not from global state. Domain ledgers are bound to market,
+  authority, and domain; withdrawal paths reject stressed/live unsafe states and
+  terminal withdrawals only debit budgets belonging to the withdrawing
+  authority.
+- PASS 10: admin/policy APIs are authority-gated and bounded. Bps fields reject
+  values above 10_000, permissionless stale/force-close windows are nonzero and
+  capped, live admin burn is blocked unless permissionless resolution is
+  configured, and base-unit mint updates require the base-unit authority plus
+  real SPL mint accounts.
+- PASS 11: resolved and terminal close APIs do not let callers redirect value.
+  Resolved payouts are paid only to token accounts owned by the stored
+  portfolio owner; `CloseSlab` requires admin authority, resolved mode, zero
+  engine vault/accounting balances, and then drains only stranded vault tokens
+  to admin-owned token accounts.
+- PASS 12: recoverability invariants remain covered by tests: nonzero
+  domain insurance/backing blocks retire/close, while authority-gated withdrawal
+  paths can drive isolated domain budgets to zero after positions close.
+
+Retained coverage consulted for this sweep:
+
+```bash
+cargo test --test v16_wrapper security_sweep -- --nocapture
+cargo test --no-run --test v16_kani
+git diff --check
+```
+
 ## Twenty-first pass — all public instruction adversary sweep
 
 **Status:** PASS_SAFE. The public crank price field was the concrete exploit
