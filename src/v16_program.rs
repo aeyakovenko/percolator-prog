@@ -1812,7 +1812,6 @@ pub mod ix {
             action: u8,
             asset_index: u16,
             now_slot: u64,
-            effective_price: u64,
             funding_rate_e9: i128,
             close_q: u128,
             fee_bps: u64,
@@ -2018,7 +2017,6 @@ pub mod ix {
                     action: read_u8(&mut rest)?,
                     asset_index: read_u16(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
-                    effective_price: read_u64(&mut rest)?,
                     funding_rate_e9: read_i128(&mut rest)?,
                     close_q: read_u128(&mut rest)?,
                     fee_bps: read_u64(&mut rest)?,
@@ -2257,7 +2255,6 @@ pub mod ix {
                     action,
                     asset_index,
                     now_slot,
-                    effective_price,
                     funding_rate_e9,
                     close_q,
                     fee_bps,
@@ -2267,7 +2264,6 @@ pub mod ix {
                     out.push(action);
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, now_slot);
-                    push_u64(&mut out, effective_price);
                     push_i128(&mut out, funding_rate_e9);
                     push_u128(&mut out, close_q);
                     push_u64(&mut out, fee_bps);
@@ -4172,7 +4168,6 @@ pub mod processor {
                 action,
                 asset_index,
                 now_slot,
-                effective_price,
                 funding_rate_e9,
                 close_q,
                 fee_bps,
@@ -4183,7 +4178,6 @@ pub mod processor {
                 action,
                 asset_index,
                 now_slot,
-                effective_price,
                 funding_rate_e9,
                 close_q,
                 fee_bps,
@@ -8480,7 +8474,6 @@ pub mod processor {
         action: u8,
         asset_index: u16,
         now_slot: u64,
-        effective_price: u64,
         funding_rate_e9: i128,
         close_q: u128,
         fee_bps: u64,
@@ -8557,18 +8550,12 @@ pub mod processor {
                 authenticated_now_slot,
                 now_unix_ts,
                 oracle_tail,
-                effective_price,
             )?;
             group.markets[asset_index_usize]
                 .engine
                 .asset
-                .raw_oracle_target_price = percolator::V16PodU64::new(
-                if oracle_v16::profile_is_price_managed(&oracle_profile) {
-                    oracle_profile.oracle_target_price_e6
-                } else {
-                    crank_price
-                },
-            );
+                .raw_oracle_target_price =
+                percolator::V16PodU64::new(oracle_profile.oracle_target_price_e6);
             cfg.last_good_oracle_slot = core::cmp::max(
                 cfg.last_good_oracle_slot,
                 oracle_profile.last_good_oracle_slot,
@@ -8746,7 +8733,6 @@ pub mod processor {
         action: u8,
         asset_index: u16,
         now_slot: u64,
-        effective_price: u64,
         funding_rate_e9: i128,
         close_q: u128,
         fee_bps: u64,
@@ -8770,7 +8756,6 @@ pub mod processor {
             action,
             asset_index,
             now_slot,
-            effective_price,
             funding_rate_e9,
             close_q,
             fee_bps,
@@ -9465,8 +9450,10 @@ pub mod processor {
         now_slot: u64,
         now_unix_ts: i64,
         oracle_accounts: &[AccountInfo],
-        fallback_price: u64,
     ) -> Result<u64, ProgramError> {
+        if asset_index >= group.header.config.max_market_slots.get() as usize {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
         if oracle_v16::profile_is_hyperp(profile) {
             let target = profile.mark_ewma_e6;
             if target == 0 {
@@ -9485,10 +9472,16 @@ pub mod processor {
             return Ok(price);
         }
         if !oracle_v16::profile_is_hybrid(profile) {
-            return Ok(fallback_price);
-        }
-        if asset_index >= group.header.config.max_market_slots.get() as usize {
-            return Err(PercolatorError::InvalidInstruction.into());
+            let price = group.markets[asset_index]
+                .engine
+                .asset
+                .effective_price
+                .get();
+            if price == 0 {
+                return Err(PercolatorError::OracleInvalid.into());
+            }
+            profile.oracle_target_price_e6 = price;
+            return Ok(price);
         }
         if cfg.permissionless_resolve_stale_slots != 0
             && now_slot.saturating_sub(profile.last_good_oracle_slot)

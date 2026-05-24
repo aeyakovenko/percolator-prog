@@ -500,34 +500,30 @@ fn kani_v16_permissionless_crank_decode_preserves_wire_fields() {
     let action: u8 = kani::any();
     let asset_index: u16 = kani::any();
     let now_slot_raw: u16 = kani::any();
-    let effective_price_raw: u16 = kani::any();
     let funding_rate_raw: i16 = kani::any();
     let close_q_raw: u16 = kani::any();
     let fee_bps_raw: u16 = kani::any();
     let recovery_reason: u8 = kani::any();
     let now_slot = now_slot_raw as u64;
-    let effective_price = effective_price_raw as u64;
     let funding_rate_e9 = funding_rate_raw as i128;
     let close_q = close_q_raw as u128;
     let fee_bps = fee_bps_raw as u64;
 
-    let mut data = [0u8; 61];
+    let mut data = [0u8; 53];
     data[0] = 5;
     data[1] = action;
     data[2..4].copy_from_slice(&asset_index.to_le_bytes());
     data[4..12].copy_from_slice(&now_slot.to_le_bytes());
-    data[12..20].copy_from_slice(&effective_price.to_le_bytes());
-    data[20..36].copy_from_slice(&funding_rate_e9.to_le_bytes());
-    data[36..52].copy_from_slice(&close_q.to_le_bytes());
-    data[52..60].copy_from_slice(&fee_bps.to_le_bytes());
-    data[60] = recovery_reason;
+    data[12..28].copy_from_slice(&funding_rate_e9.to_le_bytes());
+    data[28..44].copy_from_slice(&close_q.to_le_bytes());
+    data[44..52].copy_from_slice(&fee_bps.to_le_bytes());
+    data[52] = recovery_reason;
 
     match Instruction::decode(&data).unwrap() {
         Instruction::PermissionlessCrank {
             action: got_action,
             asset_index: got_asset,
             now_slot: got_slot,
-            effective_price: got_price,
             funding_rate_e9: got_rate,
             close_q: got_close,
             fee_bps: got_fee,
@@ -536,7 +532,6 @@ fn kani_v16_permissionless_crank_decode_preserves_wire_fields() {
             assert_eq!(got_action, action);
             assert_eq!(got_asset, asset_index);
             assert_eq!(got_slot, now_slot);
-            assert_eq!(got_price, effective_price);
             assert_eq!(got_rate, funding_rate_e9);
             assert_eq!(got_close, close_q);
             assert_eq!(got_fee, fee_bps);
@@ -995,7 +990,6 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
             action: 0,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,

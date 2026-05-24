@@ -1495,7 +1495,6 @@ fn v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_clo
             action: 0,
             asset_index: 1,
             now_slot: 10,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -1858,7 +1857,8 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
     let long_account = env.create_portfolio(&long_owner);
     let short_account = env.create_portfolio(&short_owner);
     env.deposit(&long_owner, long_account, 1_000_000);
-    env.deposit(&short_owner, short_account, 100);
+    env.deposit(&short_owner, short_account, 250);
+    env.configure_hyperp_mark_with_cu(0, 100, 1, 0);
     env.trade_with_cu(
         &long_owner,
         long_account,
@@ -1870,13 +1870,13 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
     );
 
     env.svm.warp_to_slot(1);
+    env.push_hyperp_mark_with_cu(1, 300);
     let liquidation_cu = env.crank(
         short_account,
         ProgInstruction::PermissionlessCrank {
             action: 1,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 200,
             funding_rate_e9: 0,
             close_q: POS_SCALE,
             fee_bps: 0,
@@ -1923,7 +1923,6 @@ fn v16_bpf_full_14_leg_refresh_crank_is_under_tx_limit() {
             action: 0,
             asset_index: 0,
             now_slot: 16,
-            effective_price: 95,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -1970,7 +1969,6 @@ fn v16_bpf_full_14_leg_liquidation_crank_is_under_tx_limit() {
             action: 1,
             asset_index: 0,
             now_slot: 16,
-            effective_price: 95,
             funding_rate_e9: 0,
             close_q: 10 * POS_SCALE,
             fee_bps: 0,
@@ -2175,7 +2173,6 @@ fn v16_cu_permissionless_crank_refresh_is_bounded() {
             action: 0,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 101,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -2202,7 +2199,6 @@ fn v16_bpf_permissionless_crank_uses_authenticated_clock_slot_not_caller_slot() 
             action: 0,
             asset_index: 0,
             now_slot: spoofed_slot,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -2349,7 +2345,6 @@ fn v16_cu_crank_cost_is_account_local_after_many_portfolios() {
             action: 0,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -2370,7 +2365,6 @@ fn v16_cu_crank_cost_is_account_local_after_many_portfolios() {
             action: 0,
             asset_index: 0,
             now_slot: 2,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,

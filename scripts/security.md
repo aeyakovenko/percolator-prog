@@ -1,5 +1,154 @@
 # Security findings — 2026-05-20 v16 all-public-API sweep
 
+## Standing public-API adversary model
+
+Every externally callable instruction tag is an attack surface until proven
+otherwise. Future sweeps must start by classifying each public API as
+adversarial input, even when the instruction is intended for keepers, cranks,
+permissionless market creators, liquidation searchers, or operational
+maintenance.
+
+For every public tag, explicitly answer:
+
+- Who is allowed to call it, and is that enforced by signer/account ownership
+  checks before any mutation or token movement?
+- Which scalar arguments can move prices, mark liveness, balances, authority
+  state, market lifecycle, or health certificates?
+- Which account metas can redirect custody, choose an oracle, choose a domain,
+  select a portfolio, or earn a reward?
+- If the caller is permissionless, what prevents them from choosing values that
+  create liquidations, release PnL, strand funds, refresh stale markets, delay
+  resolution, drain insurance/backing, or close/reuse someone else's market
+  state?
+- Are tests proving both rejection of malicious inputs and recoverability of
+  legitimate flows after the rejection condition?
+
+Do not use "honest keeper", "honest crank", "manual oracle", or "operator will
+pass the right value" as a safety assumption for a public instruction. If a
+public API needs an oracle price, it must consume an authenticated oracle state
+or an authority-gated oracle update, not a caller-supplied price-like argument.
+
+## Twenty-first pass — all public instruction adversary sweep
+
+**Status:** PASS_SAFE. The public crank price field was the concrete exploit
+class fixed in this pass; the broader sweep re-walked every decoded instruction
+as attacker-reachable public API. Verification completed with
+`cargo kani --tests` reporting 33 successfully verified harnesses and 0
+failures.
+
+Scope by adversary boundary:
+
+- Authority-gated setup/config: `InitMarket`, `UpdateAuthority`,
+  `UpdateInsurancePolicy`, `UpdateLiquidationFeePolicy`,
+  `UpdateMaintenanceFeePolicy`, `UpdateBackingFeePolicy`,
+  `UpdateTradeFeePolicy`, `UpdateFeeRedirectPolicy`,
+  `UpdateMarketInitFeePolicy`, `ConfigurePermissionlessResolve`,
+  `UpdateBaseUnitMints`, `SwapSecondaryForPrimary`.
+- Owner-signed portfolio/custody: `InitPortfolio`, `Deposit`, `Withdraw`,
+  `TradeNoCpi`, `TradeCpi`, `ClosePortfolio`, `ConvertReleasedPnl`,
+  `CureAndCancelClose`, `ForfeitRecoveryLeg`, `RebalanceReduce`.
+- Domain insurance/backing authority paths: `TopUpInsurance`,
+  `TopUpInsuranceDomain`, `WithdrawInsuranceLimited`, `WithdrawInsurance`,
+  `WithdrawInsuranceDomain`, `TopUpBackingBucket`,
+  `WithdrawBackingBucket`, `WithdrawBackingBucketEarnings`,
+  `SyncBackingDomainLedger`, `SyncInsuranceLedger`.
+- Oracle and lifecycle: `ConfigureHybridOracle`, `ConfigureHyperpMark`,
+  `PushHyperpMark`, `UpdateAssetLifecycle`.
+- Deliberately permissionless progress/recovery: `PermissionlessCrank`,
+  `SyncMaintenanceFee`, `ResolveStalePermissionless`, `CloseResolved`,
+  `ClaimResolvedPayoutTopup`, `FinalizeResetSide`.
+- Resolved/admin terminal paths: `ResolveMarket`, `CloseSlab`,
+  `RefineResolvedUnreceiptedBound`.
+
+API-by-API disposition:
+
+- PASS 1: all decoded tags reject trailing bytes and truncation; legacy tag `5`
+  payloads that still append a manual/effective price are invalid rather than
+  reinterpreted as another field.
+- PASS 2: no permissionless API now accepts a scalar that can directly move an
+  oracle price. `PermissionlessCrank` consumes authenticated hybrid feeds,
+  authority-pushed `EwmaMark` state, or the already stored manual/raw engine
+  price. The current ABI names for `EwmaMark` are the legacy
+  `ConfigureHyperpMark`/`PushHyperpMark` tags.
+- PASS 3: manual/raw oracle markets cannot be advanced by a public caller's
+  price. A market creator who wants operator-pushed prices must use the
+  per-market oracle authority through `EwmaMark` or `ConfigureHybridOracle`.
+- PASS 4: external oracle configuration is authority-gated per asset, verifies
+  provided feed accounts against stored feed keys, and does not advance the
+  group-wide loss accrual anchor while any asset has open position/loss state.
+- PASS 5: portfolio custody paths require the stored owner signer and account
+  provenance before mutation; deposits, cure deposits, insurance top-ups, and
+  backing top-ups accept only the current primary base-unit mint.
+- PASS 6: withdrawals and resolved payouts can use either configured base-unit
+  mint, but only when destination and vault token-account mints match and the
+  vault is owned by the wrapper PDA with no delegate or close authority.
+- PASS 7: domain insurance and backing APIs resolve authorities from the target
+  domain's asset profile. Dynamic markets therefore carry their own insurance,
+  insurance-operator, backing, and oracle authorities rather than using a
+  global authority surface.
+- PASS 8: permissionless market activation is fee-gated when the base fee is
+  above zero, the fee doubles every 32 market slots without floating point, and
+  permissionless creators must consume a retired free slot before appending.
+- PASS 9: permissionless settlement, stale resolve, resolved payout top-up,
+  finalized reset-side, and forced close cannot redirect value to the caller;
+  payouts are bound to stored portfolio owners or rewards are capped to retained
+  fee growth.
+- PASS 10: terminal drain/close paths preserve recoverability: nonzero
+  insurance/backing/domain budgets block retirement or slab close, but covered
+  authority paths can drive those balances to zero after positions close.
+
+Regression coverage retained for this pass:
+
+```bash
+cargo test --test v16_wrapper -- --nocapture
+cargo test --test v16_cu -- --nocapture
+cargo test
+cargo build-sbf --no-default-features
+cargo kani --tests
+```
+
+## Twentieth pass — public crank price-input audit
+
+**Status:** fixed locally; final proof run is tracked by the Twenty-first pass.
+The prior sweep missed an oracle-auth boundary because it treated
+`PermissionlessCrank`'s caller-supplied manual price as a benign input/test
+fixture instead of modeling the crank caller as an attacker.
+
+Corrected invariant:
+
+```text
+Permissionless public crank APIs may advance time, funding, settlement, and
+liquidation work, but they must not contain any unauthenticated price input.
+All price movement must come from either an external verified oracle profile or
+an authority-gated `EwmaMark` update.
+```
+
+Why the old sweep missed it:
+
+- The branch checklist accepted a "one honest crank" assumption for
+  permissionless progress, which is not a valid custody or liquidation trust
+  boundary.
+- The F11 fix classified non-base manual prices as caller-supplied per-asset
+  price inputs and focused on preventing cross-asset oracle pollution, but did
+  not ask whether a public caller should be able to supply any price at all.
+- Tests covered malformed prices and stale slots as rejection cases, but also
+  used public crank prices to manufacture legitimate test price moves. That
+  encoded the attack surface as expected behavior.
+- The sweep emphasized accounting after a corrupt price entered the engine; it
+  did not require an authority/liveness proof before price data reached the
+  engine.
+
+Required retained coverage for this class:
+
+- Public crank ABI has no manual/effective price field and rejects legacy
+  trailing price bytes.
+- Raw/manual oracle profiles cannot be moved by `PermissionlessCrank`; they can
+  only reuse the currently stored engine price.
+- Authorized `EwmaMark` updates remain the path for operator-pushed markets,
+  and public cranks consume only that stored mark state.
+- Liquidation and released-PnL tests that need price movement use an
+  authority-gated oracle update before the public crank.
+
 ## Nineteenth pass — primary/secondary base-unit SPL custody API
 
 **Status:** fixed with TDD, then `PASS_SAFE` on the new base-unit mint
@@ -310,7 +459,9 @@ Results:
 
 No new deterministic fund-loss, unfair insurance extraction, market-brick,
 stale-market-id reuse, matcher-CPI privilege escalation, or worst-case CU
-regression was found under the one-honest-crank assumption.
+regression was found in that pass. Its crank trust model is superseded by the
+standing public-API adversary model above; public crank inputs must be treated
+as attacker controlled.
 
 ## Twelfth pass — new portfolio maintenance-fee anchor
 
@@ -564,8 +715,10 @@ CU, or Kani test, or matched an explicitly accepted product policy.
 
 **Status:** fixed locally by scoping the wrapper's configured hybrid/Hyperp
 oracle lane to asset index `0`. Nonzero asset slots now use the per-asset
-effective price supplied to `PermissionlessCrank` and pay only their configured
-base trade fee; they do not inherit asset `0`'s composite/EWMA mark.
+oracle profile/engine price seen by `PermissionlessCrank` and pay only their
+configured base trade fee; they do not inherit asset `0`'s composite/EWMA mark.
+The old public caller-supplied price behavior in this entry was superseded by
+the Twentieth pass.
 
 Regression coverage:
 
@@ -601,7 +754,7 @@ Configured hybrid/Hyperp oracle policy:
   applies to asset_index == 0 only.
 
 For asset_index != 0:
-  PermissionlessCrank effective price = caller supplied per-asset price;
+  PermissionlessCrank effective price = stored per-asset oracle/engine state;
   TradeCpi/TradeNoCpi fee = max(caller_fee_bps, trade_fee_base_bps);
   asset-0 mark_ewma_e6/last_good_oracle_slot are not mutated.
 ```
@@ -620,7 +773,7 @@ brick was found in the three-asset shutdown/reuse path.
 ## F10 — Hybrid stale-fallback fee floor must scale with the next crank segment (Medium)
 
 **Status:** fixed locally by charging the stale-fallback uncertainty floor over
-the same bounded segment that the next honest permissionless crank can consume,
+the same bounded segment that the next valid permissionless crank can consume,
 not just one slot. Regression coverage:
 
 ```bash
@@ -631,7 +784,7 @@ cargo test --release --no-default-features \
 
 **Attacker/UX model:** a hybrid after-hours market is soft-stale and the engine
 slot is behind the authenticated clock by multiple slots. Consenting traders can
-still execute at arbitrary prices, but the next honest crank may move the
+still execute at arbitrary prices, but the next valid crank may move the
 effective external index by up to:
 
 ```text
@@ -641,7 +794,7 @@ max_price_move_bps_per_slot * min(now_slot - slot_last, max_accrual_dt_slots)
 **Original issue:** stale-fallback trades paid an uncertainty floor of only
 `max_price_move_bps_per_slot`. When `max_accrual_dt_slots > 1`, a trader could
 enter during stale fallback while paying for a one-slot oracle step even though
-the next honest crank could consume a larger bounded segment.
+the next valid crank could consume a larger bounded segment.
 
 **Fix invariant:**
 
@@ -801,7 +954,7 @@ cargo test --release --test test_tradecpi \
 
 **Attacker model:** a trader controls their signed trade, matcher/tail account choice, and the Pyth Pull update account supplied to the wrapper. A fresh regular-hours Pyth update can exist elsewhere, while the supplied account is stale and the market-owned `last_good_oracle_slot` has crossed the hybrid soft-stale window.
 
-**Original exploit:** the attacker opened at the stale EWMA fallback mark, then an honest crank installed the fresh external price one slot later inside the configured clamp. With only the static base fee, the user's extractable claim increased against the LP/counterparty.
+**Original exploit:** the attacker opened at the stale EWMA fallback mark, then a valid crank installed the fresh external price one slot later inside the configured clamp. With only the static base fee, the user's extractable claim increased against the LP/counterparty.
 
 **Fix invariant:** hybrid fallback does not reject consenting arbitrary-price trades. Instead, while the wrapper is using stale EWMA fallback, the trade fee must cover:
 
@@ -842,7 +995,7 @@ Covered weird states and public paths:
 - Exposed market just beyond one max-dt segment: nonzero trades can advance bounded progress; zero-fill cannot be used as a hidden crank. Regressions: `test_trade_nocpi_requires_crank_for_exposed_price_progress`, `test_tradecpi_nonzero_fill_requires_crank_for_exposed_price_progress`, `test_tradecpi_zero_fill_rejects_exposed_price_progress`.
 - Far-behind exposed market: trades reject with `CatchupRequired`, repeated keeper cranks catch up, and trades work after catchup. Regressions: `test_trade_nocpi_far_behind_recovers_after_repeated_keeper_cranks`, `test_tradecpi_far_behind_recovers_after_repeated_keeper_cranks`.
 - Liquidatable bounded-catchup state: honest candidate cranks keep committing progress and liquidate before deferred catchup can drain insurance. Regressions: `test_keeper_crank_partial_catchup_candidate_sequence_does_not_drain_insurance`, `test_crank_dense_same_side_fullclose_candidate_eventually_liquidates`.
-- Dense/evicted-risk-buffer states: empty or padded cranks cannot drain insurance, and honest candidate-covered cranks keep making progress under the one-honest-keeper assumption. Regressions: issue-65 tests in `test_security`.
+- Dense/evicted-risk-buffer states: empty or padded cranks cannot drain insurance, and candidate-covered keeper cranks keep making progress while public inputs remain adversarial. Regressions: issue-65 tests in `test_security`.
 - Haircut/stress state: direct close of unconverted positive PnL remains blocked, but new consenting liquidity can trade to clear positions and keeper/force-close paths remain available. Regressions: `test_live_haircut_conditions_block_unconverted_positive_pnl_close`, `test_haircut_new_mm_capital_protected_non_inverted`, `test_haircut_new_mm_capital_protected_inverted`.
 - Hybrid soft-stale after-hours state: trades remain live through EWMA fallback and pay dynamic/fallback uncertainty fees. Regressions: F5 tests above plus same-mark and band-edge hybrid tests.
 - Hybrid hard-stale terminal state: live trades reject, permissionless resolve succeeds, and existing open positions can be owner-closed after resolution. Regression: `test_external_hybrid_hard_stale_blocks_trading_and_allows_permissionless_resolve`.
@@ -856,7 +1009,7 @@ cargo test --release --test test_security issue65 -- --nocapture
 cargo test --release --test test_economic_attack_vectors
 ```
 
-Disposition: `PASS_SAFE`. No state was found where an open position is both non-liquidatable by honest keeper progress and unable to trade/resolve/close through a public path.
+Disposition: `PASS_SAFE`. No state was found where an open position is both non-liquidatable by valid keeper progress and unable to trade/resolve/close through a public path.
 
 ---
 

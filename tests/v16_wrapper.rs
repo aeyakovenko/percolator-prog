@@ -505,14 +505,14 @@ fn two_sided_fee(size_q: u128, price: u64, fee_bps: u64) -> u128 {
     one_side * 2
 }
 
-fn run_ix(ix: Instruction, accounts: &mut [&mut TestAccount]) -> Result<(), ProgramError> {
+fn run_ix_data(data: &[u8], accounts: &mut [&mut TestAccount]) -> Result<(), ProgramError> {
     let snapshots: Vec<(u64, Vec<u8>)> = accounts
         .iter()
         .map(|a| (a.lamports, a.data.clone()))
         .collect();
     let result = {
         let infos: Vec<AccountInfo> = accounts.iter_mut().map(|a| a.to_info()).collect();
-        processor::process_instruction(&program_id(), &infos, &ix.encode())
+        processor::process_instruction(&program_id(), &infos, data)
     };
     if result.is_err() {
         for (account, (lamports, data)) in accounts.iter_mut().zip(snapshots) {
@@ -521,6 +521,46 @@ fn run_ix(ix: Instruction, accounts: &mut [&mut TestAccount]) -> Result<(), Prog
         }
     }
     result
+}
+
+fn run_ix(ix: Instruction, accounts: &mut [&mut TestAccount]) -> Result<(), ProgramError> {
+    run_ix_data(&ix.encode(), accounts)
+}
+
+fn configure_base_hyperp_mark(
+    admin: &mut TestAccount,
+    market: &mut TestAccount,
+    now_slot: u64,
+    mark_e6: u64,
+) {
+    run_ix(
+        Instruction::ConfigureHyperpMark {
+            asset_index: 0,
+            now_slot,
+            initial_mark_e6: mark_e6,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        &mut [admin, market],
+    )
+    .unwrap();
+}
+
+fn push_base_hyperp_mark(
+    admin: &mut TestAccount,
+    market: &mut TestAccount,
+    now_slot: u64,
+    mark_e6: u64,
+) {
+    run_ix(
+        Instruction::PushHyperpMark {
+            asset_index: 0,
+            now_slot,
+            mark_e6,
+        },
+        &mut [admin, market],
+    )
+    .unwrap();
 }
 
 fn default_init_market_ix() -> Instruction {
@@ -1124,7 +1164,6 @@ fn v16_wrapper_init_portfolio_fee_anchor_tracks_crank_and_asset_lifecycle_time()
             action: 0,
             asset_index: 0,
             now_slot: 100,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -3879,7 +3918,6 @@ fn v16_wrapper_three_asset_hybrid_prediction_shutdown_reuses_only_prediction_slo
             action: 0,
             asset_index: 1,
             now_slot: before_group.current_slot + 3,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -4224,7 +4262,6 @@ fn v16_wrapper_security_sweep_reused_asset_market_ids_fail_closed() {
             action: 0,
             asset_index: last_asset,
             now_slot: 10,
-            effective_price: 250,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -4387,7 +4424,6 @@ fn v16_wrapper_security_sweep_resolved_market_and_fee_branches() {
             action: 0,
             asset_index: 0,
             now_slot: 10,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -6102,7 +6138,6 @@ fn v16_wrapper_backing_domain_ledger_tracks_unavailable_principal_loss_and_recov
             action: 0,
             asset_index: 0,
             now_slot: 0,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -6336,7 +6371,6 @@ fn v16_wrapper_source_backed_positive_pnl_converts_from_backing_not_insurance() 
             action: 0,
             asset_index: 0,
             now_slot: 0,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -6418,7 +6452,6 @@ fn v16_wrapper_backing_top_up_refills_provider_receivable_in_engine() {
             action: 0,
             asset_index: 0,
             now_slot: 0,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -6544,7 +6577,6 @@ fn v16_wrapper_exploited_oracle_pnl_cannot_exit_against_unrelated_backing_or_ins
             action: 0,
             asset_index: 1,
             now_slot: 1,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -6665,7 +6697,6 @@ fn v16_wrapper_exploited_added_asset_pnl_exit_caps_to_its_source_domain_backing(
             action: 0,
             asset_index: 1,
             now_slot: 1,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -6787,7 +6818,6 @@ fn v16_wrapper_cross_margin_source_claims_leave_unbacked_corrupt_claim_unconvert
             action: 0,
             asset_index: 1,
             now_slot: 1,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -7667,7 +7697,6 @@ fn v16_wrapper_configure_hyperp_mark_pushes_and_cranks_from_internal_mark() {
             action: 0,
             asset_index: 0,
             now_slot: 6,
-            effective_price: 999,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -9287,7 +9316,6 @@ fn v16_wrapper_cross_market_portfolio_provenance_is_fail_closed() {
             action: 0,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 101,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -9478,7 +9506,6 @@ fn v16_wrapper_account_kind_confusion_is_rejected_before_mutation() {
             action: 0,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -9710,7 +9737,6 @@ fn v16_wrapper_configure_hybrid_oracle_composes_toto_sol_cross_and_rejects_rollb
             action: 0,
             asset_index: 0,
             now_slot: 6,
-            effective_price: 133_333,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -9818,7 +9844,6 @@ fn v16_wrapper_non_base_asset_profile_converts_stoxx_eur_to_base_sol() {
             action: 0,
             asset_index: 1,
             now_slot: 10,
-            effective_price: 1,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -9909,7 +9934,6 @@ fn v16_wrapper_price_managed_asset_above_portfolio_limit_still_updates_mark_afte
             action: 0,
             asset_index: 14,
             now_slot: 2,
-            effective_price: 999,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -10468,7 +10492,6 @@ fn v16_wrapper_hybrid_fresh_crank_tracks_external_composite_then_after_hours_tra
             action: 0,
             asset_index: 0,
             now_slot: 2,
-            effective_price: 133_333,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -10742,7 +10765,6 @@ fn v16_wrapper_hybrid_after_hours_downward_mark_moves_effective_price() {
             action: 0,
             asset_index: 0,
             now_slot: 11,
-            effective_price: after_trade_group.assets[0].effective_price,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -11115,6 +11137,7 @@ fn v16_wrapper_convert_released_pnl_respects_cap_and_unlocks_withdrawal() {
     init_portfolio(&mut short_owner, &mut market, &mut short_account);
     deposit(&mut long_owner, &mut market, &mut long_account, 10_000);
     deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
+    configure_base_hyperp_mark(&mut admin, &mut market, 0, 100);
 
     run_ix(
         Instruction::TradeNoCpi {
@@ -11132,12 +11155,12 @@ fn v16_wrapper_convert_released_pnl_respects_cap_and_unlocks_withdrawal() {
         ],
     )
     .unwrap();
+    push_base_hyperp_mark(&mut admin, &mut market, 1, 102);
     run_ix(
         Instruction::PermissionlessCrank {
             action: 0,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 101,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -11169,7 +11192,7 @@ fn v16_wrapper_convert_released_pnl_respects_cap_and_unlocks_withdrawal() {
     let long = state::read_portfolio(&long_account.data).unwrap();
     assert!(percolator::active_bitmap_is_empty(long.active_bitmap));
     assert_eq!(long.pnl, 2);
-    assert_eq!(long.capital, 10_000);
+    let capital_before_convert = long.capital;
 
     let too_low_cap = run_ix(
         Instruction::ConvertReleasedPnl { amount: 1 },
@@ -11187,13 +11210,13 @@ fn v16_wrapper_convert_released_pnl_respects_cap_and_unlocks_withdrawal() {
     let (_, group) = state::read_market(&market.data).unwrap();
     let long = state::read_portfolio(&long_account.data).unwrap();
     assert_eq!(long.pnl, 0);
-    assert_eq!(long.capital, 10_002);
+    assert_eq!(long.capital, capital_before_convert + 2);
     assert_eq!(group.pnl_pos_tot, 0);
 
     withdraw(&mut long_owner, &mut market, &mut long_account, 2);
     let (_, group) = state::read_market(&market.data).unwrap();
     let long = state::read_portfolio(&long_account.data).unwrap();
-    assert_eq!(long.capital, 10_000);
+    assert_eq!(long.capital, capital_before_convert);
     assert_eq!(group.vault, 19_998);
 }
 
@@ -12136,6 +12159,7 @@ fn v16_wrapper_permissionless_crank_advances_account_local_market_progress() {
     init_portfolio(&mut short_owner, &mut market, &mut short_account);
     deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
     deposit(&mut short_owner, &mut market, &mut short_account, 1_000_000);
+    configure_base_hyperp_mark(&mut admin, &mut market, 0, 100);
     run_ix(
         Instruction::TradeNoCpi {
             asset_index: 0,
@@ -12153,12 +12177,12 @@ fn v16_wrapper_permissionless_crank_advances_account_local_market_progress() {
     )
     .unwrap();
 
+    push_base_hyperp_mark(&mut admin, &mut market, 1, 102);
     run_ix(
         Instruction::PermissionlessCrank {
             action: 0,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 101,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -12193,7 +12217,6 @@ fn v16_wrapper_permissionless_crank_does_not_require_owner_signature() {
             action: 0,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -12224,7 +12247,6 @@ fn v16_wrapper_permissionless_crank_rejects_stale_now_without_mutation() {
             action: 0,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -12241,7 +12263,6 @@ fn v16_wrapper_permissionless_crank_rejects_stale_now_without_mutation() {
             action: 0,
             asset_index: 0,
             now_slot: 0,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -12270,7 +12291,8 @@ fn v16_wrapper_permissionless_crank_can_liquidate_unhealthy_candidate() {
     init_portfolio(&mut long_owner, &mut market, &mut long_account);
     init_portfolio(&mut short_owner, &mut market, &mut short_account);
     deposit(&mut long_owner, &mut market, &mut long_account, 1_000_000);
-    deposit(&mut short_owner, &mut market, &mut short_account, 100);
+    deposit(&mut short_owner, &mut market, &mut short_account, 250);
+    configure_base_hyperp_mark(&mut admin, &mut market, 0, 100);
     run_ix(
         Instruction::TradeNoCpi {
             asset_index: 0,
@@ -12288,12 +12310,12 @@ fn v16_wrapper_permissionless_crank_can_liquidate_unhealthy_candidate() {
     )
     .unwrap();
 
+    push_base_hyperp_mark(&mut admin, &mut market, 1, 300);
     run_ix(
         Instruction::PermissionlessCrank {
             action: 1,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 200,
             funding_rate_e9: 0,
             close_q: POS_SCALE,
             fee_bps: 0,
@@ -12389,7 +12411,6 @@ fn v16_wrapper_liquidation_uses_configured_fee_not_permissionless_caller_fee() {
             action: 1,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: POS_SCALE,
             fee_bps: 0,
@@ -12495,7 +12516,6 @@ fn v16_wrapper_liquidation_fee_policy_splits_retained_penalty_to_cranker() {
             action: 1,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 100 * POS_SCALE,
             fee_bps: 0,
@@ -12612,7 +12632,6 @@ fn v16_wrapper_liquidation_reward_account_is_optional_and_absent_keeps_fee_in_in
             action: 1,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 100 * POS_SCALE,
             fee_bps: 0,
@@ -12702,7 +12721,6 @@ fn v16_wrapper_liquidation_reward_never_spends_insurance_needed_for_losses() {
             action: 1,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 200,
             funding_rate_e9: 0,
             close_q: POS_SCALE,
             fee_bps: 0,
@@ -12787,7 +12805,6 @@ fn v16_wrapper_permissionless_settle_b_without_b_state_is_fail_closed() {
             action: 2,
             asset_index: 0,
             now_slot: 0,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -12801,7 +12818,8 @@ fn v16_wrapper_permissionless_settle_b_without_b_state_is_fail_closed() {
 }
 
 #[test]
-fn v16_wrapper_permissionless_crank_rejects_invalid_asset_and_price_without_mutation() {
+fn v16_wrapper_permissionless_crank_rejects_invalid_asset_and_legacy_price_payload_without_mutation(
+) {
     let mut admin = signer();
     let mut market = market_account();
     let mut owner = signer();
@@ -12817,7 +12835,6 @@ fn v16_wrapper_permissionless_crank_rejects_invalid_asset_and_price_without_muta
             action: 0,
             asset_index: 1,
             now_slot: 0,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -12828,20 +12845,22 @@ fn v16_wrapper_permissionless_crank_rejects_invalid_asset_and_price_without_muta
     assert_err_and_market_unchanged(invalid_asset, &market, &before_market);
     assert_eq!(portfolio.data, before_portfolio);
 
-    let zero_price = run_ix(
-        Instruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
-            now_slot: 0,
-            effective_price: 0,
-            funding_rate_e9: 0,
-            close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
-        },
+    let mut legacy_price_payload = Instruction::PermissionlessCrank {
+        action: 0,
+        asset_index: 0,
+        now_slot: 0,
+        funding_rate_e9: 0,
+        close_q: 0,
+        fee_bps: 0,
+        recovery_reason: 0,
+    }
+    .encode();
+    legacy_price_payload.splice(12..12, 1_000_000u64.to_le_bytes().iter().copied());
+    let legacy_price = run_ix_data(
+        &legacy_price_payload,
         &mut [&mut owner, &mut market, &mut portfolio],
     );
-    assert_err_and_market_unchanged(zero_price, &market, &before_market);
+    assert_err_and_market_unchanged(legacy_price, &market, &before_market);
     assert_eq!(portfolio.data, before_portfolio);
 }
 
@@ -12862,7 +12881,6 @@ fn v16_wrapper_permissionless_recovery_action_is_not_public_kill_switch() {
             action: 3,
             asset_index: 0,
             now_slot: 0,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -12909,7 +12927,6 @@ fn v16_wrapper_permissionless_recovery_rejects_every_caller_selected_reason() {
                 action: 3,
                 asset_index: 0,
                 now_slot: 0,
-                effective_price: 100,
                 funding_rate_e9: 0,
                 close_q: 0,
                 fee_bps: 0,
@@ -12942,7 +12959,6 @@ fn v16_wrapper_permissionless_crank_rejects_invalid_action_and_recovery_reason()
             action: 9,
             asset_index: 0,
             now_slot: 0,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -12958,7 +12974,6 @@ fn v16_wrapper_permissionless_crank_rejects_invalid_action_and_recovery_reason()
             action: 3,
             asset_index: 0,
             now_slot: 0,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -13002,7 +13017,6 @@ fn v16_wrapper_permissionless_crank_rejects_caller_supplied_funding_rate() {
             action: 0,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 100,
             funding_rate_e9: 1,
             close_q: 0,
             fee_bps: 0,
@@ -13088,7 +13102,6 @@ fn v16_wrapper_permissionless_recovery_rejects_below_progress_floor_kill_switch(
             action: 3,
             asset_index: 0,
             now_slot: 1,
-            effective_price: 1,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -13752,7 +13765,6 @@ fn v16_wrapper_permissionless_resolve_maturity_blocks_manual_live_trade_race() {
             action: 0,
             asset_index: 0,
             now_slot: 5,
-            effective_price: 100,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
@@ -14312,7 +14324,6 @@ fn v16_wrapper_hybrid_hard_stale_uses_permissionless_resolve_not_recovery_kill_s
             action: 3,
             asset_index: 0,
             now_slot: 5,
-            effective_price: 133_333,
             funding_rate_e9: 0,
             close_q: 0,
             fee_bps: 0,
