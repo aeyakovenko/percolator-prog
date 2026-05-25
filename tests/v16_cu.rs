@@ -1380,13 +1380,24 @@ impl V16CuEnv {
         expo: i32,
         publish_time: i64,
     ) -> Pubkey {
+        self.set_pyth_price_with_conf(feed, price, expo, 1, publish_time)
+    }
+
+    fn set_pyth_price_with_conf(
+        &mut self,
+        feed: &[u8; 32],
+        price: i64,
+        expo: i32,
+        conf: u64,
+        publish_time: i64,
+    ) -> Pubkey {
         let key = Pubkey::new_unique();
         self.svm
             .set_account(
                 key,
                 Account {
                     lamports: 1_000_000_000,
-                    data: make_pyth_data(feed, price, expo, 1, publish_time),
+                    data: make_pyth_data(feed, price, expo, conf, publish_time),
                     owner: oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
                     executable: false,
                     rent_epoch: 0,
@@ -1489,6 +1500,36 @@ impl V16CuEnv {
         unit_scale: u32,
         hybrid_soft_stale_slots: u64,
     ) -> Result<u64, String> {
+        self.try_configure_hybrid_asset_with_conf_filter_cu(
+            asset_index,
+            oracle_leg_count,
+            oracle_leg_flags,
+            feeds,
+            oracle_accounts,
+            now_slot,
+            now_unix_ts,
+            invert,
+            unit_scale,
+            hybrid_soft_stale_slots,
+            500,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_configure_hybrid_asset_with_conf_filter_cu(
+        &mut self,
+        asset_index: u16,
+        oracle_leg_count: u8,
+        oracle_leg_flags: u8,
+        feeds: [[u8; 32]; 3],
+        oracle_accounts: &[Pubkey],
+        now_slot: u64,
+        now_unix_ts: i64,
+        invert: u8,
+        unit_scale: u32,
+        hybrid_soft_stale_slots: u64,
+        conf_filter_bps: u16,
+    ) -> Result<u64, String> {
         let mut accounts = vec![
             AccountMeta::new(self.admin.pubkey(), true),
             AccountMeta::new(self.market, false),
@@ -1516,7 +1557,7 @@ impl V16CuEnv {
                 mark_min_fee: 0,
                 invert,
                 unit_scale,
-                conf_filter_bps: 500,
+                conf_filter_bps,
                 oracle_leg_feeds: feeds,
             },
             accounts,
@@ -3803,7 +3844,140 @@ fn production_risk_params() -> V16CuMarketParams {
     }
 }
 
-fn run_hybrid_fresh_oracle_production_risk_trade_case(asset_index: u16, size_q: i128) {
+#[derive(Clone, Copy)]
+struct ProductionRiskOraclePrices {
+    leg0: i64,
+    leg1: i64,
+    leg2: i64,
+}
+
+impl ProductionRiskOraclePrices {
+    fn default_inverted_composite() -> Self {
+        Self {
+            leg0: 4_200_000_000,
+            leg1: 150_000_000,
+            leg2: 200_000_000,
+        }
+    }
+
+    fn sub_one_inverted_composite() -> Self {
+        Self {
+            leg0: 2_155_172_400,
+            leg1: 5_000_000,
+            leg2: 5_000_000,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProductionRiskTradeCase {
+    name: &'static str,
+    fixed_deposit: Option<u128>,
+    same_owner: bool,
+    oracle_prices: ProductionRiskOraclePrices,
+    oracle_conf_bps: u16,
+    conf_filter_bps: u16,
+    size_q_abs: u128,
+    assert_sub_one_mark: bool,
+}
+
+impl ProductionRiskTradeCase {
+    fn baseline() -> Self {
+        Self {
+            name: "baseline",
+            fixed_deposit: None,
+            same_owner: false,
+            oracle_prices: ProductionRiskOraclePrices::default_inverted_composite(),
+            oracle_conf_bps: 0,
+            conf_filter_bps: 500,
+            size_q_abs: POS_SCALE,
+            assert_sub_one_mark: false,
+        }
+    }
+
+    fn fixed_deposit() -> Self {
+        Self {
+            name: "fixed-300m-deposit",
+            fixed_deposit: Some(300_000_000),
+            ..Self::baseline()
+        }
+    }
+
+    fn same_owner() -> Self {
+        Self {
+            name: "same-owner-counterparties",
+            same_owner: true,
+            ..Self::baseline()
+        }
+    }
+
+    fn sub_one_mark() -> Self {
+        Self {
+            name: "sub-one-inverted-mark",
+            oracle_prices: ProductionRiskOraclePrices::sub_one_inverted_composite(),
+            size_q_abs: 10 * POS_SCALE,
+            assert_sub_one_mark: true,
+            ..Self::baseline()
+        }
+    }
+
+    fn real_conf_filter() -> Self {
+        Self {
+            name: "pyth-conf-150bps-filter-200bps",
+            oracle_conf_bps: 150,
+            conf_filter_bps: 200,
+            ..Self::baseline()
+        }
+    }
+}
+
+fn pyth_conf_for_bps(price: i64, conf_bps: u16) -> u64 {
+    if conf_bps == 0 {
+        return 1;
+    }
+    ((price as u128) * conf_bps as u128 / 10_000)
+        .max(1)
+        .try_into()
+        .unwrap()
+}
+
+fn set_production_risk_oracles(
+    env: &mut V16CuEnv,
+    feeds: &[[u8; 32]; 3],
+    prices: ProductionRiskOraclePrices,
+    conf_bps: u16,
+    publish_time: i64,
+) -> [Pubkey; 3] {
+    [
+        env.set_pyth_price_with_conf(
+            &feeds[0],
+            prices.leg0,
+            -6,
+            pyth_conf_for_bps(prices.leg0, conf_bps),
+            publish_time,
+        ),
+        env.set_pyth_price_with_conf(
+            &feeds[1],
+            prices.leg1,
+            -6,
+            pyth_conf_for_bps(prices.leg1, conf_bps),
+            publish_time,
+        ),
+        env.set_pyth_price_with_conf(
+            &feeds[2],
+            prices.leg2,
+            -6,
+            pyth_conf_for_bps(prices.leg2, conf_bps),
+            publish_time,
+        ),
+    ]
+}
+
+fn run_hybrid_fresh_oracle_production_risk_trade_case(
+    asset_index: u16,
+    case: ProductionRiskTradeCase,
+    direction_sign: i128,
+) {
     let mut env = V16CuEnv::new_with_init_params(production_risk_params());
     set_test_clock(&mut env, 1, 100);
     if asset_index != 0 {
@@ -3816,11 +3990,15 @@ fn run_hybrid_fresh_oracle_production_risk_trade_case(asset_index: u16, size_q: 
         [feed_seed.wrapping_add(2); 32],
         [feed_seed.wrapping_add(3); 32],
     ];
-    let initial_leg0 = env.set_pyth_price(&feeds[0], 4_200_000_000, -6, 100);
-    let initial_leg1 = env.set_pyth_price(&feeds[1], 150_000_000, -6, 100);
-    let initial_leg2 = env.set_pyth_price(&feeds[2], 200_000_000, -6, 100);
+    let [initial_leg0, initial_leg1, initial_leg2] = set_production_risk_oracles(
+        &mut env,
+        &feeds,
+        case.oracle_prices,
+        case.oracle_conf_bps,
+        100,
+    );
     let configure_cu = env
-        .try_configure_hybrid_asset_with_cu(
+        .try_configure_hybrid_asset_with_conf_filter_cu(
             asset_index,
             3,
             ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
@@ -3831,6 +4009,7 @@ fn run_hybrid_fresh_oracle_production_risk_trade_case(asset_index: u16, size_q: 
             1,
             0,
             3,
+            case.conf_filter_bps,
         )
         .expect("configure inverted production-risk hybrid oracle");
     assert_cu_within(
@@ -3842,9 +4021,13 @@ fn run_hybrid_fresh_oracle_production_risk_trade_case(asset_index: u16, size_q: 
     let keeper = Keypair::new();
     let keeper_portfolio = env.create_portfolio(&keeper);
     set_test_clock(&mut env, 2, 101);
-    let fresh_leg0 = env.set_pyth_price(&feeds[0], 4_200_000_000, -6, 101);
-    let fresh_leg1 = env.set_pyth_price(&feeds[1], 150_000_000, -6, 101);
-    let fresh_leg2 = env.set_pyth_price(&feeds[2], 200_000_000, -6, 101);
+    let [fresh_leg0, fresh_leg1, fresh_leg2] = set_production_risk_oracles(
+        &mut env,
+        &feeds,
+        case.oracle_prices,
+        case.oracle_conf_bps,
+        101,
+    );
     let fresh_crank_cu = env.crank_with_oracle_tail(
         keeper_portfolio,
         ProgInstruction::PermissionlessCrank {
@@ -3865,6 +4048,13 @@ fn run_hybrid_fresh_oracle_production_risk_trade_case(asset_index: u16, size_q: 
     );
     let (fresh_cfg, fresh_group) = env.market_state();
     let mark = fresh_group.assets[asset_index as usize].effective_price;
+    if case.assert_sub_one_mark {
+        assert!(
+            mark < 1_000_000,
+            "{} must exercise an inverted mark below 1.0, got {mark}",
+            case.name
+        );
+    }
     if asset_index == 0 {
         assert_eq!(fresh_cfg.last_good_oracle_slot, 2);
         assert_eq!(fresh_cfg.hybrid_soft_stale_slots, 3);
@@ -3883,20 +4073,29 @@ fn run_hybrid_fresh_oracle_production_risk_trade_case(asset_index: u16, size_q: 
     );
 
     let long_owner = Keypair::new();
-    let short_owner = Keypair::new();
+    let short_owner = if case.same_owner {
+        None
+    } else {
+        Some(Keypair::new())
+    };
+    let short_owner_ref = short_owner.as_ref().unwrap_or(&long_owner);
     let long_account = env.create_portfolio(&long_owner);
-    let short_account = env.create_portfolio(&short_owner);
+    let short_account = env.create_portfolio(short_owner_ref);
+    let size_q = direction_sign
+        .checked_mul(case.size_q_abs as i128)
+        .expect("signed size");
     let notional = (mark as u128)
-        .checked_mul(size_q.unsigned_abs())
+        .checked_mul(case.size_q_abs)
         .and_then(|v| v.checked_div(POS_SCALE))
         .expect("notional");
-    let deposit_amount = notional
+    let exact_im_deposit = notional
         .checked_mul(production_risk_params().initial_margin_bps as u128)
         .and_then(|v| v.checked_add(9_999))
         .and_then(|v| v.checked_div(10_000))
         .expect("deposit");
+    let deposit_amount = case.fixed_deposit.unwrap_or(exact_im_deposit);
     env.deposit(&long_owner, long_account, deposit_amount);
-    env.deposit(&short_owner, short_account, deposit_amount);
+    env.deposit(short_owner_ref, short_account, deposit_amount);
 
     let direction = if size_q > 0 { "long" } else { "short" };
     let open_cu = env
@@ -3904,7 +4103,7 @@ fn run_hybrid_fresh_oracle_production_risk_trade_case(asset_index: u16, size_q: 
             asset_index,
             &long_owner,
             long_account,
-            &short_owner,
+            short_owner_ref,
             short_account,
             size_q,
             mark,
@@ -3912,7 +4111,8 @@ fn run_hybrid_fresh_oracle_production_risk_trade_case(asset_index: u16, size_q: 
         )
         .unwrap_or_else(|err| {
             panic!(
-                "production-risk fresh HybridMark asset[{asset_index}] {direction}-open failed at mark={mark}, deposit={deposit_amount}: {err}"
+                "production-risk fresh HybridMark {} asset[{asset_index}] {direction}-open failed at mark={mark}, deposit={deposit_amount}: {err}",
+                case.name
             )
         });
     assert_cu_within(
@@ -3935,7 +4135,7 @@ fn run_hybrid_fresh_oracle_production_risk_trade_case(asset_index: u16, size_q: 
             asset_index,
             &long_owner,
             long_account,
-            &short_owner,
+            short_owner_ref,
             short_account,
             -size_q,
             mark,
@@ -3943,7 +4143,8 @@ fn run_hybrid_fresh_oracle_production_risk_trade_case(asset_index: u16, size_q: 
         )
         .unwrap_or_else(|err| {
             panic!(
-                "production-risk fresh HybridMark asset[{asset_index}] {direction}-close failed at mark={mark}, deposit={deposit_amount}: {err}"
+                "production-risk fresh HybridMark {} asset[{asset_index}] {direction}-close failed at mark={mark}, deposit={deposit_amount}: {err}",
+                case.name
             )
         });
     assert_cu_within(
@@ -3959,8 +4160,32 @@ fn run_hybrid_fresh_oracle_production_risk_trade_case(asset_index: u16, size_q: 
 #[test]
 fn v16_bpf_hybrid_fresh_oracle_trade_production_risk_params_opens_and_closes() {
     for asset_index in [0, 1] {
-        for size_q in [POS_SCALE as i128, -(POS_SCALE as i128)] {
-            run_hybrid_fresh_oracle_production_risk_trade_case(asset_index, size_q);
+        for direction_sign in [1, -1] {
+            run_hybrid_fresh_oracle_production_risk_trade_case(
+                asset_index,
+                ProductionRiskTradeCase::baseline(),
+                direction_sign,
+            );
+        }
+    }
+}
+
+#[test]
+fn v16_bpf_hybrid_fresh_oracle_trade_devnet_difference_axes() {
+    for case in [
+        ProductionRiskTradeCase::fixed_deposit(),
+        ProductionRiskTradeCase::same_owner(),
+        ProductionRiskTradeCase::sub_one_mark(),
+        ProductionRiskTradeCase::real_conf_filter(),
+    ] {
+        for asset_index in [0, 1] {
+            for direction_sign in [1, -1] {
+                run_hybrid_fresh_oracle_production_risk_trade_case(
+                    asset_index,
+                    case,
+                    direction_sign,
+                );
+            }
         }
     }
 }
