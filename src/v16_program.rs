@@ -5975,6 +5975,60 @@ pub mod processor {
         }
     }
 
+    const DOMAIN_WITHDRAW_AUTH_INSURANCE: u8 = 0;
+    const DOMAIN_WITHDRAW_AUTH_BACKING: u8 = 1;
+
+    #[inline(never)]
+    fn verify_domain_withdrawal_preflight<'a>(
+        program_id: &Pubkey,
+        market_ai: &AccountInfo<'a>,
+        authority: &AccountInfo<'a>,
+        dest_token: &AccountInfo<'a>,
+        vault_token: &AccountInfo<'a>,
+        vault_authority_ai: &AccountInfo<'a>,
+        domain: usize,
+        amount: u128,
+        require_live_mode: bool,
+        authority_kind: u8,
+    ) -> Result<(u8, u64), ProgramError> {
+        let market_data = market_ai.try_borrow_data()?;
+        let (cfg, mode, configured_slots, _) =
+            state::read_market_config_mode_and_capacity(&market_data)?;
+        let asset_index = domain / 2;
+        if (require_live_mode && mode != MarketModeV16::Live)
+            || domain >= configured_slots.saturating_mul(2)
+            || asset_index >= configured_slots
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
+        let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
+        let local_authorized = match authority_kind {
+            DOMAIN_WITHDRAW_AUTH_INSURANCE => {
+                live_authority_matches(&authorities.insurance_operator, authority.key)
+            }
+            DOMAIN_WITHDRAW_AUTH_BACKING => {
+                live_authority_matches(&authorities.backing_bucket_authority, authority.key)
+            }
+            _ => return Err(PercolatorError::InvalidInstruction.into()),
+        };
+        if !local_authorized && !live_authority_matches(&cfg.admin, authority.key) {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
+        expect_key(vault_authority_ai, &vault_authority)?;
+        verify_withdrawable_token_accounts(
+            dest_token,
+            authority.key,
+            vault_token,
+            &vault_authority,
+            &cfg,
+        )?;
+        let amount_u64 = amount_to_u64(amount)?;
+        require_token_balance(vault_token, amount_u64)?;
+        Ok((bump, amount_u64))
+    }
+
     #[inline(never)]
     fn handle_top_up_backing_bucket<'a>(
         program_id: &Pubkey,
@@ -6116,34 +6170,18 @@ pub mod processor {
         }
 
         let domain = domain as usize;
-        let (cfg_pre, authorities_pre) = {
-            let market_data = market_ai.try_borrow_data()?;
-            let (cfg, _, configured_slots, _) =
-                state::read_market_config_mode_and_capacity(&market_data)?;
-            let asset_index = domain / 2;
-            if domain >= configured_slots.saturating_mul(2) || asset_index >= configured_slots {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
-            let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
-            let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
-            (cfg, authorities)
-        };
-        if !live_authority_matches(&authorities_pre.backing_bucket_authority, authority.key)
-            && !live_authority_matches(&cfg_pre.admin, authority.key)
-        {
-            return Err(PercolatorError::Unauthorized.into());
-        }
-        let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
-        expect_key(vault_authority_ai, &vault_authority)?;
-        verify_withdrawable_token_accounts(
+        let (bump, amount_u64) = verify_domain_withdrawal_preflight(
+            program_id,
+            market_ai,
+            authority,
             dest_token,
-            authority.key,
             vault_token,
-            &vault_authority,
-            &cfg_pre,
+            vault_authority_ai,
+            domain,
+            amount,
+            false,
+            DOMAIN_WITHDRAW_AUTH_BACKING,
         )?;
-        let amount_u64 = amount_to_u64(amount)?;
-        require_token_balance(vault_token, amount_u64)?;
 
         let backing_num = amount
             .checked_mul(BOUND_SCALE)
@@ -6325,35 +6363,18 @@ pub mod processor {
         }
 
         let domain_usize = domain as usize;
-        let (cfg_pre, authorities_pre) = {
-            let market_data = market_ai.try_borrow_data()?;
-            let (cfg, _, configured_slots, _) =
-                state::read_market_config_mode_and_capacity(&market_data)?;
-            let asset_index = domain_usize / 2;
-            if domain_usize >= configured_slots.saturating_mul(2) || asset_index >= configured_slots
-            {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
-            let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
-            let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
-            (cfg, authorities)
-        };
-        if !live_authority_matches(&authorities_pre.backing_bucket_authority, authority.key)
-            && !live_authority_matches(&cfg_pre.admin, authority.key)
-        {
-            return Err(PercolatorError::Unauthorized.into());
-        }
-        let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
-        expect_key(vault_authority_ai, &vault_authority)?;
-        verify_withdrawable_token_accounts(
+        let (bump, amount_u64) = verify_domain_withdrawal_preflight(
+            program_id,
+            market_ai,
+            authority,
             dest_token,
-            authority.key,
             vault_token,
-            &vault_authority,
-            &cfg_pre,
+            vault_authority_ai,
+            domain_usize,
+            amount,
+            false,
+            DOMAIN_WITHDRAW_AUTH_BACKING,
         )?;
-        let amount_u64 = amount_to_u64(amount)?;
-        require_token_balance(vault_token, amount_u64)?;
 
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
@@ -6638,44 +6659,26 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let domain = domain as usize;
-        let (cfg_pre, authorities) = {
-            let market_data = market_ai.try_borrow_data()?;
-            let (cfg, mode, configured_slots, _) =
-                state::read_market_config_mode_and_capacity(&market_data)?;
-            let asset_index = domain / 2;
-            if mode != MarketModeV16::Live
-                || domain >= configured_slots.saturating_mul(2)
-                || asset_index >= configured_slots
-            {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
-            let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
-            let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
-            (cfg, authorities)
-        };
-        if !live_authority_matches(&authorities.insurance_operator, operator.key)
-            && !live_authority_matches(&cfg_pre.admin, operator.key)
-        {
-            return Err(PercolatorError::Unauthorized.into());
-        }
-        let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
-        expect_key(vault_authority_ai, &vault_authority)?;
-        verify_withdrawable_token_accounts(
+        let (bump, amount_u64) = verify_domain_withdrawal_preflight(
+            program_id,
+            market_ai,
+            operator,
             dest_token,
-            operator.key,
             vault_token,
-            &vault_authority,
-            &cfg_pre,
+            vault_authority_ai,
+            domain,
+            amount,
+            true,
+            DOMAIN_WITHDRAW_AUTH_INSURANCE,
         )?;
-        let amount_u64 = amount_to_u64(amount)?;
-        require_token_balance(vault_token, amount_u64)?;
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
-            let shutdown_drain = live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain)?;
+            let shutdown_drain =
+                live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain)?;
             let local_authorized =
                 live_authority_matches(&authorities.insurance_operator, operator.key);
