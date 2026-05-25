@@ -28,6 +28,67 @@ pass the right value" as a safety assumption for a public instruction. If a
 public API needs an oracle price, it must consume an authenticated oracle state
 or an authority-gated oracle update, not a caller-supplied price-like argument.
 
+## Twenty-fifth pass — permissionless market shutdown/reuse lifecycle
+
+**Status:** PASS_SAFE. Added an end-to-end regression for the lifecycle where a
+permissionless creator pays the market-init fee, opens an isolated secondary
+market, users abandon positions, the base market admin shuts the asset down,
+the timeout gates public cleanup, asset-domain funds are recovered into market
+0 buckets, the asset slot is retired, and the same index is reused with a fresh
+monotonic market id.
+
+Target invariant:
+
+```text
+After an admin freezes a nonzero asset into shutdown Recovery, users keep a
+configured exit window. Before that window elapses, permissionless abandoned
+cleanup rejects without mutation. After the timeout, any cranker can close
+remaining opposite-side abandoned exposure at the frozen shutdown mark, without
+caller-priced liquidation or health-state assumptions. Once local exposure and
+asset-domain balances are empty, admin can retire the slot and permissionless
+reactivation must assign a new market_id before that index can host a new
+market.
+```
+
+API-by-API disposition:
+
+- PASS 1: permissionless activation requires the configured init fee, accepts
+  only the primary collateral mint, credits the fee into market 0 insurance
+  domains, and installs asset-local insurance/backing/oracle authorities.
+- PASS 2: `UpdateAssetLifecycle(action=SHUTDOWN)` is base-admin-only, rejects
+  market 0, requires a nonzero force-close delay, freezes to the stored
+  effective mark, and stamps shutdown liveness into the asset profile.
+- PASS 3: the timeout is real: owner-signed risk-reducing trades remain
+  available during the window, while `ForceCloseAbandonedAsset` before
+  `force_close_delay_slots` rejects and leaves both portfolios plus market state
+  unchanged.
+- PASS 4: post-timeout abandoned cleanup is public but not caller-priced.
+  `ForceCloseAbandonedAsset` requires a cranker signer, two distinct writable
+  portfolios, opposite-side active legs for the shutdown asset, matching current
+  market ids, and uses only the frozen shutdown mark.
+- PASS 5: the forced close path is not health-gated, so it can close abandoned
+  opposite-side positions whether or not they are liquidatable from a margin
+  perspective. The portfolios must still validate against the current market;
+  the path cannot invent a counterparty or close unrelated/stale-market legs.
+- PASS 6: after all exposure is gone, the base admin can drain the shutdown
+  asset's domain insurance and backing buckets, then re-deposit those recovered
+  funds into market 0 insurance/backing buckets through the ordinary top-up
+  custody paths.
+- PASS 7: retire requires the shutdown timeout and empty asset lifecycle state,
+  including zero local insurance domains and zero local backing buckets.
+- PASS 8: reactivation of the retired index by a permissionless creator consumes
+  the free slot before append, charges a new init fee, resets local domain
+  state, and assigns `group.next_market_id`; stale legs from the old market id
+  cannot bind to the reused slot.
+
+Regression coverage added:
+
+```bash
+cargo test --test v16_wrapper \
+  v16_wrapper_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot \
+  -- --exact
+```
+
 ## Twenty-fourth pass — asset shutdown public-API sweep
 
 **Status:** PASS_SAFE. Re-walked the public API surface after adding
