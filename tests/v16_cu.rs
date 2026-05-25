@@ -1,11 +1,13 @@
 use litesvm::LiteSVM;
 use percolator::{
-    AssetLifecycleV16, BackingBucketStatusV16, TradeRequestV16, BOUND_SCALE, POS_SCALE,
+    AssetLifecycleV16, BackingBucketStatusV16, CloseProgressLedgerV16, MarketGroupV16,
+    MarketModeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16, ResolvedPayoutLedgerV16,
+    ResolvedPayoutReceiptV16, SideModeV16, SideV16, TradeRequestV16, BOUND_SCALE, POS_SCALE,
 };
 use percolator_prog::{
     constants::{MATCHER_ABI_VERSION, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3},
     ix::Instruction as ProgInstruction,
-    oracle_v16, state,
+    oracle_v16, processor, state,
 };
 use solana_sdk::{
     account::Account,
@@ -458,6 +460,147 @@ impl V16CuEnv {
         .expect("update asset lifecycle as admin")
     }
 
+    fn update_liquidation_fee_policy_with_cu(&mut self, cranker_share_bps: u16) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::UpdateLiquidationFeePolicy { cranker_share_bps },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("update liquidation fee policy")
+    }
+
+    fn update_backing_fee_policy_with_cu(
+        &mut self,
+        domain: u8,
+        fee_bps: u16,
+        insurance_share_bps: u16,
+    ) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::UpdateBackingFeePolicy {
+                domain,
+                fee_bps,
+                insurance_share_bps,
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("update backing fee policy")
+    }
+
+    fn update_trade_fee_policy_with_cu(&mut self, trade_fee_base_bps: u64) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::UpdateTradeFeePolicy { trade_fee_base_bps },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("update trade fee policy")
+    }
+
+    fn update_fee_redirect_policy_with_cu(&mut self, redirect_bps: u16) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("update fee redirect policy")
+    }
+
+    fn update_asset_authority_with_cu(&mut self, new_authority: &Keypair) -> u64 {
+        self.ensure_signer_account(new_authority.pubkey());
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::UpdateAuthority {
+                kind: processor::AUTHORITY_ASSET,
+                new_pubkey: new_authority.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(new_authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin, new_authority],
+        )
+        .expect("update asset authority")
+    }
+
+    fn update_base_unit_mints_with_cu(
+        &mut self,
+        primary_mint: Pubkey,
+        secondary_mint: Pubkey,
+    ) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::UpdateBaseUnitMints {
+                primary_mint: primary_mint.to_bytes(),
+                secondary_mint: secondary_mint.to_bytes(),
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new_readonly(primary_mint, false),
+                AccountMeta::new_readonly(secondary_mint, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("update base unit mints")
+    }
+
+    fn swap_secondary_for_primary_with_cu(
+        &mut self,
+        primary_source: Pubkey,
+        primary_vault: Pubkey,
+        secondary_dest: Pubkey,
+        secondary_vault: Pubkey,
+        amount: u128,
+    ) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::SwapSecondaryForPrimary { amount },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new_readonly(self.market, false),
+                AccountMeta::new(primary_source, false),
+                AccountMeta::new(primary_vault, false),
+                AccountMeta::new(secondary_dest, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("swap secondary for primary")
+    }
+
     fn token_account(&mut self, owner: Pubkey, amount: u64) -> Pubkey {
         let token = Pubkey::new_unique();
         self.svm
@@ -479,6 +622,139 @@ impl V16CuEnv {
         if self.svm.get_account(&key).is_none() {
             self.svm.airdrop(&key, 1_000_000_000).unwrap();
         }
+    }
+
+    fn create_mint(&mut self) -> Pubkey {
+        let mint = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                mint,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_mint_data(),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        mint
+    }
+
+    fn token_account_for_mint(&mut self, mint: Pubkey, owner: Pubkey, amount: u64) -> Pubkey {
+        let token = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                token,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(mint, owner, amount),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        token
+    }
+
+    fn program_account(&mut self, data_len: usize) -> Pubkey {
+        let key = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: vec![0u8; data_len],
+                    owner: self.program_id,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        key
+    }
+
+    fn backing_domain_ledger_account(&mut self) -> Pubkey {
+        self.program_account(state::backing_domain_ledger_account_len())
+    }
+
+    fn insurance_ledger_account(&mut self) -> Pubkey {
+        self.program_account(state::insurance_ledger_account_len())
+    }
+
+    fn set_token_account_amount(
+        &mut self,
+        token: Pubkey,
+        mint: Pubkey,
+        owner: Pubkey,
+        amount: u64,
+    ) {
+        let mut account = self.svm.get_account(&token).expect("token account");
+        account.data = make_token_data(mint, owner, amount);
+        account.owner = spl_token::ID;
+        self.svm.set_account(token, account).unwrap();
+    }
+
+    fn market_state(&self) -> (state::WrapperConfigV16, MarketGroupV16) {
+        let account = self.svm.get_account(&self.market).expect("market account");
+        state::read_market(&account.data).unwrap()
+    }
+
+    fn portfolio_state(&self, portfolio: Pubkey) -> PortfolioAccountV16 {
+        let account = self.svm.get_account(&portfolio).expect("portfolio account");
+        state::read_portfolio(&account.data).unwrap()
+    }
+
+    fn mutate_market<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut state::WrapperConfigV16, &mut MarketGroupV16),
+    {
+        let mut account = self.svm.get_account(&self.market).expect("market account");
+        let (mut cfg, mut group) = state::read_market(&account.data).unwrap();
+        f(&mut cfg, &mut group);
+        state::write_market(&mut account.data, &cfg, &group).unwrap();
+        self.svm.set_account(self.market, account).unwrap();
+    }
+
+    fn add_source_positive_pnl(&mut self, portfolio: Pubkey, domain: usize, amount: u128) {
+        let mut market_account = self.svm.get_account(&self.market).expect("market account");
+        let mut portfolio_account = self.svm.get_account(&portfolio).expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group
+            .add_account_source_positive_pnl_not_atomic(&mut account, domain, amount)
+            .unwrap();
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        self.svm.set_account(self.market, market_account).unwrap();
+        self.svm.set_account(portfolio, portfolio_account).unwrap();
+    }
+
+    fn seed_cancellable_close_progress(&mut self, portfolio: Pubkey) {
+        let mut market_account = self.svm.get_account(&self.market).expect("market account");
+        let mut portfolio_account = self.svm.get_account(&portfolio).expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        account.close_progress = CloseProgressLedgerV16 {
+            active: true,
+            finalized: false,
+            canceled: false,
+            close_id: 1,
+            asset_index: 0,
+            market_id: group.assets[0].market_id,
+            domain_side: SideV16::Long,
+            gross_loss_at_close_start: 10,
+            drift_reference_slot: 0,
+            max_close_slot: 10,
+            residual_remaining: 10,
+            ..CloseProgressLedgerV16::EMPTY
+        };
+        group.pending_domain_loss_barriers[0] = 1;
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        self.svm.set_account(self.market, market_account).unwrap();
+        self.svm.set_account(portfolio, portfolio_account).unwrap();
     }
 
     fn activate_permissionless_asset_with_fee(
@@ -1312,6 +1588,43 @@ impl V16CuEnv {
         (source, cu)
     }
 
+    fn top_up_insurance_with_ledger_with_cu(
+        &mut self,
+        ledger: Pubkey,
+        amount: u128,
+    ) -> (Pubkey, u64) {
+        let source = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                source,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(self.mint, self.admin.pubkey(), amount as u64),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let cu = send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::TopUpInsurance { amount },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("top up insurance with ledger");
+        (source, cu)
+    }
+
     fn top_up_insurance_domain_with_authority_and_cu(
         &mut self,
         authority: &Keypair,
@@ -1388,6 +1701,49 @@ impl V16CuEnv {
             &[&self.admin],
         )
         .expect("top up backing bucket");
+        (source, cu)
+    }
+
+    fn top_up_backing_bucket_with_ledger_with_cu(
+        &mut self,
+        ledger: Pubkey,
+        domain: u8,
+        amount: u128,
+        expiry_slot: u64,
+    ) -> (Pubkey, u64) {
+        let source = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                source,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(self.mint, self.admin.pubkey(), amount as u64),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let cu = send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::TopUpBackingBucket {
+                domain,
+                amount,
+                expiry_slot,
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("top up backing bucket with ledger");
         (source, cu)
     }
 
@@ -1503,6 +1859,64 @@ impl V16CuEnv {
         .expect("withdraw backing bucket to admin token")
     }
 
+    fn sync_backing_domain_ledger_with_cu(&mut self, ledger: Pubkey, domain: u8) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::SyncBackingDomainLedger { domain },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("sync backing domain ledger")
+    }
+
+    fn withdraw_backing_bucket_earnings_to_admin_token_with_cu(
+        &mut self,
+        ledger: Pubkey,
+        dest: Pubkey,
+        domain: u8,
+        amount: u128,
+    ) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::WithdrawBackingBucketEarnings { domain, amount },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(ledger, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("withdraw backing bucket earnings")
+    }
+
+    fn sync_insurance_ledger_with_cu(&mut self, ledger: Pubkey) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::SyncInsuranceLedger,
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("sync insurance ledger")
+    }
+
     fn try_withdraw_insurance_domain_with_authority(
         &mut self,
         authority: &Keypair,
@@ -1580,6 +1994,138 @@ impl V16CuEnv {
     fn token_amount(&self, key: Pubkey) -> u64 {
         let account = self.svm.get_account(&key).expect("token account");
         TokenAccount::unpack(&account.data).unwrap().amount
+    }
+
+    fn convert_released_pnl_with_cu(
+        &mut self,
+        owner: &Keypair,
+        portfolio: Pubkey,
+        amount: u128,
+    ) -> u64 {
+        self.send(
+            ProgInstruction::ConvertReleasedPnl { amount },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[owner],
+        )
+        .expect("convert released pnl")
+    }
+
+    fn cure_and_cancel_close_with_cu(
+        &mut self,
+        owner: &Keypair,
+        portfolio: Pubkey,
+        source: Pubkey,
+        amount: u128,
+    ) -> u64 {
+        self.send(
+            ProgInstruction::CureAndCancelClose {
+                optional_deposit: amount,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[owner],
+        )
+        .expect("cure and cancel close")
+    }
+
+    fn forfeit_recovery_leg_with_cu(
+        &mut self,
+        owner: &Keypair,
+        portfolio: Pubkey,
+        asset_index: u16,
+        b_delta_budget: u128,
+    ) -> u64 {
+        self.send(
+            ProgInstruction::ForfeitRecoveryLeg {
+                asset_index,
+                b_delta_budget,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[owner],
+        )
+        .expect("forfeit recovery leg")
+    }
+
+    fn rebalance_reduce_with_cu(
+        &mut self,
+        owner: &Keypair,
+        portfolio: Pubkey,
+        asset_index: u16,
+        reduce_q: u128,
+    ) -> u64 {
+        self.send(
+            ProgInstruction::RebalanceReduce {
+                asset_index,
+                reduce_q,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[owner],
+        )
+        .expect("rebalance reduce")
+    }
+
+    fn finalize_reset_side_with_cu(&mut self, asset_index: u16, side: u8) -> u64 {
+        self.send(
+            ProgInstruction::FinalizeResetSide { asset_index, side },
+            vec![AccountMeta::new(self.market, false)],
+            &[],
+        )
+        .expect("finalize reset side")
+    }
+
+    fn claim_resolved_payout_topup_with_cu(
+        &mut self,
+        owner: Pubkey,
+        portfolio: Pubkey,
+        dest: Pubkey,
+    ) -> u64 {
+        self.send(
+            ProgInstruction::ClaimResolvedPayoutTopup,
+            vec![
+                AccountMeta::new_readonly(owner, false),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("claim resolved payout topup")
+    }
+
+    fn refine_resolved_unreceipted_bound_with_cu(&mut self, decrease_num: u128) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::RefineResolvedUnreceiptedBound { decrease_num },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("refine resolved unreceipted bound")
     }
 
     fn crank(&mut self, portfolio: Pubkey, ix: ProgInstruction) -> u64 {
@@ -1706,6 +2252,13 @@ fn send_raw_tx(
     svm.send_transaction(tx)
         .map(|meta| meta.compute_units_consumed)
         .map_err(|e| format!("{e:?}"))
+}
+
+fn assert_cu_within(label: &str, cu: u64, limit: u64) {
+    assert!(
+        cu <= limit,
+        "{label} consumed {cu} CU, above the {limit} CU guardrail"
+    );
 }
 
 #[test]
@@ -2997,5 +3550,390 @@ fn v16_cu_crank_cost_is_account_local_after_many_portfolios() {
     assert!(
         after_extra.saturating_sub(before_extra) < 10_000,
         "v16 crank should stay account-local rather than scaling with materialized portfolio count"
+    );
+}
+
+#[test]
+fn v16_bpf_policy_authority_and_base_unit_tags_are_bounded_and_persist() {
+    let mut env = V16CuEnv::new();
+
+    let liquidation_cu = env.update_liquidation_fee_policy_with_cu(1_234);
+    assert_cu_within(
+        "UpdateLiquidationFeePolicy",
+        liquidation_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (cfg, _) = env.market_state();
+    assert_eq!(cfg.liquidation_cranker_fee_share_bps, 1_234);
+
+    let backing_cu = env.update_backing_fee_policy_with_cu(0, 77, 5_000);
+    assert_cu_within("UpdateBackingFeePolicy", backing_cu, CUSTODY_CU_LIMIT);
+    let (cfg, _) = env.market_state();
+    assert_eq!(cfg.backing_trade_fee_bps_long, 77);
+    assert_eq!(cfg.backing_trade_fee_insurance_share_bps_long, 5_000);
+    assert_eq!(cfg.backing_trade_fee_policy_count, 1);
+
+    let trade_fee_cu = env.update_trade_fee_policy_with_cu(88);
+    assert_cu_within("UpdateTradeFeePolicy", trade_fee_cu, CUSTODY_CU_LIMIT);
+    let (cfg, _) = env.market_state();
+    assert_eq!(cfg.trade_fee_base_bps, 88);
+
+    let redirect_cu = env.update_fee_redirect_policy_with_cu(2_500);
+    assert_cu_within("UpdateFeeRedirectPolicy", redirect_cu, CUSTODY_CU_LIMIT);
+    let (cfg, _) = env.market_state();
+    assert_eq!(cfg.fee_redirect_to_market_0_bps, 2_500);
+
+    let secondary_mint = env.create_mint();
+    let base_unit_cu = env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    assert_cu_within("UpdateBaseUnitMints", base_unit_cu, CUSTODY_CU_LIMIT);
+    let (cfg, _) = env.market_state();
+    assert_eq!(cfg.collateral_mint, env.mint.to_bytes());
+    assert_eq!(cfg.secondary_collateral_mint, secondary_mint.to_bytes());
+
+    let primary_source = env.token_account_for_mint(env.mint, env.admin.pubkey(), 50);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, env.admin.pubkey(), 0);
+    let secondary_vault = env.token_account_for_mint(secondary_mint, env.vault_authority, 50);
+    let before_swap_market = env.svm.get_account(&env.market).unwrap().data;
+    let swap_cu = env.swap_secondary_for_primary_with_cu(
+        primary_source,
+        env.vault,
+        secondary_dest,
+        secondary_vault,
+        50,
+    );
+    assert_cu_within("SwapSecondaryForPrimary", swap_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(primary_source), 0);
+    assert_eq!(env.token_amount(env.vault), 50);
+    assert_eq!(env.token_amount(secondary_dest), 50);
+    assert_eq!(env.token_amount(secondary_vault), 0);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before_swap_market,
+        "base-unit swap must only move SPL custody"
+    );
+
+    let new_asset_authority = Keypair::new();
+    let authority_cu = env.update_asset_authority_with_cu(&new_asset_authority);
+    assert_cu_within("UpdateAuthority", authority_cu, CUSTODY_CU_LIMIT);
+    let (cfg, _) = env.market_state();
+    assert_eq!(cfg.asset_authority, new_asset_authority.pubkey().to_bytes());
+}
+
+#[test]
+fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    let (backing_source, top_up_cu) =
+        env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10);
+    assert_cu_within(
+        "TopUpBackingBucket ledger init",
+        top_up_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(backing_source), 0);
+
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].utilization_fee_earnings = 30;
+        group.vault += 30;
+    });
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 130);
+
+    let sync_cu = env.sync_backing_domain_ledger_with_cu(ledger, 1);
+    assert_cu_within("SyncBackingDomainLedger", sync_cu, CUSTODY_CU_LIMIT);
+    let ledger_data = env.svm.get_account(&ledger).unwrap().data;
+    let ledger_state = state::read_backing_domain_ledger(&ledger_data).unwrap();
+    assert_eq!(ledger_state.total_principal_atoms, 100);
+    assert_eq!(ledger_state.last_observed_bucket_earnings_atoms, 30);
+    assert_eq!(ledger_state.total_earnings_atoms, 30);
+
+    let dest = env.token_account_for_mint(env.mint, env.admin.pubkey(), 0);
+    let withdraw_earnings_cu =
+        env.withdraw_backing_bucket_earnings_to_admin_token_with_cu(ledger, dest, 1, 20);
+    assert_cu_within(
+        "WithdrawBackingBucketEarnings",
+        withdraw_earnings_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), 20);
+    let ledger_data = env.svm.get_account(&ledger).unwrap().data;
+    let ledger_state = state::read_backing_domain_ledger(&ledger_data).unwrap();
+    let (_, group) = env.market_state();
+    assert_eq!(ledger_state.total_earnings_withdrawn_atoms, 20);
+    assert_eq!(ledger_state.last_observed_bucket_earnings_atoms, 10);
+    assert_eq!(group.source_backing_buckets[1].utilization_fee_earnings, 10);
+    assert_eq!(group.vault, 110);
+
+    let mut pnl_env = V16CuEnv::new();
+    let pnl_ledger = pnl_env.backing_domain_ledger_account();
+    pnl_env.top_up_backing_bucket_with_ledger_with_cu(pnl_ledger, 1, 40, 10);
+    let owner = Keypair::new();
+    let portfolio = pnl_env.create_portfolio(&owner);
+    pnl_env.add_source_positive_pnl(portfolio, 1, 40);
+    pnl_env.crank(
+        portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 0,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    let convert_cu = pnl_env.convert_released_pnl_with_cu(&owner, portfolio, 40);
+    assert_cu_within("ConvertReleasedPnl", convert_cu, CUSTODY_CU_LIMIT);
+    let account = pnl_env.portfolio_state(portfolio);
+    assert_eq!(account.capital, 40);
+    pnl_env.sync_backing_domain_ledger_with_cu(pnl_ledger, 1);
+    let ledger_data = pnl_env.svm.get_account(&pnl_ledger).unwrap().data;
+    let ledger_state = state::read_backing_domain_ledger(&ledger_data).unwrap();
+    assert_eq!(ledger_state.cumulative_loss_atoms, 40);
+    assert_eq!(ledger_state.last_observed_unavailable_principal_atoms, 40);
+
+    let mut insurance_env = V16CuEnv::new();
+    let insurance_ledger = insurance_env.insurance_ledger_account();
+    let (_, insurance_top_up_cu) =
+        insurance_env.top_up_insurance_with_ledger_with_cu(insurance_ledger, 100);
+    assert_cu_within(
+        "TopUpInsurance ledger init",
+        insurance_top_up_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let init_cu = insurance_env.sync_insurance_ledger_with_cu(insurance_ledger);
+    assert_cu_within("SyncInsuranceLedger init", init_cu, CUSTODY_CU_LIMIT);
+    let ledger_data = insurance_env
+        .svm
+        .get_account(&insurance_ledger)
+        .unwrap()
+        .data;
+    let ledger_state = state::read_insurance_ledger(&ledger_data).unwrap();
+    assert_eq!(ledger_state.total_principal_atoms, 100);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 100);
+
+    insurance_env.mutate_market(|_, group| {
+        group.insurance += 30;
+        group.vault += 30;
+        group.insurance_domain_budget[0] += 15;
+        group.insurance_domain_budget[1] += 15;
+    });
+    insurance_env.svm.expire_blockhash();
+    let profit_cu = insurance_env.sync_insurance_ledger_with_cu(insurance_ledger);
+    assert_cu_within("SyncInsuranceLedger profit", profit_cu, CUSTODY_CU_LIMIT);
+    let ledger_data = insurance_env
+        .svm
+        .get_account(&insurance_ledger)
+        .unwrap()
+        .data;
+    let ledger_state = state::read_insurance_ledger(&ledger_data).unwrap();
+    assert_eq!(ledger_state.cumulative_profit_atoms, 30);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 130);
+
+    insurance_env.mutate_market(|_, group| {
+        group.insurance -= 20;
+        group.vault -= 20;
+        group.insurance_domain_budget[0] -= 10;
+        group.insurance_domain_budget[1] -= 10;
+    });
+    insurance_env.svm.expire_blockhash();
+    let loss_cu = insurance_env.sync_insurance_ledger_with_cu(insurance_ledger);
+    assert_cu_within("SyncInsuranceLedger loss", loss_cu, CUSTODY_CU_LIMIT);
+    let ledger_data = insurance_env
+        .svm
+        .get_account(&insurance_ledger)
+        .unwrap()
+        .data;
+    let ledger_state = state::read_insurance_ledger(&ledger_data).unwrap();
+    assert_eq!(ledger_state.cumulative_loss_atoms, 20);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 110);
+}
+
+#[test]
+fn v16_bpf_recovery_and_reset_tags_are_bounded_and_update_state() {
+    let mut reduce_env = V16CuEnv::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = reduce_env.create_portfolio(&long_owner);
+    let short_account = reduce_env.create_portfolio(&short_owner);
+    reduce_env.deposit(&long_owner, long_account, 10_000);
+    reduce_env.deposit(&short_owner, short_account, 10_000);
+    reduce_env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (2 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    let reduce_cu = reduce_env.rebalance_reduce_with_cu(&long_owner, long_account, 0, POS_SCALE);
+    assert_cu_within("RebalanceReduce", reduce_cu, CUSTODY_CU_LIMIT);
+    let (_, group) = reduce_env.market_state();
+    let long = reduce_env.portfolio_state(long_account);
+    assert_eq!(long.legs[0].basis_pos_q, POS_SCALE as i128);
+    assert_eq!(group.assets[0].oi_eff_long_q, POS_SCALE);
+
+    let mut forfeit_env = V16CuEnv::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = forfeit_env.create_portfolio(&long_owner);
+    let short_account = forfeit_env.create_portfolio(&short_owner);
+    forfeit_env.deposit(&long_owner, long_account, 10_000);
+    forfeit_env.deposit(&short_owner, short_account, 10_000);
+    forfeit_env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    forfeit_env.mutate_market(|_, group| {
+        group.mode = MarketModeV16::Recovery;
+        group.recovery_reason = Some(PermissionlessRecoveryReasonV16::BelowProgressFloor);
+    });
+    let forfeit_cu = forfeit_env.forfeit_recovery_leg_with_cu(&long_owner, long_account, 0, 1);
+    assert_cu_within("ForfeitRecoveryLeg", forfeit_cu, CUSTODY_CU_LIMIT);
+    let (_, group) = forfeit_env.market_state();
+    let long = forfeit_env.portfolio_state(long_account);
+    assert!(percolator::active_bitmap_is_empty(long.active_bitmap));
+    assert_eq!(long.legs[0].basis_pos_q, 0);
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+
+    let mut cure_env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = cure_env.create_portfolio(&owner);
+    cure_env.seed_cancellable_close_progress(portfolio);
+    let source = cure_env.token_account_for_mint(cure_env.mint, owner.pubkey(), 20);
+    let cure_cu = cure_env.cure_and_cancel_close_with_cu(&owner, portfolio, source, 20);
+    assert_cu_within("CureAndCancelClose", cure_cu, CUSTODY_CU_LIMIT);
+    let (_, group) = cure_env.market_state();
+    let account = cure_env.portfolio_state(portfolio);
+    assert!(account.close_progress.canceled);
+    assert_eq!(account.capital, 20);
+    assert_eq!(group.c_tot, 20);
+    assert_eq!(group.vault, 20);
+    assert_eq!(group.pending_domain_loss_barriers[0], 0);
+    assert_eq!(cure_env.token_amount(source), 0);
+    assert_eq!(cure_env.token_amount(cure_env.vault), 20);
+
+    let mut reset_env = V16CuEnv::new();
+    reset_env.mutate_market(|_, group| {
+        group.assets[0].mode_long = SideModeV16::ResetPending;
+    });
+    let reset_cu = reset_env.finalize_reset_side_with_cu(0, 0);
+    assert_cu_within("FinalizeResetSide", reset_cu, CUSTODY_CU_LIMIT);
+    let (_, group) = reset_env.market_state();
+    assert_eq!(group.assets[0].mode_long, SideModeV16::Normal);
+}
+
+#[test]
+fn v16_bpf_resolved_payout_tags_are_bounded_and_update_state() {
+    let mut claim_env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = claim_env.create_portfolio(&owner);
+    {
+        let mut market_account = claim_env
+            .svm
+            .get_account(&claim_env.market)
+            .expect("market account");
+        let mut portfolio_account = claim_env
+            .svm
+            .get_account(&portfolio)
+            .expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 100 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 100,
+            paid_effective: 40,
+            finalized: false,
+        };
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        claim_env
+            .svm
+            .set_account(claim_env.market, market_account)
+            .unwrap();
+        claim_env
+            .svm
+            .set_account(portfolio, portfolio_account)
+            .unwrap();
+    }
+    claim_env.set_token_account_amount(
+        claim_env.vault,
+        claim_env.mint,
+        claim_env.vault_authority,
+        60,
+    );
+    let dest = claim_env.token_account_for_mint(claim_env.mint, owner.pubkey(), 0);
+    let claim_cu = claim_env.claim_resolved_payout_topup_with_cu(owner.pubkey(), portfolio, dest);
+    assert_cu_within("ClaimResolvedPayoutTopup", claim_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(claim_env.token_amount(dest), 60);
+    assert_eq!(claim_env.token_amount(claim_env.vault), 0);
+    let (_, group) = claim_env.market_state();
+    let account = claim_env.portfolio_state(portfolio);
+    assert_eq!(group.vault, 0);
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
+    assert!(account.resolved_payout_receipt.finalized);
+
+    let mut refine_env = V16CuEnv::new();
+    refine_env.mutate_market(|_, group| {
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 0,
+            terminal_claim_bound_unreceipted_num: 100 * BOUND_SCALE,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+    });
+    let refine_cu = refine_env.refine_resolved_unreceipted_bound_with_cu(10 * BOUND_SCALE);
+    assert_cu_within(
+        "RefineResolvedUnreceiptedBound",
+        refine_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (_, group) = refine_env.market_state();
+    assert_eq!(
+        group
+            .resolved_payout_ledger
+            .terminal_claim_bound_unreceipted_num,
+        90 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.resolved_payout_ledger.current_payout_rate_num,
+        90 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.resolved_payout_ledger.current_payout_rate_den,
+        90 * BOUND_SCALE
     );
 }
