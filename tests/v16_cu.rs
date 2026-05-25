@@ -3033,6 +3033,91 @@ fn v16_bpf_tradenocpi_fresh_open_on_base_and_added_asset_is_bounded() {
 }
 
 #[test]
+fn v16_bpf_stale_asset_does_not_block_current_unrelated_trade() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+
+    let cranker_owner = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.svm.warp_to_slot(3);
+
+    for nonce in 0..3 {
+        env.crank(
+            cranker_portfolio,
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: 3 + nonce,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+        );
+    }
+
+    env.crank(
+        cranker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: 3,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+
+    let (_, group) = env.market_state();
+    assert_eq!(group.current_slot, 3);
+    assert_eq!(group.assets[0].slot_last, 3);
+    assert!(group.assets[1].slot_last < group.current_slot);
+    assert!(
+        group.loss_stale_active,
+        "asset[1] partial catch-up must leave the market loss-stale bit set"
+    );
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000_000);
+
+    let trade_cu = env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    println!("v16 TradeNoCpi current asset[0] with stale asset[1] CU: {trade_cu}");
+    assert_cu_within(
+        "TradeNoCpi current asset[0] with unrelated stale asset[1]",
+        trade_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.assets[0].slot_last, 3);
+    assert!(group_after.assets[1].slot_last < group_after.current_slot);
+    assert!(
+        group_after.loss_stale_active,
+        "unrelated trade must not hide the stale asset state"
+    );
+
+    let long = env.portfolio_state(long_account);
+    let short = env.portfolio_state(short_account);
+    assert!(has_active_leg_for_asset(&long, 0));
+    assert!(has_active_leg_for_asset(&short, 0));
+    assert!(!has_active_leg_for_asset(&long, 1));
+    assert!(!has_active_leg_for_asset(&short, 1));
+}
+
+#[test]
 fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 58,

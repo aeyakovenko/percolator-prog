@@ -4988,6 +4988,18 @@ pub mod processor {
                     source_counterparty_backing_snapshot_view(&account_b)?,
                 ))
             };
+            // The engine stores loss-stale as a market-wide bit; isolate it to
+            // trades and accounts that actually depend on stale assets.
+            let restore_loss_stale_active = group.header.loss_stale_active;
+            let ignore_unrelated_loss_stale = can_ignore_unrelated_loss_stale_for_trade_view(
+                &group,
+                &account_a,
+                &account_b,
+                asset_index as usize,
+            )?;
+            if ignore_unrelated_loss_stale {
+                group.header.loss_stale_active = 0;
+            }
             let outcome = if size_q > 0 {
                 group
                     .execute_trade_with_fee_in_place_not_atomic(&mut account_a, &mut account_b, req)
@@ -4997,6 +5009,9 @@ pub mod processor {
                     .execute_trade_with_fee_in_place_not_atomic(&mut account_b, &mut account_a, req)
                     .map_err(map_v16_error)?
             };
+            if ignore_unrelated_loss_stale {
+                group.header.loss_stale_active = restore_loss_stale_active;
+            }
             let backing_domain_fee =
                 if let Some((backing_before_a, backing_before_b)) = backing_before {
                     apply_backing_domain_fees_after_trade_view(
@@ -5109,6 +5124,54 @@ pub mod processor {
             slot += 1;
         }
         found.ok_or(PercolatorError::EngineInvalidLeg.into())
+    }
+
+    fn asset_loss_stale_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> Result<bool, ProgramError> {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        Ok(group.markets[asset_index].engine.asset.slot_last.get()
+            < group.header.current_slot.get())
+    }
+
+    fn account_has_loss_stale_asset_exposure_view(
+        group: &state::MarketViewMutV16<'_>,
+        account: &percolator::PortfolioV16ViewMut<'_>,
+    ) -> Result<bool, ProgramError> {
+        let mut slot = 0usize;
+        while slot < account.header.legs.len() {
+            let leg = account.header.legs[slot]
+                .try_to_runtime()
+                .map_err(map_v16_error)?;
+            if leg.active && asset_loss_stale_view(group, leg.asset_index as usize)? {
+                return Ok(true);
+            }
+            slot += 1;
+        }
+        Ok(false)
+    }
+
+    fn can_ignore_unrelated_loss_stale_for_trade_view(
+        group: &state::MarketViewMutV16<'_>,
+        account_a: &percolator::PortfolioV16ViewMut<'_>,
+        account_b: &percolator::PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> Result<bool, ProgramError> {
+        if group.header.loss_stale_active == 0 {
+            return Ok(false);
+        }
+        if asset_loss_stale_view(group, asset_index)?
+            || account_has_loss_stale_asset_exposure_view(group, account_a)?
+            || account_has_loss_stale_asset_exposure_view(group, account_b)?
+        {
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     #[inline(never)]
