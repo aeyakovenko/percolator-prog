@@ -860,6 +860,31 @@ impl V16CuEnv {
         exec_price: u64,
         fee_bps: u64,
     ) -> u64 {
+        self.try_trade_asset_with_cu(
+            asset_index,
+            owner_a,
+            account_a,
+            owner_b,
+            account_b,
+            size_q,
+            exec_price,
+            fee_bps,
+        )
+        .expect("trade")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_trade_asset_with_cu(
+        &mut self,
+        asset_index: u16,
+        owner_a: &Keypair,
+        account_a: Pubkey,
+        owner_b: &Keypair,
+        account_b: Pubkey,
+        size_q: i128,
+        exec_price: u64,
+        fee_bps: u64,
+    ) -> Result<u64, String> {
         self.send(
             ProgInstruction::TradeNoCpi {
                 asset_index,
@@ -876,7 +901,6 @@ impl V16CuEnv {
             ],
             &[owner_a, owner_b],
         )
-        .expect("trade")
     }
 
     fn update_maintenance_fee_policy_with_cu(&mut self, cranker_share_bps: u16) -> u64 {
@@ -1352,6 +1376,54 @@ impl V16CuEnv {
                 AccountMeta::new_readonly(leg1, false),
                 AccountMeta::new_readonly(leg2, false),
             ],
+            &[&self.admin],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_configure_hybrid_with_cu(
+        &mut self,
+        oracle_leg_count: u8,
+        oracle_leg_flags: u8,
+        feeds: [[u8; 32]; 3],
+        oracle_accounts: &[Pubkey],
+        now_slot: u64,
+        now_unix_ts: i64,
+        invert: u8,
+        unit_scale: u32,
+        hybrid_soft_stale_slots: u64,
+    ) -> Result<u64, String> {
+        let mut accounts = vec![
+            AccountMeta::new(self.admin.pubkey(), true),
+            AccountMeta::new(self.market, false),
+        ];
+        accounts.extend(
+            oracle_accounts
+                .iter()
+                .take(oracle_leg_count as usize)
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::ConfigureHybridOracle {
+                asset_index: 0,
+                now_slot,
+                now_unix_ts,
+                oracle_leg_count,
+                oracle_leg_flags,
+                max_staleness_secs: 60,
+                hybrid_soft_stale_slots,
+                mark_ewma_halflife_slots: 1,
+                mark_min_fee: 0,
+                invert,
+                unit_scale,
+                conf_filter_bps: 500,
+                oracle_leg_feeds: feeds,
+            },
+            accounts,
             &[&self.admin],
         )
     }
@@ -3434,6 +3506,187 @@ fn v16_bpf_configure_hybrid_oracle_uses_authenticated_unix_time_not_caller_time(
         after, before,
         "rejected stale-oracle configuration must not mutate the market"
     );
+}
+
+fn set_test_clock(env: &mut V16CuEnv, slot: u64, unix_timestamp: i64) {
+    env.svm.warp_to_slot(slot);
+    let mut clock = env.svm.get_sysvar::<Clock>();
+    clock.unix_timestamp = unix_timestamp;
+    env.svm.set_sysvar(&clock);
+}
+
+fn run_hybrid_fresh_oracle_trade_case(dt: u64, oracle_leg_count: u8, invert: u8) {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+
+    let seed = 0xc0u8
+        .wrapping_add((dt as u8) << 4)
+        .wrapping_add(oracle_leg_count << 1)
+        .wrapping_add(invert);
+    let mut feeds = [[0u8; 32]; 3];
+    feeds[0] = [seed; 32];
+    if oracle_leg_count == 3 {
+        feeds[1] = [seed.wrapping_add(1); 32];
+        feeds[2] = [seed.wrapping_add(2); 32];
+    }
+    let oracle_leg_flags = if oracle_leg_count == 3 {
+        ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3
+    } else {
+        0
+    };
+
+    let initial_oracles = if oracle_leg_count == 1 {
+        vec![env.set_pyth_price(&feeds[0], 200_000, -6, 100)]
+    } else {
+        vec![
+            env.set_pyth_price(&feeds[0], 4_000_000_000, -6, 100),
+            env.set_pyth_price(&feeds[1], 150_000_000, -6, 100),
+            env.set_pyth_price(&feeds[2], 200_000_000, -6, 100),
+        ]
+    };
+    let configure_cu = env
+        .try_configure_hybrid_with_cu(
+            oracle_leg_count,
+            oracle_leg_flags,
+            feeds,
+            &initial_oracles,
+            1,
+            100,
+            invert,
+            0,
+            3,
+        )
+        .expect("configure hybrid oracle");
+    assert_cu_within(
+        "HybridMark fresh-trade configure",
+        configure_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let keeper = Keypair::new();
+    let keeper_portfolio = env.create_portfolio(&keeper);
+    set_test_clock(&mut env, 2, 101);
+    let fresh_oracles = if oracle_leg_count == 1 {
+        vec![env.set_pyth_price(&feeds[0], 210_000, -6, 101)]
+    } else {
+        vec![
+            env.set_pyth_price(&feeds[0], 4_200_000_000, -6, 101),
+            env.set_pyth_price(&feeds[1], 150_000_000, -6, 101),
+            env.set_pyth_price(&feeds[2], 200_000_000, -6, 101),
+        ]
+    };
+    let fresh_crank_cu = env.crank_with_oracle_tail(
+        keeper_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &fresh_oracles,
+    );
+    assert_cu_within(
+        "HybridMark fresh-trade crank",
+        fresh_crank_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (fresh_cfg, fresh_group) = env.market_state();
+    let mark = fresh_group.assets[0].effective_price;
+    assert!(mark > 0, "fresh HybridMark case produced a zero mark");
+    assert_eq!(fresh_cfg.last_good_oracle_slot, 2);
+    assert_eq!(fresh_cfg.hybrid_soft_stale_slots, 3);
+    assert_eq!(fresh_cfg.mark_ewma_e6, mark);
+    assert_eq!(fresh_group.assets[0].raw_oracle_target_price, mark);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 10_000_000);
+    env.deposit(&short_owner, short_account, 10_000_000);
+
+    if dt == 1 {
+        set_test_clock(&mut env, 3, 102);
+    }
+    let (before_trade_cfg, before_trade_group) = env.market_state();
+    let trade_slot = env.svm.get_sysvar::<Clock>().slot;
+    assert_eq!(
+        trade_slot - before_trade_cfg.last_good_oracle_slot,
+        dt,
+        "test case must trade while the hybrid oracle is still fresh"
+    );
+    assert!(
+        dt <= before_trade_cfg.hybrid_soft_stale_slots,
+        "test case must remain inside the live-oracle freshness window"
+    );
+    let insurance_before = before_trade_group.insurance;
+
+    let size_q = POS_SCALE;
+    let open_cu = env
+        .try_trade_asset_with_cu(
+            0,
+            &long_owner,
+            long_account,
+            &short_owner,
+            short_account,
+            size_q as i128,
+            mark,
+            0,
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "fresh HybridMark TradeNoCpi open failed for dt={dt}, legs={oracle_leg_count}, invert={invert}: {err}"
+            )
+        });
+    assert_cu_within("HybridMark fresh open", open_cu, TRADE_CU_LIMIT);
+    let (opened_cfg, opened_group) = env.market_state();
+    assert_eq!(opened_group.assets[0].oi_eff_long_q, size_q);
+    assert_eq!(opened_group.assets[0].oi_eff_short_q, size_q);
+    assert_eq!(opened_group.assets[0].effective_price, mark);
+    assert_eq!(opened_group.assets[0].raw_oracle_target_price, mark);
+    assert_eq!(opened_cfg.mark_ewma_e6, mark);
+    assert_eq!(
+        opened_group.insurance, insurance_before,
+        "fresh HybridMark trade at the live mark must not charge an after-hours movement premium"
+    );
+
+    let close_cu = env
+        .try_trade_asset_with_cu(
+            0,
+            &long_owner,
+            long_account,
+            &short_owner,
+            short_account,
+            -(size_q as i128),
+            mark,
+            0,
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "fresh HybridMark TradeNoCpi close failed for dt={dt}, legs={oracle_leg_count}, invert={invert}: {err}"
+            )
+        });
+    assert_cu_within("HybridMark fresh close", close_cu, TRADE_CU_LIMIT);
+    let (_, flat_group) = env.market_state();
+    assert_eq!(flat_group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(flat_group.assets[0].oi_eff_short_q, 0);
+    assert_eq!(flat_group.assets[0].effective_price, mark);
+    assert_eq!(flat_group.insurance, insurance_before);
+}
+
+#[test]
+fn v16_bpf_hybrid_fresh_oracle_trade_opens_and_closes() {
+    for dt in [0, 1] {
+        for oracle_leg_count in [1, 3] {
+            for invert in [0, 1] {
+                run_hybrid_fresh_oracle_trade_case(dt, oracle_leg_count, invert);
+            }
+        }
+    }
 }
 
 #[test]
