@@ -2141,6 +2141,27 @@ impl V16CuEnv {
         .expect("crank")
     }
 
+    fn crank_with_oracle_tail(
+        &mut self,
+        portfolio: Pubkey,
+        ix: ProgInstruction,
+        oracle_accounts: &[Pubkey],
+    ) -> u64 {
+        let mut accounts = vec![
+            AccountMeta::new(self.payer.pubkey(), true),
+            AccountMeta::new(self.market, false),
+            AccountMeta::new(portfolio, false),
+        ];
+        accounts.extend(
+            oracle_accounts
+                .iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+        self.send(ix, accounts, &[])
+            .expect("crank with oracle tail")
+    }
+
     fn try_force_close_abandoned_asset_with_cu(
         &mut self,
         cranker: &Keypair,
@@ -3413,6 +3434,131 @@ fn v16_bpf_configure_hybrid_oracle_uses_authenticated_unix_time_not_caller_time(
         after, before,
         "rejected stale-oracle configuration must not mutate the market"
     );
+}
+
+#[test]
+fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
+    let mut env = V16CuEnv::new();
+    env.svm.warp_to_slot(1);
+    let mut clock = env.svm.get_sysvar::<Clock>();
+    clock.unix_timestamp = 100;
+    env.svm.set_sysvar(&clock);
+
+    let feeds = [[0xb1u8; 32], [0xb2u8; 32], [0xb3u8; 32]];
+    let leg0 = env.set_pyth_price(&feeds[0], 4_000_000_000, -6, 100);
+    let leg1 = env.set_pyth_price(&feeds[1], 150_000_000, -6, 100);
+    let leg2 = env.set_pyth_price(&feeds[2], 200_000_000, -6, 100);
+    let configure_cu = env.configure_three_leg_hybrid_with_cu(feeds, leg0, leg1, leg2, 1, 100);
+    assert_cu_within("ConfigureHybridOracle", configure_cu, CUSTODY_CU_LIMIT);
+
+    let keeper = Keypair::new();
+    let keeper_portfolio = env.create_portfolio(&keeper);
+    env.svm.warp_to_slot(2);
+    let mut clock = env.svm.get_sysvar::<Clock>();
+    clock.unix_timestamp = 101;
+    env.svm.set_sysvar(&clock);
+    let fresh_leg0 = env.set_pyth_price(&feeds[0], 4_200_000_000, -6, 101);
+    let fresh_leg1 = env.set_pyth_price(&feeds[1], 150_000_000, -6, 101);
+    let fresh_leg2 = env.set_pyth_price(&feeds[2], 200_000_000, -6, 101);
+    let fresh_crank_cu = env.crank_with_oracle_tail(
+        keeper_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &[fresh_leg0, fresh_leg1, fresh_leg2],
+    );
+    assert_cu_within("HybridMark fresh crank", fresh_crank_cu, CRANK_CU_LIMIT);
+    let (fresh_cfg, fresh_group) = env.market_state();
+    assert_eq!(fresh_group.assets[0].effective_price, 140_000);
+    assert_eq!(fresh_cfg.mark_ewma_e6, 140_000);
+    assert_eq!(fresh_cfg.last_good_oracle_slot, 2);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 10_000_000);
+    env.deposit(&short_owner, short_account, 10_000_000);
+
+    env.svm.warp_to_slot(10);
+    let before_after_hours = env.market_state();
+    let size_q = POS_SCALE;
+    let after_hours_exec_price = before_after_hours.1.assets[0].effective_price * 150 / 100;
+    let open_cu = env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        size_q as i128,
+        after_hours_exec_price,
+        0,
+    );
+    assert_cu_within("HybridMark after-hours open", open_cu, TRADE_CU_LIMIT);
+    let (after_hours_cfg, after_hours_group) = env.market_state();
+    assert!(
+        after_hours_cfg.mark_ewma_e6 > before_after_hours.0.mark_ewma_e6,
+        "after-hours hybrid trade must advance the fallback EWMA mark"
+    );
+    assert_eq!(
+        after_hours_group.assets[0].effective_price, before_after_hours.1.assets[0].effective_price,
+        "after-hours execution must not rewrite the last accepted oracle index"
+    );
+    assert!(
+        after_hours_group.insurance > 0,
+        "after-hours hybrid trade must charge a dynamic mark-movement fee"
+    );
+
+    let close_cu = env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        -(size_q as i128),
+        after_hours_exec_price,
+        0,
+    );
+    assert_cu_within("HybridMark after-hours close", close_cu, TRADE_CU_LIMIT);
+    let (_, flat_group) = env.market_state();
+    assert_eq!(flat_group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(flat_group.assets[0].oi_eff_short_q, 0);
+
+    env.svm.warp_to_slot(11);
+    let mut clock = env.svm.get_sysvar::<Clock>();
+    clock.unix_timestamp = 102;
+    env.svm.set_sysvar(&clock);
+    let normal_leg0 = env.set_pyth_price(&feeds[0], 4_500_000_000, -6, 102);
+    let normal_leg1 = env.set_pyth_price(&feeds[1], 150_000_000, -6, 102);
+    let normal_leg2 = env.set_pyth_price(&feeds[2], 200_000_000, -6, 102);
+    let normal_crank_cu = env.crank_with_oracle_tail(
+        keeper_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 11,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &[normal_leg0, normal_leg1, normal_leg2],
+    );
+    assert_cu_within(
+        "HybridMark normal-hours crank",
+        normal_crank_cu,
+        CRANK_CU_LIMIT,
+    );
+    let (normal_cfg, normal_group) = env.market_state();
+    assert_eq!(normal_cfg.last_good_oracle_slot, 11);
+    assert_eq!(normal_cfg.mark_ewma_last_slot, 11);
+    assert_eq!(normal_cfg.mark_ewma_e6, 150_000);
+    assert_eq!(normal_group.assets[0].effective_price, 150_000);
+    assert_eq!(normal_group.assets[0].raw_oracle_target_price, 150_000);
 }
 
 #[test]
