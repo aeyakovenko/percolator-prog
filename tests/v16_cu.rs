@@ -200,6 +200,61 @@ struct V16CuEnv {
     portfolio_account_len: usize,
 }
 
+#[derive(Clone, Copy)]
+struct V16CuMarketParams {
+    max_portfolio_assets: u16,
+    h_min: u64,
+    h_max: u64,
+    initial_price: u64,
+    min_nonzero_mm_req: u128,
+    min_nonzero_im_req: u128,
+    maintenance_margin_bps: u64,
+    initial_margin_bps: u64,
+    max_trading_fee_bps: u64,
+    trade_fee_base_bps: u64,
+    liquidation_fee_bps: u64,
+    liquidation_fee_cap: u128,
+    min_liquidation_abs: u128,
+    max_price_move_bps_per_slot: u64,
+    max_accrual_dt_slots: u64,
+    max_abs_funding_e9_per_slot: u64,
+    min_funding_lifetime_slots: u64,
+    max_account_b_settlement_chunks: u64,
+    max_bankrupt_close_chunks: u64,
+    max_bankrupt_close_lifetime_slots: u64,
+    public_b_chunk_atoms: u128,
+    maintenance_fee_per_slot: u128,
+}
+
+impl Default for V16CuMarketParams {
+    fn default() -> Self {
+        Self {
+            max_portfolio_assets: 1,
+            h_min: 0,
+            h_max: 10,
+            initial_price: 100,
+            min_nonzero_mm_req: 1,
+            min_nonzero_im_req: 2,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_trading_fee_bps: 10_000,
+            trade_fee_base_bps: 0,
+            liquidation_fee_bps: 0,
+            liquidation_fee_cap: 0,
+            min_liquidation_abs: 0,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 0,
+            min_funding_lifetime_slots: 1,
+            max_account_b_settlement_chunks: 1,
+            max_bankrupt_close_chunks: 1,
+            max_bankrupt_close_lifetime_slots: 100,
+            public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
+            maintenance_fee_per_slot: 0,
+        }
+    }
+}
+
 impl V16CuEnv {
     fn new() -> Self {
         Self::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000)
@@ -227,6 +282,17 @@ impl V16CuEnv {
         max_price_move_bps_per_slot: u64,
         maintenance_fee_per_slot: u128,
     ) -> Self {
+        Self::new_with_init_params(V16CuMarketParams {
+            max_portfolio_assets,
+            maintenance_margin_bps,
+            initial_margin_bps,
+            max_price_move_bps_per_slot,
+            maintenance_fee_per_slot,
+            ..V16CuMarketParams::default()
+        })
+    }
+
+    fn new_with_init_params(params: V16CuMarketParams) -> Self {
         let mut svm = LiteSVM::new();
         let program_id = percolator_prog::id();
         let program_bytes = std::fs::read(program_path()).expect("read BPF");
@@ -271,8 +337,10 @@ impl V16CuEnv {
                 lamports: 1_000_000_000,
                 data: vec![
                     0u8;
-                    state::market_account_len_for_capacity(max_portfolio_assets as usize)
-                        .unwrap()
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize
+                    )
+                    .unwrap()
                 ],
                 owner: program_id,
                 executable: false,
@@ -286,28 +354,28 @@ impl V16CuEnv {
             program_id,
             &payer,
             ProgInstruction::InitMarket {
-                max_portfolio_assets,
-                h_min: 0,
-                h_max: 10,
-                initial_price: 100,
-                min_nonzero_mm_req: 1,
-                min_nonzero_im_req: 2,
-                maintenance_margin_bps,
-                initial_margin_bps,
-                max_trading_fee_bps: 10_000,
-                trade_fee_base_bps: 0,
-                liquidation_fee_bps: 0,
-                liquidation_fee_cap: 0,
-                min_liquidation_abs: 0,
-                max_price_move_bps_per_slot,
-                max_accrual_dt_slots: 1,
-                max_abs_funding_e9_per_slot: 0,
-                min_funding_lifetime_slots: 1,
-                max_account_b_settlement_chunks: 1,
-                max_bankrupt_close_chunks: 1,
-                max_bankrupt_close_lifetime_slots: 100,
-                public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
-                maintenance_fee_per_slot,
+                max_portfolio_assets: params.max_portfolio_assets,
+                h_min: params.h_min,
+                h_max: params.h_max,
+                initial_price: params.initial_price,
+                min_nonzero_mm_req: params.min_nonzero_mm_req,
+                min_nonzero_im_req: params.min_nonzero_im_req,
+                maintenance_margin_bps: params.maintenance_margin_bps,
+                initial_margin_bps: params.initial_margin_bps,
+                max_trading_fee_bps: params.max_trading_fee_bps,
+                trade_fee_base_bps: params.trade_fee_base_bps,
+                liquidation_fee_bps: params.liquidation_fee_bps,
+                liquidation_fee_cap: params.liquidation_fee_cap,
+                min_liquidation_abs: params.min_liquidation_abs,
+                max_price_move_bps_per_slot: params.max_price_move_bps_per_slot,
+                max_accrual_dt_slots: params.max_accrual_dt_slots,
+                max_abs_funding_e9_per_slot: params.max_abs_funding_e9_per_slot,
+                min_funding_lifetime_slots: params.min_funding_lifetime_slots,
+                max_account_b_settlement_chunks: params.max_account_b_settlement_chunks,
+                max_bankrupt_close_chunks: params.max_bankrupt_close_chunks,
+                max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots,
+                public_b_chunk_atoms: params.public_b_chunk_atoms,
+                maintenance_fee_per_slot: params.maintenance_fee_per_slot,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -327,7 +395,7 @@ impl V16CuEnv {
             vault,
             vault_authority,
             portfolio_account_len: state::portfolio_account_len_for_market_slots(
-                max_portfolio_assets as usize,
+                params.max_portfolio_assets as usize,
             )
             .unwrap(),
         }
@@ -1393,6 +1461,34 @@ impl V16CuEnv {
         unit_scale: u32,
         hybrid_soft_stale_slots: u64,
     ) -> Result<u64, String> {
+        self.try_configure_hybrid_asset_with_cu(
+            0,
+            oracle_leg_count,
+            oracle_leg_flags,
+            feeds,
+            oracle_accounts,
+            now_slot,
+            now_unix_ts,
+            invert,
+            unit_scale,
+            hybrid_soft_stale_slots,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_configure_hybrid_asset_with_cu(
+        &mut self,
+        asset_index: u16,
+        oracle_leg_count: u8,
+        oracle_leg_flags: u8,
+        feeds: [[u8; 32]; 3],
+        oracle_accounts: &[Pubkey],
+        now_slot: u64,
+        now_unix_ts: i64,
+        invert: u8,
+        unit_scale: u32,
+        hybrid_soft_stale_slots: u64,
+    ) -> Result<u64, String> {
         let mut accounts = vec![
             AccountMeta::new(self.admin.pubkey(), true),
             AccountMeta::new(self.market, false),
@@ -1409,7 +1505,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureHybridOracle {
-                asset_index: 0,
+                asset_index,
                 now_slot,
                 now_unix_ts,
                 oracle_leg_count,
@@ -3685,6 +3781,186 @@ fn v16_bpf_hybrid_fresh_oracle_trade_opens_and_closes() {
             for invert in [0, 1] {
                 run_hybrid_fresh_oracle_trade_case(dt, oracle_leg_count, invert);
             }
+        }
+    }
+}
+
+fn production_risk_params() -> V16CuMarketParams {
+    V16CuMarketParams {
+        h_max: 6_480_000,
+        initial_price: 1_000_000,
+        min_nonzero_mm_req: 599,
+        min_nonzero_im_req: 600,
+        maintenance_margin_bps: 500,
+        initial_margin_bps: 500,
+        liquidation_fee_bps: 5,
+        liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+        max_price_move_bps_per_slot: 24,
+        max_accrual_dt_slots: 20,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 10_000_000,
+        ..V16CuMarketParams::default()
+    }
+}
+
+fn run_hybrid_fresh_oracle_production_risk_trade_case(asset_index: u16, size_q: i128) {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    set_test_clock(&mut env, 1, 100);
+    if asset_index != 0 {
+        env.activate_asset(asset_index, 1, production_risk_params().initial_price);
+    }
+
+    let feed_seed = 0xe0u8.wrapping_add(asset_index as u8 * 3);
+    let feeds = [
+        [feed_seed.wrapping_add(1); 32],
+        [feed_seed.wrapping_add(2); 32],
+        [feed_seed.wrapping_add(3); 32],
+    ];
+    let initial_leg0 = env.set_pyth_price(&feeds[0], 4_200_000_000, -6, 100);
+    let initial_leg1 = env.set_pyth_price(&feeds[1], 150_000_000, -6, 100);
+    let initial_leg2 = env.set_pyth_price(&feeds[2], 200_000_000, -6, 100);
+    let configure_cu = env
+        .try_configure_hybrid_asset_with_cu(
+            asset_index,
+            3,
+            ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            feeds,
+            &[initial_leg0, initial_leg1, initial_leg2],
+            1,
+            100,
+            1,
+            0,
+            3,
+        )
+        .expect("configure inverted production-risk hybrid oracle");
+    assert_cu_within(
+        "HybridMark production-risk configure",
+        configure_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let keeper = Keypair::new();
+    let keeper_portfolio = env.create_portfolio(&keeper);
+    set_test_clock(&mut env, 2, 101);
+    let fresh_leg0 = env.set_pyth_price(&feeds[0], 4_200_000_000, -6, 101);
+    let fresh_leg1 = env.set_pyth_price(&feeds[1], 150_000_000, -6, 101);
+    let fresh_leg2 = env.set_pyth_price(&feeds[2], 200_000_000, -6, 101);
+    let fresh_crank_cu = env.crank_with_oracle_tail(
+        keeper_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &[fresh_leg0, fresh_leg1, fresh_leg2],
+    );
+    assert_cu_within(
+        "HybridMark production-risk fresh crank",
+        fresh_crank_cu,
+        CRANK_CU_LIMIT,
+    );
+    let (fresh_cfg, fresh_group) = env.market_state();
+    let mark = fresh_group.assets[asset_index as usize].effective_price;
+    if asset_index == 0 {
+        assert_eq!(fresh_cfg.last_good_oracle_slot, 2);
+        assert_eq!(fresh_cfg.hybrid_soft_stale_slots, 3);
+        assert_eq!(fresh_cfg.mark_ewma_e6, mark);
+    } else {
+        let market_data = env.svm.get_account(&env.market).unwrap().data;
+        let fresh_profile =
+            state::read_asset_oracle_profile(&market_data, asset_index as usize).unwrap();
+        assert_eq!(fresh_profile.last_good_oracle_slot, 2);
+        assert_eq!(fresh_profile.hybrid_soft_stale_slots, 3);
+        assert_eq!(fresh_profile.mark_ewma_e6, mark);
+    }
+    assert_eq!(
+        fresh_group.assets[asset_index as usize].raw_oracle_target_price,
+        mark
+    );
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    let notional = (mark as u128)
+        .checked_mul(size_q.unsigned_abs())
+        .and_then(|v| v.checked_div(POS_SCALE))
+        .expect("notional");
+    let deposit_amount = notional
+        .checked_mul(production_risk_params().initial_margin_bps as u128)
+        .and_then(|v| v.checked_add(9_999))
+        .and_then(|v| v.checked_div(10_000))
+        .expect("deposit");
+    env.deposit(&long_owner, long_account, deposit_amount);
+    env.deposit(&short_owner, short_account, deposit_amount);
+
+    let direction = if size_q > 0 { "long" } else { "short" };
+    let open_cu = env
+        .try_trade_asset_with_cu(
+            asset_index,
+            &long_owner,
+            long_account,
+            &short_owner,
+            short_account,
+            size_q,
+            mark,
+            0,
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "production-risk fresh HybridMark asset[{asset_index}] {direction}-open failed at mark={mark}, deposit={deposit_amount}: {err}"
+            )
+        });
+    assert_cu_within(
+        "HybridMark production-risk fresh open",
+        open_cu,
+        TRADE_CU_LIMIT,
+    );
+    let (_, opened_group) = env.market_state();
+    assert_eq!(
+        opened_group.assets[asset_index as usize].oi_eff_long_q,
+        size_q.unsigned_abs()
+    );
+    assert_eq!(
+        opened_group.assets[asset_index as usize].oi_eff_short_q,
+        size_q.unsigned_abs()
+    );
+
+    let close_cu = env
+        .try_trade_asset_with_cu(
+            asset_index,
+            &long_owner,
+            long_account,
+            &short_owner,
+            short_account,
+            -size_q,
+            mark,
+            0,
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "production-risk fresh HybridMark asset[{asset_index}] {direction}-close failed at mark={mark}, deposit={deposit_amount}: {err}"
+            )
+        });
+    assert_cu_within(
+        "HybridMark production-risk fresh close",
+        close_cu,
+        TRADE_CU_LIMIT,
+    );
+    let (_, flat_group) = env.market_state();
+    assert_eq!(flat_group.assets[asset_index as usize].oi_eff_long_q, 0);
+    assert_eq!(flat_group.assets[asset_index as usize].oi_eff_short_q, 0);
+}
+
+#[test]
+fn v16_bpf_hybrid_fresh_oracle_trade_production_risk_params_opens_and_closes() {
+    for asset_index in [0, 1] {
+        for size_q in [POS_SCALE as i128, -(POS_SCALE as i128)] {
+            run_hybrid_fresh_oracle_production_risk_trade_case(asset_index, size_q);
         }
     }
 }
