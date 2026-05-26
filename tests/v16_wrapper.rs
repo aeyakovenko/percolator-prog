@@ -16053,10 +16053,24 @@ fn v16_wrapper_stress_per_domain_backing_never_overdraws() {
     let mut admin = signer().writable();
     let mut market = market_account();
     let mint = init_market(&mut admin, &mut market);
-    update_asset_lifecycle(&mut admin, &mut market, processor::ASSET_ACTION_ACTIVATE, 1, 100, 125)
-        .unwrap();
-    update_asset_lifecycle(&mut admin, &mut market, processor::ASSET_ACTION_ACTIVATE, 2, 200, 125)
-        .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        100,
+        125,
+    )
+    .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        2,
+        200,
+        125,
+    )
+    .unwrap();
 
     let mut token_program = token_program_account();
     let mut admin_tok = user_token_account(admin.key, mint, 1_000_000_000);
@@ -16070,7 +16084,7 @@ fn v16_wrapper_stress_per_domain_backing_never_overdraws() {
     let mut withdrawn = [0u128; N_DOMAINS];
 
     let mut rng: u64 = 0xD1B5_4A32_D192_ED03;
-    let mut next = |rng: &mut u64| {
+    let next = |rng: &mut u64| {
         *rng ^= *rng << 13;
         *rng ^= *rng >> 7;
         *rng ^= *rng << 17;
@@ -16175,7 +16189,10 @@ fn v16_wrapper_stress_per_domain_backing_never_overdraws() {
                     "domain {domain} allowed backing over-withdraw {over} (fresh {})",
                     fresh[d]
                 );
-                assert_eq!(market.data, before, "rejected backing over-withdraw mutated market");
+                assert_eq!(
+                    market.data, before,
+                    "rejected backing over-withdraw mutated market"
+                );
             }
         }
         check(&market, &fresh);
