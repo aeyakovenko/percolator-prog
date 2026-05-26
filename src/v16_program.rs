@@ -5054,6 +5054,14 @@ pub mod processor {
                     &oracle_profile,
                 )?;
             }
+            if ignore_unrelated_loss_stale {
+                group.header.loss_stale_active = 0;
+            }
+            let validation_result = group.validate_shape();
+            if ignore_unrelated_loss_stale {
+                group.header.loss_stale_active = restore_loss_stale_active;
+            }
+            validation_result.map_err(map_v16_error)?;
         }
         if let Some(cfg) = cfg_after {
             state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)?;
@@ -9260,6 +9268,7 @@ pub mod processor {
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
             let insurance_before = group.header.insurance.get();
+            let is_liquidation = matches!(crank_action, PermissionlessCrankActionV16::Liquidate(_));
             if let Some(cranker_ai) = cranker_portfolio_ai {
                 let mut cranker_data = cranker_ai.try_borrow_mut_data()?;
                 let cranker = state::portfolio_view_mut_for_market_slots(
@@ -9387,6 +9396,9 @@ pub mod processor {
                     asset_index_usize,
                     retained_fee,
                 )?;
+                if is_liquidation {
+                    group.validate_shape().map_err(map_v16_error)?;
+                }
             }
             cfg_after = cfg;
         }

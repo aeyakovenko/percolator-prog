@@ -3231,6 +3231,43 @@ fn v16_bpf_tradenocpi_executes_and_is_bounded() {
 }
 
 #[test]
+fn v16_bpf_tradenocpi_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let before_market = env.svm.get_account(&env.market).unwrap().data;
+
+    let result = env.try_trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    assert!(
+        result.is_err(),
+        "TradeNoCpi must reject instead of persisting an invalid market shape"
+    );
+    let after_market = env.svm.get_account(&env.market).unwrap().data;
+    assert_eq!(
+        after_market, before_market,
+        "failed TradeNoCpi must roll back market data"
+    );
+}
+
+#[test]
 fn v16_bpf_tradenocpi_fresh_open_on_base_and_added_asset_is_bounded() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
 
@@ -3302,6 +3339,23 @@ fn v16_bpf_tradenocpi_fresh_open_on_base_and_added_asset_is_bounded() {
 #[test]
 fn v16_bpf_stale_asset_does_not_block_current_unrelated_trade() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+
+    let stale_long_owner = Keypair::new();
+    let stale_short_owner = Keypair::new();
+    let stale_long_account = env.create_portfolio(&stale_long_owner);
+    let stale_short_account = env.create_portfolio(&stale_short_owner);
+    env.deposit(&stale_long_owner, stale_long_account, 1_000_000_000);
+    env.deposit(&stale_short_owner, stale_short_account, 1_000_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &stale_long_owner,
+        stale_long_account,
+        &stale_short_owner,
+        stale_short_account,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
 
     let cranker_owner = Keypair::new();
     let cranker_portfolio = env.create_portfolio(&cranker_owner);
@@ -3609,6 +3663,68 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
 }
 
 #[test]
+fn v16_bpf_no_cranker_liquidation_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 250);
+    env.configure_ewma_mark_with_cu(0, 100, 1, 0);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_ewma_mark_with_cu(1, 300);
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let before_market = env.svm.get_account(&env.market).unwrap().data;
+    let before_short = env.svm.get_account(&short_account).unwrap().data;
+
+    let result = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+
+    assert!(
+        result.is_err(),
+        "no-cranker liquidation must reject instead of persisting an invalid market shape"
+    );
+    let after_market = env.svm.get_account(&env.market).unwrap().data;
+    let after_short = env.svm.get_account(&short_account).unwrap().data;
+    assert_eq!(
+        after_market, before_market,
+        "failed no-cranker liquidation must roll back market data"
+    );
+    assert_eq!(
+        after_short, before_short,
+        "failed no-cranker liquidation must roll back portfolio data"
+    );
+}
+
+#[test]
 fn v16_bpf_full_14_leg_refresh_crank_is_under_tx_limit() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
     let long_owner = Keypair::new();
@@ -3684,11 +3800,12 @@ fn v16_bpf_full_14_leg_liquidation_crank_is_under_tx_limit() {
         },
     );
     println!("v16 full-14-leg liquidation crank CU: {liquidation_cu}");
+    const FULL_14_LEG_LIQUIDATION_CU_LIMIT: u64 = 1_375_000;
     assert!(
-        liquidation_cu <= 1_350_000,
+        liquidation_cu <= FULL_14_LEG_LIQUIDATION_CU_LIMIT,
         "full-14-leg liquidation CU {} exceeded limit {}",
         liquidation_cu,
-        1_350_000
+        FULL_14_LEG_LIQUIDATION_CU_LIMIT
     );
 
     let market_data = env.svm.get_account(&env.market).unwrap().data;
