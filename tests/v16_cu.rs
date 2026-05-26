@@ -460,6 +460,10 @@ impl V16CuEnv {
         backing_bucket_authority: Pubkey,
         oracle_authority: Pubkey,
     ) -> u64 {
+        let clock = self.svm.get_sysvar::<Clock>();
+        if clock.slot < now_slot {
+            self.svm.warp_to_slot(now_slot);
+        }
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -2755,6 +2759,7 @@ fn v16_bpf_permissionless_asset_cannot_withdraw_unrelated_domain_insurance() {
 
     let attacker = Keypair::new();
     env.update_market_init_fee_policy_with_cu(1);
+    env.svm.warp_to_slot(3);
     let (_fee_source, _cu) = env.activate_permissionless_asset_with_fee(
         &attacker,
         3,
@@ -2810,6 +2815,113 @@ fn v16_bpf_permissionless_asset_cannot_withdraw_unrelated_domain_insurance() {
 }
 
 #[test]
+fn v16_bpf_permissionless_append_activation_uses_authenticated_slot() {
+    let mut env = V16CuEnv::new();
+    let attacker = Keypair::new();
+    env.update_market_init_fee_policy_with_cu(1);
+    env.svm.warp_to_slot(100);
+
+    let (_fee_source, _cu) = env.activate_permissionless_asset_with_fee(
+        &attacker,
+        1,
+        u64::MAX,
+        100,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.current_slot, 100,
+        "permissionless append activation must authenticate now_slot against Clock"
+    );
+    assert_eq!(group.assets[1].slot_last, 100);
+
+    let cranker = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker);
+    env.crank(
+        cranker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 100,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+}
+
+#[test]
+fn v16_bpf_permissionless_reuse_activation_uses_authenticated_slot() {
+    let mut env = V16CuEnv::new();
+    let attacker = Keypair::new();
+    env.update_market_init_fee_policy_with_cu(1);
+
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        1,
+        1,
+        100,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+
+    env.svm.warp_to_slot(3);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        3,
+        0,
+    );
+    let (_, retired_group) = env.market_state();
+    assert_eq!(retired_group.assets[1].lifecycle, AssetLifecycleV16::Retired);
+
+    env.svm.warp_to_slot(4);
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        1,
+        u64::MAX,
+        250,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.current_slot, 4,
+        "permissionless reuse activation must authenticate now_slot against Clock"
+    );
+    assert_eq!(group.assets[1].slot_last, 4);
+
+    let cranker = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker);
+    env.crank(
+        cranker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 4,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+}
+
+#[test]
 fn v16_bpf_permissionless_oracle_liquidation_uses_only_its_own_domain_insurance() {
     let mut env = V16CuEnv::new();
     let victim_insurance = Keypair::new();
@@ -2838,6 +2950,7 @@ fn v16_bpf_permissionless_oracle_liquidation_uses_only_its_own_domain_insurance(
     env.top_up_insurance_domain_with_authority(&victim_insurance, 4, 500);
 
     env.update_market_init_fee_policy_with_cu(1);
+    env.svm.warp_to_slot(3);
     env.activate_permissionless_asset_with_fee(
         &attacker,
         3,
@@ -2946,6 +3059,7 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
     env.configure_permissionless_resolve_with_cu(100, 5);
     env.update_market_init_fee_policy_with_cu(25);
 
+    env.svm.warp_to_slot(1);
     let (init_fee_source, init_cu) = env.activate_permissionless_asset_with_fee(
         &attacker,
         1,

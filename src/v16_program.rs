@@ -7622,6 +7622,7 @@ pub mod processor {
         if action == ASSET_ACTION_ACTIVATE
             && (asset_index == configured_slots_pre || permissionless_reuse_target)
         {
+            let authenticated_slot = authenticated_slot_or_fallback(now_slot);
             let append_activation = asset_index == configured_slots_pre;
             if append_activation && cfg_pre.free_market_slot_count != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
@@ -7699,7 +7700,7 @@ pub mod processor {
                                 asset_index as u32,
                                 &mut group.markets[asset_index],
                                 initial_price,
-                                now_slot,
+                                authenticated_slot,
                             )
                             .map_err(map_v16_error)?;
                         clear_asset_domain_budget_counters_view(&mut group, asset_index)?;
@@ -7708,7 +7709,7 @@ pub mod processor {
                             .checked_sub(1)
                             .ok_or(PercolatorError::EngineCounterUnderflow)?;
                         let mut profile =
-                            state::manual_asset_oracle_profile(initial_price, now_slot);
+                            state::manual_asset_oracle_profile(initial_price, authenticated_slot);
                         profile.insurance_authority = insurance_authority;
                         profile.insurance_operator = insurance_operator;
                         profile.backing_bucket_authority = backing_bucket_authority;
@@ -7755,7 +7756,7 @@ pub mod processor {
                     let profile = state::activate_dynamic_asset_slot(
                         &mut data,
                         asset_index,
-                        now_slot,
+                        authenticated_slot,
                         initial_price,
                         insurance_authority,
                         insurance_operator,
