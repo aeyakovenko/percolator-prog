@@ -15828,3 +15828,356 @@ fn v16_wrapper_hybrid_hard_stale_blocks_live_value_movement_until_resolved() {
     let (_, group) = state::read_market(&market.data).unwrap();
     assert_eq!(group.mode, MarketModeV16::Resolved);
 }
+
+// ============================================================================
+// Stress test for the per-domain insurance over-withdrawal surface.
+//
+// Bug class under test (reported as a prior engine bug): a domain being able
+// to withdraw MORE than was accounted to it — i.e., dipping into other
+// domains' insurance / the global pool beyond its own allocation. The engine
+// guards this in `validate_shape` via
+//   Σ_d (insurance_domain_budget[d] − insurance_domain_spent[d]) ≤ insurance
+// and the wrapper calls validate_shape after every mutation. This test hammers
+// the wrapper's per-domain top-up / withdraw surface with a long randomized
+// sequence and independently re-derives the conservation invariants after
+// every operation, plus asserts that deliberate over-withdrawals are rejected.
+// ============================================================================
+fn read_token_amount(acct: &TestAccount) -> u128 {
+    u64::from_le_bytes(acct.data[64..72].try_into().unwrap()) as u128
+}
+
+#[test]
+fn v16_wrapper_stress_per_domain_insurance_never_overdraws_cross_domain() {
+    const N_DOMAINS: usize = 6; // asset 0 -> domains 0,1 ; asset 1 -> 2,3 ; asset 2 -> 4,5
+    let mut admin = signer().writable();
+    let mut market = market_account();
+    let mint = init_market(&mut admin, &mut market);
+
+    // Append assets 1 and 2 as the asset authority (admin) so each per-asset
+    // domain carries admin as its insurance authority/operator.
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        100,
+        125,
+    )
+    .unwrap();
+    update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        2,
+        200,
+        125,
+    )
+    .unwrap();
+
+    let mut token_program = token_program_account();
+    // Persistent token accounts. The unit-test harness does not execute the
+    // SPL token CPI (invoke is unavailable), so token balances do not move —
+    // both accounts are pre-funded large enough that `require_token_balance`
+    // always passes. The test focuses on the wrapper's internal per-domain
+    // accounting, which is what enforces the no-cross-domain-overdraw property.
+    let mut admin_tok = user_token_account(admin.key, mint, 1_000_000_000);
+    let mut vault_tok = vault_token_account(&market, mint, 1_000_000_000);
+    let mut vault_auth = vault_authority_account(&market);
+
+    // Model of what has been credited / withdrawn per domain via the
+    // per-domain insurance API (the only paths exercised here).
+    let mut credited = [0u128; N_DOMAINS];
+    let mut withdrawn = [0u128; N_DOMAINS];
+
+    // Deterministic xorshift RNG (reproducible).
+    let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
+    let next = |rng: &mut u64| {
+        *rng ^= *rng << 13;
+        *rng ^= *rng >> 7;
+        *rng ^= *rng << 17;
+        *rng
+    };
+
+    let check_invariants = |market: &TestAccount,
+                            vault_tok: &TestAccount,
+                            credited: &[u128; N_DOMAINS],
+                            withdrawn: &[u128; N_DOMAINS]| {
+        let (_, group) = state::read_market(&market.data).unwrap();
+        // (1) per-domain: no underflow, and accounted-remaining matches model.
+        let mut sum_remaining = 0u128;
+        for d in 0..N_DOMAINS {
+            let budget = group.insurance_domain_budget[d];
+            let spent = group.insurance_domain_spent[d];
+            assert!(
+                budget >= spent,
+                "domain {d} spent {spent} > budget {budget}"
+            );
+            let remaining = budget - spent;
+            // The on-chain remaining for a domain must never exceed what the
+            // model says was credited minus withdrawn from THAT domain.
+            assert!(
+                remaining <= credited[d] - withdrawn[d],
+                "domain {d} remaining {remaining} exceeds model credited-withdrawn {}",
+                credited[d] - withdrawn[d]
+            );
+            sum_remaining += remaining;
+        }
+        // (2) the core engine invariant: domain budgets never over-allocate
+        // the global insurance pool.
+        assert!(
+            sum_remaining <= group.insurance,
+            "Σ domain remaining {sum_remaining} > insurance {}",
+            group.insurance
+        );
+        // (3) insurance is a subset of the vault, and the wrapper's vault
+        // accounting is covered by the physical SPL vault balance (the latter
+        // is a fixed pre-funded amount in this harness).
+        assert!(group.insurance <= group.vault);
+        assert!(
+            group.vault <= read_token_amount(vault_tok),
+            "wrapper vault accounting {} exceeds physical vault tokens {}",
+            group.vault,
+            read_token_amount(vault_tok)
+        );
+    };
+
+    for _ in 0..600 {
+        let r = next(&mut rng);
+        let op = r % 3;
+        let domain = (next(&mut rng) % N_DOMAINS as u64) as u8;
+        let amount = ((next(&mut rng) % 250) + 1) as u128;
+
+        match op {
+            0 => {
+                // Per-domain insurance top-up.
+                let res = run_ix(
+                    Instruction::TopUpInsuranceDomain { domain, amount },
+                    &mut [
+                        &mut admin,
+                        &mut market,
+                        &mut admin_tok,
+                        &mut vault_tok,
+                        &mut token_program,
+                    ],
+                );
+                if res.is_ok() {
+                    credited[domain as usize] += amount;
+                }
+            }
+            1 => {
+                // Per-domain insurance withdraw within the accounted budget.
+                let res = run_ix(
+                    Instruction::WithdrawInsuranceDomain { domain, amount },
+                    &mut [
+                        &mut admin,
+                        &mut market,
+                        &mut admin_tok,
+                        &mut vault_tok,
+                        &mut vault_auth,
+                        &mut token_program,
+                    ],
+                );
+                if res.is_ok() {
+                    withdrawn[domain as usize] += amount;
+                    // The headline bug-class assertion: a domain can never
+                    // have withdrawn more than was credited to it.
+                    assert!(
+                        withdrawn[domain as usize] <= credited[domain as usize],
+                        "domain {domain} over-withdrew: withdrawn {} > credited {}",
+                        withdrawn[domain as usize],
+                        credited[domain as usize]
+                    );
+                }
+            }
+            _ => {
+                // Deliberate cross-domain over-withdraw: try to take strictly
+                // more than this domain's accounted remaining. Must be rejected
+                // and must not mutate state, even when OTHER domains hold enough
+                // insurance to cover the amount globally.
+                let remaining = credited[domain as usize] - withdrawn[domain as usize];
+                let over = remaining + 1 + (next(&mut rng) % 50) as u128;
+                let before = market.data.clone();
+                let before_vault = vault_tok.data.clone();
+                let res = run_ix(
+                    Instruction::WithdrawInsuranceDomain {
+                        domain,
+                        amount: over,
+                    },
+                    &mut [
+                        &mut admin,
+                        &mut market,
+                        &mut admin_tok,
+                        &mut vault_tok,
+                        &mut vault_auth,
+                        &mut token_program,
+                    ],
+                );
+                assert!(
+                    res.is_err(),
+                    "domain {domain} allowed over-withdraw of {over} (remaining {remaining})"
+                );
+                assert_eq!(market.data, before, "rejected over-withdraw mutated market");
+                assert_eq!(
+                    vault_tok.data, before_vault,
+                    "rejected over-withdraw moved vault tokens"
+                );
+            }
+        }
+
+        check_invariants(&market, &vault_tok, &credited, &withdrawn);
+    }
+
+    // Final settlement check: total withdrawn across all domains never exceeds
+    // total credited across all domains.
+    let total_credited: u128 = credited.iter().sum();
+    let total_withdrawn: u128 = withdrawn.iter().sum();
+    assert!(
+        total_withdrawn <= total_credited,
+        "aggregate over-withdraw: {total_withdrawn} > {total_credited}"
+    );
+}
+
+// ============================================================================
+// Stress test for the per-domain BACKING over-withdrawal surface (the "+
+// backing" half of the reported bug class: a domain pulling out more backing
+// than was deposited to it). Hammers TopUpBackingBucket / WithdrawBackingBucket
+// over domains 2..6 (the appended assets, where admin is the backing
+// authority) and asserts that on-chain fresh backing always equals the model,
+// that no domain ever withdraws more backing than it deposited, and that
+// deliberate over-withdrawals are rejected without mutating state.
+// ============================================================================
+#[test]
+fn v16_wrapper_stress_per_domain_backing_never_overdraws() {
+    const N_DOMAINS: usize = 6;
+    const FAR_EXPIRY: u64 = 1_000_000;
+    let mut admin = signer().writable();
+    let mut market = market_account();
+    let mint = init_market(&mut admin, &mut market);
+    update_asset_lifecycle(&mut admin, &mut market, processor::ASSET_ACTION_ACTIVATE, 1, 100, 125)
+        .unwrap();
+    update_asset_lifecycle(&mut admin, &mut market, processor::ASSET_ACTION_ACTIVATE, 2, 200, 125)
+        .unwrap();
+
+    let mut token_program = token_program_account();
+    let mut admin_tok = user_token_account(admin.key, mint, 1_000_000_000);
+    let mut vault_tok = vault_token_account(&market, mint, 1_000_000_000);
+    let mut vault_auth = vault_authority_account(&market);
+
+    // Per-domain fresh backing the model believes is held, and gross
+    // deposited / withdrawn for the no-overdraw assertion.
+    let mut fresh = [0u128; N_DOMAINS];
+    let mut deposited = [0u128; N_DOMAINS];
+    let mut withdrawn = [0u128; N_DOMAINS];
+
+    let mut rng: u64 = 0xD1B5_4A32_D192_ED03;
+    let mut next = |rng: &mut u64| {
+        *rng ^= *rng << 13;
+        *rng ^= *rng >> 7;
+        *rng ^= *rng << 17;
+        *rng
+    };
+
+    let check = |market: &TestAccount, fresh: &[u128; N_DOMAINS]| {
+        let (_, group) = state::read_market(&market.data).unwrap();
+        let mut total_fresh_num = 0u128;
+        // Only backing-capable domains (2..6) carry model-tracked backing.
+        for d in 2..N_DOMAINS {
+            let on_chain = group.source_backing_buckets[d].fresh_unliened_backing_num;
+            assert_eq!(
+                on_chain,
+                fresh[d] * BOUND_SCALE,
+                "domain {d} on-chain fresh backing diverged from model"
+            );
+            total_fresh_num += on_chain;
+        }
+        // Vault must physically cover insurance + all fresh backing.
+        let backing_atoms = total_fresh_num / BOUND_SCALE;
+        assert!(
+            group.vault >= group.insurance + backing_atoms,
+            "vault {} < insurance {} + backing {}",
+            group.vault,
+            group.insurance,
+            backing_atoms
+        );
+    };
+
+    for _ in 0..600 {
+        let op = next(&mut rng) % 3;
+        // Restrict to backing-capable domains 2..=5.
+        let domain = (2 + (next(&mut rng) % 4)) as u8;
+        let amount = ((next(&mut rng) % 250) + 1) as u128;
+        let d = domain as usize;
+
+        match op {
+            0 => {
+                let res = run_ix(
+                    Instruction::TopUpBackingBucket {
+                        domain,
+                        amount,
+                        expiry_slot: FAR_EXPIRY,
+                    },
+                    &mut [
+                        &mut admin,
+                        &mut market,
+                        &mut admin_tok,
+                        &mut vault_tok,
+                        &mut token_program,
+                    ],
+                );
+                if res.is_ok() {
+                    fresh[d] += amount;
+                    deposited[d] += amount;
+                }
+            }
+            1 => {
+                let res = run_ix(
+                    Instruction::WithdrawBackingBucket { domain, amount },
+                    &mut [
+                        &mut admin,
+                        &mut market,
+                        &mut admin_tok,
+                        &mut vault_tok,
+                        &mut vault_auth,
+                        &mut token_program,
+                    ],
+                );
+                if res.is_ok() {
+                    fresh[d] -= amount;
+                    withdrawn[d] += amount;
+                    assert!(
+                        withdrawn[d] <= deposited[d],
+                        "domain {domain} over-withdrew backing: {} > {}",
+                        withdrawn[d],
+                        deposited[d]
+                    );
+                }
+            }
+            _ => {
+                // Deliberate over-withdraw beyond fresh backing must be rejected.
+                let over = fresh[d] + 1 + (next(&mut rng) % 50) as u128;
+                let before = market.data.clone();
+                let res = run_ix(
+                    Instruction::WithdrawBackingBucket {
+                        domain,
+                        amount: over,
+                    },
+                    &mut [
+                        &mut admin,
+                        &mut market,
+                        &mut admin_tok,
+                        &mut vault_tok,
+                        &mut vault_auth,
+                        &mut token_program,
+                    ],
+                );
+                assert!(
+                    res.is_err(),
+                    "domain {domain} allowed backing over-withdraw {over} (fresh {})",
+                    fresh[d]
+                );
+                assert_eq!(market.data, before, "rejected backing over-withdraw mutated market");
+            }
+        }
+        check(&market, &fresh);
+    }
+}

@@ -1649,6 +1649,58 @@ impl V16CuEnv {
         .expect("push auth mark")
     }
 
+    fn configure_auth_mark_for_asset_with_authority(
+        &mut self,
+        asset_index: u16,
+        authority: &Keypair,
+        now_slot: u64,
+        initial_mark_e6: u64,
+    ) -> u64 {
+        self.ensure_signer_account(authority.pubkey());
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::ConfigureAuthMark {
+                asset_index,
+                now_slot,
+                initial_mark_e6,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+        .expect("configure auth mark for asset")
+    }
+
+    fn push_auth_mark_for_asset_with_authority(
+        &mut self,
+        asset_index: u16,
+        authority: &Keypair,
+        now_slot: u64,
+        mark_e6: u64,
+    ) -> u64 {
+        self.ensure_signer_account(authority.pubkey());
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::PushAuthMark {
+                asset_index,
+                now_slot,
+                mark_e6,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+        .expect("push auth mark for asset")
+    }
+
     fn resolve_stale_permissionless_with_cu(&mut self, now_slot: u64) -> u64 {
         self.svm.warp_to_slot(now_slot);
         send_tx(
@@ -2663,6 +2715,221 @@ fn v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_clo
     env.close_slab_with_cu();
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     assert!(market_data.iter().all(|b| *b == 0));
+}
+
+#[test]
+fn v16_bpf_permissionless_asset_cannot_withdraw_unrelated_domain_insurance() {
+    let mut env = V16CuEnv::new();
+    let victim_insurance = Keypair::new();
+
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        victim_insurance.pubkey(),
+        victim_insurance.pubkey(),
+        victim_insurance.pubkey(),
+        victim_insurance.pubkey(),
+    );
+    env.activate_asset_with_authorities(
+        2,
+        2,
+        100,
+        victim_insurance.pubkey(),
+        victim_insurance.pubkey(),
+        victim_insurance.pubkey(),
+        victim_insurance.pubkey(),
+    );
+    env.top_up_insurance(500);
+    env.top_up_insurance_domain_with_authority(&victim_insurance, 2, 500);
+    env.top_up_insurance_domain_with_authority(&victim_insurance, 4, 500);
+
+    let before_vault = env.token_amount(env.vault);
+    let (_, before_group) = env.market_state();
+    assert_eq!(before_vault, 1_500);
+    assert_eq!(before_group.insurance, 1_500);
+    assert_eq!(before_group.insurance_domain_budget[0], 250);
+    assert_eq!(before_group.insurance_domain_budget[1], 250);
+    assert_eq!(before_group.insurance_domain_budget[2], 500);
+    assert_eq!(before_group.insurance_domain_budget[4], 500);
+
+    let attacker = Keypair::new();
+    env.update_market_init_fee_policy_with_cu(1);
+    let (_fee_source, _cu) = env.activate_permissionless_asset_with_fee(
+        &attacker,
+        3,
+        3,
+        100,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+
+    let after_create_vault = env.token_amount(env.vault);
+    let (_, after_create_group) = env.market_state();
+    assert_eq!(
+        after_create_group.assets[3].lifecycle,
+        AssetLifecycleV16::Active
+    );
+    assert_eq!(
+        after_create_group.insurance_domain_budget[6], 0,
+        "new attacker-controlled domain must not inherit shared insurance"
+    );
+    assert_eq!(
+        after_create_group.insurance_domain_budget[7], 0,
+        "new attacker-controlled domain must not inherit shared insurance"
+    );
+    assert_eq!(
+        after_create_vault, 1_501,
+        "only the permissionless init fee should enter the shared vault"
+    );
+
+    assert!(
+        env.try_withdraw_insurance_domain_with_authority(&attacker, 6, 840)
+            .is_err(),
+        "attacker must not withdraw victim-funded insurance through domain 6"
+    );
+    assert!(
+        env.try_withdraw_insurance_domain_with_authority(&attacker, 7, 660)
+            .is_err(),
+        "attacker must not withdraw victim-funded insurance through domain 7"
+    );
+
+    let (_, final_group) = env.market_state();
+    assert_eq!(env.token_amount(env.vault), after_create_vault);
+    assert_eq!(final_group.insurance, 1_501);
+    assert_eq!(final_group.vault, 1_501);
+    assert_eq!(final_group.insurance_domain_budget[0], 250);
+    assert_eq!(final_group.insurance_domain_budget[1], 251);
+    assert_eq!(final_group.insurance_domain_budget[2], 500);
+    assert_eq!(final_group.insurance_domain_budget[4], 500);
+    assert_eq!(final_group.insurance_domain_budget[6], 0);
+    assert_eq!(final_group.insurance_domain_budget[7], 0);
+}
+
+#[test]
+fn v16_bpf_permissionless_oracle_liquidation_uses_only_its_own_domain_insurance() {
+    let mut env = V16CuEnv::new();
+    let victim_insurance = Keypair::new();
+    let attacker = Keypair::new();
+
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        victim_insurance.pubkey(),
+        victim_insurance.pubkey(),
+        victim_insurance.pubkey(),
+        victim_insurance.pubkey(),
+    );
+    env.activate_asset_with_authorities(
+        2,
+        2,
+        100,
+        victim_insurance.pubkey(),
+        victim_insurance.pubkey(),
+        victim_insurance.pubkey(),
+        victim_insurance.pubkey(),
+    );
+    env.top_up_insurance(500);
+    env.top_up_insurance_domain_with_authority(&victim_insurance, 2, 500);
+    env.top_up_insurance_domain_with_authority(&victim_insurance, 4, 500);
+
+    env.update_market_init_fee_policy_with_cu(1);
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        3,
+        3,
+        100,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+    env.svm.warp_to_slot(4);
+    env.configure_auth_mark_for_asset_with_authority(3, &attacker, 4, 100);
+    env.top_up_insurance_domain_with_authority(&attacker, 6, 300);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 200);
+    env.trade_asset_with_cu(
+        3,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (2 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(5);
+    env.push_auth_mark_for_asset_with_authority(3, &attacker, 5, 1_000);
+    for now_slot in [5u64, 6] {
+        env.svm.warp_to_slot(now_slot);
+        env.crank(
+            long_account,
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 3,
+                now_slot,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+        );
+    }
+    let (_, before_liq) = env.market_state();
+    assert_eq!(before_liq.insurance_domain_budget[0], 250);
+    assert_eq!(before_liq.insurance_domain_budget[1], 251);
+    assert_eq!(before_liq.insurance_domain_budget[2], 500);
+    assert_eq!(before_liq.insurance_domain_budget[4], 500);
+    assert_eq!(before_liq.insurance_domain_budget[6], 300);
+    assert_eq!(before_liq.insurance_domain_spent[6], 0);
+    assert_eq!(before_liq.insurance, 1_801);
+
+    env.svm.warp_to_slot(7);
+    let liq_cu = env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 3,
+            now_slot: 7,
+            funding_rate_e9: 0,
+            close_q: 2 * POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    println!("v16 permissionless malicious-oracle liquidation CU: {liq_cu}");
+
+    let (_, after_liq) = env.market_state();
+    let own_domain_spent = after_liq.insurance_domain_spent[6];
+    assert!(
+        own_domain_spent > 0,
+        "malicious asset liquidation should consume its own funded domain"
+    );
+    assert_eq!(
+        before_liq.insurance - after_liq.insurance,
+        own_domain_spent,
+        "aggregate insurance decrease must be exactly the attacker-domain spend"
+    );
+    assert_eq!(after_liq.insurance_domain_budget[0], 250);
+    assert_eq!(after_liq.insurance_domain_budget[1], 251);
+    assert_eq!(after_liq.insurance_domain_budget[2], 500);
+    assert_eq!(after_liq.insurance_domain_budget[4], 500);
+    assert_eq!(after_liq.insurance_domain_spent[0], 0);
+    assert_eq!(after_liq.insurance_domain_spent[1], 0);
+    assert_eq!(after_liq.insurance_domain_spent[2], 0);
+    assert_eq!(after_liq.insurance_domain_spent[4], 0);
 }
 
 #[test]

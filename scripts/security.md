@@ -28,6 +28,80 @@ pass the right value" as a safety assumption for a public instruction. If a
 public API needs an oracle price, it must consume an authenticated oracle state
 or an authority-gated oracle update, not a caller-supplied price-like argument.
 
+## Twenty-sixth pass — shared-vault insurance domain isolation
+
+**Status:** PASS_SAFE_WITH_FIXED_ENGINE. Upgraded the engine to
+`8e0e3f858fa07b44434d1ff2e4630266432cdb21`, which isolates v16 insurance
+domain budgets. The previous unsafe shape was deeper than a wrapper-only
+withdrawal guard: new or empty domains could carry effectively unbounded
+budget accounting, so a locally authorized domain operation could spend from
+the shared SPL insurance vault even when that domain had not actually been
+funded.
+
+Target invariant:
+
+```text
+The physical insurance vault may be shared by the market group, but every
+spendable insurance unit must be budgeted to one explicit domain. An oracle,
+insurance operator, liquidator, or permissionless market creator for domain D
+may destroy or withdraw only D's funded budget. It must not be able to consume
+domain 0/1 market-0 insurance or any other asset's domain budget through a
+new, stale, manually priced, or malicious-oracle asset.
+```
+
+Engine-side fix reviewed:
+
+- PASS 1: new domain budgets default to zero, not "all global vault TVL".
+- PASS 2: the shape invariant accounts for every live domain's remaining
+  budget (`budget - spent`) and rejects states where total remaining domain
+  budget exceeds aggregate `group.insurance`.
+- PASS 3: per-domain withdrawal still requires the configured local insurance
+  operator/authority, but that authority is now limited by the domain's funded
+  remaining budget rather than the shared vault balance.
+- PASS 4: liquidation and bankruptcy insurance draw through the same domain
+  budget accounting. A malicious local oracle can still bankrupt its own
+  domain, but cannot source the loss from unrelated domains.
+
+Wrapper/API sweep:
+
+- PASS 5: `TopUpInsurance` credits market-0 domains and aggregate insurance
+  one-for-one. It does not silently grant spendable budget to dynamic domains.
+- PASS 6: `TopUpInsuranceDomain` credits only the selected domain and aggregate
+  insurance. It is the explicit way to fund nonzero asset-domain insurance.
+- PASS 7: permissionless asset activation/reuse installs asset-local
+  authorities but leaves the new local insurance domains at zero unless the
+  init fee is intentionally routed to market 0.
+- PASS 8: `WithdrawInsuranceDomain` cannot be made safe from the owner of that
+  domain's own oracle and insurance authority, but the fixed budget invariant
+  makes that risk domain-local.
+- PASS 9: the shared SPL vault is acceptable only as custody. It is not a
+  permission boundary; the permission boundary is the engine's per-domain
+  budget ledger plus the post-mutation shape validation.
+- PASS 10: fee and recovery paths that intentionally redirect value to market
+  0 must continue to be explicit policy choices. They should never be modeled
+  as generic "any domain may spend the group vault" authority.
+
+Regression coverage added:
+
+```bash
+cargo test --test v16_cu \
+  v16_bpf_permissionless_asset_cannot_withdraw_unrelated_domain_insurance \
+  -- --nocapture
+
+cargo test --test v16_cu \
+  v16_bpf_permissionless_oracle_liquidation_uses_only_its_own_domain_insurance \
+  -- --nocapture
+```
+
+The first LiteSVM regression recreates the reported cross-domain withdrawal
+shape: victim domains fund the shared vault, an attacker permissionlessly
+creates a new asset with local authority over its own domains, and attempted
+withdrawals from those unfunded attacker domains must fail without moving
+victim insurance. The second LiteSVM regression covers the deeper surface: a
+malicious local oracle makes its own asset liquidatable and proves liquidation
+spends only that asset's funded domain budget, leaving market-0 and other
+victim domain budgets/spent counters unchanged.
+
 ## Twenty-fifth pass — permissionless market shutdown/reuse lifecycle
 
 **Status:** PASS_SAFE. Added an end-to-end regression for the lifecycle where a
