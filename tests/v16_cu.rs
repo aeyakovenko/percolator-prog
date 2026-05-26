@@ -3922,6 +3922,32 @@ fn v16_bpf_close_resolved_moves_payout_tokens_with_ledger() {
 }
 
 #[test]
+fn v16_bpf_close_resolved_pays_positive_pnl_through_engine_ledger() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.top_up_backing_bucket(1, 250, 10);
+    env.add_source_positive_pnl(portfolio, 1, 250);
+
+    env.resolve();
+    let dest = env.close_resolved(&owner, portfolio);
+    assert_eq!(env.token_amount(dest), 1_250);
+    assert_eq!(env.token_amount(env.vault), 0);
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let portfolio_data = env.svm.get_account(&portfolio).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    let account = state::read_portfolio(&portfolio_data).unwrap();
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(account.capital, 0);
+    assert_eq!(account.pnl, 0);
+    assert!(account.resolved_payout_receipt.present);
+    assert!(account.resolved_payout_receipt.finalized);
+}
+
+#[test]
 fn v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free() {
     let mut env = V16CuEnv::new();
     let configure_cu = env.configure_permissionless_resolve_with_cu(5, 1);

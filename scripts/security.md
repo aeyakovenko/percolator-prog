@@ -28,6 +28,56 @@ pass the right value" as a safety assumption for a public instruction. If a
 public API needs an oracle price, it must consume an authenticated oracle state
 or an authority-gated oracle update, not a caller-supplied price-like argument.
 
+## Twenty-seventh pass - DPRK clean-room triage for CLI issues #73/#76/#78
+
+**Status:** PASS_SAFE_FOR_WRAPPER_FIXES. Issue bodies were used only as a claim
+inventory. No submitter code, PoC harness, binary artifact, or patch was trusted
+or copied. Every local change below was driven by an independently written
+regression test against the current wrapper behavior.
+
+Already covered reports:
+
+- CLI #73 is already fixed in this program: the no-cranker liquidation path
+  validates final market shape before returning. LiteSVM regression:
+  `v16_bpf_no_cranker_liquidation_rejects_invalid_final_market_shape`.
+- CLI #76 is already fixed in this program: `TradeNoCpi` validates the market
+  group and both changed portfolios before returning. LiteSVM regression:
+  `v16_bpf_tradenocpi_rejects_invalid_final_market_shape`.
+
+Wrapper fixes added from CLI #78 triage:
+
+- F1: `CloseResolved` no longer reimplements partial engine ledger logic in the
+  wrapper. It delegates to `close_resolved_account_not_atomic`, which settles
+  fee, negative PnL, positive PnL, payout receipt state, and close progress under
+  engine shape validation. Active or partially closed accounts may now return
+  engine progress without requiring token accounts or moving tokens. Regressions:
+  `v16_wrapper_close_resolved_pays_positive_pnl_through_engine_ledger` and
+  `v16_bpf_close_resolved_pays_positive_pnl_through_engine_ledger`.
+- F29: asset 0 cannot be retired. Market 0 is the base unit / market-0 domain
+  and must not enter the permissionless retire/reuse slot lifecycle. Regression:
+  `v16_wrapper_asset_zero_cannot_be_retired`.
+- F32: base-unit mints cannot be rotated after the market has accounted custody
+  or liabilities (`vault`, `c_tot`, or `insurance` nonzero). Rotation remains an
+  admin setup action before funds exist, not a live-custody mutation. Regression:
+  `v16_wrapper_base_unit_mint_rotation_rejects_nonempty_market_vault`.
+
+Not changed in this wrapper pass:
+
+- Engine-only or proof-debt claims in CLI #78 need engine fixes/proofs, not a
+  wrapper patch.
+- F14 was not changed: the current API contract and tests intentionally allow a
+  bilateral, signer-consented manual `TradeCpi` at the caller's limit price, as
+  `TradeNoCpi` does. Tightening that requires product policy because it changes
+  accepted manual-market trading semantics.
+- F21 and F35 were not changed: secondary collateral withdraw/swap is a
+  supported base-unit path. No clean-room cross-domain or cross-vault exploit was
+  proven locally from those claims.
+- F28 was classified invalid for the Pyth receiver model: the trusted identity
+  is the verified price feed embedded in the receiver update, not an arbitrary
+  account address chosen by the caller.
+- F36 remains intentional: post-delay permissionless close is a liveness feature
+  and pays only the resolved account owner's token destination.
+
 ## Twenty-sixth pass — shared-vault insurance domain isolation
 
 **Status:** PASS_SAFE_WITH_FIXED_ENGINE. Upgraded the engine to

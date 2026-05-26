@@ -6619,6 +6619,28 @@ fn v16_wrapper_backing_bucket_authority_is_domain_scoped_for_dynamic_assets() {
 }
 
 #[test]
+fn v16_wrapper_asset_zero_cannot_be_retired() {
+    let mut admin = signer();
+    let mut market = market_account();
+
+    init_market(&mut admin, &mut market);
+    let before = market.data.clone();
+    let retire_base = update_asset_lifecycle(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_RETIRE,
+        0,
+        1,
+        0,
+    );
+    assert_err_and_market_unchanged(retire_base, &market, &before);
+
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.free_market_slot_count, 0);
+    assert_eq!(group.assets[0].lifecycle, AssetLifecycleV16::Active);
+}
+
+#[test]
 fn v16_wrapper_asset_retire_rejects_nonzero_domain_insurance_budget() {
     let mut admin = signer();
     let mut market = market_account();
@@ -10511,6 +10533,38 @@ fn v16_wrapper_base_unit_authority_changes_primary_and_rotates() {
     let account = state::read_portfolio(&portfolio.data).unwrap();
     assert_eq!(group.vault, 1);
     assert_eq!(account.capital, 1);
+}
+
+#[test]
+fn v16_wrapper_base_unit_mint_rotation_rejects_nonempty_market_vault() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut old_primary_mint = mint_account();
+    let mut new_primary_mint = mint_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    run_ix(
+        default_init_market_ix(),
+        &mut [&mut admin, &mut market, &mut old_primary_mint],
+    )
+    .unwrap();
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 1);
+
+    let before = market.data.clone();
+    let rotate = configure_base_unit_mints(
+        &mut admin,
+        &mut market,
+        &mut old_primary_mint,
+        &mut new_primary_mint,
+    );
+    assert_err_and_market_unchanged(rotate, &market, &before);
+
+    let (cfg, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.collateral_mint, old_primary_mint.key.to_bytes());
+    assert_eq!(group.vault, 1);
+    assert_eq!(group.c_tot, 1);
 }
 
 #[test]
@@ -15279,6 +15333,50 @@ fn v16_wrapper_close_resolved_uses_configured_fee_not_permissionless_caller_fee(
 }
 
 #[test]
+fn v16_wrapper_close_resolved_pays_positive_pnl_through_engine_ledger() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut owner = signer();
+    let mut portfolio = portfolio_account();
+
+    let mint = init_market(&mut admin, &mut market);
+    init_portfolio(&mut owner, &mut market, &mut portfolio);
+    deposit(&mut owner, &mut market, &mut portfolio, 1_000);
+    top_up_backing_bucket(&mut admin, &mut market, 1, 250, 10);
+    add_source_positive_pnl(&mut market, &mut portfolio, 1, 250);
+    run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
+
+    let mut dest = user_token_account(owner.key, mint, 0);
+    let mut vault = vault_token_account(&market, mint, 1_250);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut token_program = token_program_account();
+    run_ix(
+        Instruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        &mut [
+            &mut owner,
+            &mut market,
+            &mut portfolio,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    let account = state::read_portfolio(&portfolio.data).unwrap();
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(account.capital, 0);
+    assert_eq!(account.pnl, 0);
+    assert!(account.resolved_payout_receipt.present);
+    assert!(account.resolved_payout_receipt.finalized);
+}
+
+#[test]
 fn v16_wrapper_close_resolved_does_not_double_pay_after_closed_payout() {
     let mut admin = signer();
     let mut market = market_account();
@@ -15477,7 +15575,7 @@ fn v16_wrapper_close_resolved_rejects_before_resolution_without_mutation() {
 }
 
 #[test]
-fn v16_wrapper_close_resolved_rejects_active_position_without_payout() {
+fn v16_wrapper_close_resolved_active_position_is_progress_only_without_payout() {
     let mut admin = signer();
     let mut market = market_account();
     let mut long_owner = signer();
@@ -15512,8 +15610,6 @@ fn v16_wrapper_close_resolved_rejects_active_position_without_payout() {
     let mut vault = vault_token_account(&market, mint, 2_000_000);
     let mut vault_auth = vault_authority_account(&market);
     let mut token_program = token_program_account();
-    let before_market = market.data.clone();
-    let before_long = long_account.data.clone();
     let result = run_ix(
         Instruction::CloseResolved {
             fee_rate_per_slot: 0,
@@ -15528,12 +15624,8 @@ fn v16_wrapper_close_resolved_rejects_active_position_without_payout() {
             &mut token_program,
         ],
     );
-    assert_eq!(
-        result,
-        Err(percolator_prog::error::PercolatorError::EngineLockActive.into())
-    );
-    assert_eq!(market.data, before_market);
-    assert_eq!(long_account.data, before_long);
+    assert_eq!(result, Ok(()));
+    assert_eq!(read_token_amount(&dest), 0);
 
     let (_, group) = state::read_market(&market.data).unwrap();
     let long = state::read_portfolio(&long_account.data).unwrap();
@@ -15546,7 +15638,7 @@ fn v16_wrapper_close_resolved_rejects_active_position_without_payout() {
 }
 
 #[test]
-fn v16_wrapper_close_resolved_rejects_active_position_before_requiring_token_accounts() {
+fn v16_wrapper_close_resolved_progress_only_does_not_require_token_accounts() {
     let mut admin = signer();
     let mut market = market_account();
     let mut long_owner = signer();
@@ -15577,26 +15669,19 @@ fn v16_wrapper_close_resolved_rejects_active_position_before_requiring_token_acc
     .unwrap();
     run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
 
-    let before_market = market.data.clone();
-    let before_long = long_account.data.clone();
     let result = run_ix(
         Instruction::CloseResolved {
             fee_rate_per_slot: 0,
         },
         &mut [&mut long_owner, &mut market, &mut long_account],
     );
-    assert_eq!(
-        result,
-        Err(percolator_prog::error::PercolatorError::EngineLockActive.into())
-    );
-    assert_eq!(market.data, before_market);
-    assert_eq!(long_account.data, before_long);
+    assert_eq!(result, Ok(()));
 
     let (_, group) = state::read_market(&market.data).unwrap();
     let long = state::read_portfolio(&long_account.data).unwrap();
     assert_eq!(
         group.vault, 2_000_000,
-        "active resolved close rejection must not require or perform token payout"
+        "active resolved close progress must not require or perform token payout"
     );
     assert!(!percolator::active_bitmap_is_empty(long.active_bitmap));
     assert_eq!(long.capital, 1_000_000);
