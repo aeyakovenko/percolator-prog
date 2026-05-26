@@ -15833,10 +15833,10 @@ fn v16_wrapper_hybrid_hard_stale_blocks_live_value_movement_until_resolved() {
 // Stress test for the per-domain insurance over-withdrawal surface.
 //
 // Bug class under test (reported as a prior engine bug): a domain being able
-// to withdraw MORE than was accounted to it — i.e., dipping into other
+// to withdraw MORE than was accounted to it - i.e., dipping into other
 // domains' insurance / the global pool beyond its own allocation. The engine
 // guards this in `validate_shape` via
-//   Σ_d (insurance_domain_budget[d] − insurance_domain_spent[d]) ≤ insurance
+//   sum_d (insurance_domain_budget[d] - insurance_domain_spent[d]) <= insurance
 // and the wrapper calls validate_shape after every mutation. This test hammers
 // the wrapper's per-domain top-up / withdraw surface with a long randomized
 // sequence and independently re-derives the conservation invariants after
@@ -15876,13 +15876,21 @@ fn v16_wrapper_stress_per_domain_insurance_never_overdraws_cross_domain() {
 
     let mut token_program = token_program_account();
     // Persistent token accounts. The unit-test harness does not execute the
-    // SPL token CPI (invoke is unavailable), so token balances do not move —
+    // SPL token CPI (invoke is unavailable), so token balances do not move -
     // both accounts are pre-funded large enough that `require_token_balance`
     // always passes. The test focuses on the wrapper's internal per-domain
     // accounting, which is what enforces the no-cross-domain-overdraw property.
     let mut admin_tok = user_token_account(admin.key, mint, 1_000_000_000);
     let mut vault_tok = vault_token_account(&market, mint, 1_000_000_000);
     let mut vault_auth = vault_authority_account(&market);
+
+    // Seed real user capital so all three fund classes (user capital +
+    // insurance + backing) coexist in the vault accounting while the
+    // per-domain insurance surface is stressed.
+    let mut lp_owner = signer();
+    let mut lp_account = portfolio_account();
+    init_portfolio(&mut lp_owner, &mut market, &mut lp_account);
+    deposit(&mut lp_owner, &mut market, &mut lp_account, 50_000);
 
     // Model of what has been credited / withdrawn per domain via the
     // per-domain insurance API (the only paths exercised here).
@@ -15926,13 +15934,20 @@ fn v16_wrapper_stress_per_domain_insurance_never_overdraws_cross_domain() {
         // the global insurance pool.
         assert!(
             sum_remaining <= group.insurance,
-            "Σ domain remaining {sum_remaining} > insurance {}",
+            "sum domain remaining {sum_remaining} > insurance {}",
             group.insurance
         );
-        // (3) insurance is a subset of the vault, and the wrapper's vault
-        // accounting is covered by the physical SPL vault balance (the latter
-        // is a fixed pre-funded amount in this harness).
-        assert!(group.insurance <= group.vault);
+        // (3) the vault must simultaneously cover insurance AND user capital
+        // (c_tot): a domain over-withdraw would otherwise eat into user funds.
+        assert!(
+            group.vault >= group.insurance + group.c_tot,
+            "vault {} < insurance {} + user capital {}",
+            group.vault,
+            group.insurance,
+            group.c_tot
+        );
+        // (4) the wrapper's vault accounting is covered by the physical SPL
+        // vault balance (a fixed pre-funded amount in this harness).
         assert!(
             group.vault <= read_token_amount(vault_tok),
             "wrapper vault accounting {} exceeds physical vault tokens {}",
@@ -16034,6 +16049,20 @@ fn v16_wrapper_stress_per_domain_insurance_never_overdraws_cross_domain() {
     assert!(
         total_withdrawn <= total_credited,
         "aggregate over-withdraw: {total_withdrawn} > {total_credited}"
+    );
+    // Non-vacuity: the run must actually exercise successful credits and
+    // withdraws across multiple domains, and leave at least two domains
+    // simultaneously funded at some point (so a cross-domain drain WOULD be
+    // possible if the engine guard were missing).
+    assert!(total_credited > 0, "stress run never credited any domain");
+    assert!(
+        total_withdrawn > 0,
+        "stress run never withdrew from any domain"
+    );
+    let funded_domains = credited.iter().filter(|&&c| c > 0).count();
+    assert!(
+        funded_domains >= 2,
+        "stress run only funded {funded_domains} domain(s); cross-domain drain not exercised"
     );
 }
 
@@ -16197,4 +16226,265 @@ fn v16_wrapper_stress_per_domain_backing_never_overdraws() {
         }
         check(&market, &fresh);
     }
+}
+
+// ============================================================================
+// Cross-domain isolation under oracle attack.
+//
+// Property: an attacker who fully controls one domain's oracle (asset 1 here)
+// must NOT be able to extract value from OTHER domains - neither the honest
+// domain's insurance/backing nor the capital of a bystander who only trades
+// the honest domain - even though the wrapper is cross-margin and the victim
+// holds positions. The engine isolates loss absorption per domain
+// (consume_domain_insurance_for_negative_pnl is scoped to the bankrupt asset's
+// own domain) and the wrapper keeps sum_d (budget - spent) <= insurance, so a
+// loss in the attacker's domain can consume at most that domain's insurance +
+// the victim's own capital + social loss among that asset's own participants.
+//
+// This test drives a randomized adversarial sequence on the attacker domain
+// (wild oracle pushes, trades against a victim, liquidation cranks, and
+// withdrawal attempts) and asserts after EVERY step that the honest domain's
+// per-domain insurance budget, its backing bucket, and the bystander's capital
+// are byte-for-byte unchanged from the pre-attack snapshot.
+// ============================================================================
+#[test]
+fn v16_wrapper_oracle_attacker_cannot_drain_other_domains() {
+    // asset 0 -> domains 0,1 ; asset 1 (ATTACKER) -> 2,3 ; asset 2 (HONEST) -> 4,5
+    let mut admin = signer().writable();
+    let mut market = market_account();
+    let mint = init_market(&mut admin, &mut market);
+
+    let mut attacker = signer().writable();
+    let admin_key = admin.key.to_bytes();
+    let attacker_key = attacker.key.to_bytes();
+    // Asset 1 = attacker-controlled domain (including oracle authority). Asset
+    // 2 = honest domain. Both are activated by admin (the asset authority).
+    update_asset_lifecycle_with_authorities(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        1,
+        100,
+        125,
+        attacker_key,
+        attacker_key,
+        attacker_key,
+    )
+    .unwrap();
+    update_asset_lifecycle_with_authorities(
+        &mut admin,
+        &mut market,
+        processor::ASSET_ACTION_ACTIVATE,
+        2,
+        200,
+        125,
+        admin_key,
+        admin_key,
+        admin_key,
+    )
+    .unwrap();
+
+    let mut token_program = token_program_account();
+
+    // ---- Fund the HONEST domain (asset 2: domains 4,5) ----
+    let mut admin_src = user_token_account(admin.key, mint, 1_000_000_000);
+    let mut vault_tok = vault_token_account(&market, mint, 1_000_000_000);
+    let mut vault_auth = vault_authority_account(&market);
+    let mut attacker_dest = user_token_account(attacker.key, mint, 0);
+    for dom in [4u8, 5u8] {
+        run_ix(
+            Instruction::TopUpInsuranceDomain {
+                domain: dom,
+                amount: 5_000,
+            },
+            &mut [
+                &mut admin,
+                &mut market,
+                &mut admin_src,
+                &mut vault_tok,
+                &mut token_program,
+            ],
+        )
+        .unwrap();
+    }
+    run_ix(
+        Instruction::TopUpBackingBucket {
+            domain: 4,
+            amount: 3_000,
+            expiry_slot: 1_000_000,
+        },
+        &mut [
+            &mut admin,
+            &mut market,
+            &mut admin_src,
+            &mut vault_tok,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+
+    // ---- Bystander who only ever touches the HONEST asset 2 ----
+    let mut bystander = signer();
+    let mut bystander_acct = portfolio_account();
+    init_portfolio(&mut bystander, &mut market, &mut bystander_acct);
+    deposit(&mut bystander, &mut market, &mut bystander_acct, 200_000);
+
+    // ---- Attacker + victim on asset 1 ----
+    let mut victim = signer();
+    let mut atk_acct = portfolio_account();
+    let mut vic_acct = portfolio_account();
+    init_portfolio(&mut attacker, &mut market, &mut atk_acct);
+    init_portfolio(&mut victim, &mut market, &mut vic_acct);
+    deposit(&mut attacker, &mut market, &mut atk_acct, 1_000_000);
+    deposit(&mut victim, &mut market, &mut vic_acct, 300);
+
+    // Snapshot honest-domain state and bystander capital after setup.
+    let snap = |market: &TestAccount| {
+        let (_, g) = state::read_market(&market.data).unwrap();
+        (
+            g.insurance_domain_budget[4],
+            g.insurance_domain_budget[5],
+            g.insurance_domain_spent[4],
+            g.insurance_domain_spent[5],
+            g.source_backing_buckets[4].fresh_unliened_backing_num,
+            g.source_backing_buckets[4].utilization_fee_earnings,
+        )
+    };
+    let honest_before = snap(&market);
+    let bystander_before = state::read_portfolio(&bystander_acct.data).unwrap().capital;
+
+    let assert_honest_isolated = |market: &TestAccount, bystander_acct: &TestAccount, tag: &str| {
+        assert_eq!(
+            snap(market),
+            honest_before,
+            "honest domain state changed after {tag}"
+        );
+        let (_, group) = state::read_market(&market.data).unwrap();
+        assert!(
+            group.vault >= group.insurance + group.c_tot,
+            "vault {} < insurance {} + user capital {} after {tag}",
+            group.vault,
+            group.insurance,
+            group.c_tot
+        );
+        let cap = state::read_portfolio(&bystander_acct.data).unwrap().capital;
+        assert_eq!(
+            cap, bystander_before,
+            "bystander capital changed after {tag}"
+        );
+    };
+
+    // Configure asset 1 oracle as the attacker-controlled oracle authority.
+    run_ix(
+        Instruction::ConfigureEwmaMark {
+            asset_index: 1,
+            now_slot: 300,
+            initial_mark_e6: 100,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        &mut [&mut attacker, &mut market],
+    )
+    .unwrap();
+    assert_honest_isolated(&market, &bystander_acct, "configure asset1 oracle");
+
+    // Open opposing positions on asset 1 between attacker (long) and victim
+    // (short) at the honest price.
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut attacker,
+            &mut victim,
+            &mut market,
+            &mut atk_acct,
+            &mut vic_acct,
+        ],
+    )
+    .unwrap();
+    assert_honest_isolated(&market, &bystander_acct, "open asset1 position");
+
+    // Randomized attack: push the asset-1 mark to wild values and liquidate.
+    let mut rng: u64 = 0xA11C_E5_DEAD_BEEFu64;
+    let next = |rng: &mut u64| {
+        *rng ^= *rng << 13;
+        *rng ^= *rng >> 7;
+        *rng ^= *rng << 17;
+        *rng
+    };
+    let mut liquidations = 0u32;
+    let mut slot = 300u64;
+    for _ in 0..200 {
+        slot += 1;
+        // Wild attacker-chosen price in [1, 1_000_000].
+        let mark = 1 + (next(&mut rng) % 1_000_000);
+        let _ = run_ix(
+            Instruction::PushEwmaMark {
+                asset_index: 1,
+                now_slot: slot,
+                mark_e6: mark,
+            },
+            &mut [&mut attacker, &mut market],
+        );
+        assert_honest_isolated(&market, &bystander_acct, "push asset1 mark");
+
+        // Liquidation crank against the victim on asset 1.
+        let res = run_ix(
+            Instruction::PermissionlessCrank {
+                action: 1,
+                asset_index: 1,
+                now_slot: slot,
+                funding_rate_e9: 0,
+                close_q: POS_SCALE,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            &mut [&mut admin, &mut market, &mut vic_acct],
+        );
+        if res.is_ok() {
+            liquidations += 1;
+        }
+        assert_honest_isolated(&market, &bystander_acct, "liquidate victim on asset1");
+
+        // Attacker tries to realize gains by withdrawing - capped by their real
+        // equity; can never pull honest-domain value.
+        let _ = run_ix(
+            Instruction::Withdraw {
+                amount: (next(&mut rng) % 2_000_000) as u128,
+            },
+            &mut [
+                &mut attacker,
+                &mut market,
+                &mut atk_acct,
+                &mut attacker_dest,
+                &mut vault_tok,
+                &mut vault_auth,
+                &mut token_program,
+            ],
+        );
+        assert_honest_isolated(&market, &bystander_acct, "attacker withdraw");
+    }
+
+    // Non-vacuity: the attack must have actually moved the asset-1 mark and
+    // exercised the liquidation path at least once.
+    assert!(
+        liquidations > 0,
+        "attack never triggered a liquidation; test is vacuous"
+    );
+    // Non-vacuity: the attack must have actually hurt the victim (drained their
+    // capital and/or closed their position), proving the loss-absorption path
+    // ran while the honest domain stayed isolated.
+    let victim_after = state::read_portfolio(&vic_acct.data).unwrap();
+    assert!(
+        victim_after.capital < 300
+            || percolator::active_bitmap_is_empty(victim_after.active_bitmap),
+        "victim was never harmed (capital {}); attack vacuous",
+        victim_after.capital
+    );
+    // Final isolation check.
+    assert_honest_isolated(&market, &bystander_acct, "final");
 }
