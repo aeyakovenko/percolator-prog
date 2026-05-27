@@ -289,7 +289,7 @@ AuthMark is the direct authority-mark path:
 EwmaMark is the smoothed authority-mark path for markets that use an internal mark/index rather than an external oracle.
 
 - **Mark and index prices**: maintained entirely within the engine; no external oracle feed required for mark settlement.
-- **Premium-based funding**: funding accrues based on the spread between mark and index (premium), scaled by a K-coefficient. The K-coefficient mechanism replaces direct funding rate computation.
+- **Premium-based funding**: permissionless cranks compute funding from the spread between mark and index (premium), clamp it to `max_abs_funding_e9_per_slot`, and pass that internally to the engine. The crank instruction's funding-rate field is non-authoritative and must remain zero.
 - **Rate-limited index smoothing**: index price updates are clamped per slot via `clamp_toward_with_dt`, preventing instant mark-to-index jumps. When `dt = 0` or cap is zero, the function returns `index` unchanged (no movement).
 - **Execution-price consent**: `TradeCpi` and `TradeNoCpi` both allow counterparties to agree on an execution price. The wrapper clamps mark/index impact and charges dynamic mark-movement fees; it does not reject solely because the agreed execution is away from the current effective price.
 - **Bilateral no-CPI trading**: `TradeNoCpi` is available in EwmaMark and external-oracle markets when both account owners sign. `TradeCpi` adds matcher-program authorization, but the price-flexibility policy is the same.

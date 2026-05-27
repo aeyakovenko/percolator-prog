@@ -2,7 +2,8 @@ use litesvm::LiteSVM;
 use percolator::{
     AssetLifecycleV16, BackingBucketStatusV16, CloseProgressLedgerV16, MarketGroupV16,
     MarketModeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16, ResolvedPayoutLedgerV16,
-    ResolvedPayoutReceiptV16, SideModeV16, SideV16, TradeRequestV16, BOUND_SCALE, POS_SCALE,
+    ResolvedPayoutReceiptV16, SideModeV16, SideV16, TradeRequestV16, ADL_ONE, BOUND_SCALE,
+    POS_SCALE,
 };
 use percolator_prog::{
     constants::{MATCHER_ABI_VERSION, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3},
@@ -1655,6 +1656,54 @@ impl V16CuEnv {
             &[&self.admin],
         )
         .expect("push auth mark")
+    }
+
+    fn configure_auth_mark_for_asset_as_admin(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+        initial_mark_e6: u64,
+    ) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::ConfigureAuthMark {
+                asset_index,
+                now_slot,
+                initial_mark_e6,
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("configure auth mark for asset as admin")
+    }
+
+    fn push_auth_mark_for_asset_as_admin(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+        mark_e6: u64,
+    ) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::PushAuthMark {
+                asset_index,
+                now_slot,
+                mark_e6,
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("push auth mark for asset as admin")
     }
 
     fn configure_auth_mark_for_asset_with_authority(
@@ -3534,6 +3583,388 @@ fn v16_bpf_tradenocpi_fresh_open_on_base_and_added_asset_is_bounded() {
         active_leg_for_asset(&short, 3).basis_pos_q,
         -((10 * POS_SCALE) as i128)
     );
+}
+
+#[test]
+fn v16_bpf_perps_positive_smoke_cross_margin_pnl_convert_close_and_withdraw() {
+    const INITIAL_PRICE: u64 = 100;
+    const ASSET0_MARK: u64 = 105;
+    const ASSET1_MARK: u64 = 100;
+    const DEPOSIT: u128 = 2_000_000;
+    const EXPECTED_PNL: i128 = 5;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+
+    let cross_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let cross_account = env.create_portfolio(&cross_owner);
+    let counterparty_account = env.create_portfolio(&counterparty_owner);
+    env.deposit(&cross_owner, cross_account, DEPOSIT);
+    env.deposit(&counterparty_owner, counterparty_account, DEPOSIT);
+
+    let open_asset0_cu = env.trade_asset_with_cu(
+        0,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        POS_SCALE as i128,
+        INITIAL_PRICE,
+        0,
+    );
+    assert_cu_within("perps smoke open asset[0]", open_asset0_cu, TRADE_CU_LIMIT);
+    let open_asset1_cu = env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        -(POS_SCALE as i128),
+        INITIAL_PRICE,
+        0,
+    );
+    assert_cu_within("perps smoke open asset[1]", open_asset1_cu, TRADE_CU_LIMIT);
+
+    let cross_open = env.portfolio_state(cross_account);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(cross_open.active_bitmap),
+        2
+    );
+    assert_eq!(
+        active_leg_for_asset(&cross_open, 0).basis_pos_q,
+        POS_SCALE as i128
+    );
+    assert_eq!(
+        active_leg_for_asset(&cross_open, 1).basis_pos_q,
+        -(POS_SCALE as i128)
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, ASSET0_MARK);
+    env.push_auth_mark_for_asset_as_admin(1, 2, ASSET1_MARK);
+
+    for (portfolio, asset_index, label) in [
+        (
+            counterparty_account,
+            0,
+            "counterparty asset[0] loss refresh",
+        ),
+        (cross_account, 0, "cross account asset[0] gain refresh"),
+        (
+            counterparty_account,
+            1,
+            "counterparty asset[1] loss refresh",
+        ),
+        (cross_account, 1, "cross account asset[1] gain refresh"),
+    ] {
+        let cu = env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index,
+                now_slot: 2,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+        );
+        assert_cu_within(label, cu, CRANK_CU_LIMIT);
+    }
+
+    let cross_after_refresh = env.portfolio_state(cross_account);
+    let counterparty_after_refresh = env.portfolio_state(counterparty_account);
+    assert_eq!(
+        cross_after_refresh.pnl, EXPECTED_PNL,
+        "cross-margin account should realize +5 while carrying two active legs"
+    );
+    assert_eq!(counterparty_after_refresh.pnl, 0);
+    assert_eq!(
+        counterparty_after_refresh.capital,
+        DEPOSIT - EXPECTED_PNL as u128
+    );
+
+    let close_asset0_cu = env.trade_asset_with_cu(
+        0,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        -(POS_SCALE as i128),
+        ASSET0_MARK,
+        0,
+    );
+    assert_cu_within(
+        "perps smoke close asset[0]",
+        close_asset0_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    let close_asset1_cu = env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        POS_SCALE as i128,
+        ASSET1_MARK,
+        0,
+    );
+    assert_cu_within(
+        "perps smoke close asset[1]",
+        close_asset1_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+
+    let cross_flat = env.portfolio_state(cross_account);
+    let counterparty_flat = env.portfolio_state(counterparty_account);
+    assert!(percolator::active_bitmap_is_empty(cross_flat.active_bitmap));
+    assert!(percolator::active_bitmap_is_empty(
+        counterparty_flat.active_bitmap
+    ));
+    assert_eq!(cross_flat.pnl, EXPECTED_PNL);
+    assert_eq!(cross_flat.capital, DEPOSIT);
+    assert_eq!(counterparty_flat.capital, DEPOSIT - EXPECTED_PNL as u128);
+
+    let convert_cu =
+        env.convert_released_pnl_with_cu(&cross_owner, cross_account, EXPECTED_PNL as u128);
+    assert_cu_within(
+        "perps smoke convert released pnl",
+        convert_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    let cross_after_convert = env.portfolio_state(cross_account);
+    assert_eq!(cross_after_convert.pnl, 0);
+    assert_eq!(cross_after_convert.capital, DEPOSIT + EXPECTED_PNL as u128);
+
+    let cross_dest = env.withdraw(&cross_owner, cross_account, cross_after_convert.capital);
+    let counterparty_dest = env.withdraw(
+        &counterparty_owner,
+        counterparty_account,
+        counterparty_flat.capital,
+    );
+    assert_eq!(
+        env.token_amount(cross_dest) as u128,
+        DEPOSIT + EXPECTED_PNL as u128
+    );
+    assert_eq!(
+        env.token_amount(counterparty_dest) as u128,
+        DEPOSIT - EXPECTED_PNL as u128
+    );
+    assert_eq!(env.token_amount(env.vault), 0);
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(group.insurance, 0);
+}
+
+#[test]
+fn v16_bpf_permissionless_crank_computes_funding_from_internal_mark_premium() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const DEPOSIT: u128 = 10_000_000;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_ewma_mark_with_cu(0, INITIAL_PRICE, 1, 0);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, DEPOSIT);
+    env.deposit(&short_owner, short_account, DEPOSIT);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        INITIAL_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_ewma_mark_with_cu(1, INITIAL_PRICE * 2);
+    env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    let (cfg_after_first, group_after_first) = env.market_state();
+    assert_eq!(cfg_after_first.mark_ewma_e6, 1_500_000);
+    assert_eq!(group_after_first.assets[0].effective_price, 1_100_000);
+    assert_eq!(
+        group_after_first.funding_epoch, 0,
+        "a newly pushed mark must not retroactively charge funding before its slot"
+    );
+    assert_eq!(group_after_first.assets[0].f_long_num, 0);
+    assert_eq!(group_after_first.assets[0].f_short_num, 0);
+
+    env.svm.warp_to_slot(2);
+    let funding_cu = env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    assert_cu_within(
+        "permissionless computed funding crank",
+        funding_cu,
+        CRANK_CU_LIMIT,
+    );
+    let (_, funded_group) = env.market_state();
+    assert_eq!(funded_group.funding_epoch, 1);
+    assert_eq!(funded_group.assets[0].effective_price, 1_210_000);
+    assert_eq!(funded_group.assets[0].f_long_num, -(ADL_ONE as i128));
+    assert_eq!(funded_group.assets[0].f_short_num, ADL_ONE as i128);
+}
+
+#[test]
+fn v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const FUNDING_RATE_E9: i128 = 1_000;
+    const DEPOSIT: u128 = 2_000_000;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, DEPOSIT);
+    env.deposit(&short_owner, short_account, DEPOSIT);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        INITIAL_PRICE,
+        0,
+    );
+
+    env.mutate_market(|_, group| {
+        let out = group
+            .accrue_asset_to_not_atomic(0, 1, INITIAL_PRICE, FUNDING_RATE_E9, true)
+            .unwrap();
+        assert!(out.funding_active);
+        group.assets[0].raw_oracle_target_price = INITIAL_PRICE;
+    });
+    env.svm.warp_to_slot(1);
+    let (_, funded_group) = env.market_state();
+    assert_eq!(funded_group.funding_epoch, 1);
+    assert_eq!(funded_group.assets[0].f_long_num, -(ADL_ONE as i128));
+    assert_eq!(funded_group.assets[0].f_short_num, ADL_ONE as i128);
+
+    let long_refresh_cu = env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    assert_cu_within(
+        "funding smoke long loss refresh",
+        long_refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+    let long_after = env.portfolio_state(long_account);
+    assert_eq!(long_after.pnl, 0);
+    assert_eq!(long_after.capital, DEPOSIT - 1);
+
+    let short_refresh_cu = env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    assert_cu_within(
+        "funding smoke short gain refresh",
+        short_refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+    let short_after = env.portfolio_state(short_account);
+    assert_eq!(short_after.pnl, 1);
+    assert_eq!(short_after.capital, DEPOSIT);
+
+    let close_cu = env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        -(POS_SCALE as i128),
+        INITIAL_PRICE,
+        0,
+    );
+    assert_cu_within(
+        "funding smoke close funded position",
+        close_cu,
+        TRADE_CU_LIMIT,
+    );
+    let long_flat = env.portfolio_state(long_account);
+    let short_flat = env.portfolio_state(short_account);
+    assert!(percolator::active_bitmap_is_empty(long_flat.active_bitmap));
+    assert!(percolator::active_bitmap_is_empty(short_flat.active_bitmap));
+    assert_eq!(long_flat.capital, DEPOSIT - 1);
+    assert_eq!(short_flat.pnl, 1);
+
+    let convert_cu = env.convert_released_pnl_with_cu(&short_owner, short_account, 1);
+    assert_cu_within(
+        "funding smoke convert released pnl",
+        convert_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let short_after_convert = env.portfolio_state(short_account);
+    assert_eq!(short_after_convert.pnl, 0);
+    assert_eq!(short_after_convert.capital, DEPOSIT + 1);
+
+    let (_, group) = env.market_state();
+    assert_eq!(group.c_tot, DEPOSIT * 2);
+    assert_eq!(group.vault, DEPOSIT * 2);
 }
 
 #[test]

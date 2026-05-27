@@ -6,6 +6,33 @@ use percolator_prog::ix::Instruction;
 use percolator_prog::matcher_abi::{
     validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
 };
+use percolator_prog::policy_v16;
+
+#[kani::proof]
+fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
+    let mark_raw: u16 = kani::any();
+    let index_raw: u16 = kani::any();
+    let cap_raw: u16 = kani::any();
+    let mark = mark_raw as u64 + 1;
+    let index = index_raw as u64 + 1;
+    let cap = cap_raw as u64;
+
+    let rate = policy_v16::premium_funding_rate_e9(mark, index, cap).unwrap();
+    let abs_rate = if rate < 0 {
+        (-rate) as u128
+    } else {
+        rate as u128
+    };
+    assert!(abs_rate <= cap as u128);
+
+    if cap == 0 || mark == index {
+        assert_eq!(rate, 0);
+    } else if mark > index {
+        assert!(rate > 0);
+    } else {
+        assert!(rate < 0);
+    }
+}
 
 #[kani::proof]
 fn kani_v16_init_market_decode_preserves_wire_fields() {

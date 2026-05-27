@@ -3410,6 +3410,26 @@ pub mod policy_v16 {
         u64::try_from(bps).ok()
     }
 
+    pub fn premium_funding_rate_e9(
+        mark_e6: u64,
+        index_e6: u64,
+        max_abs_rate_e9: u64,
+    ) -> Option<i128> {
+        if max_abs_rate_e9 == 0 || mark_e6 == 0 || index_e6 == 0 || mark_e6 == index_e6 {
+            return Some(0);
+        }
+        let premium_e9 = (mark_e6.abs_diff(index_e6) as u128)
+            .checked_mul(percolator::FUNDING_DEN)?
+            / index_e6 as u128;
+        let bounded = core::cmp::min(premium_e9, max_abs_rate_e9 as u128);
+        let signed = i128::try_from(bounded).ok()?;
+        if mark_e6 > index_e6 {
+            Some(signed)
+        } else {
+            Some(-signed)
+        }
+    }
+
     fn two_sided_trade_fee_paid_cap(notional: u128, fee_bps: u64) -> Option<u64> {
         if notional == 0 || fee_bps == 0 {
             return Some(0);
@@ -9196,6 +9216,12 @@ pub mod processor {
                 now_unix_ts,
                 oracle_tail,
             )?;
+            let computed_funding_rate_e9 = permissionless_funding_rate_e9_view(
+                &oracle_profile,
+                &group,
+                asset_index_usize,
+                crank_price,
+            )?;
             group.markets[asset_index_usize]
                 .engine
                 .asset
@@ -9254,7 +9280,7 @@ pub mod processor {
                             asset_index_usize,
                             authenticated_now_slot,
                             crank_price,
-                            funding_rate_e9,
+                            computed_funding_rate_e9,
                             true,
                         )
                         .map_err(map_v16_error)?;
@@ -9269,7 +9295,7 @@ pub mod processor {
                                 now_slot: authenticated_now_slot,
                                 asset_index: asset_index_usize,
                                 effective_price: crank_price,
-                                funding_rate_e9,
+                                funding_rate_e9: computed_funding_rate_e9,
                                 action: crank_action,
                             },
                         )
@@ -9332,7 +9358,7 @@ pub mod processor {
                             asset_index_usize,
                             authenticated_now_slot,
                             crank_price,
-                            funding_rate_e9,
+                            computed_funding_rate_e9,
                             true,
                         )
                         .map_err(map_v16_error)?;
@@ -9347,7 +9373,7 @@ pub mod processor {
                                 now_slot: authenticated_now_slot,
                                 asset_index: asset_index_usize,
                                 effective_price: crank_price,
-                                funding_rate_e9,
+                                funding_rate_e9: computed_funding_rate_e9,
                                 action: crank_action,
                             },
                         )
@@ -10191,6 +10217,32 @@ pub mod processor {
         Ok(price)
     }
 
+    fn permissionless_funding_rate_e9_view(
+        profile: &state::AssetOracleProfileV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        effective_price: u64,
+    ) -> Result<i128, ProgramError> {
+        if !oracle_v16::profile_is_price_managed(profile) {
+            return Ok(0);
+        }
+        let max_abs_rate = group.header.config.max_abs_funding_e9_per_slot.get();
+        if max_abs_rate == 0 {
+            return Ok(0);
+        }
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let asset = group.markets[asset_index].engine.asset;
+        if profile.mark_ewma_last_slot > asset.slot_last.get() {
+            return Ok(0);
+        }
+        policy_v16::premium_funding_rate_e9(profile.mark_ewma_e6, effective_price, max_abs_rate)
+            .ok_or(PercolatorError::EngineArithmeticOverflow.into())
+    }
+
     fn update_hybrid_mark_after_trade_view(
         profile: &mut state::AssetOracleProfileV16,
         group: &state::MarketViewMutV16<'_>,
@@ -10561,6 +10613,27 @@ pub mod processor {
             cfg.max_accrual_dt_slots = 1;
             cfg.min_funding_lifetime_slots = 1;
             cfg
+        }
+
+        #[test]
+        fn premium_funding_rate_e9_clamps_and_preserves_sign() {
+            assert_eq!(
+                policy_v16::premium_funding_rate_e9(150, 100, 1_000),
+                Some(1_000)
+            );
+            assert_eq!(
+                policy_v16::premium_funding_rate_e9(100, 150, 1_000),
+                Some(-1_000)
+            );
+            assert_eq!(
+                policy_v16::premium_funding_rate_e9(101, 100, 20_000_000),
+                Some(10_000_000)
+            );
+            assert_eq!(
+                policy_v16::premium_funding_rate_e9(100, 100, 1_000),
+                Some(0)
+            );
+            assert_eq!(policy_v16::premium_funding_rate_e9(150, 100, 0), Some(0));
         }
 
         #[test]

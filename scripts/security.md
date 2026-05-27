@@ -2074,20 +2074,19 @@ Defense-in-depth is solid:
 
 ### Funding rate boundary arithmetic
 
-`compute_current_funding_rate_e9` at `src/percolator.rs:3628-3652`
-was traced numerically. All intermediate products fit i128 easily
-given the configured bounds:
+`policy_v16::premium_funding_rate_e9` computes the permissionless
+funding rate from `mark/index - 1`, expressed in e9 units, and clamps
+it to the engine's configured `max_abs_funding_e9_per_slot`. The crank
+instruction's funding-rate field is non-authoritative and nonzero
+caller input is rejected.
 
-- `diff.saturating_mul(1e9)` at worst `1.8e19 * 1e9 = 1.8e28` (fits
-  i128 = ~1.7e38).
-- `premium_e9 * funding_k_bps` post-clamp bounded at ~9.2e28.
-- Final `.clamp(-max_rate_e9, max_rate_e9)` — `max_rate_e9 ≥ 0`
-  enforced at InitMarket (`src/percolator.rs:4325-4338`) and
-  UpdateConfig (`src/percolator.rs:6797-6803`), so the clamp
-  invariant `min ≤ max` holds and `.clamp()` never panics.
-- Engine envelope (`max_abs_funding_e9_per_slot *
-  max_accrual_dt_slots`) is validated at InitMarket per
-  `validate_params` in the engine crate.
+- `abs(mark - index) * FUNDING_DEN` is bounded by the engine oracle
+  price envelope and fits `u128`.
+- The final signed value is bounded by `max_abs_funding_e9_per_slot`,
+  which the engine validates at InitMarket.
+- A mark update newer than the asset's accrued `slot_last` produces a
+  zero funding rate for that catch-up interval, so a fresh mark push
+  cannot retroactively charge funding for time before the mark existed.
 
 ### `is_resolved()` coverage across instructions
 
