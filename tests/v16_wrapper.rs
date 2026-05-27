@@ -1358,6 +1358,7 @@ fn v16_wrapper_underfunded_flat_sync_sweeps_remaining_capital_once() {
         group
             .accrue_asset_to_not_atomic(0, 1, 100, 0, true)
             .unwrap();
+        group.assets[0].raw_oracle_target_price = 100;
         state::write_market(&mut market.data, &cfg, &group).unwrap();
     }
     let insurance_before_nonflat_sync = state::read_market(&market.data).unwrap().1.insurance;
@@ -3700,6 +3701,7 @@ fn v16_wrapper_maintenance_fee_sync_charges_recurring_fee_without_forcing_local_
     {
         let (cfg, mut group) = state::read_market(&market.data).unwrap();
         group.accrue_asset_to_not_atomic(0, 1, 50, 0, true).unwrap();
+        group.assets[0].raw_oracle_target_price = 50;
         state::write_market(&mut market.data, &cfg, &group).unwrap();
     }
 
@@ -15651,7 +15653,7 @@ fn v16_wrapper_close_resolved_rejects_before_resolution_without_mutation() {
 }
 
 #[test]
-fn v16_wrapper_close_resolved_active_position_is_progress_only_without_payout() {
+fn v16_wrapper_close_resolved_active_position_pays_when_engine_clears_exposure() {
     let mut admin = signer();
     let mut market = market_account();
     let mut long_owner = signer();
@@ -15701,20 +15703,19 @@ fn v16_wrapper_close_resolved_active_position_is_progress_only_without_payout() 
         ],
     );
     assert_eq!(result, Ok(()));
-    assert_eq!(read_token_amount(&dest), 0);
 
     let (_, group) = state::read_market(&market.data).unwrap();
     let long = state::read_portfolio(&long_account.data).unwrap();
     assert_eq!(
-        group.vault, 2_000_000,
-        "resolved close must not pay before account exposure is cleared"
+        group.vault, 1_000_000,
+        "resolved close pays capital once the engine clears account exposure"
     );
-    assert!(!percolator::active_bitmap_is_empty(long.active_bitmap));
-    assert_eq!(long.capital, 1_000_000);
+    assert!(percolator::active_bitmap_is_empty(long.active_bitmap));
+    assert_eq!(long.capital, 0);
 }
 
 #[test]
-fn v16_wrapper_close_resolved_progress_only_does_not_require_token_accounts() {
+fn v16_wrapper_close_resolved_payout_requires_token_accounts_after_exposure_clears() {
     let mut admin = signer();
     let mut market = market_account();
     let mut long_owner = signer();
@@ -15745,22 +15746,17 @@ fn v16_wrapper_close_resolved_progress_only_does_not_require_token_accounts() {
     .unwrap();
     run_ix(Instruction::ResolveMarket, &mut [&mut admin, &mut market]).unwrap();
 
+    let before_market = market.data.clone();
+    let before_portfolio = long_account.data.clone();
     let result = run_ix(
         Instruction::CloseResolved {
             fee_rate_per_slot: 0,
         },
         &mut [&mut long_owner, &mut market, &mut long_account],
     );
-    assert_eq!(result, Ok(()));
-
-    let (_, group) = state::read_market(&market.data).unwrap();
-    let long = state::read_portfolio(&long_account.data).unwrap();
-    assert_eq!(
-        group.vault, 2_000_000,
-        "active resolved close progress must not require or perform token payout"
-    );
-    assert!(!percolator::active_bitmap_is_empty(long.active_bitmap));
-    assert_eq!(long.capital, 1_000_000);
+    assert_eq!(result, Err(ProgramError::NotEnoughAccountKeys));
+    assert_eq!(market.data, before_market);
+    assert_eq!(long_account.data, before_portfolio);
 }
 
 #[test]

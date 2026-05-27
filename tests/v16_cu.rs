@@ -1048,6 +1048,10 @@ impl V16CuEnv {
                 group
                     .accrue_asset_to_not_atomic(asset_index, 16, 95, 0, true)
                     .unwrap();
+                group.markets[asset_index]
+                    .engine
+                    .asset
+                    .raw_oracle_target_price = percolator::V16PodU64::new(95);
             }
         }
         self.svm.set_account(self.market, market_account).unwrap();
@@ -5154,6 +5158,90 @@ fn v16_bpf_configure_and_push_auth_mark_are_bounded_and_clock_authenticated() {
     assert_ne!(
         cfg.mark_ewma_last_slot, spoofed_slot,
         "caller-supplied PushAuthMark now_slot must not authenticate mark liveness"
+    );
+}
+
+#[test]
+fn v16_bpf_auth_mark_target_effective_lag_counts_toward_liquidation_health() {
+    const INITIAL_MARK: u64 = 100_000_000;
+    const TARGET_MARK: u64 = 90_000_000;
+    const EXPECTED_EFFECTIVE_AFTER_ONE_SLOT: u64 = 99_760_000;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 24);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, INITIAL_MARK);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_portfolio = env.create_portfolio(&long_owner);
+    let short_portfolio = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_portfolio, 100_000_000);
+    env.deposit(&short_owner, short_portfolio, 200_000_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_portfolio,
+        &short_owner,
+        short_portfolio,
+        POS_SCALE as i128,
+        INITIAL_MARK,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, TARGET_MARK);
+    env.crank(
+        long_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+
+    let (_, lagged_group) = env.market_state();
+    assert_eq!(
+        lagged_group.assets[0].raw_oracle_target_price, TARGET_MARK,
+        "AuthMark stores the un-clamped target for health certification"
+    );
+    assert_eq!(
+        lagged_group.assets[0].effective_price, EXPECTED_EFFECTIVE_AFTER_ONE_SLOT,
+        "effective price should be clamp-lagged by one 24 bps slot"
+    );
+
+    let lagged_long = env.portfolio_state(long_portfolio);
+    assert!(
+        lagged_long.health_cert.valid,
+        "refresh must write a health certificate"
+    );
+    assert!(
+        lagged_long.health_cert.certified_maintenance_req > INITIAL_MARK as u128,
+        "maintenance must include the adverse target/effective lag penalty"
+    );
+    assert!(
+        lagged_long.health_cert.certified_liq_deficit > 0,
+        "lagged adverse AuthMark target must make the under-margined long liquidatable"
+    );
+
+    env.crank(
+        long_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    let liquidated_long = env.portfolio_state(long_portfolio);
+    assert!(
+        !has_active_leg_for_asset(&liquidated_long, 0),
+        "positive lag-deficit certification must allow permissionless liquidation"
     );
 }
 
