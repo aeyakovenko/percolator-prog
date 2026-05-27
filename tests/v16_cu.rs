@@ -3669,6 +3669,64 @@ fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
 }
 
 #[test]
+fn v16_bpf_flat_sync_cannot_pre_anchor_unpaid_future_maintenance() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 40,
+    );
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_portfolio = env.create_portfolio(&long_owner);
+    let short_portfolio = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_portfolio, 1);
+    env.deposit(&short_owner, short_portfolio, 10_000);
+
+    env.svm.warp_to_slot(10);
+    env.sync_maintenance_fee_with_cu(long_portfolio, None, 10);
+    let long_after_flat_sync = env.portfolio_state(long_portfolio);
+    assert_eq!(long_after_flat_sync.capital, 0);
+    assert_eq!(
+        long_after_flat_sync.last_fee_slot, 0,
+        "underpaid flat sync must not pre-anchor later nonflat maintenance"
+    );
+
+    env.deposit(&long_owner, long_portfolio, 1_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_portfolio,
+        &short_owner,
+        short_portfolio,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.crank(
+        long_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 10,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    let (_, before_nonflat_sync) = env.market_state();
+    assert_eq!(before_nonflat_sync.assets[0].slot_last, 1);
+    let insurance_before_nonflat_sync = before_nonflat_sync.insurance;
+
+    env.sync_maintenance_fee_with_cu(long_portfolio, None, 11);
+    let (_, group_after_nonflat_sync) = env.market_state();
+    let long_after_nonflat_sync = env.portfolio_state(long_portfolio);
+    assert_eq!(long_after_nonflat_sync.capital, 960);
+    assert_eq!(long_after_nonflat_sync.last_fee_slot, 1);
+    assert_eq!(
+        group_after_nonflat_sync.insurance,
+        insurance_before_nonflat_sync + 40
+    );
+}
+
+#[test]
 fn v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();

@@ -1292,9 +1292,80 @@ fn v16_wrapper_maintenance_fee_is_permissionless_and_capital_capped() {
     let (_, group) = state::read_market(&market.data).unwrap();
     let account = state::read_portfolio(&portfolio.data).unwrap();
     assert_eq!(account.capital, 0);
-    assert_eq!(account.last_fee_slot, 2);
+    assert_eq!(account.last_fee_slot, 1);
     assert_eq!(group.insurance, 75);
     assert_eq!(group.c_tot, 0);
+}
+
+#[test]
+fn v16_wrapper_flat_sync_cannot_pre_anchor_unpaid_future_maintenance() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut long_owner = signer();
+    let mut short_owner = signer();
+    let mut long_account = portfolio_account();
+    let mut short_account = portfolio_account();
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                maintenance_fee_per_slot,
+                ..
+            } = ix
+            {
+                *maintenance_fee_per_slot = 40;
+            }
+        }),
+    );
+    init_portfolio(&mut long_owner, &mut market, &mut long_account);
+    init_portfolio(&mut short_owner, &mut market, &mut short_account);
+    deposit(&mut long_owner, &mut market, &mut long_account, 1);
+    deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
+
+    sync_maintenance_fee(&mut market, &mut long_account, 10).unwrap();
+    let account_after_flat_sync = state::read_portfolio(&long_account.data).unwrap();
+    assert_eq!(account_after_flat_sync.capital, 0);
+    assert_eq!(
+        account_after_flat_sync.last_fee_slot, 0,
+        "underpaid flat sync must not pre-anchor later nonflat maintenance"
+    );
+
+    deposit(&mut long_owner, &mut market, &mut long_account, 1_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut long_owner,
+            &mut short_owner,
+            &mut market,
+            &mut long_account,
+            &mut short_account,
+        ],
+    )
+    .unwrap();
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group
+            .accrue_asset_to_not_atomic(0, 1, 100, 0, true)
+            .unwrap();
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+    let insurance_before_nonflat_sync = state::read_market(&market.data).unwrap().1.insurance;
+
+    sync_maintenance_fee(&mut market, &mut long_account, 10).unwrap();
+    let (_, group_after_nonflat_sync) = state::read_market(&market.data).unwrap();
+    let account_after_nonflat_sync = state::read_portfolio(&long_account.data).unwrap();
+    assert_eq!(account_after_nonflat_sync.capital, 960);
+    assert_eq!(account_after_nonflat_sync.last_fee_slot, 1);
+    assert_eq!(
+        group_after_nonflat_sync.insurance,
+        insurance_before_nonflat_sync + 40
+    );
 }
 
 #[test]
