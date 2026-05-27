@@ -5499,7 +5499,7 @@ pub mod processor {
         ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (_cfg, group) = state::market_view_mut(&mut market_data)?;
+            let (_cfg, mut group) = state::market_view_mut(&mut market_data)?;
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
             let portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
@@ -5508,49 +5508,11 @@ pub mod processor {
             portfolio
                 .validate_with_market(&group.as_view())
                 .map_err(map_v16_error)?;
-            if !percolator::active_bitmap_is_empty(
-                portfolio
-                    .header
-                    .active_bitmap
-                    .map(percolator::V16PodU64::get),
-            ) || portfolio.header.capital.get() != 0
-                || portfolio.header.pnl.get() != 0
-                || portfolio.header.reserved_pnl.get() != 0
-                || portfolio.header.fee_credits.get() != 0
-                || portfolio.header.cancel_deposit_escrow.get() != 0
-                || portfolio.header.stale_state != 0
-                || portfolio.header.b_stale_state != 0
-                || portfolio
-                    .header
-                    .close_progress
-                    .try_to_runtime()
-                    .map_err(map_v16_error)?
-                    .has_pending_residual()
-                || (portfolio.header.resolved_payout_receipt.present != 0
-                    && portfolio.header.resolved_payout_receipt.finalized == 0)
-            {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
-            let mut d = 0usize;
-            while d < portfolio.source_domains.len() {
-                if portfolio.source_domains[d].source_claim_bound_num.get() != 0 {
-                    return Err(PercolatorError::EngineLockActive.into());
-                }
-                d += 1;
-            }
-            group.header.materialized_portfolio_count = percolator::V16PodU64::new(
-                group
-                    .header
-                    .materialized_portfolio_count
-                    .get()
-                    .checked_sub(1)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?,
-            );
+            ensure_portfolio_view_closable(&portfolio)?;
+            decrement_materialized_portfolio_count(&mut group)?;
             group.validate_shape().map_err(map_v16_error)?;
         }
-        for b in portfolio_ai.try_borrow_mut_data()?.iter_mut() {
-            *b = 0;
-        }
+        close_portfolio_account_to_market_slab(portfolio_ai, market_ai)?;
         Ok(())
     }
 
@@ -7264,115 +7226,132 @@ pub mod processor {
         }
         let authenticated_now_slot = authenticated_slot_or_fallback(now_slot);
 
-        let mut market_data = market_ai.try_borrow_mut_data()?;
-        let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
-        if group.header.mode == 0 {
-            reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
-        }
-        let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
-        let mut portfolio =
-            state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
-        expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
+        let close_payer_portfolio = {
+            let mut market_data = market_ai.try_borrow_mut_data()?;
+            let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            if group.header.mode == 0 {
+                reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
+            }
+            let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
+            let mut portfolio =
+                state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
+            expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
 
-        if let Some(cranker_portfolio_ai) = accounts.get(2) {
-            if cranker_portfolio_ai.key == portfolio_ai.key {
-                let charged = group
-                    .sync_account_fee_to_slot_not_atomic(
-                        &mut portfolio,
-                        authenticated_now_slot,
-                        cfg_pre.maintenance_fee_per_slot,
-                    )
-                    .map_err(map_v16_error)?;
-                let reward = charged
-                    .checked_mul(cfg_pre.maintenance_cranker_fee_share_bps as u128)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?
-                    / 10_000;
-                if reward != 0 {
-                    group.header.insurance = percolator::V16PodU128::new(
-                        group
-                            .header
-                            .insurance
-                            .get()
-                            .checked_sub(reward)
-                            .ok_or(PercolatorError::EngineArithmeticOverflow)?,
-                    );
-                    group.header.c_tot = percolator::V16PodU128::new(
-                        group
-                            .header
-                            .c_tot
-                            .get()
-                            .checked_add(reward)
-                            .ok_or(PercolatorError::EngineArithmeticOverflow)?,
-                    );
-                    portfolio.header.capital = percolator::V16PodU128::new(
+            if let Some(cranker_portfolio_ai) = accounts.get(2) {
+                if cranker_portfolio_ai.key == portfolio_ai.key {
+                    let charged = group
+                        .sync_account_fee_to_slot_not_atomic(
+                            &mut portfolio,
+                            authenticated_now_slot,
+                            cfg_pre.maintenance_fee_per_slot,
+                        )
+                        .map_err(map_v16_error)?;
+                    let reward = charged
+                        .checked_mul(cfg_pre.maintenance_cranker_fee_share_bps as u128)
+                        .ok_or(PercolatorError::EngineArithmeticOverflow)?
+                        / 10_000;
+                    if reward != 0 {
+                        group.header.insurance = percolator::V16PodU128::new(
+                            group
+                                .header
+                                .insurance
+                                .get()
+                                .checked_sub(reward)
+                                .ok_or(PercolatorError::EngineArithmeticOverflow)?,
+                        );
+                        group.header.c_tot = percolator::V16PodU128::new(
+                            group
+                                .header
+                                .c_tot
+                                .get()
+                                .checked_add(reward)
+                                .ok_or(PercolatorError::EngineArithmeticOverflow)?,
+                        );
+                        portfolio.header.capital = percolator::V16PodU128::new(
+                            portfolio
+                                .header
+                                .capital
+                                .get()
+                                .checked_add(reward)
+                                .ok_or(PercolatorError::EngineArithmeticOverflow)?,
+                        );
+                        portfolio.header.health_cert.valid = 0;
+                        group.validate_shape().map_err(map_v16_error)?;
                         portfolio
-                            .header
-                            .capital
-                            .get()
-                            .checked_add(reward)
-                            .ok_or(PercolatorError::EngineArithmeticOverflow)?,
-                    );
-                    portfolio.header.health_cert.valid = 0;
+                            .validate_with_market(&group.as_view())
+                            .map_err(map_v16_error)?;
+                    }
+                    let retained = charged
+                        .checked_sub(reward)
+                        .ok_or(PercolatorError::EngineCounterUnderflow)?;
+                    credit_maintenance_fee_to_active_market_budgets_view(
+                        &cfg, &mut group, retained,
+                    )?;
                     group.validate_shape().map_err(map_v16_error)?;
                     portfolio
                         .validate_with_market(&group.as_view())
                         .map_err(map_v16_error)?;
-                }
-                let retained = charged
-                    .checked_sub(reward)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?;
-                credit_maintenance_fee_to_active_market_budgets_view(&cfg, &mut group, retained)?;
-                group.validate_shape().map_err(map_v16_error)?;
-                portfolio
-                    .validate_with_market(&group.as_view())
-                    .map_err(map_v16_error)?;
-            } else {
-                let mut cranker_data = cranker_portfolio_ai.try_borrow_mut_data()?;
-                let cranker = state::portfolio_view_mut_for_market_slots(
-                    &mut cranker_data,
-                    max_market_slots,
-                )?;
-                expect_portfolio_view_account_key(&cranker, cranker_portfolio_ai.key)?;
-                cranker
-                    .validate_with_market(&group.as_view())
-                    .map_err(map_v16_error)?;
-                let charged = group
-                    .sync_account_fee_to_slot_not_atomic(
-                        &mut portfolio,
-                        authenticated_now_slot,
-                        cfg_pre.maintenance_fee_per_slot,
-                    )
-                    .map_err(map_v16_error)?;
-                let reward = charged
-                    .checked_mul(cfg_pre.maintenance_cranker_fee_share_bps as u128)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?
-                    / 10_000;
-                if reward != 0 {
-                    group.header.insurance = percolator::V16PodU128::new(
-                        group
-                            .header
-                            .insurance
-                            .get()
-                            .checked_sub(reward)
-                            .ok_or(PercolatorError::EngineArithmeticOverflow)?,
-                    );
-                    group.header.c_tot = percolator::V16PodU128::new(
-                        group
-                            .header
-                            .c_tot
-                            .get()
-                            .checked_add(reward)
-                            .ok_or(PercolatorError::EngineArithmeticOverflow)?,
-                    );
-                    cranker.header.capital = percolator::V16PodU128::new(
+                } else {
+                    let mut cranker_data = cranker_portfolio_ai.try_borrow_mut_data()?;
+                    let cranker = state::portfolio_view_mut_for_market_slots(
+                        &mut cranker_data,
+                        max_market_slots,
+                    )?;
+                    expect_portfolio_view_account_key(&cranker, cranker_portfolio_ai.key)?;
+                    cranker
+                        .validate_with_market(&group.as_view())
+                        .map_err(map_v16_error)?;
+                    let charged = group
+                        .sync_account_fee_to_slot_not_atomic(
+                            &mut portfolio,
+                            authenticated_now_slot,
+                            cfg_pre.maintenance_fee_per_slot,
+                        )
+                        .map_err(map_v16_error)?;
+                    let reward = charged
+                        .checked_mul(cfg_pre.maintenance_cranker_fee_share_bps as u128)
+                        .ok_or(PercolatorError::EngineArithmeticOverflow)?
+                        / 10_000;
+                    if reward != 0 {
+                        group.header.insurance = percolator::V16PodU128::new(
+                            group
+                                .header
+                                .insurance
+                                .get()
+                                .checked_sub(reward)
+                                .ok_or(PercolatorError::EngineArithmeticOverflow)?,
+                        );
+                        group.header.c_tot = percolator::V16PodU128::new(
+                            group
+                                .header
+                                .c_tot
+                                .get()
+                                .checked_add(reward)
+                                .ok_or(PercolatorError::EngineArithmeticOverflow)?,
+                        );
+                        cranker.header.capital = percolator::V16PodU128::new(
+                            cranker
+                                .header
+                                .capital
+                                .get()
+                                .checked_add(reward)
+                                .ok_or(PercolatorError::EngineArithmeticOverflow)?,
+                        );
+                        cranker.header.health_cert.valid = 0;
+                        group.validate_shape().map_err(map_v16_error)?;
+                        portfolio
+                            .validate_with_market(&group.as_view())
+                            .map_err(map_v16_error)?;
                         cranker
-                            .header
-                            .capital
-                            .get()
-                            .checked_add(reward)
-                            .ok_or(PercolatorError::EngineArithmeticOverflow)?,
-                    );
-                    cranker.header.health_cert.valid = 0;
+                            .validate_with_market(&group.as_view())
+                            .map_err(map_v16_error)?;
+                    }
+                    let retained = charged
+                        .checked_sub(reward)
+                        .ok_or(PercolatorError::EngineCounterUnderflow)?;
+                    credit_maintenance_fee_to_active_market_budgets_view(
+                        &cfg, &mut group, retained,
+                    )?;
                     group.validate_shape().map_err(map_v16_error)?;
                     portfolio
                         .validate_with_market(&group.as_view())
@@ -7381,31 +7360,30 @@ pub mod processor {
                         .validate_with_market(&group.as_view())
                         .map_err(map_v16_error)?;
                 }
-                let retained = charged
-                    .checked_sub(reward)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?;
-                credit_maintenance_fee_to_active_market_budgets_view(&cfg, &mut group, retained)?;
+            } else {
+                let charged = group
+                    .sync_account_fee_to_slot_not_atomic(
+                        &mut portfolio,
+                        authenticated_now_slot,
+                        cfg_pre.maintenance_fee_per_slot,
+                    )
+                    .map_err(map_v16_error)?;
+                credit_maintenance_fee_to_active_market_budgets_view(&cfg, &mut group, charged)?;
                 group.validate_shape().map_err(map_v16_error)?;
                 portfolio
                     .validate_with_market(&group.as_view())
                     .map_err(map_v16_error)?;
-                cranker
-                    .validate_with_market(&group.as_view())
-                    .map_err(map_v16_error)?;
             }
-        } else {
-            let charged = group
-                .sync_account_fee_to_slot_not_atomic(
-                    &mut portfolio,
-                    authenticated_now_slot,
-                    cfg_pre.maintenance_fee_per_slot,
-                )
-                .map_err(map_v16_error)?;
-            credit_maintenance_fee_to_active_market_budgets_view(&cfg, &mut group, charged)?;
-            group.validate_shape().map_err(map_v16_error)?;
-            portfolio
-                .validate_with_market(&group.as_view())
-                .map_err(map_v16_error)?;
+
+            let close_payer_portfolio = portfolio_view_is_closable(&portfolio)?;
+            if close_payer_portfolio {
+                decrement_materialized_portfolio_count(&mut group)?;
+                group.validate_shape().map_err(map_v16_error)?;
+            }
+            close_payer_portfolio
+        };
+        if close_payer_portfolio {
+            close_portfolio_account_to_market_slab(portfolio_ai, market_ai)?;
         }
         Ok(())
     }
@@ -9499,6 +9477,88 @@ pub mod processor {
             .map_err(map_v16_error)?;
         if header.portfolio_account_id != key.to_bytes() {
             return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
+        Ok(())
+    }
+
+    fn portfolio_view_is_closable(
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+    ) -> Result<bool, ProgramError> {
+        if !percolator::active_bitmap_is_empty(
+            portfolio
+                .header
+                .active_bitmap
+                .map(percolator::V16PodU64::get),
+        ) || portfolio.header.capital.get() != 0
+            || portfolio.header.pnl.get() != 0
+            || portfolio.header.reserved_pnl.get() != 0
+            || portfolio.header.fee_credits.get() != 0
+            || portfolio.header.cancel_deposit_escrow.get() != 0
+            || portfolio.header.stale_state != 0
+            || portfolio.header.b_stale_state != 0
+            || portfolio
+                .header
+                .close_progress
+                .try_to_runtime()
+                .map_err(map_v16_error)?
+                .has_pending_residual()
+            || (portfolio.header.resolved_payout_receipt.present != 0
+                && portfolio.header.resolved_payout_receipt.finalized == 0)
+        {
+            return Ok(false);
+        }
+        let mut d = 0usize;
+        while d < portfolio.source_domains.len() {
+            if portfolio.source_domains[d].source_claim_bound_num.get() != 0 {
+                return Ok(false);
+            }
+            d += 1;
+        }
+        Ok(true)
+    }
+
+    fn ensure_portfolio_view_closable(
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+    ) -> ProgramResult {
+        if !portfolio_view_is_closable(portfolio)? {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        Ok(())
+    }
+
+    fn decrement_materialized_portfolio_count(
+        group: &mut state::MarketViewMutV16<'_>,
+    ) -> ProgramResult {
+        group.header.materialized_portfolio_count = percolator::V16PodU64::new(
+            group
+                .header
+                .materialized_portfolio_count
+                .get()
+                .checked_sub(1)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?,
+        );
+        Ok(())
+    }
+
+    fn close_portfolio_account_to_market_slab(
+        portfolio_ai: &AccountInfo<'_>,
+        market_ai: &AccountInfo<'_>,
+    ) -> ProgramResult {
+        {
+            let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
+            for b in portfolio_data.iter_mut() {
+                *b = 0;
+            }
+        }
+        #[cfg(target_os = "solana")]
+        portfolio_ai.realloc(0, false)?;
+        let portfolio_lamports = portfolio_ai.lamports();
+        if portfolio_lamports != 0 {
+            **portfolio_ai.lamports.borrow_mut() = 0;
+            **market_ai.lamports.borrow_mut() = market_ai
+                .lamports()
+                .checked_add(portfolio_lamports)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         }
         Ok(())
     }

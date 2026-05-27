@@ -4116,23 +4116,33 @@ fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
     env.deposit(&short_owner, short_portfolio, 10_000);
 
     env.svm.warp_to_slot(10);
+    let market_lamports_before_close = env.svm.get_account(&env.market).unwrap().lamports;
+    let long_lamports_before_close = env.svm.get_account(&long_portfolio).unwrap().lamports;
     env.sync_maintenance_fee_with_cu(long_portfolio, None, 10);
     let (_, group_after_flat_sync) = env.market_state();
-    let long_after_flat_sync = env.portfolio_state(long_portfolio);
-    assert_eq!(long_after_flat_sync.capital, 0);
-    assert_eq!(
-        long_after_flat_sync.last_fee_slot, 10,
-        "underfunded flat sync sweeps the remaining capital and advances once"
-    );
     assert_eq!(
         group_after_flat_sync.insurance, 1,
         "underfunded flat sync sweeps the remaining capital into insurance"
     );
+    assert_eq!(group_after_flat_sync.materialized_portfolio_count, 1);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports_before_close + long_lamports_before_close,
+        "dust-closed portfolio rent should move into the market slab"
+    );
+    if let Some(closed_long_account) = env.svm.get_account(&long_portfolio) {
+        assert_eq!(closed_long_account.lamports, 0);
+        assert!(
+            closed_long_account.data.is_empty()
+                || !state::is_initialized(&closed_long_account.data)
+        );
+    }
 
-    env.deposit(&long_owner, long_portfolio, 1_000);
+    let fresh_long_portfolio = env.create_portfolio(&long_owner);
+    env.deposit(&long_owner, fresh_long_portfolio, 1_000);
     env.trade_with_cu(
         &long_owner,
-        long_portfolio,
+        fresh_long_portfolio,
         &short_owner,
         short_portfolio,
         POS_SCALE as i128,
@@ -4140,7 +4150,7 @@ fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
         0,
     );
     env.crank(
-        long_portfolio,
+        fresh_long_portfolio,
         ProgInstruction::PermissionlessCrank {
             action: 0,
             asset_index: 0,
@@ -4155,15 +4165,50 @@ fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
     assert_eq!(before_nonflat_sync.assets[0].slot_last, 1);
     let insurance_before_nonflat_sync = before_nonflat_sync.insurance;
 
-    env.sync_maintenance_fee_with_cu(long_portfolio, None, 11);
+    let fresh_long_lamports_before_sync =
+        env.svm.get_account(&fresh_long_portfolio).unwrap().lamports;
+    env.sync_maintenance_fee_with_cu(fresh_long_portfolio, None, 11);
     let (_, group_after_nonflat_sync) = env.market_state();
-    let long_after_nonflat_sync = env.portfolio_state(long_portfolio);
+    let long_after_nonflat_sync = env.portfolio_state(fresh_long_portfolio);
     assert_eq!(long_after_nonflat_sync.capital, 1_000);
     assert_eq!(long_after_nonflat_sync.last_fee_slot, 10);
+    assert_eq!(
+        env.svm
+            .get_account(&fresh_long_portfolio)
+            .expect("non-flat portfolio should remain allocated")
+            .lamports,
+        fresh_long_lamports_before_sync
+    );
     assert_eq!(
         group_after_nonflat_sync.insurance, insurance_before_nonflat_sync,
         "later deposits are not charged for an already-swept empty interval"
     );
+}
+
+#[test]
+fn v16_bpf_close_portfolio_sweeps_rent_to_market_slab() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.withdraw(&owner, portfolio, 1_000);
+
+    let market_lamports_before_close = env.svm.get_account(&env.market).unwrap().lamports;
+    let portfolio_lamports_before_close = env.svm.get_account(&portfolio).unwrap().lamports;
+    let close_cu = env.close_portfolio_with_cu(&owner, portfolio);
+    assert_cu_within("close portfolio rent sweep", close_cu, CUSTODY_CU_LIMIT);
+
+    let (_, group) = env.market_state();
+    assert_eq!(group.materialized_portfolio_count, 0);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports_before_close + portfolio_lamports_before_close,
+        "ClosePortfolio should move closed account rent into the market slab"
+    );
+    if let Some(closed_account) = env.svm.get_account(&portfolio) {
+        assert_eq!(closed_account.lamports, 0);
+        assert!(closed_account.data.is_empty() || !state::is_initialized(&closed_account.data));
+    }
 }
 
 #[test]

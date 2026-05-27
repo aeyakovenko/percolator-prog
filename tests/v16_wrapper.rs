@@ -1285,16 +1285,24 @@ fn v16_wrapper_maintenance_fee_is_permissionless_and_capital_capped() {
     init_portfolio(&mut owner, &mut market, &mut portfolio);
     deposit(&mut owner, &mut market, &mut portfolio, 75);
 
+    let market_lamports_before = market.lamports;
+    let portfolio_lamports_before = portfolio.lamports;
     owner.is_signer = false;
     sync_maintenance_fee(&mut market, &mut portfolio, 2).unwrap();
     owner.is_signer = true;
 
     let (_, group) = state::read_market(&market.data).unwrap();
-    let account = state::read_portfolio(&portfolio.data).unwrap();
-    assert_eq!(account.capital, 0);
-    assert_eq!(account.last_fee_slot, 2);
     assert_eq!(group.insurance, 75);
     assert_eq!(group.c_tot, 0);
+    assert_eq!(group.materialized_portfolio_count, 0);
+    assert_eq!(
+        market.lamports,
+        market_lamports_before + portfolio_lamports_before,
+        "dust-closed portfolio rent should be swept into the market slab"
+    );
+    assert_eq!(portfolio.lamports, 0);
+    assert!(portfolio.data.iter().all(|b| *b == 0));
+    assert!(!state::is_initialized(&portfolio.data));
 }
 
 #[test]
@@ -1323,20 +1331,37 @@ fn v16_wrapper_underfunded_flat_sync_sweeps_remaining_capital_once() {
     deposit(&mut long_owner, &mut market, &mut long_account, 1);
     deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
 
+    let market_lamports_before = market.lamports;
+    let long_lamports_before = long_account.lamports;
     sync_maintenance_fee(&mut market, &mut long_account, 10).unwrap();
     let (_, group_after_flat_sync) = state::read_market(&market.data).unwrap();
-    let account_after_flat_sync = state::read_portfolio(&long_account.data).unwrap();
-    assert_eq!(account_after_flat_sync.capital, 0);
-    assert_eq!(
-        account_after_flat_sync.last_fee_slot, 10,
-        "underfunded flat sync sweeps the remaining capital and advances once"
-    );
     assert_eq!(
         group_after_flat_sync.insurance, 1,
         "underfunded flat sync sweeps the remaining capital into insurance"
     );
+    assert_eq!(group_after_flat_sync.materialized_portfolio_count, 1);
+    assert_eq!(long_account.lamports, 0);
+    assert_eq!(
+        market.lamports,
+        market_lamports_before + long_lamports_before,
+        "closed dust portfolio rent should accrue to the market slab"
+    );
+    assert!(long_account.data.iter().all(|b| *b == 0));
+    assert!(!state::is_initialized(&long_account.data));
 
-    deposit(&mut long_owner, &mut market, &mut long_account, 1_000);
+    let mut reopened_long_account = portfolio_account();
+    {
+        let (cfg, mut group) = state::read_market(&market.data).unwrap();
+        group.current_slot = 10;
+        state::write_market(&mut market.data, &cfg, &group).unwrap();
+    }
+    init_portfolio(&mut long_owner, &mut market, &mut reopened_long_account);
+    deposit(
+        &mut long_owner,
+        &mut market,
+        &mut reopened_long_account,
+        1_000,
+    );
     run_ix(
         Instruction::TradeNoCpi {
             asset_index: 0,
@@ -1348,24 +1373,16 @@ fn v16_wrapper_underfunded_flat_sync_sweeps_remaining_capital_once() {
             &mut long_owner,
             &mut short_owner,
             &mut market,
-            &mut long_account,
+            &mut reopened_long_account,
             &mut short_account,
         ],
     )
     .unwrap();
-    {
-        let (cfg, mut group) = state::read_market(&market.data).unwrap();
-        group
-            .accrue_asset_to_not_atomic(0, 1, 100, 0, true)
-            .unwrap();
-        group.assets[0].raw_oracle_target_price = 100;
-        state::write_market(&mut market.data, &cfg, &group).unwrap();
-    }
     let insurance_before_nonflat_sync = state::read_market(&market.data).unwrap().1.insurance;
 
-    sync_maintenance_fee(&mut market, &mut long_account, 10).unwrap();
+    sync_maintenance_fee(&mut market, &mut reopened_long_account, 10).unwrap();
     let (_, group_after_nonflat_sync) = state::read_market(&market.data).unwrap();
-    let account_after_nonflat_sync = state::read_portfolio(&long_account.data).unwrap();
+    let account_after_nonflat_sync = state::read_portfolio(&reopened_long_account.data).unwrap();
     assert_eq!(account_after_nonflat_sync.capital, 1_000);
     assert_eq!(account_after_nonflat_sync.last_fee_slot, 10);
     assert_eq!(
@@ -9546,6 +9563,8 @@ fn v16_wrapper_close_portfolio_rejects_non_empty_and_closes_empty() {
     assert!(state::read_portfolio(&portfolio.data).is_ok());
 
     withdraw(&mut owner, &mut market, &mut portfolio, 1_000);
+    let market_lamports_before_close = market.lamports;
+    let portfolio_lamports_before_close = portfolio.lamports;
     run_ix(
         Instruction::ClosePortfolio,
         &mut [&mut owner, &mut market, &mut portfolio],
@@ -9554,10 +9573,14 @@ fn v16_wrapper_close_portfolio_rejects_non_empty_and_closes_empty() {
 
     let (_, group) = state::read_market(&market.data).unwrap();
     assert_eq!(group.materialized_portfolio_count, 0);
-    assert!(
-        portfolio.data.iter().all(|b| *b == 0),
-        "closed portfolio account should be fully zeroed"
+    assert_eq!(
+        market.lamports,
+        market_lamports_before_close + portfolio_lamports_before_close,
+        "portfolio close should send rent into the market slab"
     );
+    assert_eq!(portfolio.lamports, 0);
+    assert!(portfolio.data.iter().all(|b| *b == 0));
+    assert!(!state::is_initialized(&portfolio.data));
 }
 
 #[test]
