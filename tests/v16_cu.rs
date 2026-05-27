@@ -2883,7 +2883,10 @@ fn v16_bpf_permissionless_reuse_activation_uses_authenticated_slot() {
         0,
     );
     let (_, retired_group) = env.market_state();
-    assert_eq!(retired_group.assets[1].lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(
+        retired_group.assets[1].lifecycle,
+        AssetLifecycleV16::Retired
+    );
 
     env.svm.warp_to_slot(4);
     env.activate_permissionless_asset_with_fee(
@@ -2902,6 +2905,85 @@ fn v16_bpf_permissionless_reuse_activation_uses_authenticated_slot() {
     assert_eq!(
         group.current_slot, 4,
         "permissionless reuse activation must authenticate now_slot against Clock"
+    );
+    assert_eq!(group.assets[1].slot_last, 4);
+
+    let cranker = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker);
+    env.crank(
+        cranker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 4,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+}
+
+#[test]
+fn v16_bpf_privileged_retire_uses_authenticated_slot() {
+    let mut env = V16CuEnv::new();
+    env.activate_asset(1, 1, 100);
+    env.svm.warp_to_slot(3);
+
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        u64::MAX,
+        0,
+    );
+
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.current_slot, 3,
+        "privileged retire must authenticate now_slot against Clock"
+    );
+    assert_eq!(group.assets[1].retired_slot, 3);
+
+    let cranker = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker);
+    env.crank(
+        cranker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 3,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+}
+
+#[test]
+fn v16_bpf_privileged_reactivate_uses_authenticated_slot() {
+    let mut env = V16CuEnv::new();
+    env.activate_asset(1, 1, 100);
+    env.svm.warp_to_slot(3);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        3,
+        0,
+    );
+
+    env.svm.warp_to_slot(4);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+        1,
+        u64::MAX,
+        250,
+    );
+
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.current_slot, 4,
+        "privileged reactivation must authenticate now_slot against Clock"
     );
     assert_eq!(group.assets[1].slot_last, 4);
 

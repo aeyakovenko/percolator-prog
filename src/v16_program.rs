@@ -7891,6 +7891,7 @@ pub mod processor {
             if asset_index >= configured_slots {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
+            let authenticated_slot = authenticated_slot_or_fallback(now_slot);
             let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
             let mut reset_profile = None;
             match action {
@@ -7903,7 +7904,7 @@ pub mod processor {
                             asset_index as u32,
                             &mut group.markets[asset_index],
                             initial_price,
-                            now_slot,
+                            authenticated_slot,
                         )
                         .map_err(map_v16_error)?;
                     clear_asset_domain_budget_counters_view(&mut group, asset_index)?;
@@ -7911,7 +7912,7 @@ pub mod processor {
                         cfg.free_market_slot_count -= 1;
                     }
                     let profile = preserve_backing_fee_policy(
-                        state::manual_asset_oracle_profile(initial_price, now_slot),
+                        state::manual_asset_oracle_profile(initial_price, authenticated_slot),
                         &existing_profile,
                     );
                     if asset_index == 0 {
@@ -7958,10 +7959,10 @@ pub mod processor {
                             &cfg,
                             &group,
                             asset_index,
-                            authenticated_slot_or_fallback(now_slot),
+                            authenticated_slot,
                         )?;
                     }
-                    if now_slot < group.header.current_slot.get() {
+                    if authenticated_slot < group.header.current_slot.get() {
                         return Err(PercolatorError::EngineStale.into());
                     }
                     let lifecycle = group.markets[asset_index].engine.asset.lifecycle;
@@ -7974,12 +7975,13 @@ pub mod processor {
                             group.markets[asset_index].engine.asset.lifecycle =
                                 ASSET_LIFECYCLE_RETIRED;
                             group.markets[asset_index].engine.asset.retired_slot =
-                                percolator::V16PodU64::new(now_slot);
+                                percolator::V16PodU64::new(authenticated_slot);
                             cfg.free_market_slot_count = cfg
                                 .free_market_slot_count
                                 .checked_add(1)
                                 .ok_or(PercolatorError::EngineCounterOverflow)?;
-                            group.header.current_slot = percolator::V16PodU64::new(now_slot);
+                            group.header.current_slot =
+                                percolator::V16PodU64::new(authenticated_slot);
                             group.header.asset_set_epoch = percolator::V16PodU64::new(
                                 group
                                     .header
@@ -8008,7 +8010,7 @@ pub mod processor {
                         .effective_price
                         .get();
                     let profile = preserve_backing_fee_policy(
-                        state::manual_asset_oracle_profile(price, now_slot),
+                        state::manual_asset_oracle_profile(price, authenticated_slot),
                         &existing_profile,
                     );
                     if asset_index == 0 {
