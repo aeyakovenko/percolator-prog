@@ -7219,71 +7219,6 @@ pub mod processor {
         })
     }
 
-    #[derive(Clone, Copy)]
-    struct MaintenanceFeeAnchorCorrection {
-        last_fee_slot: u64,
-        requested_anchor: u64,
-        fee_rate_per_slot: u128,
-    }
-
-    fn live_flat_maintenance_fee_anchor_correction(
-        group: &state::MarketViewMutV16<'_>,
-        portfolio: &percolator::PortfolioV16ViewMut<'_>,
-        now_slot: u64,
-        fee_rate_per_slot: u128,
-    ) -> Option<MaintenanceFeeAnchorCorrection> {
-        if group.header.mode != 0 || fee_rate_per_slot == 0 {
-            return None;
-        }
-        if !percolator::active_bitmap_is_empty(
-            portfolio
-                .header
-                .active_bitmap
-                .map(percolator::V16PodU64::get),
-        ) {
-            return None;
-        }
-        let last_fee_slot = portfolio.header.last_fee_slot.get();
-        if now_slot <= last_fee_slot {
-            return None;
-        }
-        Some(MaintenanceFeeAnchorCorrection {
-            last_fee_slot,
-            requested_anchor: now_slot,
-            fee_rate_per_slot,
-        })
-    }
-
-    fn apply_maintenance_fee_anchor_correction(
-        portfolio: &mut percolator::PortfolioV16ViewMut<'_>,
-        correction: Option<MaintenanceFeeAnchorCorrection>,
-        charged: u128,
-    ) -> ProgramResult {
-        let Some(correction) = correction else {
-            return Ok(());
-        };
-        let dt = correction
-            .requested_anchor
-            .checked_sub(correction.last_fee_slot)
-            .ok_or(PercolatorError::EngineCounterUnderflow)?;
-        let requested_fee = percolator::wide_math::U256::from_u128(correction.fee_rate_per_slot)
-            .checked_mul(percolator::wide_math::U256::from_u64(dt))
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?
-            .try_into_u128()
-            .unwrap_or(u128::MAX);
-        if charged >= requested_fee {
-            return Ok(());
-        }
-        let paid_slots = u64::try_from(charged / correction.fee_rate_per_slot)
-            .map_err(|_| PercolatorError::EngineArithmeticOverflow)?;
-        let paid_anchor = correction
-            .last_fee_slot
-            .checked_add(paid_slots)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        portfolio.header.last_fee_slot = percolator::V16PodU64::new(paid_anchor);
-        Ok(())
-    }
-
     #[inline(never)]
     fn handle_sync_maintenance_fee<'a>(
         program_id: &Pubkey,
@@ -7321,12 +7256,6 @@ pub mod processor {
 
         if let Some(cranker_portfolio_ai) = accounts.get(2) {
             if cranker_portfolio_ai.key == portfolio_ai.key {
-                let anchor_correction = live_flat_maintenance_fee_anchor_correction(
-                    &group,
-                    &portfolio,
-                    authenticated_now_slot,
-                    cfg_pre.maintenance_fee_per_slot,
-                );
                 let charged = group
                     .sync_account_fee_to_slot_not_atomic(
                         &mut portfolio,
@@ -7334,11 +7263,6 @@ pub mod processor {
                         cfg_pre.maintenance_fee_per_slot,
                     )
                     .map_err(map_v16_error)?;
-                apply_maintenance_fee_anchor_correction(
-                    &mut portfolio,
-                    anchor_correction,
-                    charged,
-                )?;
                 let reward = charged
                     .checked_mul(cfg_pre.maintenance_cranker_fee_share_bps as u128)
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?
@@ -7392,12 +7316,6 @@ pub mod processor {
                 cranker
                     .validate_with_market(&group.as_view())
                     .map_err(map_v16_error)?;
-                let anchor_correction = live_flat_maintenance_fee_anchor_correction(
-                    &group,
-                    &portfolio,
-                    authenticated_now_slot,
-                    cfg_pre.maintenance_fee_per_slot,
-                );
                 let charged = group
                     .sync_account_fee_to_slot_not_atomic(
                         &mut portfolio,
@@ -7405,11 +7323,6 @@ pub mod processor {
                         cfg_pre.maintenance_fee_per_slot,
                     )
                     .map_err(map_v16_error)?;
-                apply_maintenance_fee_anchor_correction(
-                    &mut portfolio,
-                    anchor_correction,
-                    charged,
-                )?;
                 let reward = charged
                     .checked_mul(cfg_pre.maintenance_cranker_fee_share_bps as u128)
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?
@@ -7461,12 +7374,6 @@ pub mod processor {
                     .map_err(map_v16_error)?;
             }
         } else {
-            let anchor_correction = live_flat_maintenance_fee_anchor_correction(
-                &group,
-                &portfolio,
-                authenticated_now_slot,
-                cfg_pre.maintenance_fee_per_slot,
-            );
             let charged = group
                 .sync_account_fee_to_slot_not_atomic(
                     &mut portfolio,
@@ -7474,7 +7381,6 @@ pub mod processor {
                     cfg_pre.maintenance_fee_per_slot,
                 )
                 .map_err(map_v16_error)?;
-            apply_maintenance_fee_anchor_correction(&mut portfolio, anchor_correction, charged)?;
             credit_maintenance_fee_to_active_market_budgets_view(&cfg, &mut group, charged)?;
             group.validate_shape().map_err(map_v16_error)?;
             portfolio

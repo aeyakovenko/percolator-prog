@@ -3669,7 +3669,7 @@ fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
 }
 
 #[test]
-fn v16_bpf_flat_sync_cannot_pre_anchor_unpaid_future_maintenance() {
+fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 40,
     );
@@ -3682,11 +3682,16 @@ fn v16_bpf_flat_sync_cannot_pre_anchor_unpaid_future_maintenance() {
 
     env.svm.warp_to_slot(10);
     env.sync_maintenance_fee_with_cu(long_portfolio, None, 10);
+    let (_, group_after_flat_sync) = env.market_state();
     let long_after_flat_sync = env.portfolio_state(long_portfolio);
     assert_eq!(long_after_flat_sync.capital, 0);
     assert_eq!(
-        long_after_flat_sync.last_fee_slot, 0,
-        "underpaid flat sync must not pre-anchor later nonflat maintenance"
+        long_after_flat_sync.last_fee_slot, 10,
+        "underfunded flat sync sweeps the remaining capital and advances once"
+    );
+    assert_eq!(
+        group_after_flat_sync.insurance, 1,
+        "underfunded flat sync sweeps the remaining capital into insurance"
     );
 
     env.deposit(&long_owner, long_portfolio, 1_000);
@@ -3718,11 +3723,11 @@ fn v16_bpf_flat_sync_cannot_pre_anchor_unpaid_future_maintenance() {
     env.sync_maintenance_fee_with_cu(long_portfolio, None, 11);
     let (_, group_after_nonflat_sync) = env.market_state();
     let long_after_nonflat_sync = env.portfolio_state(long_portfolio);
-    assert_eq!(long_after_nonflat_sync.capital, 960);
-    assert_eq!(long_after_nonflat_sync.last_fee_slot, 1);
+    assert_eq!(long_after_nonflat_sync.capital, 1_000);
+    assert_eq!(long_after_nonflat_sync.last_fee_slot, 10);
     assert_eq!(
-        group_after_nonflat_sync.insurance,
-        insurance_before_nonflat_sync + 40
+        group_after_nonflat_sync.insurance, insurance_before_nonflat_sync,
+        "later deposits are not charged for an already-swept empty interval"
     );
 }
 

@@ -1292,13 +1292,13 @@ fn v16_wrapper_maintenance_fee_is_permissionless_and_capital_capped() {
     let (_, group) = state::read_market(&market.data).unwrap();
     let account = state::read_portfolio(&portfolio.data).unwrap();
     assert_eq!(account.capital, 0);
-    assert_eq!(account.last_fee_slot, 1);
+    assert_eq!(account.last_fee_slot, 2);
     assert_eq!(group.insurance, 75);
     assert_eq!(group.c_tot, 0);
 }
 
 #[test]
-fn v16_wrapper_flat_sync_cannot_pre_anchor_unpaid_future_maintenance() {
+fn v16_wrapper_underfunded_flat_sync_sweeps_remaining_capital_once() {
     let mut admin = signer();
     let mut market = market_account();
     let mut long_owner = signer();
@@ -1324,11 +1324,16 @@ fn v16_wrapper_flat_sync_cannot_pre_anchor_unpaid_future_maintenance() {
     deposit(&mut short_owner, &mut market, &mut short_account, 10_000);
 
     sync_maintenance_fee(&mut market, &mut long_account, 10).unwrap();
+    let (_, group_after_flat_sync) = state::read_market(&market.data).unwrap();
     let account_after_flat_sync = state::read_portfolio(&long_account.data).unwrap();
     assert_eq!(account_after_flat_sync.capital, 0);
     assert_eq!(
-        account_after_flat_sync.last_fee_slot, 0,
-        "underpaid flat sync must not pre-anchor later nonflat maintenance"
+        account_after_flat_sync.last_fee_slot, 10,
+        "underfunded flat sync sweeps the remaining capital and advances once"
+    );
+    assert_eq!(
+        group_after_flat_sync.insurance, 1,
+        "underfunded flat sync sweeps the remaining capital into insurance"
     );
 
     deposit(&mut long_owner, &mut market, &mut long_account, 1_000);
@@ -1360,11 +1365,11 @@ fn v16_wrapper_flat_sync_cannot_pre_anchor_unpaid_future_maintenance() {
     sync_maintenance_fee(&mut market, &mut long_account, 10).unwrap();
     let (_, group_after_nonflat_sync) = state::read_market(&market.data).unwrap();
     let account_after_nonflat_sync = state::read_portfolio(&long_account.data).unwrap();
-    assert_eq!(account_after_nonflat_sync.capital, 960);
-    assert_eq!(account_after_nonflat_sync.last_fee_slot, 1);
+    assert_eq!(account_after_nonflat_sync.capital, 1_000);
+    assert_eq!(account_after_nonflat_sync.last_fee_slot, 10);
     assert_eq!(
-        group_after_nonflat_sync.insurance,
-        insurance_before_nonflat_sync + 40
+        group_after_nonflat_sync.insurance, insurance_before_nonflat_sync,
+        "later deposits are not charged for an already-swept empty interval"
     );
 }
 
