@@ -5850,6 +5850,10 @@ pub mod processor {
                     source_counterparty_backing_snapshot_view(&account_b)?,
                 ))
             };
+            let source_lien_before_a =
+                source_lien_effective_reserved_snapshot_for_trade_view(&account_a)?;
+            let source_lien_before_b =
+                source_lien_effective_reserved_snapshot_for_trade_view(&account_b)?;
             // The engine stores loss-stale as a market-wide bit; isolate it to
             // trades and accounts that actually depend on stale assets.
             let restore_loss_stale_active = group.header.loss_stale_active;
@@ -5924,6 +5928,17 @@ pub mod processor {
                 group.header.loss_stale_active = restore_loss_stale_active;
             }
             validation_result.map_err(map_v16_error)?;
+            let source_lien_after_a =
+                source_lien_effective_reserved_snapshot_for_trade_view(&account_a)?;
+            let source_lien_after_b =
+                source_lien_effective_reserved_snapshot_for_trade_view(&account_b)?;
+            ensure_new_source_lien_domains_full_rate_for_trade_view(
+                &group,
+                source_lien_before_a.as_ref(),
+                source_lien_after_a.as_ref(),
+                source_lien_before_b.as_ref(),
+                source_lien_after_b.as_ref(),
+            )?;
         }
         if let Some(cfg) = cfg_after {
             state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)?;
@@ -6042,6 +6057,87 @@ pub mod processor {
             return Ok(false);
         }
         Ok(true)
+    }
+
+    fn source_credit_has_live_amounts(source: SourceCreditStateV16) -> bool {
+        source.positive_claim_bound_num != 0
+            || source.exact_positive_claim_num != 0
+            || source.fresh_reserved_backing_num != 0
+            || source.spent_backing_num != 0
+            || source.provider_receivable_num != 0
+            || source.valid_liened_backing_num != 0
+            || source.impaired_liened_backing_num != 0
+            || source.insurance_credit_reserved_num != 0
+            || source.valid_liened_insurance_num != 0
+            || source.impaired_liened_insurance_num != 0
+    }
+
+    fn ensure_source_credit_full_rate_for_domain_view(
+        group: &state::MarketViewMutV16<'_>,
+        domain: usize,
+    ) -> ProgramResult {
+        let max_market_slots = group.header.config.max_market_slots.get() as usize;
+        let asset_index = domain / 2;
+        if max_market_slots > group.markets.len() || asset_index >= max_market_slots {
+            return Err(PercolatorError::EngineInvalidConfig.into());
+        }
+        let slot = &group.markets[asset_index].engine;
+        let source = if domain % 2 == 0 {
+            slot.source_credit_long
+                .try_to_runtime()
+                .map_err(map_v16_error)?
+        } else {
+            slot.source_credit_short
+                .try_to_runtime()
+                .map_err(map_v16_error)?
+        };
+        if source_credit_has_live_amounts(source)
+            && source.credit_rate_num != percolator::CREDIT_RATE_SCALE
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        Ok(())
+    }
+
+    fn ensure_new_source_lien_domains_full_rate_for_trade_view(
+        group: &state::MarketViewMutV16<'_>,
+        before_a: &[u128],
+        after_a: &[u128],
+        before_b: &[u128],
+        after_b: &[u128],
+    ) -> ProgramResult {
+        let domain_count = core::cmp::max(
+            core::cmp::max(before_a.len(), after_a.len()),
+            core::cmp::max(before_b.len(), after_b.len()),
+        );
+        let mut domain = 0usize;
+        while domain < domain_count {
+            let a_increased = after_a.get(domain).copied().unwrap_or(0)
+                > before_a.get(domain).copied().unwrap_or(0);
+            let b_increased = after_b.get(domain).copied().unwrap_or(0)
+                > before_b.get(domain).copied().unwrap_or(0);
+            if a_increased || b_increased {
+                ensure_source_credit_full_rate_for_domain_view(group, domain)?;
+            }
+            domain += 1;
+        }
+        Ok(())
+    }
+
+    fn source_lien_effective_reserved_snapshot_for_trade_view(
+        account: &percolator::PortfolioV16ViewMut<'_>,
+    ) -> Result<alloc::boxed::Box<[u128]>, ProgramError> {
+        let mut out = Vec::with_capacity(account.source_domains.len());
+        let mut domain = 0usize;
+        while domain < account.source_domains.len() {
+            out.push(
+                account.source_domains[domain]
+                    .source_lien_effective_reserved
+                    .get(),
+            );
+            domain += 1;
+        }
+        Ok(out.into_boxed_slice())
     }
 
     #[inline(never)]
@@ -7150,13 +7246,21 @@ pub mod processor {
             } else {
                 None
             };
-            if source.positive_claim_bound_num != 0
-                || source.exact_positive_claim_num != 0
-                || bucket.status != BackingBucketStatusV16::Fresh
+            if bucket.status != BackingBucketStatusV16::Fresh
                 || bucket.fresh_unliened_backing_num < backing_num
                 || source.fresh_reserved_backing_num < backing_num
                 || amount > group.header.vault.get()
             {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
+            let mut source_after = source;
+            source_after.fresh_reserved_backing_num = source_after
+                .fresh_reserved_backing_num
+                .checked_sub(backing_num)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?;
+            source_after.credit_rate_num =
+                expected_source_credit_rate_num(source_after).map_err(map_v16_error)?;
+            if source_after.credit_rate_num != percolator::CREDIT_RATE_SCALE {
                 return Err(PercolatorError::EngineLockActive.into());
             }
             bucket.fresh_unliened_backing_num = bucket
@@ -7173,11 +7277,7 @@ pub mod processor {
                     bucket.expiry_slot = 0;
                 }
             }
-            source.fresh_reserved_backing_num = source
-                .fresh_reserved_backing_num
-                .checked_sub(backing_num)
-                .ok_or(PercolatorError::EngineCounterUnderflow)?;
-            source.credit_rate_num = percolator::CREDIT_RATE_SCALE;
+            source = source_after;
             source.credit_epoch = source
                 .credit_epoch
                 .checked_add(1)

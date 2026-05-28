@@ -7072,11 +7072,42 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
 
     {
         let (cfg, mut group) = state::read_market(&market.data).unwrap();
-        group.source_credit[1].positive_claim_bound_num = 60 * BOUND_SCALE;
-        group.source_credit[1].exact_positive_claim_num = 60 * BOUND_SCALE;
+        group.source_credit[1].positive_claim_bound_num = 40 * BOUND_SCALE;
+        group.source_credit[1].exact_positive_claim_num = 40 * BOUND_SCALE;
         group.source_credit[1].credit_rate_num = percolator::CREDIT_RATE_SCALE;
         state::write_market(&mut market.data, &cfg, &group).unwrap();
     }
+    run_ix(
+        Instruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 20,
+        },
+        &mut [
+            &mut bucket_authority,
+            &mut market,
+            &mut dest,
+            &mut vault,
+            &mut vault_auth,
+            &mut token_program,
+        ],
+    )
+    .unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num,
+        40 * BOUND_SCALE,
+        "withdrawal should let the authority lower the domain watermark to live demand"
+    );
+    assert_eq!(
+        group.source_credit[1].fresh_reserved_backing_num,
+        40 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.source_credit[1].credit_rate_num,
+        percolator::CREDIT_RATE_SCALE,
+        "withdrawing above the watermark must not dilute existing claims"
+    );
+
     let claim_backed = market.data.clone();
     let claim_dilution = run_ix(
         Instruction::WithdrawBackingBucket {

@@ -3997,6 +3997,273 @@ fn v16_bpf_cross_margin_positive_pnl_allows_trading_negative_leg_before_convert(
     );
 }
 
+#[derive(Clone, Copy, Debug)]
+enum SourceCreditWatermarkTradePath {
+    NoCpi,
+    Cpi,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SourceCreditWatermarkDirection {
+    PositiveSize,
+    NegativeSize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_source_credit_watermark_trade(
+    env: &mut V16CuEnv,
+    path: SourceCreditWatermarkTradePath,
+    matcher_program: Option<Pubkey>,
+    owner_a: &Keypair,
+    account_a: Pubkey,
+    owner_b: &Keypair,
+    account_b: Pubkey,
+    asset_index: u16,
+    size_q: i128,
+    exec_price: u64,
+    fee_bps: u64,
+) -> Result<u64, String> {
+    match path {
+        SourceCreditWatermarkTradePath::NoCpi => env.try_trade_asset_with_cu(
+            asset_index,
+            owner_a,
+            account_a,
+            owner_b,
+            account_b,
+            size_q,
+            exec_price,
+            fee_bps,
+        ),
+        SourceCreditWatermarkTradePath::Cpi => {
+            let matcher_program = matcher_program.expect("matcher program");
+            let (matcher_ctx, matcher_delegate, _) =
+                env.init_matcher_context(matcher_program, account_b);
+            env.try_trade_cpi_with_cu_on_asset(
+                owner_a,
+                account_a,
+                owner_b,
+                account_b,
+                matcher_program,
+                matcher_ctx,
+                matcher_delegate,
+                asset_index,
+                size_q,
+                fee_bps,
+            )
+        }
+    }
+}
+
+fn run_source_credit_watermark_trade_case(
+    path: SourceCreditWatermarkTradePath,
+    direction: SourceCreditWatermarkDirection,
+) {
+    const INITIAL_PRICE: u64 = 100;
+    const ASSET0_SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const ASSET1_SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const SAFE_INCREASE_Q: i128 = POS_SCALE as i128;
+    const DEPOSIT: u128 = 313;
+    const EXPECTED_POSITIVE_PNL: i128 = 100;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    let matcher_program = match path {
+        SourceCreditWatermarkTradePath::NoCpi => None,
+        SourceCreditWatermarkTradePath::Cpi => {
+            let matcher_program = Pubkey::new_unique();
+            let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+            env.svm.add_program(matcher_program, &matcher_bytes);
+            Some(matcher_program)
+        }
+    };
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+
+    let cross_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let cross_account = env.create_portfolio(&cross_owner);
+    let counterparty_account = env.create_portfolio(&counterparty_owner);
+    env.deposit(&cross_owner, cross_account, DEPOSIT);
+    env.deposit(&counterparty_owner, counterparty_account, 1_000);
+
+    let (winning_domain, asset0_mark, asset1_mark, side_sign) = match direction {
+        SourceCreditWatermarkDirection::PositiveSize => (1usize, 105, 95, 1i128),
+        SourceCreditWatermarkDirection::NegativeSize => (0usize, 95, 105, -1i128),
+    };
+    env.top_up_backing_bucket(winning_domain as u8, 150, 10);
+
+    env.trade_asset_with_cu(
+        0,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        side_sign * ASSET0_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        side_sign * ASSET1_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, asset0_mark);
+    env.push_auth_mark_for_asset_as_admin(1, 2, asset1_mark);
+    for (portfolio, asset_index) in [
+        (counterparty_account, 0),
+        (cross_account, 0),
+        (counterparty_account, 1),
+    ] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index,
+                now_slot: 2,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+        );
+    }
+    let forced_capital = match direction {
+        SourceCreditWatermarkDirection::PositiveSize => 260,
+        SourceCreditWatermarkDirection::NegativeSize => 100,
+    };
+    env.force_portfolio_capital_for_benchmark(cross_account, forced_capital);
+
+    let cross_before = env.portfolio_state(cross_account);
+    assert_eq!(
+        cross_before.pnl, EXPECTED_POSITIVE_PNL,
+        "{path:?} {direction:?} setup must create source-backed positive PnL"
+    );
+    let (_, before_withdraw_group) = env.market_state();
+    assert_eq!(
+        before_withdraw_group.source_credit[winning_domain].positive_claim_bound_num,
+        EXPECTED_POSITIVE_PNL as u128 * BOUND_SCALE
+    );
+    let surplus_backing = before_withdraw_group.source_credit[winning_domain]
+        .fresh_reserved_backing_num
+        .checked_sub(before_withdraw_group.source_credit[winning_domain].positive_claim_bound_num)
+        .unwrap()
+        / BOUND_SCALE;
+    assert!(
+        surplus_backing > 0,
+        "{path:?} {direction:?} setup must leave withdrawable surplus backing"
+    );
+
+    let watermark_withdraw_dest = env.token_account(env.admin.pubkey(), 0);
+    env.withdraw_backing_bucket_to_admin_token_with_cu(
+        watermark_withdraw_dest,
+        winning_domain as u8,
+        surplus_backing,
+    );
+    let (_, exact_watermark_group) = env.market_state();
+    assert_eq!(
+        exact_watermark_group.source_credit[winning_domain].fresh_reserved_backing_num,
+        exact_watermark_group.source_credit[winning_domain].positive_claim_bound_num,
+        "{path:?} {direction:?} setup must leave no surplus source-credit backing"
+    );
+
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_cross = env.svm.get_account(&cross_account).unwrap();
+    let before_counterparty = env.svm.get_account(&counterparty_account).unwrap();
+    let over_watermark = try_source_credit_watermark_trade(
+        &mut env,
+        path,
+        matcher_program,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        1,
+        side_sign * SAFE_INCREASE_Q,
+        asset1_mark,
+        0,
+    );
+    assert!(
+        over_watermark.is_err(),
+        "{path:?} {direction:?} risk increase must reject at the exact source-credit watermark"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before_market.data
+    );
+    assert_eq!(
+        env.svm.get_account(&cross_account).unwrap().data,
+        before_cross.data
+    );
+    assert_eq!(
+        env.svm.get_account(&counterparty_account).unwrap().data,
+        before_counterparty.data
+    );
+
+    env.top_up_backing_bucket(winning_domain as u8, 5_000, 10);
+    let second_pass_deposit = match direction {
+        SourceCreditWatermarkDirection::PositiveSize => 50,
+        SourceCreditWatermarkDirection::NegativeSize => 200,
+    };
+    env.deposit(&cross_owner, cross_account, second_pass_deposit);
+    env.deposit(
+        &counterparty_owner,
+        counterparty_account,
+        second_pass_deposit,
+    );
+    env.svm.warp_to_slot(3);
+    let inside_watermark = try_source_credit_watermark_trade(
+        &mut env,
+        path,
+        matcher_program,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        1,
+        side_sign * SAFE_INCREASE_Q,
+        asset1_mark,
+        1,
+    );
+    assert!(
+        inside_watermark.is_ok(),
+        "{path:?} {direction:?} risk increase inside the source-credit watermark failed: {inside_watermark:?}"
+    );
+
+    let (_, after_group) = env.market_state();
+    let cross_after = env.portfolio_state(cross_account);
+    assert_eq!(
+        after_group.source_credit[winning_domain].credit_rate_num,
+        percolator::CREDIT_RATE_SCALE,
+        "{path:?} {direction:?} must not dilute live positive claims"
+    );
+    assert!(
+        cross_after.source_lien_effective_reserved[winning_domain] > 0,
+        "{path:?} {direction:?} must reserve source credit once surplus backing exists"
+    );
+}
+
+#[test]
+fn v16_bpf_trade_paths_respect_source_credit_watermark_permutations() {
+    for path in [
+        SourceCreditWatermarkTradePath::NoCpi,
+        SourceCreditWatermarkTradePath::Cpi,
+    ] {
+        for direction in [
+            SourceCreditWatermarkDirection::PositiveSize,
+            SourceCreditWatermarkDirection::NegativeSize,
+        ] {
+            run_source_credit_watermark_trade_case(path, direction);
+        }
+    }
+}
+
 #[test]
 fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg() {
     const INITIAL_PRICE: u64 = 100;
@@ -4021,7 +4288,7 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
     let counterparty_account = env.create_portfolio(&counterparty_owner);
     env.deposit(&cross_owner, cross_account, DEPOSIT);
     env.deposit(&counterparty_owner, counterparty_account, 1_000);
-    env.top_up_backing_bucket(1, 100, 10);
+    env.top_up_backing_bucket(1, 150, 10);
 
     env.trade_asset_with_cu(
         0,
@@ -4073,6 +4340,36 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
         active_leg_for_asset(&cross_before, 1).basis_pos_q,
         ASSET1_SIZE_Q,
         "asset[1] is a losing long leg before the risk-increasing trade"
+    );
+    let (_, before_watermark_group) = env.market_state();
+    let fresh_reserved_before_withdraw =
+        before_watermark_group.source_credit[1].fresh_reserved_backing_num;
+    let positive_claim_before_withdraw =
+        before_watermark_group.source_credit[1].positive_claim_bound_num;
+
+    let watermark_withdraw_dest = env.token_account(env.admin.pubkey(), 0);
+    let withdraw_cu =
+        env.withdraw_backing_bucket_to_admin_token_with_cu(watermark_withdraw_dest, 1, 50);
+    assert_cu_within(
+        "WithdrawBackingBucket live watermark",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (_, watermarked_group) = env.market_state();
+    assert_eq!(
+        watermarked_group.source_credit[1].fresh_reserved_backing_num,
+        fresh_reserved_before_withdraw - 50 * BOUND_SCALE,
+        "admin withdrawal lowers the future encumbrance watermark"
+    );
+    assert!(
+        watermarked_group.source_credit[1].fresh_reserved_backing_num
+            >= positive_claim_before_withdraw,
+        "the lowered watermark must still cover live positive-claim demand"
+    );
+    assert_eq!(
+        watermarked_group.source_credit[1].credit_rate_num,
+        percolator::CREDIT_RATE_SCALE,
+        "lowering the watermark must not dilute already-live positive claims"
     );
 
     let before_market = env.svm.get_account(&env.market).unwrap();
@@ -4157,6 +4454,33 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
         "source-credit IM lien must be backed by counterparty backing or reserved insurance"
     );
 
+    let (_, after_increase_group) = env.market_state();
+    let after_increase_source = after_increase_group.source_credit[1];
+    let after_increase_bucket = after_increase_group.source_backing_buckets[1];
+    let insurance_encumbered_num = after_increase_source
+        .valid_liened_insurance_num
+        .checked_add(after_increase_source.impaired_liened_insurance_num)
+        .unwrap();
+    let available_backing_num = after_increase_source
+        .fresh_reserved_backing_num
+        .checked_sub(after_increase_source.valid_liened_backing_num)
+        .unwrap()
+        .checked_add(
+            after_increase_source
+                .insurance_credit_reserved_num
+                .checked_sub(insurance_encumbered_num)
+                .unwrap(),
+        )
+        .unwrap();
+    let max_lossless_withdrawable_num = after_increase_bucket
+        .fresh_unliened_backing_num
+        .min(available_backing_num - after_increase_source.positive_claim_bound_num);
+    let over_watermark_amount = max_lossless_withdrawable_num / BOUND_SCALE + 1;
+    assert!(
+        over_watermark_amount > 0,
+        "test must attempt a withdrawal above the live backing watermark"
+    );
+
     let backing_withdraw_dest = env.token_account(env.admin.pubkey(), 0);
     let market_before_withdraw = env.svm.get_account(&env.market).unwrap();
     let backing_withdraw = send_tx(
@@ -4165,7 +4489,7 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
-            amount: 1,
+            amount: over_watermark_amount,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -4179,7 +4503,7 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
     );
     assert!(
         backing_withdraw.is_err(),
-        "backing that supports source-credit IM liens must not be withdrawable"
+        "withdrawal above the live backing watermark must not be allowed"
     );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap().data,
