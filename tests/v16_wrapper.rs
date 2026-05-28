@@ -1,6 +1,6 @@
 use percolator::{
     AssetLifecycleV16, AssetStateV16Account, BackingBucketStatusV16, CloseProgressLedgerV16,
-    EngineAssetSlotV16Account, MarketGroupV16, MarketGroupV16HeaderAccount, MarketModeV16,
+    EngineAssetSlotV16Account, MarketGroupV16HeaderAccount, MarketModeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16, SideV16, V16Config,
     BOUND_SCALE, POS_SCALE,
@@ -15,6 +15,7 @@ use percolator_prog::{
     },
     ix::Instruction,
     oracle_v16, policy_v16, processor, state,
+    state::{MarketGroupV16, PortfolioAccountV16},
 };
 use solana_program::{
     account_info::AccountInfo, program_error::ProgramError, program_option::COption,
@@ -100,7 +101,7 @@ fn active_bitmap_with(indices: &[usize]) -> percolator::V16ActiveBitmap {
 }
 
 fn active_leg_for_asset(
-    account: &percolator::PortfolioAccountV16,
+    account: &PortfolioAccountV16,
     asset_index: usize,
 ) -> percolator::PortfolioLegV16 {
     account
@@ -111,7 +112,7 @@ fn active_leg_for_asset(
         .unwrap()
 }
 
-fn has_active_leg_for_asset(account: &percolator::PortfolioAccountV16, asset_index: usize) -> bool {
+fn has_active_leg_for_asset(account: &PortfolioAccountV16, asset_index: usize) -> bool {
     account
         .legs
         .iter()
@@ -3717,8 +3718,11 @@ fn v16_wrapper_maintenance_fee_sync_charges_recurring_fee_without_forcing_local_
 
     {
         let (cfg, mut group) = state::read_market(&market.data).unwrap();
-        group.accrue_asset_to_not_atomic(0, 1, 50, 0, true).unwrap();
+        group.current_slot = 1;
+        group.slot_last = 1;
         group.assets[0].raw_oracle_target_price = 50;
+        group.assets[0].effective_price = 50;
+        group.assets[0].slot_last = 1;
         state::write_market(&mut market.data, &cfg, &group).unwrap();
     }
 

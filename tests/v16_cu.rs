@@ -1,14 +1,14 @@
 use litesvm::LiteSVM;
 use percolator::{
-    AssetLifecycleV16, BackingBucketStatusV16, CloseProgressLedgerV16, MarketGroupV16,
-    MarketModeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16, ResolvedPayoutLedgerV16,
-    ResolvedPayoutReceiptV16, SideModeV16, SideV16, TradeRequestV16, ADL_ONE, BOUND_SCALE,
-    POS_SCALE,
+    AssetLifecycleV16, BackingBucketStatusV16, CloseProgressLedgerV16, MarketModeV16,
+    PermissionlessRecoveryReasonV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16,
+    SideModeV16, SideV16, TradeRequestV16, ADL_ONE, BOUND_SCALE, POS_SCALE,
 };
 use percolator_prog::{
     constants::{MATCHER_ABI_VERSION, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3},
     ix::Instruction as ProgInstruction,
     oracle_v16, processor, state,
+    state::{MarketGroupV16, PortfolioAccountV16},
 };
 use solana_sdk::{
     account::Account,
@@ -39,7 +39,7 @@ fn active_bitmap_with(indices: &[usize]) -> percolator::V16ActiveBitmap {
 }
 
 fn active_leg_for_asset(
-    account: &percolator::PortfolioAccountV16,
+    account: &PortfolioAccountV16,
     asset_index: usize,
 ) -> percolator::PortfolioLegV16 {
     account
@@ -50,7 +50,7 @@ fn active_leg_for_asset(
         .unwrap()
 }
 
-fn has_active_leg_for_asset(account: &percolator::PortfolioAccountV16, asset_index: usize) -> bool {
+fn has_active_leg_for_asset(account: &PortfolioAccountV16, asset_index: usize) -> bool {
     account
         .legs
         .iter()
@@ -120,10 +120,19 @@ fn matcher_delegate_key(
 }
 
 fn encode_matcher_init_passive(max_fill_abs: u128) -> Vec<u8> {
+    encode_matcher_init_passive_with_spread(max_fill_abs, 0, 100)
+}
+
+fn encode_matcher_init_passive_with_spread(
+    max_fill_abs: u128,
+    base_spread_bps: u32,
+    max_total_bps: u32,
+) -> Vec<u8> {
     let mut data = vec![0u8; 66];
     data[0] = 2;
     data[1] = 0;
-    data[10..14].copy_from_slice(&100u32.to_le_bytes());
+    data[6..10].copy_from_slice(&base_spread_bps.to_le_bytes());
+    data[10..14].copy_from_slice(&max_total_bps.to_le_bytes());
     data[34..50].copy_from_slice(&max_fill_abs.to_le_bytes());
     data
 }
@@ -1125,10 +1134,90 @@ impl V16CuEnv {
         self.svm.set_account(portfolio_key, portfolio_data).unwrap();
     }
 
+    fn force_portfolio_bankruptcy_for_security_test(&mut self, portfolio_key: Pubkey, loss: u128) {
+        let mut market_account = self.svm.get_account(&self.market).expect("market account");
+        let mut portfolio_data = self
+            .svm
+            .get_account(&portfolio_key)
+            .expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut portfolio = state::read_portfolio(&portfolio_data.data).unwrap();
+        if portfolio.capital != 0 {
+            group.c_tot -= portfolio.capital;
+            group.vault -= portfolio.capital;
+            portfolio.capital = 0;
+        }
+        assert_eq!(
+            portfolio.pnl, 0,
+            "security seed expects neutral starting pnl"
+        );
+        let loss_i128 = i128::try_from(loss).unwrap();
+        portfolio.pnl = -loss_i128;
+        group.negative_pnl_account_count += 1;
+        portfolio.health_cert.valid = false;
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_data.data, &portfolio).unwrap();
+        self.svm.set_account(self.market, market_account).unwrap();
+        self.svm.set_account(portfolio_key, portfolio_data).unwrap();
+    }
+
+    fn force_portfolio_loss_for_security_test(&mut self, portfolio_key: Pubkey, loss: u128) {
+        let mut market_account = self.svm.get_account(&self.market).expect("market account");
+        let mut portfolio_data = self
+            .svm
+            .get_account(&portfolio_key)
+            .expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut portfolio = state::read_portfolio(&portfolio_data.data).unwrap();
+        assert!(
+            portfolio.capital > loss,
+            "loss must remain fully covered by capital"
+        );
+        assert_eq!(
+            portfolio.pnl, 0,
+            "security seed expects neutral starting pnl"
+        );
+        let loss_i128 = i128::try_from(loss).unwrap();
+        portfolio.pnl = -loss_i128;
+        group.negative_pnl_account_count += 1;
+        portfolio.health_cert.valid = false;
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_data.data, &portfolio).unwrap();
+        self.svm.set_account(self.market, market_account).unwrap();
+        self.svm.set_account(portfolio_key, portfolio_data).unwrap();
+    }
+
     fn init_matcher_context(
         &mut self,
         matcher_program: Pubkey,
         maker_account: Pubkey,
+    ) -> (Pubkey, Pubkey, u64) {
+        self.init_matcher_context_with_data(
+            matcher_program,
+            maker_account,
+            encode_matcher_init_passive(u128::MAX),
+        )
+    }
+
+    fn init_matcher_context_with_passive_spread(
+        &mut self,
+        matcher_program: Pubkey,
+        maker_account: Pubkey,
+        base_spread_bps: u32,
+        max_total_bps: u32,
+    ) -> (Pubkey, Pubkey, u64) {
+        self.init_matcher_context_with_data(
+            matcher_program,
+            maker_account,
+            encode_matcher_init_passive_with_spread(u128::MAX, base_spread_bps, max_total_bps),
+        )
+    }
+
+    fn init_matcher_context_with_data(
+        &mut self,
+        matcher_program: Pubkey,
+        maker_account: Pubkey,
+        init_data: Vec<u8>,
     ) -> (Pubkey, Pubkey, u64) {
         let ctx = Pubkey::new_unique();
         let delegate = matcher_delegate_key(
@@ -1171,7 +1260,7 @@ impl V16CuEnv {
                     AccountMeta::new_readonly(delegate, false),
                     AccountMeta::new(ctx, false),
                 ],
-                data: encode_matcher_init_passive(u128::MAX),
+                data: init_data,
             },
             &[],
         )
@@ -1218,6 +1307,35 @@ impl V16CuEnv {
         size_q: i128,
         fee_bps: u64,
     ) -> u64 {
+        self.try_trade_cpi_with_cu_on_asset(
+            owner_a,
+            account_a,
+            owner_b,
+            account_b,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            asset_index,
+            size_q,
+            fee_bps,
+        )
+        .expect("trade cpi")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_trade_cpi_with_cu_on_asset(
+        &mut self,
+        owner_a: &Keypair,
+        account_a: Pubkey,
+        owner_b: &Keypair,
+        account_b: Pubkey,
+        matcher_program: Pubkey,
+        matcher_context: Pubkey,
+        matcher_delegate: Pubkey,
+        asset_index: u16,
+        size_q: i128,
+        fee_bps: u64,
+    ) -> Result<u64, String> {
         self.send(
             ProgInstruction::TradeCpi {
                 asset_index,
@@ -1237,7 +1355,6 @@ impl V16CuEnv {
             ],
             &[owner_a, owner_b],
         )
-        .expect("trade cpi")
     }
 
     fn withdraw(&mut self, owner: &Keypair, portfolio: Pubkey, amount: u128) -> Pubkey {
@@ -3761,6 +3878,316 @@ fn v16_bpf_perps_positive_smoke_cross_margin_pnl_convert_close_and_withdraw() {
 }
 
 #[test]
+fn v16_bpf_cross_margin_positive_pnl_allows_trading_negative_leg_before_convert() {
+    const INITIAL_PRICE: u64 = 100;
+    const ASSET0_MARK: u64 = 105;
+    const ASSET1_MARK: u64 = 95;
+    const ASSET0_SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const ASSET1_SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 320;
+    const EXPECTED_POSITIVE_PNL: i128 = 100;
+    const EXPECTED_NET_PNL_AFTER_NEGATIVE_CLOSE: i128 = 50;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+
+    let cross_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let cross_account = env.create_portfolio(&cross_owner);
+    let counterparty_account = env.create_portfolio(&counterparty_owner);
+    env.deposit(&cross_owner, cross_account, DEPOSIT);
+    env.deposit(&counterparty_owner, counterparty_account, 1_000);
+
+    env.trade_asset_with_cu(
+        0,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        ASSET0_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        ASSET1_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, ASSET0_MARK);
+    env.push_auth_mark_for_asset_as_admin(1, 2, ASSET1_MARK);
+
+    for (portfolio, asset_index, label) in [
+        (
+            counterparty_account,
+            0,
+            "counterparty asset[0] loss refresh",
+        ),
+        (cross_account, 0, "cross account asset[0] gain refresh"),
+        (
+            counterparty_account,
+            1,
+            "counterparty asset[1] gain refresh",
+        ),
+    ] {
+        let cu = env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index,
+                now_slot: 2,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+        );
+        assert_cu_within(label, cu, CRANK_CU_LIMIT);
+    }
+    let (_, moved_group) = env.market_state();
+    assert_eq!(moved_group.assets[0].effective_price, ASSET0_MARK);
+    assert_eq!(moved_group.assets[1].effective_price, ASSET1_MARK);
+
+    let cross_before_close = env.portfolio_state(cross_account);
+    assert_eq!(cross_before_close.pnl, EXPECTED_POSITIVE_PNL);
+    assert_eq!(cross_before_close.capital, DEPOSIT);
+    assert_eq!(
+        active_leg_for_asset(&cross_before_close, 1).basis_pos_q,
+        ASSET1_SIZE_Q,
+        "asset[1] is a long leg with negative mark-to-market at the moved price"
+    );
+
+    let close_negative_leg_cu = env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        -ASSET1_SIZE_Q,
+        ASSET1_MARK,
+        0,
+    );
+    assert_cu_within(
+        "cross-margin close negative leg before pnl convert",
+        close_negative_leg_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+
+    let cross_after_close = env.portfolio_state(cross_account);
+    assert!(
+        has_active_leg_for_asset(&cross_after_close, 0),
+        "positive-PnL leg should remain open"
+    );
+    assert!(
+        !has_active_leg_for_asset(&cross_after_close, 1),
+        "negative-PnL leg should close without converting positive PnL first"
+    );
+    assert_eq!(cross_after_close.capital, DEPOSIT);
+    assert_eq!(
+        cross_after_close.pnl, EXPECTED_NET_PNL_AFTER_NEGATIVE_CLOSE,
+        "asset[1] loss should net against the existing source-backed positive PnL"
+    );
+}
+
+#[test]
+fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg() {
+    const INITIAL_PRICE: u64 = 100;
+    const ASSET0_MARK: u64 = 105;
+    const ASSET1_MARK: u64 = 95;
+    const ASSET0_SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const ASSET1_SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const SAFE_INCREASE_Q: i128 = POS_SCALE as i128;
+    const TOO_LARGE_INCREASE_Q: i128 = 30 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 313;
+    const EXPECTED_POSITIVE_PNL: i128 = 100;
+    const EXPECTED_NET_PNL_AFTER_REFRESH: i128 = 50;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+
+    let cross_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let cross_account = env.create_portfolio(&cross_owner);
+    let counterparty_account = env.create_portfolio(&counterparty_owner);
+    env.deposit(&cross_owner, cross_account, DEPOSIT);
+    env.deposit(&counterparty_owner, counterparty_account, 1_000);
+    env.top_up_backing_bucket(1, 100, 10);
+
+    env.trade_asset_with_cu(
+        0,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        ASSET0_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        ASSET1_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, ASSET0_MARK);
+    env.push_auth_mark_for_asset_as_admin(1, 2, ASSET1_MARK);
+    for (portfolio, asset_index) in [
+        (counterparty_account, 0),
+        (cross_account, 0),
+        (counterparty_account, 1),
+    ] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index,
+                now_slot: 2,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+        );
+    }
+
+    let cross_before = env.portfolio_state(cross_account);
+    assert_eq!(cross_before.pnl, EXPECTED_POSITIVE_PNL);
+    assert_eq!(cross_before.capital, DEPOSIT);
+    assert_eq!(
+        active_leg_for_asset(&cross_before, 1).basis_pos_q,
+        ASSET1_SIZE_Q,
+        "asset[1] is a losing long leg before the risk-increasing trade"
+    );
+
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_cross = env.svm.get_account(&cross_account).unwrap();
+    let before_counterparty = env.svm.get_account(&counterparty_account).unwrap();
+    let too_large = env.try_trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        TOO_LARGE_INCREASE_Q,
+        ASSET1_MARK,
+        0,
+    );
+    assert!(
+        too_large.is_err(),
+        "risk increase must stay capped by realizable source-backed positive PnL"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before_market.data
+    );
+    assert_eq!(
+        env.svm.get_account(&cross_account).unwrap().data,
+        before_cross.data
+    );
+    assert_eq!(
+        env.svm.get_account(&counterparty_account).unwrap().data,
+        before_counterparty.data
+    );
+
+    let increase_cu = env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        SAFE_INCREASE_Q,
+        ASSET1_MARK,
+        0,
+    );
+    assert_cu_within(
+        "cross-margin increase negative leg with backed positive pnl",
+        increase_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+
+    let cross_after = env.portfolio_state(cross_account);
+    assert_eq!(
+        active_leg_for_asset(&cross_after, 1).basis_pos_q,
+        ASSET1_SIZE_Q + SAFE_INCREASE_Q
+    );
+    assert_eq!(cross_after.capital, DEPOSIT);
+    assert_eq!(cross_after.pnl, EXPECTED_NET_PNL_AFTER_REFRESH);
+    assert!(
+        cross_after.capital < cross_after.health_cert.certified_initial_req,
+        "without positive PnL credit this risk increase would fail initial margin"
+    );
+    assert!(
+        cross_after.health_cert.certified_equity as u128
+            >= cross_after.health_cert.certified_initial_req
+    );
+    let source_lien_effective_reserved: u128 = cross_after
+        .source_lien_effective_reserved
+        .iter()
+        .copied()
+        .sum();
+    assert!(
+        source_lien_effective_reserved > 0,
+        "risk-increasing trade must reserve backed source-credit support for IM"
+    );
+    assert!(
+        cross_after
+            .source_lien_counterparty_backing_num
+            .iter()
+            .any(|amount| *amount != 0)
+            || cross_after
+                .source_lien_insurance_backing_num
+                .iter()
+                .any(|amount| *amount != 0),
+        "source-credit IM lien must be backed by counterparty backing or reserved insurance"
+    );
+
+    let backing_withdraw_dest = env.token_account(env.admin.pubkey(), 0);
+    let market_before_withdraw = env.svm.get_account(&env.market).unwrap();
+    let backing_withdraw = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 1,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_withdraw_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&env.admin],
+    );
+    assert!(
+        backing_withdraw.is_err(),
+        "backing that supports source-credit IM liens must not be withdrawable"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_before_withdraw.data
+    );
+}
+
+#[test]
 fn v16_bpf_permissionless_crank_computes_funding_from_internal_mark_premium() {
     const INITIAL_PRICE: u64 = 1_000_000;
     const DEPOSIT: u128 = 10_000_000;
@@ -4399,6 +4826,578 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
     assert_eq!(group.slot_last, 1);
     assert_eq!(group.assets[0].effective_price, 200);
     assert!(percolator::active_bitmap_is_empty(short.active_bitmap));
+}
+
+#[test]
+fn v16_bpf_tradenocpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(1_000_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+
+    let extractor_owner = Keypair::new();
+    let probe_owner = Keypair::new();
+    let extractor = env.create_portfolio(&extractor_owner);
+    let probe = env.create_portfolio(&probe_owner);
+    env.deposit(&extractor_owner, extractor, 10_000);
+    env.deposit(&probe_owner, probe, 1_000);
+    env.trade_with_cu(
+        &extractor_owner,
+        extractor,
+        &probe_owner,
+        probe,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 300);
+    env.crank(
+        probe,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    env.svm.warp_to_slot(3);
+    env.crank(
+        probe,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 3,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_extractor = env.svm.get_account(&extractor).unwrap();
+    let before_probe = env.svm.get_account(&probe).unwrap();
+    let (_, before_group) = state::read_market(&before_market.data).unwrap();
+    assert_eq!(before_group.insurance, 1_000_000);
+    let before_probe_state = state::read_portfolio(&before_probe.data).unwrap();
+    assert!(
+        before_probe_state.health_cert.certified_liq_deficit != 0,
+        "probe must be liquidatable before the attempted recycling trade"
+    );
+
+    let close = env.try_trade_asset_with_cu(
+        0,
+        &extractor_owner,
+        extractor,
+        &probe_owner,
+        probe,
+        -((10 * POS_SCALE) as i128),
+        500,
+        0,
+    );
+    assert!(
+        close.is_err(),
+        "liquidatable probe must not recycle an unsettled deficit through an off-mark close"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before_market.data
+    );
+    assert_eq!(
+        env.svm.get_account(&extractor).unwrap().data,
+        before_extractor.data
+    );
+    assert_eq!(env.svm.get_account(&probe).unwrap().data, before_probe.data);
+}
+
+#[test]
+fn v16_bpf_tradecpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    env.top_up_insurance(1_000_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+
+    let extractor_owner = Keypair::new();
+    let probe_owner = Keypair::new();
+    let extractor = env.create_portfolio(&extractor_owner);
+    let probe = env.create_portfolio(&probe_owner);
+    env.deposit(&extractor_owner, extractor, 10_000);
+    env.deposit(&probe_owner, probe, 1_000);
+    env.trade_with_cu(
+        &extractor_owner,
+        extractor,
+        &probe_owner,
+        probe,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 300);
+    env.crank(
+        probe,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    env.svm.warp_to_slot(3);
+    env.crank(
+        probe,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 3,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    let (matcher_ctx, matcher_delegate, _) =
+        env.init_matcher_context_with_passive_spread(matcher_program, extractor, 9_000, 9_000);
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_extractor = env.svm.get_account(&extractor).unwrap();
+    let before_probe = env.svm.get_account(&probe).unwrap();
+    let before_matcher = env.svm.get_account(&matcher_ctx).unwrap();
+    let before_probe_state = state::read_portfolio(&before_probe.data).unwrap();
+    assert!(
+        before_probe_state.health_cert.certified_liq_deficit != 0,
+        "probe must be liquidatable before the attempted matcher recycling trade"
+    );
+
+    let close = env.try_trade_cpi_with_cu_on_asset(
+        &probe_owner,
+        probe,
+        &extractor_owner,
+        extractor,
+        matcher_program,
+        matcher_ctx,
+        matcher_delegate,
+        0,
+        (10 * POS_SCALE) as i128,
+        0,
+    );
+    assert!(
+        close.is_err(),
+        "liquidatable probe must not recycle an unsettled deficit through an off-mark matcher fill"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before_market.data
+    );
+    assert_eq!(
+        env.svm.get_account(&extractor).unwrap().data,
+        before_extractor.data
+    );
+    assert_eq!(env.svm.get_account(&probe).unwrap().data, before_probe.data);
+    assert_eq!(
+        env.svm.get_account(&matcher_ctx).unwrap().data,
+        before_matcher.data
+    );
+}
+
+#[test]
+fn v16_bpf_tradenocpi_rejects_when_counterparty_starts_bankrupt() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(1_000_000);
+
+    let extractor_owner = Keypair::new();
+    let probe_owner = Keypair::new();
+    let extractor = env.create_portfolio(&extractor_owner);
+    let probe = env.create_portfolio(&probe_owner);
+    env.deposit(&extractor_owner, extractor, 10_000);
+    env.deposit(&probe_owner, probe, 2_000);
+    env.trade_with_cu(
+        &extractor_owner,
+        extractor,
+        &probe_owner,
+        probe,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    env.force_portfolio_bankruptcy_for_security_test(probe, 500);
+    env.crank(
+        probe,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_extractor = env.svm.get_account(&extractor).unwrap();
+    let before_probe = env.svm.get_account(&probe).unwrap();
+    let before_probe_state = state::read_portfolio(&before_probe.data).unwrap();
+    assert_eq!(before_probe_state.capital, 0);
+    assert!(
+        before_probe_state.pnl < 0,
+        "probe must start bankrupt before the attempted recycling trade"
+    );
+    assert!(before_probe_state.health_cert.valid);
+    assert!(
+        before_probe_state.health_cert.certified_equity < 0,
+        "refreshed probe certificate must confirm negative equity before the attempted trade"
+    );
+
+    let close = env.try_trade_asset_with_cu(
+        0,
+        &extractor_owner,
+        extractor,
+        &probe_owner,
+        probe,
+        -((10 * POS_SCALE) as i128),
+        500,
+        0,
+    );
+    assert!(
+        close.is_err(),
+        "bankrupt probe must not use an off-mark close as a normal bilateral trade"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before_market.data
+    );
+    assert_eq!(
+        env.svm.get_account(&extractor).unwrap().data,
+        before_extractor.data
+    );
+    assert_eq!(env.svm.get_account(&probe).unwrap().data, before_probe.data);
+}
+
+#[test]
+fn v16_bpf_tradecpi_rejects_when_counterparty_starts_bankrupt() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    env.top_up_insurance(1_000_000);
+
+    let extractor_owner = Keypair::new();
+    let probe_owner = Keypair::new();
+    let extractor = env.create_portfolio(&extractor_owner);
+    let probe = env.create_portfolio(&probe_owner);
+    env.deposit(&extractor_owner, extractor, 10_000);
+    env.deposit(&probe_owner, probe, 2_000);
+    env.trade_with_cu(
+        &extractor_owner,
+        extractor,
+        &probe_owner,
+        probe,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    env.force_portfolio_bankruptcy_for_security_test(probe, 500);
+    env.crank(
+        probe,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    let (matcher_ctx, matcher_delegate, _) =
+        env.init_matcher_context_with_passive_spread(matcher_program, extractor, 9_000, 9_000);
+
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_extractor = env.svm.get_account(&extractor).unwrap();
+    let before_probe = env.svm.get_account(&probe).unwrap();
+    let before_matcher = env.svm.get_account(&matcher_ctx).unwrap();
+    let before_probe_state = state::read_portfolio(&before_probe.data).unwrap();
+    assert_eq!(before_probe_state.capital, 0);
+    assert!(
+        before_probe_state.pnl < 0,
+        "probe must start bankrupt before the attempted matcher recycling trade"
+    );
+    assert!(before_probe_state.health_cert.valid);
+    assert!(
+        before_probe_state.health_cert.certified_equity < 0,
+        "refreshed probe certificate must confirm negative equity before the attempted matcher trade"
+    );
+
+    let close = env.try_trade_cpi_with_cu_on_asset(
+        &probe_owner,
+        probe,
+        &extractor_owner,
+        extractor,
+        matcher_program,
+        matcher_ctx,
+        matcher_delegate,
+        0,
+        (10 * POS_SCALE) as i128,
+        0,
+    );
+    assert!(
+        close.is_err(),
+        "bankrupt probe must not use an off-mark matcher fill as a normal bilateral trade"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before_market.data
+    );
+    assert_eq!(
+        env.svm.get_account(&extractor).unwrap().data,
+        before_extractor.data
+    );
+    assert_eq!(env.svm.get_account(&probe).unwrap().data, before_probe.data);
+    assert_eq!(
+        env.svm.get_account(&matcher_ctx).unwrap().data,
+        before_matcher.data
+    );
+}
+
+#[test]
+fn v16_bpf_tradenocpi_rejects_when_both_counterparties_start_bankrupt() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(1_000_000);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 2_000);
+    env.deposit(&short_owner, short_account, 2_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    env.force_portfolio_bankruptcy_for_security_test(long_account, 500);
+    env.force_portfolio_bankruptcy_for_security_test(short_account, 500);
+    env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_long = env.svm.get_account(&long_account).unwrap();
+    let before_short = env.svm.get_account(&short_account).unwrap();
+    let before_long_state = state::read_portfolio(&before_long.data).unwrap();
+    let before_short_state = state::read_portfolio(&before_short.data).unwrap();
+    assert!(before_long_state.health_cert.valid);
+    assert!(before_short_state.health_cert.valid);
+    assert!(before_long_state.health_cert.certified_equity < 0);
+    assert!(before_short_state.health_cert.certified_equity < 0);
+
+    let close = env.try_trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        -((10 * POS_SCALE) as i128),
+        100,
+        0,
+    );
+    assert!(
+        close.is_err(),
+        "two bankrupt counterparties must not use TradeNoCpi as a bankruptcy close"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before_market.data
+    );
+    assert_eq!(
+        env.svm.get_account(&long_account).unwrap().data,
+        before_long.data
+    );
+    assert_eq!(
+        env.svm.get_account(&short_account).unwrap().data,
+        before_short.data
+    );
+}
+
+#[test]
+fn v16_bpf_tradenocpi_allows_both_counterparties_with_capitalized_losses_to_risk_reduce() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(1_000_000);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 10_000);
+    env.deposit(&short_owner, short_account, 10_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    env.force_portfolio_loss_for_security_test(long_account, 500);
+    env.force_portfolio_loss_for_security_test(short_account, 500);
+
+    let (_, before_group) = env.market_state();
+    let before_long = env.portfolio_state(long_account);
+    let before_short = env.portfolio_state(short_account);
+    assert!(before_long.pnl < 0 && before_long.capital > before_long.pnl.unsigned_abs());
+    assert!(before_short.pnl < 0 && before_short.capital > before_short.pnl.unsigned_abs());
+
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        -((10 * POS_SCALE) as i128),
+        100,
+        0,
+    );
+
+    let (_, after_group) = env.market_state();
+    let after_long = env.portfolio_state(long_account);
+    let after_short = env.portfolio_state(short_account);
+    assert_eq!(
+        after_group.insurance, before_group.insurance,
+        "capitalized losses must settle from account capital, not insurance"
+    );
+    assert_eq!(after_long.pnl, 0);
+    assert_eq!(after_short.pnl, 0);
+    assert!(!has_active_leg_for_asset(&after_long, 0));
+    assert!(!has_active_leg_for_asset(&after_short, 0));
+}
+
+#[test]
+fn v16_bpf_liquidatable_solvent_account_can_risk_reduce_without_insurance_drain() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(1_000_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 10_000);
+    env.deposit(&short_owner, short_account, 3_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 300);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    env.svm.warp_to_slot(3);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 3,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+
+    let (_, before_group) = env.market_state();
+    let before_short = env.portfolio_state(short_account);
+    assert_eq!(before_group.insurance, 1_000_000);
+    assert!(
+        before_short.health_cert.certified_liq_deficit != 0,
+        "short account should be liquidatable before the safe risk reduction"
+    );
+    assert!(
+        before_short.health_cert.certified_equity > 0,
+        "short account should still be solvent before the safe risk reduction"
+    );
+
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        -((10 * POS_SCALE) as i128),
+        500,
+        0,
+    );
+
+    let (_, after_group) = env.market_state();
+    let after_long = env.portfolio_state(long_account);
+    let after_short = env.portfolio_state(short_account);
+    assert_eq!(
+        after_group.insurance, before_group.insurance,
+        "safe risk reduction must not consume or credit insurance"
+    );
+    assert_eq!(
+        after_group.c_tot + after_group.insurance + after_group.pnl_pos_tot,
+        after_group.vault
+    );
+    assert!(!has_active_leg_for_asset(&after_long, 0));
+    assert!(!has_active_leg_for_asset(&after_short, 0));
+    assert!(
+        after_long.health_cert.certified_liq_deficit == 0
+            && after_short.health_cert.certified_liq_deficit == 0,
+        "both accounts must be non-liquidatable after the risk reduction"
+    );
 }
 
 #[test]
