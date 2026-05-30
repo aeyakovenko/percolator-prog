@@ -2796,6 +2796,102 @@ fn v16_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
 }
 
 #[test]
+fn v16_bpf_failed_deposit_spl_transfer_rolls_back_engine_credit() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let source = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            source,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, owner.pubkey(), 100),
+                owner: Pubkey::new_unique(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let result = env.send(
+        ProgInstruction::Deposit { amount: 100 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+
+    assert!(
+        result.is_err(),
+        "deposit must fail when the token CPI cannot debit the source account"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+    assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(account.capital, 0);
+}
+
+#[test]
+fn v16_bpf_failed_withdraw_spl_transfer_rolls_back_engine_debit() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 100);
+    let dest = env.token_account(owner.pubkey(), 0);
+    let mut corrupted_vault = env.svm.get_account(&env.vault).unwrap();
+    corrupted_vault.owner = Pubkey::new_unique();
+    env.svm.set_account(env.vault, corrupted_vault).unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let result = env.send(
+        ProgInstruction::Withdraw { amount: 40 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+
+    assert!(
+        result.is_err(),
+        "withdraw must fail when the token CPI cannot debit the vault account"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+    assert_eq!(env.svm.get_account(&dest).unwrap(), dest_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(group.vault, 100);
+    assert_eq!(group.c_tot, 100);
+    assert_eq!(account.capital, 100);
+    assert_eq!(env.token_amount(dest), 0);
+}
+
+#[test]
 fn v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_close() {
     let mut env = V16CuEnv::new();
     let insurance_authority = Keypair::new();
