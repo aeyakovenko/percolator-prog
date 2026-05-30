@@ -1006,6 +1006,16 @@ impl V16CuEnv {
         cranker_portfolio: Option<Pubkey>,
         now_slot: u64,
     ) -> u64 {
+        self.try_sync_maintenance_fee_with_cu(portfolio, cranker_portfolio, now_slot)
+            .expect("sync maintenance fee")
+    }
+
+    fn try_sync_maintenance_fee_with_cu(
+        &mut self,
+        portfolio: Pubkey,
+        cranker_portfolio: Option<Pubkey>,
+        now_slot: u64,
+    ) -> Result<u64, String> {
         let mut accounts = vec![
             AccountMeta::new(self.market, false),
             AccountMeta::new(portfolio, false),
@@ -1018,7 +1028,6 @@ impl V16CuEnv {
             accounts,
             &[],
         )
-        .expect("sync maintenance fee")
     }
 
     fn seed_n_leg_position_for_benchmark(
@@ -4933,6 +4942,117 @@ fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
     assert_eq!(
         group_after_nonflat_sync.insurance, insurance_before_nonflat_sync,
         "later deposits are not charged for an already-swept empty interval"
+    );
+}
+
+#[test]
+fn v16_bpf_nonflat_fee_sync_settles_hidden_loss_before_sweeping_fee() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 100,
+    );
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_portfolio = env.create_portfolio(&long_owner);
+    let short_portfolio = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_portfolio, 100);
+    env.deposit(&short_owner, short_portfolio, 1_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_portfolio,
+        &short_owner,
+        short_portfolio,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    let long_before_move = env.portfolio_state(long_portfolio);
+    assert_eq!(long_before_move.capital, 100);
+    assert_eq!(long_before_move.pnl, 0);
+
+    env.mutate_market(|_, group| {
+        group.accrue_asset_to_not_atomic(0, 1, 50, 0, true).unwrap();
+        group.assets[0].raw_oracle_target_price = 50;
+    });
+    env.svm.warp_to_slot(1);
+
+    let long_with_hidden_loss = env.portfolio_state(long_portfolio);
+    assert_eq!(
+        long_with_hidden_loss.capital, 100,
+        "the price move should be hidden until the account is touched"
+    );
+    assert_eq!(long_with_hidden_loss.pnl, 0);
+    let (_, group_with_hidden_loss) = env.market_state();
+    assert_eq!(group_with_hidden_loss.insurance, 0);
+    assert_eq!(group_with_hidden_loss.c_tot, 1_100);
+
+    let sync_cu = env.sync_maintenance_fee_with_cu(long_portfolio, None, 1);
+    println!("v16 SyncMaintenanceFee nonflat hidden-loss CU: {sync_cu}");
+    assert_cu_within(
+        "SyncMaintenanceFee nonflat hidden-loss regression",
+        sync_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let long_after_sync = env.portfolio_state(long_portfolio);
+    let (_, group_after_sync) = env.market_state();
+    assert_eq!(long_after_sync.capital, 0);
+    assert_eq!(long_after_sync.pnl, 0);
+    assert_eq!(long_after_sync.last_fee_slot, 1);
+    assert_eq!(
+        group_after_sync.insurance, 50,
+        "only capital remaining after the hidden loss is settled can be swept as fee"
+    );
+    assert_eq!(group_after_sync.c_tot, 1_000);
+}
+
+#[test]
+fn v16_bpf_fee_sync_rejects_reused_market_slot_stale_leg_without_mutation() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 1,
+    );
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_portfolio = env.create_portfolio(&long_owner);
+    let short_portfolio = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_portfolio, 1_000);
+    env.deposit(&short_owner, short_portfolio, 1_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_portfolio,
+        &short_owner,
+        short_portfolio,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    let old_market_id = env.market_state().1.assets[0].market_id;
+    env.mutate_market(|_, group| {
+        group
+            .accrue_asset_to_not_atomic(0, 1, 100, 0, true)
+            .unwrap();
+        group.assets[0].market_id = old_market_id + 1;
+        group.next_market_id = group.next_market_id.max(old_market_id + 2);
+    });
+    env.svm.warp_to_slot(1);
+
+    let market_before = env.svm.get_account(&env.market).unwrap().data;
+    let long_before = env.svm.get_account(&long_portfolio).unwrap().data;
+    let err = env
+        .try_sync_maintenance_fee_with_cu(long_portfolio, None, 1)
+        .expect_err("stale market id leg must fail closed");
+    println!("v16 SyncMaintenanceFee stale reused-market-id rejection: {err}");
+
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_before,
+        "failed sync must not mutate the reused market slot"
+    );
+    assert_eq!(
+        env.svm.get_account(&long_portfolio).unwrap().data,
+        long_before,
+        "failed sync must not mutate the stale portfolio"
     );
 }
 
