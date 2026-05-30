@@ -2847,6 +2847,116 @@ fn v16_bpf_failed_deposit_spl_transfer_rolls_back_engine_credit() {
 }
 
 #[test]
+fn v16_bpf_failed_insurance_topup_transfer_rolls_back_budget_and_ledger() {
+    let mut env = V16CuEnv::new();
+    let ledger = env.insurance_ledger_account();
+    let source = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            source,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.admin.pubkey(), 100),
+                owner: Pubkey::new_unique(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let result = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsurance { amount: 100 },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&env.admin],
+    );
+
+    assert!(
+        result.is_err(),
+        "insurance top-up must fail when the transfer CPI cannot debit the source"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ledger).unwrap(), ledger_before);
+    assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 0);
+    assert_eq!(group.vault, 0);
+}
+
+#[test]
+fn v16_bpf_failed_backing_topup_transfer_rolls_back_bucket_and_ledger() {
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    let source = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            source,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.admin.pubkey(), 100),
+                owner: Pubkey::new_unique(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let result = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 100,
+            expiry_slot: 10,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&env.admin],
+    );
+
+    assert!(
+        result.is_err(),
+        "backing top-up must fail when the transfer CPI cannot debit the source"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ledger).unwrap(), ledger_before);
+    assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault, 0);
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num,
+        0
+    );
+    assert_eq!(group.source_credit[1].fresh_reserved_backing_num, 0);
+}
+
+#[test]
 fn v16_bpf_failed_withdraw_spl_transfer_rolls_back_engine_debit() {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
