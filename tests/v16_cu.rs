@@ -6278,6 +6278,58 @@ fn v16_bpf_close_resolved_moves_payout_tokens_with_ledger() {
 }
 
 #[test]
+fn v16_bpf_failed_close_resolved_transfer_rolls_back_payout_state() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.resolve();
+    let dest = env.token_account(owner.pubkey(), 0);
+    let mut corrupted_vault = env.svm.get_account(&env.vault).unwrap();
+    corrupted_vault.owner = Pubkey::new_unique();
+    env.svm.set_account(env.vault, corrupted_vault).unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let result = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+
+    assert!(
+        result.is_err(),
+        "close-resolved must fail when the payout transfer CPI fails"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+    assert_eq!(env.svm.get_account(&dest).unwrap(), dest_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(group.vault, 1_000);
+    assert_eq!(group.c_tot, 1_000);
+    assert_eq!(account.capital, 1_000);
+    assert!(
+        !account.resolved_payout_receipt.present,
+        "failed payout must not persist a paid/finalized receipt"
+    );
+    assert_eq!(env.token_amount(dest), 0);
+}
+
+#[test]
 fn v16_bpf_close_resolved_pays_positive_pnl_through_engine_ledger() {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
