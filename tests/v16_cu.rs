@@ -6330,6 +6330,52 @@ fn v16_bpf_failed_close_resolved_transfer_rolls_back_payout_state() {
 }
 
 #[test]
+fn v16_bpf_failed_terminal_insurance_withdraw_rolls_back_market_and_ledger() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(100);
+    env.resolve();
+    let ledger = env.insurance_ledger_account();
+    let dest = env.token_account(env.admin.pubkey(), 0);
+    let mut corrupted_vault = env.svm.get_account(&env.vault).unwrap();
+    corrupted_vault.owner = Pubkey::new_unique();
+    env.svm.set_account(env.vault, corrupted_vault).unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let result = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&env.admin],
+    );
+
+    assert!(
+        result.is_err(),
+        "terminal insurance withdraw must fail when the transfer CPI fails"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ledger).unwrap(), ledger_before);
+    assert_eq!(env.svm.get_account(&dest).unwrap(), dest_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 100);
+    assert_eq!(group.vault, 100);
+    assert_eq!(env.token_amount(dest), 0);
+}
+
+#[test]
 fn v16_bpf_close_resolved_pays_positive_pnl_through_engine_ledger() {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
