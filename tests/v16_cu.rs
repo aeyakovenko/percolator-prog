@@ -6486,6 +6486,61 @@ fn v16_bpf_failed_terminal_insurance_withdraw_rolls_back_market_and_ledger() {
 }
 
 #[test]
+fn v16_bpf_failed_backing_withdraw_transfer_rolls_back_bucket_and_ledger() {
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10);
+    let dest = env.token_account(env.admin.pubkey(), 0);
+    let mut corrupted_vault = env.svm.get_account(&env.vault).unwrap();
+    corrupted_vault.owner = Pubkey::new_unique();
+    env.svm.set_account(env.vault, corrupted_vault).unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let result = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&env.admin],
+    );
+
+    assert!(
+        result.is_err(),
+        "backing withdraw must fail when the transfer CPI cannot debit the vault"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ledger).unwrap(), ledger_before);
+    assert_eq!(env.svm.get_account(&dest).unwrap(), dest_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault, 100);
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num,
+        100 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.source_credit[1].fresh_reserved_backing_num,
+        100 * BOUND_SCALE
+    );
+    assert_eq!(env.token_amount(dest), 0);
+}
+
+#[test]
 fn v16_bpf_close_resolved_pays_positive_pnl_through_engine_ledger() {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
