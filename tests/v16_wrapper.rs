@@ -7075,6 +7075,11 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
         group.source_credit[1].positive_claim_bound_num = 40 * BOUND_SCALE;
         group.source_credit[1].exact_positive_claim_num = 40 * BOUND_SCALE;
         group.source_credit[1].credit_rate_num = percolator::CREDIT_RATE_SCALE;
+        // Keep the hand-crafted state consistent with the engine's global
+        // junior-bound aggregation invariant (validate_shape requires
+        // pnl_pos_bound_tot_num >= sum of per-domain positive_claim_bound_num).
+        group.pnl_pos_bound_tot_num = 40 * BOUND_SCALE;
+        group.pnl_pos_bound_tot = 40;
         state::write_market(&mut market.data, &cfg, &group).unwrap();
     }
     run_ix(
@@ -16702,4 +16707,339 @@ fn v16_wrapper_oracle_attacker_cannot_drain_other_domains() {
     );
     // Final isolation check.
     assert_honest_isolated(&market, &bystander_acct, "final");
+}
+
+// ----------------------------------------------------------------------------
+// Per-asset crank clamp dt (regression for the multi-asset clamp/envelope
+// mismatch). The wrapper used to clamp the crank price toward the target using
+// the GROUP-level dt (`now - header.slot_last`), while the engine accrual
+// envelope validates the move against the PER-ASSET dt
+// (`now - asset.slot_last`). Because `header.slot_last == min(per-asset
+// slot_last)`, a fresher asset in a multi-asset market would get a clamp dt
+// strictly larger than its own accrual dt, letting the wrapper hand the engine
+// a price the per-asset envelope rejects with RecoveryRequired -- a transient
+// crank brick for that asset (it can only be unstuck by cranking the stalest
+// asset first). The fix clamps with the per-asset slot_last so the wrapper
+// clamp bound exactly matches the engine envelope bound for the cranked asset.
+// ----------------------------------------------------------------------------
+
+// Builds a 2-asset market in the exact "group pinned stale, asset-1 fresh"
+// state and pushes `target_mark_e6` as asset 1's auth-mark target, leaving the
+// market ready for `PermissionlessCrank { asset_index: 1, now_slot: 11 }`.
+//
+// Slot layout after setup:
+//   asset 0: slot_last = 0, has open interest  -> pins header.slot_last to 0
+//   asset 1: slot_last = 10, has open interest, auth-mark target pushed
+//   header.slot_last = min(0, 10) = 0, current_slot = 10
+// So at the crank slot 11:
+//   group dt  = 11 - 0  = 11   (what the buggy clamp used)
+//   asset dt  = 11 - 10 = 1    (what the engine envelope uses)
+// With max_price_move_bps_per_slot = 1000 (10%/slot) and an asset-1 price of
+// 100, the per-asset 1-slot envelope only admits a move to 110.
+fn setup_pinned_group_fresh_asset1(target_mark_e6: u64) -> (TestAccount, TestAccount, TestAccount) {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut a0_long_owner = signer();
+    let mut a0_short_owner = signer();
+    let mut a1_long_owner = signer();
+    let mut a1_short_owner = signer();
+    let mut a0_long = portfolio_account();
+    let mut a0_short = portfolio_account();
+    let mut a1_long = portfolio_account();
+    let mut a1_short = portfolio_account();
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                max_price_move_bps_per_slot,
+                max_accrual_dt_slots,
+                min_funding_lifetime_slots,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 2;
+                *max_price_move_bps_per_slot = 1_000;
+                // Keep max_price_move_bps_per_slot * max_accrual_dt_slots <= 10_000 so
+                // the 100% maintenance-margin solvency envelope admits the config, and
+                // max_accrual_dt_slots <= min_funding_lifetime_slots for the engine.
+                *max_accrual_dt_slots = 10;
+                *min_funding_lifetime_slots = 10;
+            }
+        }),
+    );
+
+    // Asset 0: auth-mark, price 100. Open its interest at slot 0 so it is a
+    // live, accruable asset that pins header.slot_last; then never touch it
+    // again, so it stays at slot 0 while asset 1 moves ahead.
+    configure_base_auth_mark(&mut admin, &mut market, 0, 100);
+    init_portfolio(&mut a0_long_owner, &mut market, &mut a0_long);
+    init_portfolio(&mut a0_short_owner, &mut market, &mut a0_short);
+    deposit(&mut a0_long_owner, &mut market, &mut a0_long, 1_000_000);
+    deposit(&mut a0_short_owner, &mut market, &mut a0_short, 1_000_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut a0_long_owner,
+            &mut a0_short_owner,
+            &mut market,
+            &mut a0_long,
+            &mut a0_short,
+        ],
+    )
+    .unwrap();
+
+    // Asset 1 is already an active slot after init. Configure it as an auth-mark
+    // at slot 5: this sets its own slot_last to 5 (it has no open interest yet)
+    // while leaving header.slot_last pinned to 0, because asset 0 already holds a
+    // position. Then open asset-1 interest with disjoint portfolios so the
+    // asset-1 crank never settles an asset-0 leg; the trade isolates asset 0's
+    // (unrelated) loss-stale bit.
+    run_ix(
+        Instruction::ConfigureAuthMark {
+            asset_index: 1,
+            now_slot: 5,
+            initial_mark_e6: 100,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    init_portfolio(&mut a1_long_owner, &mut market, &mut a1_long);
+    init_portfolio(&mut a1_short_owner, &mut market, &mut a1_short);
+    deposit(&mut a1_long_owner, &mut market, &mut a1_long, 1_000_000);
+    deposit(&mut a1_short_owner, &mut market, &mut a1_short, 1_000_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut a1_long_owner,
+            &mut a1_short_owner,
+            &mut market,
+            &mut a1_long,
+            &mut a1_short,
+        ],
+    )
+    .unwrap();
+    {
+        let (_, group) = state::read_market(&market.data).unwrap();
+        assert_eq!(group.assets[0].slot_last, 0, "asset 0 stays stale at slot 0");
+        assert_eq!(group.assets[1].slot_last, 5, "asset 1 is fresh at slot 5");
+        assert_eq!(group.slot_last, 0, "header.slot_last is pinned by the stale asset 0");
+        assert_eq!(group.current_slot, 5);
+        assert_eq!(group.assets[1].effective_price, 100);
+    }
+
+    // Push a far auth-mark target for asset 1 at slot 6, leaving the market ready
+    // for a crank at slot 6 where group dt = 6 but asset-1 accrual dt = 1.
+    run_ix(
+        Instruction::PushAuthMark {
+            asset_index: 1,
+            now_slot: 6,
+            mark_e6: target_mark_e6,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+
+    (admin, market, a1_long)
+}
+
+#[test]
+fn v16_wrapper_crank_clamp_uses_per_asset_dt_not_group_dt() {
+    // Target 130 sits outside asset 1's per-slot envelope (max move to 110) but
+    // inside the wider group-dt window the buggy clamp used. Before the fix the
+    // wrapper clamped toward 130 with group dt = 6 and handed the engine a price
+    // the per-asset envelope (dt = 1) rejected -> the crank reverted with
+    // RecoveryRequired. After the fix the wrapper clamps with the per-asset dt,
+    // so it never proposes a move the engine will reject: the crank advances and
+    // the price walks exactly to the per-asset 1-slot bound, 110.
+    let (mut admin, mut market, mut a1_long) = setup_pinned_group_fresh_asset1(130);
+
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: 6,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut admin, &mut market, &mut a1_long],
+    )
+    .expect("fresh-asset crank must make progress when the group is pinned by a stale asset");
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        group.assets[1].effective_price, 110,
+        "crank price must be clamped to asset 1's own per-slot envelope (100 -> 110), not the wider group window",
+    );
+    assert_eq!(group.assets[1].slot_last, 6, "asset 1 accrued to the crank slot");
+    assert_eq!(group.assets[0].slot_last, 0, "the stale asset is untouched and still recoverable");
+    assert_eq!(group.mode, MarketModeV16::Live);
+}
+
+#[test]
+fn v16_wrapper_crank_per_asset_clamp_still_binds_extreme_target() {
+    // The fix tightens the clamp dt; it must not loosen the clamp. Even an
+    // absurd target is admitted by the crank only after being clamped to the
+    // per-asset 1-slot bound (100 -> 110), so the engine envelope is always
+    // satisfied and the price can never jump by the group dt.
+    let (mut admin, mut market, mut a1_long) = setup_pinned_group_fresh_asset1(100_000);
+
+    run_ix(
+        Instruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: 6,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &mut [&mut admin, &mut market, &mut a1_long],
+    )
+    .expect("crank must make progress and clamp the extreme target rather than reverting");
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        group.assets[1].effective_price, 110,
+        "per-asset 1-slot clamp must cap the move at 10% regardless of how far the pushed target is",
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Per-asset dt for the dynamic-fee externality floor (same class as the crank
+// clamp fix above). `hybrid_trade_fee_bps_view` sized the EwmaMark / matured-
+// hybrid externality floor with the GROUP dt (`now - header.slot_last`) instead
+// of the per-asset dt (`now - asset.slot_last`). In a multi-asset market pinned
+// stale by one asset, a trade on a FRESH EwmaMark asset got a hugely inflated
+// fee floor that could exceed max_trading_fee_bps and revert the trade -- a
+// liveness footgun on the fresh asset, driven by an unrelated stale co-asset.
+// The fix clamps with the per-asset dt so the floor reflects only the traded
+// asset's own staleness.
+// ----------------------------------------------------------------------------
+#[test]
+fn v16_wrapper_trade_fee_floor_uses_per_asset_dt_not_group_dt() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let mut a0_long_owner = signer();
+    let mut a0_short_owner = signer();
+    let mut a1_long_owner = signer();
+    let mut a1_short_owner = signer();
+    let mut a0_long = portfolio_account();
+    let mut a0_short = portfolio_account();
+    let mut a1_long = portfolio_account();
+    let mut a1_short = portfolio_account();
+
+    init_market_with_ix(
+        &mut admin,
+        &mut market,
+        init_market_ix_with(|ix| {
+            if let Instruction::InitMarket {
+                max_portfolio_assets,
+                max_price_move_bps_per_slot,
+                max_accrual_dt_slots,
+                min_funding_lifetime_slots,
+                max_trading_fee_bps,
+                ..
+            } = ix
+            {
+                *max_portfolio_assets = 2;
+                *max_price_move_bps_per_slot = 1_000;
+                *max_accrual_dt_slots = 10;
+                *min_funding_lifetime_slots = 10;
+                // Group dt = 5 => floor 5000 bps > cap; per-asset dt = 1 => floor
+                // 1000 bps < cap. So the cap distinguishes the two clamp dts.
+                *max_trading_fee_bps = 3_000;
+            }
+        }),
+    );
+
+    // Asset 0: auth-mark with open interest at slot 0 -> pins header.slot_last to 0.
+    configure_base_auth_mark(&mut admin, &mut market, 0, 100);
+    init_portfolio(&mut a0_long_owner, &mut market, &mut a0_long);
+    init_portfolio(&mut a0_short_owner, &mut market, &mut a0_short);
+    deposit(&mut a0_long_owner, &mut market, &mut a0_long, 1_000_000);
+    deposit(&mut a0_short_owner, &mut market, &mut a0_short, 1_000_000);
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut a0_long_owner,
+            &mut a0_short_owner,
+            &mut market,
+            &mut a0_long,
+            &mut a0_short,
+        ],
+    )
+    .unwrap();
+
+    // Asset 1: EwmaMark configured at slot 5 -> asset 1 slot_last = 5, current_slot
+    // = 5, but header.slot_last stays 0 (asset 0 already holds a position). EwmaMark
+    // (not auth-mark) so the trade actually exercises the externality fee floor.
+    run_ix(
+        Instruction::ConfigureEwmaMark {
+            asset_index: 1,
+            now_slot: 5,
+            initial_mark_e6: 100,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        &mut [&mut admin, &mut market],
+    )
+    .unwrap();
+    init_portfolio(&mut a1_long_owner, &mut market, &mut a1_long);
+    init_portfolio(&mut a1_short_owner, &mut market, &mut a1_short);
+    deposit(&mut a1_long_owner, &mut market, &mut a1_long, 1_000_000);
+    deposit(&mut a1_short_owner, &mut market, &mut a1_short, 1_000_000);
+    {
+        let (_, group) = state::read_market(&market.data).unwrap();
+        assert_eq!(group.assets[0].slot_last, 0, "asset 0 stays stale at slot 0");
+        assert_eq!(group.assets[1].slot_last, 5, "asset 1 is fresh at slot 5");
+        assert_eq!(group.slot_last, 0, "header.slot_last pinned by stale asset 0 -> group dt = 5");
+        assert_eq!(group.current_slot, 5);
+    }
+
+    // Trade on the FRESH EwmaMark asset 1 at mark price. The trade's now_slot ==
+    // current_slot == 5, so group dt = 5 (floor 5000 > 3000 cap, reverts before
+    // the fix) but per-asset dt = 0 -> max(1,..) = 1 (floor 1000 < cap) after it.
+    run_ix(
+        Instruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &mut [
+            &mut a1_long_owner,
+            &mut a1_short_owner,
+            &mut market,
+            &mut a1_long,
+            &mut a1_short,
+        ],
+    )
+    .expect("a trade on a fresh asset must not be blocked by an unrelated stale co-asset's group dt");
+
+    let (_, group) = state::read_market(&market.data).unwrap();
+    assert_eq!(
+        group.assets[1].oi_eff_long_q, POS_SCALE,
+        "the fresh-asset trade went through and opened interest",
+    );
+    assert_eq!(group.assets[0].slot_last, 0, "the stale co-asset is still untouched and recoverable");
 }

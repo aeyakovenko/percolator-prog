@@ -11038,15 +11038,27 @@ pub mod processor {
             / percolator::POS_SCALE)
     }
 
-    fn hybrid_segment_dt_view(
+    // Per-asset accrual dt, mirroring the engine's
+    // `segment_dt = min(now - asset.slot_last, max_accrual_dt_slots)` in
+    // `accrue_asset_to_not_atomic`. The crank price clamp MUST use this, not the
+    // group-level dt: `header.slot_last == min(per-asset slot_last)`, so in a
+    // multi-asset market a fresher asset has a group dt strictly larger than its
+    // own accrual dt. Clamping with the wider group dt lets the wrapper hand the
+    // engine a price its per-asset envelope rejects (RecoveryRequired), bricking
+    // that asset's crank until the stalest asset is cranked first. Clamping with
+    // the per-asset dt makes the wrapper clamp bound exactly match the engine
+    // envelope bound for the cranked asset.
+    fn asset_segment_dt_view(
         group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
         now_slot: u64,
     ) -> Result<u64, ProgramError> {
-        if now_slot < group.header.slot_last.get() {
+        let asset_slot_last = group.markets[asset_index].engine.asset.slot_last.get();
+        if now_slot < asset_slot_last {
             return Err(PercolatorError::EngineStale.into());
         }
         Ok(core::cmp::min(
-            now_slot - group.header.slot_last.get(),
+            now_slot - asset_slot_last,
             group.header.config.max_accrual_dt_slots.get(),
         ))
     }
@@ -11098,7 +11110,11 @@ pub mod processor {
         let mark_externality_notional = core::cmp::max(max_side_notional, trade_notional)
             .checked_mul(2)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        let segment_dt = core::cmp::max(1, hybrid_segment_dt_view(group, now_slot)?);
+        // Per-asset dt (not group dt): the externality floor must reflect only the
+        // traded asset's own staleness, matching the engine accrual envelope and
+        // the crank-price clamp. Group dt would over-charge / revert a fresh
+        // asset's trade when an unrelated co-asset is stale.
+        let segment_dt = core::cmp::max(1, asset_segment_dt_view(group, asset_index, now_slot)?);
         let min_externality_bps = group
             .header
             .config
@@ -11149,7 +11165,7 @@ pub mod processor {
                 asset.effective_price.get(),
                 target,
                 group.header.config.max_price_move_bps_per_slot.get(),
-                hybrid_segment_dt_view(group, now_slot)?,
+                asset_segment_dt_view(group, asset_index, now_slot)?,
                 exposed,
             );
             profile.oracle_target_price_e6 = target;
@@ -11208,7 +11224,7 @@ pub mod processor {
             asset.effective_price.get(),
             target,
             group.header.config.max_price_move_bps_per_slot.get(),
-            hybrid_segment_dt_view(group, now_slot)?,
+            asset_segment_dt_view(group, asset_index, now_slot)?,
             exposed,
         );
         profile.oracle_target_price_e6 = target;

@@ -2638,7 +2638,7 @@ dependencies = [
 [[package]]
 name = "percolator"
 version = "0.1.1"
-source = "git+https://github.com/aeyakovenko/percolator?rev=630c4f6d6ea47649c97585b40dcfd305985654c4#630c4f6d6ea47649c97585b40dcfd305985654c4"
+source = "git+https://github.com/aeyakovenko/percolator?rev=4d2ccab#4d2ccabbf0dfd296417485ceca701dbe238f3dc0"
 dependencies = [
  "bytemuck",
 ]
