@@ -11007,3 +11007,33 @@ fn v16_attack_deposit_with_parked_pnl_clean() {
     assert!(resid1 >= a1.pnl.max(0), "junior pnl still backed by residual");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
+// security.md sweep — two-sided trade fee symmetry (#33/#37): a trade fee is charged to BOTH sides;
+// each must pay exactly the same amount (no rounding asymmetry favoring one side), and the total fee
+// must equal the insurance increase. Conservation: vault unchanged (fee is internal capital->insurance).
+#[test]
+fn v16_attack_two_sided_trade_fee_symmetric() {
+    let mut env = V16CuEnv::new(); // max_trading_fee_bps = 10_000
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    let (_, g0) = env.market_state();
+    let ca0 = env.portfolio_state(pa).capital;
+    let cb0 = env.portfolio_state(pb).capital;
+    // trade with a fee (notional 100 @ POS_SCALE, 100 bps).
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 100);
+    let ca1 = env.portfolio_state(pa).capital;
+    let cb1 = env.portfolio_state(pb).capital;
+    let (_, g1) = env.market_state();
+    let fee_a = ca0 - ca1;
+    let fee_b = cb0 - cb1;
+    assert!(fee_a > 0, "a fee was charged (non-vacuous)");
+    assert_eq!(fee_a, fee_b, "both sides pay EXACTLY the same fee (no rounding asymmetry)");
+    // total fee -> insurance exactly; vault unchanged.
+    assert_eq!(g1.insurance, g0.insurance + fee_a + fee_b, "total two-sided fee accrued to insurance");
+    assert_eq!(g1.c_tot, g0.c_tot - fee_a - fee_b, "c_tot decreased by exactly the total fee");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged (fee internal)");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
