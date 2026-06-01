@@ -10293,3 +10293,48 @@ fn v16_attack_withdraw_respects_margin_and_recoverable() {
     let (_, g) = env.market_state();
     assert_eq!(g.vault, g.c_tot + g.insurance, "conservation");
 }
+
+// security.md sweep — resolved-mode operation gating (#30): once resolved, every Live-only op
+// (Deposit, Trade, Withdraw, ConvertReleasedPnl) must reject; only the wind-down path (CloseResolved)
+// works. A Live-op leaking through after resolution could corrupt the frozen state.
+#[test]
+fn v16_attack_resolved_mode_gates_all_live_ops() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    let other = Keypair::new(); let pq = env.create_portfolio(&other); // create BEFORE resolve
+    env.deposit(&owner, p, 1_000_000);
+    env.resolve();
+    let (_, g0) = env.market_state();
+
+    // Deposit -> reject
+    let src = env.token_account_for_mint(env.mint, owner.pubkey(), 100);
+    env.svm.expire_blockhash();
+    let r_dep = env.send(ProgInstruction::Deposit { amount: 100 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(src, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r_dep.is_err(), "Deposit must reject in resolved mode");
+    // Withdraw -> reject (must use CloseResolved)
+    env.svm.expire_blockhash();
+    let dest = Pubkey::new_unique();
+    env.svm.set_account(dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, owner.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    let r_wd = env.send(ProgInstruction::Withdraw { amount: 100 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r_wd.is_err(), "Withdraw must reject in resolved mode");
+    // ConvertReleasedPnl -> reject
+    env.svm.expire_blockhash();
+    let r_cv = env.send(ProgInstruction::ConvertReleasedPnl { amount: 1 },
+        vec![AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[&owner]);
+    assert!(r_cv.is_err(), "ConvertReleasedPnl must reject in resolved mode");
+    // Trade -> reject
+    env.svm.expire_blockhash();
+    let r_tr = env.try_trade_asset_with_cu(0, &owner, p, &other, pq, POS_SCALE as i128, 100, 0);
+    assert!(r_tr.is_err(), "Trade must reject in resolved mode");
+
+    // nothing changed; CloseResolved (the wind-down path) works.
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged by all rejected live ops");
+    assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged");
+    let cr = env.close_resolved(&owner, p);
+    assert_eq!(env.token_amount(cr), 1_000_000, "CloseResolved pays out the resolved capital");
+}
