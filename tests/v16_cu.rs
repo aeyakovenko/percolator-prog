@@ -13273,3 +13273,56 @@ fn v16_attack_deposit_does_not_dilute_junior_backing() {
     assert_eq!(g_post.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g_post.vault >= g_post.c_tot + g_post.insurance, "senior conservation");
 }
+
+// security.md sweep — insurance-fund ops do not touch junior-PnL backing (#6/#33/#22 interaction): a
+// backed junior holder is funded by residual (vault − c_tot − insurance). A domain insurance top-up
+// (+X to vault AND insurance) and a domain insurance withdrawal (−X to vault AND insurance) both leave
+// residual invariant. Attacker/edge goal: route value through the insurance fund to shift a junior
+// holder's realizable claim (mint by growing it / theft by shrinking it). Protection: residual — and the
+// holder's certified equity — is identical across both insurance operations; senior conservation holds.
+#[test]
+fn v16_attack_insurance_ops_preserve_junior_backing() {
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, 40, 10_000);
+    let ho = Keypair::new(); let h = env.create_portfolio(&ho);
+    env.deposit(&ho, h, 1_000);
+    env.add_source_positive_pnl(h, 1, 40);
+    env.crank(h, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 0, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    let eq0 = env.portfolio_state(h).health_cert.certified_equity;
+    let g0 = env.market_state().1;
+    let residual0 = g0.vault.saturating_sub(g0.c_tot).saturating_sub(g0.insurance);
+    assert!(env.portfolio_state(h).pnl > 0, "holder carries backed junior pnl");
+
+    let read = |env: &V16CuEnv| -> (i128, u128) {
+        let g = env.market_state().1;
+        (g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance) as i128, g.insurance)
+    };
+
+    // (1) domain insurance TOP-UP: +1M to vault AND insurance -> residual unchanged.
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority(&admin, 0, 1_000_000);
+    let (res1, ins1) = read(&env);
+    assert_eq!(res1, residual0 as i128, "residual unchanged by insurance top-up");
+    assert_eq!(ins1, g0.insurance + 1_000_000, "insurance grew by the top-up");
+
+    // refresh the holder's cert: top-up must not have changed its backing.
+    env.svm.expire_blockhash();
+    env.crank(h, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 0, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    assert_eq!(env.portfolio_state(h).health_cert.certified_equity, eq0, "holder equity unchanged by insurance top-up");
+
+    // (2) domain insurance WITHDRAW: −600k from vault AND insurance -> residual STILL unchanged.
+    env.try_withdraw_insurance_domain_with_authority(&admin, 0, 600_000).expect("domain withdraw ok");
+    let (res2, ins2) = read(&env);
+    assert_eq!(res2, residual0 as i128, "residual unchanged by insurance withdrawal");
+    assert_eq!(ins2, ins1 - 600_000, "insurance dropped by the withdrawal");
+
+    // refresh the holder's cert: withdrawal must not have touched its backing either.
+    env.svm.expire_blockhash();
+    env.crank(h, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 0, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    let hf = env.portfolio_state(h);
+    let gf = env.market_state().1;
+    assert_eq!(hf.health_cert.certified_equity, eq0, "holder equity unchanged across BOTH insurance ops");
+    assert_eq!(hf.pnl, env.portfolio_state(h).pnl, "holder pnl stable");
+    assert_eq!(gf.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(gf.vault >= gf.c_tot + gf.insurance, "senior conservation across insurance ops");
+}
