@@ -10255,3 +10255,41 @@ fn v16_attack_pnl_pos_tot_consistent_through_sign_flips() {
     crank_both(&mut env, 14); env.svm.warp_to_slot(15); crank_both(&mut env, 15);
     check(&env, "back to entry");
 }
+
+// security.md sweep — withdraw vs open-position margin (#19/#46): an account with an open position
+// must not be able to withdraw into under-collateralization (margin is conservatively reserved), yet
+// its capital must remain fully recoverable once the position is closed (no permanent lock / LoF).
+#[test]
+fn v16_attack_withdraw_respects_margin_and_recoverable() {
+    let mut env = V16CuEnv::new(); // IM = 100%, max_price_move = 100%/slot (conservative envelope)
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000);
+    env.deposit(&lb, pb, 10_000_000);
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, (6 * POS_SCALE) as i128, 100, 0); // notional 600
+
+    // with the position open, withdrawing the FULL capital must reject (margin reserved).
+    let try_wd = |env: &mut V16CuEnv, amt: u128| -> bool {
+        env.svm.expire_blockhash();
+        let d = Pubkey::new_unique();
+        env.svm.set_account(d, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, la.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+        env.send(ProgInstruction::Withdraw { amount: amt }, vec![
+            AccountMeta::new(la.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false),
+            AccountMeta::new(d, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&la]).is_ok()
+    };
+    assert!(!try_wd(&mut env, 1_000), "cannot withdraw full capital with a position open");
+    assert!(!try_wd(&mut env, 500), "conservative margin reserves capital under the worst-case envelope");
+    assert_eq!(env.portfolio_state(pa).capital, 1_000, "capital intact after rejected withdraws (no partial debit)");
+
+    // close the position; capital must then be fully recoverable (no permanent lock / LoF).
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, -(6 * POS_SCALE as i128), 100, 0);
+    assert!(percolator::active_bitmap_is_empty(env.portfolio_state(pa).active_bitmap), "la flat after close");
+    let cap = env.portfolio_state(pa).capital;
+    env.svm.expire_blockhash();
+    let (dest, _) = env.withdraw_with_cu(&la, pa, cap);
+    assert_eq!(env.token_amount(dest) as u128, cap, "full capital recovered after closing (no LoF)");
+    assert_eq!(env.portfolio_state(pa).capital, 0, "capital fully withdrawn");
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault, g.c_tot + g.insurance, "conservation");
+}
