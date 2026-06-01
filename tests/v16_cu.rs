@@ -12229,3 +12229,41 @@ fn v16_attack_deposit_during_active_close_safe() {
     assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
+// security.md sweep — fee-redirect split lands in the correct domains (#32/#33): with
+// fee_redirect_to_market_0_bps set, a fee'd trade on market N must split EXACTLY: the redirect share
+// to market 0's domain budget(s), the rest to market N's local domain budget(s). Total == fee
+// charged (conservation), no value created/lost in the split.
+#[test]
+fn v16_attack_fee_redirect_split_lands_correctly() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::ConfigureAuthMark { asset_index: 1, now_slot: 0, initial_mark_e6: 100 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin]).expect("cfg mark");
+    env.update_fee_redirect_policy_with_cu(2_000); // 20% of market 1..N fees -> market 0 domain
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 5_000_000);
+    env.deposit(&lb, pb, 5_000_000);
+    let dom = |env: &V16CuEnv, d: usize| env.market_state().1.insurance_domain_budget[d];
+    let (b0, b1, b2, b3) = (dom(&env, 0), dom(&env, 1), dom(&env, 2), dom(&env, 3));
+    let ins0 = env.market_state().1.insurance;
+    // fee'd trade on ASSET 1 (market 1) -> fees split between market 0 (domains 0,1) and market 1 (2,3).
+    env.trade_asset_with_cu(1, &la, pa, &lb, pb, (10_000 * POS_SCALE) as i128, 100, 100); // notional 1M -> fee large enough for the redirect
+    let (g0d, g1d, g2d, g3d) = (dom(&env, 0) - b0, dom(&env, 1) - b1, dom(&env, 2) - b2, dom(&env, 3) - b3);
+    let total_to_mkt0 = g0d + g1d;        // domains 0,1 belong to market 0
+    let total_to_mkt1 = g2d + g3d;        // domains 2,3 belong to market 1
+    let total_fee = total_to_mkt0 + total_to_mkt1;
+    assert!(total_fee > 0, "a fee was charged (non-vacuous)");
+    // global insurance grew by exactly the total fee (conservation).
+    assert_eq!(env.market_state().1.insurance, ins0 + total_fee, "insurance += total fee");
+    // the redirect share (20%) landed in market 0's domains; the rest (80%) stayed local in market 1.
+    // each side: redirect = floor(fee_side * 2000/10000); allow +-1 per side for flooring.
+    assert!(total_to_mkt0 >= total_fee * 2 / 10 - 2 && total_to_mkt0 <= total_fee * 2 / 10 + 2,
+        "~20% of fee redirected to market 0 (got {} of {})", total_to_mkt0, total_fee);
+    assert!(total_to_mkt1 >= total_fee * 8 / 10 - 2, "~80% of fee stayed local in market 1 (got {})", total_to_mkt1);
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
