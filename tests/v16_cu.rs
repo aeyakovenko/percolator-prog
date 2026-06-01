@@ -10136,3 +10136,25 @@ fn v16_attack_out_of_range_asset_index_rejected() {
     assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged");
     assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no OI created");
 }
+
+// security.md sweep — ledger account binding (#44, F-VAULT-FRAG sibling): a backing-domain ledger is
+// bound to (market_group, authority, domain). Passing a ledger under the WRONG domain must reject —
+// no cross-domain earnings/accounting manipulation. (Contrast the vault, which is owner-only.)
+#[test]
+fn v16_attack_backing_ledger_domain_binding_enforced() {
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10); // ledger bound to domain 1
+    // sync the SAME ledger but claiming domain 2 -> must reject (domain mismatch).
+    env.svm.expire_blockhash();
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::SyncBackingDomainLedger { domain: 2 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(ledger, false)], &[&env.admin]);
+    assert!(r.is_err(), "ledger used under the wrong domain must reject (binding enforced)");
+    // the correct domain still syncs.
+    env.svm.expire_blockhash();
+    let r_ok = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::SyncBackingDomainLedger { domain: 1 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(ledger, false)], &[&env.admin]);
+    assert!(r_ok.is_ok(), "correct-domain sync works: {:?}", r_ok);
+}
