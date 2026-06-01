@@ -8714,3 +8714,4 @@ fn v16_regression_premium_funding_settlement_conserves_vault() {
     assert!(total_equity + g.insurance as i128 <= g.vault as i128, "no value over-distributed beyond the vault");
     assert!(g.assets[0].f_long_num < 0 && g.assets[0].f_short_num > 0, "longs pay shorts under mark premium");
 }
+
