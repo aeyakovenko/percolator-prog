@@ -8377,3 +8377,28 @@ fn v16_attack_crank_caller_funding_rate_injection_rejected() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation after crank");
     assert_eq!(g.c_tot, 2_000_000, "no capital injected via funding");
 }
+
+// security.md sweep — cross-margin (#22/#32): one portfolio holds positions on TWO assets.
+// Probe aggregate conservation and per-asset OI balance under shared-capital cross-margin.
+#[test]
+fn v16_attack_cross_margin_two_asset_conservation() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::ConfigureAuthMark { asset_index: 1, now_slot: 0, initial_mark_e6: 100 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)],
+        &[&env.admin]).expect("cfg auth mark asset1");
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 2_000_000);
+    env.deposit(&lb, pb, 2_000_000);
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(1, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    let (_, g) = env.market_state();
+    assert_eq!(g.c_tot, 4_000_000, "no capital created/destroyed across two-asset cross-margin");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    assert_eq!(g.assets[0].oi_eff_long_q, g.assets[0].oi_eff_short_q, "asset0 OI balanced");
+    assert_eq!(g.assets[1].oi_eff_long_q, g.assets[1].oi_eff_short_q, "asset1 OI balanced");
+    assert!(g.assets[1].oi_eff_long_q > 0, "asset1 position actually opened");
+}
