@@ -10338,3 +10338,34 @@ fn v16_attack_resolved_mode_gates_all_live_ops() {
     let cr = env.close_resolved(&owner, p);
     assert_eq!(env.token_amount(cr), 1_000_000, "CloseResolved pays out the resolved capital");
 }
+
+// security.md sweep / F-VAULT-FRAG fix coverage — insurance top-up vault pinning: TopUpInsurance
+// routes through verify_vault_token_account, so the canonical-ATA pin must apply here too. A top-up
+// routed to a non-canonical vault-authority-owned account must reject (else insurance could be
+// credited while tokens land in a fragment account).
+#[test]
+fn v16_attack_insurance_topup_pinned_to_canonical_vault() {
+    let mut env = V16CuEnv::new();
+    let (_, g0) = env.market_state();
+    // control: top-up to the canonical vault works and conserves.
+    let (_src_ok, _) = env.top_up_insurance_with_cu(500);
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.insurance, g0.insurance + 500, "canonical insurance top-up credits insurance");
+    assert_eq!(g1.vault, g0.vault + 500, "vault grows by the top-up");
+    assert_eq!(env.token_amount(env.vault), g1.vault as u64, "real canonical vault balance matches accounting");
+
+    // attack: top-up routed to a non-canonical vault-authority-owned account must reject.
+    let fake_vault = Pubkey::new_unique();
+    env.svm.set_account(fake_vault, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, env.vault_authority, 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    let src = env.token_account_for_mint(env.mint, env.admin.pubkey(), 500);
+    env.svm.expire_blockhash();
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::TopUpInsurance { amount: 500 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(src, false), AccountMeta::new(fake_vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&env.admin]);
+    assert!(r.is_err(), "FIXED: insurance top-up to a non-canonical vault is rejected");
+    let (_, g2) = env.market_state();
+    assert_eq!(g2.insurance, g1.insurance, "insurance unchanged by rejected fragment top-up");
+    assert_eq!(g2.vault, g1.vault, "vault accounting unchanged");
+    assert_eq!(env.token_amount(fake_vault), 0, "fragment vault received nothing");
+    assert_eq!(env.token_amount(src), 500, "source untouched");
+}
