@@ -10800,3 +10800,36 @@ fn v16_attack_topup_insurance_domain_authority_gated() {
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+// security.md sweep — recovery-tool owner gating (#6): ForfeitRecoveryLeg and FinalizeResetSide are
+// owner-gated (with_one_portfolio_view enforces owner signs + matches the portfolio). A non-owner
+// must NOT be able to invoke them on a victim's portfolio (griefing a recovery/reset).
+#[test]
+fn v16_attack_recovery_tools_owner_gated() {
+    let mut env = V16CuEnv::new();
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q;
+    let (_, g0) = env.market_state();
+    let mallory = Keypair::new(); env.ensure_signer_account(mallory.pubkey());
+
+    // non-owner ForfeitRecoveryLeg on la's portfolio -> reject (owner mismatch).
+    env.svm.expire_blockhash();
+    let r1 = env.send(ProgInstruction::ForfeitRecoveryLeg { asset_index: 0, b_delta_budget: 1 },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false)], &[&mallory]);
+    assert!(r1.is_err(), "non-owner ForfeitRecoveryLeg must reject");
+
+    // non-owner FinalizeResetSide on la's portfolio -> reject.
+    env.svm.expire_blockhash();
+    let r2 = env.send(ProgInstruction::FinalizeResetSide { asset_index: 0, side: 0 },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false)], &[&mallory]);
+    assert!(r2.is_err(), "non-owner FinalizeResetSide must reject");
+
+    // victim's position untouched, conservation.
+    assert_eq!(env.portfolio_state(pa).legs[0].basis_pos_q, basis0, "victim's position untouched by recovery-tool griefing");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q, "OI still balanced");
+}
