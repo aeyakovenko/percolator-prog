@@ -11482,3 +11482,35 @@ fn v16_attack_max_leg_multi_asset_conserves() {
     assert_eq!(g2.vault as u64, env.token_amount(env.vault), "accounting==real vault after cranking all legs");
     assert!(g2.vault >= g2.c_tot + g2.insurance, "senior conservation after crank");
 }
+
+// security.md sweep — full fee'd round-trip conservation (#32/#33): deposit -> open (fee) -> close
+// (fee) -> withdraw-all for both parties. Total tokens withdrawn + remaining insurance must equal the
+// total deposited (every fee is accounted, nothing created or leaked).
+#[test]
+fn v16_attack_full_feed_roundtrip_conserves() {
+    let mut env = V16CuEnv::new();
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    // open with a fee, then close with a fee (both flat).
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 100);
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, -(POS_SCALE as i128), 100, 100);
+    assert!(percolator::active_bitmap_is_empty(env.portfolio_state(pa).active_bitmap), "la flat");
+    assert!(percolator::active_bitmap_is_empty(env.portfolio_state(pb).active_bitmap), "lb flat");
+    // both withdraw all their capital.
+    let cap_a = env.portfolio_state(pa).capital;
+    let cap_b = env.portfolio_state(pb).capital;
+    env.svm.expire_blockhash(); let da = env.withdraw(&la, pa, cap_a);
+    env.svm.expire_blockhash(); let db = env.withdraw(&lb, pb, cap_b);
+    let out = env.token_amount(da) as u128 + env.token_amount(db) as u128;
+    let (_, g) = env.market_state();
+    // total accounting closes: tokens out + remaining insurance == total deposited.
+    assert_eq!(out + g.insurance, 2_000_000, "out ({}) + insurance ({}) == deposited 2M", out, g.insurance);
+    assert!(g.insurance > 0, "fees accrued to insurance (non-vacuous)");
+    assert_eq!(g.c_tot, 0, "all capital withdrawn");
+    assert_eq!(g.vault, g.insurance, "remaining vault is exactly the insurance (the fees)");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
+    assert!(out <= 2_000_000, "no value created: out <= deposited");
+}
