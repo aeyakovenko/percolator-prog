@@ -11113,3 +11113,39 @@ fn v16_attack_update_base_unit_mints_guarded() {
     let (d, _) = env.withdraw_with_cu(&owner, p, 500_000);
     assert_eq!(env.token_amount(d), 500_000, "funds still withdrawable in the original mint");
 }
+
+// security.md sweep — partial liquidation exactness (#2/#33): liquidating with close_q < the position
+// must reduce the position by at most close_q (no over-close), conserve value (vault unchanged,
+// accounting==real), and never create value. Complements over-liquidation (batch 35).
+#[test]
+fn v16_attack_partial_liquidation_bounded_and_conserves() {
+    let mut env = V16CuEnv::new();
+    let long_owner = Keypair::new(); let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 250);
+    env.configure_ewma_mark_with_cu(0, 100, 1, 0);
+    env.trade_with_cu(&long_owner, long_account, &short_owner, short_account, POS_SCALE as i128, 100, 0);
+    for (slot, mark) in [(1u64, 300u64), (2, 800)] {
+        env.svm.warp_to_slot(slot); env.push_ewma_mark_with_cu(slot, mark);
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(short_account, false)], &[]);
+    }
+    let (_, g_pre) = env.market_state();
+    let oi_pre = g_pre.assets[0].oi_eff_short_q;
+    // partial liquidation: close only HALF (POS_SCALE/2) of the POS_SCALE position.
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: POS_SCALE / 2, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(short_account, false)], &[]);
+    let (_, g_post) = env.market_state();
+    // OI reduced by AT MOST close_q (bounded; the engine may close less if that resolves things).
+    let closed = oi_pre.saturating_sub(g_post.assets[0].oi_eff_short_q);
+    assert!(closed <= POS_SCALE / 2, "partial liquidation closed at most close_q (no over-close): closed={}", closed);
+    assert!(g_post.assets[0].oi_eff_short_q <= oi_pre, "OI never increased");
+    // conservation: vault unchanged (internal), accounting==real, senior conservation.
+    assert_eq!(g_post.vault, g_pre.vault, "vault unchanged by partial liquidation");
+    assert_eq!(g_post.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
+    assert!(g_post.vault >= g_post.c_tot + g_post.insurance, "senior conservation");
+}
