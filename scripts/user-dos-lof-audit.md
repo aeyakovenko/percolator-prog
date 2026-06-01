@@ -53,7 +53,10 @@ positive capital. Root cause: `close_progress` has FOUR engine writers
 (`begin`/`advance`/`advance_quantity_adl`/`cure`, none writes EMPTY post-init), so once
 non-EMPTY it stays non-EMPTY for the account's life.
 
-### Finding F — permissionless retired-slot reuse accepts zero domain authorities → stranded insurance (market DoS) [CONFIRMED code-level; LiteSVM repro pending]
+### Finding F — permissionless retired-slot reuse accepts zero domain authorities → stranded insurance (market DoS) [CONFIRMED + LiteSVM repro]
+Test: `v16_audit_permissionless_reuse_rejects_zero_insurance_authority` (RED, ignored) —
+reuses a retired slot with `insurance_authority = 0` and asserts rejection; RED because
+the instruction ACCEPTS it.
 The append path validates all four domain authorities are non-zero
 (`activate_dynamic_asset_slot`, `v16_program.rs:1475-1481`), but the permissionless
 retired-slot REUSE branch of `handle_update_asset_lifecycle` (`v16_program.rs:8651-8656`,

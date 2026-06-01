@@ -8116,3 +8116,66 @@ fn v16_audit_withdraw_after_cure_and_cancel_close() {
         "a flat, solvent user must be able to withdraw their capital after curing a cancelled close",
     );
 }
+
+// Coverage probe (audit, Finding F): the permissionless retired-slot REUSE branch
+// of UpdateAssetLifecycle (v16_program.rs:8651) writes the four domain authorities
+// straight from caller args with NO zero-check, unlike the append path which
+// rejects zero authorities (v16_program.rs:1475). A permissionless creator can
+// reuse a retired slot with insurance_authority = 0; fees later accrued to that
+// asset's domain are withdrawable by nobody (terminal_insurance_remaining rejects
+// a zero authority) -> CloseSlab permanently bricked. This asserts the CORRECT
+// behavior (reuse with a zero authority is REJECTED); it goes RED iff the gap is real.
+// RED: confirmed bug (Finding F). #[ignore]'d so the default suite stays green.
+#[ignore = "RED until reuse path rejects zero domain authorities like the append path (Finding F)"]
+#[test]
+fn v16_audit_permissionless_reuse_rejects_zero_insurance_authority() {
+    let mut env = V16CuEnv::new();
+    let attacker = Keypair::new();
+    env.update_market_init_fee_policy_with_cu(1);
+
+    // Permissionlessly append asset 1 with valid authorities, then retire it so the
+    // slot becomes reusable (free_market_slot_count == 1).
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &attacker, 1, 1, 100,
+        attacker.pubkey(), attacker.pubkey(), attacker.pubkey(), attacker.pubkey(), 1,
+    );
+    env.svm.warp_to_slot(3);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE, 1, 3, 0,
+    );
+    let (_, retired_group) = env.market_state();
+    assert_eq!(retired_group.assets[1].lifecycle, AssetLifecycleV16::Retired);
+
+    // Reuse the retired slot with insurance_authority = ZERO.
+    env.svm.warp_to_slot(4);
+    let source = env.token_account(attacker.pubkey(), 1);
+    let result = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 4,
+            initial_price: 250,
+            insurance_authority: Pubkey::default().to_bytes(), // ZERO -> unrecoverable
+            insurance_operator: attacker.pubkey().to_bytes(),
+            backing_bucket_authority: attacker.pubkey().to_bytes(),
+            oracle_authority: attacker.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&attacker],
+    );
+    assert!(
+        result.is_err(),
+        "reusing a retired slot with a zero insurance_authority must be rejected; accepting it \
+         strands that domain's insurance (no authority can withdraw) and permanently bricks CloseSlab",
+    );
+}
