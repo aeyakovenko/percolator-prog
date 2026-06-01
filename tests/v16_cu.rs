@@ -8759,3 +8759,97 @@ fn v16_attack_convert_released_pnl_respects_caller_cap() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation after conversions");
     assert_eq!(g1.vault, g0.vault, "ConvertReleasedPnl moves no vault tokens");
 }
+
+// security.md sweep — cross-margin insolvency (#9/#33/#22): a portfolio short on TWO assets is
+// driven underwater on BOTH until its combined loss exceeds shared capital. Cross-asset bad debt
+// must still be socialized, not printed: senior conservation holds and the winner is capped by
+// residual. Probes the interaction of cross-margin shared capital with multi-asset insolvency.
+#[test]
+fn v16_regression_cross_margin_insolvency_no_value_extraction() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    let cfg = |env: &mut V16CuEnv, ix: ProgInstruction| {
+        send_tx(&mut env.svm, env.program_id, &env.payer, ix,
+            vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)],
+            &[&env.admin]).expect("asset1 mark cfg");
+    };
+    cfg(&mut env, ProgInstruction::ConfigureAuthMark { asset_index: 1, now_slot: 0, initial_mark_e6: 100 });
+    let victim_owner = Keypair::new(); let victim = env.create_portfolio(&victim_owner);
+    let cp_owner = Keypair::new(); let cp = env.create_portfolio(&cp_owner);
+    env.deposit(&victim_owner, victim, 250);       // tiny shared capital
+    env.deposit(&cp_owner, cp, 2_000_000);
+    // victim SHORT on both assets (negative size on account_a); cp takes the long side.
+    env.trade_asset_with_cu(0, &victim_owner, victim, &cp_owner, cp, -(POS_SCALE as i128), 100, 0);
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(1, &victim_owner, victim, &cp_owner, cp, -(POS_SCALE as i128), 100, 0);
+
+    // drive BOTH asset marks up over two slots: shorts lose, combined loss > 250 capital.
+    for (slot, mark) in [(1u64, 300u64), (2, 800)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, mark);
+        cfg(&mut env, ProgInstruction::PushAuthMark { asset_index: 1, now_slot: slot, mark_e6: mark });
+        for ai in [0u16, 1] {
+            for p in [victim, cp] {
+                env.svm.expire_blockhash();
+                let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: ai, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                    vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+            }
+        }
+    }
+    // liquidate the insolvent victim on both legs.
+    for ai in [0u16, 1] {
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: ai, now_slot: 2, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(victim, false)], &[]);
+    }
+
+    let v = state::read_portfolio(&env.svm.get_account(&victim).unwrap().data).unwrap();
+    let (_, g) = env.market_state();
+    // non-vacuity: victim actually insolvent on a real up-move on both assets.
+    assert!(g.assets[0].effective_price >= 300 && g.assets[1].effective_price >= 300, "both prices moved up");
+    assert_eq!(v.capital, 0, "victim's shared capital wiped by cross-asset losses");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation under cross-margin insolvency");
+
+    // NOTE (PASS_SAFE but WEIRD): after liquidation the winner's long stays open and marks-to-market
+    // against the still-rising oracle while its counterparty is gone, so its pnl figure grows
+    // unboundedly (600 -> 1400 -> ...). That number is UNCOLLECTABLE PAPER: residual stays pinned at
+    // 250 (the victim's recovered capital). The real safety guarantees — checked below — are that the
+    // vault is never minted into and the winner can never EXTRACT more than the vault holds.
+    for slot in 3..=8u64 {
+        env.svm.warp_to_slot(slot);
+        for ai in [0u16, 1] {
+            for p in [victim, cp] {
+                env.svm.expire_blockhash();
+                let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: ai, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                    vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+            }
+        }
+    }
+    let (_, g2) = env.market_state();
+    assert_eq!(g2.vault, 2_000_250, "no tokens minted despite unbounded paper pnl");
+    assert!(g2.vault >= g2.c_tot + g2.insurance, "senior conservation persists under growing paper pnl");
+
+    // The winner's ConvertReleasedPnl is residual-bounded: it can NEVER pull paper pnl into capital
+    // beyond the residual backing, no matter the pnl figure.
+    let residual2 = (g2.vault - g2.c_tot - g2.insurance) as u128;
+    let cap_before = env.portfolio_state(cp).capital;
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::ConvertReleasedPnl { amount: 1_000_000_000 },
+        vec![AccountMeta::new(cp_owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(cp, false)], &[&cp_owner]);
+    let converted = env.portfolio_state(cp).capital - cap_before;
+    assert!(converted <= residual2, "winner conversion bounded by residual ({} <= {})", converted, residual2);
+
+    // And total tokens the winner can actually pull out never exceed the vault.
+    env.svm.expire_blockhash();
+    let dest = Pubkey::new_unique();
+    env.svm.set_account(dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, cp_owner.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    let cap_now = env.portfolio_state(cp).capital;
+    let _ = env.send(ProgInstruction::Withdraw { amount: cap_now }, vec![
+        AccountMeta::new(cp_owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(cp, false),
+        AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false)], &[&cp_owner]);
+    let out = { let d = env.svm.get_account(&dest).unwrap().data; u64::from_le_bytes(d[64..72].try_into().unwrap()) as u128 };
+    assert!(out <= 2_000_250, "winner cannot extract more tokens than the vault holds (got {})", out);
+    let (_, g3) = env.market_state();
+    assert!(g3.vault >= g3.c_tot + g3.insurance, "senior conservation after winner extraction attempt");
+}
