@@ -11853,3 +11853,38 @@ fn v16_attack_backing_expiry_no_overpay() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
 }
+
+// security.md sweep — large-amount deposit boundary + TVL cap (#37): the vault is capped at
+// MAX_VAULT_TVL (overflow prevention). A deposit above the cap must reject; a large deposit just below
+// it must credit exactly (no truncation/wraparound in the u128 aggregates) and round-trip exactly.
+#[test]
+fn v16_attack_large_amount_deposit_withdraw_exact() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    const MAX_TVL: u128 = 10_000_000_000_000_000;
+    // over-cap deposit -> reject.
+    let over = MAX_TVL + 1;
+    let src_over = env.token_account_for_mint(env.mint, owner.pubkey(), over as u64);
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Deposit { amount: over }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(src_over, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r.is_err(), "deposit above MAX_VAULT_TVL must reject (overflow/abuse cap)");
+    assert_eq!(env.portfolio_state(p).capital, 0, "no capital credited on over-cap deposit");
+
+    // large below-cap deposit -> exact credit, no overflow.
+    let big: u128 = MAX_TVL - 7;
+    env.deposit(&owner, p, big);
+    assert_eq!(env.portfolio_state(p).capital, big, "capital credited exactly (no overflow/truncation)");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.c_tot, big, "c_tot == the large deposit");
+    assert_eq!(g1.vault, big, "vault == the large deposit");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    // withdraw it all back -> exact.
+    let (dest, _) = env.withdraw_with_cu(&owner, p, big);
+    assert_eq!(env.token_amount(dest) as u128, big, "withdrew exactly the large amount");
+    let (_, g2) = env.market_state();
+    assert_eq!(g2.c_tot, 0, "c_tot back to 0");
+    assert_eq!(g2.vault, 0, "vault drained exactly");
+    assert!(g2.vault >= g2.c_tot + g2.insurance, "senior conservation");
+}
