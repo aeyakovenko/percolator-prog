@@ -9825,3 +9825,34 @@ fn v16_attack_tradecpi_limit_price_enforced() {
     let (_, g1) = env.market_state();
     assert_eq!(g1.vault, g1.c_tot + g1.insurance, "conservation after fill");
 }
+
+// security.md sweep — TradeCpi zero-fill (#39): a zero-capacity matcher (max_fill_abs=0) returns
+// exec_size=0. The wrapper must handle it cleanly — reject or no-op — never create phantom OI/basis,
+// charge a fee on nothing, or corrupt conservation.
+#[test]
+fn v16_attack_tradecpi_zero_fill_is_clean() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new(); let taker = env.create_portfolio(&taker_owner);
+    let maker_owner = Keypair::new(); let maker = env.create_portfolio(&maker_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&maker_owner, maker, 1_000_000);
+    // matcher with ZERO fill capacity.
+    let (ctx, delegate, _) = env.init_matcher_context_with_data(matcher_program, maker, encode_matcher_init_passive(0));
+    let (_, g0) = env.market_state();
+    env.svm.expire_blockhash();
+    let r = env.try_trade_cpi_with_cu_on_asset(&taker_owner, taker, &maker_owner, maker, matcher_program, ctx, delegate, 0, (10 * POS_SCALE) as i128, 100);
+    // whether reject or clean no-op: no OI, no basis, no fee, conservation intact.
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no phantom long OI from zero-fill");
+    assert_eq!(g1.assets[0].oi_eff_short_q, 0, "no phantom short OI from zero-fill");
+    assert_eq!(env.portfolio_state(taker).legs[0].basis_pos_q, 0, "taker has no basis from zero-fill");
+    assert_eq!(env.portfolio_state(maker).legs[0].basis_pos_q, 0, "maker has no basis from zero-fill");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged (no fee charged on nothing)");
+    assert_eq!(g1.insurance, g0.insurance, "no fee accrued on a zero fill");
+    assert_eq!(g1.vault, g1.c_tot + g1.insurance, "conservation intact");
+    let _ = r;
+}
