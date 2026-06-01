@@ -12662,3 +12662,65 @@ fn v16_attack_insurance_deposits_only_protects_protocol_funds() {
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+
+// security.md sweep — SwapSecondaryForPrimary authority + balance bounds (#6/#33/#44): the 1:1 par
+// collateral swap is base_unit_authority-gated and bounded by the secondary vault's balance. Attacker
+// goals: (a) a non-authority drains the secondary reserve, (b) the authority over-swaps beyond the
+// reserve to print/underflow. Must reject both; a valid swap conserves value exactly 1:1.
+#[test]
+fn v16_attack_swap_secondary_unauthorized_and_bounded() {
+    let mut env = V16CuEnv::new();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm.set_account(secondary_vault, Account {
+        lamports: 1_000_000_000, data: make_token_data(secondary_mint, env.vault_authority, 50),
+        owner: spl_token::ID, executable: false, rent_epoch: 0,
+    }).unwrap();
+
+    let swap = |env: &mut V16CuEnv, signer: &Keypair, primary_source: Pubkey, secondary_dest: Pubkey, amount: u128| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        send_tx(&mut env.svm, env.program_id, &env.payer,
+            ProgInstruction::SwapSecondaryForPrimary { amount },
+            vec![
+                AccountMeta::new(signer.pubkey(), true),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new(primary_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new(secondary_dest, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[signer])
+    };
+
+    // (a) ATTACK: a non-base_unit_authority signer (mallory) tries to swap and drain the secondary reserve.
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+    let m_primary = env.token_account_for_mint(env.mint, mallory.pubkey(), 50);
+    let m_secondary = env.token_account_for_mint(secondary_mint, mallory.pubkey(), 0);
+    assert!(swap(&mut env, &mallory, m_primary, m_secondary, 50).is_err(), "non-authority swap must reject");
+    assert_eq!(env.token_amount(secondary_vault), 50, "secondary reserve untouched by unauthorized swap");
+    assert_eq!(env.token_amount(m_secondary), 0, "no secondary drained to attacker");
+    assert_eq!(env.token_amount(m_primary), 50, "attacker's primary not pulled");
+
+    // (b) ATTACK: the legit authority over-swaps beyond the secondary reserve (51 > 50) -> reject.
+    let admin = env.admin.insecure_clone();
+    let a_primary = env.token_account_for_mint(env.mint, admin.pubkey(), 100);
+    let a_secondary = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    assert!(swap(&mut env, &admin, a_primary, a_secondary, 51).is_err(), "over-swap beyond secondary reserve must reject");
+    assert_eq!(env.token_amount(secondary_vault), 50, "reserve untouched by rejected over-swap");
+    assert_eq!(env.token_amount(a_primary), 100, "no primary pulled on rejected over-swap");
+
+    // (c) zero amount rejects.
+    assert!(swap(&mut env, &admin, a_primary, a_secondary, 0).is_err(), "zero-amount swap rejects");
+
+    // (d) VALID: authority swaps exactly the reserve (50) -> 1:1, value-conserving.
+    let vault_primary_before = env.token_amount(env.vault);
+    assert!(swap(&mut env, &admin, a_primary, a_secondary, 50).is_ok(), "authorized in-bounds swap ok");
+    assert_eq!(env.token_amount(a_primary), 50, "exactly 50 primary pulled");
+    assert_eq!(env.token_amount(env.vault), vault_primary_before + 50, "primary vault gained exactly 50");
+    assert_eq!(env.token_amount(a_secondary), 50, "exactly 50 secondary delivered 1:1");
+    assert_eq!(env.token_amount(secondary_vault), 0, "secondary reserve fully drained, not more");
+}
