@@ -11799,3 +11799,28 @@ fn v16_attack_per_asset_crank_isolation() {
     assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
+// security.md sweep — ClosePortfolio with parked pnl (#48): an account holding positive (junior) pnl
+// must NOT be closeable — closing would discard the pnl and its residual backing. ClosePortfolio
+// requires PnL == 0; a portfolio with pnl must reject (the value stays recoverable).
+#[test]
+fn v16_attack_close_portfolio_with_pnl_rejected() {
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 40, 10);
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.add_source_positive_pnl(p, 1, 40); // p now has +40 pnl, 0 capital
+    env.crank(p, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 0, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    assert!(env.portfolio_state(p).pnl > 0, "p holds parked positive pnl (non-vacuous)");
+    // ClosePortfolio must reject (PnL != 0).
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::ClosePortfolio, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[&owner]);
+    assert!(r.is_err(), "ClosePortfolio with parked pnl must reject");
+    // the account and its pnl are intact (not discarded), conservation holds.
+    assert!(env.portfolio_state(p).pnl > 0, "parked pnl NOT discarded by the rejected close");
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
