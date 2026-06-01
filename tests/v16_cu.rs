@@ -12296,3 +12296,31 @@ fn v16_attack_backing_fee_policy_authority_gated() {
     env.update_backing_fee_policy_with_cu(0, 77, 5_000);
     assert_eq!(env.market_state().0.backing_trade_fee_insurance_share_bps_long, 5_000, "authority sets the insurance share");
 }
+
+// security.md sweep — market 0 fees don't self-redirect (#32/#33) [fee-routing #2]: with
+// fee_redirect_to_market_0_bps set, a fee on MARKET 0 itself must stay 100% local (the asset_index==0
+// branch redirects 0). No spurious self-redirect / double-credit.
+#[test]
+fn v16_attack_market0_fees_stay_local() {
+    let mut env = V16CuEnv::new();
+    env.update_fee_redirect_policy_with_cu(2_000); // 20% redirect for markets 1..N
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 5_000_000);
+    env.deposit(&lb, pb, 5_000_000);
+    let dom = |env: &V16CuEnv, d: usize| env.market_state().1.insurance_domain_budget[d];
+    let (b0, b1) = (dom(&env, 0), dom(&env, 1));
+    let ins0 = env.market_state().1.insurance;
+    // fee'd trade on ASSET 0 (market 0) with a large notional.
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, (10_000 * POS_SCALE) as i128, 100, 100);
+    let g0d = dom(&env, 0) - b0;
+    let g1d = dom(&env, 1) - b1;
+    let total_local = g0d + g1d;
+    let total_fee = env.market_state().1.insurance - ins0;
+    assert!(total_fee > 0, "a fee was charged (non-vacuous)");
+    // ALL of market 0's fee stayed in market 0's domains (0,1) -- nothing redirected away or double-counted.
+    assert_eq!(total_local, total_fee, "100% of market-0 fee stays in market-0 domains (no self-redirect)");
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
