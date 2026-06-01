@@ -12760,3 +12760,51 @@ fn v16_attack_force_close_healthy_asset_rejected() {
     assert_eq!(g1.vault, g0.vault, "vault unchanged by rejected force-close");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
+// security.md sweep — off-market exec_price wash trade (#9/#22/#33): exec_price is validated only as
+// 0 < exec_price <= MAX_ORACLE_PRICE (NOT clamped to the oracle), so two colluding accounts can open a
+// position at a price far from the mark, handing one side an instant profit. Attacker goal: print
+// withdrawable value out of the off-market gap. Protection: the off-market profit settles as JUNIOR pnl
+// backed only by the counterparty's realized loss (residual), and the vault is never minted into —
+// strictly zero-sum. Asserts no value creation across the off-market open + crank.
+#[test]
+fn v16_attack_off_market_exec_price_wash_trade_prints_nothing() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100); // oracle/mark = 100
+    let oa = Keypair::new(); let a = env.create_portfolio(&oa); // both controlled by one attacker
+    let ob = Keypair::new(); let b = env.create_portfolio(&ob);
+    let d: u128 = 1_000_000;
+    env.deposit(&oa, a, d);
+    env.deposit(&ob, b, d);
+    let (_, g0) = env.market_state();
+    assert_eq!(g0.vault, 2 * d, "vault holds exactly both deposits");
+
+    // OFF-MARKET OPEN: a goes LONG at exec_price=50 while the mark is 100 -> a is handed an instant
+    // (100-50)*size paper profit; b (short) takes the symmetric loss. Far below the mark on purpose.
+    let size = POS_SCALE as i128;
+    let r = env.try_trade_asset_with_cu(0, &oa, a, &ob, b, size, 50, 0);
+    // Either the post-trade margin check rejects the lopsided open (b can't cover) -> nothing printed,
+    // or it succeeds and the profit is junior. Drive settlement either way and check the invariants.
+    for p in [a, b] {
+        env.svm.warp_to_slot(1);
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 1, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+    }
+    let g = env.market_state().1;
+
+    // INVARIANT 1: no tokens were minted — the vault still holds exactly the two deposits.
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real on-chain vault");
+    assert_eq!(g.vault, 2 * d, "off-market trade minted no vault tokens");
+    // INVARIANT 2: senior conservation — junior (positive) pnl is fully backed by residual, never senior.
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation: residual backs junior pnl");
+    // INVARIANT 3: withdrawable capital was never inflated past the deposits by the paper profit.
+    assert!(g.c_tot <= 2 * d, "no phantom capital minted (c_tot <= total deposited)");
+    // INVARIANT 4: any junior positive-pnl claim is bounded by the residual that actually backs it.
+    let residual = g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance);
+    assert!(g.pnl_pos_tot <= residual + 1, "junior positive-pnl claim bounded by residual (no over-claim)");
+    if r.is_err() {
+        // lopsided open rejected outright: nothing moved at all.
+        assert_eq!(g.c_tot, 2 * d, "rejected off-market open left both capitals intact");
+    }
+}
