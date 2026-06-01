@@ -13367,3 +13367,59 @@ fn v16_attack_recovery_blocks_pnl_conversion() {
     assert_eq!(g_post.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g_post.vault >= g_post.c_tot + g_post.insurance, "senior conservation in recovery");
 }
+
+// security.md sweep — liquidation/ADL isolation across assets (#9/#22 interaction): a liquidation (and
+// its ADL deleverage) on asset A's market must not touch asset B's independent book. Attacker goal: a
+// liquidation on one asset corrupts another asset's OI / a-factor / mark, or socializes A's loss onto
+// B's holders. Protection: OI, a_long/a_short and effective_price are per-asset; asset B is byte-stable.
+#[test]
+fn v16_attack_liquidation_isolated_across_assets() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    // asset 0: a0 long vs b0 short (b0 will be liquidated)
+    let a0o = Keypair::new(); let a0 = env.create_portfolio(&a0o);
+    let b0o = Keypair::new(); let b0 = env.create_portfolio(&b0o);
+    // asset 1: a1 long vs b1 short (independent, must be untouched)
+    let a1o = Keypair::new(); let a1 = env.create_portfolio(&a1o);
+    let b1o = Keypair::new(); let b1 = env.create_portfolio(&b1o);
+    for (o, p) in [(&a0o, a0), (&b0o, b0), (&a1o, a1), (&b1o, b1)] { env.deposit(o, p, 1_000); }
+    env.trade_asset_with_cu(0, &a0o, a0, &b0o, b0, (2 * POS_SCALE) as i128, 100, 0);
+    env.trade_asset_with_cu(1, &a1o, a1, &b1o, b1, (3 * POS_SCALE) as i128, 100, 0);
+
+    // snapshot asset 1's book BEFORE touching asset 0.
+    let g_pre = env.market_state().1;
+    let b1_oi_long = g_pre.assets[1].oi_eff_long_q;
+    let b1_oi_short = g_pre.assets[1].oi_eff_short_q;
+    let b1_a_long = g_pre.assets[1].a_long;
+    let b1_a_short = g_pre.assets[1].a_short;
+    let b1_price = g_pre.assets[1].effective_price;
+    let a1_pre = env.portfolio_state(a1);
+    let b1_pre = env.portfolio_state(b1);
+    assert_eq!(b1_oi_long, 3 * POS_SCALE, "asset 1 carries its own OI");
+
+    // drive ONLY asset 0's mark up; settle asset-0 accounts; partial-liquidate b0 (ADL on asset 0).
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 500);
+    for p in [b0, a0] {
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+    }
+    env.svm.expire_blockhash();
+    let rl = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(b0, false)], &[]);
+    assert!(rl.is_ok(), "asset-0 liquidation should proceed: {:?}", rl);
+    let g_post = env.market_state().1;
+    assert!(g_post.assets[0].a_long < ADL_ONE, "ADL engaged on asset 0 (non-vacuous)");
+
+    // ISOLATION: asset 1's entire book is byte-identical — OI, a-factors, mark, and the asset-1 portfolios.
+    assert_eq!(g_post.assets[1].oi_eff_long_q, b1_oi_long, "asset-1 long OI untouched by asset-0 liquidation");
+    assert_eq!(g_post.assets[1].oi_eff_short_q, b1_oi_short, "asset-1 short OI untouched");
+    assert_eq!(g_post.assets[1].a_long, b1_a_long, "asset-1 a_long untouched (no cross-asset ADL)");
+    assert_eq!(g_post.assets[1].a_short, b1_a_short, "asset-1 a_short untouched");
+    assert_eq!(g_post.assets[1].effective_price, b1_price, "asset-1 mark untouched");
+    assert_eq!(env.portfolio_state(a1).legs, a1_pre.legs, "asset-1 long portfolio legs untouched");
+    assert_eq!(env.portfolio_state(b1).legs, b1_pre.legs, "asset-1 short portfolio legs untouched");
+    assert!(g_post.vault >= g_post.c_tot + g_post.insurance, "senior conservation");
+}
