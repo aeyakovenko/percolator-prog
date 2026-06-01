@@ -12354,3 +12354,70 @@ fn v16_attack_fee_redirect_full_boundary() {
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+
+// security.md sweep — WithdrawInsurance wind-down gate: the global terminal WithdrawInsurance must be
+// rejected (a) while the market is Live (mode != 1), and (b) after resolution while c_tot != 0 (open
+// capital still backed). Attacker goal: drain insurance out from under accounts that still hold capital.
+// We pre-fund domain-0's budget so the available-amount gate PASSES — isolating the wind-down gate as
+// the sole reason for rejection. The same amount is then shown to SUCCEED once c_tot reaches 0.
+#[test]
+fn v16_attack_withdraw_insurance_requires_full_wind_down() {
+    let mut env = V16CuEnv::new();
+    // Fund domain-0 insurance budget so available_insurance(admin) >= the amount we attempt.
+    env.top_up_insurance_domain_with_authority(&env.admin.insecure_clone(), 0, 1_000_000);
+    let amount: u128 = 400_000;
+
+    let attempt = |env: &mut V16CuEnv| {
+        let dest = env.token_account(env.admin.pubkey(), 0);
+        send_tx(
+            &mut env.svm, env.program_id, &env.payer,
+            ProgInstruction::WithdrawInsurance { amount },
+            vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&env.admin.insecure_clone()],
+        )
+    };
+
+    // (a) Live mode (mode==0): must reject — insurance is not withdrawable before resolution.
+    assert_eq!(env.market_state().1.mode, percolator::MarketModeV16::Live, "starts Live");
+    assert!(attempt(&mut env).is_err(), "WithdrawInsurance must reject while Live");
+
+    // Open capital, then resolve. c_tot stays > 0 (depositor's capital is still on the book).
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 600_000);
+    env.resolve();
+    let g = env.market_state().1;
+    assert_eq!(g.mode, percolator::MarketModeV16::Resolved, "resolved");
+    assert!(g.c_tot > 0, "capital still open after resolve (non-vacuous gate)");
+
+    // (b) Resolved but c_tot != 0: still must reject — can't drain insurance from under open capital.
+    assert!(
+        attempt(&mut env).is_err(),
+        "WithdrawInsurance must reject while c_tot != 0 (capital still backed)"
+    );
+
+    // Control: a FRESH env, identically funded, but fully wound down (no open capital, so c_tot == 0
+    // after resolve). The SAME amount now SUCCEEDS — proving (a)/(b) rejected on the wind-down gate,
+    // not the available-amount gate (the amount/budget is identical in all three).
+    let mut env2 = V16CuEnv::new();
+    env2.top_up_insurance_domain_with_authority(&env2.admin.insecure_clone(), 0, 1_000_000);
+    env2.resolve();
+    let g2 = env2.market_state().1;
+    assert_eq!(g2.mode, percolator::MarketModeV16::Resolved, "control resolved");
+    assert_eq!(g2.c_tot, 0, "control fully wound down");
+    assert!(
+        attempt(&mut env2).is_ok(),
+        "WithdrawInsurance succeeds once fully wound down (discriminating control)"
+    );
+
+    let g = env2.market_state().1;
+    assert_eq!(g.vault as u64, env2.token_amount(env2.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
