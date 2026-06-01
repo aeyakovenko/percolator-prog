@@ -12944,3 +12944,48 @@ fn v16_attack_adl_deleverage_conserves_and_shrinks_winner_claim() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation through ADL");
     assert_eq!(g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q, "OI still balanced post-liquidation");
 }
+
+// security.md sweep — unsafe liquidation escalates to recovery (#9/#19/#30): when a position is so
+// deeply insolvent that a normal Live-mode liquidation cannot safely socialize the shortfall, the
+// engine returns EngineRecoveryRequired rather than processing a partial/unsafe liquidation. Attacker
+// goal: force such a liquidation to partially apply (mint value / strand / corrupt OI). Protection:
+// the crank is rejected and ALL market state rolls back unchanged — no value minted, no partial ADL.
+#[test]
+fn v16_attack_unsafe_liquidation_of_deep_insolvency_rejects_and_rolls_back() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    let la = Keypair::new(); let a = env.create_portfolio(&la); // long winner
+    let lb = Keypair::new(); let b = env.create_portfolio(&lb); // short, will be DEEPLY bankrupt
+    env.deposit(&la, a, 1_000);
+    env.deposit(&lb, b, 1_000);
+    env.trade_asset_with_cu(0, &la, a, &lb, b, (7 * POS_SCALE) as i128, 100, 0);
+    // 5x move: short loss ≈ 2800 >> its 1000 capital -> deeply bankrupt (negative equity).
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 500);
+    for p in [b, a] {
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+    }
+    let before = env.svm.get_account(&env.market).unwrap();
+    let g_pre = env.market_state().1;
+
+    // ATTACK: try a Live-mode partial liquidation of the deeply-bankrupt short.
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: 2 * POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(b, false)], &[]);
+    // must reject — the engine signals recovery is required, not an unsafe partial liquidation.
+    assert!(r.is_err(), "deep-insolvency Live liquidation must reject");
+    let err = format!("{:?}", r);
+    assert!(err.contains("Custom(23)"), "must be EngineRecoveryRequired (Custom 23), got: {}", err);
+
+    // ROLLBACK: the rejected crank leaves the entire market account byte-identical (no partial ADL / mint).
+    let after = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(after.data, before.data, "rejected liquidation rolled back market state byte-for-byte");
+    let g_post = env.market_state().1;
+    assert_eq!(g_post.assets[0].a_long, g_pre.assets[0].a_long, "no ADL applied on rejected liquidation");
+    assert_eq!(g_post.assets[0].a_long, ADL_ONE, "winner not deleveraged by a rejected unsafe liquidation");
+    assert_eq!(g_post.vault, g_pre.vault, "no vault value minted");
+    assert_eq!(g_post.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g_post.vault >= g_post.c_tot + g_post.insurance, "senior conservation preserved");
+}
