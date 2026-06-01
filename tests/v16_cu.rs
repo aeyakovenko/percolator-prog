@@ -10592,3 +10592,34 @@ fn v16_attack_close_resolved_dest_validation() {
     let good = env.close_resolved(&owner, p);
     assert_eq!(env.token_amount(good), 1_000_000, "correct-mint own dest receives the resolved payout");
 }
+
+// security.md sweep — liquidation of a healthy account (#2): an account above maintenance margin must
+// NOT be liquidatable. A permissionless action:1 crank against a healthy account must be a no-op — no
+// force-close, no fee extraction, position intact.
+#[test]
+fn v16_attack_healthy_account_not_liquidatable() {
+    // maintenance 50% < initial 100% -> a freshly-opened account is well above maintenance.
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q;
+    assert!(basis0 != 0, "la opened a position");
+    let (_, g0) = env.market_state();
+
+    // attacker tries to liquidate the healthy la (no adverse price move).
+    env.svm.warp_to_slot(1);
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 1, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false)], &[]);
+
+    // healthy account: position intact, no fee extracted, conservation.
+    assert_eq!(env.portfolio_state(pa).legs[0].basis_pos_q, basis0, "healthy account's position NOT force-closed by liquidation");
+    assert_eq!(env.portfolio_state(pa).capital, 1_000_000, "healthy account capital not docked a liquidation fee");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q, "OI still balanced (position intact)");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
