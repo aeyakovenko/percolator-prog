@@ -11759,3 +11759,43 @@ fn v16_attack_self_crank_maintenance_fee_conserves() {
     // la can't gain from self-cranking: its capital did not increase.
     assert!(cap1 <= cap0, "self-cranking never increases the caller's capital (no value extraction)");
 }
+
+// security.md sweep — per-asset crank isolation (#32/#22): cranking one asset must not alter another
+// asset's state. A crank+price-move on asset 0 must leave asset 1's effective_price and OI unchanged
+// (no cross-asset corruption).
+#[test]
+fn v16_attack_per_asset_crank_isolation() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::ConfigureAuthMark { asset_index: 1, now_slot: 0, initial_mark_e6: 100 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin]).expect("cfg mark");
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 2_000_000);
+    env.deposit(&lb, pb, 2_000_000);
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(1, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    // record asset 1's state.
+    let (_, g0) = env.market_state();
+    let a1_price0 = g0.assets[1].effective_price;
+    let a1_oi_long0 = g0.assets[1].oi_eff_long_q;
+    let a1_oi_short0 = g0.assets[1].oi_eff_short_q;
+    let a1_klong0 = g0.assets[1].k_long;
+    // move ONLY asset 0's mark and crank ONLY asset 0.
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, 130);
+    for slot in [10u64, 11] { env.svm.warp_to_slot(slot); for p in [pa, pb] { env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]); } }
+    // asset 0 moved; asset 1's state must be UNCHANGED.
+    let (_, g1) = env.market_state();
+    assert!(g1.assets[0].effective_price > a1_price0, "asset 0 price moved (non-vacuous)");
+    assert_eq!(g1.assets[1].effective_price, a1_price0, "asset 1 effective_price UNCHANGED by asset-0 crank");
+    assert_eq!(g1.assets[1].oi_eff_long_q, a1_oi_long0, "asset 1 long OI unchanged");
+    assert_eq!(g1.assets[1].oi_eff_short_q, a1_oi_short0, "asset 1 short OI unchanged");
+    assert_eq!(g1.assets[1].k_long, a1_klong0, "asset 1 k_long (settlement index) unchanged");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
