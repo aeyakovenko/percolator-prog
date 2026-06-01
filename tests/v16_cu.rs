@@ -8426,7 +8426,7 @@ fn v16_attack_cross_margin_two_asset_conservation() {
 fn v16_attack_cross_margin_divergent_moves_conserve() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
     env.configure_auth_mark_with_cu(0, 100);
-    let cfg_mark = |env: &mut V16CuEnv, ai: u16, slot: u64, mark: u64, ix: ProgInstruction| {
+    let cfg_mark = |env: &mut V16CuEnv, ai: u16, _slot: u64, _mark: u64, ix: ProgInstruction| {
         send_tx(&mut env.svm, env.program_id, &env.payer, ix,
             vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)],
             &[&env.admin]).unwrap_or_else(|e| panic!("asset{} mark: {}", ai, e));
@@ -10212,4 +10212,46 @@ fn v16_attack_deposit_from_vault_as_source_rejected() {
     assert!(r2.is_err(), "deposit from a third-party-owned source must reject");
     assert_eq!(env.portfolio_state(ap).capital, 0, "no capital credited from a non-owned source");
     assert_eq!(env.token_amount(other_src), 500_000, "third-party source untouched");
+}
+
+// security.md sweep — pnl_pos_tot aggregate integrity (#33, Bug-#10 neighborhood): pnl_pos_tot is the
+// sum of positive account PnLs (the haircut denominator). It must stay EXACTLY equal to Σ max(0, pnl)
+// as positions move through profit -> loss -> profit. A desync would mis-price the haircut.
+#[test]
+fn v16_attack_pnl_pos_tot_consistent_through_sign_flips() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(0, &lo_owner, lo, &sh_owner, sh, (10_000 * POS_SCALE) as i128, 100, 0);
+    let crank_both = |env: &mut V16CuEnv, slot: u64| {
+        for p in [sh, lo] {
+            env.svm.expire_blockhash();
+            let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+        }
+    };
+    let check = |env: &V16CuEnv, tag: &str| {
+        let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+        let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+        let (_, g) = env.market_state();
+        let sum_pos = (a.pnl.max(0) + b.pnl.max(0)) as u128;
+        assert_eq!(g.pnl_pos_tot, sum_pos, "[{}] pnl_pos_tot == Σ max(0,pnl) (a.pnl={} b.pnl={})", tag, a.pnl, b.pnl);
+        assert!(g.vault >= g.c_tot + g.insurance, "[{}] senior conservation", tag);
+    };
+    check(&env, "open");
+    // price UP -> long wins; crank to settle.
+    env.svm.warp_to_slot(10); env.push_auth_mark_with_cu(10, 120);
+    crank_both(&mut env, 10); env.svm.warp_to_slot(11); crank_both(&mut env, 11);
+    check(&env, "long winning");
+    // price DOWN below entry -> long now LOSES (pnl flips negative), short wins.
+    env.svm.warp_to_slot(12); env.push_auth_mark_with_cu(12, 80);
+    crank_both(&mut env, 12); env.svm.warp_to_slot(13); crank_both(&mut env, 13);
+    check(&env, "long losing / short winning");
+    // back UP to entry -> roughly flat.
+    env.svm.warp_to_slot(14); env.push_auth_mark_with_cu(14, 100);
+    crank_both(&mut env, 14); env.svm.warp_to_slot(15); crank_both(&mut env, 15);
+    check(&env, "back to entry");
 }
