@@ -102,6 +102,19 @@ resetter or are unreachable-positive in this revision:
   negative; user always has a permissionless exit (ResolveStalePermissionless,
   risk-reducing trade, CloseResolved).
 
+Verified SOUND (deep read-only trace, no bug):
+- TradeCpi external matcher — taker (account_a) fill bound by user limit price
+  (`v16_program.rs:6392-6401`); both parties sign+own (`:6270`, `:6347`); matcher return
+  identity-bound (req_id/lp/oracle/asset echoed, `:3613-3660`); fee user-signed + capped
+  (`:6338`); no reentrancy (slab not passed, mutate after CPI). Can't extract beyond
+  two-party consent.
+- Multi-asset resolved wind-down, mixed lifecycles — `close_resolved` settle path is
+  lifecycle-agnostic (`v16.rs:7914-7942`); a side resets at most once (no mode→Normal
+  reset; `:9869`/`:9894`) so the epoch-mismatch strand is closed; forfeit covers every
+  reachable dead-leg combo (`:11721`); Retired assets can't carry legs (retire requires
+  empty). Asset-lifecycle `Recovery` is never assigned (dead but harmless). The
+  pending_domain_loss_barrier co-leg freeze is the SAME mechanism as Finding D, not new.
+
 Other disproven (prior passes):
 - Insurance/domain-budget arithmetic mismatch — REFUTED: strict lockstep; aggregate
   insurance == Σ domain budgets.
