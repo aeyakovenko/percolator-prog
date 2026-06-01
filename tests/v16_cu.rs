@@ -3816,8 +3816,10 @@ fn v16_bpf_tradenocpi_executes_and_is_bounded() {
         "consented execution price must not move the effective oracle price"
     );
     assert_eq!(
-        group.insurance, 30,
-        "notional=1500 and 100 bps charges 15 to each side"
+        group.insurance, 20,
+        "F-TRADENOCPI-FEE: the trade fee is billed on the MARK (effective_price=100), NOT the \
+         consented exec_price=150 -> notional=1000, 100 bps charges 10 to each side (was 30 when the \
+         fee tracked the caller-gameable exec_price)"
     );
     assert_eq!(group.vault, 2_000_000);
     assert_eq!(group.c_tot + group.insurance, group.vault);
@@ -12807,4 +12809,30 @@ fn v16_attack_off_market_exec_price_wash_trade_prints_nothing() {
         // lopsided open rejected outright: nothing moved at all.
         assert_eq!(g.c_tot, 2 * d, "rejected off-market open left both capitals intact");
     }
+}
+
+// security.md sweep — F-TRADENOCPI-FEE fix regression: the TradeNoCpi fee is now billed on the asset
+// mark (effective_price), so the caller-supplied exec_price can no longer be gamed to under-pay fees.
+// Attacker criterion (must FAIL): declaring exec_price << mark charges a smaller fee than the mark.
+#[test]
+fn v16_attack_tradenocpi_fee_cannot_be_evaded_via_exec_price() {
+    // fee charged (insurance delta) for the SAME mark-valued position at different declared exec_prices.
+    let fee_for = |exec_price: u64| -> u128 {
+        let mut env = V16CuEnv::new();
+        env.configure_auth_mark_with_cu(0, 100); // mark = 100
+        let oa = Keypair::new(); let a = env.create_portfolio(&oa);
+        let ob = Keypair::new(); let b = env.create_portfolio(&ob);
+        env.deposit(&oa, a, 100_000_000_000);
+        env.deposit(&ob, b, 100_000_000_000);
+        let ins0 = env.market_state().1.insurance;
+        env.trade_asset_with_cu(0, &oa, a, &ob, b, (1000 * POS_SCALE) as i128, exec_price, 100);
+        env.market_state().1.insurance - ins0
+    };
+    let fee_at_mark = fee_for(100);
+    assert!(fee_at_mark > 0, "non-vacuous: a real fee is charged at the mark");
+    // The whole point of the fix: a tiny declared exec_price does NOT reduce the fee anymore.
+    assert_eq!(fee_for(1), fee_at_mark, "exec_price=1 is billed the SAME mark-based fee (no evasion)");
+    assert_eq!(fee_for(50), fee_at_mark, "exec_price below mark is billed the mark-based fee");
+    // Declaring a HIGH exec_price must not over-bill either — fee is pinned to the mark, not the caller.
+    assert_eq!(fee_for(100_000), fee_at_mark, "exec_price above mark is also billed the mark-based fee");
 }

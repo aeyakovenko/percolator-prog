@@ -5834,19 +5834,33 @@ pub mod processor {
             } else {
                 size_q.unsigned_abs()
             };
+            // F-TRADENOCPI-FEE: the position enters/settles at the asset mark (effective_price), NOT at
+            // the caller-supplied exec_price. The engine uses request.exec_price ONLY as the fee notional
+            // basis (fee = size_q*exec_price/POS_SCALE * fee_bps), so without pinning it two cooperating
+            // accounts could declare a tiny exec_price to pay an arbitrarily small fee on a full
+            // mark-valued trade. Bill the fee on the mark (the price the trade actually settles at),
+            // mirroring TradeCpi where the matcher's exec_price_e6 must equal the oracle price.
+            // NOTE: the ORIGINAL caller exec_price is still passed to update_hybrid_mark_after_trade_view
+            // below — in hybrid mode that is the reported trade price that drives mark discovery (bounded
+            // by the EWMA/clamp), a distinct role from the fee basis.
+            let fee_basis_price = group.markets[asset_index as usize]
+                .engine
+                .asset
+                .effective_price
+                .get();
             let fee_bps = hybrid_trade_fee_bps_view(
                 &cfg,
                 &oracle_profile,
                 &group,
                 asset_index as usize,
                 size_abs,
-                exec_price,
+                fee_basis_price,
                 fee_bps,
             )?;
             let req = TradeRequestV16 {
                 asset_index: asset_index as usize,
                 size_q: size_abs,
-                exec_price,
+                exec_price: fee_basis_price,
                 fee_bps,
             };
             let backing_before = if cfg.backing_trade_fee_policy_count == 0 {
