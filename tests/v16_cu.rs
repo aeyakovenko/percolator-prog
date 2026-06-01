@@ -8489,3 +8489,31 @@ fn v16_attack_account_type_confusion_rejected() {
     assert_eq!(g1.c_tot, g0.c_tot, "no capital moved by confused-account calls");
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
 }
+
+// security.md sweep — loss-of-funds / DoS (#22/#30): after maintenance fees accrue over a long
+// idle period, the user must still be able to withdraw their remaining (post-fee) capital. A bug
+// here = funds locked (LoF). Probe: deposit, accrue fees, sync, then withdraw everything left.
+#[test]
+fn v16_attack_fee_accrual_does_not_lock_user_funds() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(1, 10_000, 10_000, 10_000, 58);
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    env.update_maintenance_fee_policy_with_cu(0);
+    // long idle period, then settle the maintenance fee.
+    env.svm.warp_to_slot(500);
+    let _ = env.try_sync_maintenance_fee_with_cu(p, None, 500);
+    let remaining = state::read_portfolio(&env.svm.get_account(&p).unwrap().data).unwrap().capital;
+    assert!(remaining > 0 && remaining < 1_000_000, "fees took some but not all capital (got {})", remaining);
+    // user withdraws ALL remaining capital — must succeed, funds not locked.
+    let (dest, _) = env.withdraw_with_cu(&owner, p, remaining);
+    let got = {
+        let d = env.svm.get_account(&dest).unwrap().data;
+        u64::from_le_bytes(d[64..72].try_into().unwrap()) as u128
+    };
+    assert_eq!(got, remaining, "user recovered full post-fee capital (no LoF)");
+    let after = state::read_portfolio(&env.svm.get_account(&p).unwrap().data).unwrap();
+    assert_eq!(after.capital, 0, "capital fully withdrawn");
+    let (_, g) = env.market_state();
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation after fee+withdraw");
+}
