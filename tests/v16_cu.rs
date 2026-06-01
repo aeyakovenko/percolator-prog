@@ -11559,3 +11559,34 @@ fn v16_attack_sequence_with_liquidation_conserves() {
     let (_, g) = env.market_state();
     assert!(g.vault <= 10_000_250, "no value created across the whole sequence (deposited 5M+250+5M)");
 }
+
+// security.md sweep — EWMA mark halflife edge (#37): configuring the EWMA mark with halflife 0
+// (instant) must be handled cleanly — no div-by-zero/panic, no settlement corruption. The mark/price
+// stays in valid bounds and conservation holds.
+#[test]
+fn v16_attack_ewma_mark_halflife_zero_safe() {
+    let mut env = V16CuEnv::new();
+    // configure with halflife = 0 (instant). If accepted, settlement must stay safe.
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::ConfigureEwmaMark { asset_index: 0, now_slot: 0, initial_mark_e6: 100, mark_ewma_halflife_slots: 0, mark_min_fee: 0 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin]);
+    let lo = Keypair::new(); let plo = env.create_portfolio(&lo);
+    let sh = Keypair::new(); let psh = env.create_portfolio(&sh);
+    env.deposit(&lo, plo, 1_000_000);
+    env.deposit(&sh, psh, 1_000_000);
+    env.trade_with_cu(&lo, plo, &sh, psh, POS_SCALE as i128, 100, 0);
+    // if the halflife=0 config was accepted, push a mark and crank — must not panic/corrupt.
+    if r.is_ok() {
+        env.svm.warp_to_slot(1); env.push_ewma_mark_with_cu(1, 150);
+        for slot in [1u64, 2] { env.svm.warp_to_slot(slot); for p in [psh, plo] { env.svm.expire_blockhash();
+            let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]); } }
+    }
+    // regardless of accept/reject: no corruption, state decodes, conservation holds, price in bounds.
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault, 2_000_000, "vault intact");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    assert!(g.assets[0].effective_price > 0 && g.assets[0].effective_price <= percolator::MAX_ORACLE_PRICE, "price in valid bounds (no corruption)");
+    let _ = r;
+}
