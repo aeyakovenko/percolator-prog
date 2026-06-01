@@ -10075,3 +10075,30 @@ fn v16_exploit_vault_fragmentation_strands_honest_withdraw() {
     // The stranded 500k sits in fake_vault (vault-authority-owned); honest users never pass it.
     // Self-sacrificial griefing: the attacker's own 500k is the abandoned, stranded balance.
 }
+
+// security.md sweep — withdraw dest-owner binding (#44): withdraw must deliver only to a dest token
+// account owned by the withdrawing portfolio's owner. A dest owned by a third party must reject
+// (verify_withdrawable_token_accounts: dest.owner == expected_dest_owner).
+#[test]
+fn v16_attack_withdraw_to_third_party_dest_rejected() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    let other = Keypair::new();
+    env.deposit(&owner, p, 1_000_000);
+    let (_, g0) = env.market_state();
+    // a dest token account owned by SOMEONE ELSE (correct mint).
+    let other_dest = Pubkey::new_unique();
+    env.svm.set_account(other_dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, other.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Withdraw { amount: 500_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(other_dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r.is_err(), "withdraw to a third-party-owned dest must reject");
+    assert_eq!(env.token_amount(other_dest), 0, "no funds delivered to a third-party dest");
+    assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital not debited on rejected withdraw");
+    assert_eq!(env.market_state().1.vault, g0.vault, "vault unchanged");
+    // own-dest withdraw works.
+    env.svm.expire_blockhash();
+    let (own, _) = env.withdraw_with_cu(&owner, p, 500_000);
+    assert_eq!(env.token_amount(own), 500_000, "withdraw to own dest works");
+}
