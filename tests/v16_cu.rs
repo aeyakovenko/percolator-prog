@@ -9265,3 +9265,48 @@ fn v16_regression_crank_idempotent_at_settlement_fixed_point() {
     assert_eq!(g2.vault, 2_000_000, "vault conserved");
     assert!(g2.vault >= g2.c_tot + g2.insurance, "senior conservation");
 }
+
+// security.md sweep — account reuse / sentinel re-materialization (#44/#48): after ClosePortfolio,
+// reusing the SAME account address (re-init) must yield a CLEAN portfolio — no stale capital, pnl,
+// position, or resolved receipt may carry over. Attacker success = inheriting stale value/claims.
+#[test]
+fn v16_attack_portfolio_reuse_after_close_is_clean() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000);
+    // flatten then close.
+    env.svm.expire_blockhash();
+    env.withdraw(&owner, p, 1_000);
+    env.close_portfolio_with_cu(&owner, p);
+
+    // Adversarial twist: re-fund the SAME address with the OLD (possibly stale) bytes still present,
+    // simulating a reuse where the closed account's data was not zeroed. Re-init must overwrite it.
+    let stale = env.svm.get_account(&p).map(|a| a.data.clone()).unwrap_or_else(|| vec![0u8; env.portfolio_account_len]);
+    env.svm.set_account(p, Account {
+        lamports: 1_000_000_000,
+        data: stale, // whatever close left behind
+        owner: env.program_id, executable: false, rent_epoch: 0,
+    }).unwrap();
+    let new_owner = Keypair::new();
+    env.ensure_signer_account(new_owner.pubkey());
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::InitPortfolio, vec![
+        AccountMeta::new(new_owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[&new_owner]);
+    // Either re-init is rejected (account still considered live) OR it succeeds with a CLEAN slate.
+    if r.is_ok() {
+        let a = state::read_portfolio(&env.svm.get_account(&p).unwrap().data).unwrap();
+        assert_eq!(a.capital, 0, "reused portfolio starts with zero capital (no stale value)");
+        assert_eq!(a.pnl, 0, "no stale pnl carried over");
+        assert!(!a.resolved_payout_receipt.present, "no stale resolved receipt carried over");
+        assert!(percolator::active_bitmap_is_empty(a.active_bitmap), "no stale positions");
+        // and a fresh deposit credits exactly the deposited amount.
+        env.svm.expire_blockhash();
+        env.deposit(&new_owner, p, 500);
+        let a2 = state::read_portfolio(&env.svm.get_account(&p).unwrap().data).unwrap();
+        assert_eq!(a2.capital, 500, "fresh deposit credits exactly 500 (no stale base)");
+    }
+    // conservation intact regardless.
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault, g.c_tot + g.insurance, "conservation after close+reuse");
+}
