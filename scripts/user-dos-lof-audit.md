@@ -1,24 +1,25 @@
 # User DoS / LoF audit — autonomous find-or-disprove log
 
-## FINAL SUMMARY (sweep complete — awaiting engine fixes)
+## FINAL SUMMARY (D + E FIXED & green; F + G open program bugs)
 
-The user-DoS/LoF sweep converged. **3 confirmed engine bugs**, each with a RED LiteSVM
-proof (`#[ignore]`'d so the default suite stays green — run `cargo test --test v16_cu -- --ignored`).
-Everything else disproven or verified sound with line-refs (see ledger below). No fix for
-D/E/F has landed in the engine yet (HEAD `b1dbf65`, proofs-only); when one lands, bump the
-wrapper rev, run the matching ignored test, and delete its `#[ignore]` to flip it green.
+The user-DoS/LoF sweep converged. **4 confirmed bugs**, each with a LiteSVM proof.
+**D + E are FIXED** in the engine (`b6e23b3`, `f9af174`) and their proofs are now GREEN
+regressions in the default suite. **F + G are open PROGRAM (wrapper) bugs** — their RED
+proofs are `#[ignore]`'d so the default suite stays green (run `cargo test --test v16_cu
+-- --ignored`); both are fixable directly in `percolator-prog` (no engine round-trip).
+Everything else disproven or verified sound with line-refs (see ledger below).
 
 | # | Severity | Summary | RED test | One-line fix |
 |---|---|---|---|---|
-| **D** | HIGH | Insolvent resolved market un-drainable: a haircut winner's payout receipt never finalizes (`finalized` needs `paid==full face`, but paid caps at `floor(face·rate)`), so the portfolio can't dematerialize → `WithdrawInsurance`/`CloseSlab` blocked forever. Validates the bounty report. | `v16_audit_insolvent_resolved_winner_can_dematerialize` | finalize at the haircut entitlement (`paid==floor(face·final_rate)` when the rate is terminal) |
-| **E** | HIGH | `CureAndCancelClose` leaves `close_progress=canceled` (never reset to EMPTY); withdraw requires EMPTY → flat solvent user frozen in Live mode. `Deposit` isn't gated on it → permanent capital sink. | `v16_audit_withdraw_after_cure_and_cancel_close` | reset `close_progress` to EMPTY once the cancel barrier is consumed and no leg references it |
+| **D** | HIGH | Insolvent resolved market un-drainable: a haircut winner's payout receipt never finalizes (`finalized` needs `paid==full face`, but paid caps at `floor(face·rate)`), so the portfolio can't dematerialize → `WithdrawInsurance`/`CloseSlab` blocked forever. Validates the bounty report. | `v16_audit_insolvent_resolved_winner_can_dematerialize` (GREEN) | **FIXED** engine `b6e23b3` (clear fully-diluted receipt at terminal rate) |
+| **E** | HIGH | `CureAndCancelClose` leaves `close_progress=canceled` (never reset to EMPTY); withdraw requires EMPTY → flat solvent user frozen in Live mode. `Deposit` isn't gated on it → permanent capital sink. | `v16_audit_withdraw_after_cure_and_cancel_close` (GREEN) | **FIXED** engine `f9af174` (withdraw allows an inert canceled ledger) |
 | **F** | market DoS (program) | Permissionless retired-slot reuse (`v16_program.rs:8651`) accepts zero domain authorities (append path rejects at `:1475`) → that domain's insurance is un-withdrawable → `CloseSlab` bricked. | `v16_audit_permissionless_reuse_rejects_zero_insurance_authority` | add the `== [0u8;32] → InvalidInstruction` check at `:8651` |
 | **G** | market DoS (program) | `close_resolved` charges a maintenance fee into `group.insurance` with NO per-domain budget credit; `WithdrawInsurance` caps at Σ domain budgets, so the fee is un-withdrawable by anyone → `CloseSlab` bricked. Corrects the earlier "lockstep" false-negative. Mainnet-confirmed (AWCZ2pK). | `v16_audit_resolved_maintenance_fee_insurance_stays_recoverable` | domain-credit the close-resolved fee (mirror SyncMaintenanceFee) and/or let admin sweep aggregate insurance in Resolved mode |
 
 **Engine vs program:** D, E are ENGINE bugs (`../percolator`); F, G are PROGRAM bugs (`percolator-prog/src/v16_program.rs`, fixable directly without an engine round-trip).
 
-Default suite: 67 pass, 4 ignored (the RED proofs). Both repos clean; engine untouched.
-Sweep complete — awaiting engine fixes.
+Wrapper pinned at engine `b6e23b3`. Default suite: 69 pass, 2 ignored (F, G — open PROGRAM bugs).
+D + E fixed and now GREEN regressions; F + G are wrapper-side and still open.
 
 ---
 

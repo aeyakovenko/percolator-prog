@@ -8045,14 +8045,11 @@ fn v16_bpf_resolved_payout_tags_are_bounded_and_update_state() {
 // receipt), materialized_portfolio_count is stuck >= 1, and the market can never
 // WithdrawInsurance or CloseSlab -> permanent fund/rent strand.
 //
-// This test asserts the CORRECT end-state (the fully-settled winner's receipt
-// finalizes and the portfolio can be reclaimed). It goes RED iff the gap is real.
-// RED: confirmed bug (Finding D, see scripts/user-dos-lof-audit.md). Asserts the
-// CORRECT outcome; fails on the current engine because a haircut winner's receipt
-// never finalizes. #[ignore]'d so the default suite stays green; run with
-// `cargo test --test v16_cu -- --ignored` to see it RED. Un-ignore when the engine
-// finalizes receipts at the haircut entitlement.
-#[ignore = "RED until engine finalizes haircut payout receipts (Finding D)"]
+// This test asserts the CORRECT end-state (the fully-settled winner reaches a
+// closable receipt state and the portfolio can be reclaimed).
+// GREEN regression: Finding D was fixed in engine b6e23b3
+// (clear_fully_diluted_resolved_receipt_if_terminal clears the receipt at the
+// terminal rate so the portfolio dematerializes).
 #[test]
 fn v16_audit_insolvent_resolved_winner_can_dematerialize() {
     let mut env = V16CuEnv::new();
@@ -8072,11 +8069,15 @@ fn v16_audit_insolvent_resolved_winner_can_dematerialize() {
         state::read_portfolio(&env.svm.get_account(&portfolio).unwrap().data).unwrap();
     assert_eq!(account.capital, 0, "capital paid out");
     assert_eq!(account.pnl, 0, "pnl zeroed by resolved close");
+    // A fully-paid (haircut) resolved winner must reach a CLOSABLE receipt state so the
+    // portfolio can dematerialize: either finalized, or cleared/absent once it has been
+    // paid its full entitlement at the terminal rate. If it can't, materialized_portfolio_count
+    // stays >= 1 and the market is permanently un-drainable (no WithdrawInsurance, no CloseSlab).
     assert!(
-        account.resolved_payout_receipt.finalized,
-        "a fully-paid (haircut) resolved winner's receipt must finalize so the portfolio can be \
-         reclaimed; if it cannot, materialized_portfolio_count stays >= 1 and the market is \
-         permanently un-drainable (no WithdrawInsurance, no CloseSlab)",
+        !account.resolved_payout_receipt.present || account.resolved_payout_receipt.finalized,
+        "haircut winner's receipt must be closable (finalized or cleared at the terminal rate); \
+         present={} finalized={}",
+        account.resolved_payout_receipt.present, account.resolved_payout_receipt.finalized,
     );
 
     // The consequence: the owner must be able to reclaim the fully-settled
@@ -8089,10 +8090,9 @@ fn v16_audit_insolvent_resolved_winner_can_dematerialize() {
 // left in the `canceled` state, never reset to EMPTY. `withdraw_not_atomic`
 // requires `close_progress == EMPTY`, so the user can never withdraw their flat,
 // solvent capital again in Live mode. This test asserts the CORRECT outcome (the
-// user can withdraw after curing); it goes RED iff the gap is real.
-// RED: confirmed bug (Finding E, see scripts/user-dos-lof-audit.md). #[ignore]'d
-// so the default suite stays green; run with `-- --ignored` to see it RED.
-#[ignore = "RED until cure resets close_progress to EMPTY / withdraw accepts an inert ledger (Finding E)"]
+// user can withdraw after curing).
+// GREEN regression: Finding E was fixed in engine f9af174 (withdraw now allows an
+// inert `canceled` close ledger).
 #[test]
 fn v16_audit_withdraw_after_cure_and_cancel_close() {
     let mut env = V16CuEnv::new();
