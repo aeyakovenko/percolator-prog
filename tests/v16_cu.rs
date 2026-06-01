@@ -9594,3 +9594,4 @@ fn v16_attack_backing_withdraw_cannot_strand_liened_winner() {
     assert_eq!(env.portfolio_state(p).pnl, p0.pnl, "winner's backed pnl preserved");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
