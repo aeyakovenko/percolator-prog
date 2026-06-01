@@ -11149,3 +11149,44 @@ fn v16_attack_partial_liquidation_bounded_and_conserves() {
     assert_eq!(g_post.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
     assert!(g_post.vault >= g_post.c_tot + g_post.insurance, "senior conservation");
 }
+
+// security.md sweep — insurance makes winner whole at resolution (#33/#9): with a funded insurance
+// backstop, a winner facing a loser's bad debt should recover their full claim at resolution (insurance
+// absorbs the deficit), bounded by available insurance. Value conserved; insurance only spent.
+#[test]
+fn v16_attack_insurance_makes_winner_whole_at_resolution() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(1_000_000); // backstop
+    env.configure_ewma_mark_with_cu(0, 100, 1, 0);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);   // long winner
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);   // short loser (thin)
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 250);
+    env.trade_with_cu(&lo_owner, lo, &sh_owner, sh, POS_SCALE as i128, 100, 0);
+    let ins_before = env.market_state().1.insurance;
+    let vault_before = env.market_state().1.vault;
+    // price up over slots -> short insolvent.
+    for (slot, mark) in [(1u64, 300u64), (2, 800)] {
+        env.svm.warp_to_slot(slot); env.push_ewma_mark_with_cu(slot, mark);
+        for acct in [lo, sh] { env.svm.expire_blockhash();
+            let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(acct, false)], &[]); }
+    }
+    // liquidate the insolvent short, then resolve and wind down.
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(sh, false)], &[]);
+    env.resolve();
+    let lo_dest = env.close_resolved(&lo_owner, lo);
+    let _ = env.close_resolved(&sh_owner, sh);
+    let won = env.token_amount(lo_dest) as u128;
+    let (_, g) = env.market_state();
+    // winner recovered MORE than just their capital — insurance covered the loser's bad debt.
+    assert!(won > 1_000_000, "winner made (more) whole by insurance backstop: got {}", won);
+    // insurance was SPENT (not conjured), bounded by what was available.
+    assert!(g.insurance <= ins_before, "insurance only spent, never conjured ({} <= {})", g.insurance, ins_before);
+    // no value printed: total tokens out + remaining vault accounted, no creation.
+    assert!(g.vault <= vault_before, "vault not over-credited");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
+}
