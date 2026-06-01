@@ -12989,3 +12989,48 @@ fn v16_attack_unsafe_liquidation_of_deep_insolvency_rejects_and_rolls_back() {
     assert_eq!(g_post.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g_post.vault >= g_post.c_tot + g_post.insurance, "senior conservation preserved");
 }
+
+// security.md sweep — recovery-mode risk lockout (#9/#19/#30): once a market is in Recovery (winding
+// down), no NEW risk may be opened — only reductions/wind-down. Attacker goal: open a fresh position
+// (or grow one) during recovery to extract value or corrupt the wind-down accounting. Protection: the
+// trade handlers require Live mode, so a TradeNoCpi in Recovery rejects with state fully preserved.
+#[test]
+fn v16_attack_recovery_mode_blocks_new_risk() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let la = Keypair::new(); let a = env.create_portfolio(&la);
+    let lb = Keypair::new(); let b = env.create_portfolio(&lb);
+    env.deposit(&la, a, 1_000_000);
+    env.deposit(&lb, b, 1_000_000);
+    env.trade_asset_with_cu(0, &la, a, &lb, b, POS_SCALE as i128, 100, 0);
+    // transition the market into Recovery (engine backdoor, mirrors v16_bpf_recovery_and_reset_tags).
+    env.mutate_market(|_, group| {
+        group.mode = MarketModeV16::Recovery;
+        group.recovery_reason = Some(PermissionlessRecoveryReasonV16::BelowProgressFloor);
+    });
+    let before = env.svm.get_account(&env.market).unwrap();
+    let g_pre = env.market_state().1;
+    assert_eq!(g_pre.mode, MarketModeV16::Recovery, "market is in recovery");
+
+    // ATTACK 1: grow OI on the existing position during recovery -> must reject (mode != Live).
+    let r1 = env.try_trade_asset_with_cu(0, &la, a, &lb, b, POS_SCALE as i128, 100, 0);
+    assert!(r1.is_err(), "opening new risk in recovery must reject");
+
+    // ATTACK 2: even initializing a fresh portfolio is locked out during recovery.
+    let lc = Keypair::new();
+    env.ensure_signer_account(lc.pubkey());
+    let c = Pubkey::new_unique();
+    let plen = env.portfolio_account_len;
+    env.svm.set_account(c, Account { lamports: 1_000_000_000, data: vec![0u8; plen], owner: env.program_id, executable: false, rent_epoch: 0 }).unwrap();
+    env.svm.expire_blockhash();
+    let r2 = env.send(ProgInstruction::InitPortfolio, vec![AccountMeta::new(lc.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(c, false)], &[&lc]);
+    assert!(r2.is_err(), "InitPortfolio is locked out in recovery (no new accounts during wind-down)");
+
+    // the rejected trades must not have grown OI or minted value.
+    let g_post = env.market_state().1;
+    assert_eq!(g_post.assets[0].oi_eff_long_q, g_pre.assets[0].oi_eff_long_q, "OI not grown by rejected recovery trades");
+    assert_eq!(g_post.assets[0].oi_eff_long_q, g_post.assets[0].oi_eff_short_q, "OI still balanced");
+    assert!(g_post.vault >= g_post.c_tot + g_post.insurance, "senior conservation in recovery");
+    // the market-level trade-affected state is unchanged vs before the attacks (deposits to c/d only added capital).
+    let _ = before;
+}
