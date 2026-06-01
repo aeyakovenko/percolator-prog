@@ -13229,3 +13229,47 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
     // portion (a winner can never pull more than the system holds — and the vault was never minted, above).
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation through ADL + settlement");
 }
+
+// security.md sweep — deposit does not dilute an existing junior-PnL holder's backing (#33/#22 interaction):
+// a backed junior-PnL holder's realizable claim is funded by residual (vault - c_tot - insurance). A
+// fresh deposit by ANOTHER account increases vault AND c_tot equally, so residual — and the holder's
+// haircut-backed equity — must be UNCHANGED. Attacker/edge goal: a large third-party deposit shifts the
+// backing math so the holder's realizable claim grows (mint) or shrinks (theft). Protection: residual is
+// invariant to deposits, so the holder's certified equity is identical before/after.
+#[test]
+fn v16_attack_deposit_does_not_dilute_junior_backing() {
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, 40, 10_000); // backing for the junior holder
+    let ho = Keypair::new(); let h = env.create_portfolio(&ho); // junior-pnl holder
+    env.deposit(&ho, h, 1_000);
+    env.add_source_positive_pnl(h, 1, 40); // 40 backed positive pnl
+    env.crank(h, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 0, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    let h_pre = env.portfolio_state(h);
+    let g_pre = env.market_state().1;
+    let residual_pre = g_pre.vault.saturating_sub(g_pre.c_tot).saturating_sub(g_pre.insurance);
+    assert!(h_pre.health_cert.valid, "holder cert valid");
+    assert!(h_pre.pnl > 0, "holder carries positive (backed) junior pnl, pnl={}", h_pre.pnl);
+    let eq_pre = h_pre.health_cert.certified_equity;
+
+    // a DIFFERENT account makes a large deposit.
+    let wo = Keypair::new(); let w = env.create_portfolio(&wo);
+    env.deposit(&wo, w, 5_000_000);
+
+    // refresh the holder's cert (deposit by w should not have changed the holder's backing).
+    env.svm.expire_blockhash();
+    env.crank(h, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 0, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    let h_post = env.portfolio_state(h);
+    let g_post = env.market_state().1;
+    let residual_post = g_post.vault.saturating_sub(g_post.c_tot).saturating_sub(g_post.insurance);
+
+    // NON-DILUTION: residual is invariant to the third-party deposit (vault += D, c_tot += D).
+    assert_eq!(residual_post, residual_pre, "residual unchanged by a third-party deposit (no dilution/mint)");
+    // the holder's realizable claim (capital + backed pnl) and pnl are byte-identical.
+    assert_eq!(h_post.health_cert.certified_equity, eq_pre, "holder certified equity unchanged by w's deposit");
+    assert_eq!(h_post.capital, h_pre.capital, "holder capital unchanged");
+    assert_eq!(h_post.pnl, h_pre.pnl, "holder junior pnl unchanged");
+    // conservation, and the deposit landed as real tokens.
+    assert_eq!(g_post.vault, g_pre.vault + 5_000_000, "vault grew by exactly the deposit");
+    assert_eq!(g_post.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g_post.vault >= g_post.c_tot + g_post.insurance, "senior conservation");
+}
