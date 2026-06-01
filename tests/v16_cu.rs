@@ -9659,3 +9659,50 @@ fn v16_attack_sync_maintenance_fee_future_slot_no_overcharge() {
     let _ = env.try_sync_maintenance_fee_with_cu(p, None, 1_000_000);
     assert_eq!(env.portfolio_state(p).capital, cap_before, "same-real-slot re-sync is a no-op despite future now_slot");
 }
+
+// security.md sweep — backing earnings over/double-withdraw (#33/#48): utilization-fee earnings must
+// be withdrawable only ONCE and only up to what accrued. Over-withdrawing the remainder or replaying
+// a withdraw must not pay out more than total earnings (vault drain / double-spend).
+#[test]
+fn v16_attack_backing_earnings_no_over_or_double_withdraw() {
+    const EARNINGS: u128 = 30;
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10);
+    // inject accrued utilization-fee earnings for domain 1's bucket, then sync the ledger.
+    env.mutate_market(|_, group| { group.source_backing_buckets[1].utilization_fee_earnings = EARNINGS; });
+    env.sync_backing_domain_ledger_with_cu(ledger, 1);
+    let dest = env.token_account_for_mint(env.mint, env.admin.pubkey(), 0);
+    let vault0 = env.market_state().1.vault;
+
+    // withdraw 20 of the 30 earnings.
+    env.withdraw_backing_bucket_earnings_to_admin_token_with_cu(ledger, dest, 1, 20);
+    assert_eq!(env.token_amount(dest), 20, "first earnings withdraw pays 20");
+
+    // attempt to over-withdraw: only 10 remain, request 20 -> must reject (no double-count).
+    env.svm.expire_blockhash();
+    let r_over = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings { domain: 1, amount: 20 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(ledger, false),
+             AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)],
+        &[&env.admin]);
+    assert!(r_over.is_err(), "over-withdrawing beyond remaining earnings must reject");
+    assert_eq!(env.token_amount(dest), 20, "no extra tokens paid on rejected over-withdraw");
+
+    // withdraw the legitimate remaining 10.
+    env.svm.expire_blockhash();
+    env.withdraw_backing_bucket_earnings_to_admin_token_with_cu(ledger, dest, 1, 10);
+    assert_eq!(env.token_amount(dest), 30, "exactly total earnings (30) withdrawn across calls");
+
+    // replay: try to withdraw again -> nothing left, must reject (no double-spend).
+    env.svm.expire_blockhash();
+    let r_replay = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings { domain: 1, amount: 1 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(ledger, false),
+             AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)],
+        &[&env.admin]);
+    assert!(r_replay.is_err(), "replayed earnings withdraw (nothing left) must reject");
+    assert_eq!(env.token_amount(dest), 30, "no double-spend: total out capped at earnings");
+    // exactly the earnings (30) left the vault, never more.
+    assert_eq!(env.market_state().1.vault, vault0 - 30, "vault decreased by exactly total earnings");
+}
