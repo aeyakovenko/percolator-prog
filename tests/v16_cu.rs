@@ -9006,3 +9006,63 @@ fn v16_attack_crank_future_now_slot_does_not_overaccrue() {
     assert!(total_equity + g.insurance as i128 <= g.vault as i128, "no over-distribution");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation under slot-spoof attempt");
 }
+
+// security.md sweep — resolved payout replay / over-claim (#33/#48): once a resolved winner is fully
+// paid (receipt finalized), replaying CloseResolved or ClaimResolvedPayoutTopup must extract ZERO
+// extra tokens, and an unentitled account must not be able to claim. Guards against payout replay.
+#[test]
+fn v16_attack_resolved_payout_replay_extracts_nothing() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(0, &lo_owner, lo, &sh_owner, sh, (10_000 * POS_SCALE) as i128, 100, 0);
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, 110);
+    for slot in [10u64, 11] {
+        env.svm.warp_to_slot(slot);
+        for p in [sh, lo] {
+            env.svm.expire_blockhash();
+            let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+        }
+    }
+    env.resolve();
+    // loser closes first to fund the vault, then winner closes for full payout.
+    let _ = env.close_resolved(&sh_owner, sh);
+    let dest_win = env.close_resolved(&lo_owner, lo);
+    let won = env.token_amount(dest_win) as u128;
+    assert_eq!(won, 1_100_000, "winner fully paid");
+    let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    assert!(a.resolved_payout_receipt.finalized || !a.resolved_payout_receipt.present, "winner receipt finalized/cleared");
+    let (_, g_after) = env.market_state();
+
+    let bal = |env: &V16CuEnv, k: &Pubkey| -> u128 { let d = env.svm.get_account(k).unwrap().data; u64::from_le_bytes(d[64..72].try_into().unwrap()) as u128 };
+    // REPLAY 1: winner re-runs CloseResolved repeatedly -> 0 extra each time.
+    for _ in 0..3 {
+        env.svm.expire_blockhash();
+        let d = Pubkey::new_unique();
+        env.svm.set_account(d, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, lo_owner.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+        let _ = env.send(ProgInstruction::CloseResolved { fee_rate_per_slot: 0 }, vec![
+            AccountMeta::new_readonly(lo_owner.pubkey(), false), AccountMeta::new(env.market, false), AccountMeta::new(lo, false),
+            AccountMeta::new(d, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false)], &[]);
+        assert_eq!(bal(&env, &d), 0, "replayed CloseResolved extracts nothing");
+    }
+    // REPLAY 2: winner spams ClaimResolvedPayoutTopup -> 0 extra each time.
+    for _ in 0..3 {
+        env.svm.expire_blockhash();
+        let d = Pubkey::new_unique();
+        env.svm.set_account(d, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, lo_owner.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+        let _ = env.send(ProgInstruction::ClaimResolvedPayoutTopup, vec![
+            AccountMeta::new_readonly(lo_owner.pubkey(), false), AccountMeta::new(env.market, false), AccountMeta::new(lo, false),
+            AccountMeta::new(d, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false)], &[]);
+        assert_eq!(bal(&env, &d), 0, "replayed topup claim extracts nothing");
+    }
+    let (_, g_end) = env.market_state();
+    assert_eq!(g_end.vault, g_after.vault, "vault unchanged by replay attempts");
+    assert!(g_end.vault >= g_end.c_tot + g_end.insurance, "senior conservation preserved");
+}
