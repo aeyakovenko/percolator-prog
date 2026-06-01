@@ -11078,3 +11078,38 @@ fn v16_attack_fee_redirect_gated_bounded_no_leak() {
     // total value (c_tot + insurance + any domain attribution) still bounded by the vault.
     assert!(g1.c_tot + g1.insurance <= g1.vault, "no value created by the redirect split");
 }
+
+// security.md sweep — UpdateBaseUnitMints guard (#44/#48): the collateral mint can only be changed
+// when the market holds NO funds (vault==0 && c_tot==0 && insurance==0). Changing it with deposits
+// present would strand them (mint confusion). Must reject while funds exist, and for a non-authority.
+#[test]
+fn v16_attack_update_base_unit_mints_guarded() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000); // market now holds funds
+    let new_primary = env.create_mint();
+    let new_secondary = env.create_mint();
+    let (cfg0, g0) = env.market_state();
+
+    // authority tries to change the collateral mint WHILE funds exist -> reject.
+    env.svm.expire_blockhash();
+    let r_funds = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateBaseUnitMints { primary_mint: new_primary.to_bytes(), secondary_mint: new_secondary.to_bytes() },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new_readonly(new_primary, false), AccountMeta::new_readonly(new_secondary, false)], &[&env.admin]);
+    assert!(r_funds.is_err(), "changing collateral mint with funds present must reject");
+
+    // a non-authority also can't change it.
+    let mallory = Keypair::new(); env.ensure_signer_account(mallory.pubkey());
+    env.svm.expire_blockhash();
+    let r_auth = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateBaseUnitMints { primary_mint: new_primary.to_bytes(), secondary_mint: new_secondary.to_bytes() },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new_readonly(new_primary, false), AccountMeta::new_readonly(new_secondary, false)], &[&mallory]);
+    assert!(r_auth.is_err(), "non-authority mint change must reject");
+
+    // collateral mint unchanged; funds intact and still withdrawable in the ORIGINAL mint.
+    let (cfg1, g1) = env.market_state();
+    assert_eq!(cfg1.collateral_mint, cfg0.collateral_mint, "collateral mint unchanged by rejected updates");
+    assert_eq!(g1.vault, g0.vault, "funds intact");
+    let (d, _) = env.withdraw_with_cu(&owner, p, 500_000);
+    assert_eq!(env.token_amount(d), 500_000, "funds still withdrawable in the original mint");
+}
