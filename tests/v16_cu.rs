@@ -8402,3 +8402,47 @@ fn v16_attack_cross_margin_two_asset_conservation() {
     assert_eq!(g.assets[1].oi_eff_long_q, g.assets[1].oi_eff_short_q, "asset1 OI balanced");
     assert!(g.assets[1].oi_eff_long_q > 0, "asset1 position actually opened");
 }
+
+// security.md sweep — cross-margin settlement (#9/#33): same portfolio long on two assets;
+// asset0 rises (gain), asset1 falls (loss). Net should wash. Probe value creation/destruction
+// and senior conservation across cross-asset settlement.
+#[test]
+fn v16_attack_cross_margin_divergent_moves_conserve() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    let cfg_mark = |env: &mut V16CuEnv, ai: u16, slot: u64, mark: u64, ix: ProgInstruction| {
+        send_tx(&mut env.svm, env.program_id, &env.payer, ix,
+            vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)],
+            &[&env.admin]).unwrap_or_else(|e| panic!("asset{} mark: {}", ai, e));
+    };
+    cfg_mark(&mut env, 1, 0, 100, ProgInstruction::ConfigureAuthMark { asset_index: 1, now_slot: 0, initial_mark_e6: 100 });
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 2_000_000);
+    env.deposit(&lb, pb, 2_000_000);
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(1, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, 110); // asset0 up -> la gains
+    cfg_mark(&mut env, 1, 10, 90, ProgInstruction::PushAuthMark { asset_index: 1, now_slot: 10, mark_e6: 90 }); // asset1 down -> la loses
+    // crank both assets for both portfolios, two passes to converge §6.1/§6.2 warmup.
+    for slot in [10u64, 11] {
+        for ai in [0u16, 1] {
+            for p in [pa, pb] {
+                env.svm.expire_blockhash();
+                let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: ai, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                    vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+            }
+        }
+    }
+    let a = state::read_portfolio(&env.svm.get_account(&pa).unwrap().data).unwrap();
+    let b = state::read_portfolio(&env.svm.get_account(&pb).unwrap().data).unwrap();
+    let (_, g) = env.market_state();
+    let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
+    assert_eq!(total_equity, 4_000_000, "total equity conserved across divergent cross-asset moves");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
+    assert!(residual >= a.pnl.max(0) + b.pnl.max(0), "positive pnl backed by residual");
+}
