@@ -12069,3 +12069,40 @@ fn v16_attack_no_fee_liquidation_cranker_gets_nothing() {
     assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
+// security.md sweep — withdraw requires flat account (#19/#46): withdraw_not_atomic requires the
+// account to be FLAT (active_bitmap empty) — ANY open position blocks withdrawal, regardless of how
+// small the position or how large the capital. After closing, the full capital is recoverable (no
+// permanent lock). This documents the flatness gate (not a margin calc).
+#[test]
+fn v16_attack_withdraw_requires_flat_regardless_of_size() {
+    let mut env = V16CuEnv::new();
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 10_000_000);
+    env.deposit(&lb, pb, 10_000_000);
+    // TINY position (notional 100) vs huge (10M) capital.
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    // even a tiny withdrawal is blocked while ANY position is open (flatness gate, not margin).
+    let try_wd = |env: &mut V16CuEnv, amt: u128| -> bool {
+        env.svm.expire_blockhash();
+        let dd = Pubkey::new_unique();
+        env.svm.set_account(dd, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, la.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+        env.send(ProgInstruction::Withdraw { amount: amt }, vec![
+            AccountMeta::new(la.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false),
+            AccountMeta::new(dd, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&la]).is_ok()
+    };
+    assert!(!try_wd(&mut env, 1), "tiny withdraw blocked while a (tiny) position is open");
+    assert!(!try_wd(&mut env, 9_000_000), "bulk withdraw also blocked while positioned");
+    assert_eq!(env.portfolio_state(pa).capital, 10_000_000, "capital intact (no partial debit)");
+    // close the position -> full capital recoverable (no permanent lock).
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, -(POS_SCALE as i128), 100, 0);
+    assert!(percolator::active_bitmap_is_empty(env.portfolio_state(pa).active_bitmap), "la flat after close");
+    let cap = env.portfolio_state(pa).capital;
+    let (d2, _) = env.withdraw_with_cu(&la, pa, cap);
+    assert_eq!(env.token_amount(d2) as u128, cap, "full capital recovered after closing (no permanent lock)");
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
