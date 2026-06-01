@@ -8613,3 +8613,43 @@ fn v16_attack_insurance_backstop_absorbs_bad_debt_no_underflow() {
     let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
     assert!(residual >= lo.pnl.max(0) + sh.pnl.max(0), "winner profit backed by residual");
 }
+
+// security.md sweep — debtor escape / LoF for winner (#22/#48): an insolvent loser must NOT be
+// able to withdraw or otherwise extract value before/at liquidation, which would strand the
+// winner's claim. Probe: drive short underwater, then short attempts withdraw -> must reject; the
+// winner's position and the vault backing remain intact.
+#[test]
+fn v16_attack_insolvent_loser_cannot_withdraw_to_escape() {
+    let mut env = V16CuEnv::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 250);
+    env.configure_ewma_mark_with_cu(0, 100, 1, 0);
+    env.trade_with_cu(&long_owner, long_account, &short_owner, short_account, POS_SCALE as i128, 100, 0);
+    for (slot, mark) in [(1u64, 300u64), (2, 800)] {
+        env.svm.warp_to_slot(slot);
+        env.push_ewma_mark_with_cu(slot, mark);
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(short_account, false)], &[]);
+    }
+    let vault_before = env.market_state().1.vault;
+    // insolvent short tries to withdraw ANY amount -> must reject (margin / no free capital).
+    for amt in [1u128, 100, 250] {
+        env.svm.expire_blockhash();
+        let dest = Pubkey::new_unique();
+        env.svm.set_account(dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, short_owner.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+        let r = env.send(ProgInstruction::Withdraw { amount: amt }, vec![
+            AccountMeta::new(short_owner.pubkey(), true), AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false), AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false)], &[&short_owner]);
+        assert!(r.is_err(), "insolvent short must not withdraw {} to escape its debt", amt);
+        let got = { let d = env.svm.get_account(&dest).unwrap().data; u64::from_le_bytes(d[64..72].try_into().unwrap()) };
+        assert_eq!(got, 0, "no tokens leaked to escaping debtor");
+    }
+    assert_eq!(env.market_state().1.vault, vault_before, "vault untouched by rejected escape attempts");
+}

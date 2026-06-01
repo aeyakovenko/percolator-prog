@@ -11,7 +11,7 @@ scan continues. All writes stay inside `percolator-prog`.
 
 Engine bugs found earlier (A–G) are all fixed. Wrapper proof-strength audit done separately.
 
-## Status: CONVERGED (standard-pattern pass)
+## Status: RUNNING (complex-path frontier)
 13 adversarial LiteSVM candidates across the 49-category checklist + attack-pattern library —
 **all PASS_SAFE, 0 findings**. The protocol robustly rejects the standard attacks (double-init,
 over-leverage, self-trade, non-flat/over-draw withdraw, frozen-time writes, zero-price fills) and
@@ -52,3 +52,4 @@ _(none this sweep — all candidates PASS_SAFE; real bugs A–G were found+fixed
 | 21 | loss-of-funds / DoS (#22/#30) — withdraw after long fee accrual | maintenance-fee debt locks user out of remaining capital | PASS_SAFE (KEPT regression) | after fees accrue over 500 slots and sync, user withdraws full post-fee capital to a token account; capital->0, senior conservation holds. No LoF. `v16_attack_fee_accrual_does_not_lock_user_funds` |
 | 22 | insolvency / bad-debt (#9/#33/#19) — loser driven underwater past capital | winner's profit paid from vault past backing (value printed to cover bad debt) | PASS_SAFE (KEPT regression) | small-capital short driven insolvent (capital->0) over 2 slots to effective_price>=300, then liquidated; vault >= c_tot+insurance throughout, winner positive pnl capped by residual (bad debt socialized via haircut, not printed), no capital conjured. `v16_attack_insolvency_bad_debt_is_socialized_not_printed` |
 | 23 | insurance backstop (#33/#9) — bad debt vs pre-funded insurance | insurance underflow/wrap or vault over-credit while absorbing bad debt | PASS_SAFE (KEPT regression) | 1M insurance seeded, short driven insolvent; insurance only spent (<= before, no wrap), vault not over-credited (<= before), senior conservation holds with insurance accounted. `v16_attack_insurance_backstop_absorbs_bad_debt_no_underflow` |
+| 24 | debtor escape / winner LoF (#22/#48) — insolvent loser withdraws | underwater loser extracts value before liquidation, stranding winner | PASS_SAFE (KEPT regression) | short driven insolvent then attempts withdraw(1/100/250) -> all rejected, zero tokens leaked, vault untouched. Winner claim preserved. `v16_attack_insolvent_loser_cannot_withdraw_to_escape` |
