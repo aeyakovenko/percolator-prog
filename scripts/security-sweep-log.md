@@ -23,7 +23,15 @@ ADL/haircut precision, funding-accrual zero-sum, TradeCpi matcher) needs elabora
 setups and was covered analytically by the prior sweeps; those are the remaining frontier.
 
 ## Confirmed findings (kept tests)
-_(none this sweep — all candidates PASS_SAFE; real bugs A–G were found+fixed earlier.)_
+
+### F-VAULT-FRAG (MEDIUM) — vault account not pinned to canonical address -> honest-user LoF via liquidity fragmentation
+- **Component:** WRAPPER `src/v16_program.rs`. **Test (GREEN):** `v16_exploit_vault_fragmentation_strands_honest_withdraw`.
+- **RCA:** vault_token validated only by `owner == vault_authority PDA` (verify_vault_token_account ~:11537 used by handle_deposit:5695; verify_withdrawable_token_accounts:11510 used by handle_withdraw:5749). No canonical vault address is pinned (config stores `vault: u128` balance, not a pubkey; InitMarket records none). ANY vault-authority-owned token account is accepted.
+- **Exploit (confirmed vs BPF):** honest deposits 1M to canonical; attacker deposits 500k routed to a self-created vault-authority-owned `fake_vault` (accepted), then withdraws 500k from the CANONICAL vault (honest funds). Canonical now 500k < c_tot 1M -> honest user`'`s full 1M withdraw FAILS; 500k stranded in fake_vault.
+- **Severity nuance:** USER-reachable, custody account, confirmed honest LoF; BUT self-sacrificial 1:1 (attacker abandons equal funds to strand) and reversible (recovering un-strands) -> griefing DoS / accidental-fragmentation hazard, not profitable theft.
+- **Affected handlers:** deposit, withdraw, withdraw_insurance, withdraw_backing_bucket(+earnings), close_resolved, claim_resolved_payout_topup, cure (all validate vault by owner only).
+- **Fix:** pin vault to a canonical address in the shared verify_* helpers — either the ATA of (vault_authority, mint) [deterministic, option A] or a vault pubkey stored in the market header at InitMarket [option B]. Full writeup: /tmp/FINDING-vault-fragmentation.md.
+
 
 ## Checked-safe / false-positive candidates (deleted tests)
 
