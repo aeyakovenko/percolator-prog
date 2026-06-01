@@ -9856,3 +9856,30 @@ fn v16_attack_tradecpi_zero_fill_is_clean() {
     assert_eq!(g1.vault, g1.c_tot + g1.insurance, "conservation intact");
     let _ = r;
 }
+
+// security.md sweep — TradeCpi self-trade (#49 wash): taker == maker (same portfolio) on the matcher
+// CPI path must reject like TradeNoCpi self-trade — no wash position / OI fabrication.
+#[test]
+fn v16_attack_tradecpi_self_trade_rejected() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let owner = Keypair::new(); let acct = env.create_portfolio(&owner);
+    env.deposit(&owner, acct, 1_000_000);
+    let (ctx, delegate, _) = env.init_matcher_context(matcher_program, acct);
+    let (_, g0) = env.market_state();
+    // taker == maker == acct.
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::TradeCpi { asset_index: 0, size_q: (10 * POS_SCALE) as i128, fee_bps: 100, limit_price: 0 },
+        vec![AccountMeta::new(owner.pubkey(), true), AccountMeta::new(owner.pubkey(), true),
+             AccountMeta::new(env.market, false), AccountMeta::new(acct, false), AccountMeta::new(acct, false),
+             AccountMeta::new_readonly(matcher_program, false), AccountMeta::new(ctx, false), AccountMeta::new_readonly(delegate, false)],
+        &[&owner]);
+    assert!(r.is_err(), "TradeCpi self-trade (taker==maker) must reject");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no OI fabricated by self-trade");
+    assert_eq!(env.portfolio_state(acct).legs[0].basis_pos_q, 0, "no wash position");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged");
+}
