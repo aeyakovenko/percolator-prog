@@ -36,49 +36,30 @@ fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
 
 #[kani::proof]
 fn kani_v16_init_market_decode_preserves_wire_fields() {
+    // Full-width symbolic inputs (audit: avoid the u16->u64/u128 widening collapse so
+    // narrow-read / high-byte decode bugs are observable).
     let max_portfolio_assets: u16 = kani::any();
-    let h_min_raw: u16 = kani::any();
-    let h_max_raw: u16 = kani::any();
-    let initial_price_raw: u16 = kani::any();
-    let min_nonzero_mm_raw: u16 = kani::any();
-    let min_nonzero_im_raw: u16 = kani::any();
-    let maintenance_margin_bps_raw: u16 = kani::any();
-    let initial_margin_bps_raw: u16 = kani::any();
-    let max_trading_fee_bps_raw: u16 = kani::any();
-    let trade_fee_base_bps_raw: u16 = kani::any();
-    let liquidation_fee_bps_raw: u16 = kani::any();
-    let liquidation_fee_cap_raw: u16 = kani::any();
-    let min_liquidation_abs_raw: u16 = kani::any();
-    let max_price_move_bps_raw: u16 = kani::any();
-    let max_accrual_dt_raw: u16 = kani::any();
-    let max_abs_funding_raw: u16 = kani::any();
-    let min_funding_lifetime_raw: u16 = kani::any();
-    let max_account_b_chunks_raw: u16 = kani::any();
-    let max_bankrupt_close_chunks_raw: u16 = kani::any();
-    let max_bankrupt_close_lifetime_raw: u16 = kani::any();
-    let public_b_chunk_atoms_raw: u16 = kani::any();
-    let maintenance_fee_raw: u16 = kani::any();
-    let h_min = h_min_raw as u64;
-    let h_max = h_max_raw as u64;
-    let initial_price = initial_price_raw as u64;
-    let min_nonzero_mm_req = min_nonzero_mm_raw as u128;
-    let min_nonzero_im_req = min_nonzero_im_raw as u128;
-    let maintenance_margin_bps = maintenance_margin_bps_raw as u64;
-    let initial_margin_bps = initial_margin_bps_raw as u64;
-    let max_trading_fee_bps = max_trading_fee_bps_raw as u64;
-    let trade_fee_base_bps = trade_fee_base_bps_raw as u64;
-    let liquidation_fee_bps = liquidation_fee_bps_raw as u64;
-    let liquidation_fee_cap = liquidation_fee_cap_raw as u128;
-    let min_liquidation_abs = min_liquidation_abs_raw as u128;
-    let max_price_move_bps_per_slot = max_price_move_bps_raw as u64;
-    let max_accrual_dt_slots = max_accrual_dt_raw as u64;
-    let max_abs_funding_e9_per_slot = max_abs_funding_raw as u64;
-    let min_funding_lifetime_slots = min_funding_lifetime_raw as u64;
-    let max_account_b_settlement_chunks = max_account_b_chunks_raw as u64;
-    let max_bankrupt_close_chunks = max_bankrupt_close_chunks_raw as u64;
-    let max_bankrupt_close_lifetime_slots = max_bankrupt_close_lifetime_raw as u64;
-    let public_b_chunk_atoms = public_b_chunk_atoms_raw as u128;
-    let maintenance_fee_per_slot = maintenance_fee_raw as u128;
+    let h_min: u64 = kani::any();
+    let h_max: u64 = kani::any();
+    let initial_price: u64 = kani::any();
+    let min_nonzero_mm_req: u128 = kani::any();
+    let min_nonzero_im_req: u128 = kani::any();
+    let maintenance_margin_bps: u64 = kani::any();
+    let initial_margin_bps: u64 = kani::any();
+    let max_trading_fee_bps: u64 = kani::any();
+    let trade_fee_base_bps: u64 = kani::any();
+    let liquidation_fee_bps: u64 = kani::any();
+    let liquidation_fee_cap: u128 = kani::any();
+    let min_liquidation_abs: u128 = kani::any();
+    let max_price_move_bps_per_slot: u64 = kani::any();
+    let max_accrual_dt_slots: u64 = kani::any();
+    let max_abs_funding_e9_per_slot: u64 = kani::any();
+    let min_funding_lifetime_slots: u64 = kani::any();
+    let max_account_b_settlement_chunks: u64 = kani::any();
+    let max_bankrupt_close_chunks: u64 = kani::any();
+    let max_bankrupt_close_lifetime_slots: u64 = kani::any();
+    let public_b_chunk_atoms: u128 = kani::any();
+    let maintenance_fee_per_slot: u128 = kani::any();
 
     let mut data = [0u8; 219];
     data[0] = 0;
@@ -171,8 +152,7 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
             || tag == 42
             || tag == 47,
     );
-    let amount_raw: u16 = kani::any();
-    let amount = amount_raw as u128;
+    let amount: u128 = kani::any();
 
     let mut data = [0u8; 17];
     data[0] = tag;
@@ -206,8 +186,7 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_domain_insurance_decode_preserves_wire_fields() {
     let domain: u8 = kani::any();
-    let amount_raw: u16 = kani::any();
-    let amount = amount_raw as u128;
+    let amount: u128 = kani::any();
 
     let mut top_up = [0u8; 18];
     top_up[0] = 56;
@@ -244,13 +223,10 @@ fn kani_v16_domain_insurance_decode_preserves_wire_fields() {
 fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let side: u8 = kani::any();
-    let budget_raw: u16 = kani::any();
-    let reduce_raw: u16 = kani::any();
-    let now_slot_raw: u16 = kani::any();
-    let b_delta_budget = budget_raw as u128;
-    let reduce_q = reduce_raw as u128;
-    let close_q = reduce_raw as u128;
-    let now_slot = now_slot_raw as u64;
+    let b_delta_budget: u128 = kani::any();
+    let reduce_q: u128 = kani::any();
+    let close_q: u128 = kani::any();
+    let now_slot: u64 = kani::any();
 
     let forfeit = Instruction::ForfeitRecoveryLeg {
         asset_index,
@@ -330,10 +306,8 @@ fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
     let domain: u8 = kani::any();
-    let amount_raw: u16 = kani::any();
-    let expiry_raw: u16 = kani::any();
-    let amount = amount_raw as u128;
-    let expiry_slot = expiry_raw as u64;
+    let amount: u128 = kani::any();
+    let expiry_slot: u64 = kani::any();
 
     let mut data = [0u8; 26];
     data[0] = 24;
@@ -358,8 +332,7 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_withdraw_backing_bucket_decode_preserves_wire_fields() {
     let domain: u8 = kani::any();
-    let amount_raw: u16 = kani::any();
-    let amount = amount_raw as u128;
+    let amount: u128 = kani::any();
 
     let data = Instruction::WithdrawBackingBucket { domain, amount }.encode();
 
@@ -379,10 +352,8 @@ fn kani_v16_withdraw_backing_bucket_decode_preserves_wire_fields() {
 fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
     let action: u8 = kani::any();
     let asset_index: u16 = kani::any();
-    let now_slot_raw: u16 = kani::any();
-    let initial_price_raw: u16 = kani::any();
-    let now_slot = now_slot_raw as u64;
-    let initial_price = initial_price_raw as u64;
+    let now_slot: u64 = kani::any();
+    let initial_price: u64 = kani::any();
     let insurance_authority: [u8; 32] = kani::any();
     let insurance_operator: [u8; 32] = kani::any();
     let backing_bucket_authority: [u8; 32] = kani::any();
@@ -427,12 +398,9 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
-    let size_raw: i16 = kani::any();
-    let exec_price_raw: u16 = kani::any();
-    let fee_bps_raw: u16 = kani::any();
-    let size_q = size_raw as i128;
-    let exec_price = exec_price_raw as u64;
-    let fee_bps = fee_bps_raw as u64;
+    let size_q: i128 = kani::any();
+    let exec_price: u64 = kani::any();
+    let fee_bps: u64 = kani::any();
 
     let mut data = [0u8; 35];
     data[0] = 6;
@@ -460,12 +428,9 @@ fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_tradecpi_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
-    let size_raw: i16 = kani::any();
-    let fee_bps_raw: u16 = kani::any();
-    let limit_price_raw: u16 = kani::any();
-    let size_q = size_raw as i128;
-    let fee_bps = fee_bps_raw as u64;
-    let limit_price = limit_price_raw as u64;
+    let size_q: i128 = kani::any();
+    let fee_bps: u64 = kani::any();
+    let limit_price: u64 = kani::any();
 
     let mut data = [0u8; 35];
     data[0] = 10;
@@ -492,46 +457,73 @@ fn kani_v16_tradecpi_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
-    let req_raw: i16 = kani::any();
-    let exec_raw: i16 = kani::any();
-    let price_raw: u16 = kani::any();
-    let req_id_raw: u16 = kani::any();
-    let lp_raw: u16 = kani::any();
-    let asset_index: u16 = kani::any();
+    // Audit fix: the ret's echoed fields and abi_version are drawn INDEPENDENTLY of the
+    // expected (bound) params, and sizes are full-width i128, so both the accept path AND
+    // every rejection branch (abi mismatch, echoed-field mismatch, zero exec price, flag
+    // checks, size guards) are symbolically exercised — not just the accept path.
+    let abi_version: u32 = kani::any();
     let flags: u32 = kani::any();
-    kani::assume(req_raw != 0);
-    kani::assume(req_raw != i16::MIN);
-    kani::assume(exec_raw != i16::MIN);
-    let req_size = req_raw as i128;
-    let exec_size = exec_raw as i128;
-    let oracle_price = (price_raw as u64).saturating_add(1);
-    let req_id = req_id_raw as u64;
-    let lp_account_id = lp_raw as u64;
+    let exec_price_e6: u64 = kani::any();
+    let exec_size: i128 = kani::any();
+    let req_id_ret: u64 = kani::any();
+    let lp_ret: u64 = kani::any();
+    let oracle_ret: u64 = kani::any();
+    let asset_ret: u64 = kani::any();
+    // Bound (expected) params the validator echoes against — independent symbolics.
+    let lp_account_id: u64 = kani::any();
+    let asset_index: u16 = kani::any();
+    let oracle_price_e6: u64 = kani::any();
+    let req_size: i128 = kani::any();
+    let req_id: u64 = kani::any();
+
     let ret = MatcherReturn {
-        abi_version: percolator_prog::constants::MATCHER_ABI_VERSION,
+        abi_version,
         flags,
-        exec_price_e6: oracle_price,
+        exec_price_e6,
         exec_size,
-        req_id,
-        lp_account_id,
-        oracle_price_e6: oracle_price,
-        asset_index: asset_index as u64,
+        req_id: req_id_ret,
+        lp_account_id: lp_ret,
+        oracle_price_e6: oracle_ret,
+        asset_index: asset_ret,
     };
 
-    if validate_matcher_return(
+    let result = validate_matcher_return(
         &ret,
         lp_account_id,
         asset_index,
-        oracle_price,
+        oracle_price_e6,
         req_size,
         req_id,
-    )
-    .is_ok()
+    );
+
+    // Rejection direction (the binding security property): a return with the wrong ABI,
+    // a non-VALID/REJECTED flag state, any echoed field not bound to the expected param,
+    // or a zero exec price MUST be rejected.
+    if abi_version != percolator_prog::constants::MATCHER_ABI_VERSION
+        || (flags & FLAG_VALID) == 0
+        || (flags & FLAG_REJECTED) != 0
+        || lp_ret != lp_account_id
+        || oracle_ret != oracle_price_e6
+        || asset_ret != asset_index as u64
+        || req_id_ret != req_id
+        || exec_price_e6 == 0
     {
+        assert!(result.is_err());
+    }
+
+    // Accept direction: an accepted fill is bound to every expected field and within the
+    // requested size, with the partial flag set whenever the fill is short.
+    if result.is_ok() {
         assert!((flags & FLAG_VALID) != 0);
         assert!((flags & FLAG_REJECTED) == 0);
+        assert_eq!(lp_ret, lp_account_id);
+        assert_eq!(oracle_ret, oracle_price_e6);
+        assert_eq!(asset_ret, asset_index as u64);
+        assert_eq!(req_id_ret, req_id);
+        assert!(exec_price_e6 != 0);
         if exec_size == 0 {
             assert!((flags & FLAG_PARTIAL_OK) != 0);
+            assert_eq!(exec_price_e6, oracle_price_e6);
         } else {
             assert_eq!(exec_size.signum(), req_size.signum());
             assert!(exec_size.unsigned_abs() <= req_size.unsigned_abs());
@@ -540,21 +532,19 @@ fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
             }
         }
     }
+    // Ensure the accept path is reachable (non-vacuity of the accept assertions).
+    kani::cover!(result.is_ok());
 }
 
 #[kani::proof]
 fn kani_v16_permissionless_crank_decode_preserves_wire_fields() {
     let action: u8 = kani::any();
     let asset_index: u16 = kani::any();
-    let now_slot_raw: u16 = kani::any();
-    let funding_rate_raw: i16 = kani::any();
-    let close_q_raw: u16 = kani::any();
-    let fee_bps_raw: u16 = kani::any();
     let recovery_reason: u8 = kani::any();
-    let now_slot = now_slot_raw as u64;
-    let funding_rate_e9 = funding_rate_raw as i128;
-    let close_q = close_q_raw as u128;
-    let fee_bps = fee_bps_raw as u64;
+    let now_slot: u64 = kani::any();
+    let funding_rate_e9: i128 = kani::any();
+    let close_q: u128 = kani::any();
+    let fee_bps: u64 = kani::any();
 
     let mut data = [0u8; 53];
     data[0] = 5;
@@ -619,8 +609,7 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
 fn kani_v16_update_insurance_policy_decode_preserves_wire_fields() {
     let max_bps: u16 = kani::any();
     let deposits_only: u8 = kani::any();
-    let cooldown_raw: u16 = kani::any();
-    let cooldown_slots = cooldown_raw as u64;
+    let cooldown_slots: u64 = kani::any();
 
     let mut data = [0u8; 12];
     data[0] = 33;
@@ -732,8 +721,7 @@ fn kani_v16_update_fee_redirect_policy_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_update_market_init_fee_policy_decode_preserves_wire_fields() {
-    let min_init_fee_raw: u16 = kani::any();
-    let min_init_fee = min_init_fee_raw as u128;
+    let min_init_fee: u128 = kani::any();
 
     let mut data = [0u8; 17];
     data[0] = 59;
@@ -751,8 +739,7 @@ fn kani_v16_update_market_init_fee_policy_decode_preserves_wire_fields() {
 fn kani_v16_base_unit_payloads_decode_preserves_wire_fields() {
     let primary_mint: [u8; 32] = kani::any();
     let secondary_mint: [u8; 32] = kani::any();
-    let amount_raw: u16 = kani::any();
-    let amount = amount_raw as u128;
+    let amount: u128 = kani::any();
 
     let mut update = [0u8; 65];
     update[0] = 60;
@@ -780,12 +767,9 @@ fn kani_v16_base_unit_payloads_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
-    let stale_slots_raw: u16 = kani::any();
-    let delay_raw: u16 = kani::any();
-    let now_slot_raw: u16 = kani::any();
-    let stale_slots = stale_slots_raw as u64;
-    let force_close_delay_slots = delay_raw as u64;
-    let now_slot = now_slot_raw as u64;
+    let stale_slots: u64 = kani::any();
+    let force_close_delay_slots: u64 = kani::any();
+    let now_slot: u64 = kani::any();
 
     let mut configure = [0u8; 17];
     configure[0] = 38;
@@ -816,24 +800,17 @@ fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
-    let now_slot_raw: u16 = kani::any();
-    let now_unix_raw: i16 = kani::any();
     let oracle_leg_count: u8 = kani::any();
     let oracle_leg_flags: u8 = kani::any();
-    let max_staleness_raw: u16 = kani::any();
-    let soft_stale_raw: u16 = kani::any();
-    let halflife_raw: u16 = kani::any();
-    let mark_min_fee_raw: u16 = kani::any();
     let invert: u8 = kani::any();
-    let unit_scale_raw: u16 = kani::any();
     let conf_filter_bps: u16 = kani::any();
-    let now_slot = now_slot_raw as u64;
-    let now_unix_ts = now_unix_raw as i64;
-    let max_staleness_secs = max_staleness_raw as u64;
-    let hybrid_soft_stale_slots = soft_stale_raw as u64;
-    let mark_ewma_halflife_slots = halflife_raw as u64;
-    let mark_min_fee = mark_min_fee_raw as u64;
-    let unit_scale = unit_scale_raw as u32;
+    let now_slot: u64 = kani::any();
+    let now_unix_ts: i64 = kani::any();
+    let max_staleness_secs: u64 = kani::any();
+    let hybrid_soft_stale_slots: u64 = kani::any();
+    let mark_ewma_halflife_slots: u64 = kani::any();
+    let mark_min_fee: u64 = kani::any();
+    let unit_scale: u32 = kani::any();
     let mut feeds = [[0u8; 32]; 3];
     let mut i = 0;
     while i < 3 {
@@ -900,17 +877,13 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
-    let now_slot_raw: u16 = kani::any();
     let mark_raw: u16 = kani::any();
-    let halflife_raw: u16 = kani::any();
-    let mark_min_fee_raw: u16 = kani::any();
-    let push_mark_raw: u16 = kani::any();
 
-    let now_slot = now_slot_raw as u64;
-    let initial_mark_e6 = mark_raw as u64;
-    let mark_ewma_halflife_slots = halflife_raw as u64;
-    let mark_min_fee = mark_min_fee_raw as u64;
-    let push_mark_e6 = push_mark_raw as u64;
+    let now_slot: u64 = kani::any();
+    let initial_mark_e6: u64 = kani::any();
+    let mark_ewma_halflife_slots: u64 = kani::any();
+    let mark_min_fee: u64 = kani::any();
+    let push_mark_e6: u64 = kani::any();
 
     let mut configure = [0u8; 35];
     configure[0] = 35;
