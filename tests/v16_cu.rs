@@ -8232,8 +8232,7 @@ fn v16_regression_mark_to_market_settles_conservation_under_price_move() {
     env.deposit(&la, pa, 1_000_000);
     env.deposit(&lb, pb, 1_000_000);
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
-    let (_, g0) = env.market_state();
-    let (vault0, ctot0) = (g0.vault, g0.c_tot);
+    let (_, _g0) = env.market_state();
 
     env.svm.warp_to_slot(10);
     env.push_auth_mark_with_cu(10, 110); // mark up 10%
@@ -9141,4 +9140,43 @@ fn v16_attack_trade_fee_bps_bounded_and_conserving() {
     let a = state::read_portfolio(&env.svm.get_account(&pa).unwrap().data).unwrap();
     let b = state::read_portfolio(&env.svm.get_account(&pb).unwrap().data).unwrap();
     assert!(a.capital > 0 && b.capital > 0, "fee did not drain either party to zero");
+}
+
+// security.md sweep — accounting drift under churn (#32/#35): interleaved deposits, withdrawals, and
+// a trade open/close must never drift the aggregates. At every checkpoint c_tot == Σ(capitals) and
+// vault == c_tot + insurance, and OI stays balanced. Catches any aggregate-update slippage.
+#[test]
+fn v16_attack_conservation_under_deposit_withdraw_trade_churn() {
+    let mut env = V16CuEnv::new();
+    let a = Keypair::new(); let pa = env.create_portfolio(&a);
+    let b = Keypair::new(); let pb = env.create_portfolio(&b);
+    let c = Keypair::new(); let pc = env.create_portfolio(&c);
+    let check = |env: &V16CuEnv, tag: &str| {
+        let (_, g) = env.market_state();
+        let sum: u128 = [pa, pb, pc].iter().map(|p| state::read_portfolio(&env.svm.get_account(p).unwrap().data).unwrap().capital).sum();
+        assert_eq!(g.c_tot, sum, "[{}] c_tot == Σ capitals", tag);
+        assert_eq!(g.vault, g.c_tot + g.insurance, "[{}] vault == c_tot + insurance", tag);
+        assert_eq!(g.assets[0].oi_eff_long_q, g.assets[0].oi_eff_short_q, "[{}] OI balanced", tag);
+    };
+    env.deposit(&a, pa, 500_000); check(&env, "dep a");
+    env.deposit(&b, pb, 800_000); check(&env, "dep b");
+    env.svm.expire_blockhash(); env.withdraw(&a, pa, 100_000); check(&env, "wd a");
+    env.deposit(&c, pc, 300_000); check(&env, "dep c");
+    // a (400k) trades vs b (800k): open then more churn.
+    env.trade_asset_with_cu(0, &a, pa, &b, pb, POS_SCALE as i128, 100, 0); check(&env, "open trade");
+    env.svm.expire_blockhash(); env.deposit(&a, pa, 50_000); check(&env, "dep a2");
+    env.svm.expire_blockhash(); env.withdraw(&c, pc, 250_000); check(&env, "wd c");
+    // close the trade (opposite).
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(0, &a, pa, &b, pb, -(POS_SCALE as i128), 100, 0); check(&env, "close trade");
+    // drain everyone fully.
+    for (o, p) in [(&a, pa), (&b, pb), (&c, pc)] {
+        let cap = state::read_portfolio(&env.svm.get_account(&p).unwrap().data).unwrap().capital;
+        if cap > 0 { env.svm.expire_blockhash(); env.withdraw(o, p, cap); }
+    }
+    check(&env, "drained");
+    let (_, g) = env.market_state();
+    assert_eq!(g.c_tot, 0, "all capital withdrawn");
+    // total deposited (500k+800k+300k+50k = 1,650k) minus total withdrawn must net to insurance+vault residue.
+    assert_eq!(g.vault, g.insurance, "vault fully accounted as insurance after full drain (no stranded value)");
 }
