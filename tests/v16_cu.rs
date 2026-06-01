@@ -9310,3 +9310,44 @@ fn v16_attack_portfolio_reuse_after_close_is_clean() {
     let (_, g) = env.market_state();
     assert_eq!(g.vault, g.c_tot + g.insurance, "conservation after close+reuse");
 }
+
+// security.md sweep — rounding asymmetry (#37 dust): trade fees must round UP (ceil, protocol favor)
+// so dust-notional trades are never free and repeated churn never leaks value to the trader. Attacker
+// success = a fee that floors to 0 (free trade) or insurance that fails to grow on a fee'd dust trade.
+#[test]
+fn v16_attack_trade_fee_rounds_up_no_free_dust_trades() {
+    let mut env = V16CuEnv::new(); // max_trading_fee_bps = 10_000
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    let ins = |env: &V16CuEnv| env.market_state().1.insurance;
+    // dust notional with the smallest nonzero fee: notional = size*price/POS_SCALE.
+    // size = POS_SCALE/100 @ price 100 => notional = 1; fee_bps=1 => true fee = 0.0001 -> must ceil to >=1.
+    let dust_size = (POS_SCALE / 100) as i128;
+    let mut prev_ins = ins(&env);
+    let mut opened: i128 = 0;
+    for i in 0..5 {
+        env.svm.expire_blockhash();
+        let r = env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, dust_size, 100, 1);
+        if r.is_err() { break; } // if dust trade is rejected outright, that's also safe (no free trade)
+        opened += dust_size;
+        let now = ins(&env);
+        assert!(now > prev_ins, "dust trade #{} charged a nonzero fee (insurance grew {} -> {})", i, prev_ins, now);
+        prev_ins = now;
+        // conservation after each dust trade.
+        let (_, g) = env.market_state();
+        assert_eq!(g.vault, 2_000_000, "no value created by dust trade");
+        assert_eq!(g.vault, g.c_tot + g.insurance, "exact conservation");
+    }
+    assert!(opened > 0, "at least one dust trade executed (non-vacuous)");
+    // close the accumulated dust position; conservation still exact, insurance only grew.
+    if opened > 0 {
+        env.svm.expire_blockhash();
+        let _ = env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, -opened, 100, 0);
+    }
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault, 2_000_000, "vault conserved across dust churn");
+    assert_eq!(g.vault, g.c_tot + g.insurance, "exact conservation after close");
+    assert!(g.insurance >= prev_ins, "insurance never decreased (fees are protocol-favorable)");
+}
