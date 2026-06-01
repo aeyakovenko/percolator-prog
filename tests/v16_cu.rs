@@ -11888,3 +11888,35 @@ fn v16_attack_large_amount_deposit_withdraw_exact() {
     assert_eq!(g2.vault, 0, "vault drained exactly");
     assert!(g2.vault >= g2.c_tot + g2.insurance, "senior conservation");
 }
+// security.md sweep — TradeCpi atomic fill vs matcher capacity (#33/#39): a request exceeding the
+// matcher's fill capacity must reject ATOMICALLY (no partial/phantom position, no OI), while a
+// within-capacity request fills correctly. No phantom over-fill, conservation holds.
+#[test]
+fn v16_attack_tradecpi_atomic_fill_vs_capacity() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new(); let taker = env.create_portfolio(&taker_owner);
+    let maker_owner = Keypair::new(); let maker = env.create_portfolio(&maker_owner);
+    env.deposit(&taker_owner, taker, 100_000_000);
+    env.deposit(&maker_owner, maker, 100_000_000);
+    let (ctx, delegate, _) = env.init_matcher_context_with_data(matcher_program, maker, encode_matcher_init_passive(POS_SCALE));
+    let (_, g0) = env.market_state();
+    // request 10x the cap -> rejects atomically (no partial/phantom fill).
+    let r_over = env.try_trade_cpi_with_cu_on_asset(&taker_owner, taker, &maker_owner, maker, matcher_program, ctx, delegate, 0, (10 * POS_SCALE) as i128, 100);
+    assert!(r_over.is_err(), "over-capacity TradeCpi must reject atomically");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no phantom OI from rejected over-capacity trade");
+    assert_eq!(env.portfolio_state(taker).legs[0].basis_pos_q, 0, "no partial/phantom position");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged by rejected trade");
+    // within-capacity request fills correctly.
+    let r_ok = env.try_trade_cpi_with_cu_on_asset(&taker_owner, taker, &maker_owner, maker, matcher_program, ctx, delegate, 0, POS_SCALE as i128, 100);
+    assert!(r_ok.is_ok(), "within-capacity TradeCpi fills: {:?}", r_ok);
+    let basis = env.portfolio_state(taker).legs[0].basis_pos_q;
+    assert_eq!(basis, POS_SCALE as i128, "taker filled exactly the requested within-capacity amount");
+    let (_, g2) = env.market_state();
+    assert_eq!(g2.assets[0].oi_eff_long_q, g2.assets[0].oi_eff_short_q, "OI balanced to the fill");
+    assert_eq!(g2.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g2.vault >= g2.c_tot + g2.insurance, "senior conservation");
+}
