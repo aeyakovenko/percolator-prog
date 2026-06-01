@@ -12106,3 +12106,29 @@ fn v16_attack_withdraw_requires_flat_regardless_of_size() {
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+// security.md sweep — withdraw blocked during active close (#22/#48): an account with an active/in-
+// progress forced close must NOT be able to withdraw (withdraw_not_atomic rejects a non-inert close
+// ledger). Prevents withdrawing funds out from under a forced close.
+#[test]
+fn v16_attack_withdraw_blocked_during_active_close() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    // seed an ACTIVE (cancellable) forced-close ledger.
+    env.seed_cancellable_close_progress(p);
+    // withdraw must reject while the close is active.
+    env.svm.expire_blockhash();
+    let dest = Pubkey::new_unique();
+    env.svm.set_account(dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, owner.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    let r = env.send(ProgInstruction::Withdraw { amount: 500_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r.is_err(), "withdraw during an active forced-close must reject");
+    assert_eq!(env.token_amount(dest), 0, "no funds withdrawn during active close");
+    assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital intact");
+    // after curing+cancelling the close (Finding E), withdraw works again.
+    let src = env.token_account(owner.pubkey(), 0);
+    env.cure_and_cancel_close_with_cu(&owner, p, src, 0);
+    let (d, _) = env.withdraw_with_cu(&owner, p, 500_000);
+    assert_eq!(env.token_amount(d), 500_000, "withdraw works after curing the close");
+}
