@@ -10417,3 +10417,4 @@ fn v16_attack_funding_direction_mark_below_index_conserves() {
     let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
     assert!(total_equity + g.insurance as i128 <= g.vault as i128, "no over-distribution");
 }
+
