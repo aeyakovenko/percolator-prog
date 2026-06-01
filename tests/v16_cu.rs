@@ -9560,3 +9560,37 @@ fn v16_attack_zero_amount_inputs_are_safe() {
     assert_eq!(env.portfolio_state(pb).capital, 1_000_000, "pb capital unchanged");
     let _ = (r_dep, r_wd, r_tr);
 }
+
+// security.md sweep — backing-bucket withdraw vs committed lien (#22/#48 LoF): a backing authority
+// must NOT be able to withdraw principal that is currently LIENED to back a winner's positive PnL —
+// doing so would strand the winner (loss of funds). The withdraw is gated by fresh_unliened_backing.
+#[test]
+fn v16_attack_backing_withdraw_cannot_strand_liened_winner() {
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, 40, 10_000); // domain 1: 40 backing
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.add_source_positive_pnl(p, 1, 40); // liens the 40 to back p's +PnL
+    let (_, g0) = env.market_state();
+    let p0 = env.portfolio_state(p);
+    assert!(p0.pnl > 0, "winner has backed positive pnl (non-vacuous)");
+    let dest = env.token_account_for_mint(env.mint, env.admin.pubkey(), 0);
+
+    // try to withdraw the LIENED backing (full 40, and a partial 1) -> must reject.
+    for amt in [40u128, 1] {
+        env.svm.expire_blockhash();
+        let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+            ProgInstruction::WithdrawBackingBucket { domain: 1, amount: amt },
+            vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false),
+                 AccountMeta::new(dest, false), AccountMeta::new(env.vault, false),
+                 AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)],
+            &[&env.admin]);
+        assert!(r.is_err(), "withdrawing liened backing ({}) must reject (would strand winner)", amt);
+        assert_eq!(env.token_amount(dest), 0, "no tokens extracted from liened backing");
+    }
+    // winner's backing intact: pnl still present and vault unchanged.
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged by rejected backing withdraws");
+    assert_eq!(env.portfolio_state(p).pnl, p0.pnl, "winner's backed pnl preserved");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
