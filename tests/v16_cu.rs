@@ -13326,3 +13326,44 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
     assert_eq!(gf.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(gf.vault >= gf.c_tot + gf.insurance, "senior conservation across insurance ops");
 }
+
+// security.md sweep — recovery blocks junior→senior conversion (#6/#19/#33 interaction): ConvertReleasedPnl
+// moves backed junior pnl into withdrawable senior capital, and is Live-only (the engine's release path
+// requires Live mode). Attacker goal: during a Recovery wind-down, convert junior pnl to senior capital
+// to jump the queue / extract ahead of the orderly resolution. Protection: ConvertReleasedPnl rejects in
+// Recovery and the account/market state is fully preserved (the junior claim stays junior).
+#[test]
+fn v16_attack_recovery_blocks_pnl_conversion() {
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, 40, 10_000);
+    let o = Keypair::new(); let p = env.create_portfolio(&o);
+    env.deposit(&o, p, 1_000);
+    env.add_source_positive_pnl(p, 1, 40);
+    env.crank(p, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 0, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    let pre = env.portfolio_state(p);
+    assert!(pre.pnl > 0, "holder has backed junior pnl to (attempt to) convert, pnl={}", pre.pnl);
+
+    // transition to Recovery.
+    env.mutate_market(|_, group| {
+        group.mode = MarketModeV16::Recovery;
+        group.recovery_reason = Some(PermissionlessRecoveryReasonV16::BelowProgressFloor);
+    });
+    let before = env.svm.get_account(&env.market).unwrap();
+    let g_pre = env.market_state().1;
+
+    // ATTACK: convert junior pnl -> senior capital during the wind-down.
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::ConvertReleasedPnl { amount: 1_000_000_000 },
+        vec![AccountMeta::new(o.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[&o]);
+    assert!(r.is_err(), "ConvertReleasedPnl must reject in Recovery (Live-only)");
+
+    // ROLLBACK: the junior claim stays junior; account capital/pnl and the market are unchanged.
+    let post = env.portfolio_state(p);
+    let g_post = env.market_state().1;
+    assert_eq!(post.capital, pre.capital, "no junior->senior conversion: capital unchanged");
+    assert_eq!(post.pnl, pre.pnl, "junior pnl stays junior (not converted)");
+    assert_eq!(env.svm.get_account(&env.market).unwrap().data, before.data, "market state byte-for-byte unchanged");
+    assert_eq!(g_post.c_tot, g_pre.c_tot, "c_tot unchanged (no capital minted from junior pnl)");
+    assert_eq!(g_post.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g_post.vault >= g_post.c_tot + g_post.insurance, "senior conservation in recovery");
+}
