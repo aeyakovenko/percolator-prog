@@ -10490,3 +10490,36 @@ fn v16_regression_roundtrip_recovers_fully_at_resolution() {
     assert_eq!(env.token_amount(lo_dest), 1_000_000, "long fully recovered at resolution");
     assert_eq!(env.token_amount(sh_dest), 1_000_000, "short fully recovered at resolution (junior pnl realized)");
 }
+
+// security.md sweep — TradeCpi maker margin protection (#19/#46): a taker trading against a maker via
+// the matcher must not be able to force the maker (LP) into an under-margined position. If the maker
+// can't margin the fill, the trade must reject — the maker is protected like any account.
+#[test]
+fn v16_attack_tradecpi_thin_maker_margin_protected() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new(); let taker = env.create_portfolio(&taker_owner);
+    let maker_owner = Keypair::new(); let maker = env.create_portfolio(&maker_owner);
+    env.deposit(&taker_owner, taker, 100_000_000); // taker well funded
+    env.deposit(&maker_owner, maker, 1_000);        // maker THIN
+    let (ctx, delegate, _) = env.init_matcher_context(matcher_program, maker);
+    let (_, g0) = env.market_state();
+
+    // taker tries to trade a LARGE size against the thin maker -> maker can't margin it -> reject.
+    env.svm.expire_blockhash();
+    let r = env.try_trade_cpi_with_cu_on_asset(&taker_owner, taker, &maker_owner, maker, matcher_program, ctx, delegate, 0, (10_000 * POS_SCALE) as i128, 100);
+    assert!(r.is_err(), "trade that would leave the thin maker under-margined must reject");
+    // no position opened, no value moved, maker capital intact.
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no OI created by the rejected over-fill");
+    assert_eq!(env.portfolio_state(maker).legs[0].basis_pos_q, 0, "maker took no position");
+    assert_eq!(env.portfolio_state(taker).legs[0].basis_pos_q, 0, "taker took no position");
+    assert_eq!(env.portfolio_state(maker).capital, 1_000, "maker capital intact");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    // a SMALL trade the maker CAN margin still works (control).
+    env.svm.expire_blockhash();
+    let r_ok = env.try_trade_cpi_with_cu_on_asset(&taker_owner, taker, &maker_owner, maker, matcher_program, ctx, delegate, 0, POS_SCALE as i128, 100);
+    assert!(r_ok.is_ok(), "small in-margin trade executes against the maker: {:?}", r_ok);
+}
