@@ -8179,3 +8179,40 @@ fn v16_audit_permissionless_reuse_rejects_zero_insurance_authority() {
          strands that domain's insurance (no authority can withdraw) and permanently bricks CloseSlab",
     );
 }
+
+// Coverage probe (audit, Finding G): close_resolved_account_not_atomic charges an
+// accrued maintenance fee into group.insurance (handle_close_resolved passes
+// cfg.maintenance_fee_per_slot) but the wrapper does NOT credit any per-domain
+// insurance budget for it. WithdrawInsurance caps each authority's claim at
+// Σ(domain budget remaining) (terminal_insurance_remaining_for_authority_view),
+// not group.insurance, so this fee is withdrawable by NOBODY and permanently
+// blocks CloseSlab (requires insurance==0). This asserts the CORRECT invariant
+// (all of group.insurance is attributable to a withdrawable domain budget); it
+// goes RED iff the strand is real. Confirmed by mainnet evidence (market AWCZ2pK,
+// 4060 lamports of stranded dust with every authority = admin).
+#[ignore = "RED until resolved-mode fee charges domain-credit insurance so it stays withdrawable (Finding G)"]
+#[test]
+fn v16_audit_resolved_maintenance_fee_insurance_stays_recoverable() {
+    // maintenance_fee_per_slot = 5
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 5,
+    );
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+
+    // Accrue ~100 slots of maintenance fee, then resolve and close.
+    env.svm.warp_to_slot(100);
+    env.resolve();
+    env.close_resolved(&owner, portfolio);
+
+    let (_, group) = env.market_state();
+    let sum_budgets: u128 = group.insurance_domain_budget.iter().sum();
+    assert!(
+        sum_budgets >= group.insurance,
+        "all of group.insurance must be attributable to a withdrawable domain budget so an \
+         authority can sweep it and CloseSlab can succeed; insurance={} but \
+         sum(domain budgets)={} -> the {} difference is stranded forever",
+        group.insurance, sum_budgets, group.insurance.saturating_sub(sum_budgets),
+    );
+}
