@@ -8035,3 +8035,84 @@ fn v16_bpf_resolved_payout_tags_are_bounded_and_update_state() {
         90 * BOUND_SCALE
     );
 }
+
+// Coverage probe (audit): an INSOLVENT resolved market (residual < positive-PnL
+// face, so the resolved payout rate < 1) pays a winner only floor(face*rate) <
+// face. The receipt's `finalized` flag is set ONLY when paid_effective ==
+// terminal_positive_claim_face (the FULL face), so under a haircut it can never
+// finalize. If that is a real gap, the winner's portfolio can never be
+// dematerialized (portfolio_view_is_closable requires a finalized-or-absent
+// receipt), materialized_portfolio_count is stuck >= 1, and the market can never
+// WithdrawInsurance or CloseSlab -> permanent fund/rent strand.
+//
+// This test asserts the CORRECT end-state (the fully-settled winner's receipt
+// finalizes and the portfolio can be reclaimed). It goes RED iff the gap is real.
+// RED: confirmed bug (Finding D, see scripts/user-dos-lof-audit.md). Asserts the
+// CORRECT outcome; fails on the current engine because a haircut winner's receipt
+// never finalizes. #[ignore]'d so the default suite stays green; run with
+// `cargo test --test v16_cu -- --ignored` to see it RED. Un-ignore when the engine
+// finalizes receipts at the haircut entitlement.
+#[ignore = "RED until engine finalizes haircut payout receipts (Finding D)"]
+#[test]
+fn v16_audit_insolvent_resolved_winner_can_dematerialize() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    // Winner carries +250 of positive PnL face, but its domain is backed by only
+    // 100, so the resolved junior pool (residual = vault - c_tot) is 100 < 250 ->
+    // a permanent haircut: payout rate = 100/250 = 0.4.
+    env.top_up_backing_bucket(1, 100, 10_000);
+    env.add_source_positive_pnl(portfolio, 1, 250);
+
+    env.resolve();
+    let _dest = env.close_resolved(&owner, portfolio);
+
+    let account =
+        state::read_portfolio(&env.svm.get_account(&portfolio).unwrap().data).unwrap();
+    assert_eq!(account.capital, 0, "capital paid out");
+    assert_eq!(account.pnl, 0, "pnl zeroed by resolved close");
+    assert!(
+        account.resolved_payout_receipt.finalized,
+        "a fully-paid (haircut) resolved winner's receipt must finalize so the portfolio can be \
+         reclaimed; if it cannot, materialized_portfolio_count stays >= 1 and the market is \
+         permanently un-drainable (no WithdrawInsurance, no CloseSlab)",
+    );
+
+    // The consequence: the owner must be able to reclaim the fully-settled
+    // portfolio (this dematerializes it). Panics if the receipt blocks closability.
+    env.close_portfolio_with_cu(&owner, portfolio);
+}
+
+// Coverage probe (audit, Finding candidate): after a user defensively cures and
+// cancels a forced close (CureAndCancelClose), their `close_progress` ledger is
+// left in the `canceled` state, never reset to EMPTY. `withdraw_not_atomic`
+// requires `close_progress == EMPTY`, so the user can never withdraw their flat,
+// solvent capital again in Live mode. This test asserts the CORRECT outcome (the
+// user can withdraw after curing); it goes RED iff the gap is real.
+// RED: confirmed bug (Finding E, see scripts/user-dos-lof-audit.md). #[ignore]'d
+// so the default suite stays green; run with `-- --ignored` to see it RED.
+#[ignore = "RED until cure resets close_progress to EMPTY / withdraw accepts an inert ledger (Finding E)"]
+#[test]
+fn v16_audit_withdraw_after_cure_and_cancel_close() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 100);
+    env.seed_cancellable_close_progress(portfolio);
+
+    // Owner cures + cancels the forced close (no position -> IM is 0, so no extra
+    // deposit needed).
+    let source = env.token_account(owner.pubkey(), 0);
+    env.cure_and_cancel_close_with_cu(&owner, portfolio, source, 0);
+
+    // The account is now flat and solvent (capital 100, no positions). The user
+    // must be able to withdraw their own capital.
+    env.withdraw_with_cu(&owner, portfolio, 100);
+    let account =
+        state::read_portfolio(&env.svm.get_account(&portfolio).unwrap().data).unwrap();
+    assert_eq!(
+        account.capital, 0,
+        "a flat, solvent user must be able to withdraw their capital after curing a cancelled close",
+    );
+}
