@@ -12008,3 +12008,26 @@ fn v16_attack_portfolio_as_market_rejected() {
     assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital intact");
     assert_eq!(env.market_state().1.vault, g0.vault, "vault unchanged");
 }
+
+// security.md sweep — wrong-mint vault (#44): the vault token account must hold the collateral mint.
+// A vault of a different mint must reject (mint check + canonical-ATA pin), so no draining via a
+// mismatched-mint vault.
+#[test]
+fn v16_attack_wrong_mint_vault_rejected() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    let real_bal = env.token_amount(env.vault);
+    // overwrite the vault address with a token account of a DIFFERENT mint (still vault_authority-owned).
+    let other_mint = Pubkey::new_unique();
+    env.svm.set_account(env.vault, Account { lamports: 1_000_000_000, data: make_token_data(other_mint, env.vault_authority, real_bal), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    let dest = Pubkey::new_unique();
+    env.svm.set_account(dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, owner.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Withdraw { amount: 500_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r.is_err(), "withdraw against a wrong-mint vault must reject");
+    assert_eq!(env.token_amount(dest), 0, "no tokens out via a wrong-mint vault");
+    assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital not debited");
+}
