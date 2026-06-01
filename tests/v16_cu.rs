@@ -9741,3 +9741,50 @@ fn v16_attack_withdraw_wrong_mint_dest_rejected() {
     let (good_dest, _) = env.withdraw_with_cu(&owner, p, 500_000);
     assert_eq!(env.token_amount(good_dest), 500_000, "correct-mint withdraw works after the rejected one");
 }
+
+// security.md sweep — TradeCpi matcher identity binding (#44/#49): the matcher_delegate is a PDA
+// bound to (slab, maker, matcher_program, matcher_context). Routing a TradeCpi through a SPOOFED
+// delegate or a wrong/non-program matcher must reject — no trade executes, no value moves.
+#[test]
+fn v16_attack_tradecpi_spoofed_matcher_binding_rejected() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new(); let taker = env.create_portfolio(&taker_owner);
+    let maker_owner = Keypair::new(); let maker = env.create_portfolio(&maker_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&maker_owner, maker, 1_000_000);
+    let (matcher_ctx, matcher_delegate, _) = env.init_matcher_context(matcher_program, maker);
+    let (_, g0) = env.market_state();
+
+    // ATTACK 1: random (unbound) delegate.
+    env.svm.expire_blockhash();
+    let r1 = env.try_trade_cpi_with_cu_on_asset(&taker_owner, taker, &maker_owner, maker, matcher_program, matcher_ctx, Pubkey::new_unique(), 0, (10 * POS_SCALE) as i128, 100);
+    assert!(r1.is_err(), "spoofed (unbound) matcher delegate must reject");
+
+    // ATTACK 2: a delegate bound to a DIFFERENT context.
+    let other_program = Pubkey::new_unique();
+    env.svm.add_program(other_program, &matcher_bytes);
+    let (_other_ctx, other_delegate, _) = env.init_matcher_context(other_program, maker);
+    env.svm.expire_blockhash();
+    let r2 = env.try_trade_cpi_with_cu_on_asset(&taker_owner, taker, &maker_owner, maker, matcher_program, matcher_ctx, other_delegate, 0, (10 * POS_SCALE) as i128, 100);
+    assert!(r2.is_err(), "delegate bound to a different matcher/context must reject");
+
+    // ATTACK 3: a non-program account as the matcher program (CPI target bogus).
+    env.svm.expire_blockhash();
+    let bogus_prog = Pubkey::new_unique();
+    let r3 = env.try_trade_cpi_with_cu_on_asset(&taker_owner, taker, &maker_owner, maker, bogus_prog, matcher_ctx, matcher_delegate, 0, (10 * POS_SCALE) as i128, 100);
+    assert!(r3.is_err(), "wrong/non-program matcher must reject");
+
+    // no trade executed, no value moved across all spoof attempts.
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no OI created by spoofed-matcher TradeCpi");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged");
+    assert_eq!(env.portfolio_state(taker).legs[0].basis_pos_q, 0, "taker has no position");
+    // the legitimate binding still works (control).
+    env.svm.expire_blockhash();
+    let ok = env.try_trade_cpi_with_cu_on_asset(&taker_owner, taker, &maker_owner, maker, matcher_program, matcher_ctx, matcher_delegate, 0, (10 * POS_SCALE) as i128, 100);
+    assert!(ok.is_ok(), "correctly-bound matcher executes: {:?}", ok);
+}
