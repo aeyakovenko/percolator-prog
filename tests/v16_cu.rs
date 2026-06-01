@@ -10752,3 +10752,29 @@ fn v16_attack_rebalance_reduce_owner_gated() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
     assert_eq!(g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q, "OI still balanced");
 }
+// security.md sweep — RefineResolvedUnreceiptedBound gating (#6/#30): this wind-down tool (decreases
+// the unreceipted resolved claim bound) is admin-only and resolved-mode-only. A non-admin must
+// reject, and it must reject in Live mode — no tampering with the resolved payout accounting.
+#[test]
+fn v16_attack_refine_resolved_bound_admin_and_mode_gated() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    let mallory = Keypair::new(); env.ensure_signer_account(mallory.pubkey());
+    // 1) Live mode: even the admin can't refine (mode != Resolved).
+    env.svm.expire_blockhash();
+    let r_live = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::RefineResolvedUnreceiptedBound { decrease_num: 1 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin]);
+    assert!(r_live.is_err(), "refine must reject in Live mode");
+    // 2) Resolved mode: a NON-admin can't refine.
+    env.resolve();
+    env.svm.expire_blockhash();
+    let r_nonadmin = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::RefineResolvedUnreceiptedBound { decrease_num: 1 },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false)], &[&mallory]);
+    assert!(r_nonadmin.is_err(), "non-admin refine must reject in resolved mode");
+    // user funds still fully recoverable (the rejected refines didn't corrupt the resolved accounting).
+    let cr = env.close_resolved(&owner, p);
+    assert_eq!(env.token_amount(cr), 1_000_000, "user recovers full resolved payout after rejected refines");
+}
