@@ -9921,3 +9921,33 @@ fn v16_attack_cure_deposit_exact_and_atomic() {
     assert_eq!(g_end.vault, g_end.c_tot + g_end.insurance, "conservation intact");
     let _ = g_mid;
 }
+
+// security.md sweep — position flip margin (#19/#46 crosses_zero): a trade that flips a position
+// long->short must enforce initial_margin_bps on the RESULTING side. An attacker must not be able to
+// flip into a larger, under-margined opposite position.
+#[test]
+fn v16_attack_position_flip_enforces_initial_margin() {
+    let mut env = V16CuEnv::new(); // IM = 100%
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 100);        // exactly enough for notional 100 at 100% IM
+    env.deposit(&lb, pb, 10_000_000); // counterparty well-funded
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0); // la long 1 (notional 100)
+    let basis_open = env.portfolio_state(pa).legs[0].basis_pos_q;
+    assert_eq!(basis_open, POS_SCALE as i128, "la opened long 1");
+
+    // ATTACK: flip to SHORT 2 (sell 3) -> needs margin 200 > capital 100 -> must reject.
+    env.svm.expire_blockhash();
+    let r_over = env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, -(3 * POS_SCALE as i128), 100, 0);
+    assert!(r_over.is_err(), "flip into an under-margined short (2x notional) must reject");
+    assert_eq!(env.portfolio_state(pa).legs[0].basis_pos_q, basis_open, "position unchanged by rejected over-flip");
+
+    // CONTROL: flip to SHORT 1 (sell 2) -> notional 100, margin 100 (at edge) -> allowed.
+    env.svm.expire_blockhash();
+    let r_ok = env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, -(2 * POS_SCALE as i128), 100, 0);
+    assert!(r_ok.is_ok(), "flip to an equally-margined short should be allowed: {:?}", r_ok);
+    assert_eq!(env.portfolio_state(pa).legs[0].basis_pos_q, -(POS_SCALE as i128), "la is now short 1 after flip");
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault, g.c_tot + g.insurance, "conservation after flip");
+    assert_eq!(g.assets[0].oi_eff_long_q, g.assets[0].oi_eff_short_q, "OI balanced after flip");
+}
