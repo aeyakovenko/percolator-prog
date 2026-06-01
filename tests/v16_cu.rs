@@ -11037,3 +11037,44 @@ fn v16_attack_two_sided_trade_fee_symmetric() {
     assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
+// security.md sweep — fee redirect policy (#6/#33): fee_redirect_to_market_0_bps splits fees to
+// market 0's domain (INTERNAL), not an external party. It must be admin-gated, bounded to <=10000,
+// and must never leak value out of the protocol (vault unchanged on a fee'd trade).
+#[test]
+fn v16_attack_fee_redirect_gated_bounded_no_leak() {
+    let mut env = V16CuEnv::new();
+    let mallory = Keypair::new(); env.ensure_signer_account(mallory.pubkey());
+    // non-admin can't set the redirect.
+    env.svm.expire_blockhash();
+    let r_auth = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps: 5_000 },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false)], &[&mallory]);
+    assert!(r_auth.is_err(), "non-admin fee redirect update must reject");
+    // out-of-range redirect rejected (admin).
+    env.svm.expire_blockhash();
+    let r_oob = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps: 20_000 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin]);
+    assert!(r_oob.is_err(), "redirect_bps > 10000 must reject");
+    // valid redirect set by admin.
+    env.svm.expire_blockhash();
+    let r_ok = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps: 5_000 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin]);
+    assert!(r_ok.is_ok(), "admin redirect update should succeed: {:?}", r_ok);
+
+    // a fee'd trade with redirect active: fee stays INTERNAL (vault unchanged, no external leak).
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    let (_, g0) = env.market_state();
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 100);
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "fee with redirect stays internal: vault unchanged (no external leak)");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting vault == real on-chain vault");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+    // total value (c_tot + insurance + any domain attribution) still bounded by the vault.
+    assert!(g1.c_tot + g1.insurance <= g1.vault, "no value created by the redirect split");
+}
