@@ -12267,3 +12267,32 @@ fn v16_attack_fee_redirect_split_lands_correctly() {
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+
+// security.md sweep — backing-fee policy authorization (#6) [fee-routing #7]: UpdateBackingFeePolicy
+// (per-domain backing fee + insurance share) is gated to the domain's insurance_authority. A non-
+// authority must reject, and an out-of-range share must reject. No unauthorized fee-policy tampering.
+#[test]
+fn v16_attack_backing_fee_policy_authority_gated() {
+    let mut env = V16CuEnv::new();
+    let (cfg0, _) = env.market_state();
+    let mallory = Keypair::new(); env.ensure_signer_account(mallory.pubkey());
+    // non-authority sets the backing fee policy -> reject.
+    env.svm.expire_blockhash();
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateBackingFeePolicy { domain: 0, fee_bps: 77, insurance_share_bps: 5_000 },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false)], &[&mallory]);
+    assert!(r.is_err(), "non-authority backing fee policy update must reject");
+    // out-of-range insurance share (>10000) by the real authority -> reject.
+    env.svm.expire_blockhash();
+    let r_oob = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateBackingFeePolicy { domain: 0, fee_bps: 77, insurance_share_bps: 20_000 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin]);
+    assert!(r_oob.is_err(), "insurance_share_bps > 10000 must reject");
+    // policy unchanged by the rejected updates.
+    let (cfg1, _) = env.market_state();
+    assert_eq!(cfg1.backing_trade_fee_bps_long, cfg0.backing_trade_fee_bps_long, "backing fee policy unchanged");
+    assert_eq!(cfg1.backing_trade_fee_insurance_share_bps_long, cfg0.backing_trade_fee_insurance_share_bps_long, "insurance share unchanged");
+    // the real authority CAN set it (control).
+    env.update_backing_fee_policy_with_cu(0, 77, 5_000);
+    assert_eq!(env.market_state().0.backing_trade_fee_insurance_share_bps_long, 5_000, "authority sets the insurance share");
+}
