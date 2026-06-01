@@ -11920,3 +11920,41 @@ fn v16_attack_tradecpi_atomic_fill_vs_capacity() {
     assert_eq!(g2.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g2.vault >= g2.c_tot + g2.insurance, "senior conservation");
 }
+// security.md sweep — third-party withdraw vs winner's pnl backing (#33/#22): a winner's parked pnl is
+// backed by residual (vault - c_tot - insurance). An UNRELATED account withdrawing its own capital
+// reduces vault and c_tot equally, so the residual — and thus the winner's backing — must be unchanged.
+#[test]
+fn v16_attack_third_party_withdraw_preserves_pnl_backing() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo = Keypair::new(); let plo = env.create_portfolio(&lo);
+    let sh = Keypair::new(); let psh = env.create_portfolio(&sh);
+    let c = Keypair::new(); let pc = env.create_portfolio(&c);
+    env.deposit(&lo, plo, 1_000_000);
+    env.deposit(&sh, psh, 1_000_000);
+    env.deposit(&c, pc, 1_000_000); // unrelated, no position
+    env.trade_asset_with_cu(0, &lo, plo, &sh, psh, (10_000 * POS_SCALE) as i128, 100, 0);
+    // price up -> long parks pnl, short realizes loss (freeing residual).
+    env.svm.warp_to_slot(10); env.push_auth_mark_with_cu(10, 110);
+    for slot in [10u64, 11] { env.svm.warp_to_slot(slot); for p in [psh, plo] { env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]); } }
+    let long_pnl = env.portfolio_state(plo).pnl;
+    assert!(long_pnl > 0, "long has parked pnl (non-vacuous)");
+    let (_, g0) = env.market_state();
+    let resid0 = g0.vault as i128 - g0.c_tot as i128 - g0.insurance as i128;
+    assert!(resid0 >= long_pnl, "long's pnl is backed by residual");
+
+    // unrelated account C withdraws ALL its capital.
+    env.svm.expire_blockhash();
+    let (_d, _) = env.withdraw_with_cu(&c, pc, 1_000_000);
+    let (_, g1) = env.market_state();
+    let resid1 = g1.vault as i128 - g1.c_tot as i128 - g1.insurance as i128;
+    // residual (and thus the winner's backing) is UNCHANGED by C's withdrawal.
+    assert_eq!(resid1, resid0, "third-party withdraw did NOT change the residual backing the winner");
+    assert!(resid1 >= env.portfolio_state(plo).pnl.max(0), "long's pnl still fully backed");
+    assert_eq!(g1.vault, g0.vault - 1_000_000, "vault decreased by exactly C's withdrawal");
+    assert_eq!(g1.c_tot, g0.c_tot - 1_000_000, "c_tot decreased by exactly C's withdrawal");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
