@@ -10179,3 +10179,37 @@ fn v16_attack_backing_ledger_domain_binding_enforced() {
         vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(ledger, false)], &[&env.admin]);
     assert!(r_ok.is_ok(), "correct-domain sync works: {:?}", r_ok);
 }
+
+// security.md sweep — deposit source confusion (#35/#44): the deposit source must be a token account
+// owned by the depositor. Passing the VAULT (or any non-owned account) as the source must reject —
+// otherwise a vault->vault no-op transfer could credit capital for free (mint capital from nothing).
+#[test]
+fn v16_attack_deposit_from_vault_as_source_rejected() {
+    let mut env = V16CuEnv::new();
+    let honest = Keypair::new(); let hp = env.create_portfolio(&honest);
+    env.deposit(&honest, hp, 1_000_000); // fund the vault with real tokens
+    let attacker = Keypair::new(); let ap = env.create_portfolio(&attacker);
+    let (_, g0) = env.market_state();
+
+    // attacker tries to "deposit" using the VAULT as the source (vault is owned by vault_authority, not attacker).
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Deposit { amount: 500_000 }, vec![
+        AccountMeta::new(attacker.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(ap, false),
+        AccountMeta::new(env.vault, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&attacker]);
+    assert!(r.is_err(), "deposit using the vault as source must reject (source not owned by depositor)");
+    assert_eq!(env.portfolio_state(ap).capital, 0, "no free capital minted");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault accounting unchanged");
+    assert_eq!(env.token_amount(env.vault), 1_000_000, "real vault balance unchanged");
+
+    // also: a source owned by a THIRD PARTY (not the attacker) must reject.
+    let other = Keypair::new();
+    let other_src = env.token_account_for_mint(env.mint, other.pubkey(), 500_000);
+    env.svm.expire_blockhash();
+    let r2 = env.send(ProgInstruction::Deposit { amount: 500_000 }, vec![
+        AccountMeta::new(attacker.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(ap, false),
+        AccountMeta::new(other_src, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&attacker]);
+    assert!(r2.is_err(), "deposit from a third-party-owned source must reject");
+    assert_eq!(env.portfolio_state(ap).capital, 0, "no capital credited from a non-owned source");
+    assert_eq!(env.token_amount(other_src), 500_000, "third-party source untouched");
+}
