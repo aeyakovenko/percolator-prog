@@ -9706,3 +9706,38 @@ fn v16_attack_backing_earnings_no_over_or_double_withdraw() {
     // exactly the earnings (30) left the vault, never more.
     assert_eq!(env.market_state().1.vault, vault0 - 30, "vault decreased by exactly total earnings");
 }
+
+// security.md sweep — withdraw mint confusion (#44): withdrawing to a dest token account of a
+// DIFFERENT mint than the vault must reject (SPL transfer enforces matching mints). Capital must not
+// be debited if the transfer can't land, and no tokens leak.
+#[test]
+fn v16_attack_withdraw_wrong_mint_dest_rejected() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    let (_, g0) = env.market_state();
+    // a dest token account under a DIFFERENT mint.
+    let other_mint = Pubkey::new_unique();
+    let bad_dest = Pubkey::new_unique();
+    env.svm.set_account(bad_dest, Account {
+        lamports: 1_000_000_000, data: make_token_data(other_mint, owner.pubkey(), 0),
+        owner: spl_token::ID, executable: false, rent_epoch: 0,
+    }).unwrap();
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Withdraw { amount: 500_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(bad_dest, false), AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r.is_err(), "withdraw to a wrong-mint dest must reject (mint mismatch)");
+    assert_eq!(env.token_amount(bad_dest), 0, "no tokens leaked to wrong-mint dest");
+    // capital NOT debited (atomic): the failed transfer rolls back the whole op.
+    assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital not debited on failed withdraw");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged");
+    // a correct-mint withdraw still works afterward.
+    env.svm.expire_blockhash();
+    let (good_dest, _) = env.withdraw_with_cu(&owner, p, 500_000);
+    assert_eq!(env.token_amount(good_dest), 500_000, "correct-mint withdraw works after the rejected one");
+}
