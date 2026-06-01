@@ -9988,3 +9988,40 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
     assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged");
 }
+
+// security.md sweep — admin-instruction authorization (#6): privileged ops (ResolveMarket,
+// ConfigureAuthMark, UpdateConfig) must reject a non-admin signer. A permissionless resolve would be
+// a catastrophic griefing/wind-down trigger.
+#[test]
+fn v16_attack_non_admin_cannot_resolve_or_configure() {
+    let mut env = V16CuEnv::new();
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    env.deposit(&la, pa, 1_000_000);
+
+    // non-admin ResolveMarket -> reject; market stays Live.
+    env.svm.expire_blockhash();
+    let r_res = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::ResolveMarket,
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false)], &[&mallory]);
+    assert!(r_res.is_err(), "non-admin ResolveMarket must reject");
+    let (cfg0, g0) = env.market_state();
+    // mode 0 == Live: a successful attacker-resolve would flip it.
+    // (read via raw mode to avoid coupling; vault/positions still operable below proves Live.)
+
+    // non-admin ConfigureAuthMark -> reject.
+    env.svm.expire_blockhash();
+    let r_cfg = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::ConfigureAuthMark { asset_index: 0, now_slot: 0, initial_mark_e6: 999_999 },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false)], &[&mallory]);
+    assert!(r_cfg.is_err(), "non-admin ConfigureAuthMark must reject");
+
+    // Proof the market is still Live & operable: the owner can still withdraw (rejected if resolved).
+    env.svm.expire_blockhash();
+    let (dest, _) = env.withdraw_with_cu(&la, pa, 500_000);
+    assert_eq!(env.token_amount(dest), 500_000, "market still Live: owner withdraw works (not resolved by attacker)");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault - 500_000, "only the legit withdraw moved funds");
+    let _ = cfg0;
+}
