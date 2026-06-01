@@ -11358,3 +11358,30 @@ fn v16_attack_topup_backing_bucket_authority_gated() {
     assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
+// security.md sweep — F-VAULT-FRAG fix on a WITHDRAW path: WithdrawBackingBucket transfers FROM the
+// vault; the canonical-ATA pin must apply here too. A withdrawal routed to a non-canonical
+// vault-authority-owned account must reject (no draining a fragment / fabricating an outbound path).
+#[test]
+fn v16_attack_backing_withdraw_pinned_to_canonical_vault() {
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, 1_000, 10_000); // real backing in the canonical vault
+    let (_, g0) = env.market_state();
+    // a fake "vault" owned by vault_authority but NOT the canonical ATA.
+    let fake_vault = Pubkey::new_unique();
+    env.svm.set_account(fake_vault, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, env.vault_authority, 5_000), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    let dest = env.token_account_for_mint(env.mint, env.admin.pubkey(), 0);
+    // backing withdraw routed to the fake vault -> reject (canonical pin).
+    env.svm.expire_blockhash();
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::WithdrawBackingBucket { domain: 1, amount: 500 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(dest, false),
+             AccountMeta::new(fake_vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&env.admin]);
+    assert!(r.is_err(), "backing withdraw routed to a non-canonical vault must reject");
+    assert_eq!(env.token_amount(dest), 0, "no tokens out via the fragment vault");
+    assert_eq!(env.token_amount(fake_vault), 5_000, "fragment vault untouched");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "accounting vault unchanged");
+    assert_eq!(env.token_amount(env.vault), g1.vault as u64, "real canonical vault intact == accounting");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
