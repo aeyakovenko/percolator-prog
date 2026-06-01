@@ -11385,3 +11385,31 @@ fn v16_attack_backing_withdraw_pinned_to_canonical_vault() {
     assert_eq!(env.token_amount(env.vault), g1.vault as u64, "real canonical vault intact == accounting");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
+// security.md sweep — convert bounded by available backing (#33/#35): if a winner's positive pnl
+// exceeds its source backing, ConvertReleasedPnl must release at most the AVAILABLE backing, never the
+// full (partly-unbacked) pnl. Otherwise unbacked pnl would convert into withdrawable capital.
+#[test]
+fn v16_attack_convert_bounded_by_available_backing() {
+    const BACKING: u128 = 40;
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, BACKING, 10);
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    // add MORE positive pnl (80) than the backing (40).
+    env.add_source_positive_pnl(p, 1, 80);
+    env.crank(p, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 0, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    let cap_before = env.portfolio_state(p).capital;
+    let (_, g0) = env.market_state();
+    // convert with a huge cap -> released amount must be bounded by the available backing.
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::ConvertReleasedPnl { amount: 1_000_000_000 },
+        vec![AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[&owner]);
+    let converted = env.portfolio_state(p).capital - cap_before;
+    assert!(converted <= BACKING, "convert released at most the available backing ({} <= {})", converted, BACKING);
+    let (_, g1) = env.market_state();
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation after convert");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
+    let _ = g0;
+}
