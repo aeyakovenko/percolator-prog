@@ -9631,3 +9631,31 @@ fn v16_attack_deposit_underfunded_source_is_atomic() {
     assert_eq!(env.portfolio_state(p).capital, 100, "valid deposit credits exactly 100");
     assert_eq!(env.market_state().1.vault, g0.vault + 100, "vault grew by exactly the deposited 100");
 }
+
+// security.md sweep — maintenance-fee slot spoofing (#30/#19 DoS): SyncMaintenanceFee's now_slot is
+// caller-supplied. A caller passes a far-future now_slot to over-charge maintenance fees and drain a
+// victim. The handler must authenticate against the real Clock (charge only real elapsed slots).
+#[test]
+fn v16_attack_sync_maintenance_fee_future_slot_no_overcharge() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(1, 10_000, 10_000, 10_000, 58);
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    env.update_maintenance_fee_policy_with_cu(0);
+    // real clock = slot 10; attacker lies with now_slot = 1_000_000.
+    env.svm.warp_to_slot(10);
+    let _ = env.try_sync_maintenance_fee_with_cu(p, None, 1_000_000);
+    let a = env.portfolio_state(p);
+    // fee reflects ~10 real slots (10*58 = 580), NOT 1_000_000 slots (which would drain everything).
+    assert!(a.capital >= 1_000_000 - 10_000, "fee bounded by real elapsed slots, not the lie (capital {})", a.capital);
+    assert!(a.capital < 1_000_000, "some fee was charged for the real elapsed time (non-vacuous)");
+    assert_eq!(a.last_fee_slot, 10, "fee settled to the authenticated clock slot, not the spoofed future");
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault, 1_000_000, "fee is internal (capital->insurance): vault unchanged");
+    assert_eq!(g.vault, g.c_tot + g.insurance, "exact conservation under slot-spoof attempt");
+    // a follow-up sync at the same real slot is a no-op (no further drain).
+    let cap_before = env.portfolio_state(p).capital;
+    env.svm.expire_blockhash();
+    let _ = env.try_sync_maintenance_fee_with_cu(p, None, 1_000_000);
+    assert_eq!(env.portfolio_state(p).capital, cap_before, "same-real-slot re-sync is a no-op despite future now_slot");
+}
