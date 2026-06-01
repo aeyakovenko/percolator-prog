@@ -13069,3 +13069,62 @@ fn v16_attack_cross_margin_requirement_is_gross_not_netted() {
     let g = env.market_state().1;
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+
+// security.md sweep — multi-account asymmetric premium funding zero-sum (#32/#33): funding redistributes
+// value between longs and shorts per-leg via floored math. With UNEQUAL leg sizes across 3 accounts the
+// per-account floors need not cancel exactly. Attacker goal: drive the rounding so the system MINTS net
+// value (vault grows / senior conservation breaks) or pays longs more than shorts lose into spendable
+// capital. Protection: funding never touches the vault and any rounding excess is unbacked junior pnl.
+#[test]
+fn v16_attack_multi_account_asymmetric_funding_conserves() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const DEPOSIT: u128 = 50_000_000;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_ewma_mark_with_cu(0, INITIAL_PRICE, 1, 0);
+    let l1o = Keypair::new(); let l1 = env.create_portfolio(&l1o); // long 3S
+    let l2o = Keypair::new(); let l2 = env.create_portfolio(&l2o); // long 1S
+    let sho = Keypair::new(); let sh = env.create_portfolio(&sho); // short 4S (counterparty to both)
+    for (o, p) in [(&l1o, l1), (&l2o, l2), (&sho, sh)] { env.deposit(o, p, DEPOSIT); }
+    // Build matched OI with UNEQUAL longs: long1=3S and long2=1S, short absorbs 4S total.
+    env.trade_with_cu(&l1o, l1, &sho, sh, (3 * POS_SCALE) as i128, INITIAL_PRICE, 0);
+    env.svm.expire_blockhash();
+    env.trade_with_cu(&l2o, l2, &sho, sh, POS_SCALE as i128, INITIAL_PRICE, 0);
+
+    // premium: push the mark above the index so funding accrues, then crank all three over several slots.
+    env.svm.warp_to_slot(1); env.push_ewma_mark_with_cu(1, INITIAL_PRICE * 2);
+    for slot in 1..=6u64 {
+        env.svm.warp_to_slot(slot);
+        for p in [l1, l2, sh] {
+            env.svm.expire_blockhash();
+            let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+        }
+    }
+    let g = env.market_state().1;
+    // non-vacuity: funding actually accrued.
+    assert!(g.assets[0].f_long_num != 0 || g.assets[0].f_short_num != 0, "funding accrued (non-vacuous)");
+    // CONSERVATION: funding is internal -> the vault is byte-exact 3*DEPOSIT, nothing minted/burned.
+    // (Premium funding routes a protocol "premium cut" to insurance — internal redistribution, NOT
+    // minting: the total vault is unchanged and insurance stays bounded by the conserved vault.)
+    assert_eq!(g.vault, 3 * DEPOSIT, "vault == total deposited (funding mints nothing despite unequal legs)");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting vault == real on-chain vault");
+    assert!(g.insurance <= g.vault, "insurance (incl. premium cut) bounded by the conserved vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation under asymmetric funding");
+    // OI stayed balanced through all the funding cranks.
+    assert_eq!(g.assets[0].oi_eff_long_q, g.assets[0].oi_eff_short_q, "OI balanced");
+    // senior side never exceeds what was deposited: sum(capital + realized losses) <= deposits.
+    let mut senior: i128 = 0;
+    for p in [l1, l2, sh] {
+        let a = state::read_portfolio(&env.svm.get_account(&p).unwrap().data).unwrap();
+        senior += a.capital as i128 + a.pnl.min(0);
+    }
+    assert!(senior <= (3 * DEPOSIT) as i128, "senior value (capital + realized losses) never exceeds deposits: {}", senior);
+}
