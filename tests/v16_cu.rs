@@ -11271,3 +11271,36 @@ fn v16_attack_exposure_transfer_chain_conserves() {
     assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
+// security.md sweep — token program validation (#44): deposit/withdraw must verify the token program
+// account is the real SPL Token program. Injecting a different program must reject — no routing the
+// transfer CPI through an attacker-controlled program.
+#[test]
+fn v16_attack_wrong_token_program_rejected() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    let (_, g0) = env.market_state();
+    let fake_token_program = Pubkey::new_unique(); // not spl_token::ID
+    let dest = Pubkey::new_unique();
+    env.svm.set_account(dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, owner.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    // withdraw with a bogus token program -> reject.
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Withdraw { amount: 500_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(fake_token_program, false)], &[&owner]);
+    assert!(r.is_err(), "withdraw with a non-SPL-token program must reject");
+    assert_eq!(env.token_amount(dest), 0, "no tokens delivered via a bogus token program");
+    assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital not debited");
+    assert_eq!(env.market_state().1.vault, g0.vault, "vault unchanged");
+    // deposit with a bogus token program -> reject.
+    let src = env.token_account_for_mint(env.mint, owner.pubkey(), 100);
+    env.svm.expire_blockhash();
+    let r2 = env.send(ProgInstruction::Deposit { amount: 100 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(src, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(fake_token_program, false)], &[&owner]);
+    assert!(r2.is_err(), "deposit with a non-SPL-token program must reject");
+    // correct token program still works.
+    let (good, _) = env.withdraw_with_cu(&owner, p, 500_000);
+    assert_eq!(env.token_amount(good), 500_000, "withdraw with the real token program works");
+}
