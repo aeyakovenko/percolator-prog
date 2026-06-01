@@ -12560,3 +12560,56 @@ fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+
+// security.md sweep — WithdrawInsuranceLimited rate-limit (#6/#23): the Live-mode insurance-operator
+// withdrawal is bounded per call by insurance_withdraw_max_bps of remaining insurance AND throttled by
+// insurance_withdraw_cooldown_slots. Attacker goal: an operator drains the whole insurance fund in one
+// shot, or hammers withdrawals back-to-back to bypass the throttle.
+#[test]
+fn v16_attack_insurance_limited_withdraw_rate_limited() {
+    let mut env = V16CuEnv::new();
+    // Warp to a realistic (non-zero) slot first: the cooldown guard is `last_insurance_withdraw_slot != 0`,
+    // so recording a withdrawal at genuine slot 0 would disable it (a slot-0 artifact, never on mainnet).
+    env.svm.warp_to_slot(1_000);
+    env.top_up_insurance(1_000_000);
+    // policy: max 50% of remaining insurance per call, no deposits-only restriction, 100-slot cooldown.
+    send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateInsurancePolicy { max_bps: 5_000, deposits_only: 0, cooldown_slots: 100 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)],
+        &[&env.admin]).expect("set insurance policy");
+    let admin = env.admin.insecure_clone();
+
+    let mut try_withdraw = |env: &mut V16CuEnv, amount: u128| -> Result<u64, String> {
+        let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+        env.svm.expire_blockhash();
+        send_tx(&mut env.svm, env.program_id, &env.payer,
+            ProgInstruction::WithdrawInsuranceLimited { amount },
+            vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(dest, false),
+                 AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)],
+            &[&admin])
+    };
+
+    let ins0 = env.market_state().1.insurance;
+
+    // (1) over the per-call cap (>50% of 1M) must reject — no one-shot drain.
+    assert!(try_withdraw(&mut env, 900_000).is_err(), "withdraw > max_bps cap must reject");
+    assert_eq!(env.market_state().1.insurance, ins0, "insurance untouched by rejected over-cap withdraw");
+
+    // (2) within the cap succeeds.
+    try_withdraw(&mut env, 100_000).expect("within-cap withdraw ok");
+    let ins1 = env.market_state().1.insurance;
+    assert_eq!(ins1, ins0 - 100_000, "insurance debited by exactly the withdrawn amount");
+
+    // (3) a second withdraw within the cooldown window must reject — throttle holds even for a tiny amount.
+    assert!(try_withdraw(&mut env, 1).is_err(), "second withdraw within cooldown must reject");
+    assert_eq!(env.market_state().1.insurance, ins1, "insurance untouched by throttled withdraw");
+
+    // (4) after warping past the cooldown, a fresh within-cap withdraw succeeds again.
+    let now = env.svm.get_sysvar::<Clock>().slot;
+    env.svm.warp_to_slot(now + 200);
+    try_withdraw(&mut env, 50_000).expect("post-cooldown withdraw ok");
+    let g = env.market_state().1;
+    assert_eq!(g.insurance, ins1 - 50_000, "post-cooldown withdraw debits insurance");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
