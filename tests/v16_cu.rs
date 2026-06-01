@@ -9951,3 +9951,40 @@ fn v16_attack_position_flip_enforces_initial_margin() {
     assert_eq!(g.vault, g.c_tot + g.insurance, "conservation after flip");
     assert_eq!(g.assets[0].oi_eff_long_q, g.assets[0].oi_eff_short_q, "OI balanced after flip");
 }
+
+// security.md sweep — withdraw/trade authorization (#6): only a portfolio's OWNER may withdraw from
+// it or trade it. A non-owner signer must be rejected — no fund theft, no unauthorized position.
+#[test]
+fn v16_attack_non_owner_cannot_withdraw_or_trade() {
+    let mut env = V16CuEnv::new();
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    let (_, g0) = env.market_state();
+
+    // Mallory tries to withdraw from pa (owned by la).
+    env.svm.expire_blockhash();
+    let dest = Pubkey::new_unique();
+    env.svm.set_account(dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, mallory.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    let r_wd = env.send(ProgInstruction::Withdraw { amount: 500_000 }, vec![
+        AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false),
+        AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&mallory]);
+    assert!(r_wd.is_err(), "non-owner withdraw must reject");
+    assert_eq!(env.token_amount(dest), 0, "no funds stolen by non-owner");
+    assert_eq!(env.portfolio_state(pa).capital, 1_000_000, "pa capital intact");
+
+    // Mallory tries to trade pa against pb (signing as the account_a owner).
+    env.svm.expire_blockhash();
+    let r_tr = env.send(ProgInstruction::TradeNoCpi { asset_index: 0, size_q: POS_SCALE as i128, exec_price: 100, fee_bps: 0 }, vec![
+        AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(lb.pubkey(), true), AccountMeta::new(env.market, false),
+        AccountMeta::new(pa, false), AccountMeta::new(pb, false)], &[&mallory, &lb]);
+    assert!(r_tr.is_err(), "non-owner trade of pa must reject");
+    assert_eq!(env.portfolio_state(pa).legs[0].basis_pos_q, 0, "no unauthorized position opened on pa");
+
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged");
+}
