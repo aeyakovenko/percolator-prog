@@ -9351,3 +9351,43 @@ fn v16_attack_trade_fee_rounds_up_no_free_dust_trades() {
     assert_eq!(g.vault, g.c_tot + g.insurance, "exact conservation after close");
     assert!(g.insurance >= prev_ins, "insurance never decreased (fees are protocol-favorable)");
 }
+
+// security.md sweep — over-liquidation (#2): liquidating a bankrupt account with close_q FAR larger
+// than its position must clamp to the actual size — never over-close into phantom OI, negative OI,
+// or manufactured value. Attacker success = excess close_q creating value / corrupting OI.
+#[test]
+fn v16_attack_over_liquidation_clamps_to_position() {
+    let mut env = V16CuEnv::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 250); // tiny -> insolvent on up-move
+    env.configure_ewma_mark_with_cu(0, 100, 1, 0);
+    env.trade_with_cu(&long_owner, long_account, &short_owner, short_account, POS_SCALE as i128, 100, 0);
+    for (slot, mark) in [(1u64, 300u64), (2, 800)] {
+        env.svm.warp_to_slot(slot);
+        env.push_ewma_mark_with_cu(slot, mark);
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(short_account, false)], &[]);
+    }
+    let (_, g_pre) = env.market_state();
+    let oi_pre = g_pre.assets[0].oi_eff_long_q;
+    // liquidate with a grossly excessive close_q (1000x the position, and again u128::MAX-ish).
+    for cq in [POS_SCALE * 1_000, u128::MAX / 2] {
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: cq, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(short_account, false)], &[]);
+        let (_, g) = env.market_state();
+        // OI never goes negative / never exceeds the original (no phantom from excess close_q).
+        assert!(g.assets[0].oi_eff_short_q <= oi_pre, "short OI clamped (no phantom), got {} pre {}", g.assets[0].oi_eff_short_q, oi_pre);
+        assert!(g.assets[0].oi_eff_long_q <= oi_pre, "long OI not inflated by over-liquidation");
+        assert_eq!(g.vault, 1_000_250, "vault unchanged by liquidation (internal), no value created");
+        assert!(g.vault >= g.c_tot + g.insurance, "senior conservation under over-liquidation");
+    }
+    // the short is fully closed (position gone), not over-closed into a phantom opposite position.
+    let sh = state::read_portfolio(&env.svm.get_account(&short_account).unwrap().data).unwrap();
+    assert!(percolator::active_bitmap_is_empty(sh.active_bitmap), "short position fully closed, no phantom flip");
+}
