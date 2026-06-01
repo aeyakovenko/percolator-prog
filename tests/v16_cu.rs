@@ -9066,3 +9066,42 @@ fn v16_attack_resolved_payout_replay_extracts_nothing() {
     assert_eq!(g_end.vault, g_after.vault, "vault unchanged by replay attempts");
     assert!(g_end.vault >= g_end.c_tot + g_end.insurance, "senior conservation preserved");
 }
+
+// security.md sweep — oracle/mark bounds (#37/#39): the auth-mark push feeds settlement. An extreme
+// mark (0 or u64::MAX) must be rejected/clamped, never corrupt pnl or panic the program.
+#[test]
+fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(0, &lo_owner, lo, &sh_owner, sh, POS_SCALE as i128, 100, 0);
+    env.svm.warp_to_slot(5);
+    // push extreme marks; each must reject or be clamped — never panic, never corrupt state.
+    for mark in [0u64, 1, u64::MAX, u64::MAX / 2] {
+        env.svm.expire_blockhash();
+        let _ = send_tx(&mut env.svm, env.program_id, &env.payer,
+            ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 5, mark_e6: mark },
+            vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)],
+            &[&env.admin]); // ignore Err; we only require no panic + conservation
+        // crank against whatever mark landed; must not corrupt conservation.
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 5, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(lo, false)], &[]);
+        let (_, g) = env.market_state();
+        assert_eq!(g.vault, 2_000_000, "vault intact under extreme mark {}", mark);
+        assert!(g.vault >= g.c_tot + g.insurance, "senior conservation under extreme mark {}", mark);
+        assert!(g.assets[0].effective_price > 0 && g.assets[0].effective_price <= percolator::MAX_ORACLE_PRICE,
+            "effective price stays in valid bounds under extreme mark {} (got {})", mark, g.assets[0].effective_price);
+    }
+    // state still decodes and positions intact (no corruption). Vault holds exactly the deposits
+    // (checked per-iteration); accounted equity + insurance never EXCEEDS the vault (the small
+    // difference is the in-vault §6.2 residual buffer, not lost value).
+    let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+    let accounted = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl) + env.market_state().1.insurance as i128;
+    assert!(accounted <= 2_000_000, "no value created by extreme mark pushes (accounted {})", accounted);
+    assert!(accounted >= 2_000_000 - 1_000, "value not materially destroyed; remainder is in-vault residual (accounted {})", accounted);
+}
