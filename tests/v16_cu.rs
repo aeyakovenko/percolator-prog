@@ -10969,3 +10969,41 @@ fn v16_attack_maintenance_fee_with_open_position_conserves() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
     assert_eq!(g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q, "OI still balanced");
 }
+// security.md sweep — deposit with parked pnl (#32/#33): depositing while holding junior (parked) pnl
+// must credit capital exactly and leave the pnl and its residual backing untouched. No double-count,
+// no disturbance of the junior pnl, conservation holds.
+#[test]
+fn v16_attack_deposit_with_parked_pnl_clean() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(0, &lo_owner, lo, &sh_owner, sh, (10_000 * POS_SCALE) as i128, 100, 0);
+    // price up -> long accrues parked pnl; settle.
+    env.svm.warp_to_slot(10); env.push_auth_mark_with_cu(10, 110);
+    for slot in [10u64,11] { env.svm.warp_to_slot(slot); for p in [sh, lo] { env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]); } }
+    let a0 = env.portfolio_state(lo);
+    assert!(a0.pnl > 0, "long has parked pnl (non-vacuous)");
+    let (_, g0) = env.market_state();
+    let resid0 = g0.vault as i128 - g0.c_tot as i128 - g0.insurance as i128;
+
+    // deposit MORE while holding the parked pnl.
+    env.svm.expire_blockhash();
+    env.deposit(&lo_owner, lo, 500_000);
+    let a1 = env.portfolio_state(lo);
+    let (_, g1) = env.market_state();
+    assert_eq!(a1.capital, a0.capital + 500_000, "capital credited exactly by the deposit");
+    assert_eq!(a1.pnl, a0.pnl, "parked pnl UNCHANGED by the deposit (no double-count/disturbance)");
+    assert_eq!(g1.vault, g0.vault + 500_000, "vault grew by exactly the deposit");
+    assert_eq!(g1.c_tot, g0.c_tot + 500_000, "c_tot grew by exactly the deposit");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting vault == real vault balance");
+    // the parked pnl is still backed by (at least) the same residual.
+    let resid1 = g1.vault as i128 - g1.c_tot as i128 - g1.insurance as i128;
+    assert_eq!(resid1, resid0, "residual backing of the junior pnl unchanged by the deposit");
+    assert!(resid1 >= a1.pnl.max(0), "junior pnl still backed by residual");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
