@@ -13423,3 +13423,43 @@ fn v16_attack_liquidation_isolated_across_assets() {
     assert_eq!(env.portfolio_state(b1).legs, b1_pre.legs, "asset-1 short portfolio legs untouched");
     assert!(g_post.vault >= g_post.c_tot + g_post.insurance, "senior conservation");
 }
+
+// security.md sweep — cross-margin leg close releases its margin (#9/#22 interaction): opening a 2nd leg
+// adds its full requirement (gross, #145); closing one leg must SYMMETRICALLY remove that leg's
+// requirement (no stale margin lock, and no under-margin by dropping too much). Attacker/edge goal: after
+// closing a leg the requirement stays inflated (DoS lock) or collapses below the remaining leg's risk.
+#[test]
+fn v16_attack_cross_margin_leg_close_releases_its_margin() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let xo = Keypair::new(); let x = env.create_portfolio(&xo);
+    let yo = Keypair::new(); let y = env.create_portfolio(&yo);
+    env.deposit(&xo, x, 1_000_000);
+    env.deposit(&yo, y, 1_000_000);
+
+    // open leg 0 (LONG asset 0) -> req1; then leg 1 (SHORT asset 1) -> req2 == 2*req1 (gross).
+    env.trade_asset_with_cu(0, &xo, x, &yo, y, POS_SCALE as i128, 100, 0);
+    let req1 = env.portfolio_state(x).health_cert.certified_initial_req;
+    env.trade_asset_with_cu(1, &xo, x, &yo, y, -(POS_SCALE as i128), 100, 0);
+    let req2 = env.portfolio_state(x).health_cert.certified_initial_req;
+    assert_eq!(req2, 2 * req1, "two legs charge the gross sum (precondition)");
+    assert_eq!(percolator::active_bitmap_count_ones(env.portfolio_state(x).active_bitmap), 2, "x has 2 legs");
+
+    // CLOSE leg 0 (opposite trade on asset 0) -> x should be left with only the asset-1 leg.
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(0, &xo, x, &yo, y, -(POS_SCALE as i128), 100, 0);
+    let xs = env.portfolio_state(x);
+    let req_after = xs.health_cert.certified_initial_req;
+    let g = env.market_state().1;
+
+    // SYMMETRIC RELEASE: closing leg 0 removed exactly its requirement -> back to a single leg's req.
+    assert_eq!(percolator::active_bitmap_count_ones(xs.active_bitmap), 1, "asset-0 leg fully closed, one leg left");
+    assert_eq!(g.assets[0].oi_eff_long_q, 0, "asset-0 OI fully unwound");
+    assert!(g.assets[1].oi_eff_short_q > 0, "asset-1 leg still open");
+    assert_eq!(req_after, req1, "requirement drops back to exactly one leg's req (no stale lock, no under-margin)");
+    // x is still healthy (equity covers the remaining single-leg requirement).
+    assert!(xs.health_cert.valid && xs.health_cert.certified_equity >= 0, "x healthy with the remaining leg");
+    assert!((xs.health_cert.certified_equity as u128) >= req_after, "equity still covers the remaining requirement");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
