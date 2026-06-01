@@ -8344,3 +8344,36 @@ fn v16_regression_profit_withdraw_no_value_printed() {
     let (_, g) = env.market_state();
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation after profit withdraws");
 }
+
+// security.md sweep — privilege/injection (#19/#39): the permissionless crank's funding_rate_e9
+// and recovery_reason are CALLER-supplied. Attacker tries to inject arbitrary funding to drain the
+// counterparty. Gate (v16_program.rs:10092) must reject any nonzero caller value; the real rate is
+// derived internally and clamped to max_abs_funding_e9_per_slot.
+#[test]
+fn v16_attack_crank_caller_funding_rate_injection_rejected() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    let crank_accts = |env: &V16CuEnv| vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(pa, false),
+    ];
+    // attacker-chosen extreme funding rates + nonzero recovery_reason must all be rejected.
+    for (rate, rr) in [(i128::MAX, 0u8), (i128::MIN, 0), (1, 0), (-1, 0), (0, 1u8)] {
+        env.svm.expire_blockhash();
+        let r = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 5, funding_rate_e9: rate, close_q: 0, fee_bps: 0, recovery_reason: rr }, crank_accts(&env), &[]);
+        assert!(r.is_err(), "caller funding_rate_e9={} recovery_reason={} must be rejected", rate, rr);
+    }
+    // a legitimate rate-0 crank still works and conserves.
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 5, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 }, crank_accts(&env), &[]);
+    assert!(r.is_ok(), "rate-0 crank must succeed");
+    let (_, g) = env.market_state();
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation after crank");
+    assert_eq!(g.c_tot, 2_000_000, "no capital injected via funding");
+}
