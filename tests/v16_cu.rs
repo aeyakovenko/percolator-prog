@@ -11304,3 +11304,35 @@ fn v16_attack_wrong_token_program_rejected() {
     let (good, _) = env.withdraw_with_cu(&owner, p, 500_000);
     assert_eq!(env.token_amount(good), 500_000, "withdraw with the real token program works");
 }
+
+// security.md sweep — haircut proportionality with disparate claims (#33/#37): two resolved winners
+// with very different positive-pnl faces (100 vs 900) sharing insufficient backing must be paid
+// PROPORTIONALLY to their claim size (~1:9), and the total must not exceed the backing.
+#[test]
+fn v16_attack_haircut_proportional_to_claim_size() {
+    const BACKING: u128 = 100;
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, BACKING, 10_000);
+    let o1 = Keypair::new(); let p1 = env.create_portfolio(&o1);
+    let o2 = Keypair::new(); let p2 = env.create_portfolio(&o2);
+    env.deposit(&o1, p1, 1_000);
+    env.deposit(&o2, p2, 1_000);
+    env.add_source_positive_pnl(p1, 1, 100); // small claim
+    env.add_source_positive_pnl(p2, 1, 900); // 9x larger claim
+    env.resolve();
+    // two close passes to converge the terminal haircut rate.
+    let mut out1 = 0u128; let mut out2 = 0u128;
+    for _ in 0..2 {
+        let d1 = env.close_resolved(&o1, p1); out1 += env.token_amount(d1) as u128;
+        let d2 = env.close_resolved(&o2, p2); out2 += env.token_amount(d2) as u128;
+    }
+    let hc1 = out1.saturating_sub(1_000); // haircut payout above senior capital
+    let hc2 = out2.saturating_sub(1_000);
+    // proportionality: the larger claim (9x) gets ~9x the haircut payout.
+    assert!(hc1 > 0 && hc2 > 0, "both winners got some haircut payout (hc1={} hc2={})", hc1, hc2);
+    assert!(hc2 >= hc1 * 8 && hc2 <= hc1 * 10, "payout ~proportional to claim size (9x): hc1={} hc2={}", hc1, hc2);
+    // total haircut paid never exceeds the backing (no over-pay).
+    assert!(hc1 + hc2 <= BACKING, "summed haircut payout {} <= backing {}", hc1 + hc2, BACKING);
+    let (_, g) = env.market_state();
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
