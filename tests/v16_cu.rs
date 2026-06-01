@@ -10448,3 +10448,45 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
     assert!(r_ok.is_ok(), "co-signed authority update succeeds: {:?}", r_ok);
     assert_eq!(env.market_state().0.mark_authority, new_mark.pubkey().to_bytes(), "mark authority updated to the co-signing key");
 }
+
+// regression (security.md sweep): round-trip recovery under the junior-pnl model. A price round-trip
+// (100->110->100) leaves the drawdown-first trader's recovery as JUNIOR pnl (realized losses are
+// senior/immediate, recoveries park as junior pnl that is not liquid in Live mode). Value is fully
+// CONSERVED (vault == deposits) and fully RECOVERABLE at resolution — NOT a loss of funds. Documents
+// that per-account LIQUID equity is not symmetric in Live mode, but total value is and resolution pays
+// everyone their fair amount.
+#[test]
+fn v16_regression_roundtrip_recovers_fully_at_resolution() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(0, &lo_owner, lo, &sh_owner, sh, (10_000 * POS_SCALE) as i128, 100, 0);
+    let crank_all = |env: &mut V16CuEnv, s: u64| { for p in [sh, lo] { env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: s, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]); } };
+    // up to 110 then back to 100 (round-trip to breakeven).
+    env.svm.warp_to_slot(10); env.push_auth_mark_with_cu(10, 110);
+    for s in [10u64,11,12] { env.svm.warp_to_slot(s); crank_all(&mut env, s); }
+    env.svm.warp_to_slot(20); env.push_auth_mark_with_cu(20, 100);
+    for s in [20u64,21,22,23,24] { env.svm.warp_to_slot(s); crank_all(&mut env, s); }
+    // close both, crank to convergence.
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(0, &lo_owner, lo, &sh_owner, sh, -(10_000 * POS_SCALE as i128), 100, 0);
+    for s in 25u64..=35 { env.svm.warp_to_slot(s); crank_all(&mut env, s); }
+    // Live-mode invariants: value conserved, short's recovery is junior pnl backed by residual.
+    let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault, 2_000_000, "vault conserved through the round-trip (no value created/destroyed)");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
+    assert!(residual >= b.pnl.max(0), "short's junior recovery pnl is backed by residual");
+    // resolution pays EVERYONE their full fair value — no permanent LoF from the junior-pnl mechanism.
+    env.resolve();
+    let lo_dest = env.close_resolved(&lo_owner, lo);
+    let sh_dest = env.close_resolved(&sh_owner, sh);
+    assert_eq!(env.token_amount(lo_dest), 1_000_000, "long fully recovered at resolution");
+    assert_eq!(env.token_amount(sh_dest), 1_000_000, "short fully recovered at resolution (junior pnl realized)");
+}
