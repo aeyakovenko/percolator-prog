@@ -9595,3 +9595,39 @@ fn v16_attack_backing_withdraw_cannot_strand_liened_winner() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
 
+
+// security.md sweep — deposit atomicity vs underfunded source (#35/#48): depositing more than the
+// source token account holds must fail ATOMICALLY — capital must never be credited before the token
+// transfer succeeds (a credit-before-transfer bug would let an attacker mint capital for free).
+#[test]
+fn v16_attack_deposit_underfunded_source_is_atomic() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    let (_, g0) = env.market_state();
+    // source token account holds only 100, but we attempt to deposit 1_000_000.
+    let source = Pubkey::new_unique();
+    env.svm.set_account(source, Account {
+        lamports: 1_000_000_000, data: make_token_data(env.mint, owner.pubkey(), 100),
+        owner: spl_token::ID, executable: false, rent_epoch: 0,
+    }).unwrap();
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Deposit { amount: 1_000_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(source, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r.is_err(), "depositing more than the source holds must fail (token transfer cannot cover it)");
+    // ATOMIC: no capital credited, vault/c_tot unchanged, source untouched.
+    assert_eq!(env.portfolio_state(p).capital, 0, "no capital credited on failed deposit (no free mint)");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged by failed deposit");
+    assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged by failed deposit");
+    assert_eq!(env.token_amount(source), 100, "source token balance untouched");
+    // a valid deposit within balance still works afterward (state not corrupted).
+    env.svm.expire_blockhash();
+    let r2 = env.send(ProgInstruction::Deposit { amount: 100 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(source, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r2.is_ok(), "valid in-balance deposit succeeds after the failed one");
+    assert_eq!(env.portfolio_state(p).capital, 100, "valid deposit credits exactly 100");
+    assert_eq!(env.market_state().1.vault, g0.vault + 100, "vault grew by exactly the deposited 100");
+}
