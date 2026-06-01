@@ -12031,3 +12031,41 @@ fn v16_attack_wrong_mint_vault_rejected() {
     assert_eq!(env.token_amount(dest), 0, "no tokens out via a wrong-mint vault");
     assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital not debited");
 }
+
+// security.md sweep — no-fee liquidation cranker reward (#3): with no liquidation fee configured
+// (default), a third-party cranker liquidating an insolvent account must receive ZERO reward — no
+// value extraction from a no-fee liquidation. Conservation holds.
+#[test]
+fn v16_attack_no_fee_liquidation_cranker_gets_nothing() {
+    let mut env = V16CuEnv::new(); // default: liquidation_fee_bps = 0
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    let cranker_account = env.create_portfolio(&cranker_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 250);
+    env.deposit(&cranker_owner, cranker_account, 1_000);
+    env.configure_ewma_mark_with_cu(0, 100, 1, 0);
+    env.trade_with_cu(&long_owner, long_account, &short_owner, short_account, POS_SCALE as i128, 100, 0);
+    for (slot, mark) in [(1u64, 300u64), (2, 800)] {
+        env.svm.warp_to_slot(slot); env.push_ewma_mark_with_cu(slot, mark);
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(short_account, false)], &[]);
+    }
+    let cranker0 = env.portfolio_state(cranker_account).capital;
+    let (_, g0) = env.market_state();
+    // liquidate with the cranker portfolio (4 accounts).
+    env.svm.expire_blockhash();
+    let _ = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(cranker_owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(short_account, false), AccountMeta::new(cranker_account, false)], &[&cranker_owner]);
+    // cranker got NO reward (no fee configured).
+    assert_eq!(env.portfolio_state(cranker_account).capital, cranker0, "cranker receives no reward in a no-fee liquidation");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged (internal liquidation, no fee out)");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
