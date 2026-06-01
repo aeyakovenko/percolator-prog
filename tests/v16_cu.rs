@@ -10833,3 +10833,46 @@ fn v16_attack_recovery_tools_owner_gated() {
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
     assert_eq!(g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q, "OI still balanced");
 }
+
+// security.md sweep — operation-sequence conservation (#32/#33 fuzz-lite): a long varied sequence of
+// deposits/trades/flips/price-moves/cranks/withdrawals must never drift the core invariants. Checks
+// real-vault==accounting, c_tot==Σcapitals, senior conservation, OI balance at every checkpoint.
+#[test]
+fn v16_attack_long_sequence_conservation() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let k: Vec<Keypair> = (0..4).map(|_| Keypair::new()).collect();
+    let p: Vec<Pubkey> = k.iter().map(|kp| env.create_portfolio(kp)).collect();
+    for i in 0..4 { env.deposit(&k[i], p[i], 1_000_000); }
+    let check = |env: &V16CuEnv, tag: &str| {
+        let (_, g) = env.market_state();
+        let sum: u128 = p.iter().map(|pp| state::read_portfolio(&env.svm.get_account(pp).unwrap().data).unwrap().capital).sum();
+        assert_eq!(g.c_tot, sum, "[{}] c_tot == Σcapitals", tag);
+        assert!(g.vault >= g.c_tot + g.insurance, "[{}] senior conservation", tag);
+        assert_eq!(g.vault as u64, env.token_amount(env.vault), "[{}] accounting vault == real vault balance", tag);
+        assert_eq!(g.assets[0].oi_eff_long_q, g.assets[0].oi_eff_short_q, "[{}] OI balanced", tag);
+    };
+    check(&env, "deposits");
+    // trades among the 4 accounts (open, partial close, flip).
+    env.trade_asset_with_cu(0, &k[0], p[0], &k[1], p[1], (5_000 * POS_SCALE) as i128, 100, 0); check(&env, "t1");
+    env.svm.expire_blockhash(); env.trade_asset_with_cu(0, &k[2], p[2], &k[3], p[3], (3_000 * POS_SCALE) as i128, 100, 0); check(&env, "t2");
+    // price move + cranks.
+    env.svm.warp_to_slot(10); env.push_auth_mark_with_cu(10, 108);
+    for slot in [10u64, 11] { env.svm.warp_to_slot(slot); for pp in &p { env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(*pp, false)], &[]); } }
+    check(&env, "after move+crank");
+    // a deposit mid-stream + a flip.
+    env.svm.expire_blockhash(); env.deposit(&k[0], p[0], 200_000); check(&env, "mid-deposit");
+    env.svm.expire_blockhash(); env.trade_asset_with_cu(0, &k[1], p[1], &k[0], p[0], (2_000 * POS_SCALE) as i128, 108, 0); check(&env, "flip");
+    // price back, settle, close everyone out.
+    env.svm.warp_to_slot(20); env.push_auth_mark_with_cu(20, 100);
+    for slot in 20u64..=25 { env.svm.warp_to_slot(slot); for pp in &p { env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(*pp, false)], &[]); } }
+    check(&env, "settled");
+    // total real vault still equals accounting; no value created across the whole sequence.
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "final: accounting == real vault");
+    assert!(g.vault <= 4_200_000, "no value created (total deposited 4*1M + 200k)");
+}
