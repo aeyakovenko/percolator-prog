@@ -11958,3 +11958,30 @@ fn v16_attack_third_party_withdraw_preserves_pnl_backing() {
     assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
+// security.md sweep — cumulative TVL cap (#37): MAX_VAULT_TVL must be enforced on the TOTAL vault, not
+// per-deposit. After the vault reaches the cap, any further deposit must reject (the cumulative cap
+// can't be bypassed by splitting deposits).
+#[test]
+fn v16_attack_cumulative_tvl_cap_enforced() {
+    let mut env = V16CuEnv::new();
+    const MAX_TVL: u128 = 10_000_000_000_000_000;
+    let a = Keypair::new(); let pa = env.create_portfolio(&a);
+    let b = Keypair::new(); let pb = env.create_portfolio(&b);
+    // fill the vault to exactly the cap.
+    env.deposit(&a, pa, MAX_TVL);
+    assert_eq!(env.market_state().1.vault, MAX_TVL, "vault at the cap");
+    // a SECOND deposit (even tiny) by another account must reject -- cumulative cap.
+    let src = env.token_account_for_mint(env.mint, b.pubkey(), 100);
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Deposit { amount: 100 }, vec![
+        AccountMeta::new(b.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pb, false),
+        AccountMeta::new(src, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&b]);
+    assert!(r.is_err(), "deposit pushing the vault over MAX_VAULT_TVL must reject (cumulative cap)");
+    assert_eq!(env.portfolio_state(pb).capital, 0, "no capital credited over the cap");
+    assert_eq!(env.market_state().1.vault, MAX_TVL, "vault still exactly at the cap");
+    assert_eq!(env.token_amount(src), 100, "would-be depositor's source untouched");
+    // and the first depositor can still withdraw their funds (cap doesn't lock them).
+    let (d, _) = env.withdraw_with_cu(&a, pa, 1_000_000);
+    assert_eq!(env.token_amount(d), 1_000_000, "funds withdrawable from a capped vault");
+}
