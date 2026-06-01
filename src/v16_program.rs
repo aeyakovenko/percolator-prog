@@ -8634,6 +8634,18 @@ pub mod processor {
                         {
                             return Err(PercolatorError::EngineLockActive.into());
                         }
+                        // Reject zero domain authorities, mirroring the append path
+                        // (activate_dynamic_asset_slot, ~line 1475). A zero
+                        // insurance_authority makes that domain's insurance budget
+                        // withdrawable by nobody (terminal_insurance_remaining rejects a
+                        // zero authority), permanently bricking CloseSlab (Finding F).
+                        if insurance_authority == [0u8; 32]
+                            || insurance_operator == [0u8; 32]
+                            || backing_bucket_authority == [0u8; 32]
+                            || oracle_authority == [0u8; 32]
+                        {
+                            return Err(PercolatorError::InvalidInstruction.into());
+                        }
                         group
                             .header
                             .activate_empty_market_slot_not_atomic(
@@ -9895,9 +9907,21 @@ pub mod processor {
             {
                 expect_signer(owner)?;
             }
+            let insurance_before = group.header.insurance.get();
             let outcome = group
                 .close_resolved_account_not_atomic(&mut portfolio, cfg.maintenance_fee_per_slot)
                 .map_err(map_v16_error)?;
+            // close_resolved can charge an accrued maintenance fee into header.insurance.
+            // Domain-credit it (mirroring SyncMaintenanceFee) so it stays withdrawable via
+            // a per-domain budget; otherwise it strands in aggregate insurance — withdrawable
+            // by nobody — and permanently bricks CloseSlab (Finding G).
+            let retained = group
+                .header
+                .insurance
+                .get()
+                .saturating_sub(insurance_before);
+            credit_maintenance_fee_to_active_market_budgets_view(&cfg, &mut group, retained)?;
+            group.validate_shape().map_err(map_v16_error)?;
             let payout = match outcome {
                 percolator::ResolvedCloseOutcomeV16::ProgressOnly => 0,
                 percolator::ResolvedCloseOutcomeV16::Closed { payout } => payout,

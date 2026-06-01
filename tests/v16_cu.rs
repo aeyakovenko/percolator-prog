@@ -8124,9 +8124,9 @@ fn v16_audit_withdraw_after_cure_and_cancel_close() {
 // reuse a retired slot with insurance_authority = 0; fees later accrued to that
 // asset's domain are withdrawable by nobody (terminal_insurance_remaining rejects
 // a zero authority) -> CloseSlab permanently bricked. This asserts the CORRECT
-// behavior (reuse with a zero authority is REJECTED); it goes RED iff the gap is real.
-// RED: confirmed bug (Finding F). #[ignore]'d so the default suite stays green.
-#[ignore = "RED until reuse path rejects zero domain authorities like the append path (Finding F)"]
+// behavior (reuse with a zero authority is REJECTED).
+// GREEN regression: Finding F fixed in the wrapper reuse branch (v16_program.rs:8651
+// now rejects zero domain authorities, mirroring the append path).
 #[test]
 fn v16_audit_permissionless_reuse_rejects_zero_insurance_authority() {
     let mut env = V16CuEnv::new();
@@ -8190,7 +8190,8 @@ fn v16_audit_permissionless_reuse_rejects_zero_insurance_authority() {
 // (all of group.insurance is attributable to a withdrawable domain budget); it
 // goes RED iff the strand is real. Confirmed by mainnet evidence (market AWCZ2pK,
 // 4060 lamports of stranded dust with every authority = admin).
-#[ignore = "RED until resolved-mode fee charges domain-credit insurance so it stays withdrawable (Finding G)"]
+// GREEN regression: Finding G fixed in handle_close_resolved (the resolved maintenance
+// fee is now domain-credited via credit_maintenance_fee_to_active_market_budgets_view).
 #[test]
 fn v16_audit_resolved_maintenance_fee_insurance_stays_recoverable() {
     // maintenance_fee_per_slot = 5

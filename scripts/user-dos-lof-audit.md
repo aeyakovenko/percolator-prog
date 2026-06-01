@@ -1,25 +1,23 @@
 # User DoS / LoF audit — autonomous find-or-disprove log
 
-## FINAL SUMMARY (D + E FIXED & green; F + G open program bugs)
+## FINAL SUMMARY (ALL FIXED — D/E engine, F/G program; all proofs green)
 
 The user-DoS/LoF sweep converged. **4 confirmed bugs**, each with a LiteSVM proof.
-**D + E are FIXED** in the engine (`b6e23b3`, `f9af174`) and their proofs are now GREEN
-regressions in the default suite. **F + G are open PROGRAM (wrapper) bugs** — their RED
-proofs are `#[ignore]`'d so the default suite stays green (run `cargo test --test v16_cu
--- --ignored`); both are fixable directly in `percolator-prog` (no engine round-trip).
-Everything else disproven or verified sound with line-refs (see ledger below).
+**All 4 are FIXED**: D + E in the engine (`b6e23b3`, `f9af174`); F + G in the wrapper
+(`v16_program.rs`). All four LiteSVM proofs are now GREEN regressions in the default suite
+(no `#[ignore]` remaining). Everything else disproven or verified sound with line-refs below.
 
 | # | Severity | Summary | RED test | One-line fix |
 |---|---|---|---|---|
 | **D** | HIGH | Insolvent resolved market un-drainable: a haircut winner's payout receipt never finalizes (`finalized` needs `paid==full face`, but paid caps at `floor(face·rate)`), so the portfolio can't dematerialize → `WithdrawInsurance`/`CloseSlab` blocked forever. Validates the bounty report. | `v16_audit_insolvent_resolved_winner_can_dematerialize` (GREEN) | **FIXED** engine `b6e23b3` (clear fully-diluted receipt at terminal rate) |
 | **E** | HIGH | `CureAndCancelClose` leaves `close_progress=canceled` (never reset to EMPTY); withdraw requires EMPTY → flat solvent user frozen in Live mode. `Deposit` isn't gated on it → permanent capital sink. | `v16_audit_withdraw_after_cure_and_cancel_close` (GREEN) | **FIXED** engine `f9af174` (withdraw allows an inert canceled ledger) |
-| **F** | market DoS (program) | Permissionless retired-slot reuse (`v16_program.rs:8651`) accepts zero domain authorities (append path rejects at `:1475`) → that domain's insurance is un-withdrawable → `CloseSlab` bricked. | `v16_audit_permissionless_reuse_rejects_zero_insurance_authority` | add the `== [0u8;32] → InvalidInstruction` check at `:8651` |
-| **G** | market DoS (program) | `close_resolved` charges a maintenance fee into `group.insurance` with NO per-domain budget credit; `WithdrawInsurance` caps at Σ domain budgets, so the fee is un-withdrawable by anyone → `CloseSlab` bricked. Corrects the earlier "lockstep" false-negative. Mainnet-confirmed (AWCZ2pK). | `v16_audit_resolved_maintenance_fee_insurance_stays_recoverable` | domain-credit the close-resolved fee (mirror SyncMaintenanceFee) and/or let admin sweep aggregate insurance in Resolved mode |
+| **F** | market DoS (program) | Permissionless retired-slot reuse (`v16_program.rs:8651`) accepts zero domain authorities (append path rejects at `:1475`) → that domain's insurance is un-withdrawable → `CloseSlab` bricked. | `v16_audit_permissionless_reuse_rejects_zero_insurance_authority` (GREEN) | **FIXED** wrapper `:8651` (now rejects zero domain authorities like the append path) |
+| **G** | market DoS (program) | `close_resolved` charges a maintenance fee into `group.insurance` with NO per-domain budget credit; `WithdrawInsurance` caps at Σ domain budgets, so the fee is un-withdrawable by anyone → `CloseSlab` bricked. Corrects the earlier "lockstep" false-negative. Mainnet-confirmed (AWCZ2pK). | `v16_audit_resolved_maintenance_fee_insurance_stays_recoverable` (GREEN) | **FIXED** `handle_close_resolved` now domain-credits the resolved maintenance fee |
 
 **Engine vs program:** D, E are ENGINE bugs (`../percolator`); F, G are PROGRAM bugs (`percolator-prog/src/v16_program.rs`, fixable directly without an engine round-trip).
 
-Wrapper pinned at engine `b6e23b3`. Default suite: 69 pass, 2 ignored (F, G — open PROGRAM bugs).
-D + E fixed and now GREEN regressions; F + G are wrapper-side and still open.
+Wrapper pinned at engine `b6e23b3`. Default suite: v16_cu 71 pass / 0 ignored, v16_wrapper
+196 pass. All findings (A–G) fixed, committed, and pushed.
 
 ---
 
