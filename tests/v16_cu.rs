@@ -12836,3 +12836,61 @@ fn v16_attack_tradenocpi_fee_cannot_be_evaded_via_exec_price() {
     // Declaring a HIGH exec_price must not over-bill either — fee is pinned to the mark, not the caller.
     assert_eq!(fee_for(100_000), fee_at_mark, "exec_price above mark is also billed the mark-based fee");
 }
+
+// security.md sweep — phantom collateral via un-backed positive PnL (#9/#22/#33): an account whose
+// counterparty went insolvent carries a large positive PnL figure that is NOT backed (residual is
+// pinned at the counterparty's recovered capital). Attacker goal: have that face-value paper profit
+// counted as equity (usable as margin / withdrawable). Protection: account_haircut_equity counts
+// positive pnl only at its source-realizable (backed) value, so certified_equity must NOT include the
+// un-backed paper profit at face. Asserts the health cert reflects the backed value, not the face.
+#[test]
+fn v16_attack_unbacked_paper_pnl_not_counted_as_equity() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100); // mark = 100
+    let wa = Keypair::new(); let w = env.create_portfolio(&wa); // winner
+    let la = Keypair::new(); let l = env.create_portfolio(&la); // loser (will go insolvent)
+    env.deposit(&wa, w, 1_000);
+    env.deposit(&la, l, 1_000);
+    // winner long, loser short, full-capital position at the mark (IM=100% -> notional 1000).
+    env.trade_asset_with_cu(0, &wa, w, &la, l, (10 * POS_SCALE) as i128, 100, 0);
+
+    // price explodes 10x: loser's short loss (≈9000) far exceeds its 1000 capital -> insolvent;
+    // winner's long shows ≈ +9000 paper profit that the system cannot actually back.
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 1_000);
+    for p in [l, w] {
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+    }
+    // liquidate the insolvent loser to crystallize the bad debt / pin the residual.
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(l, false)], &[]);
+    // refresh the winner's health cert at the high mark.
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(w, false)], &[]);
+
+    let win = env.portfolio_state(w);
+    let g = env.market_state().1;
+    eprintln!("PHANTOMDBG cap={} pnl={} cert_eq={} valid={} residual={}", win.capital, win.pnl, win.health_cert.certified_equity, win.health_cert.valid, g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance));
+    // non-vacuity: the winner really does carry a large positive paper PnL.
+    assert!(win.pnl > 1_000, "winner carries large paper profit (non-vacuous), pnl={}", win.pnl);
+    // THE INVARIANT: certified equity must NOT include that paper profit at face value. It is bounded by
+    // capital + the realizable (backed) support, which is at most the residual — far below capital+pnl.
+    let face_equity = win.capital as i128 + win.pnl;
+    assert!(win.health_cert.valid, "winner cert refreshed");
+    assert!(
+        win.health_cert.certified_equity < face_equity,
+        "un-backed paper profit must NOT be counted at face: certified_equity={} < capital+pnl={}",
+        win.health_cert.certified_equity, face_equity
+    );
+    let residual = g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance);
+    assert!(
+        (win.health_cert.certified_equity as u128) <= win.capital + residual + 1,
+        "certified equity bounded by capital + residual-backed support (no phantom collateral): eq={} cap={} residual={}",
+        win.health_cert.certified_equity, win.capital, residual
+    );
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation under insolvency");
+}
