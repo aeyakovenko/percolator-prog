@@ -11336,3 +11336,25 @@ fn v16_attack_haircut_proportional_to_claim_size() {
     let (_, g) = env.market_state();
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+
+// security.md sweep — TopUpBackingBucket authorization (#6) + vault pinning (#44): funding a backing
+// bucket is gated to the domain's backing_bucket_authority and routes only to the canonical vault
+// (F-VAULT-FRAG fix). A non-authority must reject.
+#[test]
+fn v16_attack_topup_backing_bucket_authority_gated() {
+    let mut env = V16CuEnv::new();
+    let (_, g0) = env.market_state();
+    let donor = Keypair::new(); env.ensure_signer_account(donor.pubkey());
+    let src = env.token_account_for_mint(env.mint, donor.pubkey(), 500);
+    // non-authority backing top-up -> reject.
+    env.svm.expire_blockhash();
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::TopUpBackingBucket { domain: 0, amount: 500, expiry_slot: 10_000 },
+        vec![AccountMeta::new(donor.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(src, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&donor]);
+    assert!(r.is_err(), "non-authority backing bucket top-up must reject");
+    assert_eq!(env.token_amount(src), 500, "donor source untouched");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
