@@ -13128,3 +13128,43 @@ fn v16_attack_multi_account_asymmetric_funding_conserves() {
     }
     assert!(senior <= (3 * DEPOSIT) as i128, "senior value (capital + realized losses) never exceeds deposits: {}", senior);
 }
+
+// security.md sweep — ConvertReleasedPnl cannot mint from unbacked pnl (#33/#35/#22): the existing
+// caller-cap test (#?) uses FULLY-backed pnl. Here the positive pnl (100) EXCEEDS its source backing
+// (residual 40). Attacker goal: convert the full 100 into withdrawable senior capital, printing 60 of
+// unbacked value. Protection: only the residual-backed portion converts to capital; the phantom excess
+// is cleared (it was never realizable), the account's realizable value is conserved, and the vault is
+// never minted.
+#[test]
+fn v16_attack_convert_released_pnl_cannot_mint_from_unbacked_pnl() {
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, 40, 10_000); // residual backing = 40 in domain 1
+    let o = Keypair::new(); let p = env.create_portfolio(&o);
+    env.deposit(&o, p, 1_000);
+    env.add_source_positive_pnl(p, 1, 100); // claim 100 -> only 40 is backed
+    env.crank(p, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 0, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    let pre = env.portfolio_state(p);
+    let g_pre = env.market_state().1;
+    let residual_pre = g_pre.vault.saturating_sub(g_pre.c_tot).saturating_sub(g_pre.insurance);
+    assert!(pre.pnl > residual_pre as i128, "non-vacuous: pnl ({}) exceeds the backing residual ({})", pre.pnl, residual_pre);
+
+    // ATTACK: convert with a huge cap, trying to realize the full (partly-unbacked) pnl into capital.
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::ConvertReleasedPnl { amount: 1_000_000_000 },
+        vec![AccountMeta::new(o.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[&o]);
+    assert!(r.is_ok(), "convert should succeed (converting the backed portion): {:?}", r);
+
+    let post = env.portfolio_state(p);
+    let g = env.market_state().1;
+    let minted = post.capital as i128 - pre.capital as i128;
+    // ANTI-MINT: capital grew by AT MOST the residual that actually backed the pnl — never the full 100.
+    assert!(minted <= residual_pre as i128, "capital minted ({}) must not exceed backing residual ({})", minted, residual_pre);
+    assert_eq!(minted, residual_pre as i128, "exactly the backed portion (40) converts to capital");
+    assert!(minted < pre.pnl, "the unbacked excess (60) is NOT converted to capital");
+    // realizable value conserved: capital_before + backed (== capital_after); no phantom value created.
+    assert_eq!(post.capital as i128, pre.capital as i128 + residual_pre as i128, "realizable value conserved");
+    // no vault minting + senior conservation.
+    assert_eq!(g.vault, g_pre.vault, "ConvertReleasedPnl moves no vault tokens");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
