@@ -1,5 +1,24 @@
 # User DoS / LoF audit — autonomous find-or-disprove log
 
+## FINAL SUMMARY (sweep complete — awaiting engine fixes)
+
+The user-DoS/LoF sweep converged. **3 confirmed engine bugs**, each with a RED LiteSVM
+proof (`#[ignore]`'d so the default suite stays green — run `cargo test --test v16_cu -- --ignored`).
+Everything else disproven or verified sound with line-refs (see ledger below). No fix for
+D/E/F has landed in the engine yet (HEAD `b1dbf65`, proofs-only); when one lands, bump the
+wrapper rev, run the matching ignored test, and delete its `#[ignore]` to flip it green.
+
+| # | Severity | Summary | RED test | One-line fix |
+|---|---|---|---|---|
+| **D** | HIGH | Insolvent resolved market un-drainable: a haircut winner's payout receipt never finalizes (`finalized` needs `paid==full face`, but paid caps at `floor(face·rate)`), so the portfolio can't dematerialize → `WithdrawInsurance`/`CloseSlab` blocked forever. Validates the bounty report. | `v16_audit_insolvent_resolved_winner_can_dematerialize` | finalize at the haircut entitlement (`paid==floor(face·final_rate)` when the rate is terminal) |
+| **E** | HIGH | `CureAndCancelClose` leaves `close_progress=canceled` (never reset to EMPTY); withdraw requires EMPTY → flat solvent user frozen in Live mode. `Deposit` isn't gated on it → permanent capital sink. | `v16_audit_withdraw_after_cure_and_cancel_close` | reset `close_progress` to EMPTY once the cancel barrier is consumed and no leg references it |
+| **F** | market DoS | Permissionless retired-slot reuse (`v16_program.rs:8651`) accepts zero domain authorities (append path rejects at `:1475`) → that domain's insurance is un-withdrawable → `CloseSlab` bricked. | `v16_audit_permissionless_reuse_rejects_zero_insurance_authority` | add the `== [0u8;32] → InvalidInstruction` check at `:8651` |
+
+Default suite: 67 pass, 3 ignored (the RED proofs). Both repos clean; engine untouched.
+Sweep complete — awaiting engine fixes.
+
+---
+
 Running log of the user-facing denial-of-service / loss-of-funds sweep. Each
 candidate is verified or disproven with a LiteSVM test in `tests/v16_cu.rs`
 (prefix `v16_audit_`).
