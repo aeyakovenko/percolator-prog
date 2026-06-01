@@ -10690,3 +10690,29 @@ fn v16_attack_close_slab_requires_full_winddown() {
     let cr = env.close_resolved(&owner, p);
     assert_eq!(env.token_amount(cr), 1_000_000, "user recovers funds via CloseResolved");
 }
+
+// security.md sweep — WithdrawInsuranceDomain operator authorization (#6): a per-domain insurance
+// withdrawal must be signed by THAT domain's insurance_operator. A non-operator must reject — no
+// draining a domain's insurance by an unauthorized caller.
+#[test]
+fn v16_attack_withdraw_insurance_domain_operator_gated() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(1_000_000);
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+    let (_, g0) = env.market_state();
+    let dest = env.token_account_for_mint(env.mint, mallory.pubkey(), 0);
+    // non-operator attempts a domain insurance withdrawal -> reject.
+    env.svm.expire_blockhash();
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::WithdrawInsuranceDomain { domain: 0, amount: 500_000 },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(dest, false),
+             AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)],
+        &[&mallory]);
+    assert!(r.is_err(), "non-operator domain insurance withdrawal must reject");
+    assert_eq!(env.token_amount(dest), 0, "no insurance drained by non-operator");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.insurance, g0.insurance, "insurance unchanged");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
