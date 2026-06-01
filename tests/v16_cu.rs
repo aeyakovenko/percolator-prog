@@ -11440,3 +11440,45 @@ fn v16_attack_undersized_portfolio_account_realloced_safely() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
 }
+// security.md sweep — max-leg multi-asset conservation (#32/#22): one portfolio holding positions on
+// ALL asset slots must keep every invariant (c_tot==Σcapitals, accounting==real vault, per-asset OI
+// balanced). Probes breadth across the full leg array.
+#[test]
+fn v16_attack_max_leg_multi_asset_conserves() {
+    const N: u16 = 4;
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(N, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    for ai in 1..N {
+        send_tx(&mut env.svm, env.program_id, &env.payer,
+            ProgInstruction::ConfigureAuthMark { asset_index: ai, now_slot: 0, initial_mark_e6: 100 },
+            vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin]).expect("cfg mark");
+    }
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 5_000_000);
+    env.deposit(&lb, pb, 5_000_000);
+    // open a long on every asset from pa vs pb.
+    for ai in 0..N {
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(ai, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    }
+    // every leg opened, conservation across all of them.
+    let (_, g) = env.market_state();
+    for ai in 0..N as usize {
+        assert!(g.assets[ai].oi_eff_long_q > 0, "asset {} position opened", ai);
+        assert_eq!(g.assets[ai].oi_eff_long_q, g.assets[ai].oi_eff_short_q, "asset {} OI balanced", ai);
+    }
+    let sum: u128 = [pa, pb].iter().map(|p| state::read_portfolio(&env.svm.get_account(p).unwrap().data).unwrap().capital).sum();
+    assert_eq!(g.c_tot, sum, "c_tot == Σcapitals across all legs");
+    assert_eq!(g.c_tot, 10_000_000, "no value created across the multi-leg open");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    // crank every asset; still conserves.
+    env.svm.warp_to_slot(5);
+    for ai in 0..N { env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: ai, now_slot: 5, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false)], &[]); }
+    let (_, g2) = env.market_state();
+    assert_eq!(g2.vault as u64, env.token_amount(env.vault), "accounting==real vault after cranking all legs");
+    assert!(g2.vault >= g2.c_tot + g2.insurance, "senior conservation after crank");
+}
