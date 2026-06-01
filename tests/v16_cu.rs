@@ -11621,3 +11621,34 @@ fn v16_attack_vault_with_delegate_rejected() {
     assert_eq!(env.token_amount(dest), 0, "no tokens out via a delegated vault");
     assert_eq!(env.token_amount(env.vault), real_bal, "vault balance intact");
 }
+
+// security.md sweep — dest token account state validation (#44): withdraw must reject a dest that is
+// not Initialized (uninitialized or frozen) — the transfer can't land, so capital must not be debited.
+#[test]
+fn v16_attack_withdraw_to_noninitialized_dest_rejected() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    let do_wd = |env: &mut V16CuEnv, dest: Pubkey| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        env.send(ProgInstruction::Withdraw { amount: 500_000 }, vec![
+            AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+            AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner])
+    };
+    // uninitialized dest (zeroed spl-token-owned account).
+    let uninit = Pubkey::new_unique();
+    env.svm.set_account(uninit, Account { lamports: 1_000_000_000, data: vec![0u8; TokenAccount::LEN], owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    assert!(do_wd(&mut env, uninit).is_err(), "withdraw to an uninitialized dest must reject");
+    // frozen dest.
+    let frozen = Pubkey::new_unique();
+    let mut fd = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(TokenAccount { mint: env.mint, owner: owner.pubkey(), amount: 0, delegate: COption::None, state: AccountState::Frozen, is_native: COption::None, delegated_amount: 0, close_authority: COption::None }, &mut fd).unwrap();
+    env.svm.set_account(frozen, Account { lamports: 1_000_000_000, data: fd, owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    assert!(do_wd(&mut env, frozen).is_err(), "withdraw to a frozen dest must reject");
+    // capital not debited by either rejected withdraw.
+    assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital intact after rejected withdraws");
+    assert_eq!(env.market_state().1.vault, 1_000_000, "vault unchanged");
+    // a valid Initialized dest works.
+    let (good, _) = env.withdraw_with_cu(&owner, p, 500_000);
+    assert_eq!(env.token_amount(good), 500_000, "withdraw to a valid Initialized dest works");
+}
