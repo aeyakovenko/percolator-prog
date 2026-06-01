@@ -11190,3 +11190,52 @@ fn v16_attack_insurance_makes_winner_whole_at_resolution() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
 }
+
+// security.md sweep — funding + maintenance fee combined (#32/#33): an account with a position accrues
+// BOTH premium funding (zero-sum transfer to the counterparty) AND maintenance fees (to insurance).
+// Both must apply together and conserve total value (no tokens created/destroyed; vault==deposited).
+#[test]
+fn v16_attack_funding_and_fee_combined_conserve() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const DEPOSIT: u128 = 10_000_000;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 58,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_ewma_mark_with_cu(0, INITIAL_PRICE, 1, 0);
+    env.update_maintenance_fee_policy_with_cu(0);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, DEPOSIT);
+    env.deposit(&sh_owner, sh, DEPOSIT);
+    env.trade_with_cu(&lo_owner, lo, &sh_owner, sh, POS_SCALE as i128, INITIAL_PRICE, 0);
+    env.svm.warp_to_slot(1); env.push_ewma_mark_with_cu(1, INITIAL_PRICE * 2); // premium
+    for slot in 1..=6u64 {
+        env.svm.warp_to_slot(slot);
+        for p in [lo, sh] {
+            env.svm.expire_blockhash();
+            let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+            env.svm.expire_blockhash();
+            let _ = env.try_sync_maintenance_fee_with_cu(p, None, slot);
+        }
+    }
+    let (_, g) = env.market_state();
+    // funding actually accrued AND fees were charged (non-vacuous combination).
+    assert!(g.assets[0].f_long_num != 0 || g.assets[0].f_short_num != 0, "funding accrued");
+    assert!(g.insurance > 0, "maintenance fees accrued to insurance");
+    // total value conserved: no tokens minted/burned, everything accounted within the vault.
+    assert_eq!(g.vault, 2 * DEPOSIT, "vault == total deposited (funding zero-sum + fees internal)");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting vault == real on-chain vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation under funding + fees");
+    let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+    let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
+    assert!(total_equity + g.insurance as i128 <= g.vault as i128, "no value over-distributed");
+}
