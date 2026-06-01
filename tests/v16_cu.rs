@@ -10102,3 +10102,37 @@ fn v16_attack_withdraw_to_third_party_dest_rejected() {
     let (own, _) = env.withdraw_with_cu(&owner, p, 500_000);
     assert_eq!(env.token_amount(own), 500_000, "withdraw to own dest works");
 }
+
+// security.md sweep — asset_index bounds (#37/#39): an out-of-range asset_index on any instruction
+// must reject cleanly (no OOB access / panic / state corruption).
+#[test]
+fn v16_attack_out_of_range_asset_index_rejected() {
+    let mut env = V16CuEnv::new(); // 1 asset (index 0 valid)
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    let (_, g0) = env.market_state();
+    for bad in [1u16, 7, 255, 9999, u16::MAX] {
+        // trade on a bad asset index
+        env.svm.expire_blockhash();
+        let rt = env.try_trade_asset_with_cu(bad, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+        assert!(rt.is_err(), "trade on out-of-range asset_index {} must reject", bad);
+        // crank on a bad asset index
+        env.svm.expire_blockhash();
+        let rc = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: bad, now_slot: 1, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false)], &[]);
+        assert!(rc.is_err(), "crank on out-of-range asset_index {} must reject", bad);
+        // push auth mark on a bad asset index (admin)
+        env.svm.expire_blockhash();
+        let rm = send_tx(&mut env.svm, env.program_id, &env.payer,
+            ProgInstruction::PushAuthMark { asset_index: bad, now_slot: 1, mark_e6: 100 },
+            vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin]);
+        assert!(rm.is_err(), "push auth mark on out-of-range asset_index {} must reject", bad);
+    }
+    // no corruption from any rejected OOB attempt.
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged");
+    assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no OI created");
+}
