@@ -11590,3 +11590,4 @@ fn v16_attack_ewma_mark_halflife_zero_safe() {
     assert!(g.assets[0].effective_price > 0 && g.assets[0].effective_price <= percolator::MAX_ORACLE_PRICE, "price in valid bounds (no corruption)");
     let _ = r;
 }
+
