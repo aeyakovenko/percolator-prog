@@ -10418,3 +10418,33 @@ fn v16_attack_funding_direction_mark_below_index_conserves() {
     assert!(total_equity + g.insurance as i128 <= g.vault as i128, "no over-distribution");
 }
 
+
+// security.md sweep — UpdateAuthority new-authority binding (#6): setting an authority to a non-zero
+// key requires THAT key to co-sign (handle_update_authority: expect_signer(new_authority) + key match).
+// Otherwise an admin (or attacker) could assign an authority to a key nobody controls (griefing/brick).
+#[test]
+fn v16_attack_update_authority_requires_new_authority_signature() {
+    let mut env = V16CuEnv::new();
+    let victim = Keypair::new(); // a key that will NOT sign
+    let (cfg0, _) = env.market_state();
+    // admin tries to set the MARK authority to `victim` without victim signing -> reject.
+    env.svm.expire_blockhash();
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_MARK, new_pubkey: victim.pubkey().to_bytes() },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new_readonly(victim.pubkey(), false), AccountMeta::new(env.market, false)],
+        &[&env.admin]);
+    assert!(r.is_err(), "setting an authority to a non-signing key must reject");
+    let (cfg1, _) = env.market_state();
+    assert_eq!(cfg1.mark_authority, cfg0.mark_authority, "mark authority unchanged by the rejected update");
+
+    // with the new authority co-signing, the update succeeds.
+    let new_mark = Keypair::new();
+    env.ensure_signer_account(new_mark.pubkey());
+    env.svm.expire_blockhash();
+    let r_ok = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_MARK, new_pubkey: new_mark.pubkey().to_bytes() },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(new_mark.pubkey(), true), AccountMeta::new(env.market, false)],
+        &[&env.admin, &new_mark]);
+    assert!(r_ok.is_ok(), "co-signed authority update succeeds: {:?}", r_ok);
+    assert_eq!(env.market_state().0.mark_authority, new_mark.pubkey().to_bytes(), "mark authority updated to the co-signing key");
+}
