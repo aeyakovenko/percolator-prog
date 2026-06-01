@@ -8653,3 +8653,64 @@ fn v16_attack_insolvent_loser_cannot_withdraw_to_escape() {
     }
     assert_eq!(env.market_state().1.vault, vault_before, "vault untouched by rejected escape attempts");
 }
+
+// regression (security.md sweep): premium-funding + price-move settlement value-conservation.
+// Balanced long/short with a persistent mark premium so funding accrues across slots. Probe whether
+// funding/price settlement creates or destroys net VAULT value, breaks senior conservation, or
+// leaves the winner unbacked. (Initial probe fired on a too-narrow Σ(capital+pnl)==deposits invariant
+// — funding fees accrue to insurance and §6.2 warmup holds an in-vault residual; widened below.)
+#[test]
+fn v16_regression_premium_funding_settlement_conserves_vault() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const DEPOSIT: u128 = 10_000_000;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_ewma_mark_with_cu(0, INITIAL_PRICE, 1, 0);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, DEPOSIT);
+    env.deposit(&sh_owner, sh, DEPOSIT);
+    env.trade_with_cu(&lo_owner, lo, &sh_owner, sh, POS_SCALE as i128, INITIAL_PRICE, 0);
+    // Push the mark premium ONCE at slot 1 (anti-retroactivity: it won't charge funding that slot),
+    // then crank subsequent slots WITHOUT re-pushing so the established premium accrues funding.
+    env.svm.warp_to_slot(1);
+    env.push_ewma_mark_with_cu(1, INITIAL_PRICE * 2);
+    let crank_both = |env: &mut V16CuEnv, slot: u64| {
+        for acct in [lo, sh] {
+            env.svm.expire_blockhash();
+            let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(acct, false)], &[]);
+        }
+    };
+    crank_both(&mut env, 1);
+    for slot in 2..=5u64 {
+        env.svm.warp_to_slot(slot);
+        crank_both(&mut env, slot);
+    }
+    let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+    let (_, g) = env.market_state();
+    // funding must actually have accrued (non-vacuous): the ledger moved off zero.
+    assert!(g.assets[0].f_long_num != 0 || g.assets[0].f_short_num != 0, "funding actually accrued");
+    // Correct (widened) conservation invariant. NOTE: the account-level sum Σ(capital+pnl) is NOT
+    // == deposits here, because funding fees legitimately accrue to INSURANCE and the §6.2 warmup
+    // holds a RESIDUAL buffer in-vault before crediting the winner. The real guarantees are:
+    //   1) no tokens minted/burned: the vault still holds exactly the deposited amount,
+    //   2) senior conservation: vault >= c_tot + insurance,
+    //   3) winner backed: positive pnl <= residual,
+    //   4) no over-distribution: Σ(capital+pnl) + insurance <= vault.
+    assert_eq!(g.vault, 2 * DEPOSIT, "no tokens minted or burned: vault == total deposited");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation under funding");
+    let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
+    assert!(residual >= a.pnl.max(0) + b.pnl.max(0), "positive pnl backed by residual");
+    let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
+    assert!(total_equity + g.insurance as i128 <= g.vault as i128, "no value over-distributed beyond the vault");
+    assert!(g.assets[0].f_long_num < 0 && g.assets[0].f_short_num > 0, "longs pay shorts under mark premium");
+}
