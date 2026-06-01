@@ -11591,3 +11591,33 @@ fn v16_attack_ewma_mark_halflife_zero_safe() {
     let _ = r;
 }
 
+
+// security.md sweep — vault delegate/close-authority guard (#44 defense-in-depth): the wrapper rejects
+// a vault token account that has a delegate or close_authority set (verify_withdrawable_token_accounts).
+// This prevents any delegated/closable drain path on the vault. Verify a delegated vault is rejected.
+#[test]
+fn v16_attack_vault_with_delegate_rejected() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000); // funds the canonical vault
+    let real_bal = env.token_amount(env.vault);
+    // overwrite the canonical vault with the SAME balance/mint/owner but a DELEGATE set.
+    let attacker = Pubkey::new_unique();
+    let mut delegated = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(TokenAccount {
+        mint: env.mint, owner: env.vault_authority, amount: real_bal,
+        delegate: COption::Some(attacker), state: AccountState::Initialized, is_native: COption::None,
+        delegated_amount: real_bal, close_authority: COption::None,
+    }, &mut delegated).unwrap();
+    env.svm.set_account(env.vault, Account { lamports: 1_000_000_000, data: delegated, owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    // withdraw against the delegated vault -> reject.
+    env.svm.expire_blockhash();
+    let dest = Pubkey::new_unique();
+    env.svm.set_account(dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, owner.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    let r = env.send(ProgInstruction::Withdraw { amount: 500_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r.is_err(), "withdraw against a delegated vault must reject (defense-in-depth)");
+    assert_eq!(env.token_amount(dest), 0, "no tokens out via a delegated vault");
+    assert_eq!(env.token_amount(env.vault), real_bal, "vault balance intact");
+}
