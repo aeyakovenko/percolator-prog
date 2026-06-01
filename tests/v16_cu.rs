@@ -13168,3 +13168,64 @@ fn v16_attack_convert_released_pnl_cannot_mint_from_unbacked_pnl() {
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+
+// security.md sweep — ADL deleverage + subsequent settlement interaction (#9/#22/#33): after a partial
+// liquidation deleverages the winning side (a_long < ADL_ONE), the winner's NEXT mark settlement uses
+// its a_basis vs the reduced a_long (scaled_adl_delta). Attacker goal: have the winner still realize its
+// FULL pre-ADL gain into spendable capital (escaping the deleverage), or have the combined ADL+settle
+// sequence mint vault value. Protection: the winner's realizable value stays bounded by capital+residual
+// and the vault is never minted across the whole sequence. (Interaction not covered by single-mechanism
+// tests: #141 tests ADL's a-factor; this exercises ADL THEN settlement of the deleveraged leg.)
+#[test]
+fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    let la = Keypair::new(); let a = env.create_portfolio(&la); // long winner
+    let lb = Keypair::new(); let b = env.create_portfolio(&lb); // short loser
+    env.deposit(&la, a, 1_000);
+    env.deposit(&lb, b, 1_000);
+    env.trade_asset_with_cu(0, &la, a, &lb, b, (2 * POS_SCALE) as i128, 100, 0);
+    let vault0 = env.market_state().1.vault; // == 2000, the only real tokens in the system
+
+    // price up: short insolvent; settle both, then PARTIAL liquidate the short -> a_long deleverages.
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 500);
+    for p in [b, a] {
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+    }
+    env.svm.expire_blockhash();
+    let rl = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(b, false)], &[]);
+    assert!(rl.is_ok(), "partial liquidation should proceed: {:?}", rl);
+    let g_adl = env.market_state().1;
+    assert!(g_adl.assets[0].a_long < ADL_ONE, "winner deleveraged (ADL engaged), a_long={}", g_adl.assets[0].a_long);
+
+    // SECOND mark move + crank the winner: this settles the deleveraged leg (a_basis vs reduced a_long).
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 800);
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 3, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(a, false)], &[]);
+
+    let win = env.portfolio_state(a);
+    let g = env.market_state().1;
+    // non-vacuity: the winner really does carry a paper gain after the moves.
+    assert!(win.pnl > 0, "winner carries a positive paper gain (non-vacuous), pnl={}", win.pnl);
+    // NO MINT across the whole ADL+settle sequence: the vault still holds exactly the original deposits.
+    assert_eq!(g.vault, vault0, "ADL + settlement minted no vault tokens");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    // the winner cannot escape the deleverage: its REALIZABLE value (capital + backed pnl) is bounded by
+    // capital + residual — the deleveraged/unbacked gain is NOT spendable (certified equity reflects it).
+    let residual = g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance);
+    assert!(win.health_cert.valid, "winner cert valid after settlement");
+    assert!(
+        (win.health_cert.certified_equity as u128) <= win.capital + residual + 1,
+        "winner realizable value bounded by capital+residual (deleverage not escaped): eq={} cap={} residual={}",
+        win.health_cert.certified_equity, win.capital, residual
+    );
+    // The deleverage caps how much the winner can realize: the surviving gain equals exactly the backed
+    // portion (a winner can never pull more than the system holds — and the vault was never minted, above).
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation through ADL + settlement");
+}
