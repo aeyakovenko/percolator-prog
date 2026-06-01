@@ -12493,7 +12493,7 @@ fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
     let cur = env.svm.get_sysvar::<Clock>().slot;
 
     // helper: inline TopUpBackingBucket returning Result (the env helper panics on reject).
-    let mut top_up = |env: &mut V16CuEnv, amount: u128, expiry: u64| -> Result<u64, String> {
+    let top_up = |env: &mut V16CuEnv, amount: u128, expiry: u64| -> Result<u64, String> {
         let source = Pubkey::new_unique();
         env.svm
             .set_account(
@@ -12579,7 +12579,7 @@ fn v16_attack_insurance_limited_withdraw_rate_limited() {
         &[&env.admin]).expect("set insurance policy");
     let admin = env.admin.insecure_clone();
 
-    let mut try_withdraw = |env: &mut V16CuEnv, amount: u128| -> Result<u64, String> {
+    let try_withdraw = |env: &mut V16CuEnv, amount: u128| -> Result<u64, String> {
         let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
         env.svm.expire_blockhash();
         send_tx(&mut env.svm, env.program_id, &env.payer,
@@ -12610,6 +12610,55 @@ fn v16_attack_insurance_limited_withdraw_rate_limited() {
     try_withdraw(&mut env, 50_000).expect("post-cooldown withdraw ok");
     let g = env.market_state().1;
     assert_eq!(g.insurance, ins1 - 50_000, "post-cooldown withdraw debits insurance");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
+
+// security.md sweep — WithdrawInsuranceLimited deposits_only protection (#6/#23): when the policy is
+// deposits_only, the cap is min(max_bps cap, deposit_remaining), and deposit_remaining only accrues from
+// TopUpInsurance made WHILE deposits_only is active. Insurance accumulated otherwise (pre-policy deposits,
+// or fees) is NOT withdrawable by the operator. Attacker goal: an operator pulls the protocol's earned /
+// pre-existing insurance out via the limited path under deposits_only.
+#[test]
+fn v16_attack_insurance_deposits_only_protects_protocol_funds() {
+    let mut env = V16CuEnv::new();
+    env.svm.warp_to_slot(1_000);
+    // (i) 300k topped up BEFORE deposits_only is enabled -> does NOT count toward deposit_remaining.
+    env.top_up_insurance(300_000);
+    // (ii) enable deposits_only with a non-binding bps cap (100%) and no cooldown.
+    send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateInsurancePolicy { max_bps: 10_000, deposits_only: 1, cooldown_slots: 0 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)],
+        &[&env.admin]).expect("set deposits_only policy");
+    // (iii) 500k topped up WHILE deposits_only is active -> deposit_remaining = 500k.
+    env.top_up_insurance(500_000);
+    let admin = env.admin.insecure_clone();
+    let ins_total = env.market_state().1.insurance;
+    assert_eq!(ins_total, 800_000, "insurance holds both tranches");
+
+    let try_withdraw = |env: &mut V16CuEnv, amount: u128| -> Result<u64, String> {
+        let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+        env.svm.expire_blockhash();
+        send_tx(&mut env.svm, env.program_id, &env.payer,
+            ProgInstruction::WithdrawInsuranceLimited { amount },
+            vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(dest, false),
+                 AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)],
+            &[&admin])
+    };
+
+    // cap = min(100% of 800k, deposit_remaining=500k) = 500k. Over that must reject.
+    assert!(try_withdraw(&mut env, 500_001).is_err(), "withdraw > deposit_remaining must reject");
+    assert_eq!(env.market_state().1.insurance, 800_000, "insurance untouched by rejected withdraw");
+
+    // Withdraw exactly the deposited principal (500k) -> success.
+    try_withdraw(&mut env, 500_000).expect("withdraw of deposited principal ok");
+    assert_eq!(env.market_state().1.insurance, 300_000, "only the 300k protocol tranche remains");
+
+    // The remaining 300k was NOT deposited under deposits_only -> deposit_remaining is now 0 -> the
+    // operator cannot touch it via the limited path, even though insurance is still 300k > 0.
+    assert!(try_withdraw(&mut env, 1).is_err(), "protocol-retained insurance must NOT be operator-withdrawable");
+    let g = env.market_state().1;
+    assert_eq!(g.insurance, 300_000, "protocol tranche fully protected");
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
