@@ -11239,3 +11239,35 @@ fn v16_attack_funding_and_fee_combined_conserve() {
     let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
     assert!(total_equity + g.insurance as i128 <= g.vault as i128, "no value over-distributed");
 }
+
+// security.md sweep — multi-party exposure transfer (#32/#33): A goes long vs B (short); then B closes
+// by going long vs C (short). Exposure passes B->C. OI must stay balanced, B ends flat, and value is
+// conserved through the chain (no leakage at the intermediary).
+#[test]
+fn v16_attack_exposure_transfer_chain_conserves() {
+    let mut env = V16CuEnv::new();
+    let a = Keypair::new(); let pa = env.create_portfolio(&a);
+    let b = Keypair::new(); let pb = env.create_portfolio(&b);
+    let c = Keypair::new(); let pc = env.create_portfolio(&c);
+    env.deposit(&a, pa, 1_000_000);
+    env.deposit(&b, pb, 1_000_000);
+    env.deposit(&c, pc, 1_000_000);
+    let (_, g0) = env.market_state();
+    // A long vs B short.
+    env.trade_asset_with_cu(0, &a, pa, &b, pb, POS_SCALE as i128, 100, 0);
+    assert_eq!(env.portfolio_state(pa).legs[0].basis_pos_q, POS_SCALE as i128, "A long");
+    assert_eq!(env.portfolio_state(pb).legs[0].basis_pos_q, -(POS_SCALE as i128), "B short");
+    // B closes by going long vs C (B: -1 -> 0; C: 0 -> -1). Exposure transferred B->C.
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(0, &b, pb, &c, pc, POS_SCALE as i128, 100, 0);
+    assert_eq!(env.portfolio_state(pb).legs[0].basis_pos_q, 0, "B now flat (exposure passed to C)");
+    assert_eq!(env.portfolio_state(pc).legs[0].basis_pos_q, -(POS_SCALE as i128), "C now short");
+    assert_eq!(env.portfolio_state(pa).legs[0].basis_pos_q, POS_SCALE as i128, "A still long");
+    // OI balanced (A's long matched by C's short), conservation, accounting==real vault.
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q, "OI balanced after transfer");
+    assert_eq!(g1.c_tot, g0.c_tot, "c_tot conserved (no fees) through the chain");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
