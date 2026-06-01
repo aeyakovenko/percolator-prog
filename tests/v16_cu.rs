@@ -8306,3 +8306,41 @@ fn v16_attack_extreme_size_trade_rejected_no_panic() {
     assert_eq!(g.assets[0].oi_eff_long_q, 0, "no OI from rejected extreme-size trades");
     assert_eq!(g.c_tot, 2_000_000, "no capital moved");
 }
+
+// regression (security.md sweep): value extraction (#33/#35) — after a winner realizes profit and
+// closes, withdraw each leg's full capital through the REAL token vault. Attacker success = total tokens
+// out > total deposited (value printed) OR vault drops below c_tot+insurance (unbacked extraction).
+#[test]
+fn v16_regression_profit_withdraw_no_value_printed() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, 110); // winner = long (la)
+    env.crank(pa, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 10, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    env.svm.expire_blockhash();
+    env.crank(pb, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 10, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, -(POS_SCALE as i128), 110, 0); // both flat
+
+    // Each withdraws its full capital through the token vault.
+    let cap_a = state::read_portfolio(&env.svm.get_account(&pa).unwrap().data).unwrap().capital;
+    let cap_b = state::read_portfolio(&env.svm.get_account(&pb).unwrap().data).unwrap().capital;
+    env.svm.expire_blockhash();
+    let dest_a = env.withdraw(&la, pa, cap_a);
+    env.svm.expire_blockhash();
+    let dest_b = env.withdraw(&lb, pb, cap_b);
+
+    let bal = |env: &V16CuEnv, k: &Pubkey| -> u64 {
+        let d = env.svm.get_account(k).unwrap().data;
+        u64::from_le_bytes(d[64..72].try_into().unwrap())
+    };
+    let out = bal(&env, &dest_a) as u128 + bal(&env, &dest_b) as u128;
+    assert!(out <= 2_000_000, "no value printed: tokens out {} <= deposited 2_000_000", out);
+    let (_, g) = env.market_state();
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation after profit withdraws");
+}
