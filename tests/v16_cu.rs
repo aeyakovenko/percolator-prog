@@ -12724,3 +12724,39 @@ fn v16_attack_swap_secondary_unauthorized_and_bounded() {
     assert_eq!(env.token_amount(a_secondary), 50, "exactly 50 secondary delivered 1:1");
     assert_eq!(env.token_amount(secondary_vault), 0, "secondary reserve fully drained, not more");
 }
+
+// security.md sweep — ForceCloseAbandonedAsset griefing protection (#2/#6/#9): the permissionless
+// force-close is meant ONLY for an asset whose oracle died and that has aged into RECOVERY lifecycle
+// past force_close_delay_slots. Attacker goal: a cranker force-closes a HEALTHY, actively-traded asset
+// to nuke a victim's open position. Must reject (asset is ACTIVE, not RECOVERY); positions stay intact.
+#[test]
+fn v16_attack_force_close_healthy_asset_rejected() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::ConfigureAuthMark { asset_index: 1, now_slot: 0, initial_mark_e6: 100 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin]).expect("cfg asset1 mark");
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    env.trade_asset_with_cu(1, &la, pa, &lb, pb, POS_SCALE as i128, 100, 100);
+    let (_, g0) = env.market_state();
+    // non-vacuity at the market level (legs are slot-indexed, not asset-indexed): asset 1 carries OI.
+    assert!(g0.assets[1].oi_eff_long_q > 0, "open interest exists on the healthy asset 1");
+    assert_eq!(g0.assets[1].oi_eff_long_q, g0.assets[1].oi_eff_short_q, "asset-1 OI balanced pre-attack");
+
+    // ATTACK: a permissionless cranker force-closes the ACTIVE asset 1. now_slot is far in the future so
+    // any force_close_delay window would have elapsed — the ONLY thing blocking is that the asset is not
+    // abandoned (lifecycle != RECOVERY). Must reject.
+    let cranker = Keypair::new();
+    let r = env.try_force_close_abandoned_asset_with_cu(&cranker, pa, pb, 1, 5_000_000, POS_SCALE);
+    assert!(r.is_err(), "force-close of a healthy ACTIVE asset must reject (not abandoned)");
+
+    // positions untouched (OI intact at the market level), value conserved.
+    let g1 = env.market_state().1;
+    assert_eq!(g1.assets[1].oi_eff_long_q, g0.assets[1].oi_eff_long_q, "asset-1 long OI intact (no force-close)");
+    assert_eq!(g1.assets[1].oi_eff_short_q, g0.assets[1].oi_eff_short_q, "asset-1 short OI intact");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged by rejected force-close");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
