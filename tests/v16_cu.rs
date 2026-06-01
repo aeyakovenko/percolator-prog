@@ -10555,3 +10555,40 @@ fn v16_attack_mark_push_clamped_per_slot() {
     let (_, g) = env.market_state();
     assert!(g.assets[0].effective_price <= 800, "after 3 clamped slots, price is far below the 1,000,000 push (got {})", g.assets[0].effective_price);
 }
+
+// security.md sweep — CloseResolved dest validation (#44): the resolved payout must reject a dest
+// token account of the wrong mint or owned by a third party (verify_withdrawable_token_accounts
+// applies here too). No payout to a mismatched/foreign account.
+#[test]
+fn v16_attack_close_resolved_dest_validation() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    env.resolve();
+    let (_, g0) = env.market_state();
+    let cr = |env: &mut V16CuEnv, dest: Pubkey, signer: &Keypair| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        env.send(ProgInstruction::CloseResolved { fee_rate_per_slot: 0 }, vec![
+            AccountMeta::new_readonly(signer.pubkey(), false), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+            AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[])
+    };
+    // wrong-mint dest -> reject.
+    let other_mint = Pubkey::new_unique();
+    let bad_mint_dest = Pubkey::new_unique();
+    env.svm.set_account(bad_mint_dest, Account { lamports: 1_000_000_000, data: make_token_data(other_mint, owner.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    assert!(cr(&mut env, bad_mint_dest, &owner).is_err(), "CloseResolved to a wrong-mint dest must reject");
+    assert_eq!(env.token_amount(bad_mint_dest), 0, "no payout to wrong-mint dest");
+
+    // third-party-owned dest -> reject.
+    let other = Keypair::new();
+    let foreign_dest = Pubkey::new_unique();
+    env.svm.set_account(foreign_dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, other.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    assert!(cr(&mut env, foreign_dest, &owner).is_err(), "CloseResolved to a third-party dest must reject");
+    assert_eq!(env.token_amount(foreign_dest), 0, "no payout to foreign dest");
+
+    assert_eq!(env.market_state().1.vault, g0.vault, "vault unchanged by rejected payouts");
+    assert_eq!(env.portfolio_state(p).capital, 1_000_000, "portfolio still owed its capital");
+    // correct dest works.
+    let good = env.close_resolved(&owner, p);
+    assert_eq!(env.token_amount(good), 1_000_000, "correct-mint own dest receives the resolved payout");
+}
