@@ -11652,3 +11652,28 @@ fn v16_attack_withdraw_to_noninitialized_dest_rejected() {
     let (good, _) = env.withdraw_with_cu(&owner, p, 500_000);
     assert_eq!(env.token_amount(good), 500_000, "withdraw to a valid Initialized dest works");
 }
+
+// security.md sweep — vault_authority PDA validation (#44): the withdraw must verify the passed
+// vault_authority account is the canonical derived PDA (expect_key). A wrong/attacker-chosen
+// vault_authority must reject — otherwise a controlled authority could sign the vault transfer.
+#[test]
+fn v16_attack_wrong_vault_authority_rejected() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    let (_, g0) = env.market_state();
+    let dest = Pubkey::new_unique();
+    env.svm.set_account(dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, owner.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    let bad_authority = Pubkey::new_unique(); // not the derived vault PDA
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Withdraw { amount: 500_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(bad_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r.is_err(), "withdraw with a non-canonical vault_authority must reject");
+    assert_eq!(env.token_amount(dest), 0, "no tokens out via a wrong vault_authority");
+    assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital not debited");
+    assert_eq!(env.market_state().1.vault, g0.vault, "vault unchanged");
+    // the correct vault_authority still works.
+    let (good, _) = env.withdraw_with_cu(&owner, p, 500_000);
+    assert_eq!(env.token_amount(good), 500_000, "withdraw with the canonical vault_authority works");
+}
