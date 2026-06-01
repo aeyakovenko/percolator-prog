@@ -12324,3 +12324,33 @@ fn v16_attack_market0_fees_stay_local() {
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+
+// security.md sweep — fee-redirect 100% boundary (#32/#33) [fee-routing #4]: with redirect=10000, ALL
+// of market N's fees must route to market 0's domains and NONE stays local. Boundary precision of the
+// redirect split.
+#[test]
+fn v16_attack_fee_redirect_full_boundary() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::ConfigureAuthMark { asset_index: 1, now_slot: 0, initial_mark_e6: 100 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin]).expect("cfg mark");
+    env.update_fee_redirect_policy_with_cu(10_000); // 100% redirect to market 0
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 5_000_000);
+    env.deposit(&lb, pb, 5_000_000);
+    let dom = |env: &V16CuEnv, d: usize| env.market_state().1.insurance_domain_budget[d];
+    let (b0, b1, b2, b3) = (dom(&env,0), dom(&env,1), dom(&env,2), dom(&env,3));
+    let ins0 = env.market_state().1.insurance;
+    env.trade_asset_with_cu(1, &la, pa, &lb, pb, (10_000 * POS_SCALE) as i128, 100, 100);
+    let to_mkt0 = (dom(&env,0)-b0) + (dom(&env,1)-b1);
+    let to_mkt1 = (dom(&env,2)-b2) + (dom(&env,3)-b3);
+    let total_fee = env.market_state().1.insurance - ins0;
+    assert!(total_fee > 0, "fee charged (non-vacuous)");
+    assert_eq!(to_mkt0, total_fee, "100% redirect: ALL of market-1 fee went to market 0");
+    assert_eq!(to_mkt1, 0, "100% redirect: NOTHING stayed local in market 1");
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
