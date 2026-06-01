@@ -9883,3 +9883,41 @@ fn v16_attack_tradecpi_self_trade_rejected() {
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
     assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged");
 }
+
+// security.md sweep — CureAndCancelClose deposit accounting (#35/#48): the cure's optional_deposit
+// must credit capital EXACTLY once matching the token transfer (no free-mint), and reject atomically
+// if the source is underfunded. Finding E covered withdraw-after-cure; this covers the deposit leg.
+#[test]
+fn v16_attack_cure_deposit_exact_and_atomic() {
+    let mut env = V16CuEnv::new();
+    // account A: cure WITH a funded deposit -> capital credited exactly, source drained.
+    let a_owner = Keypair::new(); let a = env.create_portfolio(&a_owner);
+    env.deposit(&a_owner, a, 100);
+    env.seed_cancellable_close_progress(a);
+    let src_a = env.token_account_for_mint(env.mint, a_owner.pubkey(), 50);
+    let (_, g_pre) = env.market_state();
+    env.cure_and_cancel_close_with_cu(&a_owner, a, src_a, 50);
+    assert_eq!(env.portfolio_state(a).capital, 150, "cure deposit credits capital exactly (100 + 50)");
+    assert_eq!(env.token_amount(src_a), 0, "source token account drained by exactly the deposit");
+    let (_, g_mid) = env.market_state();
+    assert_eq!(g_mid.vault, g_pre.vault + 50, "vault grew by exactly the cure deposit");
+    assert_eq!(g_mid.vault, g_mid.c_tot + g_mid.insurance, "conservation after cure deposit");
+
+    // account B: cure with optional_deposit > source balance -> reject ATOMICALLY (no free-mint).
+    let b_owner = Keypair::new(); let b = env.create_portfolio(&b_owner);
+    env.deposit(&b_owner, b, 100);
+    env.seed_cancellable_close_progress(b);
+    let src_b = env.token_account_for_mint(env.mint, b_owner.pubkey(), 50);
+    let vault_before_failed_cure = env.market_state().1.vault; // after B's deposit
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::CureAndCancelClose { optional_deposit: 1_000 }, vec![
+        AccountMeta::new(b_owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(b, false),
+        AccountMeta::new(src_b, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&b_owner]);
+    assert!(r.is_err(), "cure deposit exceeding source balance must reject");
+    assert_eq!(env.portfolio_state(b).capital, 100, "no capital credited on failed cure (no free-mint)");
+    assert_eq!(env.token_amount(src_b), 50, "source untouched on failed cure");
+    let (_, g_end) = env.market_state();
+    assert_eq!(g_end.vault, vault_before_failed_cure, "vault unchanged by failed cure");
+    assert_eq!(g_end.vault, g_end.c_tot + g_end.insurance, "conservation intact");
+    let _ = g_mid;
+}
