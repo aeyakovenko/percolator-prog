@@ -8565,3 +8565,51 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
     // No capital was conjured: total realized capital <= total deposited.
     assert!((lo.capital + sh.capital) <= 1_000_250, "no capital printed (got {})", lo.capital + sh.capital);
 }
+
+// security.md sweep — insurance backstop accounting (#33/#9): with a pre-funded insurance fund,
+// bad debt from an insolvent loser should be absorbed by insurance so the winner is closer to
+// whole, WITHOUT insurance going negative or the vault being over-credited. Probe: same insolvency
+// as batch 16 but with seeded insurance; assert insurance never underflows and senior conservation
+// holds (vault >= c_tot + insurance) with insurance accounted, no value printed.
+#[test]
+fn v16_attack_insurance_backstop_absorbs_bad_debt_no_underflow() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(1_000_000); // junior backstop
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 250);
+    env.configure_ewma_mark_with_cu(0, 100, 1, 0);
+    env.trade_with_cu(&long_owner, long_account, &short_owner, short_account, POS_SCALE as i128, 100, 0);
+
+    let (_, g_before) = env.market_state();
+    let ins_before = g_before.insurance;
+    let vault_before = g_before.vault;
+
+    for (slot, mark) in [(1u64, 300u64), (2, 800)] {
+        env.svm.warp_to_slot(slot);
+        env.push_ewma_mark_with_cu(slot, mark);
+        for acct in [long_account, short_account] {
+            env.svm.expire_blockhash();
+            let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(acct, false)], &[]);
+        }
+    }
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(short_account, false)], &[]);
+
+    let lo = state::read_portfolio(&env.svm.get_account(&long_account).unwrap().data).unwrap();
+    let sh = state::read_portfolio(&env.svm.get_account(&short_account).unwrap().data).unwrap();
+    let (_, g) = env.market_state();
+    // insurance is a u128 accumulator: it must never wrap/underflow under bad-debt absorption.
+    assert!(g.insurance <= ins_before, "insurance only spent (not conjured): {} <= {}", g.insurance, ins_before);
+    // vault token balance is not increased by the bad-debt event (no minting).
+    assert!(g.vault <= vault_before, "vault not over-credited: {} <= {}", g.vault, vault_before);
+    // senior conservation with insurance fully accounted.
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation with insurance backstop");
+    let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
+    assert!(residual >= lo.pnl.max(0) + sh.pnl.max(0), "winner profit backed by residual");
+}
