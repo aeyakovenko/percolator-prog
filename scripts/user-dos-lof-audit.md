@@ -44,26 +44,50 @@ position (clear_leg leaves close_progress untouched) → flat but frozen.
 Fix: reset `close_progress` to EMPTY once the cancel barrier is consumed and no leg
 references it, or have withdraw treat a `canceled`/inert ledger as withdrawable.
 
+**E is worse than just the cured capital — it's a permanent capital SINK.** `Deposit`
+does NOT gate on `close_progress` (`deposit_not_atomic`, `v16.rs:11613`, only
+validate_with_market which permits a non-EMPTY ledger), so the user can keep
+depositing into a canceled-close account, and every later deposit is also frozen.
+`ClosePortfolio` is blocked too because it requires `capital == 0` but cure restored
+positive capital. Root cause: `close_progress` has FOUR engine writers
+(`begin`/`advance`/`advance_quantity_adl`/`cure`, none writes EMPTY post-init), so once
+non-EMPTY it stays non-EMPTY for the account's life.
+
 ---
 
-## PENDING (to verify/disprove)
-- Maintenance-fee drain on a position the user can't exit (stale oracle / drain-only).
-- Haircut under-paying a winner who can't realize (ConvertReleasedPnl / resolved).
-- Deposit trapped behind a reservation / mode the user can't exit.
-- Trade/liquidation counterparty griefing extracting user value.
-- Third-party making a user's portfolio un-closable.
-- Position un-exitable due to stale/bad oracle (no liquidation/resolve escape).
+## PENDING (market-DoS, lower priority than user-facing)
 - Zero-authority strandings: permissionless retired-slot reuse (`v16_program.rs:8651`)
-  + UpdateAuthority burn — market DoS, not strictly user; verify.
+  accepts zero domain authorities (append path rejects at `:1475`); `UpdateAuthority`
+  burns insurance/backing/mark authorities to zero. Strands a domain's insurance ->
+  CloseSlab bricked. Reachable; verify via LiteSVM.
 
-## DISPROVEN / FALSE POSITIVES (do not re-report as live bugs)
-- Insurance/domain-budget arithmetic mismatch — REFUTED: strict lockstep on every
-  credit/spend; aggregate insurance == Σ domain budgets.
+## DISPROVEN / FALSE POSITIVES (traced read-only with resetter line-refs)
+User value-extraction gating fields — all but close_progress/receipt have a reachable
+resetter or are unreachable-positive in this revision:
+- `close_progress.finalized` — implies bankrupt account => `capital == 0` (negative pnl
+  consumed first, `v16.rs:10087`); `ClosePortfolio` gates on `has_pending_residual()`
+  which is false when finalized -> closable. Not a freeze.
+- `reserved_pnl` — only written down/zero (`v16.rs:7016`, `11544`); never set positive
+  from zero this revision. Not a freeze.
+- `cancel_deposit_escrow` — only ever written to 0 (`v16.rs:11217`, `12306`); dead.
+- `stale_state` / `b_stale_state` — permissionless resetters `clear_account_stale`
+  (`v16.rs:7397`) / `clear_account_b_stale` (`v16.rs:7698`) via crank-refresh.
+- `source_claim_bound_num` — Resolved burn releases liens (`v16.rs:5777`) -> zeroed in
+  close_resolved.
+- `ConvertReleasedPnl` — Live with no source claim returns 0 -> `Err(LockActive)`, PnL
+  NOT lost (stays claimable at resolution); haircut math symmetric with the receipt path.
+  No loss/freeze.
+- Maintenance/trade/liq fees — `charge_account_fee_current_not_atomic` caps at
+  `min(fee, capital)` and skips when `pnl<0` (`v16.rs:10665`); never drives capital
+  negative; user always has a permissionless exit (ResolveStalePermissionless,
+  risk-reducing trade, CloseResolved).
+
+Other disproven (prior passes):
+- Insurance/domain-budget arithmetic mismatch — REFUTED: strict lockstep; aggregate
+  insurance == Σ domain budgets.
 - Dead-code reservations: `insurance_credit_reserved_num`, `impaired/consumed_liened_backing`,
-  `expire_source_backing_bucket`, standalone `add_source_positive_claim_bound`,
-  `cancel_deposit_escrow` funding — no production caller; latent only.
-- Funding zero-sum / health-cert epoch staleness — verified safe in prior passes.
-- Secondary-mint outbound-either-mint — by design (documented base-unit path); amount
-  never shorted, only mint quality.
+  `expire_source_backing_bucket`, standalone `add_source_positive_claim_bound` — no caller.
+- Funding zero-sum / health-cert epoch staleness — verified safe.
+- Secondary-mint outbound-either-mint — by design; amount never shorted, only mint quality.
 - (Process) earlier "bounty report is a misdiagnosis with escapes" — FALSE NEGATIVE;
   the symptom is the real Finding D.
