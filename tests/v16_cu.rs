@@ -12196,3 +12196,36 @@ fn v16_attack_per_asset_funding_isolation() {
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+
+// security.md sweep — deposit during active close (#22): a plain deposit to an account with an active
+// forced-close must be handled safely — whether allowed (adds capital toward curing) or rejected, it
+// must conserve and never corrupt the close ledger or accounting.
+#[test]
+fn v16_attack_deposit_during_active_close_safe() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    env.seed_cancellable_close_progress(p);
+    let cap0 = env.portfolio_state(p).capital;
+    let (_, g0) = env.market_state();
+    // attempt a plain deposit during the active close.
+    let src = env.token_account_for_mint(env.mint, owner.pubkey(), 500);
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Deposit { amount: 500 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(src, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    let cap1 = env.portfolio_state(p).capital;
+    let (_, g1) = env.market_state();
+    // either outcome must conserve: capital change == vault change == source debit, accounting intact.
+    if r.is_ok() {
+        assert_eq!(cap1, cap0 + 500, "deposit credited exactly during close");
+        assert_eq!(g1.vault, g0.vault + 500, "vault grew by exactly the deposit");
+        assert_eq!(env.token_amount(src), 0, "source fully transferred");
+    } else {
+        assert_eq!(cap1, cap0, "rejected deposit: capital unchanged");
+        assert_eq!(g1.vault, g0.vault, "rejected deposit: vault unchanged");
+        assert_eq!(env.token_amount(src), 500, "rejected deposit: source untouched");
+    }
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
