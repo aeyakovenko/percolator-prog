@@ -8958,3 +8958,51 @@ fn v16_regression_resolved_multiwinner_haircut_no_overpay_no_strand() {
     assert!(g.vault <= 1, "at most conservative-rounding dust remains in vault (got {})", g.vault);
     assert!(total_out >= 3_000, "all senior capital recovered (no LoF on capital)");
 }
+// security.md sweep — slot spoofing / over-accrual DoS (#30/#19): the permissionless crank's
+// now_slot is CALLER-supplied. A cranker passes a far-future now_slot to over-accrue funding/fees
+// against a victim. The handler must authenticate against the real Clock (authenticated_now_slot)
+// and IGNORE the caller's value — accrual reflects only real elapsed slots.
+#[test]
+fn v16_attack_crank_future_now_slot_does_not_overaccrue() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const DEPOSIT: u128 = 10_000_000;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_ewma_mark_with_cu(0, INITIAL_PRICE, 1, 0);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, DEPOSIT);
+    env.deposit(&sh_owner, sh, DEPOSIT);
+    env.trade_with_cu(&lo_owner, lo, &sh_owner, sh, POS_SCALE as i128, INITIAL_PRICE, 0);
+    env.svm.warp_to_slot(1);
+    env.push_ewma_mark_with_cu(1, INITIAL_PRICE * 2);
+
+    // REAL clock is slot 2. Cranker lies with now_slot = 1_000_000 (a ~half-million-slot jump).
+    env.svm.warp_to_slot(2);
+    const LIE: u64 = 1_000_000;
+    for acct in [lo, sh] {
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: LIE, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(acct, false)], &[]);
+    }
+    let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+    let (_, g) = env.market_state();
+    // the market advanced to the REAL clock slot (2), NOT the caller's lie.
+    assert_eq!(g.slot_last, 2, "accrual used the authenticated clock slot, not the caller's now_slot");
+    assert!(g.assets[0].slot_last < LIE, "asset slot_last is the real clock, not the spoofed future");
+    // price moved at most the per-slot clamp over REAL elapsed slots (not 1M slots of movement).
+    assert!(g.assets[0].effective_price <= INITIAL_PRICE * 2, "price bounded by real elapsed time + circuit breaker");
+    // value conserved: no massive funding/fee over-charge drained capital.
+    let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
+    assert_eq!(g.vault, 2 * DEPOSIT, "no tokens created/destroyed");
+    assert!(total_equity + g.insurance as i128 <= g.vault as i128, "no over-distribution");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation under slot-spoof attempt");
+}
