@@ -9487,3 +9487,35 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
     assert_eq!(g_after.vault, g_before.vault, "no tokens moved by liquidation attempt");
     assert!(g_after.vault >= g_after.c_tot + g_after.insurance, "senior conservation");
 }
+
+// security.md sweep — convert+withdraw exactness (#33/#35): a winner converts backed +PnL to capital
+// then withdraws through the real token vault. It must receive EXACTLY the backed amount — not more
+// (value printing) nor less (LoF) — and the system fully drains with conservation intact.
+#[test]
+fn v16_attack_convert_then_withdraw_pays_exactly_backed_amount() {
+    const BACKED: u128 = 40;
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, BACKED, 10);
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.add_source_positive_pnl(p, 1, BACKED);
+    env.crank(p, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 0, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    let vault0 = env.market_state().1.vault;
+    // convert the backed pnl into withdrawable capital.
+    env.svm.expire_blockhash();
+    let cr = env.send(ProgInstruction::ConvertReleasedPnl { amount: BACKED }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[&owner]);
+    assert!(cr.is_ok(), "convert backed pnl should succeed: {:?}", cr);
+    assert_eq!(env.portfolio_state(p).capital, BACKED, "capital == backed amount after convert");
+    // withdraw it all through the real vault.
+    let (dest, _) = env.withdraw_with_cu(&owner, p, BACKED);
+    let got = env.token_amount(dest) as u128;
+    assert_eq!(got, BACKED, "winner receives EXACTLY the backed amount (no more, no less)");
+    let a = env.portfolio_state(p);
+    assert_eq!(a.capital, 0, "capital fully withdrawn");
+    assert_eq!(a.pnl, 0, "no residual pnl");
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault, vault0 - BACKED, "vault decreased by exactly the paid amount");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation after convert+withdraw");
+}
