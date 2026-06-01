@@ -8909,3 +8909,52 @@ fn v16_regression_resolved_open_positions_recover_fairly_order_robust() {
     let (_, g) = env.market_state();
     assert_eq!(g.vault, 0, "vault fully drained, no funds stranded");
 }
+
+// security.md sweep — haircut payout rounding across multiple winners (#33/#37): when several
+// resolved winners share ONE insufficient backing pool, each is paid floor(face * rate). The sum of
+// floored payouts must NEVER exceed the backing (a rounding-up bug would let winners collectively
+// extract more than the pool holds). Probe with deliberately non-divisible faces.
+#[test]
+fn v16_regression_resolved_multiwinner_haircut_no_overpay_no_strand() {
+    const BACKING: u128 = 100;
+    // three winners with non-divisible positive-pnl faces against a shared 100 backing.
+    let faces: [u128; 3] = [250, 251, 253];
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, BACKING, 10_000);
+    let mut owners = Vec::new();
+    let mut ports = Vec::new();
+    for &face in faces.iter() {
+        let o = Keypair::new();
+        let p = env.create_portfolio(&o);
+        env.deposit(&o, p, 1_000);
+        env.add_source_positive_pnl(p, 1, face);
+        owners.push(o); ports.push(p);
+    }
+    env.resolve();
+    // Two close passes: early winners get a present-but-unfinalized receipt (terminal haircut rate
+    // not settled while other claims pend); a RETRY close after all are processed clears them.
+    let mut total_pnl_paid: u128 = 0;
+    let mut total_out: u128 = 0;
+    for _pass in 0..2 {
+        for (o, p) in owners.iter().zip(ports.iter()) {
+            let dest = env.close_resolved(o, *p);
+            let got = env.token_amount(dest) as u128;
+            total_out += got;
+            total_pnl_paid += got.saturating_sub(if got >= 1_000 { 1_000 } else { got });
+        }
+    }
+    // CRUX 1: summed haircut pnl never exceeds the shared backing (no rounding-up over-pay).
+    assert!(total_pnl_paid <= BACKING, "summed haircut pnl {} must not exceed backing {}", total_pnl_paid, BACKING);
+    // CRUX 2 (no strand): every winner's receipt is closable and the portfolio dematerializes.
+    for (o, p) in owners.iter().zip(ports.iter()) {
+        let a = state::read_portfolio(&env.svm.get_account(p).unwrap().data).unwrap();
+        assert_eq!(a.capital, 0, "winner capital fully paid");
+        assert!(!a.resolved_payout_receipt.present || a.resolved_payout_receipt.finalized, "receipt closable after retry");
+        env.close_portfolio_with_cu(o, *p); // panics if dematerialization is blocked
+    }
+    let (_, g) = env.market_state();
+    assert_eq!(g.materialized_portfolio_count, 0, "all winners dematerialized — no permanent strand");
+    assert_eq!(g.c_tot, 0, "all capital wound down");
+    assert!(g.vault <= 1, "at most conservative-rounding dust remains in vault (got {})", g.vault);
+    assert!(total_out >= 3_000, "all senior capital recovered (no LoF on capital)");
+}
