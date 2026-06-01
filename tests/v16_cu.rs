@@ -10921,3 +10921,51 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
     let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
     assert!(residual >= a.pnl.max(0) + b.pnl.max(0), "positive pnl backed by residual");
 }
+
+// security.md sweep — maintenance fee accrual on a positioned account (#32/#30): fees accrue
+// INCREMENTALLY, bounded by max_accrual_dt per sync (anti-retroactivity: a cranker cannot charge a
+// huge retroactive fee in one jump). Each increment must conserve (capital -> insurance), leave the
+// position intact, and keep senior conservation + accounting==real-vault.
+#[test]
+fn v16_attack_maintenance_fee_with_open_position_conserves() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(1, 5_000, 10_000, 1_000, 58);
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    env.update_maintenance_fee_policy_with_cu(0);
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q;
+    let cap0 = env.portfolio_state(pa).capital;
+    let (_, g0) = env.market_state();
+
+    // accrue fees incrementally across several slots (each crank+sync advances bounded by max_accrual_dt).
+    let mut max_step: u128 = 0;
+    let mut prev_cap = cap0;
+    for slot in 1..=6u64 {
+        env.svm.warp_to_slot(slot);
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false)], &[]);
+        env.svm.expire_blockhash();
+        let _ = env.try_sync_maintenance_fee_with_cu(pa, None, slot);
+        let cap = env.portfolio_state(pa).capital;
+        let step = prev_cap - cap;
+        max_step = max_step.max(step);
+        prev_cap = cap;
+    }
+    let cap_final = env.portfolio_state(pa).capital;
+    let fee = cap0 - cap_final;
+    let (_, g1) = env.market_state();
+    assert!(fee > 0, "maintenance fee accrued on the positioned account (non-vacuous)");
+    // anti-retroactivity: no single step charges more than max_accrual_dt(1) * fee_per_slot(58) (with slack).
+    assert!(max_step <= 58 * 3, "per-step fee bounded by the dt cap (no huge retroactive jump): max_step={}", max_step);
+    // conservation: the fee moved capital -> insurance exactly.
+    assert_eq!(g1.insurance, g0.insurance + fee, "fee moved capital -> insurance exactly");
+    assert_eq!(g1.c_tot, g0.c_tot - fee, "c_tot decreased by exactly the fee");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged (fee internal)");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting vault == real vault balance");
+    assert_eq!(env.portfolio_state(pa).legs[0].basis_pos_q, basis0, "fee accrual did not disturb the position");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+    assert_eq!(g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q, "OI still balanced");
+}
