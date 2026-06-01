@@ -8715,3 +8715,47 @@ fn v16_regression_premium_funding_settlement_conserves_vault() {
     assert!(g.assets[0].f_long_num < 0 && g.assets[0].f_short_num > 0, "longs pay shorts under mark premium");
 }
 
+
+// security.md sweep — §6.2 profit conversion (#33/#35): ConvertReleasedPnl moves source-backed
+// released pnl into withdrawable capital. The caller supplies `amount`, but it must only be a CAP:
+// a caller must never convert MORE than the engine's release-bounded amount (which would print
+// withdrawable capital). Probe both directions: a huge cap converts exactly the released amount
+// (not more), and an under-cap rejects (no partial over/under conversion, no value printed).
+#[test]
+fn v16_attack_convert_released_pnl_respects_caller_cap() {
+    const RELEASED: u128 = 40;
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, RELEASED, 10);
+    // portfolio A: convert with a huge cap -> must convert exactly RELEASED, never more.
+    let a_owner = Keypair::new(); let a = env.create_portfolio(&a_owner);
+    env.add_source_positive_pnl(a, 1, RELEASED);
+    env.crank(a, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 0, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    let (_, g0) = env.market_state();
+    env.svm.expire_blockhash();
+    let ra = env.send(ProgInstruction::ConvertReleasedPnl { amount: 1_000_000_000 },
+        vec![AccountMeta::new(a_owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(a, false)], &[&a_owner]);
+    assert!(ra.is_ok(), "huge-cap convert should succeed: {:?}", ra);
+    let acct_a = env.portfolio_state(a);
+    assert_eq!(acct_a.capital, RELEASED, "huge cap converts EXACTLY the released amount, not more");
+
+    // portfolio B: same released pnl, but an under-cap (RELEASED-1) -> wrapper rejects (converted > cap).
+    let b_owner = Keypair::new(); let b = env.create_portfolio(&b_owner);
+    env.add_source_positive_pnl(b, 1, RELEASED);
+    env.crank(b, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 0, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    env.svm.expire_blockhash();
+    let rb = env.send(ProgInstruction::ConvertReleasedPnl { amount: RELEASED - 1 },
+        vec![AccountMeta::new(b_owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(b, false)], &[&b_owner]);
+    assert!(rb.is_err(), "under-cap convert must reject (engine releases {} > cap {})", RELEASED, RELEASED - 1);
+    assert_eq!(env.portfolio_state(b).capital, 0, "rejected convert moves nothing");
+
+    // zero-amount convert is rejected outright.
+    env.svm.expire_blockhash();
+    let rz = env.send(ProgInstruction::ConvertReleasedPnl { amount: 0 },
+        vec![AccountMeta::new(b_owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(b, false)], &[&b_owner]);
+    assert!(rz.is_err(), "zero-amount convert rejected");
+
+    let (_, g1) = env.market_state();
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation after conversions");
+    assert_eq!(g1.vault, g0.vault, "ConvertReleasedPnl moves no vault tokens");
+}
