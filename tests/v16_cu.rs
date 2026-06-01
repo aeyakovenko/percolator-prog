@@ -10716,3 +10716,39 @@ fn v16_attack_withdraw_insurance_domain_operator_gated() {
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
+// security.md sweep — RebalanceReduce owner gating (#6/#46): RebalanceReduce is OWNER-gated
+// self-service risk reduction (with_one_portfolio_view enforces owner signs + matches the portfolio).
+// A non-owner must NOT be able to force-reduce a victim's position (griefing); the owner may reduce
+// their own. Verifies no permissionless force-close.
+#[test]
+fn v16_attack_rebalance_reduce_owner_gated() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q;
+    assert!(basis0 != 0, "la opened a position");
+    let (_, g0) = env.market_state();
+
+    // ATTACK: a non-owner tries to force-reduce la's position -> reject (owner mismatch).
+    let mallory = Keypair::new(); env.ensure_signer_account(mallory.pubkey());
+    env.svm.expire_blockhash();
+    let r_grief = env.send(ProgInstruction::RebalanceReduce { asset_index: 0, reduce_q: POS_SCALE },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false)], &[&mallory]);
+    assert!(r_grief.is_err(), "non-owner force-reduce of a victim's position must reject");
+    assert_eq!(env.portfolio_state(pa).legs[0].basis_pos_q, basis0, "victim's position not reduced by attacker");
+    assert_eq!(env.market_state().1.vault, g0.vault, "vault unchanged by rejected griefing reduce");
+
+    // LEGITIMATE: the OWNER may reduce their own position (self-service risk reduction).
+    env.svm.expire_blockhash();
+    let r_owner = env.send(ProgInstruction::RebalanceReduce { asset_index: 0, reduce_q: POS_SCALE },
+        vec![AccountMeta::new(la.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false)], &[&la]);
+    assert!(r_owner.is_ok(), "owner self-reduce should succeed: {:?}", r_owner);
+    assert!(env.portfolio_state(pa).legs[0].basis_pos_q.unsigned_abs() < basis0.unsigned_abs(), "owner reduced their own position");
+    let (_, g1) = env.market_state();
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+    assert_eq!(g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q, "OI still balanced");
+}
