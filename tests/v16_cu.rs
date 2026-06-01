@@ -12481,3 +12481,82 @@ fn v16_attack_withdraw_insurance_domain_budget_cannot_be_overdrawn() {
     );
     conserve(&env);
 }
+
+// security.md sweep — backing bucket top-up/withdraw input gates (#33/#44): a backing top-up with an
+// already-expired (or zero) expiry must reject (no dead backing injected to skew freshness accounting),
+// and a withdraw can never exceed the bucket's fresh-unliened principal. Complements the watermark/lien
+// permutation tests (which cover liened backing) with the plain balance + expiry gates.
+#[test]
+fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let cur = env.svm.get_sysvar::<Clock>().slot;
+
+    // helper: inline TopUpBackingBucket returning Result (the env helper panics on reject).
+    let mut top_up = |env: &mut V16CuEnv, amount: u128, expiry: u64| -> Result<u64, String> {
+        let source = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                source,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(env.mint, admin.pubkey(), amount.max(1) as u64),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm, env.program_id, &env.payer,
+            ProgInstruction::TopUpBackingBucket { domain: 0, amount, expiry_slot: expiry },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+    };
+
+    // (1) expiry_slot <= current_slot must reject (no already-expired backing) — for a real (amount>0) top-up.
+    assert!(top_up(&mut env, 1_000_000, cur).is_err(), "expiry == now must reject");
+    assert!(top_up(&mut env, 1_000_000, 0).is_err(), "expiry 0 must reject");
+    // (2) zero amount is a benign no-op: the engine add (which holds the expiry gate) is skipped, so it
+    // succeeds without injecting any backing — even with an expired expiry. Nothing enters the vault.
+    assert!(top_up(&mut env, 0, cur + 1_000_000).is_ok(), "zero-amount top-up is a no-op success");
+    assert!(top_up(&mut env, 0, 0).is_ok(), "zero-amount top-up no-op even with expired expiry");
+    // nothing entered the vault on any rejected top-up or zero no-op.
+    assert_eq!(env.market_state().1.vault, 0, "no backing injected by rejected/no-op top-ups");
+    assert_eq!(env.market_state().1.source_backing_buckets[0].fresh_unliened_backing_num, 0, "no backing num");
+
+    // (3) a valid top-up succeeds; backing is Fresh & unliened.
+    assert!(top_up(&mut env, 1_000_000, cur + 1_000_000).is_ok(), "valid top-up ok");
+    let g = env.market_state().1;
+    assert_eq!(g.vault, 1_000_000, "vault holds the backing principal");
+    // fresh_unliened_backing_num is in BOUND_SCALE units (amount * 1e12); just assert it's funded.
+    assert!(g.source_backing_buckets[0].fresh_unliened_backing_num > 0, "backing is fresh-unliened");
+
+    // (4) withdraw beyond the fresh-unliened principal must reject.
+    let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let r_over = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::WithdrawBackingBucket { domain: 0, amount: 1_000_001 },
+        vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(dest, false),
+             AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)],
+        &[&admin]);
+    assert!(r_over.is_err(), "withdraw > fresh-unliened principal must reject");
+    assert_eq!(env.token_amount(dest), 0, "no backing paid out on rejected over-withdraw");
+
+    // (5) withdraw exactly the principal succeeds and conserves.
+    env.svm.expire_blockhash();
+    env.withdraw_backing_bucket_to_admin_token_with_cu(dest, 0, 1_000_000);
+    assert_eq!(env.token_amount(dest), 1_000_000, "exactly the principal withdrawn");
+    let g = env.market_state().1;
+    assert_eq!(g.source_backing_buckets[0].fresh_unliened_backing_num, 0, "backing drained");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
