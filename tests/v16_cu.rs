@@ -11700,3 +11700,34 @@ fn v16_attack_init_portfolio_foreign_account_rejected() {
     env.deposit(&owner, p, 1_000);
     assert_eq!(env.portfolio_state(p).capital, 1_000, "proper portfolio works");
 }
+
+// security.md sweep — asset RETIRE authorization (#6/#48): RETIRE is gated to the asset_authority (or
+// admin). A non-authority must NOT be able to retire an asset (which, if it held positions, could
+// strand them). The engine additionally requires the asset to be EMPTY before retiring.
+#[test]
+fn v16_attack_retire_asset_authority_gated() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::ConfigureAuthMark { asset_index: 1, now_slot: 0, initial_mark_e6: 100 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin]).expect("cfg mark");
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    env.trade_asset_with_cu(1, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    assert!(env.market_state().1.assets[1].oi_eff_long_q > 0, "asset 1 has open positions");
+    // a NON-authority tries to retire asset 1 -> reject.
+    let mallory = Keypair::new(); env.ensure_signer_account(mallory.pubkey());
+    env.svm.warp_to_slot(5);
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateAssetLifecycle { action: percolator_prog::processor::ASSET_ACTION_RETIRE, asset_index: 1, now_slot: 5, initial_price: 0,
+            insurance_authority: [0u8;32], insurance_operator: [0u8;32], backing_bucket_authority: [0u8;32], oracle_authority: [0u8;32] },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false)], &[&mallory]);
+    assert!(r.is_err(), "non-authority asset RETIRE must reject");
+    // positions intact, not stranded.
+    assert!(env.market_state().1.assets[1].oi_eff_long_q > 0, "asset 1 positions NOT stranded by rejected retire");
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
