@@ -11514,3 +11514,48 @@ fn v16_attack_full_feed_roundtrip_conserves() {
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
     assert!(out <= 2_000_000, "no value created: out <= deposited");
 }
+
+// security.md sweep — long sequence with a liquidation (#32/#33 fuzz-lite): a realistic flow including
+// an insolvency+liquidation event must keep accounting==real-vault and senior conservation at every
+// checkpoint, with no value created across the whole sequence.
+#[test]
+fn v16_attack_sequence_with_liquidation_conserves() {
+    let mut env = V16CuEnv::new();
+    env.configure_ewma_mark_with_cu(0, 100, 1, 0);
+    let big = Keypair::new(); let pbig = env.create_portfolio(&big);
+    let thin = Keypair::new(); let pthin = env.create_portfolio(&thin);
+    let cp = Keypair::new(); let pcp = env.create_portfolio(&cp);
+    env.deposit(&big, pbig, 5_000_000);
+    env.deposit(&thin, pthin, 250);
+    env.deposit(&cp, pcp, 5_000_000);
+    let check = |env: &V16CuEnv, tag: &str| {
+        let (_, g) = env.market_state();
+        assert_eq!(g.vault as u64, env.token_amount(env.vault), "[{}] accounting == real vault", tag);
+        assert!(g.vault >= g.c_tot + g.insurance, "[{}] senior conservation", tag);
+        let sum: u128 = [pbig, pthin, pcp].iter().map(|p| state::read_portfolio(&env.svm.get_account(p).unwrap().data).unwrap().capital).sum();
+        assert_eq!(g.c_tot, sum, "[{}] c_tot == Σcapitals", tag);
+    };
+    check(&env, "deposits");
+    // big long vs thin short.
+    env.trade_with_cu(&big, pbig, &thin, pthin, POS_SCALE as i128, 100, 0); check(&env, "open");
+    // price up -> thin insolvent.
+    for (slot, mark) in [(1u64, 300u64), (2, 800)] {
+        env.svm.warp_to_slot(slot); env.push_ewma_mark_with_cu(slot, mark);
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pthin, false)], &[]);
+    }
+    check(&env, "thin insolvent");
+    // liquidate thin.
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pthin, false)], &[]);
+    check(&env, "after liquidation");
+    // crank big, then cp trades (fresh activity post-liquidation).
+    env.svm.warp_to_slot(3); env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 3, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pbig, false)], &[]);
+    check(&env, "settled");
+    let (_, g) = env.market_state();
+    assert!(g.vault <= 10_000_250, "no value created across the whole sequence (deposited 5M+250+5M)");
+}
