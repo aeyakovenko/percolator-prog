@@ -8517,3 +8517,51 @@ fn v16_attack_fee_accrual_does_not_lock_user_funds() {
     let (_, g) = env.market_state();
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation after fee+withdraw");
 }
+
+// security.md sweep — insolvency / bad-debt socialization (#9/#33/#19): drive a small-capital
+// SHORT underwater past its capital via a multi-slot up-move, settling each slot. The winner's
+// profit must NOT be paid out of the vault past what's actually backed — senior conservation
+// (vault >= c_tot + insurance) must hold and the winner's positive pnl must be capped by residual
+// (the loser's bad debt is socialized via haircut, not printed).
+#[test]
+fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
+    let mut env = V16CuEnv::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 250); // tiny capital -> will go insolvent
+    env.configure_ewma_mark_with_cu(0, 100, 1, 0);
+    env.trade_with_cu(&long_owner, long_account, &short_owner, short_account, POS_SCALE as i128, 100, 0);
+
+    // Push the price up across slots (circuit breaker clamps ~100%/slot): 100 -> 200 -> 400.
+    // Short's loss (size * (P-100)/POS_SCALE) exceeds its 250 capital -> bad debt.
+    for (slot, mark) in [(1u64, 300u64), (2, 800)] {
+        env.svm.warp_to_slot(slot);
+        env.push_ewma_mark_with_cu(slot, mark);
+        for acct in [long_account, short_account] {
+            env.svm.expire_blockhash();
+            let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(acct, false)], &[]);
+        }
+    }
+    // Liquidate the insolvent short.
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(short_account, false)], &[]);
+
+    let lo = state::read_portfolio(&env.svm.get_account(&long_account).unwrap().data).unwrap();
+    let sh = state::read_portfolio(&env.svm.get_account(&short_account).unwrap().data).unwrap();
+    let (_, g) = env.market_state();
+    // Guard against a vacuous pass: confirm the scenario actually reached insolvency.
+    assert!(g.assets[0].effective_price >= 300, "price actually moved up (got {})", g.assets[0].effective_price);
+    assert_eq!(sh.capital, 0, "short was driven insolvent (capital wiped)");
+    // The crux: the vault never owes more (senior) than it holds, no matter the bad debt.
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation holds under insolvency");
+    let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
+    let pos_pnl = lo.pnl.max(0) + sh.pnl.max(0);
+    assert!(residual >= pos_pnl, "winner profit capped by residual — bad debt socialized, not printed (residual {} pos_pnl {})", residual, pos_pnl);
+    // No capital was conjured: total realized capital <= total deposited.
+    assert!((lo.capital + sh.capital) <= 1_000_250, "no capital printed (got {})", lo.capital + sh.capital);
+}
