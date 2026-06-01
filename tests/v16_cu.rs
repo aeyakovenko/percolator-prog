@@ -11985,3 +11985,26 @@ fn v16_attack_cumulative_tvl_cap_enforced() {
     let (d, _) = env.withdraw_with_cu(&a, pa, 1_000_000);
     assert_eq!(env.token_amount(d), 1_000_000, "funds withdrawable from a capped vault");
 }
+
+// security.md sweep — portfolio-as-market confusion (#44/#45): passing a portfolio account where the
+// market is expected must reject (the market view decode fails on portfolio-shaped data). No cross-
+// type confusion drains funds.
+#[test]
+fn v16_attack_portfolio_as_market_rejected() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    let other = Keypair::new(); let p2 = env.create_portfolio(&other);
+    env.deposit(&owner, p, 1_000_000);
+    let (_, g0) = env.market_state();
+    let dest = Pubkey::new_unique();
+    env.svm.set_account(dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, owner.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    // withdraw but pass a PORTFOLIO account (p2) in the MARKET slot.
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Withdraw { amount: 500_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(p2, false), AccountMeta::new(p, false),
+        AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r.is_err(), "withdraw with a portfolio in the market slot must reject");
+    assert_eq!(env.token_amount(dest), 0, "no funds drained via type confusion");
+    assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital intact");
+    assert_eq!(env.market_state().1.vault, g0.vault, "vault unchanged");
+}
