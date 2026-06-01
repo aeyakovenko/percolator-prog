@@ -9439,3 +9439,51 @@ fn v16_attack_extreme_premium_funding_is_capped() {
     assert_eq!(vault1000, 2 * DEPOSIT, "scenario 1000x: vault conserved");
     assert!(vault2 >= senior2 && vault1000 >= senior1000, "senior conservation in both");
 }
+
+// security.md sweep — cross-margin liquidation fairness (#2/#22): a net-solvent cross-margined
+// portfolio (gain on asset0 offsetting a loss on asset1) must NOT be liquidatable for value
+// extraction. Attempting to liquidate the losing leg must not unfairly drain the healthy account.
+#[test]
+fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    let cfg = |env: &mut V16CuEnv, ix: ProgInstruction| {
+        send_tx(&mut env.svm, env.program_id, &env.payer, ix,
+            vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin]).expect("mark cfg");
+    };
+    cfg(&mut env, ProgInstruction::ConfigureAuthMark { asset_index: 1, now_slot: 0, initial_mark_e6: 100 });
+    let victim_owner = Keypair::new(); let victim = env.create_portfolio(&victim_owner);
+    let cp_owner = Keypair::new(); let cp = env.create_portfolio(&cp_owner);
+    env.deposit(&victim_owner, victim, 1_000_000);
+    env.deposit(&cp_owner, cp, 1_000_000);
+    // victim LONG asset0 and SHORT asset1 (cross-margined opposite exposures).
+    env.trade_asset_with_cu(0, &victim_owner, victim, &cp_owner, cp, POS_SCALE as i128, 100, 0);
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(1, &victim_owner, victim, &cp_owner, cp, -(POS_SCALE as i128), 100, 0);
+    // both marks up 10%: victim GAINS on asset0 (long), LOSES on asset1 (short) -> net ~flat.
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, 110);
+    cfg(&mut env, ProgInstruction::PushAuthMark { asset_index: 1, now_slot: 10, mark_e6: 110 });
+    for slot in [10u64, 11] {
+        env.svm.warp_to_slot(slot);
+        for ai in [0u16, 1] { for p in [victim, cp] {
+            env.svm.expire_blockhash();
+            let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: ai, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+        }}
+    }
+    let v_before = state::read_portfolio(&env.svm.get_account(&victim).unwrap().data).unwrap();
+    let equity_before = v_before.capital as i128 + v_before.pnl;
+    let (_, g_before) = env.market_state();
+    // attacker tries to liquidate the victim's LOSING leg (asset1).
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 1, now_slot: 11, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(victim, false)], &[]);
+    let v_after = state::read_portfolio(&env.svm.get_account(&victim).unwrap().data).unwrap();
+    let equity_after = v_after.capital as i128 + v_after.pnl;
+    let (_, g_after) = env.market_state();
+    // the solvent victim's total equity is not reduced by the liquidation attempt (no unfair drain).
+    assert!(equity_after >= equity_before, "solvent cross-margined victim equity not drained by liquidation attempt ({} -> {})", equity_before, equity_after);
+    assert_eq!(g_after.vault, g_before.vault, "no tokens moved by liquidation attempt");
+    assert!(g_after.vault >= g_after.c_tot + g_after.insurance, "senior conservation");
+}
