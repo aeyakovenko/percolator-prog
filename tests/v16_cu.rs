@@ -12421,3 +12421,63 @@ fn v16_attack_withdraw_insurance_requires_full_wind_down() {
     assert_eq!(g.vault as u64, env2.token_amount(env2.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+
+// security.md sweep — per-domain WithdrawInsuranceDomain budget conservation (#6): the domain insurance
+// authority may withdraw accrued domain budget in LIVE mode, but NEVER more than the domain's remaining
+// budget, and partial withdrawals must debit the remaining budget so it cannot be double-drained.
+// Attacker goal: withdraw a domain's insurance twice (or over its budget) to extract more than accrued.
+#[test]
+fn v16_attack_withdraw_insurance_domain_budget_cannot_be_overdrawn() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    // Credit domain 0's budget with 1_000_000 (Live mode). insurance and domain-0 budget both = 1M.
+    env.top_up_insurance_domain_with_authority(&admin, 0, 1_000_000);
+    let g = env.market_state().1;
+    assert_eq!(g.mode, percolator::MarketModeV16::Live, "Live");
+    assert_eq!(g.insurance_domain_budget[0], 1_000_000, "domain-0 budget funded");
+
+    let conserve = |env: &V16CuEnv| {
+        let g = env.market_state().1;
+        assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+        assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    };
+
+    // (1) Over-budget in one shot must reject (amount > remaining domain budget).
+    assert!(
+        env.try_withdraw_insurance_domain_with_authority(&admin, 0, 1_000_001).is_err(),
+        "withdraw > domain budget must reject"
+    );
+    conserve(&env);
+
+    // (2) Partial withdraw succeeds and debits the remaining budget (and insurance).
+    let (_d, _cu) = env
+        .try_withdraw_insurance_domain_with_authority(&admin, 0, 600_000)
+        .expect("partial domain withdraw ok");
+    let g = env.market_state().1;
+    assert_eq!(g.insurance_domain_budget[0], 400_000, "budget debited to 400k");
+    assert_eq!(g.insurance, 400_000, "insurance debited to 400k");
+    conserve(&env);
+
+    // (3) A second withdraw exceeding the NEW remaining budget must reject (no double-drain).
+    assert!(
+        env.try_withdraw_insurance_domain_with_authority(&admin, 0, 500_000).is_err(),
+        "withdraw > remaining (400k) must reject — no double-drain"
+    );
+    let g = env.market_state().1;
+    assert_eq!(g.insurance_domain_budget[0], 400_000, "rejected withdraw left budget intact");
+    conserve(&env);
+
+    // (4) Draining exactly the remainder succeeds; budget -> 0.
+    env.try_withdraw_insurance_domain_with_authority(&admin, 0, 400_000)
+        .expect("drain remainder ok");
+    let g = env.market_state().1;
+    assert_eq!(g.insurance_domain_budget[0], 0, "budget fully drained");
+    conserve(&env);
+
+    // (5) Any further withdraw from the exhausted domain must reject.
+    assert!(
+        env.try_withdraw_insurance_domain_with_authority(&admin, 0, 1).is_err(),
+        "withdraw from exhausted domain budget must reject"
+    );
+    conserve(&env);
+}
