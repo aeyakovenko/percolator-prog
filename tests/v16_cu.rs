@@ -12132,3 +12132,25 @@ fn v16_attack_withdraw_blocked_during_active_close() {
     let (d, _) = env.withdraw_with_cu(&owner, p, 500_000);
     assert_eq!(env.token_amount(d), 500_000, "withdraw works after curing the close");
 }
+
+// security.md sweep — trade blocked during active close (#22): an account with an active forced-close
+// must not be able to open/modify positions (it's being wound down). Trading on it must reject.
+#[test]
+fn v16_attack_trade_blocked_during_active_close() {
+    let mut env = V16CuEnv::new();
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    env.seed_cancellable_close_progress(pa); // la has an active forced-close
+    let (_, g0) = env.market_state();
+    // trading on la (with an active close) must reject.
+    env.svm.expire_blockhash();
+    let r = env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    assert!(r.is_err(), "trade on an account with an active forced-close must reject");
+    assert_eq!(env.portfolio_state(pa).legs[0].basis_pos_q, 0, "no position opened during active close");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no OI created");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+}
