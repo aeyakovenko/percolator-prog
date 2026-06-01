@@ -8255,3 +8255,54 @@ fn v16_regression_mark_to_market_settles_conservation_under_price_move() {
     let pos_pnl = a.pnl.max(0) + b.pnl.max(0);
     assert!(residual >= pos_pnl, "positive PnL must be backed by residual (no un-backed winner)");
 }
+
+// regression (security.md sweep): profit realization round-trip — open, mark up, settle,
+// then close both legs. Total equity conserved, flat, senior conservation, +pnl backed.
+#[test]
+fn v16_regression_profit_realization_roundtrip_conserves() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, 110);
+    env.crank(pa, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 10, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    env.svm.expire_blockhash();
+    env.crank(pb, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 10, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    // Close both legs at the new mark.
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, -(POS_SCALE as i128), 110, 0);
+
+    let a = state::read_portfolio(&env.svm.get_account(&pa).unwrap().data).unwrap();
+    let b = state::read_portfolio(&env.svm.get_account(&pb).unwrap().data).unwrap();
+    let (_, g) = env.market_state();
+    assert_eq!(g.assets[0].oi_eff_long_q, 0, "flat after close");
+    assert_eq!(g.assets[0].oi_eff_short_q, 0, "flat after close");
+    let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
+    assert_eq!(total_equity, 2_000_000, "total equity conserved through open->mark->close");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
+    assert!(residual >= a.pnl.max(0) + b.pnl.max(0), "positive pnl backed by residual");
+}
+
+// security.md sweep — numerical boundary (#37 i128::MIN negation / #38 wide overflow):
+// extreme trade sizes must be rejected cleanly (no panic, no OI, no value movement).
+#[test]
+fn v16_attack_extreme_size_trade_rejected_no_panic() {
+    let mut env = V16CuEnv::new();
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    for sz in [i128::MIN, i128::MAX, i128::MIN + 1] {
+        env.svm.expire_blockhash();
+        let r = env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, sz, 100, 0);
+        assert!(r.is_err(), "extreme size {} must be rejected cleanly", sz);
+    }
+    let (_, g) = env.market_state();
+    assert_eq!(g.assets[0].oi_eff_long_q, 0, "no OI from rejected extreme-size trades");
+    assert_eq!(g.c_tot, 2_000_000, "no capital moved");
+}
