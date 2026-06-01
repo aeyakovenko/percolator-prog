@@ -9788,3 +9788,40 @@ fn v16_attack_tradecpi_spoofed_matcher_binding_rejected() {
     let ok = env.try_trade_cpi_with_cu_on_asset(&taker_owner, taker, &maker_owner, maker, matcher_program, matcher_ctx, matcher_delegate, 0, (10 * POS_SCALE) as i128, 100);
     assert!(ok.is_ok(), "correctly-bound matcher executes: {:?}", ok);
 }
+
+// security.md sweep — TradeCpi limit_price slippage guard (#19/#39): with a spread matcher filling
+// OFF oracle, a taker's limit_price must be enforced — a too-tight limit must REJECT the fill
+// (slippage protection). Absent enforcement, a taker could be filled at an arbitrarily bad price.
+#[test]
+fn v16_attack_tradecpi_limit_price_enforced() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new(); let taker = env.create_portfolio(&taker_owner);
+    let maker_owner = Keypair::new(); let maker = env.create_portfolio(&maker_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&maker_owner, maker, 1_000_000);
+    // spread matcher: fills off oracle (oracle=100), base spread 500 bps -> taker buy ask > 100.
+    let (ctx, delegate, _) = env.init_matcher_context_with_passive_spread(matcher_program, maker, 500, 1_000);
+    let do_trade = |env: &mut V16CuEnv, limit: u64| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        env.send(ProgInstruction::TradeCpi { asset_index: 0, size_q: (10 * POS_SCALE) as i128, fee_bps: 100, limit_price: limit },
+            vec![AccountMeta::new(taker_owner.pubkey(), true), AccountMeta::new(maker_owner.pubkey(), true),
+                 AccountMeta::new(env.market, false), AccountMeta::new(taker, false), AccountMeta::new(maker, false),
+                 AccountMeta::new_readonly(matcher_program, false), AccountMeta::new(ctx, false), AccountMeta::new_readonly(delegate, false)],
+            &[&taker_owner, &maker_owner])
+    };
+    let (_, g0) = env.market_state();
+    // too-tight limit (100 = oracle, but buy ask is 100+spread) must reject.
+    let r_tight = do_trade(&mut env, 100);
+    assert!(r_tight.is_err(), "buy with limit at oracle must reject when matcher fills above it (slippage guard)");
+    assert_eq!(env.portfolio_state(taker).legs[0].basis_pos_q, 0, "no fill on rejected tight-limit trade");
+    assert_eq!(env.market_state().1.vault, g0.vault, "vault unchanged by rejected trade");
+    // generous limit (way above ask) must execute.
+    let r_ok = do_trade(&mut env, 1_000_000);
+    assert!(r_ok.is_ok(), "buy with generous limit executes: {:?}", r_ok);
+    assert!(env.portfolio_state(taker).legs[0].basis_pos_q > 0, "taker filled under generous limit");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g1.c_tot + g1.insurance, "conservation after fill");
+}
