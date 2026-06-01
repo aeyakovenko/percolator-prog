@@ -12154,3 +12154,45 @@ fn v16_attack_trade_blocked_during_active_close() {
     assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no OI created");
     assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
 }
+
+// security.md sweep — per-asset funding isolation (#33/#22): funding accruing on one asset (its mark
+// premium) must NOT alter another asset's funding ledger. Asset 0's funding must leave asset 1's
+// f_long_num/f_short_num unchanged.
+#[test]
+fn v16_attack_per_asset_funding_isolation() {
+    const IP: u64 = 1_000_000;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2, initial_price: IP, max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: 1, max_abs_funding_e9_per_slot: 1_000, min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_ewma_mark_with_cu(0, IP, 1, 0);
+    send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::ConfigureEwmaMark { asset_index: 1, now_slot: 0, initial_mark_e6: IP, mark_ewma_halflife_slots: 1, mark_min_fee: 0 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin]).expect("cfg ewma asset1");
+    let lo = Keypair::new(); let plo = env.create_portfolio(&lo);
+    let sh = Keypair::new(); let psh = env.create_portfolio(&sh);
+    env.deposit(&lo, plo, 100_000_000);
+    env.deposit(&sh, psh, 100_000_000);
+    // balanced positions on BOTH assets.
+    env.trade_with_cu(&lo, plo, &sh, psh, POS_SCALE as i128, IP, 0);
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(1, &lo, plo, &sh, psh, POS_SCALE as i128, IP, 0);
+    let a1_flong0 = env.market_state().1.assets[1].f_long_num;
+    let a1_fshort0 = env.market_state().1.assets[1].f_short_num;
+    // induce a mark premium and accrue funding on asset 0 ONLY.
+    env.svm.warp_to_slot(1);
+    env.push_ewma_mark_with_cu(1, IP * 2); // asset 0 premium
+    for slot in 1..=4u64 { env.svm.warp_to_slot(slot); for p in [plo, psh] { env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]); } }
+    let (_, g) = env.market_state();
+    // asset 0 funding accrued; asset 1's funding ledger UNCHANGED.
+    assert!(g.assets[0].f_long_num != 0, "asset 0 funding accrued (non-vacuous)");
+    assert_eq!(g.assets[1].f_long_num, a1_flong0, "asset 1 f_long_num UNCHANGED by asset-0 funding");
+    assert_eq!(g.assets[1].f_short_num, a1_fshort0, "asset 1 f_short_num unchanged");
+    assert_eq!(g.vault, 200_000_000, "vault conserved");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
