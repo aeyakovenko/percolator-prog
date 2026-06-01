@@ -10523,3 +10523,35 @@ fn v16_attack_tradecpi_thin_maker_margin_protected() {
     let r_ok = env.try_trade_cpi_with_cu_on_asset(&taker_owner, taker, &maker_owner, maker, matcher_program, ctx, delegate, 0, POS_SCALE as i128, 100);
     assert!(r_ok.is_ok(), "small in-margin trade executes against the maker: {:?}", r_ok);
 }
+
+// security.md sweep — circuit breaker on mark push (#9 oracle manipulation): a push to a far-away
+// mark must move the effective price by at most max_price_move_bps_per_slot per slot. An attacker
+// (mark authority) cannot jump the settlement price arbitrarily in one slot.
+#[test]
+fn v16_attack_mark_push_clamped_per_slot() {
+    let mut env = V16CuEnv::new(); // max_price_move_bps_per_slot = 10_000 (100%/slot)
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(0, &lo_owner, lo, &sh_owner, sh, POS_SCALE as i128, 100, 0);
+    let mut prev_price = 100u64;
+    for slot in [10u64, 11, 12] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, 1_000_000); // push to a huge mark (10000x) every slot
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(lo, false)], &[]);
+        let (_, g) = env.market_state();
+        let ep = g.assets[0].effective_price;
+        // the per-slot move is clamped to <= 100% (price at most doubles per slot).
+        assert!(ep <= prev_price * 2, "slot {}: effective price {} clamped to <= 2x prev {} (circuit breaker)", slot, ep, prev_price);
+        assert!(ep > prev_price, "slot {}: price moved toward the pushed mark (non-vacuous)", slot);
+        prev_price = ep;
+        assert!(g.vault >= g.c_tot + g.insurance, "senior conservation under clamped move");
+    }
+    // even after 3 slots of pushing to 1,000,000, the effective price is nowhere near it (clamped).
+    let (_, g) = env.market_state();
+    assert!(g.assets[0].effective_price <= 800, "after 3 clamped slots, price is far below the 1,000,000 push (got {})", g.assets[0].effective_price);
+}
