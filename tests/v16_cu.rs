@@ -10778,3 +10778,25 @@ fn v16_attack_refine_resolved_bound_admin_and_mode_gated() {
     let cr = env.close_resolved(&owner, p);
     assert_eq!(env.token_amount(cr), 1_000_000, "user recovers full resolved payout after rejected refines");
 }
+
+// security.md sweep — TopUpInsuranceDomain authorization (#6): a per-domain insurance top-up is gated
+// to the domain's insurance_authority (v16_program.rs:6577 expect_live_authority). A non-authority
+// must reject — no manipulating a domain's insurance/budget accounting by an unauthorized caller.
+#[test]
+fn v16_attack_topup_insurance_domain_authority_gated() {
+    let mut env = V16CuEnv::new();
+    let (_, g0) = env.market_state();
+    // a non-authority donor tries to top up domain 0's insurance -> reject (Unauthorized).
+    let donor = Keypair::new(); env.ensure_signer_account(donor.pubkey());
+    let src = env.token_account_for_mint(env.mint, donor.pubkey(), 500);
+    env.svm.expire_blockhash();
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::TopUpInsuranceDomain { domain: 0, amount: 500 },
+        vec![AccountMeta::new(donor.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(src, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&donor]);
+    assert!(r.is_err(), "non-authority domain insurance top-up must reject");
+    assert_eq!(env.token_amount(src), 500, "donor source untouched");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.insurance, g0.insurance, "insurance unchanged by unauthorized top-up");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
