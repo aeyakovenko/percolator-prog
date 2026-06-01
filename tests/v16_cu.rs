@@ -9180,3 +9180,47 @@ fn v16_attack_conservation_under_deposit_withdraw_trade_churn() {
     // total deposited (500k+800k+300k+50k = 1,650k) minus total withdrawn must net to insurance+vault residue.
     assert_eq!(g.vault, g.insurance, "vault fully accounted as insurance after full drain (no stranded value)");
 }
+
+// security.md sweep — resolve mid-flight before settlement (#30 sequence/race): push a price move,
+// then resolve WITHOUT any settlement crank. The resolved wind-down must still settle at the true
+// post-move price — the winner recovers their gain, the loser bears their loss, value conserved.
+// Attacker success = stale pre-move settlement (winner LoF, or loser escapes its loss).
+#[test]
+fn v16_regression_resolve_before_settlement_uses_official_price() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(0, &lo_owner, lo, &sh_owner, sh, (10_000 * POS_SCALE) as i128, 100, 0); // notional 1M
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, 110); // pending mark; NOT yet accrued into effective_price (anti-retroactivity)
+    // NO crank: resolve immediately. The pushed mark is unaccrued, so the official effective_price is
+    // still 100 and the position is officially flat.
+    let (_, g_pre) = env.market_state();
+    assert_eq!(g_pre.assets[0].effective_price, 100, "unaccrued mark push does NOT move the official price");
+    env.resolve();
+
+    fn bal(env: &V16CuEnv, k: &Pubkey) -> u128 { let d = env.svm.get_account(k).unwrap().data; u64::from_le_bytes(d[64..72].try_into().unwrap()) as u128 }
+    // loser-first, then winner (order-robust wind-down established in batch 23). Retry winner if deferred.
+    let _ = env.close_resolved(&sh_owner, sh);
+    let d1 = env.close_resolved(&lo_owner, lo);
+    let mut won = bal(&env, &d1);
+    if won == 0 { let d2 = env.close_resolved(&lo_owner, lo); won = bal(&env, &d2); }
+    let lost = {
+        let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+        assert_eq!(b.capital, 0, "loser wound down");
+        2_000_000u128.saturating_sub(won)
+    };
+    // CORRECT behavior: resolve settles at the OFFICIAL accrued price (100). The unaccrued mark push
+    // is NOT retroactively applied, so no value is created or destroyed — each party recovers exactly
+    // its deposit. (Contrast batch 23: crank-to-accrue BEFORE resolve, and the winner gets 1.1M.)
+    assert_eq!(won, 1_000_000, "no value invented from an unaccrued mark — deposit returned");
+    assert_eq!(won + lost, 2_000_000, "exact conservation across resolve-before-settlement");
+    let (_, g) = env.market_state();
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    assert_eq!(a.capital, 0, "long fully wound down");
+    assert!(a.resolved_payout_receipt.finalized || !a.resolved_payout_receipt.present, "receipt closable");
+}
