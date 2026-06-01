@@ -13463,3 +13463,44 @@ fn v16_attack_cross_margin_leg_close_releases_its_margin() {
     assert!((xs.health_cert.certified_equity as u128) >= req_after, "equity still covers the remaining requirement");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+
+// security.md sweep — full winner extraction: convert backed pnl then withdraw (#33/#35/#44 interaction):
+// a backed winner converts released junior pnl to senior capital, then withdraws. Attacker goal: extract
+// MORE than (deposit + backed pnl) — print value on the way out. Protection: the conversion is bounded by
+// the backing (#147) and withdraw moves only real capital, so total out == deposit + backing, no more,
+// and the vault drains to exactly what the backing provider funded.
+#[test]
+fn v16_attack_convert_then_withdraw_extracts_exactly_backed() {
+    const DEP: u128 = 1_000;
+    const BACK: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, BACK, 10_000); // an LP backs the winner with 40
+    let o = Keypair::new(); let p = env.create_portfolio(&o);
+    env.deposit(&o, p, DEP);
+    env.add_source_positive_pnl(p, 1, BACK); // fully-backed 40 junior pnl
+    env.crank(p, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 0, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    let vault0 = env.market_state().1.vault;
+    assert_eq!(vault0, DEP + BACK, "vault holds the deposit + the LP backing");
+
+    // (1) convert the backed junior pnl into senior capital.
+    env.svm.expire_blockhash();
+    let rc = env.send(ProgInstruction::ConvertReleasedPnl { amount: 1_000_000_000 },
+        vec![AccountMeta::new(o.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[&o]);
+    assert!(rc.is_ok(), "convert backed pnl should succeed: {:?}", rc);
+    let cap_after_convert = env.portfolio_state(p).capital;
+    assert_eq!(cap_after_convert, DEP + BACK, "capital == deposit + the backed portion (exactly)");
+
+    // (2) withdraw the full converted capital (account is flat — no open position).
+    env.svm.expire_blockhash();
+    let dest = env.withdraw(&o, p, DEP + BACK);
+    let out = env.token_amount(dest) as u128;
+
+    // EXTRACTION BOUND: the winner pulled EXACTLY deposit + backing, never more.
+    assert_eq!(out, DEP + BACK, "winner extracts exactly deposit + backed pnl, not a unit more");
+    let pf = env.portfolio_state(p);
+    let g = env.market_state().1;
+    assert_eq!(pf.capital, 0, "winner fully withdrawn");
+    assert_eq!(g.vault, 0, "vault drained to exactly the funded amount (deposit + LP backing), no residual mint");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
