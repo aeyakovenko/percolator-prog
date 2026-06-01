@@ -9519,3 +9519,44 @@ fn v16_attack_convert_then_withdraw_pays_exactly_backed_amount() {
     assert_eq!(g.vault, vault0 - BACKED, "vault decreased by exactly the paid amount");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation after convert+withdraw");
 }
+
+// security.md sweep — zero-amount input validation (#39): zero-amount operations must reject or be
+// clean no-ops across deposit/withdraw/trade/topup — never corrupt state or conservation.
+#[test]
+fn v16_attack_zero_amount_inputs_are_safe() {
+    let mut env = V16CuEnv::new();
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    let (_, g0) = env.market_state();
+
+    // deposit 0
+    env.svm.expire_blockhash();
+    let src = env.token_account(la.pubkey(), 0);
+    let r_dep = env.send(ProgInstruction::Deposit { amount: 0 }, vec![
+        AccountMeta::new(la.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false),
+        AccountMeta::new(src, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&la]);
+    // withdraw 0
+    env.svm.expire_blockhash();
+    let dest = Pubkey::new_unique();
+    env.svm.set_account(dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, la.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    let r_wd = env.send(ProgInstruction::Withdraw { amount: 0 }, vec![
+        AccountMeta::new(la.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false),
+        AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&la]);
+    // trade size 0
+    env.svm.expire_blockhash();
+    let r_tr = env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, 0, 100, 0);
+
+    // whatever the dispositions (reject or clean no-op), conservation must be intact and nothing moved.
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged by zero-amount ops");
+    assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged by zero-amount ops");
+    assert_eq!(g1.vault, g1.c_tot + g1.insurance, "conservation intact");
+    assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no OI from zero-size trade");
+    assert_eq!(env.token_amount(dest) as u128, 0, "zero withdraw moved no tokens");
+    // capitals unchanged.
+    assert_eq!(env.portfolio_state(pa).capital, 1_000_000, "pa capital unchanged");
+    assert_eq!(env.portfolio_state(pb).capital, 1_000_000, "pb capital unchanged");
+    let _ = (r_dep, r_wd, r_tr);
+}
