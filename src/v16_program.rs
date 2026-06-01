@@ -4048,6 +4048,13 @@ pub mod oracle_v16 {
 
     fn apply_transform(raw_price: u64, invert: u8, unit_scale: u32) -> Result<u64, ProgramError> {
         let mut price = raw_price;
+        // Guard zero BEFORE the invert divide: a multi-leg `compose` with a divide leg can floor the
+        // accumulator to 0, and `1e12 / 0` would panic. A zero price is always OracleInvalid anyway
+        // (the post-transform check below already rejects it), so this only converts the panic into
+        // the same graceful error — no valid behavior changes (valid oracle prices are nonzero).
+        if price == 0 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
         if invert != 0 {
             price = (1_000_000_000_000u128 / price as u128)
                 .try_into()
