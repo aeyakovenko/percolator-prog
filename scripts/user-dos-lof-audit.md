@@ -53,13 +53,30 @@ positive capital. Root cause: `close_progress` has FOUR engine writers
 (`begin`/`advance`/`advance_quantity_adl`/`cure`, none writes EMPTY post-init), so once
 non-EMPTY it stays non-EMPTY for the account's life.
 
+### Finding F — permissionless retired-slot reuse accepts zero domain authorities → stranded insurance (market DoS) [CONFIRMED code-level; LiteSVM repro pending]
+The append path validates all four domain authorities are non-zero
+(`activate_dynamic_asset_slot`, `v16_program.rs:1475-1481`), but the permissionless
+retired-slot REUSE branch of `handle_update_asset_lifecycle` (`v16_program.rs:8651-8656`,
+reached when `!still_asset_authority && asset_index < configured_slots &&
+free_market_slot_count != 0` on a RETIRED slot) writes them straight from caller args
+with NO zero-check; `write_oracle_profile_to_view_if_separate`→`validate_asset_oracle_profile`
+never inspects the authority fields. With `insurance_authority == 0`, fees accrued to that
+asset's domain are withdrawable by nobody (`terminal_insurance_remaining_for_authority_view`
+rejects a zero authority, `v16_program.rs:4885`), and `CloseSlab` (requires `insurance==0`)
+is permanently bricked. Attacker-reachable in a permissionless-init market (pay the init
+fee, reuse a retired slot with zero authorities). Direct verification: line 8651 is missing
+the 1475 guard. **Fix:** add the same `== [0u8;32] → InvalidInstruction` check at 8651.
+(A secondary admin self-footgun variant: `UpdateAuthority` burns insurance/backing/mark
+authorities to zero with no recovery — MEDIUM.)
+LiteSVM repro deferred (needs append→retire→reuse→accrue→resolve chain); code gap is
+unambiguous.
+
 ---
 
-## PENDING (market-DoS, lower priority than user-facing)
-- Zero-authority strandings: permissionless retired-slot reuse (`v16_program.rs:8651`)
-  accepts zero domain authorities (append path rejects at `:1475`); `UpdateAuthority`
-  burns insurance/backing/mark authorities to zero. Strands a domain's insurance ->
-  CloseSlab bricked. Reachable; verify via LiteSVM.
+## PENDING (next batches)
+- Full LiteSVM repro for Finding F (retired-slot reuse with zero authority).
+- Deeper combination / novel-vector hunt: chunked B-settlement edge cases, ADL
+  interactions, multi-asset resolved wind-down with mixed lifecycles.
 
 ## DISPROVEN / FALSE POSITIVES (traced read-only with resetter line-refs)
 User value-extraction gating fields — all but close_progress/receipt have a reachable
