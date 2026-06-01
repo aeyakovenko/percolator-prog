@@ -115,6 +115,12 @@ Verified SOUND (deep read-only trace, no bug):
   empty). Asset-lifecycle `Recovery` is never assigned (dead but harmless). The
   pending_domain_loss_barrier co-leg freeze is the SAME mechanism as Finding D, not new.
 
+- Dust/rounding LoF on deposit→withdraw — DISPROVEN: deposit/withdraw are exact 1:1
+  (`amount_to_u64` pure cast, no scale); existing `v16_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger`
+  proves exact round-trip (deposit 1000 → withdraw 400 → dest=400, vault/c_tot/capital exact).
+  Default new_account_fee/maintenance_fee = 0; backing BOUND_SCALE top-up/withdraw are exact
+  inverses. No sub-unit dust path.
+
 Other disproven (prior passes):
 - Insurance/domain-budget arithmetic mismatch — REFUTED: strict lockstep; aggregate
   insurance == Σ domain budgets.
