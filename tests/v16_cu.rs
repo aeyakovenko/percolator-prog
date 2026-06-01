@@ -9391,3 +9391,51 @@ fn v16_attack_over_liquidation_clamps_to_position() {
     let sh = state::read_portfolio(&env.svm.get_account(&short_account).unwrap().data).unwrap();
     assert!(percolator::active_bitmap_is_empty(sh.active_bitmap), "short position fully closed, no phantom flip");
 }
+
+// security.md sweep — funding cap precision (#19 DoS): an extreme mark premium must be clamped to
+// max_abs_funding_e9_per_slot. If funding scaled with the raw premium, a tiny mark push could drain
+// a counterparty arbitrarily fast. Decisive check: a 2x-index premium and a 1000x-index premium must
+// accrue IDENTICAL funding (both pinned to the cap), and value stays conserved.
+#[test]
+fn v16_attack_extreme_premium_funding_is_capped() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const DEPOSIT: u128 = 100_000_000;
+    fn run_scenario(mark_mult: u64) -> (i128, u128, u128) {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            initial_price: INITIAL_PRICE,
+            max_price_move_bps_per_slot: 1_000,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 1,
+            ..V16CuMarketParams::default()
+        });
+        env.svm.warp_to_slot(0);
+        env.configure_ewma_mark_with_cu(0, INITIAL_PRICE, 1, 0);
+        let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+        let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+        env.deposit(&lo_owner, lo, DEPOSIT);
+        env.deposit(&sh_owner, sh, DEPOSIT);
+        env.trade_with_cu(&lo_owner, lo, &sh_owner, sh, POS_SCALE as i128, INITIAL_PRICE, 0);
+        env.svm.warp_to_slot(1);
+        env.push_ewma_mark_with_cu(1, INITIAL_PRICE.saturating_mul(mark_mult)); // premium
+        for slot in 1..=4u64 {
+            env.svm.warp_to_slot(slot);
+            for p in [lo, sh] {
+                env.svm.expire_blockhash();
+                let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                    vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+            }
+        }
+        let (_, g) = env.market_state();
+        (g.assets[0].f_long_num, g.vault, g.c_tot + g.insurance)
+    }
+    let (f2, vault2, senior2) = run_scenario(2);     // 2x index premium
+    let (f1000, vault1000, senior1000) = run_scenario(1000); // 1000x index premium (capped at clamp)
+    assert!(f2 != 0, "funding actually accrued (non-vacuous)");
+    // CRUX: extreme premium yields the SAME funding as the moderate one — both pinned to the cap.
+    assert_eq!(f2, f1000, "extreme premium funding is clamped to the cap (identical to moderate)");
+    // conservation in both runs.
+    assert_eq!(vault2, 2 * DEPOSIT, "scenario 2x: vault conserved");
+    assert_eq!(vault1000, 2 * DEPOSIT, "scenario 1000x: vault conserved");
+    assert!(vault2 >= senior2 && vault1000 >= senior1000, "senior conservation in both");
+}
