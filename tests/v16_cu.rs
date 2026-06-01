@@ -10659,3 +10659,34 @@ fn v16_attack_permissionless_resolve_rejects_fresh_market() {
     let (d2, _) = env2.withdraw_with_cu(&o2, p2, 100_000);
     assert_eq!(env2.token_amount(d2), 100_000, "market still Live after rejected fresh-oracle resolve");
 }
+
+// security.md sweep — CloseSlab wind-down finality (#30/#48): a market may only be closed when fully
+// wound down (mode==Resolved AND vault==0 && insurance==0 && c_tot==0 && no materialized portfolios).
+// Closing while value/positions remain would strand funds — must reject.
+#[test]
+fn v16_attack_close_slab_requires_full_winddown() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    let close_slab = |env: &mut V16CuEnv| -> Result<u64, String> {
+        let dest = Pubkey::new_unique();
+        env.svm.set_account(dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, env.admin.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+        env.svm.expire_blockhash();
+        send_tx(&mut env.svm, env.program_id, &env.payer, ProgInstruction::CloseSlab,
+            vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(env.vault, false),
+                 AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new(dest, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&env.admin])
+    };
+    // 1) Live market with funds -> reject (mode != Resolved).
+    assert!(close_slab(&mut env).is_err(), "CloseSlab on a Live market must reject");
+    assert_eq!(env.token_amount(env.vault), 1_000_000, "vault funds intact");
+
+    // 2) Resolved market but still holding c_tot / a materialized portfolio -> reject.
+    env.resolve();
+    let (_, g) = env.market_state();
+    assert!(g.c_tot != 0 || g.vault != 0, "market still holds value after resolve (positions not closed)");
+    assert!(close_slab(&mut env).is_err(), "CloseSlab while value/positions remain must reject");
+    assert_eq!(env.token_amount(env.vault), 1_000_000, "vault funds still intact (not stranded)");
+    // the user can still recover via CloseResolved (funds not locked by the rejected CloseSlab).
+    let cr = env.close_resolved(&owner, p);
+    assert_eq!(env.token_amount(cr), 1_000_000, "user recovers funds via CloseResolved");
+}
