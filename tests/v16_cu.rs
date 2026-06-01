@@ -10623,3 +10623,39 @@ fn v16_attack_healthy_account_not_liquidatable() {
     assert_eq!(g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q, "OI still balanced (position intact)");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
+// security.md sweep — permissionless resolve gating (#30 DoS): ResolveStalePermissionless lets ANYONE
+// resolve a market, but ONLY when the oracle is genuinely stale-matured. It must reject on a fresh
+// market (and when not configured) — otherwise an attacker could force resolution as a griefing DoS.
+#[test]
+fn v16_attack_permissionless_resolve_rejects_fresh_market() {
+    let resolve_stale = |env: &mut V16CuEnv, now_slot: u64| -> Result<u64, String> {
+        env.svm.warp_to_slot(now_slot);
+        env.send(ProgInstruction::ResolveStalePermissionless { now_slot }, vec![AccountMeta::new(env.market, false)], &[])
+    };
+    // 1) DEFAULT env: permissionless_resolve_stale_slots == 0 -> always disabled. Even a huge future
+    //    now_slot can't force resolution (slot is authenticated; staleness not configured).
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    assert!(resolve_stale(&mut env, 1_000_000).is_err(), "permissionless resolve must reject when not configured");
+    // market still Live: owner can withdraw (would fail if resolved).
+    let (d, _) = env.withdraw_with_cu(&owner, p, 100_000);
+    assert_eq!(env.token_amount(d), 100_000, "market still Live after rejected permissionless resolve");
+
+    // 2) CONFIGURED env (stale_slots=5) but oracle FRESH -> still rejects.
+    let mut env2 = V16CuEnv::new();
+    env2.configure_permissionless_resolve_with_cu(5, 5);
+    env2.configure_auth_mark_with_cu(0, 100);
+    let o2 = Keypair::new(); let p2 = env2.create_portfolio(&o2);
+    env2.deposit(&o2, p2, 1_000_000);
+    // keep the oracle fresh by pushing/cranking at slot 3, then try to resolve only 2 slots later.
+    env2.svm.warp_to_slot(3); env2.push_auth_mark_with_cu(3, 100);
+    env2.svm.expire_blockhash();
+    let _ = env2.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 3, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env2.payer.pubkey(), true), AccountMeta::new(env2.market, false), AccountMeta::new(p2, false)], &[]);
+    assert!(resolve_stale(&mut env2, 4).is_err(), "permissionless resolve must reject while the oracle is fresh (only 1 slot stale < 5)");
+    // market still Live: a withdraw succeeds (resolved mode would reject it).
+    let (d2, _) = env2.withdraw_with_cu(&o2, p2, 100_000);
+    assert_eq!(env2.token_amount(d2), 100_000, "market still Live after rejected fresh-oracle resolve");
+}
