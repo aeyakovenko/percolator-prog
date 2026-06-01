@@ -10369,3 +10369,51 @@ fn v16_attack_insurance_topup_pinned_to_canonical_vault() {
     assert_eq!(env.token_amount(fake_vault), 0, "fragment vault received nothing");
     assert_eq!(env.token_amount(src), 500, "source untouched");
 }
+
+// security.md sweep — funding direction symmetry (#33/#9): with the mark BELOW the index (opposite of
+// batch 19), funding must flow the other way (shorts pay longs) and still be value-conserving. Probes
+// the negative-premium branch of premium_funding_rate_e9.
+#[test]
+fn v16_attack_funding_direction_mark_below_index_conserves() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const DEPOSIT: u128 = 10_000_000;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_ewma_mark_with_cu(0, INITIAL_PRICE, 1, 0);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, DEPOSIT);
+    env.deposit(&sh_owner, sh, DEPOSIT);
+    env.trade_with_cu(&lo_owner, lo, &sh_owner, sh, POS_SCALE as i128, INITIAL_PRICE, 0);
+    // push the mark BELOW the index, then let funding accrue (no re-push).
+    env.svm.warp_to_slot(1);
+    env.push_ewma_mark_with_cu(1, INITIAL_PRICE / 2);
+    for slot in 1..=5u64 {
+        env.svm.warp_to_slot(slot);
+        for p in [lo, sh] {
+            env.svm.expire_blockhash();
+            let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+        }
+    }
+    let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+    let (_, g) = env.market_state();
+    assert!(g.assets[0].f_long_num != 0 || g.assets[0].f_short_num != 0, "funding accrued (non-vacuous)");
+    // mark < index => OPPOSITE direction from batch 19 (where longs were charged): longs are credited.
+    assert!(g.assets[0].f_long_num > 0 && g.assets[0].f_short_num < 0, "mark < index => shorts pay longs (f_long>0, f_short<0)");
+    // value conservation (same widened invariant as batch 19).
+    assert_eq!(g.vault, 2 * DEPOSIT, "no tokens minted/burned");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
+    assert!(residual >= a.pnl.max(0) + b.pnl.max(0), "positive pnl backed by residual");
+    let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
+    assert!(total_equity + g.insurance as i128 <= g.vault as i128, "no over-distribution");
+}
