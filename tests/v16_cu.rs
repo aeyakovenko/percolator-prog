@@ -8446,3 +8446,46 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
     let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
     assert!(residual >= a.pnl.max(0) + b.pnl.max(0), "positive pnl backed by residual");
 }
+
+// security.md sweep — account confusion (#44/#45): pass wrong-type accounts where a portfolio is
+// expected (the market account, the vault, an uninitialized account). Owner/discriminator checks
+// must reject; no state mutation, no value movement.
+#[test]
+fn v16_attack_account_type_confusion_rejected() {
+    let mut env = V16CuEnv::new();
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    let (_, g0) = env.market_state();
+
+    // 1) withdraw naming the MARKET account as the portfolio.
+    let dest = Pubkey::new_unique();
+    env.svm.set_account(dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, la.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    let r1 = env.send(ProgInstruction::Withdraw { amount: 1 }, vec![
+        AccountMeta::new(la.pubkey(), true), AccountMeta::new(env.market, false),
+        AccountMeta::new(env.market, false), AccountMeta::new(dest, false),
+        AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false)], &[&la]);
+    assert!(r1.is_err(), "withdraw with market-as-portfolio must reject");
+
+    // 2) trade naming the VAULT as account_a.
+    env.svm.expire_blockhash();
+    let r2 = env.send(ProgInstruction::TradeNoCpi { asset_index: 0, size_q: POS_SCALE as i128, exec_price: 100, fee_bps: 0 }, vec![
+        AccountMeta::new(la.pubkey(), true), AccountMeta::new(lb.pubkey(), true),
+        AccountMeta::new(env.market, false), AccountMeta::new(env.vault, false),
+        AccountMeta::new(pb, false)], &[&la, &lb]);
+    assert!(r2.is_err(), "trade with vault-as-portfolio must reject");
+
+    // 3) crank naming an uninitialized (system) account as the portfolio.
+    let junk = Pubkey::new_unique();
+    env.svm.set_account(junk, Account { lamports: 1_000_000, data: vec![0u8; 64], owner: solana_sdk::system_program::ID, executable: false, rent_epoch: 0 }).unwrap();
+    env.svm.expire_blockhash();
+    let r3 = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 1, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(junk, false)], &[]);
+    assert!(r3.is_err(), "crank with uninitialized-account-as-portfolio must reject");
+
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.c_tot, g0.c_tot, "no capital moved by confused-account calls");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+}
