@@ -153,6 +153,17 @@ fn make_mint_data() -> Vec<u8> {
     data
 }
 
+/// The canonical vault address the wrapper now pins to (F-VAULT-FRAG fix): the Associated Token
+/// Account of the vault_authority PDA for the given mint.
+fn canonical_vault_ata(vault_authority: Pubkey, mint: Pubkey) -> Pubkey {
+    let ata_program = solana_sdk::pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+    Pubkey::find_program_address(
+        &[vault_authority.as_ref(), spl_token::ID.as_ref(), mint.as_ref()],
+        &ata_program,
+    )
+    .0
+}
+
 fn make_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
     let mut data = vec![0u8; TokenAccount::LEN];
     TokenAccount::pack(
@@ -314,9 +325,10 @@ impl V16CuEnv {
         let admin = Keypair::new();
         let market = Pubkey::new_unique();
         let mint = Pubkey::new_unique();
-        let vault = Pubkey::new_unique();
         let vault_authority =
             Pubkey::find_program_address(&[b"vault", market.as_ref()], &program_id).0;
+        // F-VAULT-FRAG fix: the vault must be the canonical ATA of (vault_authority, mint).
+        let vault = canonical_vault_ata(vault_authority, mint);
         svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
         svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
         svm.set_account(
@@ -7690,7 +7702,12 @@ fn v16_bpf_policy_authority_and_base_unit_tags_are_bounded_and_persist() {
 
     let primary_source = env.token_account_for_mint(env.mint, env.admin.pubkey(), 50);
     let secondary_dest = env.token_account_for_mint(secondary_mint, env.admin.pubkey(), 0);
-    let secondary_vault = env.token_account_for_mint(secondary_mint, env.vault_authority, 50);
+    // F-VAULT-FRAG fix: the secondary vault must be the canonical ATA of (vault_authority, secondary_mint).
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm.set_account(secondary_vault, Account {
+        lamports: 1_000_000_000, data: make_token_data(secondary_mint, env.vault_authority, 50),
+        owner: spl_token::ID, executable: false, rent_epoch: 0,
+    }).unwrap();
     let before_swap_market = env.svm.get_account(&env.market).unwrap().data;
     let swap_cu = env.swap_secondary_for_primary_with_cu(
         primary_source,
@@ -10033,47 +10050,51 @@ fn v16_attack_non_admin_cannot_resolve_or_configure() {
 // it, and withdraw from the canonical vault — fragmenting liquidity so an honest user's withdrawal
 // against the canonical vault fails (loss-of-funds), at a 1:1 self-cost (abandoned funds).
 #[test]
-fn v16_exploit_vault_fragmentation_strands_honest_withdraw() {
+fn v16_regression_vault_pinned_to_canonical_ata_no_fragmentation() {
+    // F-VAULT-FRAG REGRESSION (now FIXED): the wrapper pins the vault to the canonical ATA of
+    // (vault_authority, mint). Routing a deposit to a second vault_authority-owned account is now
+    // rejected, so the liquidity-fragmentation / honest-withdraw-strand attack is no longer possible.
     let mut env = V16CuEnv::new();
-    // honest user deposits 1,000,000 to the CANONICAL vault.
     let honest = Keypair::new(); let hp = env.create_portfolio(&honest);
     env.deposit(&honest, hp, 1_000_000);
     assert_eq!(env.token_amount(env.vault), 1_000_000, "canonical vault holds the honest deposit");
 
-    // attacker creates a SECOND token account owned by the same vault_authority PDA (anyone can: the
-    // SPL token-account owner field is arbitrary at creation).
+    // attacker creates a SECOND token account owned by the vault_authority PDA (NOT the canonical ATA).
     let attacker = Keypair::new(); let ap = env.create_portfolio(&attacker);
     let fake_vault = Pubkey::new_unique();
     env.svm.set_account(fake_vault, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, env.vault_authority, 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
-    // attacker deposits 500k routed to the FAKE vault. GAP: verify_vault_token_account only checks
-    // owner == vault_authority, so this is ACCEPTED instead of rejected.
+    assert_ne!(fake_vault, env.vault, "fake vault is not the canonical vault");
+
+    // FIX: deposit routed to the non-canonical (fake) vault is now REJECTED.
     let atk_src = env.token_account_for_mint(env.mint, attacker.pubkey(), 500_000);
     env.svm.expire_blockhash();
     let dep = env.send(ProgInstruction::Deposit { amount: 500_000 }, vec![
         AccountMeta::new(attacker.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(ap, false),
         AccountMeta::new(atk_src, false), AccountMeta::new(fake_vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&attacker]);
-    assert!(dep.is_ok(), "GAP: deposit to a non-canonical vault-authority-owned account is accepted");
-    assert_eq!(env.portfolio_state(ap).capital, 500_000, "attacker credited 500k capital");
-    assert_eq!(env.token_amount(env.vault), 1_000_000, "the 500k went to the FAKE vault, not canonical");
-    assert_eq!(env.token_amount(fake_vault), 500_000, "fake vault now holds the attacker's deposit");
+    assert!(dep.is_err(), "FIXED: deposit to a non-canonical vault-authority-owned account is rejected");
+    assert_eq!(env.portfolio_state(ap).capital, 0, "no capital credited via a fake vault");
+    assert_eq!(env.token_amount(fake_vault), 0, "fake vault received nothing");
+    assert_eq!(env.token_amount(atk_src), 500_000, "attacker source untouched");
 
-    // attacker withdraws 500k from the CANONICAL vault (draining honest liquidity, not their own deposit).
+    // a withdraw routed to the fake vault is likewise rejected.
+    env.deposit(&attacker, ap, 500_000); // legit deposit to canonical so attacker has capital
     env.svm.expire_blockhash();
-    let (atk_dest, _) = env.withdraw_with_cu(&attacker, ap, 500_000);
-    assert_eq!(env.token_amount(atk_dest), 500_000, "attacker pulled 500k of HONEST funds from canonical");
-    assert_eq!(env.token_amount(env.vault), 500_000, "canonical vault now under-funded (1M owed, 500k held)");
+    let dest = Pubkey::new_unique();
+    env.svm.set_account(dest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, attacker.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    let wd = env.send(ProgInstruction::Withdraw { amount: 500_000 }, vec![
+        AccountMeta::new(attacker.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(ap, false),
+        AccountMeta::new(dest, false), AccountMeta::new(fake_vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&attacker]);
+    assert!(wd.is_err(), "FIXED: withdraw from a non-canonical vault is rejected");
 
-    // CONSEQUENCE: the honest user can no longer withdraw their full 1,000,000 from the canonical vault.
+    // honest user can still withdraw their full balance from the canonical vault — no stranding.
     env.svm.expire_blockhash();
     let hdest = Pubkey::new_unique();
     env.svm.set_account(hdest, Account { lamports: 1_000_000_000, data: make_token_data(env.mint, honest.pubkey(), 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
     let hw = env.send(ProgInstruction::Withdraw { amount: 1_000_000 }, vec![
         AccountMeta::new(honest.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(hp, false),
         AccountMeta::new(hdest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&honest]);
-    assert!(hw.is_err(), "CONFIRMED LoF: honest user's full withdraw fails — canonical vault was fragmented");
-    assert_eq!(env.portfolio_state(hp).capital, 1_000_000, "honest user still owed 1M but canonical holds only 500k");
-    // The stranded 500k sits in fake_vault (vault-authority-owned); honest users never pass it.
-    // Self-sacrificial griefing: the attacker's own 500k is the abandoned, stranded balance.
+    assert!(hw.is_ok(), "honest user withdraws their full 1M from the canonical vault (no fragmentation)");
+    assert_eq!(env.token_amount(hdest), 1_000_000, "honest user fully paid");
 }
 
 // security.md sweep — withdraw dest-owner binding (#44): withdraw must deliver only to a dest token
