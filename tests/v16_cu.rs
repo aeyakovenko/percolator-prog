@@ -11731,3 +11731,31 @@ fn v16_attack_retire_asset_authority_gated() {
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+// security.md sweep — self-crank maintenance fee (#32): an account syncing its OWN maintenance fee as
+// the cranker (cranker_portfolio == self) must still conserve — the fee splits into the cranker share
+// (back to self) and insurance, totaling exactly the fee charged. No value created by self-cranking.
+#[test]
+fn v16_attack_self_crank_maintenance_fee_conserves() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(1, 10_000, 10_000, 10_000, 580);
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    env.deposit(&la, pa, 100_000_000);
+    env.update_maintenance_fee_policy_with_cu(4_000); // cranker takes 40%
+    let cap0 = env.portfolio_state(pa).capital;
+    let (_, g0) = env.market_state();
+    // la syncs its OWN fee, naming ITSELF as the cranker.
+    env.svm.warp_to_slot(10);
+    let _ = env.try_sync_maintenance_fee_with_cu(pa, Some(pa), 10);
+    let cap1 = env.portfolio_state(pa).capital;
+    let (_, g1) = env.market_state();
+    // net effect on la's capital = -(fee) + (cranker share). insurance += (fee - cranker share).
+    let net_loss = cap0.saturating_sub(cap1);
+    let insurance_gain = g1.insurance - g0.insurance;
+    // total value conserved: la's net loss == insurance gain (the cranker share returned to la nets out).
+    assert_eq!(net_loss, insurance_gain, "self-crank: la's net loss == insurance gain (fee fully conserved)");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged (fee internal)");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert_eq!(g1.c_tot, cap1, "c_tot == la's capital (single account)");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+    // la can't gain from self-cranking: its capital did not increase.
+    assert!(cap1 <= cap0, "self-cranking never increases the caller's capital (no value extraction)");
+}
