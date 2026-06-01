@@ -11413,3 +11413,30 @@ fn v16_attack_convert_bounded_by_available_backing() {
     assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
     let _ = g0;
 }
+
+// security.md sweep — undersized portfolio account handling (#44/#37): InitPortfolio on an account
+// smaller than the required size must NOT cause an out-of-bounds write. The wrapper safely REALLOCS
+// the account up to the required length (zero-initialized) before any portfolio write — then it works
+// correctly. (No OOB; this verifies the safe-resize path.)
+#[test]
+fn v16_attack_undersized_portfolio_account_realloced_safely() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    env.ensure_signer_account(owner.pubkey());
+    // a program-owned account smaller than the required portfolio length.
+    let small = Pubkey::new_unique();
+    let small_len = env.portfolio_account_len / 2;
+    env.svm.set_account(small, Account { lamports: 1_000_000_000, data: vec![0u8; small_len], owner: env.program_id, executable: false, rent_epoch: 0 }).unwrap();
+    // InitPortfolio reallocs it to the required size (no OOB) and succeeds.
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::InitPortfolio, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(small, false)], &[&owner]);
+    assert!(r.is_ok(), "InitPortfolio reallocs an undersized account safely: {:?}", r);
+    assert!(env.svm.get_account(&small).unwrap().data.len() >= env.portfolio_account_len, "account realloced to >= required size");
+    // and the realloced portfolio works correctly (no corruption): a deposit credits exactly.
+    env.deposit(&owner, small, 1_000);
+    assert_eq!(env.portfolio_state(small).capital, 1_000, "realloced portfolio credits a deposit exactly (no OOB/corruption)");
+    let (_, g) = env.market_state();
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
+}
