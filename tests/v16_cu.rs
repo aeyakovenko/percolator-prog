@@ -11677,3 +11677,26 @@ fn v16_attack_wrong_vault_authority_rejected() {
     let (good, _) = env.withdraw_with_cu(&owner, p, 500_000);
     assert_eq!(env.token_amount(good), 500_000, "withdraw with the canonical vault_authority works");
 }
+
+// security.md sweep — InitPortfolio account-owner validation (#44/#45): initializing a portfolio on an
+// account NOT owned by the program must reject (the program can't safely realloc/write a foreign
+// account). No corrupting an account it doesn't own.
+#[test]
+fn v16_attack_init_portfolio_foreign_account_rejected() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new(); env.ensure_signer_account(owner.pubkey());
+    // an account owned by SPL Token (a foreign program), sized like a portfolio.
+    let foreign = Pubkey::new_unique();
+    env.svm.set_account(foreign, Account { lamports: 1_000_000_000, data: vec![0u8; env.portfolio_account_len], owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::InitPortfolio, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(foreign, false)], &[&owner]);
+    assert!(r.is_err(), "InitPortfolio on a foreign-owned account must reject");
+    // the foreign account is unchanged (still spl-token-owned, not a portfolio).
+    let acc = env.svm.get_account(&foreign).unwrap();
+    assert_eq!(acc.owner, spl_token::ID, "foreign account ownership unchanged (not hijacked)");
+    // a proper program-owned account still initializes fine.
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000);
+    assert_eq!(env.portfolio_state(p).capital, 1_000, "proper portfolio works");
+}
