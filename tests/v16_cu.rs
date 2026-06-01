@@ -9105,3 +9105,40 @@ fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
     assert!(accounted <= 2_000_000, "no value created by extreme mark pushes (accounted {})", accounted);
     assert!(accounted >= 2_000_000 - 1_000, "value not materially destroyed; remainder is in-vault residual (accounted {})", accounted);
 }
+
+// security.md sweep — fee bounds / overflow (#37/#19): TradeNoCpi's fee_bps is caller-supplied. An
+// out-of-range fee_bps must be rejected (bounded by max_trading_fee_bps), never overflow or drain
+// beyond capital. A valid max fee must accrue to insurance with exact conservation.
+#[test]
+fn v16_attack_trade_fee_bps_bounded_and_conserving() {
+    let mut env = V16CuEnv::new(); // default max_trading_fee_bps = 10_000
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    // out-of-range fee_bps must be rejected with no state change.
+    for bad in [u64::MAX, 10_001u64, 50_000] {
+        env.svm.expire_blockhash();
+        let r = env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, bad);
+        assert!(r.is_err(), "fee_bps {} > max_trading_fee_bps must be rejected", bad);
+    }
+    let (_, g0) = env.market_state();
+    assert_eq!(g0.assets[0].oi_eff_long_q, 0, "no OI from rejected over-fee trades");
+    assert_eq!(g0.c_tot, 2_000_000, "no capital moved by rejected trades");
+
+    // valid max fee (10_000 bps = 100% of notional) succeeds and accrues to insurance.
+    env.svm.expire_blockhash();
+    let r = env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 10_000);
+    assert!(r.is_ok(), "max valid fee_bps should succeed: {:?}", r);
+    let (_, g1) = env.market_state();
+    // fee moved capital -> insurance internally; vault unchanged, conservation exact.
+    assert_eq!(g1.vault, 2_000_000, "fee is internal: vault unchanged (no tokens created/destroyed)");
+    assert_eq!(g1.vault, g1.c_tot + g1.insurance, "exact conservation: vault == c_tot + insurance");
+    assert!(g1.insurance > 0, "fee actually accrued to insurance");
+    // fee never exceeds the traded notional (bounded), so neither party is over-drained.
+    let notional = 100u128; // POS_SCALE @ 100
+    assert!(g1.insurance <= 2 * notional, "fee bounded by ~notional per side (insurance {})", g1.insurance);
+    let a = state::read_portfolio(&env.svm.get_account(&pa).unwrap().data).unwrap();
+    let b = state::read_portfolio(&env.svm.get_account(&pb).unwrap().data).unwrap();
+    assert!(a.capital > 0 && b.capital > 0, "fee did not drain either party to zero");
+}
