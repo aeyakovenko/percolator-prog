@@ -9224,3 +9224,44 @@ fn v16_regression_resolve_before_settlement_uses_official_price() {
     assert_eq!(a.capital, 0, "long fully wound down");
     assert!(a.resolved_payout_receipt.finalized || !a.resolved_payout_receipt.present, "receipt closable");
 }
+
+// security.md sweep — crank idempotency / double-accrual (#32 race): re-cranking an asset at the SAME
+// slot must be a no-op. If a second same-slot crank re-applies the price move/funding, an attacker
+// could double-realize a counterparty's loss or double-charge funding. We first crank to the
+// settlement fixed point (§6.1/§6.2 needs multiple passes), then assert re-cranking is an exact no-op.
+#[test]
+fn v16_regression_crank_idempotent_at_settlement_fixed_point() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(0, &lo_owner, lo, &sh_owner, sh, (10_000 * POS_SCALE) as i128, 100, 0);
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, 110);
+    let crank = |env: &mut V16CuEnv, p: Pubkey, slot: u64| {
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+    };
+    // crank many passes at slot 11 and watch the short's capital: it must CONVERGE to a fixed point
+    // (settlement completing), not keep dropping (which would be double-accrual).
+    env.svm.warp_to_slot(11);
+    for _ in 0..8 { for p in [sh, lo] { crank(&mut env, p, 11); } } // crank to the settlement fixed point
+    let lo1 = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    let sh1 = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+    let (_, g1) = env.market_state();
+    let ep1 = g1.assets[0].effective_price;
+    for _ in 0..3 { for p in [sh, lo] { crank(&mut env, p, 11); } }
+    let lo2 = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    let sh2 = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+    let (_, g2) = env.market_state();
+
+    assert_eq!(g2.assets[0].effective_price, ep1, "effective price unchanged by same-slot re-crank");
+    assert_eq!((lo2.capital, lo2.pnl), (lo1.capital, lo1.pnl), "long pnl/capital not double-accrued");
+    assert_eq!((sh2.capital, sh2.pnl), (sh1.capital, sh1.pnl), "short pnl/capital not double-accrued");
+    assert_eq!(g2.assets[0].f_long_num, g1.assets[0].f_long_num, "funding ledger not double-applied");
+    assert_eq!(g2.vault, 2_000_000, "vault conserved");
+    assert!(g2.vault >= g2.c_tot + g2.insurance, "senior conservation");
+}
