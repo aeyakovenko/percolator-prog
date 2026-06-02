@@ -14728,3 +14728,36 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
     assert!(ok.is_ok(), "the genuine admin rotates the admin (co-signed): {:?}", ok);
     assert_eq!(env.market_state().0.admin, new_admin.pubkey().to_bytes(), "admin rotated by the genuine holder");
 }
+
+// security.md sweep — admin renounce anti-brick (#6/#30): renouncing the admin (new_pubkey = zero) is
+// only permitted if a PERMISSIONLESS fallback exists (permissionless_resolve_stale_slots != 0 AND
+// force_close_delay_slots != 0), src/v16_program.rs:8413. Attacker/footgun goal: renounce admin with no
+// permissionless path so the market is PERMANENTLY bricked (no admin to resolve, no permissionless
+// resolution). Protection: renounce-to-zero rejects unless the fallback is configured first.
+#[test]
+fn v16_attack_admin_renounce_without_fallback_rejected() {
+    let mut env = V16CuEnv::new(); // default: permissionless_resolve_stale_slots == 0 (no fallback)
+    let (cfg0, _) = env.market_state();
+    let zero = Pubkey::default();
+
+    // ATTACK/FOOTGUN: renounce admin (-> zero) with NO permissionless fallback -> reject (no brick).
+    env.svm.expire_blockhash();
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_ADMIN, new_pubkey: [0u8; 32] },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new_readonly(zero, false), AccountMeta::new(env.market, false)],
+        &[&env.admin]);
+    assert!(r.is_err(), "renouncing admin with no permissionless fallback must reject (anti-brick)");
+    assert_eq!(env.market_state().0.admin, cfg0.admin, "admin unchanged — market not bricked");
+
+    // configure a permissionless fallback (stale + force-close delay both > 0).
+    env.configure_permissionless_resolve_with_cu(100, 100);
+
+    // NOW renouncing admin is permitted (the market can still be resolved permissionlessly).
+    env.svm.expire_blockhash();
+    let ok = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_ADMIN, new_pubkey: [0u8; 32] },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new_readonly(zero, false), AccountMeta::new(env.market, false)],
+        &[&env.admin]);
+    assert!(ok.is_ok(), "renouncing admin WITH a permissionless fallback is allowed: {:?}", ok);
+    assert_eq!(env.market_state().0.admin, [0u8; 32], "admin renounced to zero (fallback present)");
+}
