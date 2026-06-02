@@ -70,14 +70,14 @@ The economic and governance model for a permissionless multi-asset market. Statu
 
 ### Isolation — traders are safe from other assets, even faulty ones
 Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guarantee:
-- A trader is **safe from traders in other assets even if those assets are faulty/malicious**. **◑**
+- A trader is **safe from traders in other assets even if those assets are faulty/malicious**. **✅**
 - **Every domain is isolated**: a claim is bound to its originating `(asset, side)` domain
   (`source_claim_market_id` must match the asset's `market_id`), a winner is backed only by that
   domain (`account_source_realizable_support`, per-domain — not the global residual), and **bad debt
   is contained to the domain that caused it** — it can never drain or haircut another asset's
-  insurance/backing/winners. **◑** (Insurance side verified:
-  `v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance`; backing-side counterpart + the
-  cross-margin bankruptcy-containment case still to add.)
+  insurance/backing/winners. **✅** A faulty asset's insolvency leaves another asset's **insurance**
+  (`v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance`) AND **backing**
+  (`v16_attack_asset1_insolvency_cannot_drain_asset0_backing`) byte-identical.
 - **Even the asset-0 admin is bounded** — it cannot reach into another asset's funds or a user's
   collateral. **◑**
 
@@ -102,12 +102,13 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   account id** — with **safe delays that cannot steal user funds** but **eventually drain an
   abandoned market to zero**. **◑** (`ResolveMarket` / permissionless-resolve fallback + `CloseSlab`;
   reclaim/abandonment-drain semantics partial.)
-- **The asset-0 key can force-shutdown assets 1..N without rugging traders** — via **timeouts so
-  traders can exit** before the asset is wound down. **✅** mechanism verified
-  (`v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot`,
-  `v16_attack_force_close_healthy_asset_rejected`, and `withdraw`/`trade` are blocked only during the
-  active close window — `v16_attack_withdraw_blocked_during_active_close`). A dedicated
-  exit-during-the-delay assertion remains **◑**.
+- **The asset-0 key can force-shutdown assets 1..N without rugging traders** — `ASSET_ACTION_SHUTDOWN`
+  moves the asset to RECOVERY with a frozen mark, and the wind-down force-close is gated behind
+  `force_close_delay_slots` so there is an **exit window**. **✅**
+  `v16_attack_force_shutdown_timeout_lets_traders_exit_before_close` asserts shutdown → RECOVERY,
+  force-close **rejects before** the delay and **succeeds after**; plus
+  `v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot` and
+  `v16_attack_force_close_healthy_asset_rejected`.
 
 ### Base unit (collateral)
 - The base unit is held in **two SPL token accounts** (a **primary** and a **secondary**), both

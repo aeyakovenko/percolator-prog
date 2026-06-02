@@ -15176,3 +15176,96 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
         "domain authority self-rotates even after the asset admin is burned");
     assert_eq!(prof(&env, 1).oracle_authority, cold.pubkey().to_bytes(), "oracle self-rotated post-burn");
 }
+
+// Product spec — cross-asset BACKING isolation (counterpart to the domain-insurance isolation test):
+// a faulty/insolvent permissionless asset must not drain ANOTHER asset's backing bucket. Fund both
+// assets' backing, drive asset 1 insolvent + liquidate, and assert asset 0's backing buckets are
+// byte-identical.
+#[test]
+fn v16_attack_asset1_insolvency_cannot_drain_asset0_backing() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    // fund BOTH assets' backing buckets (asset 0 -> domains 0,1; asset 1 -> domains 2,3), long expiry.
+    env.top_up_backing_bucket(0, 1_000, 100_000);
+    env.top_up_backing_bucket(1, 1_000, 100_000);
+    env.top_up_backing_bucket(2, 500, 100_000);
+    env.top_up_backing_bucket(3, 500, 100_000);
+    let bk = |env: &V16CuEnv, d: usize| env.market_state().1.source_backing_buckets[d].fresh_unliened_backing_num;
+    let (a0d0, a0d1) = (bk(&env, 0), bk(&env, 1));
+    assert!(a0d0 > 0 && a0d1 > 0, "asset-0 backing funded (non-vacuous)");
+
+    // asset-1: tiny-capital short driven insolvent (bad debt on asset 1).
+    let a1o = Keypair::new(); let a1 = env.create_portfolio(&a1o);
+    let b1o = Keypair::new(); let b1 = env.create_portfolio(&b1o);
+    env.deposit(&a1o, a1, 1_000_000);
+    env.deposit(&b1o, b1, 250);
+    env.trade_asset_with_cu(1, &a1o, a1, &b1o, b1, POS_SCALE as i128, 100, 0);
+    for (slot, mark) in [(2u64, 200u64), (3, 400), (4, 800)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(1, slot, mark);
+        for p in [a1, b1] {
+            env.svm.expire_blockhash();
+            let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 1, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+        }
+    }
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 1, now_slot: 4, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(b1, false)], &[]);
+
+    let g1 = env.market_state().1;
+    assert_eq!(env.portfolio_state(b1).capital, 0, "asset-1 short driven insolvent (non-vacuous)");
+    // ISOLATION: asset-0's backing buckets are byte-identical — asset-1 bad debt can't reach asset-0 backing.
+    assert_eq!(g1.source_backing_buckets[0].fresh_unliened_backing_num, a0d0, "asset-0 long-domain backing UNTOUCHED");
+    assert_eq!(g1.source_backing_buckets[1].fresh_unliened_backing_num, a0d1, "asset-0 short-domain backing UNTOUCHED");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation under cross-asset insolvency");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+}
+
+// Product spec — force-shutdown with a timeout so traders can exit (no rug): the asset-0 admin can
+// shut down asset 1..N (ASSET_ACTION_SHUTDOWN -> RECOVERY with a frozen mark), but the permissionless
+// force-close (which winds the asset down) is gated behind force_close_delay_slots. So there is a
+// window after shutdown during which the asset is NOT yet force-closed — traders can exit — and only
+// after the delay can the wind-down proceed. Asserts: shutdown -> RECOVERY; force-close REJECTS before
+// the delay; force-close SUCCEEDS after it.
+#[test]
+fn v16_attack_force_shutdown_timeout_lets_traders_exit_before_close() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    const DELAY: u64 = 50;
+    env.configure_permissionless_resolve_with_cu(100, DELAY); // force_close_delay_slots = 50
+
+    // open an asset-1 position (a trader is exposed when the shutdown lands).
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    env.trade_asset_with_cu(1, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+
+    // asset-0 admin force-shuts-down asset 1 at slot 10 -> RECOVERY (frozen mark, not yet wound down).
+    const SHUT: u64 = 10;
+    env.svm.warp_to_slot(SHUT);
+    env.svm.expire_blockhash();
+    env.update_asset_lifecycle_as_admin_with_cu(percolator_prog::processor::ASSET_ACTION_SHUTDOWN, 1, SHUT, 0);
+    assert_eq!(env.market_state().1.assets[1].lifecycle, AssetLifecycleV16::Recovery,
+        "asset 1 is in RECOVERY after shutdown (not instantly force-closed)");
+
+    // WINDOW: before the delay elapses, the permissionless force-close is REJECTED -> traders still have
+    // time to exit; the asset is not rugged out from under them.
+    let cranker = Keypair::new();
+    env.svm.warp_to_slot(SHUT + DELAY - 1);
+    let early = env.try_force_close_abandoned_asset_with_cu(&cranker, pa, pb, 1, SHUT + DELAY - 1, POS_SCALE);
+    assert!(early.is_err(), "force-close must REJECT before force_close_delay_slots elapses (exit window open)");
+    assert_eq!(env.market_state().1.assets[1].lifecycle, AssetLifecycleV16::Recovery, "asset still RECOVERY, not closed");
+
+    // after the delay, the wind-down may proceed.
+    env.svm.warp_to_slot(SHUT + DELAY + 5);
+    env.svm.expire_blockhash();
+    let late = env.try_force_close_abandoned_asset_with_cu(&cranker, pa, pb, 1, SHUT + DELAY + 5, POS_SCALE);
+    assert!(late.is_ok(), "force-close succeeds once the delay has elapsed: {:?}", late);
+    let g = env.market_state().1;
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation across shutdown + delayed force-close");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+}
