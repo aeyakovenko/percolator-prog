@@ -15269,3 +15269,98 @@ fn v16_attack_force_shutdown_timeout_lets_traders_exit_before_close() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation across shutdown + delayed force-close");
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
 }
+
+// security.md sweep — §6.2 backing-yield fee split (#5): when a risk-increasing trade GROWS an
+// account's source-credit IM lien that draws a fresh counterparty backing bucket, the wrapper charges
+// a backing-domain trade fee = fee_bps * Δbacking and splits it three ways: insurance_share to the
+// market insurance pool (asset-0), the SAME amount earmarked into that domain's insurance budget, and
+// the remainder to the backing provider's bucket earnings. Verify the split conserves on real BPF
+// state: charged == insurance_pool_delta + provider_delta, and the domain budget mirrors the insurance
+// share. The lien is formed organically (cross-margin positive PnL used as IM), not injected.
+#[test]
+fn v16_attack_backing_fee_split_conserves() {
+    const INITIAL_PRICE: u64 = 100;
+    const ASSET0_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const ASSET1_SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const SAFE_INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 3_130;
+    const WINNING_DOMAIN: usize = 1;
+    const FEE_BPS: u16 = 5_000; // 10% of consumed backing
+    const INSURANCE_SHARE_BPS: u16 = 2_500; // 25% of the fee to insurance, 75% to provider
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+    env.update_backing_fee_policy_with_cu(WINNING_DOMAIN as u8, FEE_BPS, INSURANCE_SHARE_BPS);
+
+    let cross_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let cross_account = env.create_portfolio(&cross_owner);
+    let counterparty_account = env.create_portfolio(&counterparty_owner);
+    env.deposit(&cross_owner, cross_account, DEPOSIT);
+    env.deposit(&counterparty_owner, counterparty_account, 10_000);
+    env.top_up_backing_bucket(WINNING_DOMAIN as u8, 1_500, 10);
+
+    // Build cross_account's source-backed positive PnL on asset0 (a long that wins as the mark rises).
+    env.trade_asset_with_cu(0, &cross_owner, cross_account, &counterparty_owner, counterparty_account, ASSET0_SIZE_Q, INITIAL_PRICE, 0);
+    env.trade_asset_with_cu(1, &cross_owner, cross_account, &counterparty_owner, counterparty_account, ASSET1_SIZE_Q, INITIAL_PRICE, 0);
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 95);
+    for (portfolio, asset_index) in [(counterparty_account, 0), (cross_account, 0), (counterparty_account, 1)] {
+        env.crank(portfolio, ProgInstruction::PermissionlessCrank { action: 0, asset_index, now_slot: 2, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    }
+    // Force capital low so the parked positive-PnL claim is NEEDED as IM (triggers the source lien).
+    env.force_portfolio_capital_for_benchmark(cross_account, 2_600);
+    assert_eq!(env.portfolio_state(cross_account).pnl, 1_000, "setup must create source-backed positive PnL");
+
+    // Trim the bucket to the exact watermark, then refill generously so the risk increase liens against
+    // fresh counterparty backing.
+    let (_, g0) = env.market_state();
+    let surplus = (g0.source_credit[WINNING_DOMAIN].fresh_reserved_backing_num
+        - g0.source_credit[WINNING_DOMAIN].positive_claim_bound_num) / BOUND_SCALE;
+    if surplus > 0 {
+        let dest = env.token_account(env.admin.pubkey(), 0);
+        env.withdraw_backing_bucket_to_admin_token_with_cu(dest, WINNING_DOMAIN as u8, surplus);
+    }
+    env.top_up_backing_bucket(WINNING_DOMAIN as u8, 50_000, 10);
+    env.deposit(&cross_owner, cross_account, 500);
+    env.deposit(&counterparty_owner, counterparty_account, 500);
+    env.svm.warp_to_slot(3);
+
+    // Snapshot the three sinks + the payers before the lien-growing trade.
+    let (_, gb) = env.market_state();
+    let insurance_before = gb.insurance;
+    let budget_before = gb.insurance_domain_budget[WINNING_DOMAIN];
+    let provider_before = gb.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings;
+    let ctot_before = gb.c_tot;
+    let cap_cross_before = env.portfolio_state(cross_account).capital;
+    let cap_cp_before = env.portfolio_state(counterparty_account).capital;
+    let lien_before: u128 = env.portfolio_state(cross_account).source_lien_counterparty_backing_num.iter().sum();
+
+    // Risk-increasing trade: grows the IM source-credit lien -> draws fresh backing -> charges the fee.
+    let r = env.try_trade_asset_with_cu(1, &cross_owner, cross_account, &counterparty_owner, counterparty_account, SAFE_INCREASE_Q, 95, 0);
+    assert!(r.is_ok(), "backed risk increase must succeed: {r:?}");
+
+    let (_, ga) = env.market_state();
+    let insurance_delta = ga.insurance - insurance_before;
+    let budget_delta = ga.insurance_domain_budget[WINNING_DOMAIN] - budget_before;
+    let provider_delta = ga.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings - provider_before;
+    let cap_cross_after = env.portfolio_state(cross_account).capital;
+    let cap_cp_after = env.portfolio_state(counterparty_account).capital;
+    let lien_after: u128 = env.portfolio_state(cross_account).source_lien_counterparty_backing_num.iter().sum();
+    let charged = (cap_cross_before - cap_cross_after) + (cap_cp_before - cap_cp_after);
+
+    // The trade must actually grow the counterparty-backing lien (else the fee is vacuous).
+    assert!(lien_after > lien_before, "trade must grow the counterparty-backing lien (before={lien_before} after={lien_after})");
+    assert!(charged > 0, "a positive backing fee must be charged");
+    // Route 1+2+3: charged splits exactly into insurance pool + provider earnings, no atoms created/lost.
+    assert_eq!(insurance_delta + provider_delta, charged, "fee must split with no leakage: ins={insurance_delta} prov={provider_delta} charged={charged}");
+    // Insurance share is floor(charged * share_bps): asset-0 pool and the per-domain budget move together.
+    let expected_insurance = charged * INSURANCE_SHARE_BPS as u128 / 10_000;
+    assert_eq!(insurance_delta, expected_insurance, "insurance pool gets floor(fee*share)");
+    assert_eq!(budget_delta, insurance_delta, "per-domain insurance budget mirrors the insurance share");
+    // c_tot drops by exactly the fee debited from collateral (insurance + provider leave c_tot).
+    assert_eq!(ctot_before - ga.c_tot, charged, "c_tot decreases by exactly the charged fee");
+}
