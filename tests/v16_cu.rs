@@ -14180,3 +14180,39 @@ fn v16_attack_oracle_compose_divide_by_zero_leg_rejects() {
     let (normal_ok, _, _) = configure(150_000_000);
     assert!(normal_ok, "a normally-priced divide leg configures cleanly");
 }
+
+// security.md sweep — composite price over MAX_ORACLE_PRICE rejects (#37/#39): tiny (but nonzero)
+// divide legs inflate the composite to a huge value. Attacker goal: drive the composite past
+// MAX_ORACLE_PRICE so the protocol marks at a garbage/overflowed price (mass mis-liquidation / value
+// extraction). Protection: apply_transform's post-check `price > MAX_ORACLE_PRICE -> OracleInvalid`
+// (src/v16_program.rs:4067) rejects it; checked arithmetic prevents silent overflow. Complement to
+// #167 (invert-of-zero) and #168 (compose div-by-zero).
+#[test]
+fn v16_attack_oracle_composite_over_max_price_rejects() {
+    let configure = |l1: i64, l2: i64| -> (bool, Option<String>, bool) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let feeds = [[0x91u8;32],[0x92u8;32],[0x93u8;32]];
+        let a0 = env.set_pyth_price_with_conf(&feeds[0], 4_000_000_000, -6, 0, 100);
+        let a1 = env.set_pyth_price_with_conf(&feeds[1], l1, -6, 0, 100);
+        let a2 = env.set_pyth_price_with_conf(&feeds[2], l2, -6, 0, 100);
+        let flags = ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3;
+        let before = env.svm.get_account(&env.market).unwrap().data;
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0, 3, flags, feeds, &[a0, a1, a2], 1, 100, 0, 0, 100, 0);
+        let after = env.svm.get_account(&env.market).unwrap().data;
+        (r.is_ok(), r.err(), before == after)
+    };
+
+    // tiny divide legs (1, 1) -> 4e9 / 1 / 1 composite >> MAX_ORACLE_PRICE -> rejected, no overflow/garbage.
+    let (huge_ok, huge_err, huge_unchanged) = configure(1, 1);
+    assert!(!huge_ok, "a composite price over MAX_ORACLE_PRICE must reject");
+    let e = huge_err.unwrap();
+    assert!(e.contains("Custom(26)"), "must be OracleInvalid (Custom 26), got: {}", e);
+    assert!(!e.contains("panic") && !e.contains("ProgramFailedToComplete"), "must NOT overflow/crash: {}", e);
+    assert!(huge_unchanged, "rejected over-max configuration must not mutate the market");
+
+    // DISCRIMINATING CONTROL: normal divide legs produce an in-range composite -> configures cleanly.
+    let (normal_ok, _, _) = configure(150_000_000, 200_000_000);
+    assert!(normal_ok, "a normal composite (in range) configures cleanly");
+}
