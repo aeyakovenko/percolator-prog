@@ -14682,3 +14682,49 @@ fn v16_attack_convert_released_pnl_owner_gated() {
     assert!(ok.is_ok(), "owner-signed convert works: {:?}", ok);
     assert_eq!(env.portfolio_state(p).capital, cap0 + 40, "owner converts the backed 40 to capital");
 }
+
+// security.md sweep — UpdateAuthority current-authority gating / anti-takeover (#6): rotating an authority
+// requires the CURRENT holder of that authority to sign (expect_live_authority(cfg.<auth>, current)).
+// Attacker goal: a non-admin seizes the admin (or any) authority — a full protocol takeover. Protection:
+// the current-authority check rejects anyone who isn't the present holder; the authority is unchanged.
+#[test]
+fn v16_attack_update_authority_non_holder_cannot_rotate() {
+    let mut env = V16CuEnv::new();
+    let (cfg0, _) = env.market_state();
+    // mallory is NOT any authority; she tries to seize ADMIN, co-signing as the incoming admin.
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+
+    // ATTACK: rotate ADMIN with mallory as the CURRENT authority -> reject (mallory != cfg.admin).
+    env.svm.expire_blockhash();
+    let r_admin = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_ADMIN, new_pubkey: mallory.pubkey().to_bytes() },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false)],
+        &[&mallory]);
+    assert!(r_admin.is_err(), "a non-admin seizing the ADMIN authority must reject");
+
+    // and rotating the MARK authority as a non-(mark-)authority also rejects.
+    env.svm.expire_blockhash();
+    let r_mark = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_MARK, new_pubkey: mallory.pubkey().to_bytes() },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false)],
+        &[&mallory]);
+    assert!(r_mark.is_err(), "a non-holder rotating the MARK authority must reject");
+
+    // all authorities are byte-identical to the start — no takeover.
+    let (cfg1, _) = env.market_state();
+    assert_eq!(cfg1.admin, cfg0.admin, "admin authority unchanged (no takeover)");
+    assert_eq!(cfg1.mark_authority, cfg0.mark_authority, "mark authority unchanged");
+    assert_eq!(cfg1.insurance_authority, cfg0.insurance_authority, "insurance authority unchanged");
+
+    // CONTROL: the genuine current admin CAN rotate the admin (two-party handoff with the new admin co-signing).
+    let new_admin = Keypair::new();
+    env.ensure_signer_account(new_admin.pubkey());
+    env.svm.expire_blockhash();
+    let ok = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_ADMIN, new_pubkey: new_admin.pubkey().to_bytes() },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(new_admin.pubkey(), true), AccountMeta::new(env.market, false)],
+        &[&env.admin, &new_admin]);
+    assert!(ok.is_ok(), "the genuine admin rotates the admin (co-signed): {:?}", ok);
+    assert_eq!(env.market_state().0.admin, new_admin.pubkey().to_bytes(), "admin rotated by the genuine holder");
+}
