@@ -14031,3 +14031,52 @@ fn v16_attack_tradecpi_enforces_maker_margin() {
     let g = env.market_state().1;
     assert_eq!(g.c_tot + g.insurance, g.vault, "conservation after the in-margin fill");
 }
+
+// security.md sweep — matcher CPI cannot be handed protocol state (reentrancy, #22/#21): the accounts
+// forwarded to the matcher CPI (tail = accounts[8..]) are validated to EXCLUDE the market, both
+// portfolios, the program id, and ANY account owned by the percolator program (src/v16_program.rs:6308).
+// Attacker goal: pass a percolator-owned account (market/portfolio) into the matcher tail so a malicious
+// matcher can reenter and read/write protocol state mid-trade. Protection: any such tail account rejects.
+#[test]
+fn v16_attack_tradecpi_matcher_tail_cannot_carry_protocol_state() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let to = Keypair::new(); let t = env.create_portfolio(&to);
+    let mo = Keypair::new(); let m = env.create_portfolio(&mo);
+    let vo = Keypair::new(); let victim = env.create_portfolio(&vo); // a third, unrelated portfolio
+    env.deposit(&to, t, 1_000_000);
+    env.deposit(&mo, m, 1_000_000);
+    env.deposit(&vo, victim, 1_000_000);
+    let (ctx, del, _) = env.init_matcher_context(matcher_program, m);
+    let (_, g0) = env.market_state();
+
+    let market = env.market;
+    let base = |extra: Pubkey| vec![
+        AccountMeta::new(to.pubkey(), true), AccountMeta::new(mo.pubkey(), true),
+        AccountMeta::new(market, false), AccountMeta::new(t, false), AccountMeta::new(m, false),
+        AccountMeta::new_readonly(matcher_program, false), AccountMeta::new(ctx, false), AccountMeta::new_readonly(del, false),
+        AccountMeta::new(extra, false), // tail account[8] -> handed to the matcher CPI
+    ];
+    let ix = |asset_index, size_q| ProgInstruction::TradeCpi { asset_index, size_q, fee_bps: 100, limit_price: 0 };
+
+    // ATTACK 1: forward the MARKET account into the matcher tail -> reject.
+    env.svm.expire_blockhash();
+    let r1 = env.send(ix(0u16, (10 * POS_SCALE) as i128), base(market), &[&to, &mo]);
+    assert!(r1.is_err(), "matcher tail carrying the market account must reject");
+    // ATTACK 2: forward a third (percolator-owned) portfolio into the tail -> reject (ai.owner == program).
+    env.svm.expire_blockhash();
+    let r2 = env.send(ix(0u16, (10 * POS_SCALE) as i128), base(victim), &[&to, &mo]);
+    assert!(r2.is_err(), "matcher tail carrying a protocol-owned portfolio must reject");
+
+    // no state touched by either rejected attempt.
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no OI from rejected reentrancy attempts");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(env.portfolio_state(victim).capital, 1_000_000, "victim portfolio untouched");
+    // control: the SAME trade WITHOUT a poisoned tail fills cleanly.
+    env.svm.expire_blockhash();
+    let ok = env.try_trade_cpi_with_cu_on_asset(&to, t, &mo, m, matcher_program, ctx, del, 0, (10 * POS_SCALE) as i128, 100);
+    assert!(ok.is_ok(), "clean TradeCpi (no poisoned tail) executes: {:?}", ok);
+}
