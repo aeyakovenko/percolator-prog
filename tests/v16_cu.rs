@@ -13908,3 +13908,52 @@ fn v16_attack_over_liquidation_fee_clamped_to_position() {
     assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
+// security.md sweep — TradeCpi short-fill is atomic / rejected (#22/#33): a matcher capped at
+// max_fill_abs below the requested size cannot fully fill. Attacker goal: a short-filling matcher leaves
+// the taker with an unexpected partial position (phantom OI / under-fill) while the trade still
+// "succeeds". Protection: the trade is ATOMIC — a matcher that can't fill the requested size causes the
+// whole TradeCpi to REJECT, leaving both accounts position-free and the book unchanged.
+#[test]
+fn v16_attack_tradecpi_short_fill_rejects_atomically() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let maker_owner = Keypair::new();
+    let taker_account = env.create_portfolio(&taker_owner);
+    let maker_account = env.create_portfolio(&maker_owner);
+    env.deposit(&taker_owner, taker_account, 1_000_000);
+    env.deposit(&maker_owner, maker_account, 1_000_000);
+
+    // matcher capped at 5*POS_SCALE.
+    let cap: u128 = 5 * POS_SCALE;
+    let (matcher_ctx, matcher_delegate, _) =
+        env.init_matcher_context_with_data(matcher_program, maker_account, encode_matcher_init_passive(cap));
+    let (_, g0) = env.market_state();
+
+    // ATTACK: request 10*POS_SCALE (> cap) -> the matcher can't fully fill -> trade REJECTS atomically.
+    let r = env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner, taker_account, &maker_owner, maker_account,
+        matcher_program, matcher_ctx, matcher_delegate, 0, (10 * POS_SCALE) as i128, 100);
+    assert!(r.is_err(), "a matcher that can't fully fill must reject the whole trade (atomic)");
+
+    // ROLLBACK: no partial position created on either side; book and vault unchanged.
+    assert!(percolator::active_bitmap_is_empty(env.portfolio_state(taker_account).active_bitmap), "taker has NO position (no partial fill)");
+    assert!(percolator::active_bitmap_is_empty(env.portfolio_state(maker_account).active_bitmap), "maker has NO position");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no OI created by the rejected short-fill");
+    assert_eq!(g1.insurance, g0.insurance, "no fee charged on a rejected trade");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+
+    // DISCRIMINATING CONTROL: a request WITHIN the cap (the exact cap) fills cleanly -> the rejection
+    // above was specifically because of the short-fill, not some unrelated failure.
+    let _ = env.trade_cpi_with_cu_on_asset(
+        &taker_owner, taker_account, &maker_owner, maker_account,
+        matcher_program, matcher_ctx, matcher_delegate, 0, cap as i128, 100);
+    let taker = env.portfolio_state(taker_account);
+    assert_eq!(taker.legs[0].basis_pos_q, cap as i128, "an at-cap request fills fully and cleanly");
+    let g = env.market_state().1;
+    assert_eq!(g.c_tot + g.insurance, g.vault, "conservation after the successful in-cap fill");
+}
