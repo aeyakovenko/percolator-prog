@@ -13991,3 +13991,43 @@ fn v16_attack_tradecpi_fee_is_mark_pinned_not_matcher_quoted() {
     assert_eq!(fee_for_spread(2_000, 4_000), fee_no_spread, "matcher spread does not change the CPI fee (mark-pinned)");
     assert_eq!(fee_for_spread(500, 1_000), fee_no_spread, "fee invariant to a moderate spread too");
 }
+
+// security.md sweep — TradeCpi enforces the MAKER's margin too (#9/#22): the matcher fills the taker
+// against the maker (LP), who takes the opposite side. Attacker goal: a matcher opens a large position
+// against an under-capitalized maker (the maker can't margin its leg), fabricating OI / bad debt on the
+// maker side. Protection: the post-trade margin check covers BOTH sides, so an under-margined maker
+// causes the whole TradeCpi to reject; a well-capitalized maker fills cleanly.
+#[test]
+fn v16_attack_tradecpi_enforces_maker_margin() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let to = Keypair::new(); let t = env.create_portfolio(&to);
+    let mo = Keypair::new(); let m = env.create_portfolio(&mo);
+    env.deposit(&to, t, 100_000_000);     // taker well funded
+    env.deposit(&mo, m, 100);             // maker thin: cannot margin a 10*POS_SCALE leg (IM=100% -> req 1000)
+    let (ctx, del, _) = env.init_matcher_context(matcher_program, m);
+    let (_, g0) = env.market_state();
+
+    // ATTACK: 10*POS_SCALE fill -> the maker would owe IM ~1000 >> its 100 capital -> reject.
+    env.svm.expire_blockhash();
+    let r = env.try_trade_cpi_with_cu_on_asset(&to, t, &mo, m, matcher_program, ctx, del, 0, (10 * POS_SCALE) as i128, 100);
+    assert!(r.is_err(), "TradeCpi against an under-margined maker must reject");
+
+    // ROLLBACK: no position on either side, no OI, vault unchanged.
+    assert!(percolator::active_bitmap_is_empty(env.portfolio_state(t).active_bitmap), "taker has no position");
+    assert!(percolator::active_bitmap_is_empty(env.portfolio_state(m).active_bitmap), "maker has no position");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no OI fabricated against the thin maker");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+
+    // DISCRIMINATING CONTROL: top the maker up so it CAN margin the leg -> the same trade fills cleanly.
+    env.deposit(&mo, m, 2_000_000);
+    env.svm.expire_blockhash();
+    let ok = env.try_trade_cpi_with_cu_on_asset(&to, t, &mo, m, matcher_program, ctx, del, 0, (10 * POS_SCALE) as i128, 100);
+    assert!(ok.is_ok(), "well-capitalized maker fills cleanly: {:?}", ok);
+    assert_eq!(env.portfolio_state(m).legs[0].basis_pos_q, -((10 * POS_SCALE) as i128), "maker took the opposite leg");
+    let g = env.market_state().1;
+    assert_eq!(g.c_tot + g.insurance, g.vault, "conservation after the in-margin fill");
+}
