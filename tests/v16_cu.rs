@@ -13863,3 +13863,48 @@ fn v16_attack_cross_margin_netting_conserves() {
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation across cross-margin netting");
 }
+
+// security.md sweep — over-liquidation close_q clamps the FEE too (#3/#19): the liquidation fee is
+// bps * CLOSED notional. A cranker passing close_q >> the position is clamped to the position size
+// (#9376), but the FEE must be charged on the actually-closed amount, not the inflated close_q.
+// Attacker goal: pass a giant close_q to extract a fee far larger than the position warrants.
+#[test]
+fn v16_attack_over_liquidation_fee_clamped_to_position() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(0); // all to insurance
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let lo = Keypair::new(); let l = env.create_portfolio(&lo);
+    let so = Keypair::new(); let s = env.create_portfolio(&so);
+    let co = Keypair::new(); let c = env.create_portfolio(&co);
+    env.deposit(&lo, l, 100_000_000);
+    env.deposit(&so, s, 100_000);
+    env.deposit(&co, c, 1_000);
+    env.trade_asset_with_cu(0, &lo, l, &so, s, POS_SCALE as i128, 1_000_000, 0); // POS_SCALE position only
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(s, false)], &[]);
+    }
+    let (_, g0) = env.market_state();
+
+    // ATTACK: liquidate with close_q = 1000x the actual POS_SCALE position to inflate the fee.
+    env.svm.expire_blockhash();
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 30, funding_rate_e9: 0, close_q: 1_000 * POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(co.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(s, false), AccountMeta::new(c, false)], &[&co]);
+    assert!(r.is_ok(), "over-close liquidation should clamp and proceed: {:?}", r);
+    let (_, g1) = env.market_state();
+    let fee = g1.insurance - g0.insurance;
+
+    // CLAMP: the fee is on the actual POS_SCALE closed (~535 = 5bps * ~1.07e6), NOT 1000x that (~535_000).
+    assert!(fee > 0, "a fee was charged (non-vacuous)");
+    assert!(fee < 10_000, "fee {} reflects the ACTUAL closed POS_SCALE (~535), not the inflated 1000x close_q (~535_000)", fee);
+    // the position is fully closed (clamped to the actual size), not over-closed into a phantom.
+    let sl = env.portfolio_state(s);
+    assert!(sl.legs[0].basis_pos_q.unsigned_abs() <= POS_SCALE, "position closed at most to its actual size (no phantom over-close)");
+    assert_eq!(g1.vault, g0.vault, "fee internal, no vault mint");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
