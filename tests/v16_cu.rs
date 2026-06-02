@@ -13785,3 +13785,34 @@ fn v16_attack_margin_gap_zone_no_liq_no_risk_increase() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
 }
+
+// security.md sweep — dust-position MAINTENANCE floor (#9/#19): the per-leg maintenance requirement is
+// floored at min_nonzero_mm_req for any nonzero leg (the liquidation-threshold counterpart to the IM
+// floor in #161). Attacker goal: a dust position whose proportional maintenance margin (bps*tiny
+// notional) rounds near 0 becomes effectively un-liquidatable (it never breaches a ~0 maintenance req).
+// Protection: certified_maintenance_req >= min_nonzero_mm_req for a live leg.
+#[test]
+fn v16_attack_dust_position_maintenance_floored() {
+    // production_risk_params: maintenance_margin_bps=500 (5%), min_nonzero_mm_req=599.
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let xo = Keypair::new(); let x = env.create_portfolio(&xo);
+    let yo = Keypair::new(); let y = env.create_portfolio(&yo);
+    env.deposit(&xo, x, 1_000_000);
+    env.deposit(&yo, y, 1_000_000);
+    let dust = (POS_SCALE / 1_000) as i128; // notional ~1000 -> proportional MM (5%) ~25
+    env.trade_asset_with_cu(0, &xo, x, &yo, y, dust, 1_000_000, 0);
+
+    let xs = env.portfolio_state(x);
+    assert_eq!(percolator::active_bitmap_count_ones(xs.active_bitmap), 1, "dust position opened");
+    let mreq = xs.health_cert.certified_maintenance_req;
+    // FLOOR: maintenance req is the min_nonzero_mm_req floor (599), not the proportional ~25.
+    assert!(mreq >= 599, "dust maintenance req floored at min_nonzero_mm_req (599), got {}", mreq);
+    assert!(mreq > 25, "floor strictly exceeds the proportional dust MM (no liquidation-immune dust)");
+    // and the maintenance floor is below the initial floor (a real gap remains for the dust leg).
+    assert!(mreq <= xs.health_cert.certified_initial_req, "maint floor <= initial floor");
+
+    let g = env.market_state().1;
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+}
