@@ -47,7 +47,8 @@ The economic and governance model for a permissionless multi-asset market. Statu
 
 ### Asset 0 — the base unit
 - **Asset 0 is denominated in the base unit** and has its own **insurance + backing**. **✅**
-- A **configured % of asset-0 backing yield routes to asset-0 insurance**. **◑**
+- A **configured % of asset-0 backing yield routes to asset-0 insurance**. **✅**
+  (`v16_attack_backing_fee_split_conserves` — see Assets 1..N fee routing.)
 - An **asset-0 key sets the fee to create assets 1..N permissionlessly**. **A fee of zero means
   creation is NOT permissionless** — market-wide authority is then required to add an asset. **◑**
   (`UpdateMarketInitFeePolicy`; the append path charges `permissionless_market_init_fee_for_asset`
@@ -64,9 +65,12 @@ The economic and governance model for a permissionless multi-asset market. Statu
     (`v16_attack_fee_redirect_split_lands_correctly` asserts the 20% split + conservation;
     `v16_attack_market0_fees_stay_local`, `..._fee_redirect_full_boundary`.)
   - a % of **asset-N backing yield → asset-N insurance** and **→ asset-0 insurance**
-    (`backing_trade_fee_insurance_share`, redirected via the same market-0 share). **◑** — policy is
-    authority-gated + bounded (`v16_attack_backing_fee_policy_authority_gated`); a dedicated
-    backing-yield split-conservation test is the remaining gap.
+    (`backing_trade_fee_insurance_share`, redirected via the same market-0 share). **✅** — policy is
+    authority-gated + bounded (`v16_attack_backing_fee_policy_authority_gated`), and
+    `v16_attack_backing_fee_split_conserves` drives a real BPF risk-increase that grows a
+    counterparty-backing lien and asserts the fee splits with no leakage: `charged ==
+    insurance_pool_delta + provider_delta`, `insurance_delta == floor(charged * share_bps)`, and the
+    per-domain insurance budget mirrors the insurance share.
 
 ### Isolation — traders are safe from other assets, even faulty ones
 Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guarantee:
