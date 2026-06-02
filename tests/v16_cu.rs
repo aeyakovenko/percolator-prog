@@ -15058,3 +15058,64 @@ fn v16_attack_market_exceeds_64_assets_position_holds_any_14_legs() {
 }
 
 
+
+// security.md sweep — cross-asset domain-insurance isolation (#22/#32): a permissionless asset is
+// untrusted, so a position/insolvency on asset 1 must NEVER consume asset 0's domain insurance. The
+// existing isolation test (#13376) checks OI/ADL/price isolation; this checks the per-DOMAIN INSURANCE
+// budget. Attacker goal: drive an insolvency (bad debt) on asset 1 and have its socialization reach into
+// asset 0's funded domain-insurance budget (draining funds that back asset-0 traders). Protection: domain
+// insurance budgets are per-domain (asset i -> domains 2i, 2i+1); asset-1 bad debt is bounded to asset-1's
+// own domains, so asset 0's domain-insurance bytes are unchanged. Senior conservation holds throughout.
+#[test]
+fn v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    // fund BOTH assets' domain insurance (asset 0 -> domains 0,1; asset 1 -> domains 2,3). admin is the
+    // domain insurance authority for every domain (set at init / activation).
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority(&admin, 0, 1_000);
+    env.top_up_insurance_domain_with_authority(&admin, 1, 1_000);
+    env.top_up_insurance_domain_with_authority(&admin, 2, 500);
+    env.top_up_insurance_domain_with_authority(&admin, 3, 500);
+    let g0 = env.market_state().1;
+    let a0_dom0 = g0.insurance_domain_budget[0];
+    let a0_dom1 = g0.insurance_domain_budget[1];
+    assert_eq!(a0_dom0, 1_000, "asset-0 long-domain insurance funded");
+    assert_eq!(a0_dom1, 1_000, "asset-0 short-domain insurance funded");
+
+    // asset-1 position: tiny-capital short that will be driven insolvent (bad debt on asset 1).
+    let a1o = Keypair::new(); let a1 = env.create_portfolio(&a1o);
+    let b1o = Keypair::new(); let b1 = env.create_portfolio(&b1o);
+    env.deposit(&a1o, a1, 1_000_000);
+    env.deposit(&b1o, b1, 250); // tiny -> insolvent short
+    env.trade_asset_with_cu(1, &a1o, a1, &b1o, b1, POS_SCALE as i128, 100, 0);
+
+    // push ONLY asset-1 mark up across slots (each step <= 2x, within the 100%/slot breaker): 100->800.
+    // short's loss (units * (P-100)) = 1 * 700 = 700 >> 250 capital -> insolvent.
+    for (slot, mark) in [(2u64, 200u64), (3, 400), (4, 800)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(1, slot, mark);
+        for p in [a1, b1] {
+            env.svm.expire_blockhash();
+            let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 1, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+                vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+        }
+    }
+    // liquidate the insolvent asset-1 short (socializes its bad debt).
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 1, now_slot: 4, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(b1, false)], &[]);
+
+    let g1 = env.market_state().1;
+    // non-vacuity: asset-1 actually reached insolvency.
+    assert_eq!(env.portfolio_state(b1).capital, 0, "asset-1 short was driven insolvent (non-vacuous)");
+    assert!(g1.assets[1].effective_price >= 200, "asset-1 mark actually moved (non-vacuous, got {})", g1.assets[1].effective_price);
+    // ISOLATION (headline): asset-0's domain insurance budgets are byte-identical — asset-1 bad debt
+    // could not reach into asset-0's insurance.
+    assert_eq!(g1.insurance_domain_budget[0], a0_dom0, "asset-0 long-domain insurance UNTOUCHED by asset-1 insolvency");
+    assert_eq!(g1.insurance_domain_budget[1], a0_dom1, "asset-0 short-domain insurance UNTOUCHED by asset-1 insolvency");
+    // senior conservation + accounting integrity across the whole sequence.
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation under cross-asset insolvency");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting vault == real on-chain vault");
+}
