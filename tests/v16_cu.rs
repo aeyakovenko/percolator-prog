@@ -14115,3 +14115,34 @@ fn v16_attack_oracle_wide_confidence_feed_rejected() {
     let (over_ok, _) = configure((price as u64 * 250) / 10_000);
     assert!(!over_ok, "a feed just over the conf filter (2.5% > 2%) must reject");
 }
+
+// security.md sweep — F-ORACLE-INVERT regression: invert-of-a-zero-composite rejects, never panics
+// (#37/#39). A multi-leg DIVIDE composite can floor to 0 (a tiny numerator over large divisors); with
+// invert=1 the engine would otherwise compute 1e12/0 and PANIC (aborting the program). The F-ORACLE-
+// INVERT fix (src/v16_program.rs:4054) guards `price == 0 -> OracleInvalid` BEFORE the invert divide.
+// Attacker goal: craft feeds whose composite floors to 0 under invert to crash/DoS the program or slip a
+// garbage mark. Protection: graceful OracleInvalid (Custom 26), no panic, market unmutated.
+#[test]
+fn v16_attack_oracle_invert_of_zero_composite_rejects_no_panic() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+    let feeds = [[0x71u8;32],[0x72u8;32],[0x73u8;32]];
+    // leg0 = 1 (tiny) divided by two 4e9 legs -> composite floors to 0; invert=1 would do 1e12/0.
+    let l0 = env.set_pyth_price_with_conf(&feeds[0], 1, -6, 0, 100);
+    let l1 = env.set_pyth_price_with_conf(&feeds[1], 4_000_000_000, -6, 0, 100);
+    let l2 = env.set_pyth_price_with_conf(&feeds[2], 4_000_000_000, -6, 0, 100);
+    let flags = ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3;
+    let before = env.svm.get_account(&env.market).unwrap().data;
+
+    let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0, 3, flags, feeds, &[l0, l1, l2], 1, 100, 1 /*invert*/, 0, 100, 0);
+
+    // GRACEFUL: rejected with OracleInvalid (Custom 26) — NOT a panic/abort (the process is still here).
+    assert!(r.is_err(), "invert of a zero-flooring composite must reject");
+    let err = r.unwrap_err();
+    assert!(err.contains("Custom(26)"), "must be OracleInvalid (Custom 26 = the F-ORACLE-INVERT guard), got: {}", err);
+    assert!(!err.contains("panic") && !err.contains("ProgramFailedToComplete"), "must NOT panic/abort: {}", err);
+    // the rejected configuration left the market untouched.
+    let after = env.svm.get_account(&env.market).unwrap().data;
+    assert_eq!(after, before, "rejected invert-of-zero configuration must not mutate the market");
+}
