@@ -14434,3 +14434,36 @@ fn v16_attack_tradenocpi_self_trade_rejected() {
     assert!(percolator::active_bitmap_is_empty(env.portfolio_state(p).active_bitmap), "no position opened");
     assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital intact");
 }
+
+// security.md sweep — deposit into an uninitialized portfolio rejects (#44/#45): an account that was
+// never InitPortfolio'd (zeroed data) is not a valid portfolio — its stored id is all-zero, not its key.
+// Attacker goal: deposit into a raw program-owned account to corrupt the accounting / create a portfolio
+// the engine didn't initialize. Protection: the identity/validation check rejects; vault & source intact.
+#[test]
+fn v16_attack_deposit_into_uninitialized_portfolio_rejects() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    env.ensure_signer_account(owner.pubkey());
+    // a RAW, never-initialized account: program-owned, correct size, all-zero data.
+    let raw = Pubkey::new_unique();
+    let plen = env.portfolio_account_len;
+    env.svm.set_account(raw, Account {
+        lamports: 1_000_000_000, data: vec![0u8; plen], owner: env.program_id, executable: false, rent_epoch: 0,
+    }).unwrap();
+    // a funded source token account.
+    let source = env.token_account_for_mint(env.mint, owner.pubkey(), 1_000);
+    let (_, g0) = env.market_state();
+
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Deposit { amount: 1_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(raw, false),
+        AccountMeta::new(source, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)],
+        &[&owner]);
+    assert!(r.is_err(), "deposit into an uninitialized portfolio must reject");
+
+    // nothing moved: source tokens not pulled, vault/c_tot unchanged.
+    assert_eq!(env.token_amount(source), 1_000, "source tokens not pulled into a non-portfolio");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged (no phantom capital from an uninit account)");
+}
