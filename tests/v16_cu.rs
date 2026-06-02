@@ -13705,3 +13705,35 @@ fn v16_attack_leveraged_bad_debt_socialized_not_printed() {
     let residual = g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance);
     assert!((lw.health_cert.certified_equity as u128) <= lw.capital + residual + 1, "winner realizable bounded by capital+residual (bad debt not realizable)");
 }
+
+// security.md sweep — dust-position margin floor (#9/#22): the per-leg initial margin requirement is
+// floored at min_nonzero_im_req for any nonzero position. Attacker goal: open a tiny position whose
+// proportional IM (bps * tiny notional) rounds below the floor, getting near-free leverage / a position
+// that evades meaningful margin. Protection: certified_initial_req >= min_nonzero_im_req for a live leg.
+#[test]
+fn v16_attack_dust_position_margin_floored() {
+    // production_risk_params: initial_margin_bps=500 (5%), min_nonzero_im_req=600.
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let xo = Keypair::new(); let x = env.create_portfolio(&xo);
+    let yo = Keypair::new(); let y = env.create_portfolio(&yo);
+    env.deposit(&xo, x, 1_000_000);
+    env.deposit(&yo, y, 1_000_000);
+
+    // a DUST position: size POS_SCALE/1000 -> notional ~1000 -> proportional IM (5%) ~50, BELOW the 600 floor.
+    let dust = (POS_SCALE / 1_000) as i128;
+    assert!(dust > 0, "dust size is nonzero");
+    env.trade_asset_with_cu(0, &xo, x, &yo, y, dust, 1_000_000, 0);
+
+    let xs = env.portfolio_state(x);
+    assert_eq!(percolator::active_bitmap_count_ones(xs.active_bitmap), 1, "dust position opened");
+    let req = xs.health_cert.certified_initial_req;
+    // FLOOR: the requirement is the min_nonzero_im_req floor (600), NOT the tiny proportional ~50.
+    assert!(req >= 600, "dust-position initial margin floored at min_nonzero_im_req (600), got {}", req);
+    // sanity: the floor is well above the naive proportional IM for this dust notional (~50).
+    assert!(req > 50, "floor strictly exceeds the proportional dust IM (no near-free leverage)");
+
+    let g = env.market_state().1;
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+}
