@@ -14795,3 +14795,62 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
         vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&admin]);
     assert!(ok.is_ok(), "the genuine mark authority's push is accepted: {:?}", ok);
 }
+
+// security.md sweep — EWMA-mark mode respects the per-slot circuit breaker (#6/#9/#37): the auth-mark
+// test (#10533) proves AUTH_MARK clamps to <= max_price_move_bps_per_slot; EWMA_MARK is a SEPARATE
+// pricing mode (halflife smoothing toward a pushed mark) and could, if the clamp lived only in the
+// auth-mark path, let the mark authority move the effective settlement price arbitrarily fast in one
+// slot. Attacker goal: as mark authority, push the EWMA mark to 100x and have the NEXT crank settle the
+// effective price (used for liquidation/funding/PnL) at the full 100x in a single slot. Protection: the
+// per-slot move gate is mode-INDEPENDENT — it lives in accrue_asset_to_not_atomic (percolator/src/v16.rs:
+// 8052: price_diff*MAX_MARGIN_BPS <= max_price_move_bps_per_slot*segment_dt*old_price, else RecoveryRequired),
+// so an EWMA push beyond the budget either clamps or is refused; the effective price cannot jump past the
+// per-slot cap. Complements #10533 with the EWMA mode.
+#[test]
+fn v16_attack_ewma_mark_respects_per_slot_circuit_breaker() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const MOVE_BPS: u64 = 1_000; // 10% / slot circuit breaker
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: MOVE_BPS,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    // EWMA mark mode with an aggressive halflife (1 slot) so the smoothed target races toward any push.
+    env.configure_ewma_mark_with_cu(0, INITIAL_PRICE, 1, 0);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 50_000_000);
+    env.deposit(&sh_owner, sh, 50_000_000);
+    // open matched OI so equity is active (the move gate at v16.rs:8060 only fires when equity_active).
+    env.trade_asset_with_cu(0, &lo_owner, lo, &sh_owner, sh, POS_SCALE as i128, INITIAL_PRICE, 0);
+
+    let mut prev_price = INITIAL_PRICE;
+    // push the EWMA mark to 100x EVERY slot and crank; the effective price must never jump past the cap.
+    for slot in 1..=4u64 {
+        env.svm.warp_to_slot(slot);
+        env.push_ewma_mark_with_cu(slot, INITIAL_PRICE * 100); // 100,000,000 — 100x
+        env.svm.expire_blockhash();
+        // crank may succeed (clamped move) or be refused (RecoveryRequired) — either way price is bounded.
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(lo, false)], &[]);
+        let g = env.market_state().1;
+        let ep = g.assets[0].effective_price;
+        // PER-SLOT CAP: the move from the previous settled price is at most MOVE_BPS (10%); a small
+        // tolerance covers rounding in the EWMA target. The mark authority CANNOT jump the price 100x.
+        let cap = prev_price + prev_price * (MOVE_BPS + 1) / 10_000;
+        assert!(ep <= cap, "slot {}: effective price {} clamped to <= per-slot cap {} (prev {})", slot, ep, cap, prev_price);
+        prev_price = ep;
+        assert!(g.vault >= g.c_tot + g.insurance, "senior conservation under clamped EWMA move");
+        assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting vault == real on-chain vault");
+    }
+    // NON-VACUITY + the headline: after FOUR slots of pushing to 100,000,000, the effective settlement
+    // price is still nowhere near it — the EWMA mode did NOT bypass the circuit breaker.
+    let final_price = env.market_state().1.assets[0].effective_price;
+    assert!(final_price < INITIAL_PRICE * 2, "after 4 clamped slots the price ({}) is far below the 100x push (circuit breaker held across EWMA mode)", final_price);
+    // NON-VACUITY: the price DID move toward the push (the clamp throttled a real move, it wasn't a no-op).
+    assert!(final_price > INITIAL_PRICE, "the EWMA mark actually moved the price (clamped, not frozen): {} > {}", final_price, INITIAL_PRICE);
+}
