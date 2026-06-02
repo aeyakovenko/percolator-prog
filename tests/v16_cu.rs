@@ -13606,3 +13606,47 @@ fn v16_attack_liquidation_fee_capped() {
     assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+
+// security.md sweep — partial-liquidation fee additivity (#3/#33): the liquidation fee is proportional
+// to the CLOSED notional (bps * close_q * mark). Attacker/cranker goal: split a liquidation into many
+// partials to over-charge the victim (each partial adds extra fee) or under-charge (skim). Protection:
+// at a stable mark, two equal partial liquidations charge the SAME fee each — fee tracks the closed
+// amount, not the number of crank calls. (Exercises the fee'd/leveraged regime, mark held fixed.)
+#[test]
+fn v16_attack_partial_liquidation_fee_additivity() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(0); // all fee to insurance (clean single accumulator)
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let lo = Keypair::new(); let l = env.create_portfolio(&lo);
+    let so = Keypair::new(); let s = env.create_portfolio(&so);
+    let co = Keypair::new(); let c = env.create_portfolio(&co);
+    env.deposit(&lo, l, 100_000_000);
+    env.deposit(&so, s, 200_000); // enough to open 2*POS_SCALE at 5% IM, then go insolvent
+    env.deposit(&co, c, 1_000);
+    env.trade_asset_with_cu(0, &lo, l, &so, s, (2 * POS_SCALE) as i128, 1_000_000, 0);
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(s, false)], &[]);
+    }
+    // mark is now fixed (no further pushes). Liquidate in two equal POS_SCALE partials.
+    let liq = |env: &mut V16CuEnv| -> u128 {
+        let ins0 = env.market_state().1.insurance;
+        env.svm.expire_blockhash();
+        let _ = send_tx(&mut env.svm, env.program_id, &env.payer,
+            ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 30, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(co.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(s, false), AccountMeta::new(c, false)], &[&co]);
+        env.market_state().1.insurance - ins0
+    };
+    let fee1 = liq(&mut env);
+    let fee2 = liq(&mut env);
+
+    // ADDITIVITY: at a fixed mark, two equal partials charge the SAME fee (proportional to closed amount).
+    assert!(fee1 > 0, "first partial charges a fee (non-vacuous), fee1={}", fee1);
+    assert_eq!(fee1, fee2, "equal partials at a fixed mark charge equal fees — no gaming by splitting (fee1={} fee2={})", fee1, fee2);
+    let g = env.market_state().1;
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
