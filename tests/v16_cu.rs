@@ -14854,3 +14854,69 @@ fn v16_attack_ewma_mark_respects_per_slot_circuit_breaker() {
     // NON-VACUITY: the price DID move toward the push (the clamp throttled a real move, it wasn't a no-op).
     assert!(final_price > INITIAL_PRICE, "the EWMA mark actually moved the price (clamped, not frozen): {} > {}", final_price, INITIAL_PRICE);
 }
+
+// security.md sweep — crank dt-clamp prevents retroactive one-shot settlement after a long gap (#9/#22):
+// the per-crank segment is clamped to max_accrual_dt_slots (percolator/src/v16.rs:8037), and a crank
+// advances slot_last by only that clamped segment (v16.rs:8089), NOT all the way to now_slot. This dt is
+// the multiplier on EVERY time-scaled accrual (funding: v16.rs:8072 funding_rate*segment_dt*price; and the
+// price-move budget: v16.rs:8057 cap*segment_dt). Attacker goal: leave the market un-cranked for a long
+// time so a large accrual window builds up, then fire ONE crank to retroactively settle the FULL elapsed
+// window in a single shot — a one-block funding windfall to the favoured side, or a surprise margin blow-up
+// of the other side that skips the per-slot price-move circuit breaker. Protection: each crank settles at
+// most max_accrual_dt_slots; slot_last creeps forward by the clamp per crank, so catch-up is bounded and
+// many cranks (each itself re-clamped) are required to close the gap — no one-shot retroactive settlement.
+// (Not covered by the conservation tests, which all crank every slot so dt is always 1.)
+#[test]
+fn v16_attack_crank_dt_clamp_blocks_retroactive_settle() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const DT_CLAMP: u64 = 3; // max_accrual_dt_slots
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: DT_CLAMP,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: DT_CLAMP, // lifetime >= accrual window (config validity)
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_ewma_mark_with_cu(0, INITIAL_PRICE, 1, 0);
+    let lo_owner = Keypair::new(); let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new(); let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 50_000_000);
+    env.deposit(&sh_owner, sh, 50_000_000);
+    env.trade_asset_with_cu(0, &lo_owner, lo, &sh_owner, sh, POS_SCALE as i128, INITIAL_PRICE, 0);
+    let slot_last_0 = env.market_state().1.assets[0].slot_last;
+    assert_eq!(slot_last_0, 0, "asset starts settled at slot 0 (open position is live)");
+
+    // ATTACK: leave the market UNCRANKED for a huge window, then fire ONE crank that tries to settle it all.
+    const GAP_SLOT: u64 = 500;
+    env.svm.warp_to_slot(GAP_SLOT);
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: GAP_SLOT, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(lo, false)], &[]);
+    assert!(r.is_ok(), "the catch-up crank itself succeeds: {:?}", r);
+
+    let g1 = env.market_state().1;
+    // ANTI-RETROACTIVITY (the headline): the settled segment is the dt CLAMP (3), NOT the 500-slot gap.
+    // A naive retroactive settle would jump slot_last to 500 and apply ~166x the funding/move budget in one
+    // block; the clamp holds the advance to exactly max_accrual_dt_slots.
+    assert_eq!(g1.assets[0].slot_last, slot_last_0 + DT_CLAMP, "one crank settles only max_accrual_dt_slots ({}), NOT the full {}-slot gap (slot_last={})", DT_CLAMP, GAP_SLOT, g1.assets[0].slot_last);
+    assert!(GAP_SLOT > 50 * DT_CLAMP, "non-vacuous: the elapsed gap ({}) dwarfs the clamp ({}) — the clamp is the binding constraint", GAP_SLOT, DT_CLAMP);
+    assert_eq!(g1.current_slot, GAP_SLOT, "header current_slot advances to now (the asset is intentionally left 'behind' by design)");
+    // conservation: whatever was settled is internal redistribution; nothing minted.
+    assert_eq!(g1.vault, 100_000_000, "vault unchanged (settlement mints nothing)");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting vault == real on-chain vault");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation under the clamped catch-up");
+
+    // A SECOND crank at the same now_slot advances slot_last by ANOTHER clamp window — catch-up is bounded
+    // PER crank, so closing a 500-slot gap needs ~167 separately-clamped cranks, each re-subject to the
+    // per-slot price-move circuit breaker. There is no single transaction that settles the whole window.
+    env.svm.expire_blockhash();
+    let r2 = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: GAP_SLOT, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(lo, false)], &[]);
+    assert!(r2.is_ok(), "second catch-up crank succeeds: {:?}", r2);
+    let g2 = env.market_state().1;
+    assert_eq!(g2.assets[0].slot_last, slot_last_0 + 2 * DT_CLAMP, "second crank advances another clamp window (bounded per-crank catch-up)");
+    assert!(g2.assets[0].slot_last < GAP_SLOT, "even after two cranks the asset is still far short of the gap (catch-up is throttled, not instant)");
+    assert!(g2.vault >= g2.c_tot + g2.insurance, "senior conservation after second crank");
+}
