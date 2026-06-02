@@ -14977,3 +14977,84 @@ fn v16_attack_haircut_rounding_many_winners_no_mint() {
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting vault == real on-chain vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation after many-winner haircut");
 }
+
+// security.md sweep — market capacity: >64 assets per market + a position holding any 14 legs (#22/#32).
+// The "v16 exposes up to 64 market slots" comment (src/v16_program.rs:81) is STALE: the real per-market
+// asset count is config.max_market_slots (u32), grown one slot at a time by the append path in
+// handle_update_asset_lifecycle (src/v16_program.rs:8620 realloc + :8728 activate_dynamic_asset_slot).
+// There is NO hardcoded 64 cap. This test proves: (1) a single market grows to >64 assets, (2) the per-
+// position leg cap stays at WRAPPER_MAX_PORTFOLIO_ASSETS=14 INDEPENDENT of the market's asset count, and
+// (3) a position can carry 14 legs drawn from arbitrary HIGH indices across the full set (not just 0..13).
+// Conservation holds across a 14-leg cross-margin portfolio spanning the grown asset set.
+#[test]
+fn v16_attack_market_exceeds_64_assets_position_holds_any_14_legs() {
+    const PRICE: u64 = 100;
+    const TARGET: usize = 70;
+    // per-position leg cap = 14; the market starts with 14 configured asset slots (max_market_slots == 14).
+    // The account is PRE-SIZED to capacity TARGET so init sets asset_slot_capacity=TARGET (init derives it
+    // from the account length, src/v16_program.rs:2397). This exercises the append-grow LOGIC (max_market_slots
+    // bumping 14->TARGET) independently of in-instruction realloc (which LiteSVM handles separately).
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 10_000, 10_000, 10_000);
+    let start = env.market_state().1.config.max_market_slots as usize;
+    assert_eq!(start, 14, "market starts at 14 configured slots (== per-position leg cap)");
+
+    // GROW PAST 64: append new asset slots as the asset_authority (admin => fee-free). Each append reallocs
+    // the market account (+1 slot) and bumps max_market_slots by one — the genuine on-chain grow path
+    // (handle_update_asset_lifecycle append: src/v16_program.rs:8620 realloc + :8728 activate_dynamic_asset_slot).
+    // NOTE: each activation MUST occur at a strictly-advancing slot (the append enforces slot progress); two
+    // activations in the same slot are rejected. There is NO hardcoded 64 cap (the line-81 comment is stale).
+    for idx in start..TARGET {
+        env.activate_asset(idx as u16, idx as u64 + 1, PRICE);
+    }
+    let g = env.market_state().1;
+    assert!(g.config.max_market_slots as usize >= 65, "market grew PAST 64 assets (max_market_slots={})", g.config.max_market_slots);
+    assert_eq!(g.config.max_market_slots as usize, TARGET, "grew to exactly {} assets", TARGET);
+    assert!(g.assets.len() >= TARGET, "asset array reallocated to hold the grown set (len={})", g.assets.len());
+    // the per-position leg cap is UNCHANGED by the market's asset count.
+    assert_eq!(g.config.max_portfolio_assets, 14, "per-position leg cap stays 14 regardless of the >64 asset count");
+
+    // move past the activation slots; configure marks + trade in a single later slot.
+    const TRADE_SLOT: u64 = TARGET as u64 + 10;
+    env.svm.warp_to_slot(TRADE_SLOT);
+
+    // ANY 14 LEGS FROM THE FULL SET: a single portfolio opens positions on 14 distinct HIGH indices
+    // (all > 14, i.e. from the grown region), proving a position can hold any 14 of the >64 assets.
+    let cfg_auth_mark = |env: &mut V16CuEnv, ai: u16| {
+        env.svm.expire_blockhash();
+        send_tx(&mut env.svm, env.program_id, &env.payer,
+            ProgInstruction::ConfigureAuthMark { asset_index: ai, now_slot: TRADE_SLOT, initial_mark_e6: PRICE },
+            vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&env.admin])
+            .expect("configure auth mark for high asset index");
+    };
+    let legs: [u16; 14] = [15, 19, 23, 28, 31, 37, 41, 47, 52, 56, 60, 63, 66, 69];
+    for &ai in legs.iter() { cfg_auth_mark(&mut env, ai); }
+
+    // portfolios in an N-asset market are sized for max_market_slots (2N source-domain slots): pre-size the
+    // portfolio account to the grown N so InitPortfolio allocates it up front (the genuine on-chain flow;
+    // a single realloc across a large N jump would exceed Solana's 10240-byte per-instruction limit).
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(TARGET).unwrap();
+    let la = Keypair::new(); let pa = env.create_portfolio(&la);
+    let lb = Keypair::new(); let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 5_000_000);
+    env.deposit(&lb, pb, 5_000_000);
+    for &ai in legs.iter() {
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(ai, &la, pa, &lb, pb, POS_SCALE as i128, PRICE, 0);
+    }
+    // all 14 high-index legs are open on the SAME portfolio.
+    let g2 = env.market_state().1;
+    for &ai in legs.iter() {
+        assert!(g2.assets[ai as usize].oi_eff_long_q > 0, "leg on high asset index {} is open", ai);
+        assert_eq!(g2.assets[ai as usize].oi_eff_long_q, g2.assets[ai as usize].oi_eff_short_q, "asset {} OI balanced", ai);
+    }
+    // The 14 legs are drawn from arbitrary HIGH indices (15..69) of the 70-asset set — proving a position
+    // can carry any 14 of the >64 assets, not just the first 14. (The per-position leg cap is bounded by the
+    // engine portfolio bitmap, independent of the market's total asset count.)
+
+    // conservation across the 14-leg cross-margin portfolio spanning the grown set.
+    assert_eq!(g2.c_tot, 10_000_000, "no capital created/destroyed across the 14-leg multi-asset portfolio");
+    assert_eq!(g2.vault as u64, env.token_amount(env.vault), "accounting vault == real on-chain vault");
+    assert!(g2.vault >= g2.c_tot + g2.insurance, "senior conservation across a >64-asset market");
+}
+
+
