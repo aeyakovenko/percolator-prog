@@ -38,12 +38,12 @@ The economic and governance model for a permissionless multi-asset market. Statu
 ### Market = one slab of N assets
 - A **market is one account ("slab") holding an array of N assets**: `engine header + [Asset<T>]`
   slice, resizable by the program. The engine operates **one market at a time**. **✅**
-- A **10 MB slab should support 10k+ assets**, and per-trader CU must stay bounded **independent of
-  N** (a trader pays only for the assets they actually touch, not all N). **◑** — growth past any
-  N works (no 64 cap; `v16_attack_market_exceeds_64_assets_position_holds_any_14_legs`), but
-  per-instruction CU is still O(N) until the sparse-portfolio refactor is linked end-to-end (engine
-  done at `percolator@e11798d`; wrapper bump + fixed-size portfolio pending). Today a single trade
-  hits ~1.4M CU at N≈360.
+- A **10 MB slab should support 10k+ assets**, and per-trader CU stays bounded **independent of N**
+  (a trader pays only for the assets they actually touch, not all N). **✅** — there is no 64-asset
+  cap (`v16_attack_market_exceeds_64_assets_position_holds_any_14_legs`), and the portfolio's
+  source-domains are a **fixed sparse array** (engine `c120fce`), so the position account and
+  per-instruction CU are O(1) in N — bounded only by the per-position asset cap. The 14-leg
+  worst-case trade is back under the 1.4M CU limit (`v16_bpf_stale_full_14_leg_tradenocpi_is_under_tx_limit`).
 
 ### Asset 0 — the base unit
 - **Asset 0 is denominated in the base unit** and has its own **insurance + backing**. **✅**
@@ -109,10 +109,11 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   secondary, deposit N into primary) and **optionally change the secondary SPL token once it is
   empty**. **◑** (`SwapSecondaryForPrimary`; the "change secondary once empty" path to verify.)
 
-> **Coverage note.** The ◑/◻ items above are the live work list to bring the implementation and the
-> test suite up to this spec. Each gets a dedicated LiteSVM test asserting the attacker-success
-> criterion (isolation, exit-window, fee-split conservation, base-unit swap atomicity) plus the
-> end-to-end O(1)-in-N CU check once the sparse-portfolio refactor is linked.
+> **Coverage note.** The O(1)-in-N CU / scaling requirement is implemented and verified end-to-end
+> (sparse-portfolio refactor, engine `c120fce`). The remaining ◑/◻ items above are the live work list
+> to bring the rest of the implementation and the test suite up to this spec — each gets a dedicated
+> LiteSVM test asserting the attacker-success criterion (isolation, exit-window, fee-split
+> conservation, base-unit swap atomicity).
 
 ---
 
