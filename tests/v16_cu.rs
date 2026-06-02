@@ -14274,3 +14274,31 @@ fn v16_attack_oracle_staleness_bound_exact() {
     assert!(!configure(939), "a 61s-old feed (> 60s) must reject (one second past the bound)");
     assert!(!configure(930), "a 70s-old feed must reject");
 }
+
+// security.md sweep — Pyth feed negative/zero price rejected (#37/#39): a Pyth price is an i64 and can
+// be negative or zero. Attacker goal: a malicious/garbage feed reporting a negative or zero price injects
+// an invalid mark (settlement at a nonsensical price / sign flip). Protection: the oracle parse accepts
+// only a positive price; negative or zero -> OracleInvalid. Completes the oracle price-domain coverage.
+#[test]
+fn v16_attack_oracle_negative_or_zero_price_rejected() {
+    let configure = |price: i64| -> (bool, Option<String>) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let feed = [0x55u8;32];
+        let acct = env.set_pyth_price_with_conf(&feed, price, -6, 0, 100);
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0, 1, 0, [feed, [0u8;32], [0u8;32]], &[acct], 1, 100, 0, 0, 100, 0);
+        (r.is_ok(), r.err())
+    };
+    // a positive price configures.
+    let (pos_ok, _) = configure(200_000);
+    assert!(pos_ok, "a positive Pyth price configures");
+    // a NEGATIVE price is rejected (no sign-flipped mark).
+    let (neg_ok, neg_err) = configure(-200_000);
+    assert!(!neg_ok, "a negative Pyth price must reject");
+    assert!(neg_err.unwrap().contains("Custom(26)"), "negative price must be OracleInvalid (Custom 26)");
+    // a ZERO price is rejected (no zero mark / downstream div-by-zero).
+    let (zero_ok, zero_err) = configure(0);
+    assert!(!zero_ok, "a zero Pyth price must reject");
+    assert!(zero_err.unwrap().contains("Custom(26)"), "zero price must be OracleInvalid (Custom 26)");
+}
