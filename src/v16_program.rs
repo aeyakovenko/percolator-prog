@@ -58,9 +58,9 @@ pub mod constants {
     pub const DEFAULT_MARKET_SLOT_CAPACITY: usize = 1;
     pub const MARKET_ACCOUNT_LEN: usize =
         MARKET_GROUP_OFF + MARKET_GROUP_LEN + DEFAULT_MARKET_SLOT_CAPACITY * MARKET_ASSET_SLOT_LEN;
-    pub const PORTFOLIO_ACCOUNT_LEN: usize = HEADER_LEN
-        + PORTFOLIO_STATE_LEN
-        + DEFAULT_MARKET_SLOT_CAPACITY * 2 * PORTFOLIO_SOURCE_DOMAIN_LEN;
+    // Source-domains are a fixed sparse array embedded in PORTFOLIO_STATE_LEN (no 2N tail):
+    // the portfolio account is fixed-size, independent of the market asset count N.
+    pub const PORTFOLIO_ACCOUNT_LEN: usize = HEADER_LEN + PORTFOLIO_STATE_LEN;
     pub const MAX_MATCHER_TAIL_ACCOUNTS: usize = 32;
     pub const MATCHER_ABI_VERSION: u32 = 3;
     pub const MATCHER_CONTEXT_MIN_LEN: usize = 64;
@@ -155,7 +155,7 @@ pub mod state {
             MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN, ORACLE_LEG_CAP,
             ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
             ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN,
-            PORTFOLIO_SOURCE_DOMAIN_LEN, PORTFOLIO_STATE_LEN, VERSION, WRAPPER_CONFIG_LEN,
+            PORTFOLIO_STATE_LEN, VERSION, WRAPPER_CONFIG_LEN,
         },
         error::PercolatorError,
     };
@@ -199,6 +199,8 @@ pub mod state {
         pub source_lien_fee_last_slot: Vec<u64>,
         pub source_claim_impaired_num: Vec<u128>,
         pub source_lien_impaired_effective_reserved: Vec<u128>,
+        pub source_lien_capital_at_risk_fee_revenue: Vec<u128>,
+        pub source_lien_impaired_capital_at_risk_fee_revenue: Vec<u128>,
         pub fee_credits: i128,
         pub cancel_deposit_escrow: u128,
         pub last_fee_slot: u64,
@@ -228,6 +230,8 @@ pub mod state {
                 .min(self.source_lien_fee_last_slot.len())
                 .min(self.source_claim_impaired_num.len())
                 .min(self.source_lien_impaired_effective_reserved.len())
+                .min(self.source_lien_capital_at_risk_fee_revenue.len())
+                .min(self.source_lien_impaired_capital_at_risk_fee_revenue.len())
         }
 
         fn ensure_source_domain_capacity(&mut self, domain_count: usize) {
@@ -246,6 +250,10 @@ pub mod state {
             self.source_lien_fee_last_slot.resize(domain_count, 0);
             self.source_claim_impaired_num.resize(domain_count, 0);
             self.source_lien_impaired_effective_reserved
+                .resize(domain_count, 0);
+            self.source_lien_capital_at_risk_fee_revenue
+                .resize(domain_count, 0);
+            self.source_lien_impaired_capital_at_risk_fee_revenue
                 .resize(domain_count, 0);
         }
     }
@@ -1310,19 +1318,12 @@ pub mod state {
 
     #[inline]
     pub fn portfolio_account_len_for_market_slots(
-        max_market_slots: usize,
+        _max_market_slots: usize,
     ) -> Result<usize, ProgramError> {
-        let market_slots =
-            u32::try_from(max_market_slots).map_err(|_| PercolatorError::InvalidAccountLen)?;
-        let domains =
-            v16_domain_count_for_market_slots(market_slots).map_err(map_account_wire_error)?;
+        // Fixed-size: source-domains are a fixed sparse array embedded in PORTFOLIO_STATE_LEN.
+        // Independent of the market's asset count N (O(1) portfolio).
         HEADER_LEN
             .checked_add(PORTFOLIO_STATE_LEN)
-            .and_then(|v| {
-                domains
-                    .checked_mul(PORTFOLIO_SOURCE_DOMAIN_LEN)
-                    .and_then(|d| v.checked_add(d))
-            })
             .ok_or(PercolatorError::InvalidAccountLen.into())
     }
 
@@ -1991,99 +1992,6 @@ pub mod state {
         Ok(())
     }
 
-    #[cfg(not(target_os = "solana"))]
-    fn portfolio_source_domain_capacity(data: &[u8]) -> Result<usize, ProgramError> {
-        if data.len() < HEADER_LEN + PORTFOLIO_STATE_LEN {
-            return Err(PercolatorError::InvalidAccountLen.into());
-        }
-        let trailing = data.len() - HEADER_LEN - PORTFOLIO_STATE_LEN;
-        if trailing % PORTFOLIO_SOURCE_DOMAIN_LEN != 0 {
-            return Err(ProgramError::InvalidAccountData);
-        }
-        Ok(trailing / PORTFOLIO_SOURCE_DOMAIN_LEN)
-    }
-
-    #[cfg(not(target_os = "solana"))]
-    fn portfolio_source_domain_range(
-        domain: usize,
-    ) -> Result<core::ops::Range<usize>, ProgramError> {
-        let offset = domain
-            .checked_mul(PORTFOLIO_SOURCE_DOMAIN_LEN)
-            .and_then(|v| v.checked_add(HEADER_LEN + PORTFOLIO_STATE_LEN))
-            .ok_or(PercolatorError::InvalidAccountLen)?;
-        Ok(offset..offset + PORTFOLIO_SOURCE_DOMAIN_LEN)
-    }
-
-    #[cfg(not(target_os = "solana"))]
-    fn portfolio_source_domain_wire(
-        data: &[u8],
-        domain: usize,
-    ) -> Result<&PortfolioSourceDomainV16Account, ProgramError> {
-        let capacity = portfolio_source_domain_capacity(data)?;
-        if domain >= capacity {
-            return Err(PercolatorError::InvalidAccountLen.into());
-        }
-        let bytes = data
-            .get(portfolio_source_domain_range(domain)?)
-            .ok_or(PercolatorError::InvalidAccountLen)?;
-        bytemuck::try_from_bytes(bytes).map_err(|_| ProgramError::InvalidAccountData)
-    }
-
-    #[cfg(not(target_os = "solana"))]
-    fn portfolio_source_domain_wire_mut(
-        data: &mut [u8],
-        domain: usize,
-    ) -> Result<&mut PortfolioSourceDomainV16Account, ProgramError> {
-        let capacity = portfolio_source_domain_capacity(data)?;
-        if domain >= capacity {
-            return Err(PercolatorError::InvalidAccountLen.into());
-        }
-        let bytes = data
-            .get_mut(portfolio_source_domain_range(domain)?)
-            .ok_or(PercolatorError::InvalidAccountLen)?;
-        bytemuck::try_from_bytes_mut(bytes).map_err(|_| ProgramError::InvalidAccountData)
-    }
-
-    #[cfg(not(target_os = "solana"))]
-    fn portfolio_source_domains_from_wire(
-        data: &[u8],
-        source_domain_count: Option<usize>,
-    ) -> Result<Vec<PortfolioSourceDomainV16Account>, ProgramError> {
-        let capacity = portfolio_source_domain_capacity(data)?;
-        if let Some(count) = source_domain_count {
-            if count > capacity {
-                return Err(PercolatorError::InvalidAccountLen.into());
-            }
-            let mut out = Vec::with_capacity(count);
-            let mut d = 0usize;
-            while d < count {
-                out.push(*portfolio_source_domain_wire(data, d)?);
-                d += 1;
-            }
-            return Ok(out);
-        }
-        #[cfg(target_os = "solana")]
-        let capacity = {
-            let mut used = 0usize;
-            let mut d = 0usize;
-            while d < capacity {
-                let source = *portfolio_source_domain_wire(data, d)?;
-                if bytemuck::bytes_of(&source).iter().any(|b| *b != 0) {
-                    used = d.checked_add(1).ok_or(PercolatorError::InvalidAccountLen)?;
-                }
-                d += 1;
-            }
-            used
-        };
-        let mut out = Vec::with_capacity(capacity);
-        let mut d = 0usize;
-        while d < capacity {
-            out.push(*portfolio_source_domain_wire(data, d)?);
-            d += 1;
-        }
-        Ok(out)
-    }
-
     #[inline]
     #[cfg(not(target_os = "solana"))]
     fn decode_bool(v: u8) -> Result<bool, ProgramError> {
@@ -2111,6 +2019,9 @@ pub mod state {
         let mut source_lien_fee_last_slot = Vec::with_capacity(source_domain_count);
         let mut source_claim_impaired_num = Vec::with_capacity(source_domain_count);
         let mut source_lien_impaired_effective_reserved = Vec::with_capacity(source_domain_count);
+        let mut source_lien_capital_at_risk_fee_revenue = Vec::with_capacity(source_domain_count);
+        let mut source_lien_impaired_capital_at_risk_fee_revenue =
+            Vec::with_capacity(source_domain_count);
         let mut d = 0usize;
         while d < source_domain_count {
             source_claim_market_id.push(0);
@@ -2124,6 +2035,8 @@ pub mod state {
             source_lien_fee_last_slot.push(0);
             source_claim_impaired_num.push(0);
             source_lien_impaired_effective_reserved.push(0);
+            source_lien_capital_at_risk_fee_revenue.push(0);
+            source_lien_impaired_capital_at_risk_fee_revenue.push(0);
             d += 1;
         }
 
@@ -2154,6 +2067,10 @@ pub mod state {
                 .write(source_claim_impaired_num);
             core::ptr::addr_of_mut!((*ptr).source_lien_impaired_effective_reserved)
                 .write(source_lien_impaired_effective_reserved);
+            core::ptr::addr_of_mut!((*ptr).source_lien_capital_at_risk_fee_revenue)
+                .write(source_lien_capital_at_risk_fee_revenue);
+            core::ptr::addr_of_mut!((*ptr).source_lien_impaired_capital_at_risk_fee_revenue)
+                .write(source_lien_impaired_capital_at_risk_fee_revenue);
             core::ptr::addr_of_mut!((*ptr).fee_credits).write(0);
             core::ptr::addr_of_mut!((*ptr).cancel_deposit_escrow).write(0);
             core::ptr::addr_of_mut!((*ptr).last_fee_slot).write(last_fee_slot);
@@ -2190,13 +2107,19 @@ pub mod state {
         source_domain_count: Option<usize>,
     ) -> Result<Box<PortfolioAccountV16>, ProgramError> {
         let wire = portfolio_wire(data)?;
-        let source_domains = portfolio_source_domains_from_wire(data, source_domain_count)?;
         let header = wire
             .provenance_header
             .try_to_runtime()
             .map_err(map_account_wire_error)?;
-        let mut account =
-            empty_portfolio_boxed(header, wire.last_fee_slot.get(), source_domains.len())?;
+        // Size the dense runtime to cover all occupied (domain-tagged) sparse slots (or the requested
+        // count, whichever is larger). The embedded sparse array is bounded by the position asset cap.
+        let mut needed = source_domain_count.unwrap_or(0);
+        for slot in wire.source_domains.iter() {
+            if slot.is_occupied() {
+                needed = needed.max((slot.domain.get() as usize).saturating_add(1));
+            }
+        }
+        let mut account = empty_portfolio_boxed(header, wire.last_fee_slot.get(), needed)?;
         account.owner = wire.owner;
         account.capital = wire.capital.get();
         account.pnl = wire.pnl.get();
@@ -2227,26 +2150,31 @@ pub mod state {
             .resolved_payout_receipt
             .try_to_runtime()
             .map_err(map_account_wire_error)?;
-        let mut d = 0usize;
-        while d < source_domains.len() {
-            let source = source_domains[d];
-            account.source_claim_market_id[d] = source.source_claim_market_id.get();
-            account.source_claim_bound_num[d] = source.source_claim_bound_num.get();
-            account.source_claim_liened_num[d] = source.source_claim_liened_num.get();
+        for slot in wire.source_domains.iter() {
+            if !slot.is_occupied() {
+                continue;
+            }
+            let d = slot.domain.get() as usize;
+            account.source_claim_market_id[d] = slot.source_claim_market_id.get();
+            account.source_claim_bound_num[d] = slot.source_claim_bound_num.get();
+            account.source_claim_liened_num[d] = slot.source_claim_liened_num.get();
             account.source_claim_counterparty_liened_num[d] =
-                source.source_claim_counterparty_liened_num.get();
+                slot.source_claim_counterparty_liened_num.get();
             account.source_claim_insurance_liened_num[d] =
-                source.source_claim_insurance_liened_num.get();
-            account.source_lien_effective_reserved[d] = source.source_lien_effective_reserved.get();
+                slot.source_claim_insurance_liened_num.get();
+            account.source_lien_effective_reserved[d] = slot.source_lien_effective_reserved.get();
             account.source_lien_counterparty_backing_num[d] =
-                source.source_lien_counterparty_backing_num.get();
+                slot.source_lien_counterparty_backing_num.get();
             account.source_lien_insurance_backing_num[d] =
-                source.source_lien_insurance_backing_num.get();
-            account.source_lien_fee_last_slot[d] = source.source_lien_fee_last_slot.get();
-            account.source_claim_impaired_num[d] = source.source_claim_impaired_num.get();
+                slot.source_lien_insurance_backing_num.get();
+            account.source_lien_fee_last_slot[d] = slot.source_lien_fee_last_slot.get();
+            account.source_claim_impaired_num[d] = slot.source_claim_impaired_num.get();
             account.source_lien_impaired_effective_reserved[d] =
-                source.source_lien_impaired_effective_reserved.get();
-            d += 1;
+                slot.source_lien_impaired_effective_reserved.get();
+            account.source_lien_capital_at_risk_fee_revenue[d] =
+                slot.source_lien_capital_at_risk_fee_revenue.get();
+            account.source_lien_impaired_capital_at_risk_fee_revenue[d] =
+                slot.source_lien_impaired_capital_at_risk_fee_revenue.get();
         }
         Ok(account)
     }
@@ -2256,11 +2184,7 @@ pub mod state {
         data: &mut [u8],
         account: &PortfolioAccountV16,
     ) -> Result<(), ProgramError> {
-        let domain_capacity = portfolio_source_domain_capacity(data)?;
         let account_domain_count = account.source_domain_capacity();
-        if domain_capacity < account_domain_count {
-            return Err(PercolatorError::InvalidAccountLen.into());
-        }
         let wire = portfolio_wire_mut(data)?;
         wire.provenance_header =
             percolator::ProvenanceHeaderV16Account::from_runtime(&account.provenance_header);
@@ -2287,48 +2211,61 @@ pub mod state {
         wire.resolved_payout_receipt = percolator::ResolvedPayoutReceiptV16Account::from_runtime(
             &account.resolved_payout_receipt,
         );
+        // Source-domains are a fixed sparse array embedded in the wire header. Clear all slots, then
+        // compact the non-empty runtime domains (dense, indexed by domain) into slots, tagging each
+        // with its domain index. Bounded by PORTFOLIO_SOURCE_DOMAIN_CAP, independent of N.
+        for slot in wire.source_domains.iter_mut() {
+            *slot = PortfolioSourceDomainV16Account::default();
+        }
+        let mut next_slot = 0usize;
         let mut d = 0usize;
-        while d < domain_capacity {
-            let source = if d < account_domain_count {
-                PortfolioSourceDomainV16Account {
-                    source_claim_market_id: percolator::V16PodU64::new(
-                        account.source_claim_market_id[d],
-                    ),
-                    source_claim_bound_num: percolator::V16PodU128::new(
-                        account.source_claim_bound_num[d],
-                    ),
-                    source_claim_liened_num: percolator::V16PodU128::new(
-                        account.source_claim_liened_num[d],
-                    ),
-                    source_claim_counterparty_liened_num: percolator::V16PodU128::new(
-                        account.source_claim_counterparty_liened_num[d],
-                    ),
-                    source_claim_insurance_liened_num: percolator::V16PodU128::new(
-                        account.source_claim_insurance_liened_num[d],
-                    ),
-                    source_lien_effective_reserved: percolator::V16PodU128::new(
-                        account.source_lien_effective_reserved[d],
-                    ),
-                    source_lien_counterparty_backing_num: percolator::V16PodU128::new(
-                        account.source_lien_counterparty_backing_num[d],
-                    ),
-                    source_lien_insurance_backing_num: percolator::V16PodU128::new(
-                        account.source_lien_insurance_backing_num[d],
-                    ),
-                    source_lien_fee_last_slot: percolator::V16PodU64::new(
-                        account.source_lien_fee_last_slot[d],
-                    ),
-                    source_claim_impaired_num: percolator::V16PodU128::new(
-                        account.source_claim_impaired_num[d],
-                    ),
-                    source_lien_impaired_effective_reserved: percolator::V16PodU128::new(
-                        account.source_lien_impaired_effective_reserved[d],
-                    ),
-                }
-            } else {
-                PortfolioSourceDomainV16Account::default()
+        while d < account_domain_count {
+            let entry = PortfolioSourceDomainV16Account {
+                domain: percolator::V16PodU32::new(
+                    u32::try_from(d).map_err(|_| PercolatorError::InvalidAccountLen)?,
+                ),
+                source_claim_market_id: percolator::V16PodU64::new(account.source_claim_market_id[d]),
+                source_claim_bound_num: percolator::V16PodU128::new(account.source_claim_bound_num[d]),
+                source_claim_liened_num: percolator::V16PodU128::new(account.source_claim_liened_num[d]),
+                source_claim_counterparty_liened_num: percolator::V16PodU128::new(
+                    account.source_claim_counterparty_liened_num[d],
+                ),
+                source_claim_insurance_liened_num: percolator::V16PodU128::new(
+                    account.source_claim_insurance_liened_num[d],
+                ),
+                source_lien_effective_reserved: percolator::V16PodU128::new(
+                    account.source_lien_effective_reserved[d],
+                ),
+                source_lien_counterparty_backing_num: percolator::V16PodU128::new(
+                    account.source_lien_counterparty_backing_num[d],
+                ),
+                source_lien_insurance_backing_num: percolator::V16PodU128::new(
+                    account.source_lien_insurance_backing_num[d],
+                ),
+                source_lien_fee_last_slot: percolator::V16PodU64::new(
+                    account.source_lien_fee_last_slot[d],
+                ),
+                source_claim_impaired_num: percolator::V16PodU128::new(
+                    account.source_claim_impaired_num[d],
+                ),
+                source_lien_impaired_effective_reserved: percolator::V16PodU128::new(
+                    account.source_lien_impaired_effective_reserved[d],
+                ),
+                source_lien_capital_at_risk_fee_revenue: percolator::V16PodU128::new(
+                    account.source_lien_capital_at_risk_fee_revenue[d],
+                ),
+                source_lien_impaired_capital_at_risk_fee_revenue: percolator::V16PodU128::new(
+                    account.source_lien_impaired_capital_at_risk_fee_revenue[d],
+                ),
             };
-            *portfolio_source_domain_wire_mut(data, d)? = source;
+            if entry.is_occupied() {
+                let slot = wire
+                    .source_domains
+                    .get_mut(next_slot)
+                    .ok_or(PercolatorError::InvalidAccountLen)?;
+                *slot = entry;
+                next_slot += 1;
+            }
             d += 1;
         }
         Ok(())
@@ -2336,40 +2273,23 @@ pub mod state {
 
     pub fn portfolio_view_mut_for_market_slots(
         data: &mut [u8],
-        max_market_slots: usize,
+        _max_market_slots: usize,
     ) -> Result<PortfolioV16ViewMut<'_>, ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;
-        let market_slots =
-            u32::try_from(max_market_slots).map_err(|_| PercolatorError::InvalidAccountLen)?;
-        let domain_count =
-            v16_domain_count_for_market_slots(market_slots).map_err(map_account_wire_error)?;
+        // Source-domains are a fixed sparse array embedded in PortfolioAccountV16Account
+        // (covered by PORTFOLIO_STATE_LEN); fixed-size account, no 2N tail.
         let required = HEADER_LEN
             .checked_add(PORTFOLIO_STATE_LEN)
-            .and_then(|v| {
-                domain_count
-                    .checked_mul(PORTFOLIO_SOURCE_DOMAIN_LEN)
-                    .and_then(|d| v.checked_add(d))
-            })
             .ok_or(PercolatorError::InvalidAccountLen)?;
         if data.len() < required {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
-        let body = data
-            .get_mut(HEADER_LEN..)
+        let portfolio_bytes = data
+            .get_mut(HEADER_LEN..required)
             .ok_or(PercolatorError::InvalidAccountLen)?;
-        let (portfolio_bytes, source_bytes) = body.split_at_mut(PORTFOLIO_STATE_LEN);
         let header = bytemuck::try_from_bytes_mut::<PortfolioAccountV16Account>(portfolio_bytes)
             .map_err(|_| ProgramError::InvalidAccountData)?;
-        let source_len = domain_count
-            .checked_mul(PORTFOLIO_SOURCE_DOMAIN_LEN)
-            .ok_or(PercolatorError::InvalidAccountLen)?;
-        let source_bytes = source_bytes
-            .get_mut(..source_len)
-            .ok_or(PercolatorError::InvalidAccountLen)?;
-        let source_domains =
-            bytemuck::try_cast_slice_mut::<u8, PortfolioSourceDomainV16Account>(source_bytes)
-                .map_err(|_| ProgramError::InvalidAccountData)?;
-        Ok(PortfolioV16ViewMut::new(header, source_domains))
+        Ok(PortfolioV16ViewMut::new(header))
     }
 
     pub fn init_market_account_zero_copy(
@@ -6122,41 +6042,48 @@ pub mod processor {
 
     fn ensure_new_source_lien_domains_full_rate_for_trade_view(
         group: &state::MarketViewMutV16<'_>,
-        before_a: &[u128],
-        after_a: &[u128],
-        before_b: &[u128],
-        after_b: &[u128],
+        before_a: &[(u32, u128)],
+        after_a: &[(u32, u128)],
+        before_b: &[(u32, u128)],
+        after_b: &[(u32, u128)],
     ) -> ProgramResult {
-        let domain_count = core::cmp::max(
-            core::cmp::max(before_a.len(), after_a.len()),
-            core::cmp::max(before_b.len(), after_b.len()),
-        );
-        let mut domain = 0usize;
-        while domain < domain_count {
-            let a_increased = after_a.get(domain).copied().unwrap_or(0)
-                > before_a.get(domain).copied().unwrap_or(0);
-            let b_increased = after_b.get(domain).copied().unwrap_or(0)
-                > before_b.get(domain).copied().unwrap_or(0);
-            if a_increased || b_increased {
-                ensure_source_credit_full_rate_for_domain_view(group, domain)?;
+        // For each account, any domain whose source-lien effective reserve INCREASED across the trade
+        // must have its source credit at full rate. After-state is the sparse occupied set (<= CAP);
+        // look up the before value by domain (default 0 for a freshly-occupied domain).
+        for (after, before) in [(after_a, before_a), (after_b, before_b)] {
+            let mut i = 0usize;
+            while i < after.len() {
+                let (domain, after_val) = after[i];
+                if after_val > sparse_domain_value_lookup(before, domain) {
+                    ensure_source_credit_full_rate_for_domain_view(group, domain as usize)?;
+                }
+                i += 1;
             }
-            domain += 1;
         }
         Ok(())
     }
 
+    // Sparse before/after trade snapshots: one (domain, value) entry per OCCUPIED source-domain slot
+    // (<= PORTFOLIO_SOURCE_DOMAIN_CAP), so the trade path is O(active source-domains), not O(N).
+    fn sparse_domain_value_lookup(snapshot: &[(u32, u128)], domain: u32) -> u128 {
+        let mut i = 0usize;
+        while i < snapshot.len() {
+            if snapshot[i].0 == domain {
+                return snapshot[i].1;
+            }
+            i += 1;
+        }
+        0
+    }
+
     fn source_lien_effective_reserved_snapshot_for_trade_view(
         account: &percolator::PortfolioV16ViewMut<'_>,
-    ) -> Result<alloc::boxed::Box<[u128]>, ProgramError> {
-        let mut out = Vec::with_capacity(account.source_domains.len());
-        let mut domain = 0usize;
-        while domain < account.source_domains.len() {
-            out.push(
-                account.source_domains[domain]
-                    .source_lien_effective_reserved
-                    .get(),
-            );
-            domain += 1;
+    ) -> Result<alloc::boxed::Box<[(u32, u128)]>, ProgramError> {
+        let mut out = Vec::new();
+        for slot in account.header.source_domains.iter() {
+            if slot.is_occupied() {
+                out.push((slot.domain.get(), slot.source_lien_effective_reserved.get()));
+            }
         }
         Ok(out.into_boxed_slice())
     }
@@ -10494,12 +10421,10 @@ pub mod processor {
         {
             return Ok(false);
         }
-        let mut d = 0usize;
-        while d < portfolio.source_domains.len() {
-            if portfolio.source_domains[d].source_claim_bound_num.get() != 0 {
+        for slot in portfolio.header.source_domains.iter() {
+            if slot.source_claim_bound_num.get() != 0 {
                 return Ok(false);
             }
-            d += 1;
         }
         Ok(true)
     }
@@ -10603,33 +10528,40 @@ pub mod processor {
             .map_err(map_v16_error)
     }
 
-    type SourceBackingSnapshot = alloc::boxed::Box<[u128]>;
-    type DomainFeeTotals = alloc::boxed::Box<[u128]>;
+    // Sparse: (domain, value) per occupied source-domain slot (<= PORTFOLIO_SOURCE_DOMAIN_CAP).
+    type SourceBackingSnapshot = alloc::boxed::Box<[(u32, u128)]>;
+    // Sparse accumulator: (domain, fee) entries, keyed by domain.
+    type DomainFeeTotals = Vec<(u32, u128)>;
 
     fn source_counterparty_backing_snapshot_view(
         account: &percolator::PortfolioV16ViewMut<'_>,
     ) -> Result<SourceBackingSnapshot, ProgramError> {
-        let mut out = Vec::with_capacity(account.source_domains.len());
-        let mut d = 0usize;
-        while d < account.source_domains.len() {
-            out.push(
-                account.source_domains[d]
-                    .source_lien_counterparty_backing_num
-                    .get(),
-            );
-            d += 1;
+        let mut out = Vec::new();
+        for slot in account.header.source_domains.iter() {
+            if slot.is_occupied() {
+                out.push((
+                    slot.domain.get(),
+                    slot.source_lien_counterparty_backing_num.get(),
+                ));
+            }
         }
         Ok(out.into_boxed_slice())
     }
 
-    fn domain_fee_totals_zeroed(domain_count: usize) -> Result<DomainFeeTotals, ProgramError> {
-        let mut out = Vec::with_capacity(domain_count);
-        let mut d = 0usize;
-        while d < domain_count {
-            out.push(0);
-            d += 1;
+    fn domain_fee_add(fees: &mut DomainFeeTotals, domain: u32, fee: u128) -> Result<(), ProgramError> {
+        let mut i = 0usize;
+        while i < fees.len() {
+            if fees[i].0 == domain {
+                fees[i].1 = fees[i]
+                    .1
+                    .checked_add(fee)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                return Ok(());
+            }
+            i += 1;
         }
-        Ok(out.into_boxed_slice())
+        fees.push((domain, fee));
+        Ok(())
     }
 
     fn backing_fee_policy_for_domain_view(
@@ -10668,40 +10600,35 @@ pub mod processor {
         group: &state::MarketViewMutV16<'_>,
         cfg: &WrapperConfigV16,
         account: &percolator::PortfolioV16ViewMut<'_>,
-        before: &[u128],
-        fees_by_domain: &mut [u128],
+        before: &[(u32, u128)],
+        fees_by_domain: &mut DomainFeeTotals,
     ) -> Result<u128, ProgramError> {
-        let max_slots = group.header.config.max_market_slots.get() as usize;
-        let domain_count = max_slots
-            .checked_mul(2)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        // Iterate only the OCCUPIED source-domain slots (after-state, <= CAP). For each, compute the
+        // counterparty-backing increase vs the before snapshot (looked up by domain) and charge the
+        // backing fee. O(active source-domains), independent of N.
         let mut total = 0u128;
-        let mut d = 0usize;
-        while d < domain_count {
-            if d >= before.len() || d >= fees_by_domain.len() || d >= account.source_domains.len() {
-                return Err(PercolatorError::EngineInvalidConfig.into());
+        for slot in account.header.source_domains.iter() {
+            if !slot.is_occupied() {
+                continue;
             }
-            let after = account.source_domains[d]
-                .source_lien_counterparty_backing_num
-                .get();
-            if after > before[d] {
-                let delta_num = after - before[d];
+            let domain = slot.domain.get();
+            let after = slot.source_lien_counterparty_backing_num.get();
+            let before_val = sparse_domain_value_lookup(before, domain);
+            if after > before_val {
+                let delta_num = after - before_val;
                 if delta_num % BOUND_SCALE != 0 {
                     return Err(PercolatorError::EngineInvalidLeg.into());
                 }
                 let delta = delta_num / BOUND_SCALE;
-                let (bps, _) = backing_fee_policy_for_domain_view(group, cfg, d)?;
+                let (bps, _) = backing_fee_policy_for_domain_view(group, cfg, domain as usize)?;
                 let fee = fee_bps_ceil(delta, bps)?;
                 if fee != 0 {
-                    fees_by_domain[d] = fees_by_domain[d]
-                        .checked_add(fee)
-                        .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                    domain_fee_add(fees_by_domain, domain, fee)?;
                     total = total
                         .checked_add(fee)
                         .ok_or(PercolatorError::EngineArithmeticOverflow)?;
                 }
             }
-            d += 1;
         }
         Ok(total)
     }
@@ -10796,27 +10723,24 @@ pub mod processor {
         cfg: &WrapperConfigV16,
         group: &mut state::MarketViewMutV16<'_>,
         account_a: &mut percolator::PortfolioV16ViewMut<'_>,
-        before_a: &[u128],
+        before_a: &[(u32, u128)],
         account_b: &mut percolator::PortfolioV16ViewMut<'_>,
-        before_b: &[u128],
+        before_b: &[(u32, u128)],
     ) -> Result<u128, ProgramError> {
-        let domain_count =
-            v16_domain_count_for_market_slots(group.header.config.max_market_slots.get())
-                .map_err(map_v16_error)?;
-        let mut fees_by_domain = domain_fee_totals_zeroed(domain_count)?;
+        let mut fees_by_domain: DomainFeeTotals = Vec::new();
         let fee_a = collect_backing_domain_fees_for_account_view(
             group,
             cfg,
             account_a,
             before_a,
-            fees_by_domain.as_mut(),
+            &mut fees_by_domain,
         )?;
         let fee_b = collect_backing_domain_fees_for_account_view(
             group,
             cfg,
             account_b,
             before_b,
-            fees_by_domain.as_mut(),
+            &mut fees_by_domain,
         )?;
         if fee_a == 0 && fee_b == 0 {
             return Ok(0);
@@ -10826,9 +10750,11 @@ pub mod processor {
         debit_account_view_backing_domain_fee(group, account_a, fee_a)?;
         debit_account_view_backing_domain_fee(group, account_b, fee_b)?;
 
-        let mut d = 0usize;
-        while d < domain_count {
-            let fee = fees_by_domain[d];
+        let mut fee_idx = 0usize;
+        while fee_idx < fees_by_domain.len() {
+            let (domain, fee) = fees_by_domain[fee_idx];
+            fee_idx += 1;
+            let d = domain as usize;
             if fee != 0 {
                 let asset_index = d / 2;
                 let (_, insurance_share_bps) = backing_fee_policy_for_domain_view(group, cfg, d)?;
@@ -10868,7 +10794,6 @@ pub mod processor {
                     credit_fee_to_domain_budget_view(cfg, group, d, insurance_fee)?;
                 }
             }
-            d += 1;
         }
         if account_a.header.health_cert.valid != 0 {
             account_a.header.health_cert.cert_risk_epoch = group.header.risk_epoch;

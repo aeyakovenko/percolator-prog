@@ -15119,3 +15119,5 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation under cross-asset insolvency");
     assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting vault == real on-chain vault");
 }
+
+
