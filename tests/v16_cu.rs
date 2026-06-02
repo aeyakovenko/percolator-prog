@@ -14507,3 +14507,55 @@ fn v16_attack_deposit_wrong_mint_source_rejects() {
     assert!(ok.is_ok(), "correct-mint deposit works: {:?}", ok);
     assert_eq!(env.portfolio_state(p).capital, cap0 + 500, "correct-mint deposit credits capital");
 }
+
+// security.md sweep — withdraw rejects a vault with a delegate/close_authority (#44 defense-in-depth):
+// verify_withdrawable_token_accounts rejects the vault if it has a delegate or close_authority set
+// (such a vault could be drained/closed out-of-band by that authority). Attacker goal: route withdrawals
+// through a vault carrying a close_authority/delegate they control to siphon or reclaim funds.
+// Protection: vault.delegate.is_some() || vault.close_authority.is_some() -> reject.
+#[test]
+fn v16_attack_withdraw_vault_with_close_authority_rejected() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000);
+    let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+
+    // craft the CANONICAL vault account to carry a close_authority (attacker-controlled), same balance.
+    let mut tainted = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(TokenAccount {
+        mint: env.mint, owner: env.vault_authority, amount: 1_000,
+        delegate: COption::None, state: AccountState::Initialized, is_native: COption::None,
+        delegated_amount: 0, close_authority: COption::Some(Pubkey::new_unique()),
+    }, &mut tainted).unwrap();
+    let mut vacct = env.svm.get_account(&env.vault).unwrap();
+    vacct.data = tainted;
+    env.svm.set_account(env.vault, vacct).unwrap();
+
+    // ATTACK: withdraw through the close_authority-tainted vault -> reject.
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Withdraw { amount: 1_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r.is_err(), "withdraw through a vault with a close_authority must reject");
+    assert_eq!(env.token_amount(dest), 0, "no funds withdrawn through the tainted vault");
+
+    // restore a clean vault (no close_authority) -> the legitimate withdraw works.
+    let mut clean = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(TokenAccount {
+        mint: env.mint, owner: env.vault_authority, amount: 1_000,
+        delegate: COption::None, state: AccountState::Initialized, is_native: COption::None,
+        delegated_amount: 0, close_authority: COption::None,
+    }, &mut clean).unwrap();
+    let mut v2 = env.svm.get_account(&env.vault).unwrap();
+    v2.data = clean;
+    env.svm.set_account(env.vault, v2).unwrap();
+    env.svm.expire_blockhash();
+    let ok = env.send(ProgInstruction::Withdraw { amount: 1_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(ok.is_ok(), "withdraw through a clean vault works: {:?}", ok);
+    assert_eq!(env.token_amount(dest), 1_000, "clean withdraw delivers the funds");
+}
