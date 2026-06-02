@@ -14761,3 +14761,37 @@ fn v16_attack_admin_renounce_without_fallback_rejected() {
     assert!(ok.is_ok(), "renouncing admin WITH a permissionless fallback is allowed: {:?}", ok);
     assert_eq!(env.market_state().0.admin, [0u8; 32], "admin renounced to zero (fallback present)");
 }
+
+// security.md sweep — auth-mark push is authority-gated (#6/#37): pushing the settlement mark requires
+// the signer to be the asset's oracle/mark authority (expect_live_authority(authorities.oracle_authority,
+// signer), src/v16_program.rs:9868). Attacker goal: a non-authority pushes an extreme mark to manipulate
+// settlement (induce liquidations / print PnL). Protection: a non-authority push rejects; mark unchanged.
+#[test]
+fn v16_attack_non_authority_cannot_push_auth_mark() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100); // auth-mark mode, oracle_authority defaults to admin
+    let g0 = env.market_state().1;
+    assert_eq!(g0.assets[0].effective_price, 100, "mark starts at 100");
+
+    // ATTACK: a non-authority (mallory) pushes an extreme mark -> reject.
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 2, mark_e6: 9_999_999 },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false)], &[&mallory]);
+    assert!(r.is_err(), "a non-authority auth-mark push must reject");
+
+    // the mark was NOT moved by the attacker.
+    assert_eq!(env.market_state().1.assets[0].effective_price, 100, "mark unchanged by the rejected push");
+
+    // CONTROL: the genuine authority (admin) — the SAME push — is ACCEPTED (proving the rejection
+    // above was the authority gate, not an unrelated failure).
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    let ok = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 2, mark_e6: 150 },
+        vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&admin]);
+    assert!(ok.is_ok(), "the genuine mark authority's push is accepted: {:?}", ok);
+}
