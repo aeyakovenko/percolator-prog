@@ -13556,3 +13556,53 @@ fn v16_attack_liquidation_cranker_reward_bounded_by_fee() {
     assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation through fee'd liquidation");
 }
+
+// security.md sweep — liquidation fee is bounded by liquidation_fee_cap (#3/#33): the liquidation fee is
+// min(liquidation_fee_bps * notional, liquidation_fee_cap). Attacker/edge goal: a large liquidation
+// charges an unbounded fee (bps*notional) draining the victim / over-feeding insurance+cranker past the
+// configured cap. Protection: the total fee (cranker + insurance) never exceeds liquidation_fee_cap.
+#[test]
+fn v16_attack_liquidation_fee_capped() {
+    const CAP: u128 = 100;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        liquidation_fee_cap: CAP, // tiny cap; 5bps * ~1e6 notional would be ~535 uncapped
+        ..production_risk_params()
+    });
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let lo = Keypair::new(); let l = env.create_portfolio(&lo);
+    let so = Keypair::new(); let s = env.create_portfolio(&so);
+    let co = Keypair::new(); let c = env.create_portfolio(&co);
+    env.deposit(&lo, l, 100_000_000);
+    env.deposit(&so, s, 100_000);
+    env.deposit(&co, c, 1_000);
+    env.trade_asset_with_cu(0, &lo, l, &so, s, POS_SCALE as i128, 1_000_000, 0);
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(s, false)], &[]);
+    }
+    let c0 = env.portfolio_state(c).capital;
+    let (_, g0) = env.market_state();
+
+    env.svm.expire_blockhash();
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 30, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(co.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(s, false), AccountMeta::new(c, false)], &[&co]);
+    assert!(r.is_ok(), "liquidation should proceed: {:?}", r);
+    let (_, g1) = env.market_state();
+    let cranker_reward = (env.portfolio_state(c).capital as i128 - c0 as i128) as u128;
+    let ins_delta = (g1.insurance as i128 - g0.insurance as i128) as u128;
+    let total_fee = cranker_reward + ins_delta;
+
+    // CAP: the total liquidation fee is bounded by liquidation_fee_cap — NOT the uncapped bps*notional.
+    assert!(total_fee > 0, "a fee was charged (non-vacuous)");
+    assert!(total_fee <= CAP, "total liquidation fee {} must be capped at liquidation_fee_cap {}", total_fee, CAP);
+    // the cap actually bit: 5bps of ~1e6 notional (~535) would have exceeded CAP=100 absent the cap.
+    assert_eq!(total_fee, CAP, "the fee is the cap exactly (uncapped fee would be ~535 >> 100)");
+    assert_eq!(g1.vault, g0.vault, "fee is internal, no vault mint");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
+}
