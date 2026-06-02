@@ -13504,3 +13504,55 @@ fn v16_attack_convert_then_withdraw_extracts_exactly_backed() {
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+
+// security.md sweep — liquidation cranker reward bounded by the fee (#3): with a NONZERO liquidation
+// fee configured, a cranker is paid cranker_share_bps of the fee. Attacker goal: self-liquidate (control
+// both the liquidated account AND the cranker) to net-profit, i.e. cranker reward > fee paid. Protection:
+// reward == cranker_share% of the fee (≤ fee), the fee is internal (vault unminted), and the remainder
+// goes to insurance — so a self-liquidator nets ≤ 0 (here −fee + 50%·fee < 0). First BPF test to drive a
+// nonzero liquidation_fee_bps (via production_risk_params, which satisfies the engine solvency envelope).
+#[test]
+fn v16_attack_liquidation_cranker_reward_bounded_by_fee() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000); // cranker share = 50%
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let lo = Keypair::new(); let l = env.create_portfolio(&lo);
+    let so = Keypair::new(); let s = env.create_portfolio(&so);
+    let co = Keypair::new(); let c = env.create_portfolio(&co); // cranker (could be a self-liquidator)
+    env.deposit(&lo, l, 100_000_000);
+    env.deposit(&so, s, 100_000); // ~2x the 5% IM -> insolvent on a modest move
+    env.deposit(&co, c, 1_000);
+    env.trade_asset_with_cu(0, &lo, l, &so, s, POS_SCALE as i128, 1_000_000, 0);
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(s, false)], &[]);
+    }
+    let c0 = env.portfolio_state(c).capital;
+    let (_, g0) = env.market_state();
+
+    // liquidate the insolvent short, crediting the cranker portfolio.
+    env.svm.expire_blockhash();
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 30, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(co.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(s, false), AccountMeta::new(c, false)], &[&co]);
+    assert!(r.is_ok(), "liquidation with a fee should proceed: {:?}", r);
+    let (_, g1) = env.market_state();
+    let cranker_reward = env.portfolio_state(c).capital as i128 - c0 as i128;
+    let ins_delta = g1.insurance as i128 - g0.insurance as i128;
+    let total_fee = cranker_reward + ins_delta;
+
+    // non-vacuity: a real liquidation fee was charged and the cranker got a real reward.
+    assert!(cranker_reward > 0, "cranker received a reward (non-vacuous), got {}", cranker_reward);
+    assert!(total_fee > 0, "a liquidation fee was charged");
+    // BOUND: the reward never exceeds the fee, and at 50% share it is exactly half (rest to insurance).
+    assert!(cranker_reward <= total_fee, "cranker reward must not exceed the fee (no profit beyond the fee)");
+    assert_eq!(cranker_reward, ins_delta, "50%% share: cranker reward == insurance share (exact split)");
+    assert!(cranker_reward < total_fee, "cranker gets < the full fee -> self-liquidation nets negative");
+    // NO MINT: the fee is internal (liquidated account -> cranker + insurance), vault unchanged.
+    assert_eq!(g1.vault, g0.vault, "liquidation fee mints no vault tokens");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation through fee'd liquidation");
+}
