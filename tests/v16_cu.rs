@@ -14080,3 +14080,38 @@ fn v16_attack_tradecpi_matcher_tail_cannot_carry_protocol_state() {
     let ok = env.try_trade_cpi_with_cu_on_asset(&to, t, &mo, m, matcher_program, ctx, del, 0, (10 * POS_SCALE) as i128, 100);
     assert!(ok.is_ok(), "clean TradeCpi (no poisoned tail) executes: {:?}", ok);
 }
+
+// security.md sweep — oracle confidence filter rejects wide-confidence feeds (#37/#39): the hybrid
+// (Pyth) oracle gates a feed by its confidence interval — `conf*10000 > price*conf_filter_bps` rejects
+// (src/v16_program.rs:3844). Attacker goal: configure/use the oracle against a feed with a huge
+// confidence interval (an uncertain/manipulable price) so the protocol trades on an unreliable mark.
+// Protection: a wide-conf feed is rejected; only a feed whose confidence is within the filter is accepted.
+#[test]
+fn v16_attack_oracle_wide_confidence_feed_rejected() {
+    let price: i64 = 200_000;
+    // helper: configure a 1-leg hybrid oracle from a Pyth feed with the given confidence; conf_filter=2%.
+    let configure = |conf: u64| -> (bool, bool) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let feed = [0x55u8; 32];
+        let acct = env.set_pyth_price_with_conf(&feed, price, -6, conf, 100);
+        let before = env.svm.get_account(&env.market).unwrap().data;
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0, 1, 0, [feed, [0u8;32], [0u8;32]], &[acct], 1, 100, 0, 0, 100, 200);
+        let after = env.svm.get_account(&env.market).unwrap().data;
+        (r.is_ok(), before == after) // (configured?, market_unchanged?)
+    };
+
+    // NARROW confidence (0.1% of price) is within the 2% filter -> accepted.
+    let (narrow_ok, _) = configure((price / 1000) as u64);
+    assert!(narrow_ok, "a tight-confidence feed (0.1%) must configure (within the 2% filter)");
+
+    // WIDE confidence (50% of price) far exceeds the 2% filter -> REJECTED, market unmutated.
+    let (wide_ok, wide_unchanged) = configure((price / 2) as u64);
+    assert!(!wide_ok, "a wide-confidence feed (50%) must be REJECTED by the conf filter");
+    assert!(wide_unchanged, "rejected wide-conf configuration must not mutate the market");
+
+    // BORDERLINE just over the filter (2.5% > 2%) also rejects -> the bound is enforced precisely.
+    let (over_ok, _) = configure((price as u64 * 250) / 10_000);
+    assert!(!over_ok, "a feed just over the conf filter (2.5% > 2%) must reject");
+}
