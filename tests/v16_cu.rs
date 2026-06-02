@@ -14216,3 +14216,37 @@ fn v16_attack_oracle_composite_over_max_price_rejects() {
     let (normal_ok, _, _) = configure(150_000_000, 200_000_000);
     assert!(normal_ok, "a normal composite (in range) configures cleanly");
 }
+
+// security.md sweep — oracle unit_scale transform: correct scaling + floor-to-0 rejected (#37/#39):
+// apply_transform divides the price by unit_scale (`price /= unit_scale`, src/v16_program.rs:4064) and
+// the post-check rejects a 0 result. Attacker goal: a unit_scale larger than the price floors the mark
+// to 0 (slipping a garbage/zero mark) OR the scaling yields a wrong price. Protection: the mark is the
+// exact divided price, and a scale that floors it to 0 -> OracleInvalid. Last degenerate-price path
+// (complements the composite trio #167/#168/#169).
+#[test]
+fn v16_attack_oracle_unit_scale_transform_correct_and_floor0_rejected() {
+    let configure = |scale: u32| -> (bool, u64, Option<String>) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let feed = [0x55u8;32];
+        let acct = env.set_pyth_price_with_conf(&feed, 200_000, -6, 0, 100); // price_e6 = 200_000
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0, 1, 0, [feed, [0u8;32], [0u8;32]], &[acct], 1, 100, 0, scale, 100, 0);
+        let eff = if r.is_ok() { env.market_state().1.assets[0].effective_price } else { 0 };
+        (r.is_ok(), eff, r.err())
+    };
+
+    // VALID scale: mark is the EXACT divided price (200_000 / 2 = 100_000).
+    let (ok2, eff2, _) = configure(2);
+    assert!(ok2, "a valid unit_scale configures");
+    assert_eq!(eff2, 100_000, "unit_scale divides the mark exactly (200_000/2)");
+    // and unit_scale 4 -> 50_000.
+    let (ok4, eff4, _) = configure(4);
+    assert!(ok4 && eff4 == 50_000, "unit_scale=4 -> 200_000/4 = 50_000, got {}", eff4);
+
+    // FLOOR-TO-0: a unit_scale > the price floors the mark to 0 -> rejected (no zero/garbage mark).
+    let (ok_floor, _, floor_err) = configure(300_000);
+    assert!(!ok_floor, "a unit_scale that floors the price to 0 must reject");
+    let e = floor_err.unwrap();
+    assert!(e.contains("Custom(26)"), "floor-to-0 must be OracleInvalid (Custom 26), got: {}", e);
+}
