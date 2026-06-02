@@ -12,6 +12,7 @@ This README is intentionally **high-level**: it explains the trust model, accoun
 
 ## Table of contents
 
+- [Product specification](#product-specification)
 - [Concepts](#concepts)
 - [Trust boundaries](#trust-boundaries)
 - [Account model](#account-model)
@@ -26,6 +27,92 @@ This README is intentionally **high-level**: it explains the trust model, accoun
 - [Admin Key Threat Model](#admin-key-threat-model)
 - [Failure modes and recovery](#failure-modes-and-recovery)
 - [Build & test](#build--test)
+
+---
+
+## Product specification
+
+The economic and governance model for a permissionless multi-asset market. Status legend:
+**✅ implemented + tested** · **◑ partial / needs verification** · **◻ planned (not yet)**.
+
+### Market = one slab of N assets
+- A **market is one account ("slab") holding an array of N assets**: `engine header + [Asset<T>]`
+  slice, resizable by the program. The engine operates **one market at a time**. **✅**
+- A **10 MB slab should support 10k+ assets**, and per-trader CU must stay bounded **independent of
+  N** (a trader pays only for the assets they actually touch, not all N). **◑** — growth past any
+  N works (no 64 cap; `v16_attack_market_exceeds_64_assets_position_holds_any_14_legs`), but
+  per-instruction CU is still O(N) until the sparse-portfolio refactor is linked end-to-end (engine
+  done at `percolator@e11798d`; wrapper bump + fixed-size portfolio pending). Today a single trade
+  hits ~1.4M CU at N≈360.
+
+### Asset 0 — the base unit
+- **Asset 0 is denominated in the base unit** and has its own **insurance + backing**. **✅**
+- A **configured % of asset-0 backing yield routes to asset-0 insurance**. **◑**
+- An **asset-0 key sets the fee to create assets 1..N permissionlessly**. **A fee of zero means
+  creation is NOT permissionless** — market-wide authority is then required to add an asset. **◑**
+  (`UpdateMarketInitFeePolicy`; the append path charges `permissionless_market_init_fee_for_asset`
+  and returns `Unauthorized` for a non-authority when the fee is 0, `v16_program.rs:8598`.)
+
+### Assets 1..N
+- All **denominated in the base unit**; every asset terminates into the base unit. **✅**
+- **Permissionless to create for a fee, and that fee goes to asset-0 insurance.** **◑**
+  (`handle_update_asset_lifecycle` append → `credit_market_insurance_budget_view(group, 0, fee)`,
+  `v16_program.rs:8723/8758`.)
+- Each asset has its **own insurance + backing**. **✅**
+- **Fee routing (configured percentages):**
+  - a % of **all trading fees → asset-0 insurance** (`fee_redirect_to_market_0_bps`). **◑**
+  - a % of **asset-N backing yield → asset-N insurance** (`backing_trade_fee_insurance_share`). **◑**
+  - a % of **asset-N backing yield → asset-0 insurance**. **◑**
+  - *(The exact split semantics and their conservation still need a dedicated test pass.)*
+
+### Isolation — traders are safe from other assets, even faulty ones
+Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guarantee:
+- A trader is **safe from traders in other assets even if those assets are faulty/malicious**. **◑**
+- **Every domain is isolated**: a claim is bound to its originating `(asset, side)` domain
+  (`source_claim_market_id` must match the asset's `market_id`), a winner is backed only by that
+  domain (`account_source_realizable_support`, per-domain — not the global residual), and **bad debt
+  is contained to the domain that caused it** — it can never drain or haircut another asset's
+  insurance/backing/winners. **◑** (Insurance side verified:
+  `v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance`; backing-side counterpart + the
+  cross-margin bankruptcy-containment case still to add.)
+- **Even the asset-0 admin is bounded** — it cannot reach into another asset's funds or a user's
+  collateral. **◑**
+
+### Cross-margin
+- A trader may **cross-position across multiple assets in a single position account, up to the CU
+  limit** (engine cap 16 assets / program cap 14 per account). **✅** A trader may hold **unlimited
+  position accounts**; to use more assets, open more accounts (never grow one account past the cap).
+
+### Governance & admin keys
+- **Per-asset admin keys, isolated** — one asset's admin can never be used against another asset.
+  **◻** (today the operational `admin` is market-wide; only per-domain insurance/oracle/backing
+  *authorities* are per-asset. The per-asset admin role is the open governance work.)
+- **Each asset has a cold-storage admin** that can **rotate the asset's other keys** and **can be
+  burned (set to 0)**. **◻**
+- **Each other asset key can rotate itself or be set to 0.** **◑** (`UpdateAuthority` self-rotation
+  exists market-wide; per-asset scoping pending.)
+- **Market admin can run a scheduled market close** — fully shut the market down and **reclaim the
+  account id** — with **safe delays that cannot steal user funds** but **eventually drain an
+  abandoned market to zero**. **◑** (`ResolveMarket` / permissionless-resolve fallback + `CloseSlab`;
+  reclaim/abandonment-drain semantics partial.)
+- **The asset-0 key can force-shutdown assets 1..N without rugging traders** — via **timeouts so
+  traders can exit** before the asset is wound down. **◑** (`ASSET_ACTION_SHUTDOWN` gated on
+  `force_close_delay_slots`; the trader-exit window needs an explicit test.)
+
+### Base unit (collateral)
+- The base unit is held in **two SPL token accounts** (a **primary** and a **secondary**), both
+  **program-owned PDAs**. All assets settle into the base unit. **✅**
+- **One market admin can rotate the base-unit SPL account from primary → secondary.** **◑**
+  (`UpdateBaseUnitMints`, gated on `base_unit_authority`.)
+- **Anyone can withdraw from either** account; **deposits go only into primary**. **◑**
+- The **base-unit admin can perform a 1:1 atomic swap from secondary into primary** (withdraw N from
+  secondary, deposit N into primary) and **optionally change the secondary SPL token once it is
+  empty**. **◑** (`SwapSecondaryForPrimary`; the "change secondary once empty" path to verify.)
+
+> **Coverage note.** The ◑/◻ items above are the live work list to bring the implementation and the
+> test suite up to this spec. Each gets a dedicated LiteSVM test asserting the attacker-success
+> criterion (isolation, exit-window, fee-split conservation, base-unit swap atomicity) plus the
+> end-to-end O(1)-in-N CU check once the sparse-portfolio refactor is linked.
 
 ---
 
