@@ -15121,3 +15121,58 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance() {
 }
 
 
+
+
+// Product spec — per-asset cold-storage admin keys (governance): each permissionless asset (1..N) has
+// its OWN admin that can rotate that asset's domain authorities (insurance/operator/backing/oracle)
+// and itself, and can be BURNED to 0; isolated — it can never act on another asset, and asset 0 uses
+// the market-wide UpdateAuthority. Each domain authority can also self-rotate / burn.
+#[test]
+fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
+    let mut env = V16CuEnv::new(); // 1 slot (asset 0); asset 1 is APPENDED permissionlessly below
+    env.configure_auth_mark_with_cu(0, 100);
+    env.activate_asset(1, 2, 100); // APPEND asset 1 -> profile.asset_admin bootstraps to the activator (admin)
+    let prof = |env: &V16CuEnv, ai: usize|
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, ai).unwrap();
+    assert_eq!(prof(&env, 1).asset_admin, env.admin.pubkey().to_bytes(), "asset-1 admin = activator");
+    let admin = env.admin.insecure_clone();
+    let upd = |env: &mut V16CuEnv, signer: &Keypair, co: Option<&Keypair>, ai: u16, kind: u8, new: [u8; 32]| {
+        env.ensure_signer_account(signer.pubkey());
+        let mut signers = vec![signer];
+        let co_key = co.map(|k| { env.ensure_signer_account(k.pubkey()); k.pubkey() }).unwrap_or(env.payer.pubkey());
+        if let Some(k) = co { signers.push(k); }
+        env.svm.expire_blockhash();
+        send_tx(&mut env.svm, env.program_id, &env.payer,
+            ProgInstruction::UpdateAssetAuthority { asset_index: ai, kind, new_pubkey: new },
+            vec![AccountMeta::new(signer.pubkey(), true), AccountMeta::new(co_key, co.is_some()), AccountMeta::new(env.market, false)],
+            &signers)
+    };
+
+    // 1) the per-asset admin rotates the asset's ORACLE authority (new key co-signs).
+    let new_oracle = Keypair::new();
+    assert!(upd(&mut env, &admin, Some(&new_oracle), 1, processor::ASSET_AUTH_ORACLE, new_oracle.pubkey().to_bytes()).is_ok(),
+        "per-asset admin rotates the asset's oracle authority");
+    assert_eq!(prof(&env, 1).oracle_authority, new_oracle.pubkey().to_bytes(), "oracle authority rotated");
+
+    // 2) a non-admin / non-holder cannot rotate.
+    let mallory = Keypair::new(); let m2 = Keypair::new();
+    assert!(upd(&mut env, &mallory, Some(&m2), 1, processor::ASSET_AUTH_INSURANCE, m2.pubkey().to_bytes()).is_err(),
+        "non-admin cannot rotate the asset's authorities");
+
+    // 3) ISOLATION: rejected for asset 0 (per-asset admin can't reach the base asset).
+    assert!(upd(&mut env, &admin, Some(&new_oracle), 0, processor::ASSET_AUTH_ORACLE, new_oracle.pubkey().to_bytes()).is_err(),
+        "UpdateAssetAuthority rejected for asset 0");
+
+    // 4) BURN the per-asset admin to 0 (asset becomes credibly admin-free).
+    assert!(upd(&mut env, &admin, None, 1, processor::ASSET_AUTH_ADMIN, [0u8; 32]).is_ok(), "asset admin can be burned");
+    assert_eq!(prof(&env, 1).asset_admin, [0u8; 32], "asset-1 admin burned");
+
+    // 5) after burn the admin can't be revived (no live admin to sign)...
+    assert!(upd(&mut env, &admin, Some(&admin), 1, processor::ASSET_AUTH_ADMIN, admin.pubkey().to_bytes()).is_err(),
+        "a burned asset admin cannot be revived");
+    // ...but a domain authority still self-rotates (its current holder signs).
+    let cold = Keypair::new();
+    assert!(upd(&mut env, &new_oracle, Some(&cold), 1, processor::ASSET_AUTH_ORACLE, cold.pubkey().to_bytes()).is_ok(),
+        "domain authority self-rotates even after the asset admin is burned");
+    assert_eq!(prof(&env, 1).oracle_authority, cold.pubkey().to_bytes(), "oracle self-rotated post-burn");
+}

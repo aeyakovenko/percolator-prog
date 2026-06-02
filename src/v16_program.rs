@@ -47,7 +47,7 @@ pub mod constants {
 
     pub const HEADER_LEN: usize = 16;
     pub const WRAPPER_CONFIG_LEN: usize = 624;
-    pub const ASSET_ORACLE_PROFILE_LEN: usize = 368;
+    pub const ASSET_ORACLE_PROFILE_LEN: usize = 400;
     pub const ASSET_ORACLE_WRAPPER_LEN: usize = 512;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16HeaderAccount>();
     pub const MARKET_ASSET_SLOT_LEN: usize = size_of::<Market<[u8; ASSET_ORACLE_WRAPPER_LEN]>>();
@@ -738,6 +738,10 @@ pub mod state {
         pub oracle_leg_feeds: [[u8; 32]; ORACLE_LEG_CAP],
         pub oracle_leg_prices_e6: [u64; ORACLE_LEG_CAP],
         pub oracle_leg_publish_times: [i64; ORACLE_LEG_CAP],
+        // Per-asset cold-storage admin (assets 1..N). Can rotate THIS asset's domain authorities
+        // (insurance/operator/backing/oracle) and itself, and can be burned (set to 0). Isolated:
+        // it can never act on another asset. Set to the activator at creation.
+        pub asset_admin: [u8; 32],
     }
 
     /// Aggregate backing-domain accounting for an authority-controlled vault.
@@ -1256,6 +1260,7 @@ pub mod state {
             oracle_leg_feeds: [[0u8; 32]; ORACLE_LEG_CAP],
             oracle_leg_prices_e6: [0u64; ORACLE_LEG_CAP],
             oracle_leg_publish_times: [0i64; ORACLE_LEG_CAP],
+            asset_admin: [0u8; 32],
         }
     }
 
@@ -1290,6 +1295,7 @@ pub mod state {
             oracle_leg_feeds: config.oracle_leg_feeds,
             oracle_leg_prices_e6: config.oracle_leg_prices_e6,
             oracle_leg_publish_times: config.oracle_leg_publish_times,
+            asset_admin: [0u8; 32],
         }
     }
 
@@ -2664,6 +2670,14 @@ pub mod ix {
             kind: u8,
             new_pubkey: [u8; 32],
         },
+        /// Rotate one of a permissionless asset's (1..N) per-asset authorities. Gated by the asset's
+        /// own `asset_admin` (rotates any, incl. itself, burnable) or the current holder of that
+        /// authority (self-rotation / burn). Isolated to the given asset_index.
+        UpdateAssetAuthority {
+            asset_index: u16,
+            kind: u8,
+            new_pubkey: [u8; 32],
+        },
         UpdateInsurancePolicy {
             max_bps: u16,
             deposits_only: u8,
@@ -2881,6 +2895,11 @@ pub mod ix {
                     fee_rate_per_slot: read_u128(&mut rest)?,
                 },
                 32 => Self::UpdateAuthority {
+                    kind: read_u8(&mut rest)?,
+                    new_pubkey: read_bytes32(&mut rest)?,
+                },
+                65 => Self::UpdateAssetAuthority {
+                    asset_index: read_u16(&mut rest)?,
                     kind: read_u8(&mut rest)?,
                     new_pubkey: read_bytes32(&mut rest)?,
                 },
@@ -3167,6 +3186,16 @@ pub mod ix {
                 }
                 Self::UpdateAuthority { kind, new_pubkey } => {
                     out.push(32);
+                    out.push(kind);
+                    out.extend_from_slice(&new_pubkey);
+                }
+                Self::UpdateAssetAuthority {
+                    asset_index,
+                    kind,
+                    new_pubkey,
+                } => {
+                    out.push(65);
+                    push_u16(&mut out, asset_index);
                     out.push(kind);
                     out.extend_from_slice(&new_pubkey);
                 }
@@ -4327,6 +4356,13 @@ pub mod processor {
     pub const AUTHORITY_ASSET: u8 = 5;
     pub const AUTHORITY_BASE_UNIT: u8 = 6;
 
+    // Per-asset authority kinds (UpdateAssetAuthority), scoped to a single permissionless asset's profile.
+    pub const ASSET_AUTH_ADMIN: u8 = 0;
+    pub const ASSET_AUTH_INSURANCE: u8 = 1;
+    pub const ASSET_AUTH_INSURANCE_OPERATOR: u8 = 2;
+    pub const ASSET_AUTH_BACKING_BUCKET: u8 = 3;
+    pub const ASSET_AUTH_ORACLE: u8 = 4;
+
     pub const ASSET_ACTION_ACTIVATE: u8 = 0;
     pub const ASSET_ACTION_DRAIN_ONLY: u8 = 1;
     pub const ASSET_ACTION_RETIRE: u8 = 2;
@@ -5210,6 +5246,11 @@ pub mod processor {
             Instruction::UpdateAuthority { kind, new_pubkey } => {
                 handle_update_authority(program_id, accounts, kind, new_pubkey)
             }
+            Instruction::UpdateAssetAuthority {
+                asset_index,
+                kind,
+                new_pubkey,
+            } => handle_update_asset_authority(program_id, accounts, asset_index, kind, new_pubkey),
             Instruction::UpdateInsurancePolicy {
                 max_bps,
                 deposits_only,
@@ -8374,6 +8415,70 @@ pub mod processor {
     }
 
     #[inline(never)]
+    fn handle_update_asset_authority<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        asset_index: u16,
+        kind: u8,
+        new_pubkey: [u8; 32],
+    ) -> ProgramResult {
+        let current = account(accounts, 0)?;
+        let new_authority = account(accounts, 1)?;
+        let market_ai = account(accounts, 2)?;
+        expect_signer(current)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+
+        // A non-zero incoming key must co-sign (proves control); burning to 0 needs only the rotator.
+        if new_pubkey != [0u8; 32] {
+            expect_signer(new_authority)?;
+            if new_authority.key.to_bytes() != new_pubkey {
+                return Err(PercolatorError::Unauthorized.into());
+            }
+        }
+
+        let asset_index = asset_index as usize;
+        // Per-asset authorities exist only for permissionless assets 1..N; asset 0 uses UpdateAuthority.
+        if asset_index == 0 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+
+        let mut data = market_ai.try_borrow_mut_data()?;
+        let (cfg, mut group) = state::market_view_mut(&mut data)?;
+        if asset_index >= group.header.config.max_market_slots.get() as usize {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let mut profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
+
+        // The asset's own cold-storage admin may rotate ANY of its authorities (incl. itself, and burn
+        // to 0); otherwise the current holder of THIS authority self-rotates (or burns itself). Scoped
+        // to this asset's profile only — it can never act on another asset.
+        let admin_signed =
+            profile.asset_admin != [0u8; 32] && profile.asset_admin == current.key.to_bytes();
+        let current_value = match kind {
+            ASSET_AUTH_ADMIN => profile.asset_admin,
+            ASSET_AUTH_INSURANCE => profile.insurance_authority,
+            ASSET_AUTH_INSURANCE_OPERATOR => profile.insurance_operator,
+            ASSET_AUTH_BACKING_BUCKET => profile.backing_bucket_authority,
+            ASSET_AUTH_ORACLE => profile.oracle_authority,
+            _ => return Err(PercolatorError::InvalidInstruction.into()),
+        };
+        if !admin_signed {
+            expect_live_authority(&current_value, current.key)?;
+        }
+        match kind {
+            ASSET_AUTH_ADMIN => profile.asset_admin = new_pubkey,
+            ASSET_AUTH_INSURANCE => profile.insurance_authority = new_pubkey,
+            ASSET_AUTH_INSURANCE_OPERATOR => profile.insurance_operator = new_pubkey,
+            ASSET_AUTH_BACKING_BUCKET => profile.backing_bucket_authority = new_pubkey,
+            ASSET_AUTH_ORACLE => profile.oracle_authority = new_pubkey,
+            _ => return Err(PercolatorError::InvalidInstruction.into()),
+        }
+        write_oracle_profile_to_view_if_separate(&mut group, asset_index, &profile)?;
+        Ok(())
+    }
+
+    #[inline(never)]
     fn handle_update_base_unit_mints<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
@@ -8614,6 +8719,9 @@ pub mod processor {
                         profile.insurance_operator = insurance_operator;
                         profile.backing_bucket_authority = backing_bucket_authority;
                         profile.oracle_authority = oracle_authority;
+                        // Per-asset cold-storage admin: bootstrap to the activator; it can later be
+                        // rotated to a cold key or burned via UpdateAssetAuthority.
+                        profile.asset_admin = authority.key.to_bytes();
                         write_oracle_profile_to_view_if_separate(
                             &mut group,
                             asset_index,
@@ -8653,7 +8761,7 @@ pub mod processor {
                 let (_cfg, _mode, configured_slots, _) =
                     state::read_market_config_mode_and_capacity(&data)?;
                 if !reuse_activated && asset_index == configured_slots {
-                    let profile = state::activate_dynamic_asset_slot(
+                    let mut profile = state::activate_dynamic_asset_slot(
                         &mut data,
                         asset_index,
                         authenticated_slot,
@@ -8663,6 +8771,9 @@ pub mod processor {
                         backing_bucket_authority,
                         oracle_authority,
                     )?;
+                    // Per-asset cold-storage admin: bootstrap to the activator (the permissionless
+                    // creator or the asset_authority); rotatable / burnable via UpdateAssetAuthority.
+                    profile.asset_admin = authority.key.to_bytes();
                     state::write_asset_oracle_profile(&mut data, asset_index, &profile)?;
                     if init_fee != 0 {
                         let (_cfg, mut group) = state::market_view_mut(&mut data)?;
@@ -9392,6 +9503,7 @@ pub mod processor {
                 _padding0: [0u8; 6],
                 insurance_authority: existing_profile.insurance_authority,
                 insurance_operator: existing_profile.insurance_operator,
+                asset_admin: existing_profile.asset_admin,
                 backing_bucket_authority: existing_profile.backing_bucket_authority,
                 oracle_authority: existing_profile.oracle_authority,
                 max_staleness_secs,
@@ -9519,6 +9631,7 @@ pub mod processor {
                 _padding0: [0u8; 6],
                 insurance_authority: existing_profile.insurance_authority,
                 insurance_operator: existing_profile.insurance_operator,
+                asset_admin: existing_profile.asset_admin,
                 backing_bucket_authority: existing_profile.backing_bucket_authority,
                 oracle_authority: existing_profile.oracle_authority,
                 max_staleness_secs: 0,
@@ -9628,6 +9741,7 @@ pub mod processor {
                 _padding0: [0u8; 6],
                 insurance_authority: existing_profile.insurance_authority,
                 insurance_operator: existing_profile.insurance_operator,
+                asset_admin: existing_profile.asset_admin,
                 backing_bucket_authority: existing_profile.backing_bucket_authority,
                 oracle_authority: existing_profile.oracle_authority,
                 max_staleness_secs: 0,

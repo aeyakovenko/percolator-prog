@@ -60,10 +60,13 @@ The economic and governance model for a permissionless multi-asset market. Statu
   `v16_program.rs:8723/8758`.)
 - Each asset has its **own insurance + backing**. **✅**
 - **Fee routing (configured percentages):**
-  - a % of **all trading fees → asset-0 insurance** (`fee_redirect_to_market_0_bps`). **◑**
-  - a % of **asset-N backing yield → asset-N insurance** (`backing_trade_fee_insurance_share`). **◑**
-  - a % of **asset-N backing yield → asset-0 insurance**. **◑**
-  - *(The exact split semantics and their conservation still need a dedicated test pass.)*
+  - a % of **all trading fees → asset-0 insurance** (`fee_redirect_to_market_0_bps`). **✅**
+    (`v16_attack_fee_redirect_split_lands_correctly` asserts the 20% split + conservation;
+    `v16_attack_market0_fees_stay_local`, `..._fee_redirect_full_boundary`.)
+  - a % of **asset-N backing yield → asset-N insurance** and **→ asset-0 insurance**
+    (`backing_trade_fee_insurance_share`, redirected via the same market-0 share). **◑** — policy is
+    authority-gated + bounded (`v16_attack_backing_fee_policy_authority_gated`); a dedicated
+    backing-yield split-conservation test is the remaining gap.
 
 ### Isolation — traders are safe from other assets, even faulty ones
 Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guarantee:
@@ -85,12 +88,16 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
 
 ### Governance & admin keys
 - **Per-asset admin keys, isolated** — one asset's admin can never be used against another asset.
-  **◻** (today the operational `admin` is market-wide; only per-domain insurance/oracle/backing
-  *authorities* are per-asset. The per-asset admin role is the open governance work.)
-- **Each asset has a cold-storage admin** that can **rotate the asset's other keys** and **can be
-  burned (set to 0)**. **◻**
-- **Each other asset key can rotate itself or be set to 0.** **◑** (`UpdateAuthority` self-rotation
-  exists market-wide; per-asset scoping pending.)
+  **✅** Each permissionless asset (1..N) carries its own `asset_admin` (`AssetOracleProfileV16`),
+  bootstrapped to the activator. `UpdateAssetAuthority { asset_index, kind, new_pubkey }` is scoped to
+  that asset's profile only and rejects `asset_index == 0` (asset 0 uses the market-wide
+  `UpdateAuthority`).
+- **Each asset has a cold-storage admin** that can **rotate the asset's other keys**
+  (insurance/operator/backing/oracle) and **can be burned (set to 0)** — a credibly admin-free asset
+  that can't be revived. **✅**
+- **Each other asset key can rotate itself or be set to 0.** **✅** (a domain authority self-rotates
+  even after the asset admin is burned). All verified by
+  `v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable`.
 - **Market admin can run a scheduled market close** — fully shut the market down and **reclaim the
   account id** — with **safe delays that cannot steal user funds** but **eventually drain an
   abandoned market to zero**. **◑** (`ResolveMarket` / permissionless-resolve fallback + `CloseSlab`;
