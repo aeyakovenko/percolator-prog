@@ -199,6 +199,8 @@ pub mod state {
         pub source_lien_fee_last_slot: Vec<u64>,
         pub source_claim_impaired_num: Vec<u128>,
         pub source_lien_impaired_effective_reserved: Vec<u128>,
+        pub source_lien_capital_at_risk_fee_revenue: Vec<u128>,
+        pub source_lien_impaired_capital_at_risk_fee_revenue: Vec<u128>,
         pub fee_credits: i128,
         pub cancel_deposit_escrow: u128,
         pub last_fee_slot: u64,
@@ -228,6 +230,8 @@ pub mod state {
                 .min(self.source_lien_fee_last_slot.len())
                 .min(self.source_claim_impaired_num.len())
                 .min(self.source_lien_impaired_effective_reserved.len())
+                .min(self.source_lien_capital_at_risk_fee_revenue.len())
+                .min(self.source_lien_impaired_capital_at_risk_fee_revenue.len())
         }
 
         fn ensure_source_domain_capacity(&mut self, domain_count: usize) {
@@ -246,6 +250,10 @@ pub mod state {
             self.source_lien_fee_last_slot.resize(domain_count, 0);
             self.source_claim_impaired_num.resize(domain_count, 0);
             self.source_lien_impaired_effective_reserved
+                .resize(domain_count, 0);
+            self.source_lien_capital_at_risk_fee_revenue
+                .resize(domain_count, 0);
+            self.source_lien_impaired_capital_at_risk_fee_revenue
                 .resize(domain_count, 0);
         }
     }
@@ -2011,6 +2019,9 @@ pub mod state {
         let mut source_lien_fee_last_slot = Vec::with_capacity(source_domain_count);
         let mut source_claim_impaired_num = Vec::with_capacity(source_domain_count);
         let mut source_lien_impaired_effective_reserved = Vec::with_capacity(source_domain_count);
+        let mut source_lien_capital_at_risk_fee_revenue = Vec::with_capacity(source_domain_count);
+        let mut source_lien_impaired_capital_at_risk_fee_revenue =
+            Vec::with_capacity(source_domain_count);
         let mut d = 0usize;
         while d < source_domain_count {
             source_claim_market_id.push(0);
@@ -2024,6 +2035,8 @@ pub mod state {
             source_lien_fee_last_slot.push(0);
             source_claim_impaired_num.push(0);
             source_lien_impaired_effective_reserved.push(0);
+            source_lien_capital_at_risk_fee_revenue.push(0);
+            source_lien_impaired_capital_at_risk_fee_revenue.push(0);
             d += 1;
         }
 
@@ -2054,6 +2067,10 @@ pub mod state {
                 .write(source_claim_impaired_num);
             core::ptr::addr_of_mut!((*ptr).source_lien_impaired_effective_reserved)
                 .write(source_lien_impaired_effective_reserved);
+            core::ptr::addr_of_mut!((*ptr).source_lien_capital_at_risk_fee_revenue)
+                .write(source_lien_capital_at_risk_fee_revenue);
+            core::ptr::addr_of_mut!((*ptr).source_lien_impaired_capital_at_risk_fee_revenue)
+                .write(source_lien_impaired_capital_at_risk_fee_revenue);
             core::ptr::addr_of_mut!((*ptr).fee_credits).write(0);
             core::ptr::addr_of_mut!((*ptr).cancel_deposit_escrow).write(0);
             core::ptr::addr_of_mut!((*ptr).last_fee_slot).write(last_fee_slot);
@@ -2154,6 +2171,10 @@ pub mod state {
             account.source_claim_impaired_num[d] = slot.source_claim_impaired_num.get();
             account.source_lien_impaired_effective_reserved[d] =
                 slot.source_lien_impaired_effective_reserved.get();
+            account.source_lien_capital_at_risk_fee_revenue[d] =
+                slot.source_lien_capital_at_risk_fee_revenue.get();
+            account.source_lien_impaired_capital_at_risk_fee_revenue[d] =
+                slot.source_lien_impaired_capital_at_risk_fee_revenue.get();
         }
         Ok(account)
     }
@@ -2229,6 +2250,12 @@ pub mod state {
                 ),
                 source_lien_impaired_effective_reserved: percolator::V16PodU128::new(
                     account.source_lien_impaired_effective_reserved[d],
+                ),
+                source_lien_capital_at_risk_fee_revenue: percolator::V16PodU128::new(
+                    account.source_lien_capital_at_risk_fee_revenue[d],
+                ),
+                source_lien_impaired_capital_at_risk_fee_revenue: percolator::V16PodU128::new(
+                    account.source_lien_impaired_capital_at_risk_fee_revenue[d],
                 ),
             };
             if entry.is_occupied() {
