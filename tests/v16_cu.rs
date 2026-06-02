@@ -14639,3 +14639,46 @@ fn v16_attack_direct_vault_donation_mints_nothing() {
     assert_eq!(env.token_amount(env.vault), 500, "the 500 donation remains stranded in the vault");
     assert_eq!(env.market_state().1.vault, 0, "accounting vault back to 0");
 }
+
+// security.md sweep — ConvertReleasedPnl is owner-gated (#6/#33): the convert moves a portfolio's backed
+// junior pnl into senior capital; with_one_portfolio_view(...,true,...) requires the OWNER to sign and
+// match the portfolio. Attacker goal: force a VICTIM's conversion (premature junior→senior move, changing
+// their haircut exposure) without their consent. Protection: a non-owner signer, or the owner as a
+// non-signer, both reject; only the genuine owner-signed call converts.
+#[test]
+fn v16_attack_convert_released_pnl_owner_gated() {
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, 40, 10_000);
+    let owner = Keypair::new(); let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000);
+    env.add_source_positive_pnl(p, 1, 40);
+    env.crank(p, ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 0, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 });
+    let cap0 = env.portfolio_state(p).capital;
+    let pnl0 = env.portfolio_state(p).pnl;
+    assert!(pnl0 > 0, "victim has backed junior pnl");
+
+    // ATTACK 1: a NON-OWNER (mallory) signs a convert on the victim's portfolio -> reject (owner mismatch).
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+    env.svm.expire_blockhash();
+    let r1 = env.send(ProgInstruction::ConvertReleasedPnl { amount: 1_000_000_000 },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[&mallory]);
+    assert!(r1.is_err(), "non-owner convert must reject");
+
+    // ATTACK 2: the owner's pubkey is passed but NOT as a signer -> reject (expect_signer).
+    env.svm.expire_blockhash();
+    let r2 = env.send(ProgInstruction::ConvertReleasedPnl { amount: 1_000_000_000 },
+        vec![AccountMeta::new_readonly(owner.pubkey(), false), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[]);
+    assert!(r2.is_err(), "convert with the owner as a non-signer must reject");
+
+    // neither attempt converted anything.
+    assert_eq!(env.portfolio_state(p).capital, cap0, "capital unchanged by rejected converts");
+    assert_eq!(env.portfolio_state(p).pnl, pnl0, "junior pnl not converted by an unauthorized caller");
+
+    // CONTROL: the genuine OWNER-signed convert works.
+    env.svm.expire_blockhash();
+    let ok = env.send(ProgInstruction::ConvertReleasedPnl { amount: 1_000_000_000 },
+        vec![AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false)], &[&owner]);
+    assert!(ok.is_ok(), "owner-signed convert works: {:?}", ok);
+    assert_eq!(env.portfolio_state(p).capital, cap0 + 40, "owner converts the backed 40 to capital");
+}
