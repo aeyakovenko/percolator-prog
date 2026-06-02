@@ -14250,3 +14250,27 @@ fn v16_attack_oracle_unit_scale_transform_correct_and_floor0_rejected() {
     let e = floor_err.unwrap();
     assert!(e.contains("Custom(26)"), "floor-to-0 must be OracleInvalid (Custom 26), got: {}", e);
 }
+
+// security.md sweep — oracle staleness bound is exact (#37/#39): the hybrid oracle rejects a feed whose
+// age (authenticated_unix − publish_time) exceeds max_staleness_secs. Attacker goal: configure/use a
+// STALE feed (a price no longer current, e.g. a frozen/old quote) to mark against an outdated price.
+// Protection: age > max_staleness_secs rejects; the bound is precise and uses the AUTHENTICATED clock
+// (complements #6747 which proves the caller cannot spoof now_unix to make a stale feed look fresh).
+#[test]
+fn v16_attack_oracle_staleness_bound_exact() {
+    // max_staleness_secs=60 (set by the helper); authenticated unix time = 1000.
+    let configure = |publish_time: i64| -> bool {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 1000);
+        let feed = [0x55u8;32];
+        let acct = env.set_pyth_price_with_conf(&feed, 200_000, -6, 0, publish_time);
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0, 1, 0, [feed, [0u8;32], [0u8;32]], &[acct], 1, 1000, 0, 0, 100, 0).is_ok()
+    };
+    // FRESH (age 50s ≤ 60) and the EXACT edge (age 60s ≤ 60) configure.
+    assert!(configure(950), "a 50s-old feed (≤ 60s) configures");
+    assert!(configure(940), "a feed at exactly the 60s staleness edge configures (inclusive bound)");
+    // JUST OVER (age 61s) and clearly STALE (age 70s) reject.
+    assert!(!configure(939), "a 61s-old feed (> 60s) must reject (one second past the bound)");
+    assert!(!configure(930), "a 70s-old feed must reject");
+}
