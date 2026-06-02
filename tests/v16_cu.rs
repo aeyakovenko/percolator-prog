@@ -14302,3 +14302,33 @@ fn v16_attack_oracle_negative_or_zero_price_rejected() {
     assert!(!zero_ok, "a zero Pyth price must reject");
     assert!(zero_err.unwrap().contains("Custom(26)"), "zero price must be OracleInvalid (Custom 26)");
 }
+
+// security.md sweep — oracle feed account owner validation (#37/#44): a Pyth feed account must be owned
+// by the Pyth receiver program. Attacker goal: substitute a self-owned account holding crafted "Pyth"
+// data to inject an arbitrary oracle price (full oracle spoof). Protection: the wrapper rejects a feed
+// whose owner is not the Pyth receiver program (IllegalOwner) — the data is never even parsed.
+#[test]
+fn v16_attack_oracle_feed_wrong_owner_rejected() {
+    let configure = |owner: Pubkey| -> (bool, Option<String>) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let feed = [0x55u8;32];
+        let acct = Pubkey::new_unique();
+        // valid-looking Pyth data, but planted under an attacker-chosen owner.
+        env.svm.set_account(acct, Account {
+            lamports: 1_000_000_000, data: make_pyth_data(&feed, 200_000, -6, 0, 100),
+            owner, executable: false, rent_epoch: 0,
+        }).unwrap();
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0, 1, 0, [feed, [0u8;32], [0u8;32]], &[acct], 1, 100, 0, 0, 100, 0);
+        (r.is_ok(), r.err())
+    };
+    // genuinely Pyth-owned -> configures.
+    let (real_ok, _) = configure(oracle_v16::PYTH_RECEIVER_PROGRAM_ID);
+    assert!(real_ok, "a genuinely Pyth-receiver-owned feed configures");
+    // attacker-owned account with crafted Pyth data -> rejected on the OWNER check (IllegalOwner),
+    // before the crafted price is ever parsed.
+    let (fake_ok, fake_err) = configure(Pubkey::new_unique());
+    assert!(!fake_ok, "a feed owned by an attacker (non-Pyth) program must reject — no oracle spoof");
+    assert!(fake_err.unwrap().contains("IllegalOwner"), "must reject on the feed owner check (IllegalOwner)");
+}
