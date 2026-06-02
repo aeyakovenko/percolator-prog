@@ -14559,3 +14559,45 @@ fn v16_attack_withdraw_vault_with_close_authority_rejected() {
     assert!(ok.is_ok(), "withdraw through a clean vault works: {:?}", ok);
     assert_eq!(env.token_amount(dest), 1_000, "clean withdraw delivers the funds");
 }
+
+// security.md sweep — withdraw to a FROZEN dest rejects gracefully (#44 robustness): the dest token
+// account must be in the Initialized state (verify_withdrawable_token_accounts: dest.state ==
+// Initialized). A frozen dest can't receive; the wrapper rejects it cleanly BEFORE the transfer rather
+// than letting the SPL CPI fail mid-state. Attacker/edge: a frozen dest leaves the withdraw half-applied
+// (capital debited, transfer failed). Protection: pre-check rejects; capital and vault stay intact.
+#[test]
+fn v16_attack_withdraw_to_frozen_dest_rejects_clean() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000);
+    let (_, g0) = env.market_state();
+
+    // a FROZEN dest token account (correct mint/owner, but state = Frozen).
+    let dest = Pubkey::new_unique();
+    let mut frozen = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(TokenAccount {
+        mint: env.mint, owner: owner.pubkey(), amount: 0,
+        delegate: COption::None, state: AccountState::Frozen, is_native: COption::None,
+        delegated_amount: 0, close_authority: COption::None,
+    }, &mut frozen).unwrap();
+    env.svm.set_account(dest, Account {
+        lamports: 1_000_000_000, data: frozen, owner: spl_token::ID, executable: false, rent_epoch: 0,
+    }).unwrap();
+
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Withdraw { amount: 1_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r.is_err(), "withdraw to a frozen dest must reject");
+
+    // NO half-applied withdraw: capital and vault are fully intact.
+    assert_eq!(env.portfolio_state(p).capital, 1_000, "capital NOT debited on the rejected withdraw");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged (no half-applied transfer)");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    // CONTROL: an Initialized dest receives the withdrawal.
+    let good = env.withdraw(&owner, p, 1_000);
+    assert_eq!(env.token_amount(good), 1_000, "withdraw to a healthy dest delivers the funds");
+}
