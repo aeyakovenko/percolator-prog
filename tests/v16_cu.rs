@@ -13737,3 +13737,51 @@ fn v16_attack_dust_position_margin_floored() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
 }
+
+// security.md sweep — IM/MM margin-gap zone (#9/#19/#46): with IM(100%) > MM(50%) a position whose
+// equity sits BETWEEN the maintenance and initial requirements must be (a) NOT liquidatable (equity >
+// maint_req) yet (b) UNABLE to increase risk (equity < init_req). Attacker goals: liquidate a healthy
+// in-gap account to skim a fee/grief it, OR add risk while under-margined for it. Both must be blocked.
+#[test]
+fn v16_attack_margin_gap_zone_no_liq_no_risk_increase() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000); // MM=50%, IM=100%
+    env.configure_auth_mark_with_cu(0, 100);
+    let xo = Keypair::new(); let x = env.create_portfolio(&xo);
+    let yo = Keypair::new(); let y = env.create_portfolio(&yo);
+    env.deposit(&xo, x, 100);
+    env.deposit(&yo, y, 1_000_000);
+    env.trade_asset_with_cu(0, &xo, x, &yo, y, -(POS_SCALE as i128), 100, 0); // x SHORT POS_SCALE
+    let basis0 = env.portfolio_state(x).legs[0].basis_pos_q;
+    assert!(basis0 != 0, "x opened a short");
+
+    // move the mark up so x's requirements land between MM and IM (the gap).
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 110);
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(x, false)], &[]);
+    let xs = env.portfolio_state(x);
+    let eq = xs.health_cert.certified_equity;
+    let mreq = xs.health_cert.certified_maintenance_req as i128;
+    let ireq = xs.health_cert.certified_initial_req as i128;
+    // precondition: equity is strictly inside the gap (MM < equity < IM).
+    assert!(eq > mreq, "above maintenance (not liquidatable): eq={} mreq={}", eq, mreq);
+    assert!(eq < ireq, "below initial (cannot add risk): eq={} ireq={}", eq, ireq);
+    assert_eq!(xs.health_cert.certified_liq_deficit, 0, "no liquidation deficit in the gap");
+
+    // ATTACK (a): liquidate the in-gap (healthy) account -> must be a no-op (position intact).
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(x, false)], &[]);
+    assert_eq!(env.portfolio_state(x).legs[0].basis_pos_q, basis0, "in-gap account NOT liquidated (position intact)");
+
+    // ATTACK (b): grow the short (increase risk) while in the gap -> must reject (equity < IM req).
+    env.svm.expire_blockhash();
+    let r = env.try_trade_asset_with_cu(0, &xo, x, &yo, y, -(POS_SCALE as i128), 110, 0);
+    assert!(r.is_err(), "risk increase in the margin gap must reject (under-margined for IM)");
+    assert_eq!(env.portfolio_state(x).legs[0].basis_pos_q, basis0, "position unchanged by rejected risk increase");
+
+    let g = env.market_state().1;
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+}
