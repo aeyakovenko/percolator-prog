@@ -13816,3 +13816,50 @@ fn v16_attack_dust_position_maintenance_floored() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
 }
+
+// security.md sweep — multi-asset cross-margin netting conservation (#9/#22 interaction): a portfolio
+// holding a GAINING leg on asset 0 and a LOSING leg on asset 1 nets the two in equity (one offsets the
+// other) while the requirement stays GROSS. Attacker goal: a simultaneous gain+loss across assets mints
+// vault value or under-collateralizes the portfolio. Protection: price moves mint nothing (vault is
+// byte-stable == deposits), the portfolio stays solvent, and senior conservation holds.
+#[test]
+fn v16_attack_cross_margin_netting_conserves() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let xo = Keypair::new(); let x = env.create_portfolio(&xo);
+    let y0o = Keypair::new(); let y0 = env.create_portfolio(&y0o);
+    let y1o = Keypair::new(); let y1 = env.create_portfolio(&y1o);
+    env.deposit(&xo, x, 10_000);
+    env.deposit(&y0o, y0, 1_000_000);
+    env.deposit(&y1o, y1, 1_000_000);
+    let total_deposits = 10_000u128 + 1_000_000 + 1_000_000;
+    env.trade_asset_with_cu(0, &xo, x, &y0o, y0, POS_SCALE as i128, 100, 0);       // x LONG asset0
+    env.trade_asset_with_cu(1, &xo, x, &y1o, y1, -(POS_SCALE as i128), 100, 0);    // x SHORT asset1
+    assert_eq!(env.market_state().1.vault, total_deposits, "vault == deposits at open");
+
+    // asset0 UP -> x's long GAINS; asset1 UP -> x's short LOSES (offsetting legs).
+    let admin = env.admin.insecure_clone();
+    env.svm.warp_to_slot(2);
+    let _ = env.push_auth_mark_with_cu(2, 110);
+    env.svm.expire_blockhash();
+    let _ = env.send(ProgInstruction::PushAuthMark { asset_index: 1, now_slot: 2, mark_e6: 110 },
+        vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&admin]);
+    for ai in [0u16, 1] {
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: ai, now_slot: 2, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(x, false)], &[]);
+    }
+
+    let xs = env.portfolio_state(x);
+    let g = env.market_state().1;
+    // both legs live, requirement gross (covers both); portfolio solvent (equity covers maintenance).
+    assert_eq!(percolator::active_bitmap_count_ones(xs.active_bitmap), 2, "x holds both legs");
+    assert!(xs.health_cert.valid, "x cert valid");
+    assert!(xs.health_cert.certified_equity >= xs.health_cert.certified_maintenance_req as i128, "x solvent (equity >= maint req)");
+    assert!(g.assets[0].effective_price > 100 && g.assets[1].effective_price > 100, "both marks moved (non-vacuous)");
+    // NO MINT: the simultaneous gain+loss across assets nets internally — vault is byte-stable == deposits.
+    assert_eq!(g.vault, total_deposits, "cross-asset gain+loss mints no vault value");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation across cross-margin netting");
+}
