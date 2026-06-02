@@ -14360,3 +14360,47 @@ fn v16_attack_oracle_legcount_account_mismatch_rejects_clean() {
         0, 3, flags, feeds, &[a0, a1, a2], 1, 100, 0, 0, 100, 0);
     assert!(r_ok.is_ok(), "the correctly-sized 3-leg/3-account config configures: {:?}", r_ok);
 }
+
+// security.md sweep — portfolio identity binding / anti-clone (#44/#45): each portfolio stores its own
+// account key (portfolio_account_id); the handlers reject if the stored id != the passed account key
+// (src/v16_program.rs:10465). Attacker goal: copy a funded portfolio's bytes into a NEW account they
+// control and withdraw its capital (duplicate/hijack the capital). Protection: the cloned account's
+// stored id (the original key) != its own key -> reject; the clone is unusable and the original is intact.
+#[test]
+fn v16_attack_cloned_portfolio_cannot_withdraw() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000);
+    let (_, g0) = env.market_state();
+
+    // CLONE: copy the funded portfolio's bytes into a fresh account key (program-owned, right size).
+    let p_data = env.svm.get_account(&p).unwrap().data.clone();
+    let clone = Pubkey::new_unique();
+    env.svm.set_account(clone, Account {
+        lamports: 1_000_000_000, data: p_data, owner: env.program_id, executable: false, rent_epoch: 0,
+    }).unwrap();
+    // sanity: the clone's stored id is the ORIGINAL key, not its own.
+    let cloned = state::read_portfolio(&env.svm.get_account(&clone).unwrap().data).unwrap();
+    assert_eq!(cloned.capital, 1_000, "clone carries the copied capital");
+
+    // ATTACK: withdraw the (copied) capital via the clone account -> must reject on the id binding.
+    let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Withdraw { amount: 1_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(clone, false),
+        AccountMeta::new(dest, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r.is_err(), "withdraw via a cloned portfolio (stored id != account key) must reject");
+    assert_eq!(env.token_amount(dest), 0, "no capital extracted via the clone");
+
+    // the original portfolio and vault are untouched (no duplication of capital).
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged (no duplicated capital)");
+    assert_eq!(env.portfolio_state(p).capital, 1_000, "original portfolio still holds its capital");
+    // CONTROL: the genuine portfolio can withdraw normally.
+    env.svm.expire_blockhash();
+    let good = env.withdraw(&owner, p, 1_000);
+    assert_eq!(env.token_amount(good), 1_000, "the genuine portfolio withdraws its capital");
+}
