@@ -14404,3 +14404,33 @@ fn v16_attack_cloned_portfolio_cannot_withdraw() {
     let good = env.withdraw(&owner, p, 1_000);
     assert_eq!(env.token_amount(good), 1_000, "the genuine portfolio withdraws its capital");
 }
+
+// security.md sweep — TradeNoCpi self-trade (#49 wash): a direct trade with account_a == account_b (the
+// same portfolio trading with itself) must reject — the wash-trade guard on the NON-matcher path
+// (src/v16_program.rs:5992), complementing the CPI version (#9882). Attacker goal: fabricate OI / a wash
+// position / churn fees against oneself. Protection: same-account trade rejects, no OI, no fee, intact.
+#[test]
+fn v16_attack_tradenocpi_self_trade_rejected() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    let (_, g0) = env.market_state();
+
+    // TradeNoCpi with the SAME portfolio (and owner) on both sides.
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::TradeNoCpi { asset_index: 0, size_q: POS_SCALE as i128, exec_price: 100, fee_bps: 100 },
+        vec![AccountMeta::new(owner.pubkey(), true), AccountMeta::new(owner.pubkey(), true),
+             AccountMeta::new(env.market, false), AccountMeta::new(p, false), AccountMeta::new(p, false)],
+        &[&owner]);
+    assert!(r.is_err(), "TradeNoCpi self-trade (account_a == account_b) must reject");
+
+    // no wash position / OI / fee created; portfolio + vault intact.
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no OI fabricated by self-trade");
+    assert_eq!(g1.insurance, g0.insurance, "no fee churned by a rejected self-trade");
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert!(percolator::active_bitmap_is_empty(env.portfolio_state(p).active_bitmap), "no position opened");
+    assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital intact");
+}
