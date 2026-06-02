@@ -13957,3 +13957,37 @@ fn v16_attack_tradecpi_short_fill_rejects_atomically() {
     let g = env.market_state().1;
     assert_eq!(g.c_tot + g.insurance, g.vault, "conservation after the successful in-cap fill");
 }
+
+// security.md sweep — TradeCpi fee is mark-pinned, not matcher-quoted (F-TRADENOCPI-FEE, CPI path):
+// handle_trade_cpi_zero_copy delegates to handle_trade_nocpi_zero_copy (src/v16_program.rs:6428) passing
+// the matcher's exec_price_e6, and the F-TRADENOCPI-FEE fix there pins the fee BASIS to the asset mark
+// (effective_price), NOT the passed exec_price. Attacker goal: a colluding/malicious matcher quotes a
+// low exec_price to under-bill the CPI trade fee (the TradeNoCpi attack, on the CPI path). Protection:
+// the fee is computed on the mark, so the matcher's price-quoting knobs (spread) cannot change the fee.
+#[test]
+fn v16_attack_tradecpi_fee_is_mark_pinned_not_matcher_quoted() {
+    let fee_for_spread = |base_spread: u32, max_total: u32| -> u128 {
+        let mut env = V16CuEnv::new();
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let to = Keypair::new(); let t = env.create_portfolio(&to);
+        let mo = Keypair::new(); let m = env.create_portfolio(&mo);
+        env.deposit(&to, t, 100_000_000);
+        env.deposit(&mo, m, 100_000_000);
+        let (ctx, del, _) = env.init_matcher_context_with_passive_spread(matcher_program, m, base_spread, max_total);
+        let ins0 = env.market_state().1.insurance;
+        let _ = env.trade_cpi_with_cu_on_asset(&to, t, &mo, m, matcher_program, ctx, del, 0, (10 * POS_SCALE) as i128, 100);
+        // entry is at the mark (effective_price==100) regardless of the matcher's spread.
+        assert_eq!(env.market_state().1.assets[0].effective_price, 100, "position priced at the mark");
+        assert_eq!(env.portfolio_state(t).pnl, 0, "no off-market PnL from the matcher quote");
+        env.market_state().1.insurance - ins0
+    };
+    // fee at the mark (no spread): 10*POS_SCALE @ 100 = notional 1000 -> 100bps -> 10/side -> 20 total.
+    let fee_no_spread = fee_for_spread(0, 100);
+    assert_eq!(fee_no_spread, 20, "baseline CPI fee is the mark-based fee");
+    // a WIDE matcher spread (20%) charges the IDENTICAL fee -> the fee is on the mark, NOT the matcher's
+    // (potentially manipulated) exec_price. A malicious matcher cannot under-bill the CPI fee.
+    assert_eq!(fee_for_spread(2_000, 4_000), fee_no_spread, "matcher spread does not change the CPI fee (mark-pinned)");
+    assert_eq!(fee_for_spread(500, 1_000), fee_no_spread, "fee invariant to a moderate spread too");
+}
