@@ -14467,3 +14467,43 @@ fn v16_attack_deposit_into_uninitialized_portfolio_rejects() {
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
     assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged (no phantom capital from an uninit account)");
 }
+
+// security.md sweep — deposit from a WRONG-MINT source rejects (#44): the deposit pulls collateral from
+// the caller's source token account; that account must hold the market's collateral mint. Attacker goal:
+// deposit from a token account of a DIFFERENT (worthless/attacker) mint to credit capital without paying
+// real collateral. Protection: verify_user_token_account checks source.mint == collateral mint -> reject.
+#[test]
+fn v16_attack_deposit_wrong_mint_source_rejects() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    let (_, g0) = env.market_state();
+    let cap0 = env.portfolio_state(p).capital;
+
+    // a source token account of a DIFFERENT mint (not the market's collateral mint).
+    let other_mint = env.create_mint();
+    let bad_source = env.token_account_for_mint(other_mint, owner.pubkey(), 1_000_000);
+
+    env.svm.expire_blockhash();
+    let r = env.send(ProgInstruction::Deposit { amount: 1_000_000 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(bad_source, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)],
+        &[&owner]);
+    assert!(r.is_err(), "deposit from a wrong-mint source must reject");
+
+    // no collateral pulled, no capital credited.
+    assert_eq!(env.token_amount(bad_source), 1_000_000, "wrong-mint tokens not pulled");
+    assert_eq!(env.portfolio_state(p).capital, cap0, "no capital credited from a wrong-mint deposit");
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g0.vault, "vault unchanged");
+    assert_eq!(g1.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    // CONTROL: a correct-mint deposit credits capital normally.
+    let good_source = env.token_account_for_mint(env.mint, owner.pubkey(), 500);
+    env.svm.expire_blockhash();
+    let ok = env.send(ProgInstruction::Deposit { amount: 500 }, vec![
+        AccountMeta::new(owner.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(p, false),
+        AccountMeta::new(good_source, false), AccountMeta::new(env.vault, false), AccountMeta::new_readonly(spl_token::ID, false)],
+        &[&owner]);
+    assert!(ok.is_ok(), "correct-mint deposit works: {:?}", ok);
+    assert_eq!(env.portfolio_state(p).capital, cap0 + 500, "correct-mint deposit credits capital");
+}
