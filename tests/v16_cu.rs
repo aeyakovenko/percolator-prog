@@ -14601,3 +14601,41 @@ fn v16_attack_withdraw_to_frozen_dest_rejects_clean() {
     let good = env.withdraw(&owner, p, 1_000);
     assert_eq!(env.token_amount(good), 1_000, "withdraw to a healthy dest delivers the funds");
 }
+
+// security.md sweep — direct vault donation doesn't mint capital (#33/#35): the vault accounting
+// (header.vault) is driven by Deposit/Withdraw instructions, NOT the raw token balance. Attacker goal:
+// transfer tokens DIRECTLY to the vault ATA (bypassing Deposit) to inflate the accounting / mint capital
+// to themselves. Protection: a direct donation changes only the real balance (becomes stranded surplus);
+// no capital is credited and the accounting is unchanged — withdrawals still settle against the accounting.
+#[test]
+fn v16_attack_direct_vault_donation_mints_nothing() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000);
+    let g0 = env.market_state().1;
+    assert_eq!(g0.vault, 1_000, "accounting vault == the deposit");
+    assert_eq!(env.token_amount(env.vault), 1_000, "real == accounting at start");
+
+    // DONATE: bump the vault's REAL token balance by 500 directly (simulating a raw SPL transfer in).
+    let mut vacct = env.svm.get_account(&env.vault).unwrap();
+    let mut ta = TokenAccount::unpack(&vacct.data).unwrap();
+    ta.amount += 500;
+    TokenAccount::pack(ta, &mut vacct.data).unwrap();
+    env.svm.set_account(env.vault, vacct).unwrap();
+    assert_eq!(env.token_amount(env.vault), 1_500, "real vault now holds the donation");
+
+    // NO MINT: the donation credited NO capital and did NOT change the accounting.
+    assert_eq!(env.portfolio_state(p).capital, 1_000, "donation credits no capital to anyone");
+    let g1 = env.market_state().1;
+    assert_eq!(g1.vault, 1_000, "accounting vault unchanged by a raw donation (not balance-driven)");
+    assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged");
+    assert!(g1.vault as u64 <= env.token_amount(env.vault), "accounting ≤ real (surplus is stranded, never < real)");
+
+    // the depositor can still withdraw exactly their accounted capital; the donation stays stranded.
+    let dest = env.withdraw(&owner, p, 1_000);
+    assert_eq!(env.token_amount(dest), 1_000, "withdraw settles against the accounting (1000), not the donation");
+    assert_eq!(env.portfolio_state(p).capital, 0, "capital fully withdrawn");
+    assert_eq!(env.token_amount(env.vault), 500, "the 500 donation remains stranded in the vault");
+    assert_eq!(env.market_state().1.vault, 0, "accounting vault back to 0");
+}
