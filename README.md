@@ -103,18 +103,23 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   abandoned market to zero**. **◑** (`ResolveMarket` / permissionless-resolve fallback + `CloseSlab`;
   reclaim/abandonment-drain semantics partial.)
 - **The asset-0 key can force-shutdown assets 1..N without rugging traders** — via **timeouts so
-  traders can exit** before the asset is wound down. **◑** (`ASSET_ACTION_SHUTDOWN` gated on
-  `force_close_delay_slots`; the trader-exit window needs an explicit test.)
+  traders can exit** before the asset is wound down. **✅** mechanism verified
+  (`v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot`,
+  `v16_attack_force_close_healthy_asset_rejected`, and `withdraw`/`trade` are blocked only during the
+  active close window — `v16_attack_withdraw_blocked_during_active_close`). A dedicated
+  exit-during-the-delay assertion remains **◑**.
 
 ### Base unit (collateral)
 - The base unit is held in **two SPL token accounts** (a **primary** and a **secondary**), both
   **program-owned PDAs**. All assets settle into the base unit. **✅**
-- **One market admin can rotate the base-unit SPL account from primary → secondary.** **◑**
-  (`UpdateBaseUnitMints`, gated on `base_unit_authority`.)
+- **One market admin can rotate the base-unit SPL account from primary → secondary.** **✅**
+  (`UpdateBaseUnitMints`, gated on `base_unit_authority` — `v16_attack_update_base_unit_mints_guarded`.)
 - **Anyone can withdraw from either** account; **deposits go only into primary**. **◑**
+  (impl present; a dedicated deposit-primary-only / withdraw-either test is the remaining gap.)
 - The **base-unit admin can perform a 1:1 atomic swap from secondary into primary** (withdraw N from
-  secondary, deposit N into primary) and **optionally change the secondary SPL token once it is
-  empty**. **◑** (`SwapSecondaryForPrimary`; the "change secondary once empty" path to verify.)
+  secondary, deposit N into primary). **✅** authority + bounds verified
+  (`v16_attack_swap_secondary_unauthorized_and_bounded`). The **optional "change secondary once empty"**
+  path remains **◑** (to verify).
 
 > **Coverage note.** The O(1)-in-N CU / scaling requirement is implemented and verified end-to-end
 > (sparse-portfolio refactor, engine `c120fce`). The remaining ◑/◻ items above are the live work list
