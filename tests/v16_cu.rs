@@ -14332,3 +14332,31 @@ fn v16_attack_oracle_feed_wrong_owner_rejected() {
     assert!(!fake_ok, "a feed owned by an attacker (non-Pyth) program must reject — no oracle spoof");
     assert!(fake_err.unwrap().contains("IllegalOwner"), "must reject on the feed owner check (IllegalOwner)");
 }
+
+// security.md sweep — malformed oracle config rejects cleanly (#37/#44 robustness): a hybrid oracle
+// declaring N legs but supplied with fewer oracle accounts must reject WITHOUT partially configuring or
+// corrupting the market (no out-of-bounds read, no half-written oracle profile). Protection: the runtime
+// rejects on NotEnoughAccountKeys before any mutation; the correctly-sized config configures.
+#[test]
+fn v16_attack_oracle_legcount_account_mismatch_rejects_clean() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+    let feeds = [[0xb1u8;32],[0xb2u8;32],[0xb3u8;32]];
+    let a0 = env.set_pyth_price_with_conf(&feeds[0], 4_000_000_000, -6, 0, 100);
+    let a1 = env.set_pyth_price_with_conf(&feeds[1], 150_000_000, -6, 0, 100);
+    let a2 = env.set_pyth_price_with_conf(&feeds[2], 200_000_000, -6, 0, 100);
+    let flags = ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3;
+    let before = env.svm.get_account(&env.market).unwrap().data;
+
+    // declare a 3-leg composite but supply ONLY 1 oracle account -> reject, market unmutated.
+    let r_bad = env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0, 3, flags, feeds, &[a0], 1, 100, 0, 0, 100, 0);
+    assert!(r_bad.is_err(), "a 3-leg config with 1 oracle account must reject");
+    let after_bad = env.svm.get_account(&env.market).unwrap().data;
+    assert_eq!(after_bad, before, "rejected malformed config must not mutate/partially-configure the market");
+
+    // DISCRIMINATING CONTROL: the correctly-sized 3-account config configures.
+    let r_ok = env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0, 3, flags, feeds, &[a0, a1, a2], 1, 100, 0, 0, 100, 0);
+    assert!(r_ok.is_ok(), "the correctly-sized 3-leg/3-account config configures: {:?}", r_ok);
+}
