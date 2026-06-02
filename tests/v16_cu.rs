@@ -13650,3 +13650,58 @@ fn v16_attack_partial_liquidation_fee_additivity() {
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
+
+// security.md sweep — leveraged bad-debt socialization (#9/#22/#33): at 20x leverage (5% margin) a
+// thin-margin short's loss can EXCEED its capital, creating bad debt. Attacker goal: the loser's
+// unrecovered deficit is printed as the winner's spendable gain (vault mint / senior over-pay).
+// Protection: the loser's capital floors at 0 (loss capped at capital), the unrecovered deficit is
+// absorbed as un-backed junior pnl on the winner side (not minted), and the vault is never inflated.
+#[test]
+fn v16_attack_leveraged_bad_debt_socialized_not_printed() {
+    const SHORT_CAP: u128 = 55_000; // ~10% above the 50_000 (5% of 1e6) initial margin
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(0);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let lo = Keypair::new(); let l = env.create_portfolio(&lo);
+    let so = Keypair::new(); let s = env.create_portfolio(&so);
+    let co = Keypair::new(); let c = env.create_portfolio(&co);
+    env.deposit(&lo, l, 100_000_000);
+    env.deposit(&so, s, SHORT_CAP);
+    env.deposit(&co, c, 1_000);
+    let total_deposits = 100_000_000u128 + SHORT_CAP + 1_000;
+    env.trade_asset_with_cu(0, &lo, l, &so, s, POS_SCALE as i128, 1_000_000, 0);
+    assert_eq!(env.market_state().1.vault, total_deposits, "vault == total deposits at open");
+
+    // drive the mark to 1.07e6: short loss ≈ 70_000 > its 55_000 capital -> 15_000 bad debt.
+    for slot in 1..=40u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 1_070_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(ProgInstruction::PermissionlessCrank { action: 0, asset_index: 0, now_slot: slot, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0 },
+            vec![AccountMeta::new(env.payer.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(s, false)], &[]);
+    }
+    // NON-VACUITY: the short is insolvent — its capital was fully consumed by the loss.
+    assert_eq!(env.portfolio_state(s).capital, 0, "short capital wiped to 0 by the loss (bad debt exists)");
+
+    // liquidate the insolvent short.
+    let (_, g_pre) = env.market_state();
+    env.svm.expire_blockhash();
+    let r = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::PermissionlessCrank { action: 1, asset_index: 0, now_slot: 40, funding_rate_e9: 0, close_q: POS_SCALE, fee_bps: 0, recovery_reason: 0 },
+        vec![AccountMeta::new(co.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(s, false), AccountMeta::new(c, false)], &[&co]);
+    assert!(r.is_ok(), "liquidation of the insolvent short should proceed: {:?}", r);
+    let (_, g) = env.market_state();
+
+    // NO MINT: the unrecovered bad debt is NOT printed — vault stays == total deposits the whole way.
+    assert_eq!(g.vault, total_deposits, "vault never inflated by the bad debt (no mint)");
+    assert_eq!(g.vault, g_pre.vault, "liquidation of the insolvent short mints nothing");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    // short capital still 0 (never negative); senior conservation preserved through the bad-debt event.
+    assert_eq!(env.portfolio_state(s).capital, 0, "short capital floored at 0 (never negative)");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation under leveraged bad debt");
+    // the winner's gain that exceeds the recoverable backing is un-backed junior pnl (residual-bounded),
+    // not spendable senior capital -> the bad debt is socialized, not paid out.
+    let lw = env.portfolio_state(l);
+    let residual = g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance);
+    assert!((lw.health_cert.certified_equity as u128) <= lw.capital + residual + 1, "winner realizable bounded by capital+residual (bad debt not realizable)");
+}
