@@ -14146,3 +14146,37 @@ fn v16_attack_oracle_invert_of_zero_composite_rejects_no_panic() {
     let after = env.svm.get_account(&env.market).unwrap().data;
     assert_eq!(after, before, "rejected invert-of-zero configuration must not mutate the market");
 }
+
+// security.md sweep — composite divide-by-zero leg rejects, no crash (#37/#39): a multi-leg oracle
+// that DIVIDES by a leg priced 0 would divide-by-zero. Attacker goal: a 0-priced divide leg crashes the
+// program (DoS) or yields a garbage/infinite composite mark. Protection: `compose` guards `leg_e6 == 0
+// -> OracleInvalid` (src/v16_program.rs:4073) BEFORE the divide. Complement to #167 (invert-of-zero).
+#[test]
+fn v16_attack_oracle_compose_divide_by_zero_leg_rejects() {
+    let configure = |l1_price: i64| -> (bool, Option<String>, Vec<u8>) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let feeds = [[0x81u8;32],[0x82u8;32],[0x83u8;32]];
+        let l0 = env.set_pyth_price_with_conf(&feeds[0], 4_000_000_000, -6, 0, 100);
+        let l1 = env.set_pyth_price_with_conf(&feeds[1], l1_price, -6, 0, 100); // a DIVIDE leg
+        let l2 = env.set_pyth_price_with_conf(&feeds[2], 200_000_000, -6, 0, 100);
+        let flags = ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3;
+        let before = env.svm.get_account(&env.market).unwrap().data;
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0, 3, flags, feeds, &[l0, l1, l2], 1, 100, 0, 0, 100, 0);
+        let after = env.svm.get_account(&env.market).unwrap().data;
+        (r.is_ok(), r.err(), if before == after { vec![] } else { vec![1] })
+    };
+
+    // a 0-priced DIVIDE leg -> rejected with OracleInvalid (Custom 26), no panic, market unmutated.
+    let (zero_ok, zero_err, zero_changed) = configure(0);
+    assert!(!zero_ok, "a 0-priced divide leg must reject (no divide-by-zero)");
+    let e = zero_err.unwrap();
+    assert!(e.contains("Custom(26)"), "must be OracleInvalid (Custom 26), got: {}", e);
+    assert!(!e.contains("panic") && !e.contains("ProgramFailedToComplete"), "must NOT crash on the divide-by-zero: {}", e);
+    assert!(zero_changed.is_empty(), "rejected zero-leg configuration must not mutate the market");
+
+    // DISCRIMINATING CONTROL: a normal divide leg configures cleanly -> the rejection is the zero leg.
+    let (normal_ok, _, _) = configure(150_000_000);
+    assert!(normal_ok, "a normally-priced divide leg configures cleanly");
+}
