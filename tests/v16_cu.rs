@@ -14920,3 +14920,60 @@ fn v16_attack_crank_dt_clamp_blocks_retroactive_settle() {
     assert!(g2.assets[0].slot_last < GAP_SLOT, "even after two cranks the asset is still far short of the gap (catch-up is throttled, not instant)");
     assert!(g2.vault >= g2.c_tot + g2.insurance, "senior conservation after second crank");
 }
+
+// security.md sweep — haircut rounding across MANY tiny winners (#22/#33/#35): when the backing residual
+// is smaller than total positive-pnl claims, the haircut rate h = residual / total_claims is applied to
+// each winner's claim. The classic precision attack on any proportional split is per-winner round-UP: with
+// N winners each rounding their floor(claim_i * h) UP, the summed payout can exceed the residual, MINTING
+// value from rounding dust. The 2-winner test (#11314) checks proportionality; this stresses the rounding
+// edge with EIGHT winners holding coprime claims against a tiny residual (max cumulative rounding error).
+// Attacker goal: split a claim across many small accounts so the rounded-up dust sums to more than the
+// backing actually held — a free mint. Protection: the engine rounds haircut payouts conservatively
+// (down/toward the protocol), so sum(payouts) <= residual no matter how the claims are partitioned.
+#[test]
+fn v16_attack_haircut_rounding_many_winners_no_mint() {
+    const BACKING: u128 = 100; // tiny residual -> aggressive haircut, max rounding pressure
+    // eight coprime/awkward claims so claim_i * h rarely lands on an integer (forces rounding every winner).
+    const CLAIMS: [u128; 8] = [7, 11, 13, 17, 19, 23, 29, 31]; // sum = 150 >> 100 backing
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, BACKING, 10_000);
+    let mut owners = Vec::new();
+    let mut ports = Vec::new();
+    for &claim in CLAIMS.iter() {
+        let o = Keypair::new();
+        let p = env.create_portfolio(&o);
+        env.deposit(&o, p, 1_000);
+        env.add_source_positive_pnl(p, 1, claim);
+        owners.push(o);
+        ports.push(p);
+    }
+    let total_claims: u128 = CLAIMS.iter().sum();
+    assert!(total_claims > BACKING, "non-vacuous: claims ({}) exceed backing ({}) so the haircut bites", total_claims, BACKING);
+
+    env.resolve();
+    // converge the terminal haircut rate across all winners (a few passes, like the 2-winner test).
+    let mut hc_total = 0u128;
+    let mut payouts = vec![0u128; CLAIMS.len()];
+    for _ in 0..3 {
+        for (i, (o, p)) in owners.iter().zip(ports.iter()).enumerate() {
+            let d = env.close_resolved(o, *p);
+            payouts[i] += env.token_amount(d) as u128;
+        }
+    }
+    // haircut payout = anything paid ABOVE each winner's own senior capital (1_000 deposited).
+    for (i, &paid) in payouts.iter().enumerate() {
+        let hc = paid.saturating_sub(1_000);
+        hc_total += hc;
+        // each winner's haircut payout is bounded by its own claim (never paid MORE than it claimed).
+        assert!(hc <= CLAIMS[i], "winner {} haircut payout {} <= its claim {}", i, hc, CLAIMS[i]);
+    }
+    // THE HEADLINE: summed haircut payout across all eight winners never exceeds the backing residual —
+    // per-winner rounding dust cannot accumulate into a mint, however the claims are partitioned.
+    assert!(hc_total <= BACKING, "summed haircut payout {} must not exceed backing {} (no rounding mint)", hc_total, BACKING);
+    // non-vacuity: the haircut actually paid out a meaningful fraction of the backing (not a degenerate zero).
+    assert!(hc_total > BACKING / 2, "non-vacuous: the winners collectively received a real haircut payout ({} of {})", hc_total, BACKING);
+    // conservation: no vault minting, senior invariant intact.
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting vault == real on-chain vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation after many-winner haircut");
+}
