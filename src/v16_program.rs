@@ -270,6 +270,12 @@ pub mod state {
         pub pnl_pos_bound_tot_num: u128,
         pub pnl_pos_bound_tot: u128,
         pub pnl_matured_pos_tot: u128,
+        // O(1)-in-N market aggregate totals (engine-maintained; mirrored here for host serialization).
+        pub backing_provider_earnings_total: u128,
+        pub source_claim_bound_total_num: u128,
+        pub source_insurance_credit_reserved_total_atoms: u128,
+        pub insurance_domain_budget_remaining_total: u128,
+        pub resolved_payout_blocker_count: u64,
         pub insurance_domain_budget: Vec<u128>,
         pub insurance_domain_spent: Vec<u128>,
         pub pending_domain_loss_barriers: Vec<u64>,
@@ -340,6 +346,11 @@ pub mod state {
                 pnl_pos_bound_tot_num: 0,
                 pnl_pos_bound_tot: 0,
                 pnl_matured_pos_tot: 0,
+                backing_provider_earnings_total: 0,
+                source_claim_bound_total_num: 0,
+                source_insurance_credit_reserved_total_atoms: 0,
+                insurance_domain_budget_remaining_total: 0,
+                resolved_payout_blocker_count: 0,
                 insurance_domain_budget: vec_with_value(domain_count, 0u128),
                 insurance_domain_spent: vec_with_value(domain_count, 0u128),
                 pending_domain_loss_barriers: vec_with_value(domain_count, 0u64),
@@ -1790,6 +1801,15 @@ pub mod state {
             pnl_pos_bound_tot_num: wire.pnl_pos_bound_tot_num.get(),
             pnl_pos_bound_tot: wire.pnl_pos_bound_tot.get(),
             pnl_matured_pos_tot: wire.pnl_matured_pos_tot.get(),
+            backing_provider_earnings_total: wire.backing_provider_earnings_total.get(),
+            source_claim_bound_total_num: wire.source_claim_bound_total_num.get(),
+            source_insurance_credit_reserved_total_atoms: wire
+                .source_insurance_credit_reserved_total_atoms
+                .get(),
+            insurance_domain_budget_remaining_total: wire
+                .insurance_domain_budget_remaining_total
+                .get(),
+            resolved_payout_blocker_count: wire.resolved_payout_blocker_count.get(),
             insurance_domain_budget: vec_with_value(domain_count, 0u128),
             insurance_domain_spent: vec_with_value(domain_count, 0u128),
             pending_domain_loss_barriers: vec_with_value(domain_count, 0u64),
@@ -1921,6 +1941,63 @@ pub mod state {
         header.pnl_pos_bound_tot_num = percolator::V16PodU128::new(group.pnl_pos_bound_tot_num);
         header.pnl_pos_bound_tot = percolator::V16PodU128::new(group.pnl_pos_bound_tot);
         header.pnl_matured_pos_tot = percolator::V16PodU128::new(group.pnl_matured_pos_tot);
+        // Recompute the O(1) market aggregate totals from the mirror's per-domain data so a host
+        // read -> mutate -> write round-trip serializes them consistently with the per-domain state
+        // (the engine maintains these incrementally on-chain).
+        {
+            let mut earnings = 0u128;
+            for b in &group.source_backing_buckets {
+                earnings = earnings.saturating_add(b.utilization_fee_earnings);
+            }
+            let mut claim_bound = 0u128;
+            let mut ins_reserved = 0u128;
+            for s in &group.source_credit {
+                claim_bound = claim_bound.saturating_add(s.positive_claim_bound_num);
+                let num = s.insurance_credit_reserved_num;
+                let whole = num / percolator::BOUND_SCALE;
+                let atoms = if num % percolator::BOUND_SCALE == 0 {
+                    whole
+                } else {
+                    whole.saturating_add(1)
+                };
+                ins_reserved = ins_reserved.saturating_add(atoms);
+            }
+            let mut budget_remaining = 0u128;
+            for (d, &budget) in group.insurance_domain_budget.iter().enumerate() {
+                let spent = group.insurance_domain_spent.get(d).copied().unwrap_or(0);
+                budget_remaining = budget_remaining.saturating_add(budget.saturating_sub(spent));
+            }
+            header.backing_provider_earnings_total = percolator::V16PodU128::new(earnings);
+            header.source_claim_bound_total_num = percolator::V16PodU128::new(claim_bound);
+            header.source_insurance_credit_reserved_total_atoms =
+                percolator::V16PodU128::new(ins_reserved);
+            header.insurance_domain_budget_remaining_total =
+                percolator::V16PodU128::new(budget_remaining);
+            // #5: per-asset position/stale counts + per-domain pending loss barriers.
+            let mut blockers = 0u64;
+            for (i, a) in group.assets.iter().enumerate() {
+                blockers = blockers
+                    .saturating_add(a.stored_pos_count_long)
+                    .saturating_add(a.stored_pos_count_short)
+                    .saturating_add(a.stale_account_count_long)
+                    .saturating_add(a.stale_account_count_short)
+                    .saturating_add(
+                        group
+                            .pending_domain_loss_barriers
+                            .get(2 * i)
+                            .copied()
+                            .unwrap_or(0),
+                    )
+                    .saturating_add(
+                        group
+                            .pending_domain_loss_barriers
+                            .get(2 * i + 1)
+                            .copied()
+                            .unwrap_or(0),
+                    );
+            }
+            header.resolved_payout_blocker_count = percolator::V16PodU64::new(blockers);
+        }
         header.materialized_portfolio_count =
             percolator::V16PodU64::new(group.materialized_portfolio_count);
         header.stale_certificate_count = percolator::V16PodU64::new(group.stale_certificate_count);
@@ -4763,26 +4840,9 @@ pub mod processor {
         })
     }
 
-    fn set_domain_budget_view(
-        group: &mut state::MarketViewMutV16<'_>,
-        domain: usize,
-        budget: u128,
-    ) -> ProgramResult {
-        let asset_index = domain / 2;
-        if domain >= (group.header.config.max_market_slots.get() as usize).saturating_mul(2)
-            || asset_index >= group.markets.len()
-        {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
-        let slot = &mut group.markets[asset_index].engine;
-        if domain % 2 == 0 {
-            slot.insurance_domain_budget_long = percolator::V16PodU128::new(budget);
-        } else {
-            slot.insurance_domain_budget_short = percolator::V16PodU128::new(budget);
-        }
-        Ok(())
-    }
-
+    // Domain-budget mutations route through the engine's aggregate-maintaining API
+    // (`insurance_domain_budget_remaining_total` is kept in lockstep there); the wrapper must not
+    // write `insurance_domain_budget_*` directly or the O(1) market-aggregate totals drift.
     fn add_to_domain_budget_view(
         group: &mut state::MarketViewMutV16<'_>,
         domain: usize,
@@ -4791,14 +4851,9 @@ pub mod processor {
         if amount == 0 {
             return Ok(());
         }
-        let (budget, _) = domain_budget_parts_view(group, domain)?;
-        set_domain_budget_view(
-            group,
-            domain,
-            budget
-                .checked_add(amount)
-                .ok_or(PercolatorError::EngineArithmeticOverflow)?,
-        )
+        group
+            .credit_domain_insurance_budget_not_atomic(domain, amount)
+            .map_err(map_v16_error)
     }
 
     fn domain_budget_remaining_view(
@@ -4888,14 +4943,10 @@ pub mod processor {
                 let remaining = domain_budget_remaining_view(group, domain)?;
                 let debit = remaining.min(amount);
                 if debit != 0 {
-                    let (budget, _) = domain_budget_parts_view(group, domain)?;
-                    set_domain_budget_view(
-                        group,
-                        domain,
-                        budget
-                            .checked_sub(debit)
-                            .ok_or(PercolatorError::EngineCounterUnderflow)?,
-                    )?;
+                    // Atomic insurance/vault/budget withdraw per domain (maintains the budget total).
+                    group
+                        .withdraw_domain_insurance_not_atomic(domain, debit)
+                        .map_err(map_v16_error)?;
                     amount = amount
                         .checked_sub(debit)
                         .ok_or(PercolatorError::EngineCounterUnderflow)?;
@@ -4922,14 +4973,9 @@ pub mod processor {
         let long_remaining = domain_budget_remaining_view(group, long_domain)?;
         let long_debit = long_remaining.min(amount);
         if long_debit != 0 {
-            let (budget, _) = domain_budget_parts_view(group, long_domain)?;
-            set_domain_budget_view(
-                group,
-                long_domain,
-                budget
-                    .checked_sub(long_debit)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?,
-            )?;
+            group
+                .withdraw_domain_insurance_not_atomic(long_domain, long_debit)
+                .map_err(map_v16_error)?;
             amount = amount
                 .checked_sub(long_debit)
                 .ok_or(PercolatorError::EngineCounterUnderflow)?;
@@ -4939,14 +4985,9 @@ pub mod processor {
             if amount > short_remaining {
                 return Err(PercolatorError::EngineCounterUnderflow.into());
             }
-            let (budget, _) = domain_budget_parts_view(group, short_domain)?;
-            set_domain_budget_view(
-                group,
-                short_domain,
-                budget
-                    .checked_sub(amount)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?,
-            )?;
+            group
+                .withdraw_domain_insurance_not_atomic(short_domain, amount)
+                .map_err(map_v16_error)?;
         }
         Ok(())
     }
@@ -7549,22 +7590,8 @@ pub mod processor {
             } else {
                 None
             };
-            group.header.insurance = percolator::V16PodU128::new(
-                group
-                    .header
-                    .insurance
-                    .get()
-                    .checked_sub(amount)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?,
-            );
-            group.header.vault = percolator::V16PodU128::new(
-                group
-                    .header
-                    .vault
-                    .get()
-                    .checked_sub(amount)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?,
-            );
+            // insurance + vault + per-domain budget all decremented atomically inside the engine
+            // withdraw (called per domain by the helper); no separate header decrement here.
             debit_terminal_insurance_budgets_for_authority_view(
                 &mut group,
                 &cfg,
@@ -7700,30 +7727,11 @@ pub mod processor {
             } else {
                 None
             };
-            group.header.insurance = percolator::V16PodU128::new(
-                group
-                    .header
-                    .insurance
-                    .get()
-                    .checked_sub(amount)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?,
-            );
-            group.header.vault = percolator::V16PodU128::new(
-                group
-                    .header
-                    .vault
-                    .get()
-                    .checked_sub(amount)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?,
-            );
-            let (budget, _) = domain_budget_parts_view(&group, domain)?;
-            set_domain_budget_view(
-                &mut group,
-                domain,
-                budget
-                    .checked_sub(amount)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?,
-            )?;
+            // Atomic insurance/vault/budget withdraw through the engine (maintains the
+            // insurance_domain_budget_remaining_total aggregate).
+            group
+                .withdraw_domain_insurance_not_atomic(domain, amount)
+                .map_err(map_v16_error)?;
             if let Some((ledger, _)) = ledger_state.as_mut() {
                 ledger.total_withdrawn_atoms = ledger
                     .total_withdrawn_atoms
@@ -7954,15 +7962,7 @@ pub mod processor {
             } else {
                 None
             };
-            group.header.insurance = percolator::V16PodU128::new(
-                group
-                    .header
-                    .insurance
-                    .get()
-                    .checked_sub(amount)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?,
-            );
-            group.header.vault = percolator::V16PodU128::new(vault - amount);
+            // insurance + vault + budget decremented atomically per domain inside the engine withdraw.
             debit_market_insurance_budget_view(&mut group, 0, amount)?;
             if let Some((ledger, _)) = ledger_state.as_mut() {
                 ledger.total_withdrawn_atoms = ledger
@@ -10870,24 +10870,24 @@ pub mod processor {
             fee_idx += 1;
             let d = domain as usize;
             if fee != 0 {
-                let asset_index = d / 2;
                 let (_, insurance_share_bps) = backing_fee_policy_for_domain_view(group, cfg, d)?;
                 let insurance_fee = fee_share_floor(fee, insurance_share_bps)?;
                 let provider_fee = fee
                     .checked_sub(insurance_fee)
                     .ok_or(PercolatorError::EngineCounterUnderflow)?;
-                let bucket_acc = if d % 2 == 0 {
-                    &mut group.markets[asset_index].engine.backing_long
-                } else {
-                    &mut group.markets[asset_index].engine.backing_short
-                };
-                let mut bucket = bucket_acc.try_to_runtime().map_err(map_v16_error)?;
-                if bucket.status != BackingBucketStatusV16::Fresh
-                    || bucket.expiry_slot <= group.header.current_slot.get()
-                {
-                    return Err(PercolatorError::EngineLockActive.into());
+                // Provider split: book the collected fee (already in vault slack from the capital
+                // debit above) into the backing bucket's earnings via the engine (maintains
+                // backing_provider_earnings_total + checks the bucket is Fresh).
+                if provider_fee != 0 {
+                    group
+                        .credit_backing_provider_earnings_not_atomic(d, provider_fee)
+                        .map_err(map_v16_error)?;
                 }
                 if insurance_fee != 0 {
+                    // Insurance split: reclassify the collected fee from capital into insurance, then
+                    // earmark it into the domain budget through the engine (maintains the budget total).
+                    // NOTE: header.insurance has no engine "capital-slack -> insurance" entry point yet
+                    // (see /tmp/engine.md); the budget earmark below requires insurance to cover it.
                     group.header.insurance = percolator::V16PodU128::new(
                         group
                             .header
@@ -10896,15 +10896,6 @@ pub mod processor {
                             .checked_add(insurance_fee)
                             .ok_or(PercolatorError::EngineArithmeticOverflow)?,
                     );
-                }
-                if provider_fee != 0 {
-                    bucket.utilization_fee_earnings = bucket
-                        .utilization_fee_earnings
-                        .checked_add(provider_fee)
-                        .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-                    *bucket_acc = percolator::BackingBucketV16Account::from_runtime(&bucket);
-                }
-                if insurance_fee != 0 {
                     credit_fee_to_domain_budget_view(cfg, group, d, insurance_fee)?;
                 }
             }
