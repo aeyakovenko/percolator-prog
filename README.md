@@ -101,9 +101,10 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   bootstrapped to the activator. `UpdateAssetAuthority { asset_index, kind, new_pubkey }` is scoped to
   that asset's profile only and rejects `asset_index == 0` (asset 0 uses the market-wide
   `UpdateAuthority`).
-- **Each asset has a cold-storage admin** that can **rotate the asset's other keys**
-  (insurance/operator/backing/oracle) and **can be burned (set to 0)** — a credibly admin-free asset
-  that can't be revived. **✅**
+- **Each permissionless asset (1..N) has a cold-storage admin** that can **rotate that asset's other
+  keys** (insurance/operator/backing/oracle) and **can be burned (set to 0)** — a credibly admin-free
+  asset that can't be revived. **✅** (Asset 0 / market-wide authorities have no such override; they
+  self-rotate via `UpdateAuthority` — see the Self-rotation caveat in the Admin Key Threat Model.)
 - **Each other asset key can rotate itself or be set to 0.** **✅** (a domain authority self-rotates
   even after the asset admin is burned). All verified by
   `v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable`.
@@ -685,6 +686,21 @@ These are governance powers, not bugs:
 9. `CloseSlab` (when market is fully empty)
     - decommission market account and recover slab lamports.
     - impact: market is permanently closed.
+
+> **Self-rotation caveat (items 3, 5, 7).** `UpdateAuthority { kind = AUTHORITY_MARK | AUTHORITY_INSURANCE |
+> AUTHORITY_INSURANCE_OPERATOR }` is **not** an admin override: each requires the **current holder of that
+> role** to sign (`expect_live_authority(&cfg.<role>, current.key)`), and a non-zero replacement must also
+> sign. So the admin can rotate/burn these **only while it still holds the role** (the common bootstrap
+> state where one key holds everything). **Once a role is delegated to an independent key (e.g. a Squads or
+> cold key), the admin can no longer reclaim or burn it** — the delegated holder must sign its own rotation.
+> Delegation is therefore sticky/one-way, which is a feature: it lets you hand the live insurance operator
+> (or mark/resolved-insurance authority) to an independent signer that the market admin cannot claw back.
+> The corollary is that a **lost** market-0 operator cannot be force-replaced by the admin; only the
+> per-asset cold-storage `asset_admin` (assets 1..N, via `UpdateAssetAuthority`) can override its asset's
+> sub-authorities — **asset 0 / market-wide authorities have no such override** and use self-rotation only.
+> Verified by `v16_attack_update_authority_non_holder_cannot_rotate` (a non-holder, incl. the admin,
+> cannot rotate a role it doesn't hold) and `v16_attack_update_authority_requires_new_authority_signature`
+> (the replacement key must co-sign).
 
 ### What a malicious admin should NOT be able to do
 
