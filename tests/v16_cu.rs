@@ -16197,3 +16197,123 @@ fn v16_bpf_batch_trade_cpi_14_legs_under_tx_limit() {
     let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
     assert_eq!(percolator::active_bitmap_count_ones(t.active_bitmap), 14);
 }
+
+// Isolation: per-leg fees in an atomic batch are credited to the CORRECT asset's insurance domains,
+// never aggregated or cross-credited across assets. The batch path reconstructs per-leg fees out of
+// the engine's AGGREGATE outcome (unlike single trades), so this guards that reconstruction against
+// cross-asset fee leakage. Two legs with different fee_bps must move each asset's own domain budget
+// by its own fee.
+#[test]
+fn v16_attack_batch_fees_isolated_to_each_asset_domain() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 10_000_000);
+    env.deposit(&lp, la, 10_000_000);
+    let before = env.market_state().1;
+    let b0 = before.insurance_domain_budget[0] + before.insurance_domain_budget[1];
+    let b1 = before.insurance_domain_budget[2] + before.insurance_domain_budget[3];
+    let sz = (10 * POS_SCALE) as i128;
+    env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![
+                BatchTradeLeg { asset_index: 0, size_q: sz, exec_price: 100, fee_bps: 100 },
+                BatchTradeLeg { asset_index: 1, size_q: sz, exec_price: 100, fee_bps: 500 },
+            ],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+        ],
+        &[&taker, &lp],
+    ).expect("batch");
+    let after = env.market_state().1;
+    let a0 = (after.insurance_domain_budget[0] + after.insurance_domain_budget[1]) - b0;
+    let a1 = (after.insurance_domain_budget[2] + after.insurance_domain_budget[3]) - b1;
+    assert!(a0 > 0 && a1 > 0, "each asset's own domain budget moved by its own fee");
+    assert!(
+        a1 > a0,
+        "asset1 (fee_bps 500) credit {a1} > asset0 (fee_bps 100) credit {a0}: per-asset, not aggregated/cross-credited"
+    );
+}
+
+// LOF: the batch's single end-state initial-margin check protects the COUNTERPARTY too. A funded
+// taker cannot use a batch to force an undercapitalized LP into a position it cannot margin — the
+// engine certifies BOTH accounts (long and short) on the final portfolio, so the batch reverts.
+#[test]
+fn v16_attack_batch_cannot_force_counterparty_underwater() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 100_000_000); // taker funded
+    env.deposit(&lp, la, 50); // LP cannot margin a large short
+    let sz = (50 * POS_SCALE) as i128; // notional 5000, IM 500 >> LP capital 50
+    let res = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![
+                BatchTradeLeg { asset_index: 0, size_q: sz, exec_price: 100, fee_bps: 0 },
+                BatchTradeLeg { asset_index: 1, size_q: sz, exec_price: 100, fee_bps: 0 },
+            ],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(res.is_err(), "batch must reject when the LP cannot meet end-state initial margin (no LOF)");
+}
+
+// Surface 2 guard: the force-close timeout uses the AUTHENTICATED clock, not the caller's now_slot.
+// A cranker cannot rug traders early by LYING that the exit window elapsed — passing a post-timeout
+// now_slot while the real clock is still inside the window must REJECT; only once the real clock
+// crosses force_close_delay_slots does it succeed.
+#[test]
+fn v16_attack_force_close_cannot_bypass_timeout_with_future_now_slot() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    const DELAY: u64 = 50;
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+    let la = Keypair::new();
+    let lb = Keypair::new();
+    let pa = env.create_portfolio(&la);
+    let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    env.trade_asset_with_cu(1, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    const SHUT: u64 = 10;
+    env.svm.warp_to_slot(SHUT);
+    env.update_asset_lifecycle_as_admin_with_cu(percolator_prog::processor::ASSET_ACTION_SHUTDOWN, 1, SHUT, 0);
+
+    // REAL clock is still well inside the exit window, but the cranker LIES with a far-future now_slot.
+    env.svm.warp_to_slot(SHUT + 1);
+    let cranker = Keypair::new();
+    let liar = env.try_force_close_abandoned_asset_with_cu(&cranker, pa, pb, 1, SHUT + DELAY + 10_000, POS_SCALE);
+    assert!(
+        liar.is_err(),
+        "force-close must use the authenticated clock, not the caller's now_slot: a future now_slot \
+         cannot bypass the exit window while the real clock is pre-timeout"
+    );
+    // state untouched (no early rug).
+    assert_eq!(env.market_state().1.assets[1].lifecycle, AssetLifecycleV16::Recovery);
+
+    // once the REAL clock crosses the window, the same call succeeds.
+    env.svm.warp_to_slot(SHUT + DELAY + 5);
+    env.svm.expire_blockhash();
+    let ok = env.try_force_close_abandoned_asset_with_cu(&cranker, pa, pb, 1, SHUT + DELAY + 5, POS_SCALE);
+    assert!(ok.is_ok(), "force-close succeeds once the authenticated clock crosses the window: {ok:?}");
+}

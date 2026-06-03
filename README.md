@@ -134,9 +134,10 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   value, and only **succeeds + zeroes (reclaims) the account** once users are made whole and the slab
   is fully drained; the abandoned-market path is the permissionless-resolve fallback
   (`v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free`, bounded + oracle-free).
-- **The asset-0 key can force-shutdown assets 1..N without rugging traders** — `ASSET_ACTION_SHUTDOWN`
-  moves the asset to RECOVERY with a frozen mark, and the wind-down force-close is gated behind
-  `force_close_delay_slots` so there is an **exit window**. **✅**
+- **The `marketauth` key can force-shutdown assets 1..N without rugging traders** — `ASSET_ACTION_SHUTDOWN`
+  is gated on `marketauth` (a non-`marketauth` signer is rejected); it moves the asset to RECOVERY with
+  a frozen mark, and the wind-down force-close is gated behind `force_close_delay_slots` so there is an
+  **exit window**. **✅**
   `v16_attack_force_shutdown_timeout_lets_traders_exit_before_close` asserts shutdown → RECOVERY,
   force-close **rejects before** the delay and **succeeds after**; plus
   `v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot` and
