@@ -141,6 +141,20 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   force-close **rejects before** the delay and **succeeds after**; plus
   `v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot` and
   `v16_attack_force_close_healthy_asset_rejected`.
+- **No trader can block cleanup — the timeout guarantees liveness as well as safety.** The same
+  `force_close_delay_slots` gate is two-sided: **before** it elapses it protects traders (exit
+  window, above); **after** it elapses the wind-down force-close becomes **permissionless** — any
+  cranker, with no cooperation from either position owner, nets a long against a short at the frozen
+  mark (`ForceCloseAbandonedAsset`). This always terminates because positions are opened in matched
+  long/short pairs, so every long in a retired asset has a short to net against (the test drives
+  `oi_eff_long_q`/`oi_eff_short_q` to `0`). A user therefore **cannot grief `marketauth`'s cleanup**
+  by sitting on a position — once the timeout passes, anyone resolves it. Nor can portfolio
+  complexity block it: a one-shot force-close of two maximally-stale 14-leg accounts would exceed
+  the 1.4M tx CU limit, but the **permissionless `PermissionlessCrank` Refresh** first settles each
+  account's stale legs in its own tx (~0.5M each, well under the limit), after which the force-close
+  nets the pair at ~1.1M CU — so cleanup is reachable in bounded, permissionless steps no matter how
+  stale or how many legs the griefer holds. **✅** (force-close worst-case CU is exercised by
+  `v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot`.)
 
 ### Base unit (collateral)
 - The base unit is held in **two SPL token accounts** (a **primary** and a **secondary**), both
@@ -320,6 +334,16 @@ This section describes intent and operational ordering, not argument-by-argument
   - trade without external matcher (used for testing / deterministic scenarios)
 - **TradeCpi**
   - trade via LP-chosen matcher CPI with strict binding + validation
+- **BatchTradeNoCpi** (tag 66)
+  - atomic multi-leg batch (up to the portfolio asset cap) against one taker/LP pair; each leg's
+    **signed** `size_q` sets its direction, so a single batch can carry a mixed long/short spread.
+    The engine settles both accounts once, applies every leg, then runs a **single end-state
+    initial-margin check** — interim legs need not be individually margin-feasible.
+- **BatchTradeCpi** (tag 67)
+  - same atomic multi-leg batch routed through an external matcher: **one** batched matcher CPI
+    (matcher tag 3) fills every leg against a single LP, each return is validated under the same
+    anti-spoof binding as `TradeCpi`, then all fills apply through the batch path. Bounded to 16
+    legs (the matcher's return-data cap).
 
 ### Oracle / mark management
 - External-oracle markets read configured oracle account(s) directly in live price-taking instructions.

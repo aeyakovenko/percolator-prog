@@ -6,7 +6,7 @@ use percolator::{
 };
 use percolator_prog::{
     constants::{MATCHER_ABI_VERSION, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3},
-    ix::Instruction as ProgInstruction,
+    ix::{BatchTradeCpiLeg, BatchTradeLeg, Instruction as ProgInstruction},
     oracle_v16, processor, state,
     state::{MarketGroupV16, PortfolioAccountV16},
 };
@@ -1067,7 +1067,7 @@ impl V16CuEnv {
                         &mut short,
                         TradeRequestV16 {
                             asset_index,
-                            size_q: 10 * POS_SCALE,
+                            size_q: (10 * POS_SCALE) as i128,
                             exec_price: 100,
                             fee_bps: 0,
                         },
@@ -1115,7 +1115,7 @@ impl V16CuEnv {
                         &mut short,
                         TradeRequestV16 {
                             asset_index,
-                            size_q: 10 * POS_SCALE,
+                            size_q: (10 * POS_SCALE) as i128,
                             exec_price: 100,
                             fee_bps: 0,
                         },
@@ -15878,4 +15878,322 @@ fn v16_bpf_5000_asset_market_trades_with_bounded_cu() {
         trade_cu < 1_400_000,
         "5000-asset trade CU {trade_cu} is under the 1.4M tx limit"
     );
+}
+
+// LIVENESS: no trader can block marketauth's asset cleanup. After force_close_delay_slots, the
+// permissionless force-close winds down a retired asset by netting a long against a short at the
+// frozen mark. A griefer who sits on a maximally-complex (14-leg) STALE portfolio cannot stall this:
+// a one-shot force-close of two such accounts would exceed the 1.4M tx CU limit (it must settle all
+// 28 stale legs inline before netting), but the permissionless PermissionlessCrank Refresh settles
+// each account's stale legs in its own bounded tx first, after which the force-close of the now-fresh
+// pair fits comfortably. Cleanup is therefore reachable in bounded, permissionless steps regardless
+// of how stale or how many legs the griefer holds.
+#[test]
+fn v16_bpf_force_close_liveness_survives_14_stale_leg_grief_via_precrank() {
+    // (A) one-shot force-close on two fully-stale 14-leg accounts: too heavy for a single tx.
+    {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
+        env.configure_permissionless_resolve_with_cu(100, 5);
+        let lo = Keypair::new();
+        let so = Keypair::new();
+        let pa = env.create_portfolio(&lo);
+        let pb = env.create_portfolio(&so);
+        env.deposit(&lo, pa, 1_000_000);
+        env.deposit(&so, pb, 1_000_000);
+        env.seed_n_leg_position_for_benchmark(pa, pb, 14);
+        env.svm.warp_to_slot(16);
+        env.update_asset_lifecycle_as_admin_with_cu(
+            percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+            13,
+            16,
+            0,
+        );
+        env.svm.warp_to_slot(22);
+        env.svm.expire_blockhash();
+        let cranker = Keypair::new();
+        let one_shot = env.try_force_close_abandoned_asset_with_cu(
+            &cranker,
+            pa,
+            pb,
+            13,
+            22,
+            (10 * POS_SCALE) as u128,
+        );
+        assert!(
+            one_shot.is_err(),
+            "one-shot force-close of two 14-stale-leg accounts is expected to exceed the tx CU \
+             limit; cleanup must go through the pre-crank path"
+        );
+    }
+
+    // (B) the supported liveness path: permissionless Refresh settles each account, then force-close.
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    let lo = Keypair::new();
+    let so = Keypair::new();
+    let pa = env.create_portfolio(&lo);
+    let pb = env.create_portfolio(&so);
+    env.deposit(&lo, pa, 1_000_000);
+    env.deposit(&so, pb, 1_000_000);
+    env.seed_n_leg_position_for_benchmark(pa, pb, 14);
+    env.svm.warp_to_slot(16);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        13,
+        16,
+        0,
+    );
+    env.svm.warp_to_slot(22);
+    let refresh = |slot: u64| ProgInstruction::PermissionlessCrank {
+        action: 0,
+        asset_index: 0,
+        now_slot: slot,
+        funding_rate_e9: 0,
+        close_q: 0,
+        fee_bps: 0,
+        recovery_reason: 0,
+    };
+    let c_long = env.crank(pa, refresh(22));
+    let c_short = env.crank(pb, refresh(22));
+    assert!(
+        c_long < 1_400_000 && c_short < 1_400_000,
+        "each permissionless Refresh fits a tx: long={c_long} short={c_short}"
+    );
+    env.svm.expire_blockhash();
+    let cranker = Keypair::new();
+    let fc = env
+        .try_force_close_abandoned_asset_with_cu(&cranker, pa, pb, 13, 22, (10 * POS_SCALE) as u128)
+        .expect("force-close of the refreshed pair must succeed (permissionless liveness)");
+    println!("v16 force-close-after-precrank worst-case CU: {fc}");
+    assert!(
+        fc < 1_400_000,
+        "force-close of the refreshed 14-leg pair must fit the tx CU limit: {fc}"
+    );
+    // the shut-down asset's book is wound down to zero on both sides.
+    let g = env.market_state().1;
+    assert_eq!(g.assets[13].oi_eff_long_q, 0);
+    assert_eq!(g.assets[13].oi_eff_short_q, 0);
+}
+
+// BatchTradeNoCpi: a single atomic batch carries a MIXED-direction spread (taker long asset 0,
+// short asset 1) against one LP, applied with one end-state margin check.
+#[test]
+fn v16_bpf_batch_trade_executes_mixed_direction_spread() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+    let sz = (5 * POS_SCALE) as i128;
+    let cu = env
+        .send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![
+                    BatchTradeLeg { asset_index: 0, size_q: sz, exec_price: 100, fee_bps: 0 },
+                    BatchTradeLeg { asset_index: 1, size_q: -sz, exec_price: 100, fee_bps: 0 },
+                ],
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+            ],
+            &[&taker, &lp],
+        )
+        .expect("mixed-direction batch must execute");
+    println!("v16 batch mixed-direction 2-leg CU: {cu}");
+    let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
+    let l = state::read_portfolio(&env.svm.get_account(&la).unwrap().data).unwrap();
+    assert_eq!(active_leg_for_asset(&t, 0).side, SideV16::Long);
+    assert_eq!(active_leg_for_asset(&t, 1).side, SideV16::Short);
+    assert_eq!(active_leg_for_asset(&l, 0).side, SideV16::Short);
+    assert_eq!(active_leg_for_asset(&l, 1).side, SideV16::Long);
+    assert_eq!(active_leg_for_asset(&t, 0).basis_pos_q, sz);
+    assert_eq!(active_leg_for_asset(&t, 1).basis_pos_q, -sz);
+}
+
+// BatchTradeNoCpi end-state margin: a leg that is individually margin-INFEASIBLE (it would leave the
+// taker holding two full positions at once) is rejected as a standalone trade, but the SAME leg in a
+// batch that also closes the offsetting position SUCCEEDS, because the batch checks initial margin
+// only on the final portfolio.
+#[test]
+fn v16_bpf_batch_trade_checks_margin_on_final_portfolio_only() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000); // at 10% IM, capital fits ONE 80-lot position (IM 800), not two (1600)
+    env.deposit(&lp, la, 1_000_000);
+    let sz = (80 * POS_SCALE) as i128;
+    // taker opens a short on asset 0 (one position, feasible).
+    env.trade_asset_with_cu(0, &lp, la, &taker, ta, sz, 100, 0);
+    assert_eq!(active_leg_for_asset(&state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap(), 0).side, SideV16::Short);
+
+    // a standalone long on asset 1 would leave the taker holding TWO positions (short-0 + long-1):
+    // initial margin on that interim portfolio exceeds capital, so it must be rejected.
+    let interim = env.try_trade_asset_with_cu(1, &taker, ta, &lp, la, sz, 100, 0);
+    assert!(interim.is_err(), "interim two-position state must fail a standalone trade: {interim:?}");
+
+    // the batch does the long-1 leg AND closes the short-0 leg; the FINAL portfolio is a single
+    // long-1 position (feasible), so the batch is accepted even though an interim leg is not.
+    let cu = env
+        .send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![
+                    BatchTradeLeg { asset_index: 1, size_q: sz, exec_price: 100, fee_bps: 0 },
+                    BatchTradeLeg { asset_index: 0, size_q: sz, exec_price: 100, fee_bps: 0 },
+                ],
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+            ],
+            &[&taker, &lp],
+        )
+        .expect("batch must accept a final-IM-feasible basket despite an infeasible interim leg");
+    println!("v16 batch end-state-margin 2-leg CU: {cu}");
+    let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
+    assert!(!has_active_leg_for_asset(&t, 0), "short asset-0 closed by the batch");
+    assert_eq!(active_leg_for_asset(&t, 1).side, SideV16::Long, "taker keeps only the asset-1 long");
+}
+
+// BatchTradeNoCpi 14-leg fan-out on a fresh account, all under one tx CU budget.
+#[test]
+fn v16_bpf_batch_trade_14_legs_under_tx_limit() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
+    for a in 0..14u16 {
+        env.configure_auth_mark_for_asset_as_admin(a, 1, 100);
+    }
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 10_000_000);
+    env.deposit(&lp, la, 10_000_000);
+    let legs: Vec<BatchTradeLeg> = (0..14u16)
+        .map(|a| BatchTradeLeg { asset_index: a, size_q: POS_SCALE as i128, exec_price: 100, fee_bps: 100 })
+        .collect();
+    let cu = env
+        .send(
+            ProgInstruction::BatchTradeNoCpi { legs },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+            ],
+            &[&taker, &lp],
+        )
+        .expect("14-leg batch must execute");
+    println!("v16 batch 14-leg fresh BatchTradeNoCpi CU: {cu}");
+    assert!(cu < 1_400_000, "14-leg batch CU {cu} must fit the tx limit");
+    let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
+    assert_eq!(percolator::active_bitmap_count_ones(t.active_bitmap), 14);
+}
+
+// BatchTradeCpi: a single batched matcher CPI fills a MIXED-direction spread (taker long asset 0,
+// short asset 1) against one LP, then both fills apply with one end-state margin check.
+#[test]
+fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+    let (ctx, delegate, _) = env.init_matcher_context(matcher_program, la);
+    let sz = (5 * POS_SCALE) as i128;
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![
+                    BatchTradeCpiLeg { asset_index: 0, size_q: sz, fee_bps: 100, limit_price: 0 },
+                    BatchTradeCpiLeg { asset_index: 1, size_q: -sz, fee_bps: 100, limit_price: 0 },
+                ],
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker, &lp],
+        )
+        .expect("batch CPI mixed spread must execute through the matcher");
+    println!("v16 batch CPI mixed-direction 2-leg CU: {cu}");
+    let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
+    let l = state::read_portfolio(&env.svm.get_account(&la).unwrap().data).unwrap();
+    assert_eq!(active_leg_for_asset(&t, 0).side, SideV16::Long);
+    assert_eq!(active_leg_for_asset(&t, 1).side, SideV16::Short);
+    assert_eq!(active_leg_for_asset(&l, 0).side, SideV16::Short);
+    assert_eq!(active_leg_for_asset(&l, 1).side, SideV16::Long);
+    assert_eq!(active_leg_for_asset(&t, 0).basis_pos_q, sz);
+    assert_eq!(active_leg_for_asset(&t, 1).basis_pos_q, -sz);
+}
+
+// BatchTradeCpi 14-leg fan-out through one batched matcher CPI, under the tx CU budget.
+#[test]
+fn v16_bpf_batch_trade_cpi_14_legs_under_tx_limit() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
+    for a in 0..14u16 {
+        env.configure_auth_mark_for_asset_as_admin(a, 1, 100);
+    }
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 10_000_000);
+    env.deposit(&lp, la, 10_000_000);
+    let (ctx, delegate, _) = env.init_matcher_context(matcher_program, la);
+    let legs: Vec<BatchTradeCpiLeg> = (0..14u16)
+        .map(|a| BatchTradeCpiLeg { asset_index: a, size_q: POS_SCALE as i128, fee_bps: 100, limit_price: 0 })
+        .collect();
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::BatchTradeCpi { legs },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker, &lp],
+        )
+        .expect("14-leg batch CPI must execute");
+    println!("v16 batch 14-leg BatchTradeCpi (one matcher CPI) CU: {cu}");
+    assert!(cu < 1_400_000, "14-leg batch CPI CU {cu} must fit the tx limit");
+    let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
+    assert_eq!(percolator::active_bitmap_count_ones(t.active_bitmap), 14);
 }

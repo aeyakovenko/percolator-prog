@@ -2517,6 +2517,33 @@ pub mod state {
         ))
     }
 
+    /// Batch oracle-price read for a multi-leg trade: parse the header/config ONCE, then read each
+    /// requested asset's effective price. Avoids the O(N^2) cost of calling
+    /// `read_market_trade_preflight` per leg (which re-parses the config every time).
+    pub fn read_asset_effective_prices(
+        data: &[u8],
+        asset_indices: &[u16],
+    ) -> Result<(MarketModeV16, u64, alloc::vec::Vec<u64>), ProgramError> {
+        if data.len() < MIN_MARKET_ACCOUNT_LEN {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
+        check_header(data, KIND_MARKET)?;
+        let wire = market_header(data)?;
+        let engine_config = wire
+            .config
+            .try_to_runtime()
+            .map_err(map_account_wire_error)?;
+        let mut prices = alloc::vec::Vec::with_capacity(asset_indices.len());
+        for &asset_index in asset_indices {
+            if asset_index as usize >= engine_config.max_market_slots as usize {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            let slot = asset_slot_wire(data, asset_index as usize)?;
+            prices.push(slot.asset.effective_price.get());
+        }
+        Ok((decode_market_mode(wire.mode)?, wire.current_slot.get(), prices))
+    }
+
     #[cfg(not(target_os = "solana"))]
     pub fn write_market(
         data: &mut [u8],
@@ -2663,6 +2690,28 @@ pub mod ix {
     use alloc::vec::Vec;
     use solana_program::program_error::ProgramError;
 
+    /// One leg of an atomic multi-leg batch trade. `size_q` is SIGNED (engine semantics): a
+    /// positive size makes the taker (account_a) long that asset, a negative size makes it short,
+    /// so a single batch can express a mixed-direction spread (long A / short B) against one LP.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct BatchTradeLeg {
+        pub asset_index: u16,
+        pub size_q: i128,
+        pub exec_price: u64,
+        pub fee_bps: u64,
+    }
+
+    /// One leg of an atomic multi-leg batch routed through an external matcher. `size_q` is the
+    /// SIGNED requested size (the matcher returns the actual exec size/price); `limit_price` is a
+    /// per-leg bound (0 = no limit) checked against the matcher's exec price.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct BatchTradeCpiLeg {
+        pub asset_index: u16,
+        pub size_q: i128,
+        pub fee_bps: u64,
+        pub limit_price: u64,
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum Instruction {
         InitMarket {
@@ -2716,6 +2765,16 @@ pub mod ix {
             size_q: i128,
             fee_bps: u64,
             limit_price: u64,
+        },
+        /// Atomic multi-leg batch: apply every leg against one taker/LP pair with a single
+        /// end-state initial-margin check (interim legs need not be individually margin-feasible).
+        BatchTradeNoCpi {
+            legs: Vec<BatchTradeLeg>,
+        },
+        /// Atomic multi-leg batch routed through an external matcher: one batched matcher CPI fills
+        /// every leg against a single LP, then all fills apply with one end-state margin check.
+        BatchTradeCpi {
+            legs: Vec<BatchTradeCpiLeg>,
         },
         ClosePortfolio,
         TopUpInsurance {
@@ -2947,6 +3006,32 @@ pub mod ix {
                     fee_bps: read_u64(&mut rest)?,
                     limit_price: read_u64(&mut rest)?,
                 },
+                66 => {
+                    let n = read_u8(&mut rest)? as usize;
+                    let mut legs = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        legs.push(BatchTradeLeg {
+                            asset_index: read_u16(&mut rest)?,
+                            size_q: read_i128(&mut rest)?,
+                            exec_price: read_u64(&mut rest)?,
+                            fee_bps: read_u64(&mut rest)?,
+                        });
+                    }
+                    Self::BatchTradeNoCpi { legs }
+                }
+                67 => {
+                    let n = read_u8(&mut rest)? as usize;
+                    let mut legs = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        legs.push(BatchTradeCpiLeg {
+                            asset_index: read_u16(&mut rest)?,
+                            size_q: read_i128(&mut rest)?,
+                            fee_bps: read_u64(&mut rest)?,
+                            limit_price: read_u64(&mut rest)?,
+                        });
+                    }
+                    Self::BatchTradeCpi { legs }
+                }
                 8 => Self::ClosePortfolio,
                 9 => Self::TopUpInsurance {
                     amount: read_u128(&mut rest)?,
@@ -3224,6 +3309,26 @@ pub mod ix {
                     push_i128(&mut out, size_q);
                     push_u64(&mut out, fee_bps);
                     push_u64(&mut out, limit_price);
+                }
+                Self::BatchTradeNoCpi { ref legs } => {
+                    out.push(66);
+                    out.push(legs.len() as u8);
+                    for leg in legs.iter() {
+                        push_u16(&mut out, leg.asset_index);
+                        push_i128(&mut out, leg.size_q);
+                        push_u64(&mut out, leg.exec_price);
+                        push_u64(&mut out, leg.fee_bps);
+                    }
+                }
+                Self::BatchTradeCpi { ref legs } => {
+                    out.push(67);
+                    out.push(legs.len() as u8);
+                    for leg in legs.iter() {
+                        push_u16(&mut out, leg.asset_index);
+                        push_i128(&mut out, leg.size_q);
+                        push_u64(&mut out, leg.fee_bps);
+                        push_u64(&mut out, leg.limit_price);
+                    }
                 }
                 Self::ClosePortfolio => out.push(8),
                 Self::TopUpInsurance { amount } => {
@@ -3605,6 +3710,9 @@ pub mod ix {
 pub mod matcher_abi {
     use crate::constants::MATCHER_ABI_VERSION;
     use solana_program::program_error::ProgramError;
+
+    /// Wire size of one serialized MatcherReturn.
+    pub const MATCHER_RETURN_BYTES: usize = 64;
 
     pub const FLAG_VALID: u32 = 1;
     pub const FLAG_PARTIAL_OK: u32 = 2;
@@ -5251,6 +5359,12 @@ pub mod processor {
                 fee_bps,
                 limit_price,
             ),
+            Instruction::BatchTradeNoCpi { legs } => {
+                handle_batch_trade_nocpi(program_id, accounts, &legs)
+            }
+            Instruction::BatchTradeCpi { legs } => {
+                handle_batch_trade_cpi(program_id, accounts, &legs)
+            }
             Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
             Instruction::TopUpInsurance { amount } => {
                 handle_top_up_insurance(program_id, accounts, amount)
@@ -5848,7 +5962,10 @@ pub mod processor {
             )?;
             let req = TradeRequestV16 {
                 asset_index: asset_index as usize,
-                size_q: size_abs,
+                // size_q is signed (i128) in the engine; direction is carried by the long/short
+                // account orientation chosen below (size_q > 0 ? (a,b) : (b,a)), so pass the
+                // positive magnitude here to preserve the existing single-trade semantics.
+                size_q: size_abs as i128,
                 exec_price: fee_basis_price,
                 fee_bps,
             };
@@ -5933,6 +6050,271 @@ pub mod processor {
                 group.header.loss_stale_active = restore_loss_stale_active;
             }
             validation_result.map_err(map_v16_error)?;
+            let source_lien_after_a =
+                source_lien_effective_reserved_snapshot_for_trade_view(&account_a)?;
+            let source_lien_after_b =
+                source_lien_effective_reserved_snapshot_for_trade_view(&account_b)?;
+            ensure_new_source_lien_domains_full_rate_for_trade_view(
+                &group,
+                source_lien_before_a.as_ref(),
+                source_lien_after_a.as_ref(),
+                source_lien_before_b.as_ref(),
+                source_lien_after_b.as_ref(),
+            )?;
+        }
+        if let Some(cfg) = cfg_after {
+            state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)?;
+        }
+        Ok(())
+    }
+
+    /// Reconstruct the exact per-leg fee the engine charges for one leg, so wrapper-side
+    /// per-asset/per-domain fee accounting can be split out of the engine's AGGREGATE batch
+    /// outcome. Mirrors engine `trade_notional_floor` (floor) + `checked_fee_bps` (ceil) on the
+    /// fast u128 path; extreme sizes that would need the engine's U256 widening error out (the
+    /// batch then rejects rather than mis-accounting — see the aggregate cross-check below).
+    fn batch_leg_fee(abs_size_q: u128, exec_price: u64, fee_bps: u64) -> Result<u128, ProgramError> {
+        if abs_size_q == 0 || fee_bps == 0 {
+            return Ok(0);
+        }
+        let notional = abs_size_q
+            .checked_mul(exec_price as u128)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?
+            / percolator::POS_SCALE;
+        if notional == 0 {
+            return Ok(0);
+        }
+        let product = notional
+            .checked_mul(fee_bps as u128)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let den = percolator::MAX_MARGIN_BPS as u128;
+        Ok((product / den) + u128::from(product % den != 0))
+    }
+
+    /// Atomic multi-leg batch trade. `account_a` (taker) is the long side, `account_b` (LP) the
+    /// short side; each leg's SIGNED `size_q` decides that leg's direction, so one batch can carry
+    /// a mixed long/short spread. The engine settles both accounts ONCE, applies every leg, then
+    /// runs a SINGLE end-state initial-margin check — interim legs need not be individually
+    /// margin-feasible. The wrapper still does its per-asset bookkeeping (fee basis, per-domain fee
+    /// crediting, hybrid-mark discovery, oracle-profile writeback) for each leg around that one
+    /// engine call.
+    #[inline(never)]
+    fn handle_batch_trade_nocpi<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        legs: &[ix::BatchTradeLeg],
+    ) -> ProgramResult {
+        let signer_a = account(accounts, 0)?;
+        let signer_b = account(accounts, 1)?;
+        let market_ai = account(accounts, 2)?;
+        let account_a_ai = account(accounts, 3)?;
+        let account_b_ai = account(accounts, 4)?;
+        expect_signer(signer_a)?;
+        expect_signer(signer_b)?;
+        expect_writable(market_ai)?;
+        expect_writable(account_a_ai)?;
+        expect_writable(account_b_ai)?;
+        expect_owner(market_ai, program_id)?;
+        expect_owner(account_a_ai, program_id)?;
+        expect_owner(account_b_ai, program_id)?;
+        if account_a_ai.key == account_b_ai.key {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let (_cfg_pre, mode_pre, max_market_slots, _) =
+            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        if mode_pre != MarketModeV16::Live {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        handle_batch_execute_zero_copy(
+            program_id,
+            signer_a,
+            signer_b,
+            market_ai,
+            account_a_ai,
+            account_b_ai,
+            legs,
+            max_market_slots,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_batch_execute_zero_copy<'a>(
+        _program_id: &Pubkey,
+        signer_a: &AccountInfo<'a>,
+        signer_b: &AccountInfo<'a>,
+        market_ai: &AccountInfo<'a>,
+        account_a_ai: &AccountInfo<'a>,
+        account_b_ai: &AccountInfo<'a>,
+        legs: &[ix::BatchTradeLeg],
+        max_market_slots: usize,
+    ) -> ProgramResult {
+        if legs.is_empty() {
+            return Err(PercolatorError::EngineNonProgress.into());
+        }
+        ensure_portfolio_storage_for_market_slots(account_a_ai, max_market_slots)?;
+        ensure_portfolio_storage_for_market_slots(account_b_ai, max_market_slots)?;
+        let mut cfg_after = None;
+        {
+            let mut market_data = market_ai.try_borrow_mut_data()?;
+            let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            // v1 scope: per-leg backing-domain trade fees are not split in a batch yet. If a backing
+            // fee policy is configured, reject so we never silently skip those fees.
+            if cfg.backing_trade_fee_policy_count != 0 {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
+            let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
+            let mut account_a = state::portfolio_view_mut_for_market_slots(
+                &mut account_a_data,
+                max_market_slots,
+            )?;
+            let mut account_b = state::portfolio_view_mut_for_market_slots(
+                &mut account_b_data,
+                max_market_slots,
+            )?;
+            expect_portfolio_view_account_key(&account_a, account_a_ai.key)?;
+            expect_portfolio_view_account_key(&account_b, account_b_ai.key)?;
+            expect_portfolio_view_owner(&account_a, signer_a.key)?;
+            expect_portfolio_view_owner(&account_b, signer_b.key)?;
+
+            // Pre-pass: per leg, read its oracle profile, pin the fee basis to the asset mark, and
+            // build the SIGNED engine request. Reject duplicate assets (one leg per asset per batch).
+            let mut requests: Vec<TradeRequestV16> = Vec::with_capacity(legs.len());
+            // (asset_index, oracle_profile, reported_exec_price, fee_basis_price, fee_bps_eff, abs_size)
+            let mut leg_ctx: Vec<(usize, state::AssetOracleProfileV16, u64, u64, u64, u128)> =
+                Vec::with_capacity(legs.len());
+            for leg in legs {
+                let asset_index = leg.asset_index as usize;
+                if requests.iter().any(|r| r.asset_index == asset_index) {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                let oracle_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
+                reject_permissionless_resolve_matured_live_for_profile_view(
+                    &cfg,
+                    &oracle_profile,
+                    &group,
+                )?;
+                if leg.size_q == i128::MIN || leg.size_q == 0 {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                let abs_size = leg.size_q.unsigned_abs();
+                let fee_basis_price = group.markets[asset_index]
+                    .engine
+                    .asset
+                    .effective_price
+                    .get();
+                let fee_bps_eff = hybrid_trade_fee_bps_view(
+                    &cfg,
+                    &oracle_profile,
+                    &group,
+                    asset_index,
+                    abs_size,
+                    fee_basis_price,
+                    leg.fee_bps,
+                )?;
+                requests.push(TradeRequestV16 {
+                    asset_index,
+                    size_q: leg.size_q,
+                    exec_price: fee_basis_price,
+                    fee_bps: fee_bps_eff,
+                });
+                leg_ctx.push((
+                    asset_index,
+                    oracle_profile,
+                    leg.exec_price,
+                    fee_basis_price,
+                    fee_bps_eff,
+                    abs_size,
+                ));
+            }
+
+            // Loss-stale isolation: only ignore a market-wide loss-stale bit if EVERY leg's asset is
+            // unrelated to it (mirrors the single-trade handler, generalized to the batch's asset set).
+            let restore_loss_stale_active = group.header.loss_stale_active;
+            let mut ignore_unrelated_loss_stale = group.header.loss_stale_active != 0;
+            if ignore_unrelated_loss_stale {
+                for (asset_index, ..) in &leg_ctx {
+                    if !can_ignore_unrelated_loss_stale_for_trade_view(
+                        &group,
+                        &account_a,
+                        &account_b,
+                        *asset_index,
+                    )? {
+                        ignore_unrelated_loss_stale = false;
+                        break;
+                    }
+                }
+            }
+            if ignore_unrelated_loss_stale {
+                group.header.loss_stale_active = 0;
+            }
+
+            let source_lien_before_a =
+                source_lien_effective_reserved_snapshot_for_trade_view(&account_a)?;
+            let source_lien_before_b =
+                source_lien_effective_reserved_snapshot_for_trade_view(&account_b)?;
+
+            let outcome = group
+                .execute_batch_with_fee_in_place_not_atomic(
+                    &mut account_a,
+                    &mut account_b,
+                    &requests,
+                )
+                .map_err(map_v16_error)?;
+
+            // Post-pass: split fees back to each asset's domains and drive its hybrid mark. Fees are
+            // reconstructed deterministically per leg; the running total must equal the engine's
+            // aggregate or we refuse the batch (no silent mis-accounting).
+            let mut reconstructed_total: u128 = 0;
+            let mut cfg_dirty = false;
+            for (asset_index, oracle_profile, reported_price, fee_basis_price, fee_bps_eff, abs_size) in
+                leg_ctx.iter_mut()
+            {
+                let fee_leg = batch_leg_fee(*abs_size, *fee_basis_price, *fee_bps_eff)?;
+                credit_trade_fees_to_market_budgets_view(
+                    &cfg,
+                    &mut group,
+                    *asset_index,
+                    fee_leg,
+                    fee_leg,
+                )?;
+                let total_fee_leg = fee_leg
+                    .checked_add(fee_leg)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                reconstructed_total = reconstructed_total
+                    .checked_add(total_fee_leg)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                update_hybrid_mark_after_trade_view(
+                    oracle_profile,
+                    &group,
+                    *asset_index,
+                    *reported_price,
+                    total_fee_leg,
+                )?;
+                write_oracle_profile_to_view(&mut group, *asset_index, oracle_profile)?;
+                if *asset_index == 0 && oracle_v16::profile_is_price_managed(oracle_profile) {
+                    cfg.mark_ewma_e6 = oracle_profile.mark_ewma_e6;
+                    cfg.mark_ewma_last_slot = oracle_profile.mark_ewma_last_slot;
+                    cfg_dirty = true;
+                }
+            }
+            let engine_total = outcome
+                .fee_a
+                .checked_add(outcome.fee_b)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            if reconstructed_total != engine_total {
+                return Err(PercolatorError::EngineArithmeticOverflow.into());
+            }
+            if cfg_dirty {
+                cfg_after = Some(cfg);
+            }
+
+            let validation_result = group.validate_shape();
+            if ignore_unrelated_loss_stale {
+                group.header.loss_stale_active = restore_loss_stale_active;
+            }
+            validation_result.map_err(map_v16_error)?;
+
             let source_lien_after_a =
                 source_lien_effective_reserved_snapshot_for_trade_view(&account_a)?;
             let source_lien_after_b =
@@ -6238,7 +6620,9 @@ pub mod processor {
         }
         let req = TradeRequestV16 {
             asset_index: asset_index_usize,
-            size_q: close_q,
+            // signed size_q; force-close direction is carried by the long/short orientation
+            // selected just below, so pass the positive close magnitude here.
+            size_q: close_q as i128,
             exec_price: frozen_mark,
             fee_bps: 0,
         };
@@ -6427,6 +6811,236 @@ pub mod processor {
             ret.exec_size,
             ret.exec_price_e6,
             fee_bps,
+            max_market_slots,
+        )
+    }
+
+    /// Maximum legs in a single matcher batch CPI: the matcher returns N*64 bytes via
+    /// `set_return_data`, bounded by Solana's 1024-byte return-data cap.
+    const MATCHER_BATCH_MAX_LEGS: usize = 16;
+
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_matcher_batch<'a>(
+        matcher_prog: &AccountInfo<'a>,
+        matcher_ctx: &AccountInfo<'a>,
+        matcher_delegate: &AccountInfo<'a>,
+        tail: &[AccountInfo<'a>],
+        req_id: u64,
+        lp_account_id: u64,
+        // (asset_index, oracle_price_e6, signed req_size) per leg
+        legs: &[(u16, u64, i128)],
+        seeds: &[&[u8]],
+    ) -> ProgramResult {
+        let mut data = Vec::with_capacity(18 + legs.len() * 26);
+        data.push(3u8);
+        data.push(legs.len() as u8);
+        data.extend_from_slice(&req_id.to_le_bytes());
+        data.extend_from_slice(&lp_account_id.to_le_bytes());
+        for (asset_index, oracle_price_e6, req_size) in legs {
+            data.extend_from_slice(&asset_index.to_le_bytes());
+            data.extend_from_slice(&oracle_price_e6.to_le_bytes());
+            data.extend_from_slice(&req_size.to_le_bytes());
+        }
+        let mut metas = Vec::with_capacity(2 + tail.len());
+        metas.push(AccountMeta::new_readonly(*matcher_delegate.key, true));
+        metas.push(AccountMeta::new(*matcher_ctx.key, false));
+        for ai in tail {
+            if ai.is_writable {
+                metas.push(AccountMeta::new(*ai.key, ai.is_signer));
+            } else {
+                metas.push(AccountMeta::new_readonly(*ai.key, ai.is_signer));
+            }
+        }
+        let ix = SolInstruction {
+            program_id: *matcher_prog.key,
+            accounts: metas,
+            data,
+        };
+        let mut infos = Vec::with_capacity(3 + tail.len());
+        infos.push(matcher_delegate.clone());
+        infos.push(matcher_ctx.clone());
+        infos.push(matcher_prog.clone());
+        for ai in tail {
+            infos.push(ai.clone());
+        }
+        invoke_signed(&ix, &infos, &[seeds])
+    }
+
+    /// Atomic multi-leg batch routed through one external matcher. A single batched matcher CPI
+    /// fills every leg against the LP (account_b), the per-leg returns are validated under the same
+    /// anti-spoof binding as the single-fill path, and all fills then apply through the batch
+    /// engine path with one end-state margin check.
+    #[inline(never)]
+    fn handle_batch_trade_cpi<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        legs: &[ix::BatchTradeCpiLeg],
+    ) -> ProgramResult {
+        if legs.is_empty() || legs.len() > MATCHER_BATCH_MAX_LEGS {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let signer_a = account(accounts, 0)?;
+        let signer_b = account(accounts, 1)?;
+        let market_ai = account(accounts, 2)?;
+        let account_a_ai = account(accounts, 3)?;
+        let account_b_ai = account(accounts, 4)?;
+        let matcher_prog = account(accounts, 5)?;
+        let matcher_ctx = account(accounts, 6)?;
+        let matcher_delegate = account(accounts, 7)?;
+        let tail = &accounts[8..];
+
+        expect_signer(signer_a)?;
+        expect_signer(signer_b)?;
+        expect_writable(market_ai)?;
+        expect_writable(account_a_ai)?;
+        expect_writable(account_b_ai)?;
+        expect_writable(matcher_ctx)?;
+        expect_owner(market_ai, program_id)?;
+        expect_owner(account_a_ai, program_id)?;
+        expect_owner(account_b_ai, program_id)?;
+        if account_a_ai.key == account_b_ai.key
+            || !matcher_prog.executable
+            || matcher_ctx.owner != matcher_prog.key
+            || matcher_ctx.data_len() < constants::MATCHER_CONTEXT_MIN_LEN
+            || tail.len() > constants::MAX_MATCHER_TAIL_ACCOUNTS
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        for ai in tail {
+            if ai.key == market_ai.key
+                || ai.key == account_a_ai.key
+                || ai.key == account_b_ai.key
+                || ai.key == program_id
+                || ai.owner == program_id
+            {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+        }
+
+        let (delegate, bump) = derive_matcher_delegate(
+            program_id,
+            market_ai.key,
+            account_b_ai.key,
+            matcher_prog.key,
+            matcher_ctx.key,
+        );
+        expect_key(matcher_delegate, &delegate)?;
+
+        // Preflight: market must be Live, both accounts owned by their signers and self-consistent,
+        // and read each leg's oracle price (for the matcher request + return binding).
+        let mut asset_indices: Vec<u16> = Vec::with_capacity(legs.len());
+        for leg in legs {
+            if leg.size_q == 0 || leg.size_q == i128::MIN {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            asset_indices.push(leg.asset_index);
+        }
+        // One header/config parse for mode + slot + every leg's oracle price (avoids O(N^2)
+        // re-parsing the market once per leg).
+        let (mode_pre, current_slot_pre, oracle_prices) = {
+            let market_data = market_ai.try_borrow_data()?;
+            state::read_asset_effective_prices(&market_data, &asset_indices)?
+        };
+        if mode_pre != MarketModeV16::Live {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        let (account_a_header, account_a_owner) =
+            state::read_portfolio_owner_preflight(&account_a_ai.try_borrow_data()?)?;
+        let (account_b_header, account_b_owner) =
+            state::read_portfolio_owner_preflight(&account_b_ai.try_borrow_data()?)?;
+        if account_a_header.portfolio_account_id != account_a_ai.key.to_bytes()
+            || account_b_header.portfolio_account_id != account_b_ai.key.to_bytes()
+        {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
+        if account_a_owner != signer_a.key.to_bytes() || account_b_owner != signer_b.key.to_bytes() {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+
+        let req_id = current_slot_pre.wrapping_add(1);
+        let lp_account_id = matcher_lp_account_id(&delegate);
+
+        // Build the matcher batch request: per leg, (asset, that asset's oracle price, signed size).
+        let mut matcher_legs: Vec<(u16, u64, i128)> = Vec::with_capacity(legs.len());
+        for (i, leg) in legs.iter().enumerate() {
+            if oracle_prices[i] == 0 {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            matcher_legs.push((leg.asset_index, oracle_prices[i], leg.size_q));
+        }
+
+        invoke_matcher_batch(
+            matcher_prog,
+            matcher_ctx,
+            matcher_delegate,
+            tail,
+            req_id,
+            lp_account_id,
+            &matcher_legs,
+            &[
+                b"matcher",
+                market_ai.key.as_ref(),
+                account_b_ai.key.as_ref(),
+                matcher_prog.key.as_ref(),
+                matcher_ctx.key.as_ref(),
+                &[bump],
+            ],
+        )?;
+
+        // Read the N back-to-back returns the matcher emitted via set_return_data.
+        let (ret_program, ret_data) =
+            solana_program::program::get_return_data().ok_or(PercolatorError::InvalidInstruction)?;
+        if ret_program != *matcher_prog.key
+            || ret_data.len() != legs.len() * matcher_abi::MATCHER_RETURN_BYTES
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+
+        let mut exec_legs: Vec<ix::BatchTradeLeg> = Vec::with_capacity(legs.len());
+        for (i, leg) in legs.iter().enumerate() {
+            let chunk = &ret_data[i * matcher_abi::MATCHER_RETURN_BYTES
+                ..(i + 1) * matcher_abi::MATCHER_RETURN_BYTES];
+            let ret = matcher_abi::read_matcher_return(chunk)?;
+            matcher_abi::validate_matcher_return(
+                &ret,
+                lp_account_id,
+                leg.asset_index,
+                oracle_prices[i],
+                leg.size_q,
+                req_id,
+            )?;
+            // Atomic strategy semantics: every leg must fill (no zero/skip fills in a batch).
+            if ret.exec_size == 0 {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            if leg.limit_price != 0 {
+                let limit_ok = if leg.size_q > 0 {
+                    ret.exec_price_e6 <= leg.limit_price
+                } else {
+                    ret.exec_price_e6 >= leg.limit_price
+                };
+                if !limit_ok {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+            }
+            exec_legs.push(ix::BatchTradeLeg {
+                asset_index: leg.asset_index,
+                size_q: ret.exec_size,
+                exec_price: ret.exec_price_e6,
+                fee_bps: leg.fee_bps,
+            });
+        }
+
+        let (_, _, max_market_slots, _) =
+            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        handle_batch_execute_zero_copy(
+            program_id,
+            signer_a,
+            signer_b,
+            market_ai,
+            account_a_ai,
+            account_b_ai,
+            &exec_legs,
             max_market_slots,
         )
     }
