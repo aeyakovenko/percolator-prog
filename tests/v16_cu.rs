@@ -16534,3 +16534,37 @@ fn v16_attack_maintenance_fee_spam_cannot_overdrain() {
     env.sync_maintenance_fee_with_cu(p, None, 100);
     assert!(env.portfolio_state(p).capital < cap1, "advancing real time accrues additional fee");
 }
+
+// SOL-010 (reinitialization): InitPortfolio targets a program-owned account and SETS its owner. An
+// attacker could try to re-init a VICTIM's already-funded portfolio -- which would reset its capital
+// and reassign ownership, a severe LOF (victim's vaulted tokens orphaned). The is_initialized guard
+// must reject it, leaving the victim's portfolio byte-identical.
+#[test]
+fn v16_attack_init_portfolio_cannot_reinit_funded_victim() {
+    let mut env = V16CuEnv::new();
+    let victim = Keypair::new();
+    let vp = env.create_portfolio(&victim);
+    env.deposit(&victim, vp, 500_000);
+    let before = env.svm.get_account(&vp).unwrap().data.clone();
+    let v_owner = env.portfolio_state(vp).owner;
+    let v_cap = env.portfolio_state(vp).capital;
+    assert!(v_cap > 0);
+    // attacker tries to re-initialize the victim's portfolio, claiming ownership.
+    let attacker = Keypair::new();
+    env.ensure_signer_account(attacker.pubkey());
+    env.svm.expire_blockhash();
+    let r = env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(vp, false),
+        ],
+        &[&attacker],
+    );
+    assert!(r.is_err(), "re-init of an initialized portfolio must reject (AlreadyInitialized)");
+    // victim's portfolio is byte-identical: capital, owner, and raw bytes intact.
+    assert_eq!(env.svm.get_account(&vp).unwrap().data, before, "victim portfolio bytes unchanged");
+    assert_eq!(env.portfolio_state(vp).owner, v_owner, "ownership not reassigned");
+    assert_eq!(env.portfolio_state(vp).capital, v_cap, "capital not reset");
+}
