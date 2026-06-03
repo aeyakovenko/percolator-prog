@@ -16568,3 +16568,34 @@ fn v16_attack_init_portfolio_cannot_reinit_funded_victim() {
     assert_eq!(env.portfolio_state(vp).owner, v_owner, "ownership not reassigned");
     assert_eq!(env.portfolio_state(vp).capital, v_cap, "capital not reset");
 }
+
+// LOF (fund-stranding): ClosePortfolio zeroes the account and reclaims its rent. If it allowed closing
+// a portfolio with non-zero capital, those vaulted tokens would be orphaned -- and this would NOT trip
+// conservation (vault still >= c_tot + insurance; the tokens just become unwithdrawable). The closable
+// guard must reject a funded close. Verify reject + funds fully intact + still withdrawable after.
+#[test]
+fn v16_attack_close_portfolio_with_capital_rejected_no_strand() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 400_000);
+    let cap = env.portfolio_state(p).capital;
+    let vault0 = env.token_amount(env.vault);
+    assert!(cap > 0 && vault0 >= 400_000);
+    env.svm.expire_blockhash();
+    let r = env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+        ],
+        &[&owner],
+    );
+    assert!(r.is_err(), "closing a funded portfolio must reject (would strand vault tokens)");
+    assert_eq!(env.portfolio_state(p).capital, cap, "capital intact after rejected close");
+    assert_eq!(env.token_amount(env.vault), vault0, "vault untouched");
+    // and the funds remain withdrawable -> not stranded.
+    let dest = env.withdraw(&owner, p, 400_000);
+    assert_eq!(env.token_amount(dest), 400_000, "owner can still withdraw the full balance");
+}
