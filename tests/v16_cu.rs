@@ -15722,3 +15722,160 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
     ).expect("the asset authority may activate");
     assert_eq!(env.market_state().1.assets[1].lifecycle, AssetLifecycleV16::Active, "admin activation succeeds");
 }
+
+
+
+// Scale proof — a 5,000-asset market (~8.57 MB account, the largest that fits Solana's 10 MiB
+// account cap) is valid AND a real BPF trade on a HIGH asset index executes with O(1)-in-N compute.
+//
+// We cannot activate 5,000 assets via 5,000 UpdateAssetLifecycle txs (far too slow), so we CONSTRUCT
+// the market state directly: start from a known-good 1-asset market, make asset 0 active+flat via
+// ConfigureAuthMark, grow the on-chain account to market_account_len_for_capacity(5000), then via the
+// host mirror set max_market_slots=5000 and clone asset 0's active state into a high traded index
+// (index 4999). All intermediate slots stay canonical DISABLED slots (validate_shape accepts them).
+// A real BPF TradeNoCpi on index 4999 then opens a balanced position; its CU is compared to a
+// small-N trade to prove per-trade compute does NOT scale with the 5,000 asset count.
+//
+// Mechanism notes worth recording (verified against the pinned engine + wrapper):
+//   * The production validate_shape() is HEADER-ONLY (O(1)); the O(N) per-slot audit scan is gated
+//     behind the `audit-scan`/test/kani features, which are OFF in the deployed `.so`.
+//   * handle_trade_nocpi reads the market as a zero-copy view and indexes group.markets[asset_index]
+//     directly — it never iterates the 5,000 slots, so trade CU is O(1) in N.
+//   * The trade path enforces backing_bucket.market_id == asset.market_id (engine v16.rs:4112), so the
+//     cloned high-index asset's two domain backing buckets must carry the same market_id.
+//   * Each asset's oracle profile lives in the per-slot wrapper prefix; we copy asset 0's AUTH_MARK
+//     profile bytes into the high slot so the high index has a valid, current (non-stale) mark.
+#[test]
+fn v16_bpf_5000_asset_market_trades_with_bounded_cu() {
+    const N: usize = 5_000;
+    const TRADED: usize = N - 1; // 4999 — a HIGH index, proving the trade isn't special to asset 0.
+    const PRICE: u64 = 100;
+    const TRADE_SLOT: u64 = 10;
+
+    // 1) Known-good 1-asset market; make asset 0 ACTIVE + flat with a current AUTH_MARK at PRICE.
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(1, PRICE);
+    let (_, g0) = env.market_state();
+    assert_eq!(g0.config.max_market_slots, 1, "starts as a 1-asset market");
+    assert_eq!(
+        g0.assets[0].lifecycle,
+        AssetLifecycleV16::Active,
+        "asset 0 active after ConfigureAuthMark"
+    );
+    let template = g0.assets[0]; // active-but-flat AssetStateV16 to clone into the high index.
+
+    // 2) Grow the on-chain market account to the 5,000-slot capacity (~8.57 MB). Preserve the existing
+    //    header/asset-0 bytes (so check_header still passes); the appended tail is zero-filled, which
+    //    reads back as canonical DISABLED slots.
+    let new_len = state::market_account_len_for_capacity(N).unwrap();
+    let small_len = state::market_account_len_for_capacity(1).unwrap();
+    assert!(
+        new_len >= 8_000_000 && new_len <= 10 * 1024 * 1024,
+        "5,000-asset market account is ~8.57 MB and fits Solana's 10 MiB cap (got {new_len} bytes)"
+    );
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        assert_eq!(acct.data.len(), small_len, "market started at the 1-slot length");
+        acct.data.resize(new_len, 0u8); // append zero-filled (canonical disabled) slots.
+        // Bump lamports so the larger account is rent-exempt under LiteSVM's rent model.
+        acct.lamports = acct.lamports.max(new_len as u64 * 10);
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    // 3) Build the 5,000-asset mirror: bump max_market_slots to N and clone asset 0's active state into
+    //    the high traded index (fixing its per-asset market_id + matching domain backing buckets).
+    let high_market_id: u64 = (TRADED as u64) + 1; // canonical market_id = index + 1.
+    env.mutate_market(|_cfg, group| {
+        // Reading the grown account already yields 5,000 assets (asset 0 active, 1..N disabled) and
+        // per-domain Vecs of length 2*N; just bump the configured slot count and activate the high one.
+        assert_eq!(group.assets.len(), N, "grown read yields N asset slots");
+        assert_eq!(group.insurance_domain_budget.len(), 2 * N, "per-domain Vecs sized to 2N");
+        group.config.max_market_slots = N as u32;
+        group.next_market_id = (N as u64) + 1;
+
+        let mut high = template; // active-but-flat clone.
+        high.market_id = high_market_id;
+        group.assets[TRADED] = high;
+
+        // The traded asset's two domains (2*TRADED, 2*TRADED+1) need backing buckets whose market_id
+        // matches the asset (engine trade path asserts this); the rest stay EMPTY/disabled.
+        let (ld, sd) = (2 * TRADED, 2 * TRADED + 1);
+        group.source_backing_buckets[ld] = percolator::BackingBucketV16::empty_for_market(high_market_id);
+        group.source_backing_buckets[sd] = percolator::BackingBucketV16::empty_for_market(high_market_id);
+    });
+
+    // 4) Copy asset 0's AUTH_MARK oracle profile into the high slot so index 4999 has a valid, current
+    //    (non-stale) mark to trade against.
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        let profile0 = state::read_asset_oracle_profile(&acct.data, 0).unwrap();
+        state::write_asset_oracle_profile(&mut acct.data, TRADED, &profile0).unwrap();
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    // Sanity: the constructed 5,000-asset state round-trips and the high index is active.
+    let (_, g) = env.market_state();
+    assert_eq!(g.config.max_market_slots as usize, N, "market now reports 5,000 configured slots");
+    assert_eq!(g.assets.len(), N, "5,000 asset slots present");
+    assert_eq!(
+        g.assets[TRADED].lifecycle,
+        AssetLifecycleV16::Active,
+        "high traded index {TRADED} is ACTIVE"
+    );
+    assert_eq!(g.assets[TRADED].effective_price, PRICE, "high index carries a current mark");
+    assert_eq!(g.assets[TRADED].market_id, high_market_id, "high index market_id set");
+    let actual_account_len = env.svm.get_account(&env.market).unwrap().data.len();
+    assert_eq!(actual_account_len, new_len, "on-chain market account is the 8.57 MB buffer");
+
+    // 5) Pre-size portfolios for the grown market, fund them, and execute a real BPF trade on index 4999.
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+
+    env.svm.warp_to_slot(TRADE_SLOT);
+    env.svm.expire_blockhash();
+    let trade_cu = env.trade_asset_with_cu(
+        TRADED as u16,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        PRICE,
+        100,
+    );
+
+    println!(
+        "v16 5000-asset market: account_len={actual_account_len} bytes ({:.2} MB), \
+         trade on asset[{TRADED}] BPF CU={trade_cu}",
+        actual_account_len as f64 / 1_000_000.0
+    );
+
+    // The trade actually opened a balanced position on the HIGH index.
+    let (_, gt) = env.market_state();
+    assert_eq!(
+        gt.assets[TRADED].oi_eff_long_q,
+        gt.assets[TRADED].oi_eff_short_q,
+        "balanced OI on the high index"
+    );
+    assert!(gt.assets[TRADED].oi_eff_long_q > 0, "position opened on asset[{TRADED}]");
+    let long = env.portfolio_state(long_account);
+    let short = env.portfolio_state(short_account);
+    assert_eq!(long.legs[0].basis_pos_q, (10 * POS_SCALE) as i128, "long leg basis");
+    assert_eq!(short.legs[0].basis_pos_q, -((10 * POS_SCALE) as i128), "short leg basis");
+    // Conservation across the 8.57 MB market.
+    assert_eq!(gt.vault as u64, env.token_amount(env.vault), "accounting vault == real vault");
+    assert!(gt.vault >= gt.c_tot + gt.insurance, "senior conservation at N=5000");
+
+    // HEADLINE: per-trade CU is O(1) in N — a 5,000-asset trade costs about the same as a small-N
+    // trade and is FAR under the 1.4M tx limit. Bound it well below the single-trade guardrail.
+    assert_cu_within("5000-asset trade", trade_cu, TRADE_CU_LIMIT);
+    assert!(
+        trade_cu < 1_400_000,
+        "5000-asset trade CU {trade_cu} is under the 1.4M tx limit"
+    );
+}

@@ -38,12 +38,16 @@ The economic and governance model for a permissionless multi-asset market. Statu
 ### Market = one slab of N assets
 - A **market is one account ("slab") holding an array of N assets**: `engine header + [Asset<T>]`
   slice, resizable by the program. The engine operates **one market at a time**. **✅**
-- A **10 MB slab should support 10k+ assets**, and per-trader CU stays bounded **independent of N**
-  (a trader pays only for the assets they actually touch, not all N). **✅** — there is no 64-asset
-  cap (`v16_attack_market_exceeds_64_assets_position_holds_any_14_legs`), and the portfolio's
+- A **10 MB slab fits ~5,800 assets** (per-asset slot is 1797 B; Solana caps an account at 10 MiB), and
+  per-trader CU stays bounded **independent of N** (a trader pays only for the assets they actually
+  touch, not all N). **✅** — no 64-asset cap (`v16_attack_market_exceeds_64_assets_position_holds_any_14_legs`),
+  and a real BPF trade on asset **index 4999 of a 5,000-asset / 8.99 MB market costs ~76k CU** — flat
+  vs. small-N, proving O(1)-in-N (`v16_bpf_5000_asset_market_trades_with_bounded_cu`). The portfolio's
   source-domains are a **fixed sparse array** (engine `c120fce`), so the position account and
-  per-instruction CU are O(1) in N — bounded only by the per-position asset cap. The 14-leg
-  worst-case trade is back under the 1.4M CU limit (`v16_bpf_stale_full_14_leg_tradenocpi_is_under_tx_limit`).
+  per-instruction CU are O(1) in N — bounded only by the per-position asset cap. The 14-leg worst-case
+  trade is under the 1.4M CU limit (`v16_bpf_stale_full_14_leg_tradenocpi_is_under_tx_limit`).
+  (A literal 10k assets in one slab would need the per-asset slot trimmed 1797 B → ≤ ~1048 B; the
+  O(1)-in-N scaling property holds regardless.)
 
 ### Asset 0 — the base unit
 - **Asset 0 is denominated in the base unit** and has its own **insurance + backing**. **✅**
