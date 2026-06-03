@@ -1,0 +1,13 @@
+[package]
+name = "hostile-matcher"
+version = "0.1.0"
+edition = "2021"
+
+# isolate from any parent: own workspace root so `cargo test` in percolator-prog ignores it.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = "2.0"

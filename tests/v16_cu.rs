@@ -16431,3 +16431,72 @@ fn v16_attack_matcher_return_antispoof_rejections() {
         assert!(chk(&bad).is_err(), "hostile matcher return must be rejected: {name}");
     }
 }
+
+fn hostile_matcher_program_path() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("tests/fixtures/hostile_matcher/target/deploy/hostile_matcher.so");
+    assert!(path.exists(), "build the hostile matcher: cargo build-sbf in {path:?}");
+    path
+}
+
+// End-to-end adversarial: a HOSTILE matcher .so returns crafted tag-3 replies (over-fill, reversed
+// sign, forged asset/oracle/req_id/lp echo, zero price, unflagged partial, short return length). The
+// wrapper's get_return_data + per-leg validate_matcher_return must REJECT every one (whole batch
+// reverts, no position opened); only the faithful reply (mode 9) executes. Complements the
+// validate_matcher_return UNIT test by exercising the full CPI return-data plumbing end-to-end.
+#[test]
+fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(hostile, &std::fs::read(hostile_matcher_program_path()).unwrap());
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(&env.program_id, &env.market, &la, &hostile, &ctx);
+    env.svm.set_account(delegate, Account { lamports: 1_000_000_000, data: vec![], owner: Pubkey::default(), executable: false, rent_epoch: 0 }).unwrap();
+    let sz = (5 * POS_SCALE) as i128;
+    let send_mode = |env: &mut V16CuEnv, mode: u8| -> Result<u64, String> {
+        let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
+        data[0] = mode;
+        env.svm.set_account(ctx, Account { lamports: 1_000_000_000, data, owner: hostile, executable: false, rent_epoch: 0 }).unwrap();
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::BatchTradeCpi { legs: vec![
+                BatchTradeCpiLeg { asset_index: 0, size_q: sz, fee_bps: 100, limit_price: 0 },
+                BatchTradeCpiLeg { asset_index: 1, size_q: sz, fee_bps: 100, limit_price: 0 },
+            ]},
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker, &lp],
+        )
+    };
+    let labels = ["over-fill", "reversed-sign", "forged-asset", "forged-oracle", "forged-req_id",
+                  "forged-lp", "zero-price", "unflagged-partial", "short-length"];
+    for (mode, label) in labels.iter().enumerate() {
+        let r = send_mode(&mut env, mode as u8);
+        assert!(r.is_err(), "hostile matcher mode '{label}' must be rejected by the wrapper");
+        let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
+        assert!(!has_active_leg_for_asset(&t, 0) && !has_active_leg_for_asset(&t, 1),
+            "no position may be opened on a rejected hostile reply ({label})");
+    }
+    // sanity: the SAME harness with a faithful reply (mode 9) executes -> rejections above are real,
+    // not a broken test setup.
+    let ok = send_mode(&mut env, 9);
+    assert!(ok.is_ok(), "faithful matcher reply must execute through the same path: {ok:?}");
+    let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
+    assert!(has_active_leg_for_asset(&t, 0) && has_active_leg_for_asset(&t, 1), "faithful reply fills both legs");
+}
