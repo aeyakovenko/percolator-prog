@@ -16381,3 +16381,53 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
     let t2 = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
     assert!(has_active_leg_for_asset(&t2, 0) && has_active_leg_for_asset(&t2, 1), "both legs filled");
 }
+
+// Anti-spoof core: validate_matcher_return is the per-leg gate that bounds a (possibly hostile)
+// matcher's reply. Every CPI integration test feeds it HONEST returns; this exercises the REJECTION
+// branches directly with crafted hostile replies (over-fill, reversed sign, forged echo, bad flags,
+// zero price, unflagged partial). Guards the anti-spoof against regression end-to-end of the struct.
+#[test]
+fn v16_attack_matcher_return_antispoof_rejections() {
+    use percolator_prog::matcher_abi::{validate_matcher_return, MatcherReturn, FLAG_VALID, FLAG_PARTIAL_OK, FLAG_REJECTED};
+    const LP: u64 = 7;
+    const ASSET: u16 = 1;
+    const ORACLE: u64 = 100;
+    const REQID: u64 = 42;
+    let req: i128 = (10 * POS_SCALE) as i128; // taker buy, full size 10
+    let valid = MatcherReturn {
+        abi_version: MATCHER_ABI_VERSION,
+        flags: FLAG_VALID,
+        exec_price_e6: 100,
+        exec_size: req,
+        req_id: REQID,
+        lp_account_id: LP,
+        oracle_price_e6: ORACLE,
+        asset_index: ASSET as u64,
+    };
+    let chk = |r: &MatcherReturn| validate_matcher_return(r, LP, ASSET, ORACLE, req, REQID);
+    // baseline: a faithful full fill is accepted.
+    assert!(chk(&valid).is_ok(), "faithful full fill must validate");
+    // a faithful partial fill (flagged) is accepted.
+    let mut partial = valid; partial.exec_size = (5 * POS_SCALE) as i128; partial.flags = FLAG_VALID | FLAG_PARTIAL_OK;
+    assert!(chk(&partial).is_ok(), "flagged partial fill validates");
+
+    // --- hostile replies, each must REJECT ---
+    let cases: &[(&str, fn(MatcherReturn) -> MatcherReturn)] = &[
+        ("over-fill (exec>req)", |mut r| { r.exec_size = (20 * POS_SCALE) as i128; r }),
+        ("reversed sign", |mut r| { r.exec_size = -((10 * POS_SCALE) as i128); r }),
+        ("forged asset echo", |mut r| { r.asset_index = 2; r }),
+        ("forged oracle echo", |mut r| { r.oracle_price_e6 = 99; r }),
+        ("forged req_id", |mut r| { r.req_id = 43; r }),
+        ("forged lp_account_id", |mut r| { r.lp_account_id = 8; r }),
+        ("bad abi_version", |mut r| { r.abi_version = MATCHER_ABI_VERSION + 1; r }),
+        ("REJECTED flag set", |mut r| { r.flags = FLAG_VALID | FLAG_REJECTED; r }),
+        ("VALID flag missing", |mut r| { r.flags = 0; r }),
+        ("unknown flag bit", |mut r| { r.flags = FLAG_VALID | 0x100; r }),
+        ("zero exec_price", |mut r| { r.exec_price_e6 = 0; r }),
+        ("unflagged partial (exec<req, no PARTIAL_OK)", |mut r| { r.exec_size = (5 * POS_SCALE) as i128; r }),
+    ];
+    for (name, mutate) in cases {
+        let bad = mutate(valid);
+        assert!(chk(&bad).is_err(), "hostile matcher return must be rejected: {name}");
+    }
+}
