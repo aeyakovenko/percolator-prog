@@ -16500,3 +16500,37 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
     let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
     assert!(has_active_leg_for_asset(&t, 0) && has_active_leg_for_asset(&t, 1), "faithful reply fills both legs");
 }
+
+// DoS-resistance: SyncMaintenanceFee is permissionless, so an attacker could try to grief a victim by
+// spamming it to over-drain their capital, or by passing a far-future now_slot to charge future time.
+// The fee is time-based (charged on real elapsed slots, last_sync advanced to now) and uses the
+// AUTHENTICATED clock -> spamming in one slot charges only once, and a future now_slot charges nothing
+// extra. The victim pays exactly the elapsed-time fee they already owe, no more.
+#[test]
+fn v16_attack_maintenance_fee_spam_cannot_overdrain() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(1, 1_000, 1_000, 500, 100);
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    let cap0 = env.portfolio_state(p).capital;
+    env.svm.warp_to_slot(50);
+    // first sync at slot 50: charges the elapsed-time maintenance fee.
+    env.sync_maintenance_fee_with_cu(p, None, 50);
+    let cap1 = env.portfolio_state(p).capital;
+    assert!(cap1 < cap0, "first sync charges the accrued maintenance fee");
+    // SPAM: repeated syncs in the same slot charge nothing more (idempotent -> no grief over-drain).
+    for _ in 0..5 {
+        env.svm.expire_blockhash();
+        let _ = env.try_sync_maintenance_fee_with_cu(p, None, 50);
+    }
+    assert_eq!(env.portfolio_state(p).capital, cap1, "spamming sync in one slot must not over-charge");
+    // FUTURE now_slot lie: real clock is still 50, so no future time can be charged.
+    env.svm.expire_blockhash();
+    let _ = env.try_sync_maintenance_fee_with_cu(p, None, 50 + 1_000_000);
+    assert_eq!(env.portfolio_state(p).capital, cap1, "a future now_slot cannot charge future maintenance time");
+    // real time advancing DOES accrue more (fee is genuinely time-based).
+    env.svm.warp_to_slot(100);
+    env.svm.expire_blockhash();
+    env.sync_maintenance_fee_with_cu(p, None, 100);
+    assert!(env.portfolio_state(p).capital < cap1, "advancing real time accrues additional fee");
+}
