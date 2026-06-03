@@ -16317,3 +16317,67 @@ fn v16_attack_force_close_cannot_bypass_timeout_with_future_now_slot() {
     let ok = env.try_force_close_abandoned_asset_with_cu(&cranker, pa, pb, 1, SHUT + DELAY + 5, POS_SCALE);
     assert!(ok.is_ok(), "force-close succeeds once the authenticated clock crosses the window: {ok:?}");
 }
+
+// SOL-028 (slippage) + atomicity: in a BatchTradeCpi, each leg's limit_price is enforced against the
+// matcher's off-oracle fill, AND a slippage violation on ANY single leg must abort the WHOLE atomic
+// batch (no partial execution). A spread matcher fills buys above oracle; one tight-limit leg
+// bundled with generous legs must revert the entire batch with nothing filled.
+#[test]
+fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+    // spread matcher: oracle 100, base spread 500 bps -> buy ask = 105 on every leg.
+    let (ctx, delegate, _) = env.init_matcher_context_with_passive_spread(matcher_program, la, 500, 1_000);
+    let sz = (5 * POS_SCALE) as i128;
+    let metas = |env: &V16CuEnv| vec![
+        AccountMeta::new(taker.pubkey(), true),
+        AccountMeta::new(lp.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(ta, false),
+        AccountMeta::new(la, false),
+        AccountMeta::new_readonly(matcher_program, false),
+        AccountMeta::new(ctx, false),
+        AccountMeta::new_readonly(delegate, false),
+    ];
+    // leg 0 generous limit (would fill at 105 <= 1_000_000); leg 1 tight limit (100 < ask 105 -> violate).
+    env.svm.expire_blockhash();
+    let r = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![
+                BatchTradeCpiLeg { asset_index: 0, size_q: sz, fee_bps: 100, limit_price: 1_000_000 },
+                BatchTradeCpiLeg { asset_index: 1, size_q: sz, fee_bps: 100, limit_price: 100 },
+            ],
+        },
+        metas(&env),
+        &[&taker, &lp],
+    );
+    assert!(r.is_err(), "a per-leg slippage violation must abort the whole batch");
+    let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
+    assert!(!has_active_leg_for_asset(&t, 0) && !has_active_leg_for_asset(&t, 1),
+        "atomic: NO leg filled when one leg's limit is violated (no partial execution)");
+    // control: both legs generous -> whole batch executes, both legs filled.
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![
+                BatchTradeCpiLeg { asset_index: 0, size_q: sz, fee_bps: 100, limit_price: 1_000_000 },
+                BatchTradeCpiLeg { asset_index: 1, size_q: sz, fee_bps: 100, limit_price: 1_000_000 },
+            ],
+        },
+        metas(&env),
+        &[&taker, &lp],
+    );
+    assert!(ok.is_ok(), "batch with both limits generous must execute: {ok:?}");
+    let t2 = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
+    assert!(has_active_leg_for_asset(&t2, 0) && has_active_leg_for_asset(&t2, 1), "both legs filled");
+}
