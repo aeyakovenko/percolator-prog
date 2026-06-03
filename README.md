@@ -50,13 +50,16 @@ The economic and governance model for a permissionless multi-asset market. Statu
 - A **configured % of asset-0 backing yield routes to asset-0 insurance**. **✅**
   (`v16_attack_backing_fee_split_conserves` — see Assets 1..N fee routing.)
 - An **asset-0 key sets the fee to create assets 1..N permissionlessly**. **A fee of zero means
-  creation is NOT permissionless** — market-wide authority is then required to add an asset. **◑**
+  creation is NOT permissionless** — market-wide authority is then required to add an asset. **✅**
   (`UpdateMarketInitFeePolicy`; the append path charges `permissionless_market_init_fee_for_asset`
-  and returns `Unauthorized` for a non-authority when the fee is 0, `v16_program.rs:8598`.)
+  and returns `Unauthorized` for a non-authority when the fee is 0, `v16_program.rs:8598`;
+  `v16_attack_permissionless_create_requires_nonzero_fee`.)
 
 ### Assets 1..N
 - All **denominated in the base unit**; every asset terminates into the base unit. **✅**
-- **Permissionless to create for a fee, and that fee goes to asset-0 insurance.** **◑**
+- **Permissionless to create for a fee, and that fee goes to asset-0 insurance.** **✅**
+  (`v16_attack_permissionless_create_fee_funds_asset0_insurance` asserts the whole fee lands in the
+  asset-0 insurance pool + its per-domain budgets, conserved.)
   (`handle_update_asset_lifecycle` append → `credit_market_insurance_budget_view(group, 0, fee)`,
   `v16_program.rs:8723/8758`.)
 - Each asset has its **own insurance + backing**. **✅**
@@ -83,7 +86,9 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   (`v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance`) AND **backing**
   (`v16_attack_asset1_insolvency_cannot_drain_asset0_backing`) byte-identical.
 - **Even the asset-0 admin is bounded** — it cannot reach into another asset's funds or a user's
-  collateral. **◑**
+  collateral. **✅** (`v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral`: the
+  market admin is rejected withdrawing a permissionless asset's domain insurance and a user's
+  portfolio capital; the asset's own operator / the portfolio owner can.)
 
 ### Cross-margin
 - A trader may **cross-position across multiple assets in a single position account, up to the CU
@@ -104,8 +109,11 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   `v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable`.
 - **Market admin can run a scheduled market close** — fully shut the market down and **reclaim the
   account id** — with **safe delays that cannot steal user funds** but **eventually drain an
-  abandoned market to zero**. **◑** (`ResolveMarket` / permissionless-resolve fallback + `CloseSlab`;
-  reclaim/abandonment-drain semantics partial.)
+  abandoned market to zero**. **✅** `v16_attack_scheduled_close_cannot_strand_funds_then_reclaims`
+  asserts `CloseSlab` **rejects** on a live market and on a resolved market that still custodies user
+  value, and only **succeeds + zeroes (reclaims) the account** once users are made whole and the slab
+  is fully drained; the abandoned-market path is the permissionless-resolve fallback
+  (`v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free`, bounded + oracle-free).
 - **The asset-0 key can force-shutdown assets 1..N without rugging traders** — `ASSET_ACTION_SHUTDOWN`
   moves the asset to RECOVERY with a frozen mark, and the wind-down force-close is gated behind
   `force_close_delay_slots` so there is an **exit window**. **✅**
@@ -119,18 +127,21 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   **program-owned PDAs**. All assets settle into the base unit. **✅**
 - **One market admin can rotate the base-unit SPL account from primary → secondary.** **✅**
   (`UpdateBaseUnitMints`, gated on `base_unit_authority` — `v16_attack_update_base_unit_mints_guarded`.)
-- **Anyone can withdraw from either** account; **deposits go only into primary**. **◑**
-  (impl present; a dedicated deposit-primary-only / withdraw-either test is the remaining gap.)
+- **Anyone can withdraw from either** account; **deposits go only into primary**. **✅**
+  (`v16_attack_deposit_primary_only_withdraw_either`: a secondary-mint deposit rejects, while
+  withdrawals settle in either the primary or secondary mint.)
 - The **base-unit admin can perform a 1:1 atomic swap from secondary into primary** (withdraw N from
   secondary, deposit N into primary). **✅** authority + bounds verified
-  (`v16_attack_swap_secondary_unauthorized_and_bounded`). The **optional "change secondary once empty"**
-  path remains **◑** (to verify).
+  (`v16_attack_swap_secondary_unauthorized_and_bounded`). The **"change base-unit mints only when
+  empty"** path is verified by `v16_attack_base_unit_mints_changeable_only_when_empty` (authority may
+  set the mints on an empty market; the change rejects once any value is custodied) plus
+  `v16_attack_update_base_unit_mints_guarded`. **✅**
 
 > **Coverage note.** The O(1)-in-N CU / scaling requirement is implemented and verified end-to-end
-> (sparse-portfolio refactor, engine `c120fce`). The remaining ◑/◻ items above are the live work list
-> to bring the rest of the implementation and the test suite up to this spec — each gets a dedicated
-> LiteSVM test asserting the attacker-success criterion (isolation, exit-window, fee-split
-> conservation, base-unit swap atomicity).
+> (sparse-portfolio refactor, engine `c120fce`). Every product-spec item above is now **✅** — each
+> backed by a dedicated LiteSVM test against the production BPF asserting the attacker-success
+> criterion (isolation, exit-window, fee-split conservation, base-unit deposit/withdraw routing and
+> swap atomicity, permissionless-create fee gating, bounded admin, and scheduled-close reclaim).
 
 ---
 

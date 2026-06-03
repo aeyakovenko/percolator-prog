@@ -15364,3 +15364,234 @@ fn v16_attack_backing_fee_split_conserves() {
     // c_tot drops by exactly the fee debited from collateral (insurance + provider leave c_tot).
     assert_eq!(ctot_before - ga.c_tot, charged, "c_tot decreases by exactly the charged fee");
 }
+
+// security.md sweep — permissionless asset-create fee gate (#5 / README L52): when the configured
+// permissionless market-init fee is ZERO, asset creation is NOT permissionless — only the market-wide
+// asset authority may append a new asset; a stranger is rejected with Unauthorized.
+#[test]
+fn v16_attack_permissionless_create_requires_nonzero_fee() {
+    let mut env = V16CuEnv::new(); // default permissionless_market_init_fee == 0
+    let market = env.market;
+    env.svm.warp_to_slot(1);
+    let append = |env: &mut V16CuEnv, signer: &Keypair| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+                asset_index: 1, now_slot: 1, initial_price: 100,
+                insurance_authority: signer.pubkey().to_bytes(),
+                insurance_operator: signer.pubkey().to_bytes(),
+                backing_bucket_authority: signer.pubkey().to_bytes(),
+                oracle_authority: signer.pubkey().to_bytes(),
+            },
+            vec![AccountMeta::new(signer.pubkey(), true), AccountMeta::new(market, false)],
+            &[signer],
+        )
+    };
+    let stranger = Keypair::new();
+    env.ensure_signer_account(stranger.pubkey());
+    assert!(append(&mut env, &stranger).is_err(), "fee=0: a stranger must NOT be able to append an asset");
+    let (_, g_after_reject) = env.market_state();
+    assert_ne!(g_after_reject.assets.get(1).map(|a| a.lifecycle), Some(AssetLifecycleV16::Active), "no asset created by the rejected stranger");
+    // The market-wide asset authority (admin) appends for free.
+    let admin = env.admin.insecure_clone();
+    append(&mut env, &admin).expect("the asset authority may append for free when fee=0");
+    assert_eq!(env.market_state().1.assets[1].lifecycle, AssetLifecycleV16::Active, "authority append activated asset 1");
+}
+
+// security.md sweep — permissionless create fee funds asset-0 insurance (#5 / README L59): the fee a
+// stranger pays to permissionlessly create asset N flows entirely into asset-0's insurance (the market
+// insurance pool + asset-0's per-domain budgets), conserving every atom.
+#[test]
+fn v16_attack_permissionless_create_fee_funds_asset0_insurance() {
+    const FEE: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(FEE);
+    env.svm.warp_to_slot(1);
+    let (_, before) = env.market_state();
+    let stranger = Keypair::new();
+    let ins_auth = Keypair::new();
+    let admin_pk = env.admin.pubkey();
+    let (fee_src, _cu) = env.activate_permissionless_asset_with_fee(
+        &stranger, 1, 1, 100, ins_auth.pubkey(), ins_auth.pubkey(), ins_auth.pubkey(), admin_pk, FEE);
+    let (_, after) = env.market_state();
+    assert_eq!(env.token_amount(fee_src), 0, "creator's fee fully pulled");
+    assert_eq!(after.vault - before.vault, FEE, "fee deposited into the vault");
+    assert_eq!(after.insurance - before.insurance, FEE, "entire create fee funds asset-0 insurance pool");
+    let b0 = after.insurance_domain_budget[0] - before.insurance_domain_budget[0];
+    let b1 = after.insurance_domain_budget[1] - before.insurance_domain_budget[1];
+    assert_eq!(b0 + b1, FEE, "fee earmarked into asset-0's insurance domains (0=long,1=short), no leakage");
+    assert_eq!(after.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert!(after.vault >= after.c_tot + after.insurance, "senior conservation");
+}
+
+// security.md sweep — base-unit deposit/withdraw mint routing (#5 / README L122): deposits accept ONLY
+// the primary base-unit mint, but a holder may withdraw in EITHER the primary or the secondary mint.
+#[test]
+fn v16_attack_deposit_primary_only_withdraw_either() {
+    let mut env = V16CuEnv::new();
+    let market = env.market;
+    let primary = env.mint;
+    let vault_authority = env.vault_authority;
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(primary, secondary);
+
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000); // PRIMARY deposit works.
+
+    // SECONDARY deposit must reject (deposits are primary-only).
+    let sec_src = env.token_account_for_mint(secondary, owner.pubkey(), 500);
+    let sec_vault = canonical_vault_ata(vault_authority, secondary);
+    env.svm.set_account(sec_vault, Account { lamports: 1_000_000_000, data: make_token_data(secondary, vault_authority, 0), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    env.svm.expire_blockhash();
+    let r_dep = env.send(ProgInstruction::Deposit { amount: 500 },
+        vec![AccountMeta::new(owner.pubkey(), true), AccountMeta::new(market, false), AccountMeta::new(p, false),
+             AccountMeta::new(sec_src, false), AccountMeta::new(sec_vault, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r_dep.is_err(), "depositing the secondary mint must reject (primary-only)");
+    assert_eq!(env.token_amount(sec_src), 500, "rejected secondary deposit pulled nothing");
+
+    // Withdraw in PRIMARY works.
+    let (pd, _) = env.withdraw_with_cu(&owner, p, 400);
+    assert_eq!(env.token_amount(pd), 400, "primary withdrawal delivered");
+
+    // Withdraw in SECONDARY works too (fund the secondary reserve, withdraw to a secondary dest).
+    env.svm.set_account(sec_vault, Account { lamports: 1_000_000_000, data: make_token_data(secondary, vault_authority, 300), owner: spl_token::ID, executable: false, rent_epoch: 0 }).unwrap();
+    let sec_dest = env.token_account_for_mint(secondary, owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let r_wd = env.send(ProgInstruction::Withdraw { amount: 300 },
+        vec![AccountMeta::new(owner.pubkey(), true), AccountMeta::new(market, false), AccountMeta::new(p, false),
+             AccountMeta::new(sec_dest, false), AccountMeta::new(sec_vault, false), AccountMeta::new_readonly(vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&owner]);
+    assert!(r_wd.is_ok(), "withdrawing in the secondary mint must succeed: {r_wd:?}");
+    assert_eq!(env.token_amount(sec_dest), 300, "secondary withdrawal delivered 1:1");
+}
+
+// security.md sweep — base-unit mints changeable only when empty (#5 / README L127): the base-unit
+// authority may (re)set the primary/secondary mints ONLY while the market holds no value; once funded,
+// the change is rejected so live collateral can never be re-denominated out from under holders.
+#[test]
+fn v16_attack_base_unit_mints_changeable_only_when_empty() {
+    let mut env = V16CuEnv::new();
+    let market = env.market;
+    let primary = env.mint;
+    let admin = env.admin.insecure_clone();
+    // EMPTY market: the base-unit authority may set the secondary mint.
+    let new_secondary = env.create_mint();
+    env.svm.expire_blockhash();
+    let r_empty = env.send(ProgInstruction::UpdateBaseUnitMints { primary_mint: primary.to_bytes(), secondary_mint: new_secondary.to_bytes() },
+        vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(market, false), AccountMeta::new_readonly(primary, false), AccountMeta::new_readonly(new_secondary, false)], &[&admin]);
+    assert!(r_empty.is_ok(), "empty market: base-unit authority may set the secondary mint: {r_empty:?}");
+    assert_eq!(env.market_state().0.secondary_collateral_mint, new_secondary.to_bytes(), "secondary mint updated while empty");
+
+    // Fund the market; a further change must now reject.
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000);
+    let other = env.create_mint();
+    env.svm.expire_blockhash();
+    let r_funded = env.send(ProgInstruction::UpdateBaseUnitMints { primary_mint: primary.to_bytes(), secondary_mint: other.to_bytes() },
+        vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(market, false), AccountMeta::new_readonly(primary, false), AccountMeta::new_readonly(other, false)], &[&admin]);
+    assert!(r_funded.is_err(), "funded market: secondary-mint change must reject");
+    assert_eq!(env.market_state().0.secondary_collateral_mint, new_secondary.to_bytes(), "secondary mint unchanged while funded");
+}
+
+// security.md sweep — asset-0 / market admin is bounded (#5 / README L85): even the market-wide admin
+// cannot reach into a PERMISSIONLESSLY-created asset's own domain insurance (that is gated by that
+// asset's operator), nor can it withdraw a user's portfolio collateral (gated by the portfolio owner).
+#[test]
+fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
+    let mut env = V16CuEnv::new();
+    let market = env.market;
+    let vault = env.vault;
+    let vault_authority = env.vault_authority;
+    let admin = env.admin.insecure_clone();
+    env.update_market_init_fee_policy_with_cu(10);
+    env.svm.warp_to_slot(1);
+
+    // A stranger permissionlessly creates asset 1, owning ALL of its domain authorities.
+    let stranger = Keypair::new();
+    env.svm.airdrop(&stranger.pubkey(), 1_000_000_000).unwrap();
+    let sp = stranger.pubkey();
+    env.activate_permissionless_asset_with_fee(&stranger, 1, 1, 100, sp, sp, sp, sp, 10);
+    env.top_up_insurance_domain_with_authority(&stranger, 2, 500); // asset-1 long domain
+    let (_, g0) = env.market_state();
+    assert!(g0.insurance_domain_budget[2] >= 500, "asset-1 domain insurance funded by its own operator");
+
+    // BOUND 1: the market admin CANNOT withdraw asset-1's domain insurance (it is not the operator and
+    // the asset is healthy/live, so the admin-shutdown-drain path does not apply).
+    let admin_dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let r_foreign = env.send(ProgInstruction::WithdrawInsuranceDomain { domain: 2, amount: 500 },
+        vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(market, false), AccountMeta::new(admin_dest, false),
+             AccountMeta::new(vault, false), AccountMeta::new_readonly(vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&admin]);
+    assert!(r_foreign.is_err(), "market admin must NOT drain a foreign asset's domain insurance");
+    assert_eq!(env.token_amount(admin_dest), 0, "nothing drained to admin");
+    assert!(env.market_state().1.insurance_domain_budget[2] >= 500, "asset-1 insurance intact");
+
+    // POSITIVE CONTROL: asset-1's own operator CAN withdraw its domain insurance.
+    let strn_dest = env.token_account(stranger.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let r_owner = env.send(ProgInstruction::WithdrawInsuranceDomain { domain: 2, amount: 200 },
+        vec![AccountMeta::new(stranger.pubkey(), true), AccountMeta::new(market, false), AccountMeta::new(strn_dest, false),
+             AccountMeta::new(vault, false), AccountMeta::new_readonly(vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&stranger]);
+    assert!(r_owner.is_ok(), "the asset's own operator may withdraw its domain insurance: {r_owner:?}");
+    assert_eq!(env.token_amount(strn_dest), 200, "operator received exactly its withdrawal");
+
+    // BOUND 2: the market admin cannot withdraw a USER's portfolio collateral (owner-gated).
+    let user = Keypair::new();
+    let p = env.create_portfolio(&user);
+    env.deposit(&user, p, 10_000);
+    let admin_steal = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let r_user = env.send(ProgInstruction::Withdraw { amount: 10_000 },
+        vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(market, false), AccountMeta::new(p, false),
+             AccountMeta::new(admin_steal, false), AccountMeta::new(vault, false), AccountMeta::new_readonly(vault_authority, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&admin]);
+    assert!(r_user.is_err(), "market admin must NOT withdraw a user's collateral");
+    assert_eq!(env.token_amount(admin_steal), 0, "no user collateral drained to admin");
+    assert_eq!(env.portfolio_state(p).capital, 10_000, "user capital intact");
+}
+
+// security.md sweep — scheduled close cannot strand user funds, but eventually reclaims (#5 / README
+// L105): CloseSlab (the account-id reclaim) is gated on a fully-drained market — it rejects on a LIVE
+// market and on a RESOLVED market that still custodies any user capital or insurance, so the admin can
+// never use the close to strand/steal value. Once users are made whole and insurance is withdrawn, the
+// close succeeds and zeroes (reclaims) the market account.
+#[test]
+fn v16_attack_scheduled_close_cannot_strand_funds_then_reclaims() {
+    let mut env = V16CuEnv::new();
+    let market = env.market;
+    let vault = env.vault;
+    let vault_authority = env.vault_authority;
+    let admin = env.admin.insecure_clone();
+
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000);
+
+    let try_close = |env: &mut V16CuEnv| -> Result<u64, String> {
+        let dest = env.token_account(admin.pubkey(), 0);
+        env.svm.expire_blockhash();
+        env.send(ProgInstruction::CloseSlab,
+            vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(market, false), AccountMeta::new(vault, false),
+                 AccountMeta::new_readonly(vault_authority, false), AccountMeta::new(dest, false), AccountMeta::new_readonly(spl_token::ID, false)], &[&admin])
+    };
+
+    // LIVE market: CloseSlab must reject (not resolved).
+    assert!(try_close(&mut env).is_err(), "CloseSlab on a LIVE market must reject");
+
+    env.resolve();
+    // RESOLVED but user capital + insurance still custodied: CloseSlab must reject (cannot strand value).
+    assert!(try_close(&mut env).is_err(), "CloseSlab with user funds present must reject");
+    assert_eq!(env.market_state().1.vault, 1_000, "user capital still custodied post-resolve");
+
+    // Make the user whole via the resolved payout.
+    env.close_resolved_with_cu(&owner, p);
+    env.close_portfolio_with_cu(&owner, p); // dematerialize the now-empty portfolio account
+    let (_, g) = env.market_state();
+    assert_eq!((g.vault, g.insurance, g.c_tot), (0, 0, 0), "market fully drained to zero");
+    assert_eq!(g.materialized_portfolio_count, 0, "no portfolios left materialized");
+
+    // Fully drained: CloseSlab succeeds and reclaims (zeroes) the market account.
+    assert!(try_close(&mut env).is_ok(), "a fully-drained market can be closed");
+    assert!(env.svm.get_account(&market).unwrap().data.iter().all(|x| *x == 0), "market account reclaimed (zeroed)");
+}
