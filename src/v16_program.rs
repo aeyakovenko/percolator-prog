@@ -11887,8 +11887,9 @@ pub mod processor {
                 state::write_portfolio(&mut account_b_data, &account_b).unwrap();
             }
 
-            let before_a = vec![0u128, 0u128].into_boxed_slice();
-            let before_b = vec![0u128, 0u128].into_boxed_slice();
+            // Sparse pre-trade per-domain backing snapshots: empty == all domains zero.
+            let before_a: &[(u32, u128)] = &[];
+            let before_b: &[(u32, u128)] = &[];
             {
                 let (cfg_view, mut group) = state::market_view_mut(&mut market_data).unwrap();
                 let mut account_a =
@@ -11899,9 +11900,9 @@ pub mod processor {
                     &cfg_view,
                     &mut group,
                     &mut account_a,
-                    before_a.as_ref(),
+                    before_a,
                     &mut account_b,
-                    before_b.as_ref(),
+                    before_b,
                 )
                 .unwrap();
                 assert_eq!(charged, 10);
