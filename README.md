@@ -24,7 +24,7 @@ This README is intentionally **high-level**: it explains the trust model, accoun
 - [Operational runbook](#operational-runbook)
 - [Deployment flow](#deployment-flow)
 - [Security properties and verification](#security-properties-and-verification)
-- [Admin Key Threat Model](#admin-key-threat-model)
+- [marketauth Key Threat Model](#marketauth-key-threat-model)
 - [Failure modes and recovery](#failure-modes-and-recovery)
 - [Build & test](#build--test)
 
@@ -49,7 +49,7 @@ The economic and governance model for a permissionless multi-asset market. Statu
 - **Asset 0 is denominated in the base unit** and has its own **insurance + backing**. **✅**
 - A **configured % of asset-0 backing yield routes to asset-0 insurance**. **✅**
   (`v16_attack_backing_fee_split_conserves` — see Assets 1..N fee routing.)
-- An **asset-0 key sets the fee to create assets 1..N permissionlessly**. **A fee of zero means
+- The **`marketauth` key sets the fee to create assets 1..N permissionlessly**. **A fee of zero means
   creation is NOT permissionless** — market-wide authority is then required to add an asset. **✅**
   (`UpdateMarketInitFeePolicy`; the append path charges `permissionless_market_init_fee_for_asset`
   and returns `Unauthorized` for a non-authority when the fee is 0, `v16_program.rs:8598`;
@@ -108,8 +108,18 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   (insurance/operator/backing/oracle) and **can be burned (set to 0)** — a credibly admin-free asset
   that can't be revived. **✅** For asset 0 this means the market admin can force-replace or burn the
   shared insurance operator/authority via `UpdateAssetAuthority`, and burning `asset_admin` makes those
-  delegations sticky (admin-free). The market-wide `UpdateAuthority` now only rotates the truly
-  market-level keys (`ADMIN`, `ASSET` create-fee gate, `BASE_UNIT`).
+  delegations sticky (admin-free).
+- **One market-level key: `marketauth`.** **✅** All market-level governance collapses into a single
+  `WrapperConfigV16.marketauth` key (it replaced the former separate `admin` / `asset_authority` /
+  `base_unit_authority`). `marketauth` is the only key that can: **create market 0** (`InitMarket`),
+  **create/retire assets and set the permissionless-create-fee policy**, **safely force-shutdown a
+  permissionless asset 1..N** (`ASSET_ACTION_SHUTDOWN` → RECOVERY with the `force_close_delay_slots`
+  exit window so traders can exit — a non-`marketauth` signer is rejected), **resolve/close the market**
+  (`ResolveMarket`/`CloseSlab`/`AdminForceCloseAccount`), **`UpdateConfig`**, and **rotate the base-unit
+  mint**. It is rotated/burned via `UpdateAuthority { new_pubkey }` (current `marketauth` signs, non-zero
+  replacement co-signs; burn-to-zero blocked while Live unless permissionless-resolve + force-close are
+  configured). Everything else — insurance/operator/backing/oracle on **every** asset including 0 — is
+  per-asset (`asset_admin` + `UpdateAssetAuthority`), never `marketauth`.
 - **Each other asset key can rotate itself or be set to 0.** **✅** (a domain authority self-rotates
   even after the asset admin is burned). All verified by
   `v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable`.
@@ -131,8 +141,8 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
 ### Base unit (collateral)
 - The base unit is held in **two SPL token accounts** (a **primary** and a **secondary**), both
   **program-owned PDAs**. All assets settle into the base unit. **✅**
-- **One market admin can rotate the base-unit SPL account from primary → secondary.** **✅**
-  (`UpdateBaseUnitMints`, gated on `base_unit_authority` — `v16_attack_update_base_unit_mints_guarded`.)
+- **`marketauth` can rotate the base-unit SPL account from primary → secondary.** **✅**
+  (`UpdateBaseUnitMints`, gated on `marketauth` — `v16_attack_update_base_unit_mints_guarded`.)
 - **Anyone can withdraw from either** account; **deposits go only into primary**. **✅**
   (`v16_attack_deposit_primary_only_withdraw_either`: a secondary-mint deposit rejects, while
   withdrawals settle in either the primary or secondary mint.)
@@ -262,10 +272,12 @@ This section describes intent and operational ordering, not argument-by-argument
   - initializes slab header/config + calls `RiskEngine::init_in_place(risk_params, clock.slot, init_price)`
   - binds vault token account + oracle keys into config
   - initializes the matcher nonce to zero
-- **UpdateAuthority** (tag 32)
-  - rotates one scoped authority: admin, mark pusher, resolved insurance authority, or live insurance operator
-  - setting an authority to all zeros burns that capability permanently
-  - burning admin is guarded by permissionless resolution / force-close liveness checks
+- **UpdateAuthority** (tag 32) — single-purpose: rotate/burn the one market-level `marketauth` key
+  - `UpdateAuthority { new_pubkey }`: current `marketauth` signs; a non-zero replacement co-signs
+  - setting `new_pubkey` to all zeros burns `marketauth` permanently (admin-free market)
+  - burning is guarded by permissionless resolution / force-close liveness checks
+  - per-asset authorities (insurance/operator/backing/oracle, incl. asset 0) are rotated via
+    `UpdateAssetAuthority`, not this instruction
 
 ### Participant lifecycle
 - **InitUser**
@@ -654,35 +666,40 @@ Before publishing a bounty, run the commands in [Build & test](#build--test) and
 
 ---
 
-## Admin Key Threat Model
+## marketauth Key Threat Model
 
-Assume the admin key is compromised or adversarial. This section lists:
+Assume the single market-level `marketauth` key is compromised or adversarial (it replaced the former
+separate `admin` / `asset_authority` / `base_unit_authority` — one key now holds all market-level
+governance). This section lists:
 - what that key is intentionally trusted to do (and therefore can abuse),
 - what it is **not** supposed to be able to do.
 
-### What a malicious admin can do (by design / trust boundary)
+Note: `marketauth` is *also* asset-0's `asset_admin` at `InitMarket`, so items 3/5/7 (asset-0's
+mark/insurance/operator) are reachable until asset-0's `asset_admin` is rotated away or burned.
+
+### What a malicious marketauth can do (by design / trust boundary)
 
 These are governance powers, not bugs:
 
-1. `UpdateAuthority { kind = AUTHORITY_ADMIN }`
-   - rotate admin to attacker-controlled key or burn admin to zero.
+1. `UpdateAuthority { new_pubkey }`
+   - rotate `marketauth` to an attacker key or burn it to zero.
    - impact: governance capture or permanent governance lockout.
-2. `UpdateConfig`
-   - change funding and TVL:insurance cap policy knobs within validation bounds.
-   - impact: economics can become unfavorable to users.
-3. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_ORACLE }` (while admin holds asset-0's `asset_admin`)
+2. `UpdateConfig` / `UpdateMarketInitFeePolicy` / `UpdateBaseUnitMints` / asset create+retire+force-shutdown
+   - change funding/cap policy knobs (within validation bounds), the create fee, the base-unit mint, and the asset set — all now under the one `marketauth` key.
+   - impact: economics/market shape can become unfavorable to users (force-shutdown still honors the trader exit window).
+3. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_ORACLE }` (while marketauth holds asset-0's `asset_admin`)
    - choose or burn who can push asset-0 AuthMark/EwmaMark updates.
    - impact: authority mark input control/censorship surface.
 4. `ResolveMarket`
    - transition market to resolved mode using stored authority price.
    - impact: trading/deposits/new accounts are halted; market enters wind-down.
-5. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_INSURANCE }` (while admin holds asset-0's `asset_admin`)
+5. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_INSURANCE }` (while marketauth holds asset-0's `asset_admin`)
    - choose or burn who can withdraw resolved-market insurance.
    - impact: resolved insurance extraction capability is delegated or permanently removed.
 6. `WithdrawInsurance` (post-resolution, after positions are closed)
    - withdraw insurance buffer to admin ATA.
    - impact: no insurance backstop remains.
-7. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_INSURANCE_OPERATOR }` (while admin holds asset-0's `asset_admin`)
+7. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_INSURANCE_OPERATOR }` (while marketauth holds asset-0's `asset_admin`)
    - choose or burn who can call bounded live insurance withdrawal.
    - impact: bounded live insurance extraction capability is delegated or permanently removed.
 8. `AdminForceCloseAccount` (post-resolution only)
@@ -708,7 +725,7 @@ These are governance powers, not bugs:
 > `v16_attack_update_authority_non_holder_cannot_rotate`, and
 > `v16_attack_update_authority_requires_new_authority_signature`.
 
-### What a malicious admin should NOT be able to do
+### What a malicious marketauth should NOT be able to do
 
 These are intended hard boundaries enforced in code and test suites:
 

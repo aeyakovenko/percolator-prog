@@ -46,7 +46,7 @@ pub mod constants {
     pub const KIND_INSURANCE_LEDGER: u8 = 4;
 
     pub const HEADER_LEN: usize = 16;
-    pub const WRAPPER_CONFIG_LEN: usize = 624;
+    pub const WRAPPER_CONFIG_LEN: usize = 432;
     pub const ASSET_ORACLE_PROFILE_LEN: usize = 400;
     pub const ASSET_ORACLE_WRAPPER_LEN: usize = 512;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16HeaderAccount>();
@@ -670,21 +670,21 @@ pub mod state {
     #[repr(C)]
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
     pub struct WrapperConfigV16 {
-        pub admin: [u8; 32],
+        /// Single market-level authority key. Set to the init signer at InitMarket. Can: create
+        /// market 0, activate/retire assets + set the permissionless-create-fee policy, force-shutdown
+        /// permissionless assets 1..N (RECOVERY with exit window), ResolveMarket / CloseSlab /
+        /// AdminForceCloseAccount, UpdateConfig, and base-unit mint rotation/swap. Rotated/burned via
+        /// UpdateAuthority (tag 32). Replaces the former separate admin / asset_authority /
+        /// base_unit_authority keys (which were always the same init signer).
+        pub marketauth: [u8; 32],
         pub collateral_mint: [u8; 32],
         pub secondary_collateral_mint: [u8; 32],
-        pub base_unit_authority: [u8; 32],
         pub maintenance_fee_per_slot: u128,
         pub permissionless_market_init_fee: u128,
         pub trade_fee_base_bps: u64,
         pub permissionless_resolve_stale_slots: u64,
         pub force_close_delay_slots: u64,
         pub last_good_oracle_slot: u64,
-        pub insurance_authority: [u8; 32],
-        pub insurance_operator: [u8; 32],
-        pub backing_bucket_authority: [u8; 32],
-        pub asset_authority: [u8; 32],
-        pub mark_authority: [u8; 32],
         pub insurance_withdraw_deposit_remaining: u128,
         pub insurance_withdraw_max_bps: u16,
         pub liquidation_cranker_fee_share_bps: u16,
@@ -1290,10 +1290,12 @@ pub mod state {
             backing_trade_fee_insurance_share_bps_short: config
                 .backing_trade_fee_insurance_share_bps_short,
             _padding0: [0u8; 6],
-            insurance_authority: config.insurance_authority,
-            insurance_operator: config.insurance_operator,
-            backing_bucket_authority: config.backing_bucket_authority,
-            oracle_authority: config.mark_authority,
+            // At InitMarket the market key bootstraps asset 0 exactly like an activator bootstraps a
+            // permissionless asset 1..N: it is asset 0's cold-storage admin and all its sub-authorities.
+            insurance_authority: config.marketauth,
+            insurance_operator: config.marketauth,
+            backing_bucket_authority: config.marketauth,
+            oracle_authority: config.marketauth,
             max_staleness_secs: config.max_staleness_secs,
             hybrid_soft_stale_slots: config.hybrid_soft_stale_slots,
             mark_ewma_e6: config.mark_ewma_e6,
@@ -1306,7 +1308,7 @@ pub mod state {
             oracle_leg_feeds: config.oracle_leg_feeds,
             oracle_leg_prices_e6: config.oracle_leg_prices_e6,
             oracle_leg_publish_times: config.oracle_leg_publish_times,
-            asset_admin: config.admin,
+            asset_admin: config.marketauth,
         }
     }
 
@@ -2743,8 +2745,10 @@ pub mod ix {
         CloseResolved {
             fee_rate_per_slot: u128,
         },
+        /// Rotate or burn the single market-level authority (`marketauth`). The current `marketauth`
+        /// must sign; a non-zero replacement must co-sign. Burning to zero is blocked while Live unless
+        /// permissionless-resolve + force-close liveness are configured.
         UpdateAuthority {
-            kind: u8,
             new_pubkey: [u8; 32],
         },
         /// Rotate one of a permissionless asset's (1..N) per-asset authorities. Gated by the asset's
@@ -2972,7 +2976,6 @@ pub mod ix {
                     fee_rate_per_slot: read_u128(&mut rest)?,
                 },
                 32 => Self::UpdateAuthority {
-                    kind: read_u8(&mut rest)?,
                     new_pubkey: read_bytes32(&mut rest)?,
                 },
                 65 => Self::UpdateAssetAuthority {
@@ -3261,9 +3264,8 @@ pub mod ix {
                     out.push(30);
                     push_u128(&mut out, fee_rate_per_slot);
                 }
-                Self::UpdateAuthority { kind, new_pubkey } => {
+                Self::UpdateAuthority { new_pubkey } => {
                     out.push(32);
-                    out.push(kind);
                     out.extend_from_slice(&new_pubkey);
                 }
                 Self::UpdateAssetAuthority {
@@ -4425,13 +4427,8 @@ pub mod processor {
         state::{self, WrapperConfigV16},
     };
 
-    pub const AUTHORITY_ADMIN: u8 = 0;
-    pub const AUTHORITY_MARK: u8 = 1;
-    pub const AUTHORITY_INSURANCE: u8 = 2;
-    pub const AUTHORITY_BACKING_BUCKET: u8 = 3;
-    pub const AUTHORITY_INSURANCE_OPERATOR: u8 = 4;
-    pub const AUTHORITY_ASSET: u8 = 5;
-    pub const AUTHORITY_BASE_UNIT: u8 = 6;
+    // The market-level authority is now a single `marketauth` key rotated via UpdateAuthority
+    // (tag 32) with no `kind` discriminant, so the former AUTHORITY_* market-kind constants are gone.
 
     // Per-asset authority kinds (UpdateAssetAuthority), scoped to a single permissionless asset's profile.
     pub const ASSET_AUTH_ADMIN: u8 = 0;
@@ -5280,8 +5277,8 @@ pub mod processor {
             Instruction::CloseResolved { fee_rate_per_slot } => {
                 handle_close_resolved(program_id, accounts, fee_rate_per_slot)
             }
-            Instruction::UpdateAuthority { kind, new_pubkey } => {
-                handle_update_authority(program_id, accounts, kind, new_pubkey)
+            Instruction::UpdateAuthority { new_pubkey } => {
+                handle_update_authority(program_id, accounts, new_pubkey)
             }
             Instruction::UpdateAssetAuthority {
                 asset_index,
@@ -5546,21 +5543,15 @@ pub mod processor {
         }
         let init_slot = Clock::get().map(|c| c.slot).unwrap_or(0);
         let wrapper = WrapperConfigV16 {
-            admin: admin.key.to_bytes(),
+            marketauth: admin.key.to_bytes(),
             collateral_mint: mint_ai.key.to_bytes(),
             secondary_collateral_mint: [0u8; 32],
-            base_unit_authority: admin.key.to_bytes(),
             maintenance_fee_per_slot,
             permissionless_market_init_fee: 0,
             trade_fee_base_bps,
             permissionless_resolve_stale_slots: 0,
             force_close_delay_slots: 0,
             last_good_oracle_slot: init_slot,
-            insurance_authority: admin.key.to_bytes(),
-            insurance_operator: admin.key.to_bytes(),
-            backing_bucket_authority: admin.key.to_bytes(),
-            asset_authority: admin.key.to_bytes(),
-            mark_authority: admin.key.to_bytes(),
             insurance_withdraw_deposit_remaining: 0,
             insurance_withdraw_max_bps: 0,
             liquidation_cranker_fee_share_bps: 0,
@@ -7031,7 +7022,7 @@ pub mod processor {
             }
             _ => return Err(PercolatorError::InvalidInstruction.into()),
         };
-        if !local_authorized && !live_authority_matches(&cfg.admin, authority.key) {
+        if !local_authorized && !live_authority_matches(&cfg.marketauth, authority.key) {
             return Err(PercolatorError::Unauthorized.into());
         }
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
@@ -7224,12 +7215,12 @@ pub mod processor {
             let local_authorized =
                 live_authority_matches(&authorities.backing_bucket_authority, authority.key);
             let admin_shutdown_authorized =
-                shutdown_drain && live_authority_matches(&cfg.admin, authority.key);
+                shutdown_drain && live_authority_matches(&cfg.marketauth, authority.key);
             if !local_authorized && !admin_shutdown_authorized {
                 return Err(PercolatorError::Unauthorized.into());
             }
             let ledger_authority = if admin_shutdown_authorized && !local_authorized {
-                cfg.admin
+                cfg.marketauth
             } else {
                 authorities.backing_bucket_authority
             };
@@ -7418,12 +7409,12 @@ pub mod processor {
             let local_authorized =
                 live_authority_matches(&authorities.backing_bucket_authority, authority.key);
             let admin_shutdown_authorized =
-                shutdown_drain && live_authority_matches(&cfg.admin, authority.key);
+                shutdown_drain && live_authority_matches(&cfg.marketauth, authority.key);
             if !local_authorized && !admin_shutdown_authorized {
                 return Err(PercolatorError::Unauthorized.into());
             }
             let ledger_authority = if admin_shutdown_authorized && !local_authorized {
-                cfg.admin
+                cfg.marketauth
             } else {
                 authorities.backing_bucket_authority
             };
@@ -7694,12 +7685,12 @@ pub mod processor {
             let local_authorized =
                 live_authority_matches(&authorities.insurance_operator, operator.key);
             let admin_shutdown_authorized =
-                shutdown_drain && live_authority_matches(&cfg.admin, operator.key);
+                shutdown_drain && live_authority_matches(&cfg.marketauth, operator.key);
             if !local_authorized && !admin_shutdown_authorized {
                 return Err(PercolatorError::Unauthorized.into());
             }
             let ledger_authority = if admin_shutdown_authorized && !local_authorized {
-                cfg.admin
+                cfg.marketauth
             } else {
                 authorities.insurance_authority
             };
@@ -7784,7 +7775,7 @@ pub mod processor {
         let cfg_pre = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, group) = state::market_view_mut(&mut market_data)?;
-            expect_live_authority(&cfg.admin, admin_dest.key)?;
+            expect_live_authority(&cfg.marketauth, admin_dest.key)?;
             if group.header.mode != 1 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
@@ -8340,7 +8331,7 @@ pub mod processor {
         if group.header.mode != 0 {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        expect_live_authority(&cfg.admin, admin.key)?;
+        expect_live_authority(&cfg.marketauth, admin.key)?;
         let slot = Clock::get()
             .map(|c| c.slot)
             .unwrap_or(group.header.current_slot.get());
@@ -8359,7 +8350,6 @@ pub mod processor {
     fn handle_update_authority<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        kind: u8,
         new_pubkey: [u8; 32],
     ) -> ProgramResult {
         let current = account(accounts, 0)?;
@@ -8369,6 +8359,7 @@ pub mod processor {
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
 
+        // A non-zero incoming key must co-sign (proves control); burning to 0 needs only the rotator.
         if new_pubkey != [0u8; 32] {
             expect_signer(new_authority)?;
             if new_authority.key.to_bytes() != new_pubkey {
@@ -8378,29 +8369,16 @@ pub mod processor {
 
         let (mut cfg, mode, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        match kind {
-            AUTHORITY_ADMIN => {
-                expect_live_authority(&cfg.admin, current.key)?;
-                if new_pubkey == [0u8; 32]
-                    && (mode == MarketModeV16::Live
-                        && (cfg.permissionless_resolve_stale_slots == 0
-                            || cfg.force_close_delay_slots == 0))
-                {
-                    return Err(PercolatorError::InvalidInstruction.into());
-                }
-                cfg.admin = new_pubkey;
-            }
-            AUTHORITY_ASSET => {
-                expect_live_authority(&cfg.asset_authority, current.key)?;
-                cfg.asset_authority = new_pubkey;
-            }
-            AUTHORITY_BASE_UNIT => {
-                expect_live_authority(&cfg.base_unit_authority, current.key)?;
-                cfg.base_unit_authority = new_pubkey;
-            }
-            _ => return Err(PercolatorError::InvalidInstruction.into()),
+        expect_live_authority(&cfg.marketauth, current.key)?;
+        // Burn-guard: cannot burn the single market authority to zero while the market is Live unless
+        // permissionless-resolve + force-close liveness are configured (so the market can still wind down).
+        if new_pubkey == [0u8; 32]
+            && mode == MarketModeV16::Live
+            && (cfg.permissionless_resolve_stale_slots == 0 || cfg.force_close_delay_slots == 0)
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
         }
-
+        cfg.marketauth = new_pubkey;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
     }
 
@@ -8496,7 +8474,7 @@ pub mod processor {
         let mut data = market_ai.try_borrow_mut_data()?;
         let mut cfg = {
             let (cfg, group) = state::market_view_mut(&mut data)?;
-            expect_live_authority(&cfg.base_unit_authority, authority.key)?;
+            expect_live_authority(&cfg.marketauth, authority.key)?;
             if group.header.vault.get() != 0
                 || group.header.c_tot.get() != 0
                 || group.header.insurance.get() != 0
@@ -8538,7 +8516,7 @@ pub mod processor {
 
         let (cfg, _, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        expect_live_authority(&cfg.base_unit_authority, authority.key)?;
+        expect_live_authority(&cfg.marketauth, authority.key)?;
         let primary_mint = primary_collateral_mint(&cfg);
         let secondary_mint = secondary_collateral_mint(&cfg)?;
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
@@ -8594,8 +8572,8 @@ pub mod processor {
         if mode_pre != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        let is_asset_authority = cfg_pre.asset_authority != [0u8; 32]
-            && cfg_pre.asset_authority == authority.key.to_bytes();
+        let is_asset_authority = cfg_pre.marketauth != [0u8; 32]
+            && cfg_pre.marketauth == authority.key.to_bytes();
         let permissionless_reuse_target = action == ASSET_ACTION_ACTIVATE
             && !is_asset_authority
             && asset_index < configured_slots_pre
@@ -8647,8 +8625,8 @@ pub mod processor {
                 let mut reuse_activated = false;
                 {
                     let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
-                    let still_asset_authority = cfg.asset_authority != [0u8; 32]
-                        && cfg.asset_authority == authority.key.to_bytes();
+                    let still_asset_authority = cfg.marketauth != [0u8; 32]
+                        && cfg.marketauth == authority.key.to_bytes();
                     if !still_asset_authority {
                         let expected_fee = permissionless_market_init_fee_for_asset(
                             cfg.permissionless_market_init_fee,
@@ -8799,7 +8777,7 @@ pub mod processor {
             return Ok(());
         }
         if action == ASSET_ACTION_SHUTDOWN {
-            expect_live_authority(&cfg_pre.admin, authority.key)?;
+            expect_live_authority(&cfg_pre.marketauth, authority.key)?;
             if asset_index == 0
                 || now_slot == 0
                 || initial_price != 0
@@ -8810,7 +8788,7 @@ pub mod processor {
             let authenticated_slot = authenticated_slot_or_fallback(now_slot);
             let mut data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut data)?;
-            expect_live_authority(&cfg.admin, authority.key)?;
+            expect_live_authority(&cfg.marketauth, authority.key)?;
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
@@ -8865,24 +8843,23 @@ pub mod processor {
             }
             return group.validate_shape().map_err(map_v16_error);
         }
-        let asset_authorized_pre = live_authority_matches(&cfg_pre.asset_authority, authority.key);
-        let admin_retire_candidate = action == ASSET_ACTION_RETIRE
-            && !asset_authorized_pre
-            && live_authority_matches(&cfg_pre.admin, authority.key);
-        if !asset_authorized_pre && !admin_retire_candidate {
+        // Activate (privileged, fee-free) / retire are gated solely on `marketauth`.
+        if !live_authority_matches(&cfg_pre.marketauth, authority.key) {
             return Err(PercolatorError::Unauthorized.into());
         }
 
         let cfg_after = {
             let mut data = market_ai.try_borrow_mut_data()?;
             let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
-            let asset_authorized = live_authority_matches(&cfg.asset_authority, authority.key);
-            let admin_retire = action == ASSET_ACTION_RETIRE
-                && !asset_authorized
-                && live_authority_matches(&cfg.admin, authority.key);
-            if !asset_authorized && !admin_retire {
+            if !live_authority_matches(&cfg.marketauth, authority.key) {
                 return Err(PercolatorError::Unauthorized.into());
             }
+            // Pre-collapse this was true only when the *admin* key (distinct from the *asset_authority*
+            // key) retired an asset; the market authority itself was always "asset-authorized" so this
+            // branch never fired for the init signer. With admin and asset_authority collapsed into the
+            // single `marketauth`, the holder is always asset-authorized, so this stays false — an exact
+            // 1:1 preservation of the prior single-init-key behavior (no widening, no narrowing).
+            let admin_retire = false;
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
@@ -9089,7 +9066,7 @@ pub mod processor {
         }
         let mut data = market_ai.try_borrow_mut_data()?;
         let (cfg, group) = state::market_view_mut(&mut data)?;
-        expect_live_authority(&cfg.admin, admin.key)?;
+        expect_live_authority(&cfg.marketauth, admin.key)?;
         if group.header.mode != 1 || group.header.payout_snapshot_captured == 0 {
             return Err(PercolatorError::EngineLockActive.into());
         }
@@ -9152,7 +9129,7 @@ pub mod processor {
         }
         let (mut cfg, _, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        expect_live_authority(&cfg.admin, admin.key)?;
+        expect_live_authority(&cfg.marketauth, admin.key)?;
         cfg.insurance_withdraw_max_bps = max_bps;
         cfg.insurance_withdraw_deposits_only = deposits_only;
         cfg.insurance_withdraw_cooldown_slots = cooldown_slots;
@@ -9178,7 +9155,7 @@ pub mod processor {
         }
         let (mut cfg, _, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        expect_live_authority(&cfg.admin, admin.key)?;
+        expect_live_authority(&cfg.marketauth, admin.key)?;
         cfg.liquidation_cranker_fee_share_bps = cranker_share_bps;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
     }
@@ -9199,7 +9176,7 @@ pub mod processor {
         }
         let (mut cfg, _, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        expect_live_authority(&cfg.admin, admin.key)?;
+        expect_live_authority(&cfg.marketauth, admin.key)?;
         cfg.maintenance_cranker_fee_share_bps = cranker_share_bps;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
     }
@@ -9331,7 +9308,7 @@ pub mod processor {
         }
         let (mut cfg, _, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        expect_live_authority(&cfg.admin, admin.key)?;
+        expect_live_authority(&cfg.marketauth, admin.key)?;
         cfg.fee_redirect_to_market_0_bps = redirect_bps;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
     }
@@ -9350,7 +9327,7 @@ pub mod processor {
         let _ = amount_to_u64(min_init_fee)?;
         let (mut cfg, _, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        expect_live_authority(&cfg.admin, admin.key)?;
+        expect_live_authority(&cfg.marketauth, admin.key)?;
         cfg.permissionless_market_init_fee = min_init_fee;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
     }
@@ -9376,7 +9353,7 @@ pub mod processor {
         }
         let (mut cfg, mode, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        expect_live_authority(&cfg.admin, admin.key)?;
+        expect_live_authority(&cfg.marketauth, admin.key)?;
         if mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
@@ -9474,11 +9451,9 @@ pub mod processor {
             require_asset_active_for_oracle_reconfiguration_view(&group, asset_index_usize)?;
             let group_had_position_or_loss_state = group_has_position_or_loss_state_view(&group);
             let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
-            if asset_index_usize == 0 {
-                expect_live_authority(&cfg.admin, admin.key)?;
-            } else {
-                expect_live_authority(&existing_profile.oracle_authority, admin.key)?;
-            }
+            // Asset 0 has a real stored profile; gate oracle reconfiguration on its
+            // oracle_authority exactly like permissionless assets 1..N.
+            expect_live_authority(&existing_profile.oracle_authority, admin.key)?;
 
             let mut profile = state::AssetOracleProfileV16 {
                 oracle_mode: constants::ORACLE_MODE_HYBRID_AFTER_HOURS,
@@ -9601,11 +9576,9 @@ pub mod processor {
             require_asset_active_for_oracle_reconfiguration_view(&group, asset_index_usize)?;
             let group_had_position_or_loss_state = group_has_position_or_loss_state_view(&group);
             let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
-            if asset_index_usize == 0 {
-                expect_live_authority(&cfg.admin, admin.key)?;
-            } else {
-                expect_live_authority(&existing_profile.oracle_authority, admin.key)?;
-            }
+            // Asset 0 has a real stored profile; gate oracle reconfiguration on its
+            // oracle_authority exactly like permissionless assets 1..N.
+            expect_live_authority(&existing_profile.oracle_authority, admin.key)?;
 
             let profile = state::AssetOracleProfileV16 {
                 oracle_mode: constants::ORACLE_MODE_EWMA_MARK,
@@ -9710,11 +9683,9 @@ pub mod processor {
             require_asset_active_for_oracle_reconfiguration_view(&group, asset_index_usize)?;
             let group_had_position_or_loss_state = group_has_position_or_loss_state_view(&group);
             let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
-            if asset_index_usize == 0 {
-                expect_live_authority(&cfg.admin, authority.key)?;
-            } else {
-                expect_live_authority(&existing_profile.oracle_authority, authority.key)?;
-            }
+            // Asset 0 has a real stored profile; gate oracle reconfiguration on its
+            // oracle_authority exactly like permissionless assets 1..N.
+            expect_live_authority(&existing_profile.oracle_authority, authority.key)?;
 
             let profile = state::AssetOracleProfileV16 {
                 oracle_mode: constants::ORACLE_MODE_AUTH_MARK,
@@ -11690,15 +11661,19 @@ pub mod processor {
         use alloc::vec;
         use percolator::HealthCertV16;
 
+        #[test]
+        fn wrapper_config_len_matches_struct_size() {
+            assert_eq!(
+                core::mem::size_of::<state::WrapperConfigV16>(),
+                state::wrapper_config_len_for_test(),
+                "WRAPPER_CONFIG_LEN must equal size_of::<WrapperConfigV16>() for the zero-copy layout",
+            );
+        }
+
         fn test_wrapper_config(price: u64) -> state::WrapperConfigV16 {
             let mut cfg = state::WrapperConfigV16::default();
-            cfg.admin = [1u8; 32];
+            cfg.marketauth = [1u8; 32];
             cfg.collateral_mint = [2u8; 32];
-            cfg.insurance_authority = [1u8; 32];
-            cfg.insurance_operator = [1u8; 32];
-            cfg.backing_bucket_authority = [1u8; 32];
-            cfg.asset_authority = [1u8; 32];
-            cfg.mark_authority = [1u8; 32];
             cfg.oracle_mode = constants::ORACLE_MODE_MANUAL;
             cfg.last_good_oracle_slot = 0;
             cfg.mark_ewma_e6 = price;

@@ -630,7 +630,6 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::UpdateAuthority {
-                kind: processor::AUTHORITY_ASSET,
                 new_pubkey: new_authority.pubkey().to_bytes(),
             },
             vec![
@@ -640,7 +639,7 @@ impl V16CuEnv {
             ],
             &[&self.admin, new_authority],
         )
-        .expect("update asset authority")
+        .expect("update market authority")
     }
 
     fn update_base_unit_mints_with_cu(
@@ -7733,7 +7732,7 @@ fn v16_bpf_policy_authority_and_base_unit_tags_are_bounded_and_persist() {
     let authority_cu = env.update_asset_authority_with_cu(&new_asset_authority);
     assert_cu_within("UpdateAuthority", authority_cu, CUSTODY_CU_LIMIT);
     let (cfg, _) = env.market_state();
-    assert_eq!(cfg.asset_authority, new_asset_authority.pubkey().to_bytes());
+    assert_eq!(cfg.marketauth, new_asset_authority.pubkey().to_bytes());
 }
 
 #[test]
@@ -10429,27 +10428,27 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
     let mut env = V16CuEnv::new();
     let victim = Keypair::new(); // a key that will NOT sign
     let (cfg0, _) = env.market_state();
-    // --- market-wide handler (kept kind: ASSET authority) ---
-    // admin tries to set the ASSET authority to `victim` without victim signing -> reject.
+    // --- market-wide handler (single `marketauth` key) ---
+    // marketauth tries to set itself to `victim` without victim signing -> reject.
     env.svm.expire_blockhash();
     let r = send_tx(&mut env.svm, env.program_id, &env.payer,
-        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_ASSET, new_pubkey: victim.pubkey().to_bytes() },
+        ProgInstruction::UpdateAuthority { new_pubkey: victim.pubkey().to_bytes() },
         vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new_readonly(victim.pubkey(), false), AccountMeta::new(env.market, false)],
         &[&env.admin]);
-    assert!(r.is_err(), "setting an authority to a non-signing key must reject");
+    assert!(r.is_err(), "setting the market authority to a non-signing key must reject");
     let (cfg1, _) = env.market_state();
-    assert_eq!(cfg1.asset_authority, cfg0.asset_authority, "asset authority unchanged by the rejected update");
+    assert_eq!(cfg1.marketauth, cfg0.marketauth, "market authority unchanged by the rejected update");
 
     // with the new authority co-signing, the update succeeds.
     let new_asset = Keypair::new();
     env.ensure_signer_account(new_asset.pubkey());
     env.svm.expire_blockhash();
     let r_ok = send_tx(&mut env.svm, env.program_id, &env.payer,
-        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_ASSET, new_pubkey: new_asset.pubkey().to_bytes() },
+        ProgInstruction::UpdateAuthority { new_pubkey: new_asset.pubkey().to_bytes() },
         vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(new_asset.pubkey(), true), AccountMeta::new(env.market, false)],
         &[&env.admin, &new_asset]);
     assert!(r_ok.is_ok(), "co-signed authority update succeeds: {:?}", r_ok);
-    assert_eq!(env.market_state().0.asset_authority, new_asset.pubkey().to_bytes(), "asset authority updated to the co-signing key");
+    assert_eq!(env.market_state().0.marketauth, new_asset.pubkey().to_bytes(), "market authority updated to the co-signing key");
 
     // --- per-asset handler for ASSET 0 (insurance authority now rotates via UpdateAssetAuthority) ---
     let prof0 = |env: &V16CuEnv|
@@ -14719,21 +14718,13 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
     let mallory = Keypair::new();
     env.ensure_signer_account(mallory.pubkey());
 
-    // ATTACK: rotate ADMIN with mallory as the CURRENT authority -> reject (mallory != cfg.admin).
+    // ATTACK: rotate marketauth with mallory as the CURRENT authority -> reject (mallory != cfg.marketauth).
     env.svm.expire_blockhash();
     let r_admin = send_tx(&mut env.svm, env.program_id, &env.payer,
-        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_ADMIN, new_pubkey: mallory.pubkey().to_bytes() },
+        ProgInstruction::UpdateAuthority { new_pubkey: mallory.pubkey().to_bytes() },
         vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false)],
         &[&mallory]);
-    assert!(r_admin.is_err(), "a non-admin seizing the ADMIN authority must reject");
-
-    // and rotating the market-wide ASSET authority as a non-holder also rejects.
-    env.svm.expire_blockhash();
-    let r_asset = send_tx(&mut env.svm, env.program_id, &env.payer,
-        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_ASSET, new_pubkey: mallory.pubkey().to_bytes() },
-        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false)],
-        &[&mallory]);
-    assert!(r_asset.is_err(), "a non-holder rotating the ASSET authority must reject");
+    assert!(r_admin.is_err(), "a non-holder seizing the market authority must reject");
 
     // and rotating ASSET 0's insurance authority (now a per-asset op) by a non-holder also rejects:
     // mallory is neither asset-0's asset_admin nor its insurance authority.
@@ -14748,21 +14739,20 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
     assert!(r_a0_ins.is_err(), "a non-holder rotating asset-0's insurance authority must reject");
     assert_eq!(prof0(&env).insurance_authority, a0_ins_before, "asset-0 insurance authority unchanged");
 
-    // all market-wide authorities are byte-identical to the start — no takeover.
+    // the market authority is byte-identical to the start — no takeover.
     let (cfg1, _) = env.market_state();
-    assert_eq!(cfg1.admin, cfg0.admin, "admin authority unchanged (no takeover)");
-    assert_eq!(cfg1.asset_authority, cfg0.asset_authority, "asset authority unchanged");
+    assert_eq!(cfg1.marketauth, cfg0.marketauth, "market authority unchanged (no takeover)");
 
-    // CONTROL: the genuine current admin CAN rotate the admin (two-party handoff with the new admin co-signing).
+    // CONTROL: the genuine current marketauth CAN rotate it (two-party handoff with the new key co-signing).
     let new_admin = Keypair::new();
     env.ensure_signer_account(new_admin.pubkey());
     env.svm.expire_blockhash();
     let ok = send_tx(&mut env.svm, env.program_id, &env.payer,
-        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_ADMIN, new_pubkey: new_admin.pubkey().to_bytes() },
+        ProgInstruction::UpdateAuthority { new_pubkey: new_admin.pubkey().to_bytes() },
         vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(new_admin.pubkey(), true), AccountMeta::new(env.market, false)],
         &[&env.admin, &new_admin]);
-    assert!(ok.is_ok(), "the genuine admin rotates the admin (co-signed): {:?}", ok);
-    assert_eq!(env.market_state().0.admin, new_admin.pubkey().to_bytes(), "admin rotated by the genuine holder");
+    assert!(ok.is_ok(), "the genuine market authority rotates itself (co-signed): {:?}", ok);
+    assert_eq!(env.market_state().0.marketauth, new_admin.pubkey().to_bytes(), "market authority rotated by the genuine holder");
 }
 
 // security.md sweep — admin renounce anti-brick (#6/#30): renouncing the admin (new_pubkey = zero) is
@@ -14776,26 +14766,26 @@ fn v16_attack_admin_renounce_without_fallback_rejected() {
     let (cfg0, _) = env.market_state();
     let zero = Pubkey::default();
 
-    // ATTACK/FOOTGUN: renounce admin (-> zero) with NO permissionless fallback -> reject (no brick).
+    // ATTACK/FOOTGUN: renounce marketauth (-> zero) with NO permissionless fallback -> reject (no brick).
     env.svm.expire_blockhash();
     let r = send_tx(&mut env.svm, env.program_id, &env.payer,
-        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_ADMIN, new_pubkey: [0u8; 32] },
+        ProgInstruction::UpdateAuthority { new_pubkey: [0u8; 32] },
         vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new_readonly(zero, false), AccountMeta::new(env.market, false)],
         &[&env.admin]);
-    assert!(r.is_err(), "renouncing admin with no permissionless fallback must reject (anti-brick)");
-    assert_eq!(env.market_state().0.admin, cfg0.admin, "admin unchanged — market not bricked");
+    assert!(r.is_err(), "renouncing market authority with no permissionless fallback must reject (anti-brick)");
+    assert_eq!(env.market_state().0.marketauth, cfg0.marketauth, "market authority unchanged — market not bricked");
 
     // configure a permissionless fallback (stale + force-close delay both > 0).
     env.configure_permissionless_resolve_with_cu(100, 100);
 
-    // NOW renouncing admin is permitted (the market can still be resolved permissionlessly).
+    // NOW renouncing marketauth is permitted (the market can still be resolved permissionlessly).
     env.svm.expire_blockhash();
     let ok = send_tx(&mut env.svm, env.program_id, &env.payer,
-        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_ADMIN, new_pubkey: [0u8; 32] },
+        ProgInstruction::UpdateAuthority { new_pubkey: [0u8; 32] },
         vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new_readonly(zero, false), AccountMeta::new(env.market, false)],
         &[&env.admin]);
-    assert!(ok.is_ok(), "renouncing admin WITH a permissionless fallback is allowed: {:?}", ok);
-    assert_eq!(env.market_state().0.admin, [0u8; 32], "admin renounced to zero (fallback present)");
+    assert!(ok.is_ok(), "renouncing market authority WITH a permissionless fallback is allowed: {:?}", ok);
+    assert_eq!(env.market_state().0.marketauth, [0u8; 32], "market authority renounced to zero (fallback present)");
 }
 
 // security.md sweep — auth-mark push is authority-gated (#6/#37): pushing the settlement mark requires
@@ -15301,9 +15291,29 @@ fn v16_attack_force_shutdown_timeout_lets_traders_exit_before_close() {
     env.deposit(&lb, pb, 1_000_000);
     env.trade_asset_with_cu(1, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
 
-    // asset-0 admin force-shuts-down asset 1 at slot 10 -> RECOVERY (frozen mark, not yet wound down).
+    // GATE: only `marketauth` may force-shutdown a permissionless asset. A non-marketauth signer
+    // (here a fresh key that is not the init signer) is rejected before any state changes.
     const SHUT: u64 = 10;
     env.svm.warp_to_slot(SHUT);
+    env.svm.expire_blockhash();
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+    let stranger = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+            asset_index: 1, now_slot: SHUT, initial_price: 0,
+            insurance_authority: mallory.pubkey().to_bytes(),
+            insurance_operator: mallory.pubkey().to_bytes(),
+            backing_bucket_authority: mallory.pubkey().to_bytes(),
+            oracle_authority: mallory.pubkey().to_bytes(),
+        },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false)],
+        &[&mallory]);
+    assert!(stranger.is_err(), "a non-marketauth signer must NOT be able to force-shutdown an asset");
+    assert_eq!(env.market_state().1.assets[1].lifecycle, AssetLifecycleV16::Active,
+        "asset 1 still ACTIVE after the rejected non-marketauth shutdown");
+
+    // marketauth (the init signer) force-shuts-down asset 1 at slot 10 -> RECOVERY (frozen mark, not yet wound down).
     env.svm.expire_blockhash();
     env.update_asset_lifecycle_as_admin_with_cu(percolator_prog::processor::ASSET_ACTION_SHUTDOWN, 1, SHUT, 0);
     assert_eq!(env.market_state().1.assets[1].lifecycle, AssetLifecycleV16::Recovery,
