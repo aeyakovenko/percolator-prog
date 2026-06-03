@@ -15595,3 +15595,63 @@ fn v16_attack_scheduled_close_cannot_strand_funds_then_reclaims() {
     assert!(try_close(&mut env).is_ok(), "a fully-drained market can be closed");
     assert!(env.svm.get_account(&market).unwrap().data.iter().all(|x| *x == 0), "market account reclaimed (zeroed)");
 }
+
+// Regression for percolator-cli#82 (fixed by 05a8f845): UpdateAssetLifecycle(Activate) must NOT let a
+// non-admin install attacker-controlled per-asset authorities. Exact exploit shape: a non-admin calls
+// Activate on a slot with ITSELF as oracle/insurance/operator/backing authority (written verbatim from
+// instruction data), then ConfigureAuthMark + PushAuthMark an extreme price and extracts PnL. The
+// fee/admin gate (v16_program.rs:8623) rejects step 1 on a default (fee=0) market: non-admin => Unauthorized.
+#[test]
+fn v16_attack_non_admin_activate_cannot_install_authorities() {
+    let mut env = V16CuEnv::new(); // default permissionless_market_init_fee == 0 => admin-only activation
+    let market = env.market;
+    env.svm.warp_to_slot(1);
+
+    // Attacker installs ITSELF as every per-asset authority (the exact bounty shape).
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+    let atk = mallory.pubkey().to_bytes();
+
+    env.svm.expire_blockhash();
+    let r_activate = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1, now_slot: 1, initial_price: 100,
+            insurance_authority: atk, insurance_operator: atk,
+            backing_bucket_authority: atk, oracle_authority: atk,
+        },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(market, false)],
+        &[&mallory],
+    );
+    assert!(r_activate.is_err(), "non-admin Activate installing attacker authorities must be rejected (fee=0 => Unauthorized)");
+
+    // No asset was created; the attacker is not an authority for anything.
+    let g = env.market_state().1;
+    assert_ne!(g.assets.get(1).map(|a| a.lifecycle), Some(AssetLifecycleV16::Active), "attacker created no asset");
+
+    // Exploit follow-through is dead at step 1: the attacker cannot drive the asset's mark, because the
+    // activation that would have installed it as oracle_authority never happened.
+    env.svm.expire_blockhash();
+    let r_mark = env.send(
+        ProgInstruction::ConfigureAuthMark { asset_index: 1, now_slot: 1, initial_mark_e6: 1_000_000 },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(market, false)],
+        &[&mallory],
+    );
+    assert!(r_mark.is_err(), "attacker must not be able to push the mark on an asset it could not activate");
+
+    // Positive control: the market's asset authority (admin) CAN activate.
+    let admin = env.admin.insecure_clone();
+    let adm = admin.pubkey().to_bytes();
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1, now_slot: 1, initial_price: 100,
+            insurance_authority: adm, insurance_operator: adm,
+            backing_bucket_authority: adm, oracle_authority: adm,
+        },
+        vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(market, false)],
+        &[&admin],
+    ).expect("the asset authority may activate");
+    assert_eq!(env.market_state().1.assets[1].lifecycle, AssetLifecycleV16::Active, "admin activation succeeds");
+}
