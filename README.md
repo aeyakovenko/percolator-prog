@@ -96,15 +96,20 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   position accounts**; to use more assets, open more accounts (never grow one account past the cap).
 
 ### Governance & admin keys
-- **Per-asset admin keys, isolated** — one asset's admin can never be used against another asset.
-  **✅** Each permissionless asset (1..N) carries its own `asset_admin` (`AssetOracleProfileV16`),
-  bootstrapped to the activator. `UpdateAssetAuthority { asset_index, kind, new_pubkey }` is scoped to
-  that asset's profile only and rejects `asset_index == 0` (asset 0 uses the market-wide
-  `UpdateAuthority`).
-- **Each permissionless asset (1..N) has a cold-storage admin** that can **rotate that asset's other
-  keys** (insurance/operator/backing/oracle) and **can be burned (set to 0)** — a credibly admin-free
-  asset that can't be revived. **✅** (Asset 0 / market-wide authorities have no such override; they
-  self-rotate via `UpdateAuthority` — see the Self-rotation caveat in the Admin Key Threat Model.)
+- **Per-asset admin keys, isolated — uniform across all assets including asset 0** — one asset's admin
+  can never be used against another asset. **✅** Every asset (0..N) carries its own `asset_admin`
+  (`AssetOracleProfileV16`): assets 1..N bootstrap it to the activator, **asset 0 bootstraps it to the
+  market admin at `InitMarket`**. `UpdateAssetAuthority { asset_index, kind, new_pubkey }` is scoped to
+  that asset's profile only and now operates on **asset 0 too** (the old `asset_index == 0` rejection is
+  gone). Asset 0 is **not** special for authorities — its only special properties are **fee capture**
+  (it's the insurance-redirect target) and that it **cannot be permissionlessly created** (it's created
+  at `InitMarket`, not via `UpdateAssetLifecycle`).
+- **Each asset (0..N) has a cold-storage admin** that can **rotate that asset's other keys**
+  (insurance/operator/backing/oracle) and **can be burned (set to 0)** — a credibly admin-free asset
+  that can't be revived. **✅** For asset 0 this means the market admin can force-replace or burn the
+  shared insurance operator/authority via `UpdateAssetAuthority`, and burning `asset_admin` makes those
+  delegations sticky (admin-free). The market-wide `UpdateAuthority` now only rotates the truly
+  market-level keys (`ADMIN`, `ASSET` create-fee gate, `BASE_UNIT`).
 - **Each other asset key can rotate itself or be set to 0.** **✅** (a domain authority self-rotates
   even after the asset admin is burned). All verified by
   `v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable`.
@@ -665,19 +670,19 @@ These are governance powers, not bugs:
 2. `UpdateConfig`
    - change funding and TVL:insurance cap policy knobs within validation bounds.
    - impact: economics can become unfavorable to users.
-3. `UpdateAuthority { kind = AUTHORITY_MARK }`
-   - choose or burn who can push AuthMark or EwmaMark updates.
+3. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_ORACLE }` (while admin holds asset-0's `asset_admin`)
+   - choose or burn who can push asset-0 AuthMark/EwmaMark updates.
    - impact: authority mark input control/censorship surface.
 4. `ResolveMarket`
    - transition market to resolved mode using stored authority price.
    - impact: trading/deposits/new accounts are halted; market enters wind-down.
-5. `UpdateAuthority { kind = AUTHORITY_INSURANCE }`
+5. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_INSURANCE }` (while admin holds asset-0's `asset_admin`)
    - choose or burn who can withdraw resolved-market insurance.
    - impact: resolved insurance extraction capability is delegated or permanently removed.
 6. `WithdrawInsurance` (post-resolution, after positions are closed)
    - withdraw insurance buffer to admin ATA.
    - impact: no insurance backstop remains.
-7. `UpdateAuthority { kind = AUTHORITY_INSURANCE_OPERATOR }`
+7. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_INSURANCE_OPERATOR }` (while admin holds asset-0's `asset_admin`)
    - choose or burn who can call bounded live insurance withdrawal.
    - impact: bounded live insurance extraction capability is delegated or permanently removed.
 8. `AdminForceCloseAccount` (post-resolution only)
@@ -687,20 +692,21 @@ These are governance powers, not bugs:
     - decommission market account and recover slab lamports.
     - impact: market is permanently closed.
 
-> **Self-rotation caveat (items 3, 5, 7).** `UpdateAuthority { kind = AUTHORITY_MARK | AUTHORITY_INSURANCE |
-> AUTHORITY_INSURANCE_OPERATOR }` is **not** an admin override: each requires the **current holder of that
-> role** to sign (`expect_live_authority(&cfg.<role>, current.key)`), and a non-zero replacement must also
-> sign. So the admin can rotate/burn these **only while it still holds the role** (the common bootstrap
-> state where one key holds everything). **Once a role is delegated to an independent key (e.g. a Squads or
-> cold key), the admin can no longer reclaim or burn it** — the delegated holder must sign its own rotation.
-> Delegation is therefore sticky/one-way, which is a feature: it lets you hand the live insurance operator
-> (or mark/resolved-insurance authority) to an independent signer that the market admin cannot claw back.
-> The corollary is that a **lost** market-0 operator cannot be force-replaced by the admin; only the
-> per-asset cold-storage `asset_admin` (assets 1..N, via `UpdateAssetAuthority`) can override its asset's
-> sub-authorities — **asset 0 / market-wide authorities have no such override** and use self-rotation only.
-> Verified by `v16_attack_update_authority_non_holder_cannot_rotate` (a non-holder, incl. the admin,
-> cannot rotate a role it doesn't hold) and `v16_attack_update_authority_requires_new_authority_signature`
-> (the replacement key must co-sign).
+> **Authority model (items 3, 5, 7).** Asset-0's insurance/operator/oracle(mark)/backing authorities now
+> use the **same per-asset `asset_admin` model as assets 1..N** (`UpdateAssetAuthority { asset_index = 0 }`).
+> Asset 0's `asset_admin` is bootstrapped to the **market admin** at `InitMarket`, so a malicious admin
+> **can** rotate or burn the shared insurance operator/authority and the mark pusher (items 3/5/7) —
+> exactly the powers the asset_admin has over any asset. Two ways to make those delegations stick:
+> burn the **sub-authority** itself (set to 0 — capability permanently removed), or burn asset-0's
+> **`asset_admin`** (set to 0 — no key can rotate asset-0's sub-authorities again, and the current holders
+> are frozen). The market-wide `UpdateAuthority` (tag 32) now rotates **only** the truly market-level keys
+> — `ADMIN`, `ASSET` (create-fee gate), `BASE_UNIT` — each requiring its current holder to sign plus a
+> co-signing replacement (`expect_live_authority(&cfg.<role>, current.key)`); the per-asset
+> `MARK/INSURANCE/INSURANCE_OPERATOR/BACKING` kinds were removed. Verified by
+> `v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable` (asset-0 `asset_admin` rotates/burns
+> asset-0's sub-authorities, isolated from other assets),
+> `v16_attack_update_authority_non_holder_cannot_rotate`, and
+> `v16_attack_update_authority_requires_new_authority_signature`.
 
 ### What a malicious admin should NOT be able to do
 

@@ -1306,7 +1306,7 @@ pub mod state {
             oracle_leg_feeds: config.oracle_leg_feeds,
             oracle_leg_prices_e6: config.oracle_leg_prices_e6,
             oracle_leg_publish_times: config.oracle_leg_publish_times,
-            asset_admin: [0u8; 32],
+            asset_admin: config.admin,
         }
     }
 
@@ -4682,11 +4682,8 @@ pub mod processor {
         cfg: &WrapperConfigV16,
         asset_index: usize,
     ) -> Result<state::AssetOracleProfileV16, ProgramError> {
-        if asset_index == 0 {
-            Ok(state::asset_oracle_profile_from_config(cfg))
-        } else {
-            state::read_asset_oracle_profile(market_data, asset_index)
-        }
+        let _ = cfg;
+        state::read_asset_oracle_profile(market_data, asset_index)
     }
 
     fn read_oracle_profile_from_view(
@@ -4694,9 +4691,7 @@ pub mod processor {
         cfg: &WrapperConfigV16,
         asset_index: usize,
     ) -> Result<state::AssetOracleProfileV16, ProgramError> {
-        if asset_index == 0 {
-            return Ok(state::asset_oracle_profile_from_config(cfg));
-        }
+        let _ = cfg;
         let market = group
             .markets
             .get(asset_index)
@@ -4716,14 +4711,23 @@ pub mod processor {
         profile: &state::AssetOracleProfileV16,
     ) -> ProgramResult {
         if asset_index != 0 {
-            state::validate_asset_oracle_profile(profile)?;
-            let market = group
-                .markets
-                .get_mut(asset_index)
-                .ok_or(PercolatorError::InvalidInstruction)?;
-            market.wrapper[..constants::ASSET_ORACLE_PROFILE_LEN]
-                .copy_from_slice(bytemuck::bytes_of(profile));
+            write_oracle_profile_to_view(group, asset_index, profile)?;
         }
+        Ok(())
+    }
+
+    fn write_oracle_profile_to_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        profile: &state::AssetOracleProfileV16,
+    ) -> ProgramResult {
+        state::validate_asset_oracle_profile(profile)?;
+        let market = group
+            .markets
+            .get_mut(asset_index)
+            .ok_or(PercolatorError::InvalidInstruction)?;
+        market.wrapper[..constants::ASSET_ORACLE_PROFILE_LEN]
+            .copy_from_slice(bytemuck::bytes_of(profile));
         Ok(())
     }
 
@@ -4784,20 +4788,12 @@ pub mod processor {
         profile: &state::AssetOracleProfileV16,
         asset_index: usize,
     ) -> DomainAuthoritiesV16 {
-        if asset_index == 0 {
-            DomainAuthoritiesV16 {
-                insurance_authority: cfg.insurance_authority,
-                insurance_operator: cfg.insurance_operator,
-                backing_bucket_authority: cfg.backing_bucket_authority,
-                oracle_authority: cfg.mark_authority,
-            }
-        } else {
-            DomainAuthoritiesV16 {
-                insurance_authority: profile.insurance_authority,
-                insurance_operator: profile.insurance_operator,
-                backing_bucket_authority: profile.backing_bucket_authority,
-                oracle_authority: profile.oracle_authority,
-            }
+        let _ = (cfg, asset_index);
+        DomainAuthoritiesV16 {
+            insurance_authority: profile.insurance_authority,
+            insurance_operator: profile.insurance_operator,
+            backing_bucket_authority: profile.backing_bucket_authority,
+            oracle_authority: profile.oracle_authority,
         }
     }
 
@@ -5932,16 +5928,11 @@ pub mod processor {
                     .and_then(|v| v.checked_add(backing_domain_fee))
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?,
             )?;
+            write_oracle_profile_to_view(&mut group, asset_index as usize, &oracle_profile)?;
             if asset_index == 0 && oracle_v16::profile_is_price_managed(&oracle_profile) {
                 cfg.mark_ewma_e6 = oracle_profile.mark_ewma_e6;
                 cfg.mark_ewma_last_slot = oracle_profile.mark_ewma_last_slot;
                 cfg_after = Some(cfg);
-            } else {
-                write_oracle_profile_to_view_if_separate(
-                    &mut group,
-                    asset_index as usize,
-                    &oracle_profile,
-                )?;
             }
             if ignore_unrelated_loss_stale {
                 group.header.loss_stale_active = 0;
@@ -6506,12 +6497,17 @@ pub mod processor {
             expect_owner(ledger_ai, program_id)?;
         }
         verify_token_program(token_program)?;
-        let (cfg_pre, mode, _, _) =
-            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        let (cfg_pre, mode, asset0_insurance_authority) = {
+            let market_data = market_ai.try_borrow_data()?;
+            let (cfg_pre, mode, _, _) =
+                state::read_market_config_mode_and_capacity(&market_data)?;
+            let profile0 = read_oracle_profile_for_asset(&market_data, &cfg_pre, 0)?;
+            (cfg_pre, mode, profile0.insurance_authority)
+        };
         if mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        expect_live_authority(&cfg_pre.insurance_authority, signer.key)?;
+        expect_live_authority(&asset0_insurance_authority, signer.key)?;
         let mint = primary_collateral_mint(&cfg_pre);
         let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
         verify_user_token_account(source_token, signer.key, &mint)?;
@@ -6526,7 +6522,9 @@ pub mod processor {
                 return Err(PercolatorError::EngineLockActive.into());
             }
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
-            expect_live_authority(&cfg.insurance_authority, signer.key)?;
+            let asset0_insurance_authority =
+                domain_authorities_from_view(&group, &cfg, 0)?.insurance_authority;
+            expect_live_authority(&asset0_insurance_authority, signer.key)?;
             let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
                 Some(ledger_ai.try_borrow_mut_data()?)
             } else {
@@ -6536,7 +6534,7 @@ pub mod processor {
                 let (mut ledger, initialized) = read_or_new_insurance_ledger(
                     data,
                     market_ai.key.to_bytes(),
-                    cfg.insurance_authority,
+                    asset0_insurance_authority,
                     market_insurance_remaining_view(&group, 0)?,
                 )?;
                 sync_insurance_ledger(&mut ledger, market_insurance_remaining_view(&group, 0)?)?;
@@ -7520,13 +7518,15 @@ pub mod processor {
 
         let mut market_data = market_ai.try_borrow_mut_data()?;
         let (cfg, group) = state::market_view_mut(&mut market_data)?;
-        expect_live_authority(&cfg.insurance_authority, authority.key)?;
+        let asset0_insurance_authority =
+            domain_authorities_from_view(&group, &cfg, 0)?.insurance_authority;
+        expect_live_authority(&asset0_insurance_authority, authority.key)?;
         let mut ledger_data = ledger_ai.try_borrow_mut_data()?;
         let observed = market_insurance_remaining_view(&group, 0)?;
         let (mut ledger, initialized) = read_or_new_insurance_ledger(
             &ledger_data,
             market_ai.key.to_bytes(),
-            cfg.insurance_authority,
+            asset0_insurance_authority,
             observed,
         )?;
         sync_insurance_ledger(&mut ledger, observed)?;
@@ -7876,9 +7876,14 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
 
-        let (cfg_pre, mode, _, _) =
-            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        expect_live_authority(&cfg_pre.insurance_operator, operator.key)?;
+        let (cfg_pre, mode, asset0_insurance_operator) = {
+            let market_data = market_ai.try_borrow_data()?;
+            let (cfg_pre, mode, _, _) =
+                state::read_market_config_mode_and_capacity(&market_data)?;
+            let profile0 = read_oracle_profile_for_asset(&market_data, &cfg_pre, 0)?;
+            (cfg_pre, mode, profile0.insurance_operator)
+        };
+        expect_live_authority(&asset0_insurance_operator, operator.key)?;
         if mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
@@ -7896,7 +7901,8 @@ pub mod processor {
         let cfg_after = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
-            expect_live_authority(&cfg.insurance_operator, operator.key)?;
+            let asset0_authorities = domain_authorities_from_view(&group, &cfg, 0)?;
+            expect_live_authority(&asset0_authorities.insurance_operator, operator.key)?;
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
@@ -7954,7 +7960,7 @@ pub mod processor {
                 let (mut ledger, initialized) = read_or_new_insurance_ledger(
                     data,
                     market_ai.key.to_bytes(),
-                    cfg.insurance_authority,
+                    asset0_authorities.insurance_authority,
                     insurance,
                 )?;
                 sync_insurance_ledger(&mut ledger, insurance)?;
@@ -8384,25 +8390,9 @@ pub mod processor {
                 }
                 cfg.admin = new_pubkey;
             }
-            AUTHORITY_MARK => {
-                expect_live_authority(&cfg.mark_authority, current.key)?;
-                cfg.mark_authority = new_pubkey;
-            }
-            AUTHORITY_INSURANCE => {
-                expect_live_authority(&cfg.insurance_authority, current.key)?;
-                cfg.insurance_authority = new_pubkey;
-            }
-            AUTHORITY_BACKING_BUCKET => {
-                expect_live_authority(&cfg.backing_bucket_authority, current.key)?;
-                cfg.backing_bucket_authority = new_pubkey;
-            }
             AUTHORITY_ASSET => {
                 expect_live_authority(&cfg.asset_authority, current.key)?;
                 cfg.asset_authority = new_pubkey;
-            }
-            AUTHORITY_INSURANCE_OPERATOR => {
-                expect_live_authority(&cfg.insurance_operator, current.key)?;
-                cfg.insurance_operator = new_pubkey;
             }
             AUTHORITY_BASE_UNIT => {
                 expect_live_authority(&cfg.base_unit_authority, current.key)?;
@@ -8438,10 +8428,8 @@ pub mod processor {
         }
 
         let asset_index = asset_index as usize;
-        // Per-asset authorities exist only for permissionless assets 1..N; asset 0 uses UpdateAuthority.
-        if asset_index == 0 {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
+        // Asset 0 carries a real stored profile (asset_admin bootstrapped to the market admin) and is
+        // rotated/burned here exactly like permissionless assets 1..N.
 
         let mut data = market_ai.try_borrow_mut_data()?;
         let (cfg, mut group) = state::market_view_mut(&mut data)?;
@@ -8474,7 +8462,7 @@ pub mod processor {
             ASSET_AUTH_ORACLE => profile.oracle_authority = new_pubkey,
             _ => return Err(PercolatorError::InvalidInstruction.into()),
         }
-        write_oracle_profile_to_view_if_separate(&mut group, asset_index, &profile)?;
+        write_oracle_profile_to_view(&mut group, asset_index, &profile)?;
         Ok(())
     }
 
@@ -9032,7 +9020,7 @@ pub mod processor {
                 _ => return Err(PercolatorError::InvalidInstruction.into()),
             }
             if let Some(profile) = reset_profile {
-                write_oracle_profile_to_view_if_separate(&mut group, asset_index, &profile)?;
+                write_oracle_profile_to_view(&mut group, asset_index, &profile)?;
             }
             group.validate_shape().map_err(map_v16_error)?;
             cfg
@@ -9310,9 +9298,14 @@ pub mod processor {
         expect_signer(authority)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
-        let (mut cfg, _, _, _, max_trading_fee_bps) =
-            state::read_market_trade_preflight(&market_ai.try_borrow_data()?, 0)?;
-        expect_live_authority(&cfg.insurance_authority, authority.key)?;
+        let (mut cfg, asset0_insurance_authority, max_trading_fee_bps) = {
+            let market_data = market_ai.try_borrow_data()?;
+            let (cfg, _, _, _, max_trading_fee_bps) =
+                state::read_market_trade_preflight(&market_data, 0)?;
+            let profile0 = read_oracle_profile_for_asset(&market_data, &cfg, 0)?;
+            (cfg, profile0.insurance_authority, max_trading_fee_bps)
+        };
+        expect_live_authority(&asset0_insurance_authority, authority.key)?;
         if trade_fee_base_bps > max_trading_fee_bps
             || trade_fee_base_bps > constants::MAX_DYNAMIC_TRADE_FEE_BPS
         {
@@ -9540,6 +9533,7 @@ pub mod processor {
             asset.slot_last = percolator::V16PodU64::new(authenticated_slot);
             cfg.last_good_oracle_slot =
                 core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
+            write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
                 cfg.oracle_mode = profile.oracle_mode;
                 cfg.oracle_leg_count = profile.oracle_leg_count;
@@ -9558,8 +9552,6 @@ pub mod processor {
                 cfg.oracle_target_publish_time = profile.oracle_target_publish_time;
                 cfg.mark_ewma_e6 = profile.mark_ewma_e6;
                 cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
-            } else {
-                write_oracle_profile_to_view_if_separate(&mut group, asset_index_usize, &profile)?;
             }
             group.header.current_slot = percolator::V16PodU64::new(authenticated_slot);
             if !group_had_position_or_loss_state {
@@ -9655,6 +9647,7 @@ pub mod processor {
             asset.slot_last = percolator::V16PodU64::new(authenticated_slot);
             cfg.last_good_oracle_slot =
                 core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
+            write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
                 cfg.oracle_mode = profile.oracle_mode;
                 cfg.oracle_leg_count = 0;
@@ -9673,8 +9666,6 @@ pub mod processor {
                 cfg.oracle_leg_feeds = [[0u8; 32]; constants::ORACLE_LEG_CAP];
                 cfg.oracle_leg_prices_e6 = [0u64; constants::ORACLE_LEG_CAP];
                 cfg.oracle_leg_publish_times = [0i64; constants::ORACLE_LEG_CAP];
-            } else {
-                write_oracle_profile_to_view_if_separate(&mut group, asset_index_usize, &profile)?;
             }
             group.header.current_slot = percolator::V16PodU64::new(authenticated_slot);
             if !group_had_position_or_loss_state {
@@ -9765,6 +9756,9 @@ pub mod processor {
             asset.slot_last = percolator::V16PodU64::new(authenticated_slot);
             cfg.last_good_oracle_slot =
                 core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
+            // Asset 0 now carries a real stored profile: persist it like 1..N, and ALSO mirror the
+            // oracle/mark fields into the market-wide config (other code paths still read cfg for asset 0).
+            write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
                 cfg.oracle_mode = profile.oracle_mode;
                 cfg.oracle_leg_count = 0;
@@ -9783,8 +9777,6 @@ pub mod processor {
                 cfg.oracle_leg_feeds = [[0u8; 32]; constants::ORACLE_LEG_CAP];
                 cfg.oracle_leg_prices_e6 = [0u64; constants::ORACLE_LEG_CAP];
                 cfg.oracle_leg_publish_times = [0i64; constants::ORACLE_LEG_CAP];
-            } else {
-                write_oracle_profile_to_view_if_separate(&mut group, asset_index_usize, &profile)?;
             }
             group.header.current_slot = percolator::V16PodU64::new(authenticated_slot);
             if !group_had_position_or_loss_state {
@@ -9859,13 +9851,12 @@ pub mod processor {
             profile.last_good_oracle_slot = authenticated_slot;
             cfg.last_good_oracle_slot =
                 core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
+            write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
                 cfg.mark_ewma_e6 = profile.mark_ewma_e6;
                 cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
                 cfg.oracle_target_price_e6 = profile.oracle_target_price_e6;
                 cfg.oracle_target_publish_time = 0;
-            } else {
-                write_oracle_profile_to_view_if_separate(&mut group, asset_index_usize, &profile)?;
             }
             group.validate_shape().map_err(map_v16_error)?;
             cfg
@@ -9919,6 +9910,7 @@ pub mod processor {
             profile.last_good_oracle_slot = authenticated_slot;
             cfg.last_good_oracle_slot =
                 core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
+            write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
                 cfg.mark_ewma_e6 = profile.mark_ewma_e6;
                 cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
@@ -9926,8 +9918,6 @@ pub mod processor {
                 cfg.mark_min_fee = 0;
                 cfg.oracle_target_price_e6 = profile.oracle_target_price_e6;
                 cfg.oracle_target_publish_time = 0;
-            } else {
-                write_oracle_profile_to_view_if_separate(&mut group, asset_index_usize, &profile)?;
             }
             group.validate_shape().map_err(map_v16_error)?;
             cfg
@@ -10237,6 +10227,7 @@ pub mod processor {
                 cfg.last_good_oracle_slot,
                 oracle_profile.last_good_oracle_slot,
             );
+            write_oracle_profile_to_view(&mut group, asset_index_usize, &oracle_profile)?;
             if asset_index_usize == 0 && oracle_v16::profile_is_price_managed(&oracle_profile) {
                 cfg.oracle_mode = oracle_profile.oracle_mode;
                 cfg.oracle_leg_count = oracle_profile.oracle_leg_count;
@@ -10255,12 +10246,6 @@ pub mod processor {
                 cfg.oracle_leg_feeds = oracle_profile.oracle_leg_feeds;
                 cfg.oracle_leg_prices_e6 = oracle_profile.oracle_leg_prices_e6;
                 cfg.oracle_leg_publish_times = oracle_profile.oracle_leg_publish_times;
-            } else {
-                write_oracle_profile_to_view_if_separate(
-                    &mut group,
-                    asset_index_usize,
-                    &oracle_profile,
-                )?;
             }
 
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;

@@ -10429,26 +10429,50 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
     let mut env = V16CuEnv::new();
     let victim = Keypair::new(); // a key that will NOT sign
     let (cfg0, _) = env.market_state();
-    // admin tries to set the MARK authority to `victim` without victim signing -> reject.
+    // --- market-wide handler (kept kind: ASSET authority) ---
+    // admin tries to set the ASSET authority to `victim` without victim signing -> reject.
     env.svm.expire_blockhash();
     let r = send_tx(&mut env.svm, env.program_id, &env.payer,
-        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_MARK, new_pubkey: victim.pubkey().to_bytes() },
+        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_ASSET, new_pubkey: victim.pubkey().to_bytes() },
         vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new_readonly(victim.pubkey(), false), AccountMeta::new(env.market, false)],
         &[&env.admin]);
     assert!(r.is_err(), "setting an authority to a non-signing key must reject");
     let (cfg1, _) = env.market_state();
-    assert_eq!(cfg1.mark_authority, cfg0.mark_authority, "mark authority unchanged by the rejected update");
+    assert_eq!(cfg1.asset_authority, cfg0.asset_authority, "asset authority unchanged by the rejected update");
 
     // with the new authority co-signing, the update succeeds.
-    let new_mark = Keypair::new();
-    env.ensure_signer_account(new_mark.pubkey());
+    let new_asset = Keypair::new();
+    env.ensure_signer_account(new_asset.pubkey());
     env.svm.expire_blockhash();
     let r_ok = send_tx(&mut env.svm, env.program_id, &env.payer,
-        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_MARK, new_pubkey: new_mark.pubkey().to_bytes() },
-        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(new_mark.pubkey(), true), AccountMeta::new(env.market, false)],
-        &[&env.admin, &new_mark]);
+        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_ASSET, new_pubkey: new_asset.pubkey().to_bytes() },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(new_asset.pubkey(), true), AccountMeta::new(env.market, false)],
+        &[&env.admin, &new_asset]);
     assert!(r_ok.is_ok(), "co-signed authority update succeeds: {:?}", r_ok);
-    assert_eq!(env.market_state().0.mark_authority, new_mark.pubkey().to_bytes(), "mark authority updated to the co-signing key");
+    assert_eq!(env.market_state().0.asset_authority, new_asset.pubkey().to_bytes(), "asset authority updated to the co-signing key");
+
+    // --- per-asset handler for ASSET 0 (insurance authority now rotates via UpdateAssetAuthority) ---
+    let prof0 = |env: &V16CuEnv|
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0).unwrap();
+    let ins_before = prof0(&env).insurance_authority;
+    // asset-0 admin (the market admin) tries to set asset-0 insurance to a non-signing key -> reject.
+    env.svm.expire_blockhash();
+    let r2 = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateAssetAuthority { asset_index: 0, kind: processor::ASSET_AUTH_INSURANCE, new_pubkey: victim.pubkey().to_bytes() },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new_readonly(victim.pubkey(), false), AccountMeta::new(env.market, false)],
+        &[&env.admin]);
+    assert!(r2.is_err(), "asset-0 insurance rotation to a non-signing key must reject");
+    assert_eq!(prof0(&env).insurance_authority, ins_before, "asset-0 insurance unchanged by the rejected update");
+    // with the new authority co-signing, the asset-0 rotation succeeds.
+    let new_ins = Keypair::new();
+    env.ensure_signer_account(new_ins.pubkey());
+    env.svm.expire_blockhash();
+    let r2_ok = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateAssetAuthority { asset_index: 0, kind: processor::ASSET_AUTH_INSURANCE, new_pubkey: new_ins.pubkey().to_bytes() },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(new_ins.pubkey(), true), AccountMeta::new(env.market, false)],
+        &[&env.admin, &new_ins]);
+    assert!(r2_ok.is_ok(), "co-signed asset-0 insurance rotation succeeds: {:?}", r2_ok);
+    assert_eq!(prof0(&env).insurance_authority, new_ins.pubkey().to_bytes(), "asset-0 insurance rotated to the co-signing key");
 }
 
 // regression (security.md sweep): round-trip recovery under the junior-pnl model. A price round-trip
@@ -14703,19 +14727,31 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         &[&mallory]);
     assert!(r_admin.is_err(), "a non-admin seizing the ADMIN authority must reject");
 
-    // and rotating the MARK authority as a non-(mark-)authority also rejects.
+    // and rotating the market-wide ASSET authority as a non-holder also rejects.
     env.svm.expire_blockhash();
-    let r_mark = send_tx(&mut env.svm, env.program_id, &env.payer,
-        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_MARK, new_pubkey: mallory.pubkey().to_bytes() },
+    let r_asset = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateAuthority { kind: processor::AUTHORITY_ASSET, new_pubkey: mallory.pubkey().to_bytes() },
         vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false)],
         &[&mallory]);
-    assert!(r_mark.is_err(), "a non-holder rotating the MARK authority must reject");
+    assert!(r_asset.is_err(), "a non-holder rotating the ASSET authority must reject");
 
-    // all authorities are byte-identical to the start — no takeover.
+    // and rotating ASSET 0's insurance authority (now a per-asset op) by a non-holder also rejects:
+    // mallory is neither asset-0's asset_admin nor its insurance authority.
+    let prof0 = |env: &V16CuEnv|
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0).unwrap();
+    let a0_ins_before = prof0(&env).insurance_authority;
+    env.svm.expire_blockhash();
+    let r_a0_ins = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateAssetAuthority { asset_index: 0, kind: processor::ASSET_AUTH_INSURANCE, new_pubkey: mallory.pubkey().to_bytes() },
+        vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false)],
+        &[&mallory]);
+    assert!(r_a0_ins.is_err(), "a non-holder rotating asset-0's insurance authority must reject");
+    assert_eq!(prof0(&env).insurance_authority, a0_ins_before, "asset-0 insurance authority unchanged");
+
+    // all market-wide authorities are byte-identical to the start — no takeover.
     let (cfg1, _) = env.market_state();
     assert_eq!(cfg1.admin, cfg0.admin, "admin authority unchanged (no takeover)");
-    assert_eq!(cfg1.mark_authority, cfg0.mark_authority, "mark authority unchanged");
-    assert_eq!(cfg1.insurance_authority, cfg0.insurance_authority, "insurance authority unchanged");
+    assert_eq!(cfg1.asset_authority, cfg0.asset_authority, "asset authority unchanged");
 
     // CONTROL: the genuine current admin CAN rotate the admin (two-party handoff with the new admin co-signing).
     let new_admin = Keypair::new();
@@ -15123,10 +15159,11 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance() {
 
 
 
-// Product spec — per-asset cold-storage admin keys (governance): each permissionless asset (1..N) has
+// Product spec — per-asset cold-storage admin keys (governance): EVERY asset (including asset 0) has
 // its OWN admin that can rotate that asset's domain authorities (insurance/operator/backing/oracle)
-// and itself, and can be BURNED to 0; isolated — it can never act on another asset, and asset 0 uses
-// the market-wide UpdateAuthority. Each domain authority can also self-rotate / burn.
+// and itself, and can be BURNED to 0; isolated — it can never act on another asset. Asset 0's
+// asset_admin is bootstrapped to the market admin at InitMarket and is rotated/burned through the same
+// UpdateAssetAuthority path as assets 1..N. Each domain authority can also self-rotate / burn.
 #[test]
 fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
     let mut env = V16CuEnv::new(); // 1 slot (asset 0); asset 1 is APPENDED permissionlessly below
@@ -15135,6 +15172,8 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
     let prof = |env: &V16CuEnv, ai: usize|
         state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, ai).unwrap();
     assert_eq!(prof(&env, 1).asset_admin, env.admin.pubkey().to_bytes(), "asset-1 admin = activator");
+    // asset 0 carries a real stored profile whose asset_admin is the market admin (bootstrapped at init).
+    assert_eq!(prof(&env, 0).asset_admin, env.admin.pubkey().to_bytes(), "asset-0 admin = market admin");
     let admin = env.admin.insecure_clone();
     let upd = |env: &mut V16CuEnv, signer: &Keypair, co: Option<&Keypair>, ai: u16, kind: u8, new: [u8; 32]| {
         env.ensure_signer_account(signer.pubkey());
@@ -15159,9 +15198,23 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
     assert!(upd(&mut env, &mallory, Some(&m2), 1, processor::ASSET_AUTH_INSURANCE, m2.pubkey().to_bytes()).is_err(),
         "non-admin cannot rotate the asset's authorities");
 
-    // 3) ISOLATION: rejected for asset 0 (per-asset admin can't reach the base asset).
-    assert!(upd(&mut env, &admin, Some(&new_oracle), 0, processor::ASSET_AUTH_ORACLE, new_oracle.pubkey().to_bytes()).is_err(),
-        "UpdateAssetAuthority rejected for asset 0");
+    // 3) ASSET 0 uses the SAME per-asset path: its asset_admin (the market admin) rotates asset-0's
+    //    insurance authority — and this is ISOLATED, leaving asset 1's authorities byte-identical.
+    let a0_ins = Keypair::new();
+    let a1_oracle_before = prof(&env, 1).oracle_authority;
+    let a1_ins_before = prof(&env, 1).insurance_authority;
+    assert!(upd(&mut env, &admin, Some(&a0_ins), 0, processor::ASSET_AUTH_INSURANCE, a0_ins.pubkey().to_bytes()).is_ok(),
+        "asset-0 admin rotates asset-0 insurance authority via UpdateAssetAuthority");
+    assert_eq!(prof(&env, 0).insurance_authority, a0_ins.pubkey().to_bytes(), "asset-0 insurance authority rotated");
+    assert_eq!(prof(&env, 1).oracle_authority, a1_oracle_before, "asset-1 oracle UNTOUCHED by asset-0 rotation");
+    assert_eq!(prof(&env, 1).insurance_authority, a1_ins_before, "asset-1 insurance UNTOUCHED by asset-0 rotation");
+
+    // 3b) ISOLATION the other way: the asset-1 admin cannot reach asset 0.
+    let a0_prof_before = prof(&env, 0);
+    assert!(upd(&mut env, &admin, Some(&new_oracle), 1, processor::ASSET_AUTH_ORACLE, new_oracle.pubkey().to_bytes()).is_ok(),
+        "asset-1 admin rotates asset-1 oracle (re-establish a known holder)");
+    assert_eq!(prof(&env, 0).insurance_authority, a0_prof_before.insurance_authority, "asset-0 insurance UNTOUCHED by asset-1 rotation");
+    assert_eq!(prof(&env, 0).asset_admin, a0_prof_before.asset_admin, "asset-0 admin UNTOUCHED by asset-1 rotation");
 
     // 4) BURN the per-asset admin to 0 (asset becomes credibly admin-free).
     assert!(upd(&mut env, &admin, None, 1, processor::ASSET_AUTH_ADMIN, [0u8; 32]).is_ok(), "asset admin can be burned");
@@ -15175,6 +15228,10 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
     assert!(upd(&mut env, &new_oracle, Some(&cold), 1, processor::ASSET_AUTH_ORACLE, cold.pubkey().to_bytes()).is_ok(),
         "domain authority self-rotates even after the asset admin is burned");
     assert_eq!(prof(&env, 1).oracle_authority, cold.pubkey().to_bytes(), "oracle self-rotated post-burn");
+
+    // 6) asset-0 admin can also BURN asset-0's own admin (same as 1..N).
+    assert!(upd(&mut env, &admin, None, 0, processor::ASSET_AUTH_ADMIN, [0u8; 32]).is_ok(), "asset-0 admin can be burned");
+    assert_eq!(prof(&env, 0).asset_admin, [0u8; 32], "asset-0 admin burned");
 }
 
 // Product spec — cross-asset BACKING isolation (counterpart to the domain-insurance isolation test):
