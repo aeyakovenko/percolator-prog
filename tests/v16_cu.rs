@@ -14314,6 +14314,111 @@ fn v16_attack_withdraw_insurance_domain_budget_cannot_be_overdrawn() {
     conserve(&env);
 }
 
+// security.md sweep - live insurance policy shape (#6/#23): non-deposit-only live insurance
+// withdrawal must never be configurable as a one-call full drain. The strongest valid
+// non-deposit policy still leaves at least one basis point behind and needs a nonzero cooldown.
+#[test]
+fn v16_attack_live_insurance_policy_cannot_enable_one_call_full_drain() {
+    let mut env = V16CuEnv::new();
+    env.svm.warp_to_slot(1_000);
+    env.top_up_insurance(1_000_000);
+    let admin = env.admin.insecure_clone();
+    let cfg0 = env.market_state().0;
+
+    let set_policy = |env: &mut V16CuEnv, max_bps: u16, deposits_only: u8, cooldown_slots: u64| {
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::UpdateInsurancePolicy {
+                max_bps,
+                deposits_only,
+                cooldown_slots,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        )
+    };
+
+    assert!(
+        set_policy(&mut env, 10_000, 0, 100).is_err(),
+        "non-deposit-only max_bps=10000 would allow a one-call full drain and must reject"
+    );
+    assert!(
+        set_policy(&mut env, 9_999, 0, 0).is_err(),
+        "non-deposit-only live withdrawal must require a nonzero cooldown"
+    );
+    assert!(
+        set_policy(&mut env, 10_001, 1, 0).is_err(),
+        "max_bps above 10000 must reject even in deposits-only mode"
+    );
+    assert!(
+        set_policy(&mut env, 1, 2, 1).is_err(),
+        "invalid deposits_only flag must reject"
+    );
+    let cfg_rejected = env.market_state().0;
+    assert_eq!(
+        cfg_rejected.insurance_withdraw_max_bps,
+        cfg0.insurance_withdraw_max_bps,
+        "rejected policies must not mutate max_bps"
+    );
+    assert_eq!(
+        cfg_rejected.insurance_withdraw_deposits_only,
+        cfg0.insurance_withdraw_deposits_only,
+        "rejected policies must not mutate deposits_only"
+    );
+    assert_eq!(
+        cfg_rejected.insurance_withdraw_cooldown_slots,
+        cfg0.insurance_withdraw_cooldown_slots,
+        "rejected policies must not mutate cooldown"
+    );
+
+    set_policy(&mut env, 9_999, 0, 1).expect("strongest valid non-deposit policy");
+
+    let try_withdraw = |env: &mut V16CuEnv, amount: u128| -> Result<u64, String> {
+        let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::WithdrawInsuranceLimited { amount },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+    };
+
+    assert!(
+        try_withdraw(&mut env, 1_000_000).is_err(),
+        "strongest valid non-deposit policy still cannot withdraw 100% in one call"
+    );
+    assert_eq!(
+        env.market_state().1.insurance,
+        1_000_000,
+        "rejected full-drain attempt leaves insurance untouched"
+    );
+
+    try_withdraw(&mut env, 999_900).expect("9999 bps of 1,000,000 is withdrawable");
+    let g = env.market_state().1;
+    assert_eq!(
+        g.insurance, 100,
+        "at least one basis point remains after the strongest valid withdrawal"
+    );
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
+
 // security.md sweep — backing bucket top-up/withdraw input gates (#33/#44): a backing top-up with an
 // already-expired (or zero) expiry must reject (no dead backing injected to skew freshness accounting),
 // and a withdraw can never exceed the bucket's fresh-unliened principal. Complements the watermark/lien
