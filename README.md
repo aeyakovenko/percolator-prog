@@ -277,16 +277,19 @@ Matcher delegate PDA:
 This makes it a "pure identity signer" and prevents it from becoming an attack surface.
 
 ### Matcher authorization (TradeCpi / BatchTradeCpi)
-Unsigned LP matcher fills require a Percolator-owned authorization account. `SetMatcherAuthorization`
-(tag 68) is signed by the LP owner and writes the exact tuple:
+Unsigned LP matcher fills require the canonical Percolator-owned authorization PDA. Its seeds are:
+
+`["matcher-auth", market_group_pubkey, lp_portfolio_pubkey, lp_owner_pubkey, matcher_program_pubkey, matcher_context_pubkey]`
+
+`SetMatcherAuthorization` (tag 68) is signed by the LP owner and writes the exact tuple:
 
 `market_group, lp_portfolio, lp_owner, matcher_program, matcher_context, matcher_delegate, enabled`
 
-During `TradeCpi` / `BatchTradeCpi`, if the LP owner does not sign, account 8 must be this
-authorization account, read-only, owned by Percolator, `enabled == 1`, and byte-for-byte matching
-the instruction's market/LP/matcher arguments. Extra matcher CPI tail accounts begin after it.
-Attacker-owned bytes, writable auth accounts, disabled records, or replaying an auth record against
-different matcher args all reject.
+During `TradeCpi` / `BatchTradeCpi`, if the LP owner does not sign, account 8 must be this canonical
+authorization PDA, read-only, owned by Percolator, `enabled == 1`, and byte-for-byte matching the
+instruction's market/LP/matcher arguments. Extra matcher CPI tail accounts begin after it.
+Attacker-owned bytes, writable auth accounts, disabled records, noncanonical auth accounts, or
+replaying an auth record against different matcher args all reject.
 
 ### Matcher context (TradeCpi)
 - account owned by matcher program
@@ -800,8 +803,8 @@ These are intended hard boundaries enforced in code and test suites:
 
 ### Common rejection causes (TradeCpi)
 - matcher identity mismatch (program/context/delegate tuple does not match the LP portfolio)
-- missing, disabled, writable, attacker-owned, or argument-mismatched matcher authorization account
-  when the LP owner does not sign
+- missing, disabled, writable, attacker-owned, noncanonical, or argument-mismatched matcher
+  authorization account when the LP owner does not sign
 - bad matcher shape (non-executable program, executable ctx, wrong ctx owner, short ctx)
 - matcher delegate PDA mismatch / wrong PDA shape
 - ABI prefix invalid (flags, echoed fields, size constraints)

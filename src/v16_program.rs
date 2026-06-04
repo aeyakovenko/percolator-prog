@@ -6682,6 +6682,15 @@ pub mod processor {
         if auth_ai.is_writable {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        let (auth_key, _) = derive_matcher_authorization(
+            program_id,
+            market_key,
+            lp_portfolio,
+            lp_owner,
+            matcher_program,
+            matcher_context,
+        );
+        expect_key(auth_ai, &auth_key)?;
         expect_owner(auth_ai, program_id)?;
         let auth = state::read_matcher_authorization(&auth_ai.try_borrow_data()?)?;
         if auth.enabled != 1
@@ -6975,6 +6984,15 @@ pub mod processor {
             matcher_ctx.key,
         );
         expect_key(matcher_delegate, &delegate)?;
+        let (auth_key, _) = derive_matcher_authorization(
+            program_id,
+            market_ai.key,
+            lp_portfolio_ai.key,
+            lp_owner.key,
+            matcher_prog.key,
+            matcher_ctx.key,
+        );
+        expect_key(auth_ai, &auth_key)?;
         let new_auth = state::MatcherAuthorizationAccountV16 {
             market_group: market_ai.key.to_bytes(),
             lp_portfolio: lp_portfolio_ai.key.to_bytes(),
@@ -11663,6 +11681,27 @@ pub mod processor {
         Pubkey::find_program_address(
             &[
                 b"matcher",
+                market_key.as_ref(),
+                maker_account.as_ref(),
+                maker_owner.as_ref(),
+                matcher_program.as_ref(),
+                matcher_context.as_ref(),
+            ],
+            program_id,
+        )
+    }
+
+    fn derive_matcher_authorization(
+        program_id: &Pubkey,
+        market_key: &Pubkey,
+        maker_account: &Pubkey,
+        maker_owner: &Pubkey,
+        matcher_program: &Pubkey,
+        matcher_context: &Pubkey,
+    ) -> (Pubkey, u8) {
+        Pubkey::find_program_address(
+            &[
+                b"matcher-auth",
                 market_key.as_ref(),
                 maker_account.as_ref(),
                 maker_owner.as_ref(),

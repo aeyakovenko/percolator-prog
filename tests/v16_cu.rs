@@ -11012,6 +11012,112 @@ fn v16_attack_revoked_matcher_authorization_blocks_unsigned_lp_fills() {
 }
 
 #[test]
+fn v16_attack_noncanonical_matcher_authorization_account_cannot_authorize_unsigned_fills() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+
+    let canonical_auth = matcher_auth_key(
+        &env.program_id,
+        &env.market,
+        &lp,
+        &lp_owner.pubkey(),
+        &matcher_program,
+        &ctx,
+    );
+    let noncanonical_auth = Pubkey::new_unique();
+    assert_ne!(noncanonical_auth, canonical_auth);
+    let mut auth_data = vec![0u8; state::matcher_authorization_account_len()];
+    state::write_matcher_authorization(
+        &mut auth_data,
+        &state::MatcherAuthorizationAccountV16 {
+            market_group: env.market.to_bytes(),
+            lp_portfolio: lp.to_bytes(),
+            lp_owner: lp_owner.pubkey().to_bytes(),
+            matcher_program: matcher_program.to_bytes(),
+            matcher_context: ctx.to_bytes(),
+            matcher_delegate: delegate.to_bytes(),
+            enabled: 1,
+        },
+    )
+    .expect("write forged duplicate auth bytes");
+    env.svm
+        .set_account(
+            noncanonical_auth,
+            Account {
+                lamports: 1_000_000_000,
+                data: auth_data,
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker).unwrap();
+    let lp_before = env.svm.get_account(&lp).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+
+    env.svm.expire_blockhash();
+    let forged = env.send(
+        ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q: (5 * POS_SCALE) as i128,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+        vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new_readonly(lp_owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+            AccountMeta::new_readonly(noncanonical_auth, false),
+        ],
+        &[&taker_owner],
+    );
+    assert!(
+        forged.is_err(),
+        "valid-looking matcher auth bytes at a noncanonical account must not authorize unsigned fills"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+    assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+
+    env.svm.expire_blockhash();
+    let overwrite = env.send(
+        ProgInstruction::SetMatcherAuthorization { enabled: 1 },
+        vec![
+            AccountMeta::new(lp_owner.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new_readonly(lp, false),
+            AccountMeta::new(noncanonical_auth, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new_readonly(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&lp_owner],
+    );
+    assert!(
+        overwrite.is_err(),
+        "SetMatcherAuthorization must only write the canonical matcher-auth PDA"
+    );
+}
+
+#[test]
 fn v16_attack_non_owner_cannot_revoke_matcher_authorization() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
