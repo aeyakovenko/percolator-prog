@@ -13569,6 +13569,17 @@ fn v16_attack_swap_secondary_unauthorized_and_bounded() {
     // (c) zero amount rejects.
     assert!(swap(&mut env, &admin, a_primary, a_secondary, 0).is_err(), "zero-amount swap rejects");
 
+    // (c2) ATTACK: even the legit authority cannot route the secondary payout to a third party.
+    // The rejected swap must not pull primary first or mutate either vault.
+    let foreign_secondary = env.token_account_for_mint(secondary_mint, mallory.pubkey(), 0);
+    assert!(
+        swap(&mut env, &admin, a_primary, foreign_secondary, 10).is_err(),
+        "swap to a third-party secondary destination must reject",
+    );
+    assert_eq!(env.token_amount(a_primary), 100, "primary not pulled on bad-dest swap");
+    assert_eq!(env.token_amount(foreign_secondary), 0, "no secondary paid to third party");
+    assert_eq!(env.token_amount(secondary_vault), 50, "secondary reserve untouched by bad-dest swap");
+
     // (d) VALID: authority swaps exactly the reserve (50) -> 1:1, value-conserving.
     let vault_primary_before = env.token_amount(env.vault);
     assert!(swap(&mut env, &admin, a_primary, a_secondary, 50).is_ok(), "authorized in-bounds swap ok");
