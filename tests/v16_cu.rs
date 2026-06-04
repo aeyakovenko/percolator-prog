@@ -10818,6 +10818,112 @@ fn v16_attack_backing_ledger_domain_binding_enforced() {
     assert!(r_ok.is_ok(), "correct-domain sync works: {:?}", r_ok);
 }
 
+#[test]
+fn v16_attack_insurance_ledger_authority_binding_enforced() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority(&admin, 0, 100);
+
+    let wrong_ledger = env.insurance_ledger_account();
+    let wrong_authority = Keypair::new();
+    let mut wrong_ledger_account = env.svm.get_account(&wrong_ledger).unwrap();
+    state::init_insurance_ledger(
+        &mut wrong_ledger_account.data,
+        &state::InsuranceLedgerAccountV16 {
+            market_group: env.market.to_bytes(),
+            authority: wrong_authority.pubkey().to_bytes(),
+            total_principal_atoms: 100,
+            total_deposited_atoms: 100,
+            total_withdrawn_atoms: 0,
+            cumulative_profit_atoms: 0,
+            cumulative_loss_atoms: 0,
+            last_observed_insurance_atoms: 100,
+        },
+    )
+    .expect("initialize wrong-authority insurance ledger");
+    env.svm.set_account(wrong_ledger, wrong_ledger_account).unwrap();
+
+    let bad_dest = env.token_account(admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap().data;
+    let ledger_before = env.svm.get_account(&wrong_ledger).unwrap().data;
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let bad = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceDomain {
+            domain: 0,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(bad_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(wrong_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        bad.is_err(),
+        "wrong-authority insurance ledger must not authorize a domain withdrawal"
+    );
+    assert_eq!(env.token_amount(bad_dest), 0, "no payout through wrong ledger");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_before,
+        "wrong-authority insurance ledger must not mutate market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&wrong_ledger).unwrap().data,
+        ledger_before,
+        "wrong-authority insurance ledger must not be rewritten"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "wrong-authority insurance ledger must not move vault tokens"
+    );
+
+    let correct_ledger = env.insurance_ledger_account();
+    let good_dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceDomain {
+            domain: 0,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(good_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(correct_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(ok.is_ok(), "matching-authority ledger withdraw works: {ok:?}");
+    assert_eq!(env.token_amount(good_dest), 40);
+    let ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&correct_ledger).unwrap().data)
+            .expect("correct ledger initialized");
+    assert_eq!(ledger_state.authority, admin.pubkey().to_bytes());
+    assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+    let group = env.market_state().1;
+    assert_eq!(group.insurance_domain_budget[0], 60);
+    assert_eq!(group.insurance, 60);
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+}
+
 // security.md sweep — deposit source confusion (#35/#44): the deposit source must be a token account
 // owned by the depositor. Passing the VAULT (or any non-owned account) as the source must reject —
 // otherwise a vault->vault no-op transfer could credit capital for free (mint capital from nothing).
