@@ -11977,6 +11977,218 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
 
+// security.md sweep — domain-indexed public calls must reject domains outside the configured market
+// slots before touching accounting, ledgers, or SPL custody. On a one-asset market, domains 0/1 are
+// valid and domain 2 is out of range; a real market authority with valid token accounts still cannot
+// write or move funds through that phantom domain.
+#[test]
+fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    const BAD_DOMAIN: u8 = 2;
+
+    env.top_up_insurance(1_000);
+    env.top_up_backing_bucket_with_cu(0, 1_000, 10_000);
+    let (_, funded) = env.market_state();
+    assert_eq!(
+        funded.insurance_domain_budget.len(),
+        2,
+        "one-asset market has exactly domains 0 and 1"
+    );
+    assert!(funded.vault >= 2_000, "setup leaves real withdrawable vault balance");
+
+    let insurance_src = env.token_account_for_mint(env.mint, admin.pubkey(), 123);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let source_before = env.svm.get_account(&insurance_src).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let topup_ins = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: BAD_DOMAIN,
+            amount: 123,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_src, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(topup_ins.is_err(), "phantom insurance domain top-up must reject");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&insurance_src).unwrap(), source_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    let backing_src = env.token_account_for_mint(env.mint, admin.pubkey(), 456);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let source_before = env.svm.get_account(&backing_src).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let topup_backing = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: BAD_DOMAIN,
+            amount: 456,
+            expiry_slot: 10_000,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_src, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(topup_backing.is_err(), "phantom backing bucket top-up must reject");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&backing_src).unwrap(), source_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    let insurance_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let dest_before = env.svm.get_account(&insurance_dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let withdraw_ins = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceDomain {
+            domain: BAD_DOMAIN,
+            amount: 1,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(withdraw_ins.is_err(), "phantom insurance domain withdraw must reject");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&insurance_dest).unwrap(), dest_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    let backing_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let dest_before = env.svm.get_account(&backing_dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let withdraw_backing = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: BAD_DOMAIN,
+            amount: 1,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(withdraw_backing.is_err(), "phantom backing bucket withdraw must reject");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&backing_dest).unwrap(), dest_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    let earnings_ledger = env.backing_domain_ledger_account();
+    let earnings_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&earnings_ledger).unwrap();
+    let dest_before = env.svm.get_account(&earnings_dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let withdraw_earnings = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: BAD_DOMAIN,
+            amount: 1,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(earnings_ledger, false),
+            AccountMeta::new(earnings_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        withdraw_earnings.is_err(),
+        "phantom backing earnings withdraw must reject"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&earnings_ledger).unwrap(), ledger_before);
+    assert_eq!(env.svm.get_account(&earnings_dest).unwrap(), dest_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    let sync_ledger = env.backing_domain_ledger_account();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&sync_ledger).unwrap();
+    env.svm.expire_blockhash();
+    let sync = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SyncBackingDomainLedger { domain: BAD_DOMAIN },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(sync_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(sync.is_err(), "phantom backing ledger sync must reject");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&sync_ledger).unwrap(), ledger_before);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let fee_policy = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateBackingFeePolicy {
+            domain: BAD_DOMAIN,
+            fee_bps: 77,
+            insurance_share_bps: 5_000,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(fee_policy.is_err(), "phantom backing fee policy update must reject");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+
+    let (_, g) = env.market_state();
+    assert_eq!(g.insurance_domain_budget.len(), 2, "no phantom domain was appended");
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == canonical vault");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
+
 // security.md sweep — funding direction symmetry (#33/#9): with the mark BELOW the index (opposite of
 // batch 19), funding must flow the other way (shorts pay longs) and still be value-conserving. Probes
 // the negative-premium branch of premium_funding_rate_e9.
