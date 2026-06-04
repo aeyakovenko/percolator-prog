@@ -12570,6 +12570,117 @@ fn v16_attack_permissionless_resolve_uses_authenticated_clock_slot() {
     );
 }
 
+// security.md sweep - permissionless asset stale state must not trigger global resolution (#24/#30):
+// a permissionlessly-created asset has a local oracle authority that may stop cranking. That local
+// stale state must not let any cranker call ResolveStalePermissionless and resolve the whole market
+// while the base market-0 oracle is fresh. The stale asset can remain locally stale; unrelated base
+// trades must stay live.
+#[test]
+fn v16_attack_stale_permissionless_asset_cannot_global_resolve_market() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.update_market_init_fee_policy_with_cu(1);
+
+    let creator = Keypair::new();
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+
+    let stale_long_owner = Keypair::new();
+    let stale_short_owner = Keypair::new();
+    let stale_long_account = env.create_portfolio(&stale_long_owner);
+    let stale_short_account = env.create_portfolio(&stale_short_owner);
+    env.deposit(&stale_long_owner, stale_long_account, 1_000_000);
+    env.deposit(&stale_short_owner, stale_short_account, 1_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &stale_long_owner,
+        stale_long_account,
+        &stale_short_owner,
+        stale_short_account,
+        (5 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+    let cranker_owner = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.crank(
+        cranker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 3,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    env.configure_permissionless_resolve_with_cu(5, 5);
+
+    env.svm.warp_to_slot(6);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 6 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_err(),
+        "stale permissionless asset must not globally resolve while market-0 oracle is fresh"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected permissionless stale resolve leaves market bytes unchanged"
+    );
+    let (_, group_after_reject) = env.market_state();
+    assert_eq!(group_after_reject.mode, percolator::MarketModeV16::Live);
+    assert!(
+        group_after_reject.assets[1].slot_last < 6,
+        "permissionless asset remains locally stale and non-vacuous"
+    );
+
+    let base_long_owner = Keypair::new();
+    let base_short_owner = Keypair::new();
+    let base_long_account = env.create_portfolio(&base_long_owner);
+    let base_short_account = env.create_portfolio(&base_short_owner);
+    env.deposit(&base_long_owner, base_long_account, 1_000_000);
+    env.deposit(&base_short_owner, base_short_account, 1_000_000);
+    let trade = env.try_trade_asset_with_cu(
+        0,
+        &base_long_owner,
+        base_long_account,
+        &base_short_owner,
+        base_short_account,
+        (5 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    assert!(
+        trade.is_ok(),
+        "unrelated base trade must remain live despite stale permissionless asset: {trade:?}"
+    );
+    let (_, group_after_trade) = env.market_state();
+    assert_eq!(group_after_trade.mode, percolator::MarketModeV16::Live);
+    assert!(group_after_trade.assets[0].oi_eff_long_q > 0);
+    assert!(group_after_trade.assets[1].oi_eff_long_q > 0);
+}
+
 // security.md sweep — CloseSlab wind-down finality (#30/#48): a market may only be closed when fully
 // wound down (mode==Resolved AND vault==0 && insurance==0 && c_tot==0 && no materialized portfolios).
 // Closing while value/positions remain would strand funds — must reject.
