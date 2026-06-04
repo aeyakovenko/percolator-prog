@@ -16818,6 +16818,140 @@ fn v16_bpf_batch_trade_executes_mixed_direction_spread() {
     assert_eq!(active_leg_for_asset(&t, 1).basis_pos_q, -sz);
 }
 
+// security.md sweep - duplicate asset legs in a batch (#22/#33): batch fee/accounting reconstruction
+// is per-asset, so a batch must not contain two legs for the same asset. Both the direct and matcher-CPI
+// batch paths reject duplicates atomically, then accept the same setup with distinct asset legs.
+#[test]
+fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+    let before = env.market_state().1;
+    let taker_before = env.portfolio_state(ta);
+    let lp_before = env.portfolio_state(la);
+    let sz = (5 * POS_SCALE) as i128;
+
+    env.svm.expire_blockhash();
+    let duplicate_nocpi = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![
+                BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: sz,
+                    exec_price: 100,
+                    fee_bps: 100,
+                },
+                BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: -sz,
+                    exec_price: 100,
+                    fee_bps: 100,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(duplicate_nocpi.is_err(), "duplicate-asset BatchTradeNoCpi must reject");
+    let after_nocpi = env.market_state().1;
+    assert_eq!(after_nocpi.assets[0].oi_eff_long_q, 0, "no OI from rejected no-CPI batch");
+    assert_eq!(after_nocpi.assets[1].oi_eff_long_q, 0, "unrelated asset untouched");
+    assert_eq!(after_nocpi.insurance, before.insurance, "no fee credited by rejected no-CPI batch");
+    assert_eq!(after_nocpi.vault, before.vault, "vault unchanged by rejected no-CPI batch");
+    assert_eq!(env.portfolio_state(ta).capital, taker_before.capital);
+    assert_eq!(env.portfolio_state(la).capital, lp_before.capital);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, la);
+    env.svm.expire_blockhash();
+    let duplicate_cpi = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![
+                BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: sz,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+                BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: -sz,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new_readonly(lp.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker],
+    );
+    assert!(duplicate_cpi.is_err(), "duplicate-asset BatchTradeCpi must reject");
+    let after_cpi = env.market_state().1;
+    assert_eq!(after_cpi.assets[0].oi_eff_long_q, 0, "no OI from rejected CPI batch");
+    assert_eq!(after_cpi.assets[1].oi_eff_long_q, 0, "unrelated asset untouched by rejected CPI batch");
+    assert_eq!(after_cpi.insurance, before.insurance, "no fee credited by rejected CPI batch");
+    assert_eq!(after_cpi.vault, before.vault, "vault unchanged by rejected CPI batch");
+    assert_eq!(env.portfolio_state(ta).capital, taker_before.capital);
+    assert_eq!(env.portfolio_state(la).capital, lp_before.capital);
+
+    env.svm.expire_blockhash();
+    let clean = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![
+                BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: sz,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+                BatchTradeCpiLeg {
+                    asset_index: 1,
+                    size_q: -sz,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new_readonly(lp.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker],
+    );
+    assert!(clean.is_ok(), "distinct-asset BatchTradeCpi control must execute: {clean:?}");
+    let taker_after = env.portfolio_state(ta);
+    assert!(has_active_leg_for_asset(&taker_after, 0), "clean control fills asset 0");
+    assert!(has_active_leg_for_asset(&taker_after, 1), "clean control fills asset 1");
+}
+
 // BatchTradeNoCpi end-state margin: a leg that is individually margin-INFEASIBLE (it would leave the
 // taker holding two full positions at once) is rejected as a standalone trade, but the SAME leg in a
 // batch that also closes the offsetting position SUCCEEDS, because the batch checks initial margin
