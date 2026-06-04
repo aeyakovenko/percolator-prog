@@ -19848,6 +19848,78 @@ fn v16_attack_abandoned_empty_portfolio_cannot_block_slab_close() {
     assert!(close_slab(&mut env).is_ok(), "after abandoned empty cleanup the slab can be reclaimed");
 }
 
+// Regression for the marketauth terminal-cleanup privilege: it is only a liveness tool for already
+// closable empty portfolios. It must not let marketauth skip CloseResolved and burn a user's pending
+// payout/capital during market wind-down.
+#[test]
+fn v16_attack_marketauth_terminal_close_cannot_skip_resolved_payout() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.resolve();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let terminal_close = env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        terminal_close.is_err(),
+        "marketauth terminal cleanup must reject a portfolio with unresolved payout/capital"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected terminal ClosePortfolio must not mutate resolved market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected terminal ClosePortfolio must not dematerialize the user's payout state"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected terminal ClosePortfolio must not move custody"
+    );
+
+    let (dest, _) = env.close_resolved_with_cu(&owner, portfolio);
+    assert_eq!(env.token_amount(dest), 1_000, "owner still recovers through CloseResolved");
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault, 0, "resolved payout drains accounted vault value");
+    assert_eq!(
+        group.materialized_portfolio_count, 1,
+        "CloseResolved pays value; ClosePortfolio performs the separate dematerialization step"
+    );
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    )
+    .expect("owner can dematerialize the empty resolved portfolio after payout");
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "owner ClosePortfolio completes the wind-down after payout"
+    );
+}
+
 // End-to-end adversarial coverage of the PRODUCTION single-fill path: a hostile matcher writes a
 // crafted tag-0 return into the ctx account (over-fill / reversed / forged echo / zero-price /
 // unflagged-partial). handle_trade_cpi reads the ctx return + validate_matcher_return must REJECT
