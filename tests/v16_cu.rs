@@ -11308,9 +11308,9 @@ fn v16_attack_topup_insurance_domain_authority_gated() {
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
-// security.md sweep — recovery-tool owner gating (#6): ForfeitRecoveryLeg and FinalizeResetSide are
-// owner-gated (with_one_portfolio_view enforces owner signs + matches the portfolio). A non-owner
-// must NOT be able to invoke them on a victim's portfolio (griefing a recovery/reset).
+// security.md sweep — recovery-tool gating (#6): ForfeitRecoveryLeg is owner-gated
+// (with_one_portfolio_view enforces owner signs + matches the portfolio). FinalizeResetSide is
+// market-only and permissionless, so a bogus victim-portfolio account list must not be accepted.
 #[test]
 fn v16_attack_recovery_tools_owner_gated() {
     let mut env = V16CuEnv::new();
@@ -11329,17 +11329,84 @@ fn v16_attack_recovery_tools_owner_gated() {
         vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false)], &[&mallory]);
     assert!(r1.is_err(), "non-owner ForfeitRecoveryLeg must reject");
 
-    // non-owner FinalizeResetSide on la's portfolio -> reject.
+    // malformed FinalizeResetSide with a victim portfolio account list -> reject.
     env.svm.expire_blockhash();
     let r2 = env.send(ProgInstruction::FinalizeResetSide { asset_index: 0, side: 0 },
         vec![AccountMeta::new(mallory.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(pa, false)], &[&mallory]);
-    assert!(r2.is_err(), "non-owner FinalizeResetSide must reject");
+    assert!(r2.is_err(), "FinalizeResetSide must reject the wrong account layout");
 
     // victim's position untouched, conservation.
     assert_eq!(env.portfolio_state(pa).legs[0].basis_pos_q, basis0, "victim's position untouched by recovery-tool griefing");
     let (_, g1) = env.market_state();
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
     assert_eq!(g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q, "OI still balanced");
+}
+
+// security.md sweep — permissionless reset finalizer (#31/#44): anyone may finalize a reset-pending
+// side, but only after both stored and stale counters for that side are zero. A public finalizer must
+// not be able to unlock trading while positions still need recovery/cranking.
+#[test]
+fn v16_attack_finalize_reset_side_requires_empty_side_counts() {
+    let mut env = V16CuEnv::new();
+    env.mutate_market(|_, group| {
+        group.assets[0].mode_long = SideModeV16::ResetPending;
+        group.assets[0].stored_pos_count_long = 1;
+    });
+
+    env.svm.expire_blockhash();
+    let r_stored = env.send(
+        ProgInstruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 0,
+        },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(r_stored.is_err(), "stored positions must block reset finalization");
+    assert_eq!(
+        env.market_state().1.assets[0].mode_long,
+        SideModeV16::ResetPending,
+        "rejected finalization must leave the side locked",
+    );
+
+    env.mutate_market(|_, group| {
+        group.assets[0].stored_pos_count_long = 0;
+        group.assets[0].stale_account_count_long = 1;
+    });
+    env.svm.expire_blockhash();
+    let r_stale = env.send(
+        ProgInstruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 0,
+        },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(r_stale.is_err(), "stale accounts must block reset finalization");
+    assert_eq!(
+        env.market_state().1.assets[0].mode_long,
+        SideModeV16::ResetPending,
+        "stale-count rejection must leave the side locked",
+    );
+
+    env.mutate_market(|_, group| {
+        group.assets[0].stale_account_count_long = 0;
+    });
+    env.svm.expire_blockhash();
+    let r_empty = env.send(
+        ProgInstruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 0,
+        },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(r_empty.is_ok(), "anyone may finalize once the side is empty: {:?}", r_empty);
+    assert_eq!(
+        env.market_state().1.assets[0].mode_long,
+        SideModeV16::Normal,
+        "empty reset-pending side unlocks",
+    );
 }
 
 // security.md sweep — operation-sequence conservation (#32/#33 fuzz-lite): a long varied sequence of
