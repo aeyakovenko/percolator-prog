@@ -11105,6 +11105,155 @@ fn v16_attack_sync_ledgers_cannot_overwrite_portfolio_accounts() {
     );
 }
 
+// security.md sweep — optional ledger account-kind confusion on token-moving paths (#44/#35):
+// top-up and withdraw instructions update engine accounting before/around SPL transfers. If their
+// optional ledger validation accepted or rewrote a portfolio account, an authorized operator could
+// strand user funds or partially move custody before the instruction failed. Passing a funded
+// portfolio as the optional ledger must reject before any market, vault, source, or destination move.
+#[test]
+fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.top_up_insurance_domain_with_authority(&admin, 0, 100);
+    env.top_up_backing_bucket(1, 100, 10);
+
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let assert_core_unchanged = |env: &V16CuEnv| {
+        assert_eq!(
+            env.svm.get_account(&portfolio).unwrap(),
+            portfolio_before,
+            "wrong-kind ledger must not rewrite the funded portfolio"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "wrong-kind ledger rejection must leave market accounting unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "wrong-kind ledger rejection must leave vault custody unchanged"
+        );
+    };
+
+    let top_up_insurance_source = env.token_account(admin.pubkey(), 25);
+    env.svm.expire_blockhash();
+    let top_up_insurance = env.send(
+        ProgInstruction::TopUpInsurance { amount: 25 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(top_up_insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        top_up_insurance.is_err(),
+        "TopUpInsurance must reject a portfolio account as the optional ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(
+        env.token_amount(top_up_insurance_source),
+        25,
+        "wrong-kind insurance ledger must reject before pulling source tokens"
+    );
+
+    let top_up_backing_source = env.token_account(admin.pubkey(), 30);
+    env.svm.expire_blockhash();
+    let top_up_backing = env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 30,
+            expiry_slot: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(top_up_backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        top_up_backing.is_err(),
+        "TopUpBackingBucket must reject a portfolio account as the optional ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(
+        env.token_amount(top_up_backing_source),
+        30,
+        "wrong-kind backing ledger must reject before pulling source tokens"
+    );
+
+    let insurance_dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let withdraw_insurance = env.send(
+        ProgInstruction::WithdrawInsuranceDomain {
+            domain: 0,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        withdraw_insurance.is_err(),
+        "WithdrawInsuranceDomain must reject a portfolio account as the optional ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(
+        env.token_amount(insurance_dest),
+        0,
+        "wrong-kind insurance withdraw ledger must reject before paying destination"
+    );
+
+    let backing_dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let withdraw_backing = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        withdraw_backing.is_err(),
+        "WithdrawBackingBucket must reject a portfolio account as the optional ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(
+        env.token_amount(backing_dest),
+        0,
+        "wrong-kind backing withdraw ledger must reject before paying destination"
+    );
+}
+
 // security.md sweep — deposit source confusion (#35/#44): the deposit source must be a token account
 // owned by the depositor. Passing the VAULT (or any non-owned account) as the source must reject —
 // otherwise a vault->vault no-op transfer could credit capital for free (mint capital from nothing).
