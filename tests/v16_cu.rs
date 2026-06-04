@@ -11089,6 +11089,84 @@ fn v16_attack_non_owner_cannot_revoke_matcher_authorization() {
 }
 
 #[test]
+fn v16_attack_cross_lp_cannot_overwrite_matcher_authorization_account() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let victim_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let victim_lp = env.create_portfolio(&victim_owner);
+    let attacker_lp = env.create_portfolio(&attacker_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&victim_owner, victim_lp, 1_000_000);
+    env.deposit(&attacker_owner, attacker_lp, 1_000_000);
+    let (victim_ctx, victim_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &victim_owner, victim_lp);
+    let (attacker_ctx, attacker_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &attacker_owner, attacker_lp);
+    let victim_auth = matcher_auth_key(
+        &env.program_id,
+        &env.market,
+        &victim_lp,
+        &victim_owner.pubkey(),
+        &matcher_program,
+        &victim_ctx,
+    );
+    let victim_auth_before = env.svm.get_account(&victim_auth).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim_lp).unwrap();
+    let attacker_before = env.svm.get_account(&attacker_lp).unwrap();
+
+    env.svm.expire_blockhash();
+    let overwrite = env.send(
+        ProgInstruction::SetMatcherAuthorization { enabled: 0 },
+        vec![
+            AccountMeta::new(attacker_owner.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new_readonly(attacker_lp, false),
+            AccountMeta::new(victim_auth, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new_readonly(attacker_ctx, false),
+            AccountMeta::new_readonly(attacker_delegate, false),
+        ],
+        &[&attacker_owner],
+    );
+    assert!(
+        overwrite.is_err(),
+        "one LP must not overwrite another LP's matcher authorization account with its own tuple"
+    );
+    assert_eq!(
+        env.svm.get_account(&victim_auth).unwrap(),
+        victim_auth_before,
+        "rejected cross-LP overwrite leaves victim auth bytes unchanged"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&victim_lp).unwrap(), victim_before);
+    assert_eq!(env.svm.get_account(&attacker_lp).unwrap(), attacker_before);
+
+    env.svm.expire_blockhash();
+    let victim_fill = env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &victim_owner,
+        victim_lp,
+        matcher_program,
+        victim_ctx,
+        victim_delegate,
+        0,
+        (5 * POS_SCALE) as i128,
+        100,
+    );
+    assert!(
+        victim_fill.is_ok(),
+        "failed cross-LP overwrite must not DoS the victim LP's authorized matcher fills: {victim_fill:?}"
+    );
+}
+
+#[test]
 fn v16_attack_tradecpi_matcher_auth_arguments_must_match_account_bytes() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
     env.configure_auth_mark_for_asset_as_admin(0, 1, 100);

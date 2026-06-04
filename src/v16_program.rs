@@ -6950,7 +6950,7 @@ pub mod processor {
             matcher_ctx.key,
         );
         expect_key(matcher_delegate, &delegate)?;
-        let auth = state::MatcherAuthorizationAccountV16 {
+        let new_auth = state::MatcherAuthorizationAccountV16 {
             market_group: market_ai.key.to_bytes(),
             lp_portfolio: lp_portfolio_ai.key.to_bytes(),
             lp_owner: lp_owner.key.to_bytes(),
@@ -6959,7 +6959,22 @@ pub mod processor {
             matcher_delegate: matcher_delegate.key.to_bytes(),
             enabled: enabled as u64,
         };
-        state::write_matcher_authorization(&mut auth_ai.try_borrow_mut_data()?, &auth)
+        {
+            let auth_data = auth_ai.try_borrow_data()?;
+            if state::is_initialized(&auth_data) {
+                let existing = state::read_matcher_authorization(&auth_data)?;
+                if existing.market_group != new_auth.market_group
+                    || existing.lp_portfolio != new_auth.lp_portfolio
+                    || existing.lp_owner != new_auth.lp_owner
+                    || existing.matcher_program != new_auth.matcher_program
+                    || existing.matcher_context != new_auth.matcher_context
+                    || existing.matcher_delegate != new_auth.matcher_delegate
+                {
+                    return Err(PercolatorError::Unauthorized.into());
+                }
+            }
+        }
+        state::write_matcher_authorization(&mut auth_ai.try_borrow_mut_data()?, &new_auth)
     }
 
     /// Maximum legs in a single matcher batch CPI: the matcher returns N*64 bytes via
