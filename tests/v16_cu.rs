@@ -10636,15 +10636,40 @@ fn v16_attack_out_of_range_asset_index_rejected() {
 // no cross-domain earnings/accounting manipulation. (Contrast the vault, which is owner-only.)
 #[test]
 fn v16_attack_backing_ledger_domain_binding_enforced() {
-    let mut env = V16CuEnv::new();
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
     let ledger = env.backing_domain_ledger_account();
     env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10); // ledger bound to domain 1
+    env.top_up_backing_bucket(2, 100, 10); // make domain 2 valid and funded too.
     // sync the SAME ledger but claiming domain 2 -> must reject (domain mismatch).
     env.svm.expire_blockhash();
     let r = send_tx(&mut env.svm, env.program_id, &env.payer,
         ProgInstruction::SyncBackingDomainLedger { domain: 2 },
         vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(ledger, false)], &[&env.admin]);
     assert!(r.is_err(), "ledger used under the wrong domain must reject (binding enforced)");
+
+    // the spend path must also reject a wrong-domain ledger before paying earnings out of the vault.
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[2].utilization_fee_earnings = 40;
+        group.vault += 40;
+    });
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 240);
+    let ledger_before = env.svm.get_account(&ledger).unwrap().data;
+    let (_, g_before_spend) = env.market_state();
+    let dest = env.token_account_for_mint(env.mint, env.admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let r_spend = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings { domain: 2, amount: 10 },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false),
+             AccountMeta::new(ledger, false), AccountMeta::new(dest, false),
+             AccountMeta::new(env.vault, false), AccountMeta::new_readonly(env.vault_authority, false),
+             AccountMeta::new_readonly(spl_token::ID, false)], &[&env.admin]);
+    assert!(r_spend.is_err(), "wrong-domain ledger must not authorize an earnings withdrawal");
+    assert_eq!(env.token_amount(dest), 0, "no earnings paid with the wrong ledger");
+    assert_eq!(env.market_state().1.vault, g_before_spend.vault, "vault accounting unchanged");
+    assert_eq!(env.token_amount(env.vault), g_before_spend.vault as u64, "real vault unchanged");
+    assert_eq!(env.svm.get_account(&ledger).unwrap().data, ledger_before, "wrong-domain spend does not rewrite ledger");
+    assert_eq!(env.market_state().1.source_backing_buckets[2].utilization_fee_earnings, 40, "domain-2 earnings remain withdrawable");
+
     // the correct domain still syncs.
     env.svm.expire_blockhash();
     let r_ok = send_tx(&mut env.svm, env.program_id, &env.payer,
