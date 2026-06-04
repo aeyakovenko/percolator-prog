@@ -17898,6 +17898,11 @@ fn v16_attack_backing_fee_split_conserves() {
     env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
     env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
     env.update_backing_fee_policy_with_cu(WINNING_DOMAIN as u8, FEE_BPS, INSURANCE_SHARE_BPS);
+    // Reconfigure the asset-0 oracle after setting the policy. Asset 0 carries both market-wide
+    // config and a stored per-asset profile; the fee policy must survive this path because the
+    // backing-fee collector reads the stored profile.
+    env.svm.expire_blockhash();
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
 
     let cross_owner = Keypair::new();
     let counterparty_owner = Keypair::new();

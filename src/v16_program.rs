@@ -9440,6 +9440,7 @@ pub mod processor {
             };
         let mut market_data = market_ai.try_borrow_mut_data()?;
         if asset_index == 0 {
+            let mut profile = state::read_asset_oracle_profile(&market_data, asset_index)?;
             let old_fee = if long_side {
                 cfg.backing_trade_fee_bps_long
             } else {
@@ -9449,11 +9450,16 @@ pub mod processor {
             if long_side {
                 cfg.backing_trade_fee_bps_long = fee_bps;
                 cfg.backing_trade_fee_insurance_share_bps_long = insurance_share_bps;
+                profile.backing_trade_fee_bps_long = fee_bps;
+                profile.backing_trade_fee_insurance_share_bps_long = insurance_share_bps;
             } else {
                 cfg.backing_trade_fee_bps_short = fee_bps;
                 cfg.backing_trade_fee_insurance_share_bps_short = insurance_share_bps;
+                profile.backing_trade_fee_bps_short = fee_bps;
+                profile.backing_trade_fee_insurance_share_bps_short = insurance_share_bps;
             }
-            state::write_wrapper_config(&mut market_data, &cfg)
+            state::write_wrapper_config(&mut market_data, &cfg)?;
+            state::write_asset_oracle_profile(&mut market_data, asset_index, &profile)
         } else {
             let mut profile = state::read_asset_oracle_profile(&market_data, asset_index)?;
             let old_fee = if long_side {
