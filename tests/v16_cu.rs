@@ -16510,6 +16510,86 @@ fn v16_attack_permissionless_create_requires_nonzero_fee() {
     assert_eq!(env.market_state().1.assets[1].lifecycle, AssetLifecycleV16::Active, "authority append activated asset 1");
 }
 
+// security.md sweep — permissionless create fee preflight (#5 / README L59): an underfunded
+// permissionless creator must not grow the market, install asset authorities, or credit market-0
+// insurance. The funded control proves the rejection is the fee gate, not a dead activation path.
+#[test]
+fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit() {
+    const FEE: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(FEE);
+    env.svm.warp_to_slot(1);
+
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let (_, group_before) = env.market_state();
+    assert_eq!(group_before.config.max_market_slots, 1, "starts as a one-asset market");
+
+    let underfunded_source = env.token_account(creator.pubkey(), FEE as u64 - 1);
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(underfunded_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(rejected.is_err(), "underfunded permissionless init fee must reject");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before, "market account unchanged by rejected create");
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before, "vault token account unchanged by rejected create");
+    assert_eq!(env.token_amount(underfunded_source), FEE as u64 - 1, "rejected create pulls no fee");
+    let (_, rejected_group) = env.market_state();
+    assert_eq!(rejected_group.config.max_market_slots, 1, "rejected create did not append a slot");
+    assert_eq!(rejected_group.insurance, group_before.insurance, "rejected create did not credit insurance");
+    assert_eq!(rejected_group.vault, group_before.vault, "rejected create did not credit accounting vault");
+    assert_eq!(rejected_group.insurance_domain_budget, group_before.insurance_domain_budget);
+
+    let funded_source = env.token_account(creator.pubkey(), FEE as u64);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(funded_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    )
+    .expect("properly funded permissionless create succeeds");
+    let (_, funded_group) = env.market_state();
+    assert_eq!(env.token_amount(funded_source), 0, "funded create pulls the fee");
+    assert_eq!(funded_group.config.max_market_slots, 2, "funded create appends exactly one slot");
+    assert_eq!(funded_group.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(funded_group.insurance - group_before.insurance, FEE, "fee credited to market-0 insurance");
+    assert_eq!(funded_group.vault - group_before.vault, FEE, "fee credited to accounting vault");
+}
+
 // security.md sweep — permissionless create fee funds asset-0 insurance (#5 / README L59): the fee a
 // stranger pays to permissionlessly create asset N flows entirely into asset-0's insurance (the market
 // insurance pool + asset-0's per-domain budgets), conserving every atom.
