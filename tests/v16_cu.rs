@@ -12881,6 +12881,179 @@ fn v16_attack_close_resolved_dest_validation() {
     assert_eq!(env.token_amount(good), 1_000_000, "correct-mint own dest receives the resolved payout");
 }
 
+// security.md sweep - resolved payout account aliasing (#26/#44/#48): CloseResolved and the unsigned
+// ClaimResolvedPayoutTopup are value-moving wind-down paths. Passing the market slab as the portfolio
+// account must reject atomically and must not burn the real user's payout state.
+#[test]
+fn v16_attack_resolved_payout_paths_cannot_use_market_as_portfolio_alias() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000_000);
+    env.resolve();
+
+    let close_dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let close_alias = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(close_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        close_alias.is_err(),
+        "CloseResolved must reject market-as-portfolio alias"
+    );
+    assert_eq!(env.token_amount(close_dest), 0, "no payout to alias close dest");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "alias CloseResolved must not rewrite the market slab"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "alias CloseResolved must not burn the real user's payout state"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "alias CloseResolved must not move custody"
+    );
+
+    let good_close = env.close_resolved(&owner, portfolio);
+    assert_eq!(
+        env.token_amount(good_close),
+        1_000_000,
+        "real CloseResolved still pays after rejected alias attempt"
+    );
+
+    let mut topup_env = V16CuEnv::new();
+    let topup_owner = Keypair::new();
+    let topup_portfolio = topup_env.create_portfolio(&topup_owner);
+    {
+        let mut market_account = topup_env
+            .svm
+            .get_account(&topup_env.market)
+            .expect("market account");
+        let mut portfolio_account = topup_env
+            .svm
+            .get_account(&topup_portfolio)
+            .expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 100 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 100,
+            paid_effective: 40,
+            finalized: false,
+        };
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        topup_env
+            .svm
+            .set_account(topup_env.market, market_account)
+            .unwrap();
+        topup_env
+            .svm
+            .set_account(topup_portfolio, portfolio_account)
+            .unwrap();
+    }
+    topup_env.set_token_account_amount(
+        topup_env.vault,
+        topup_env.mint,
+        topup_env.vault_authority,
+        60,
+    );
+
+    let topup_dest = topup_env.token_account_for_mint(topup_env.mint, topup_owner.pubkey(), 0);
+    let topup_market_before = topup_env.svm.get_account(&topup_env.market).unwrap();
+    let topup_portfolio_before = topup_env.svm.get_account(&topup_portfolio).unwrap();
+    let topup_vault_before = topup_env.svm.get_account(&topup_env.vault).unwrap();
+
+    topup_env.svm.expire_blockhash();
+    let topup_alias = topup_env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(topup_owner.pubkey(), false),
+            AccountMeta::new(topup_env.market, false),
+            AccountMeta::new(topup_env.market, false),
+            AccountMeta::new(topup_dest, false),
+            AccountMeta::new(topup_env.vault, false),
+            AccountMeta::new_readonly(topup_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        topup_alias.is_err(),
+        "ClaimResolvedPayoutTopup must reject market-as-portfolio alias"
+    );
+    assert_eq!(topup_env.token_amount(topup_dest), 0, "no payout to alias top-up dest");
+    assert_eq!(
+        topup_env.svm.get_account(&topup_env.market).unwrap(),
+        topup_market_before,
+        "alias top-up must not rewrite the market slab"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_portfolio).unwrap(),
+        topup_portfolio_before,
+        "alias top-up must not burn the real pending receipt"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_env.vault).unwrap(),
+        topup_vault_before,
+        "alias top-up must not move custody"
+    );
+
+    let topup_cu = topup_env.claim_resolved_payout_topup_with_cu(
+        topup_owner.pubkey(),
+        topup_portfolio,
+        topup_dest,
+    );
+    assert_cu_within(
+        "ClaimResolvedPayoutTopup alias regression control",
+        topup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        topup_env.token_amount(topup_dest),
+        60,
+        "real top-up claim still pays after rejected alias attempt"
+    );
+}
+
 // security.md sweep — liquidation of a healthy account (#2): an account above maintenance margin must
 // NOT be liquidatable. A permissionless action:1 crank against a healthy account must be a no-op — no
 // force-close, no fee extraction, position intact.
