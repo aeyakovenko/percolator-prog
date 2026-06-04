@@ -16650,3 +16650,30 @@ fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
     assert!(ok.is_ok(), "faithful matcher reply must execute through the single path: {ok:?}");
     assert!(has_active_leg_for_asset(&state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap(), 0), "faithful reply fills");
 }
+
+// DoS/manipulation rate-limit: PushEwmaMark feeds a SMOOTHED mark (EWMA over dt slots). A mark
+// authority must not defeat the per-slot rate limit by pushing repeatedly within ONE slot (each push
+// compounding toward an extreme value -> instant mark manipulation -> mis-liquidation). The EWMA
+// update returns `old` when dt==0, so same-slot repeats are no-ops. (Distinct code path from the
+// hyperp-index Bug #9 fix, which has its own test.)
+#[test]
+fn v16_attack_push_ewma_mark_same_slot_does_not_compound() {
+    let mut env = V16CuEnv::new();
+    env.configure_ewma_mark_with_cu(1, 100, 10, 0); // asset 0 EWMA, mark 100, halflife 10
+    env.svm.warp_to_slot(5);
+    env.svm.expire_blockhash();
+    env.push_ewma_mark_with_cu(5, 1000); // push toward 1000 -> partial (alpha) move, not a jump
+    let m1 = env.market_state().0.mark_ewma_e6;
+    assert!(m1 > 100 && m1 < 1000, "first push moves EWMA partially toward target (no instant jump): {m1}");
+    // SECOND push, SAME slot, same target: dt==0 -> must NOT move (no compounding).
+    env.svm.expire_blockhash();
+    env.push_ewma_mark_with_cu(5, 1000);
+    let m2 = env.market_state().0.mark_ewma_e6;
+    assert_eq!(m2, m1, "same-slot repeated PushEwmaMark must not compound (dt==0 -> no movement)");
+    // a genuine slot advance resumes movement (time-gated, not frozen).
+    env.svm.warp_to_slot(6);
+    env.svm.expire_blockhash();
+    env.push_ewma_mark_with_cu(6, 1000);
+    let m3 = env.market_state().0.mark_ewma_e6;
+    assert!(m3 > m2, "advancing a slot resumes EWMA movement: {m3} vs {m2}");
+}
