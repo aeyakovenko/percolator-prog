@@ -18632,12 +18632,16 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
     let delegate = matcher_delegate_key(&env.program_id, &env.market, &la, &lp.pubkey(), &hostile, &ctx);
     env.svm.set_account(delegate, Account { lamports: 1_000_000_000, data: vec![], owner: Pubkey::default(), executable: false, rent_epoch: 0 }).unwrap();
     let sz = (5 * POS_SCALE) as i128;
-    let send_mode = |env: &mut V16CuEnv, mode: u8| -> Result<u64, String> {
+    let send_mode = |env: &mut V16CuEnv, mode: u8| -> (Result<u64, String>, Account, Account, Account, Account) {
         let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
         data[0] = mode;
         env.svm.set_account(ctx, Account { lamports: 1_000_000_000, data, owner: hostile, executable: false, rent_epoch: 0 }).unwrap();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_before = env.svm.get_account(&ta).unwrap();
+        let lp_before = env.svm.get_account(&la).unwrap();
+        let ctx_before = env.svm.get_account(&ctx).unwrap();
         env.svm.expire_blockhash();
-        env.send(
+        let result = env.send(
             ProgInstruction::BatchTradeCpi { legs: vec![
                 BatchTradeCpiLeg { asset_index: 0, size_q: sz, fee_bps: 100, limit_price: 0 },
                 BatchTradeCpiLeg { asset_index: 1, size_q: sz, fee_bps: 100, limit_price: 0 },
@@ -18653,20 +18657,25 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
                 AccountMeta::new_readonly(delegate, false),
             ],
             &[&taker, &lp],
-        )
+        );
+        (result, market_before, taker_before, lp_before, ctx_before)
     };
     let labels = ["over-fill", "reversed-sign", "forged-asset", "forged-oracle", "forged-req_id",
                   "forged-lp", "zero-price", "unflagged-partial", "short-length"];
     for (mode, label) in labels.iter().enumerate() {
-        let r = send_mode(&mut env, mode as u8);
+        let (r, market_before, taker_before, lp_before, ctx_before) = send_mode(&mut env, mode as u8);
         assert!(r.is_err(), "hostile matcher mode '{label}' must be rejected by the wrapper");
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before, "hostile batch mode '{label}' must not mutate market state");
+        assert_eq!(env.svm.get_account(&ta).unwrap(), taker_before, "hostile batch mode '{label}' must not mutate taker state");
+        assert_eq!(env.svm.get_account(&la).unwrap(), lp_before, "hostile batch mode '{label}' must not mutate LP state");
+        assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before, "hostile batch mode '{label}' must roll back matcher context writes");
         let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
         assert!(!has_active_leg_for_asset(&t, 0) && !has_active_leg_for_asset(&t, 1),
             "no position may be opened on a rejected hostile reply ({label})");
     }
     // sanity: the SAME harness with a faithful reply (mode 9) executes -> rejections above are real,
     // not a broken test setup.
-    let ok = send_mode(&mut env, 9);
+    let (ok, _, _, _, _) = send_mode(&mut env, 9);
     assert!(ok.is_ok(), "faithful matcher reply must execute through the same path: {ok:?}");
     let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
     assert!(has_active_leg_for_asset(&t, 0) && has_active_leg_for_asset(&t, 1), "faithful reply fills both legs");
@@ -18802,22 +18811,31 @@ fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
         AccountMeta::new(ctx, false),
         AccountMeta::new_readonly(delegate, false),
     ];
-    let send_mode = |env: &mut V16CuEnv, mode: u8| -> Result<u64, String> {
+    let send_mode = |env: &mut V16CuEnv, mode: u8| -> (Result<u64, String>, Account, Account, Account, Account) {
         let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
         data[0] = mode;
         env.svm.set_account(ctx, Account { lamports: 1_000_000_000, data, owner: hostile, executable: false, rent_epoch: 0 }).unwrap();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_before = env.svm.get_account(&ta).unwrap();
+        let lp_before = env.svm.get_account(&la).unwrap();
+        let ctx_before = env.svm.get_account(&ctx).unwrap();
         env.svm.expire_blockhash();
         let m = metas(env);
-        env.send(ProgInstruction::TradeCpi { asset_index: 0, size_q: sz, fee_bps: 100, limit_price: 0 }, m, &[&taker, &lp])
+        let result = env.send(ProgInstruction::TradeCpi { asset_index: 0, size_q: sz, fee_bps: 100, limit_price: 0 }, m, &[&taker, &lp]);
+        (result, market_before, taker_before, lp_before, ctx_before)
     };
     let labels = ["over-fill", "reversed-sign", "forged-asset", "forged-oracle", "forged-req_id", "forged-lp", "zero-price", "unflagged-partial"];
     for (mode, label) in labels.iter().enumerate() {
-        let r = send_mode(&mut env, mode as u8);
+        let (r, market_before, taker_before, lp_before, ctx_before) = send_mode(&mut env, mode as u8);
         assert!(r.is_err(), "single TradeCpi hostile mode '{label}' must be rejected");
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before, "hostile single mode '{label}' must not mutate market state");
+        assert_eq!(env.svm.get_account(&ta).unwrap(), taker_before, "hostile single mode '{label}' must not mutate taker state");
+        assert_eq!(env.svm.get_account(&la).unwrap(), lp_before, "hostile single mode '{label}' must not mutate LP state");
+        assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before, "hostile single mode '{label}' must roll back matcher context writes");
         let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
         assert!(!has_active_leg_for_asset(&t, 0), "no position opened on a rejected hostile reply ({label})");
     }
-    let ok = send_mode(&mut env, 9);
+    let (ok, _, _, _, _) = send_mode(&mut env, 9);
     assert!(ok.is_ok(), "faithful matcher reply must execute through the single path: {ok:?}");
     assert!(has_active_leg_for_asset(&state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap(), 0), "faithful reply fills");
 }
