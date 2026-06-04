@@ -17741,6 +17741,70 @@ fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
     assert_eq!(active_leg_for_asset(&t, 1).basis_pos_q, -sz);
 }
 
+// security.md sweep — BatchTradeCpi fee bounds on permissionless LP fills (#37/#49): in CPI mode the
+// taker supplies fee_bps while the LP owner does not sign the fill. An over-max fee must therefore
+// reject the whole batch, or a taker could drain an LP into protocol insurance through a matcher fill.
+#[test]
+fn v16_attack_batch_cpi_fee_bps_bounded_for_permissionless_lp() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, lp_account);
+    let before = env.market_state().1;
+    let taker_before = env.portfolio_state(taker_account);
+    let lp_before = env.portfolio_state(lp_account);
+    let send_fee = |env: &mut V16CuEnv, fee_bps: u64| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: (5 * POS_SCALE) as i128,
+                    fee_bps,
+                    limit_price: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new_readonly(lp.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+                AccountMeta::new(lp_account, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker],
+        )
+    };
+
+    for bad in [10_001u64, u64::MAX] {
+        let rejected = send_fee(&mut env, bad);
+        assert!(rejected.is_err(), "BatchTradeCpi fee_bps {bad} must reject");
+        let group = env.market_state().1;
+        assert_eq!(group.assets[0].oi_eff_long_q, 0, "no OI from rejected over-fee batch");
+        assert_eq!(group.insurance, before.insurance, "no fee accrued on rejected over-fee batch");
+        assert_eq!(group.c_tot, before.c_tot, "capital accounting unchanged by rejected over-fee batch");
+        assert_eq!(group.vault, before.vault, "vault unchanged by rejected over-fee batch");
+        assert_eq!(env.portfolio_state(taker_account).capital, taker_before.capital, "taker capital untouched");
+        assert_eq!(env.portfolio_state(lp_account).capital, lp_before.capital, "LP capital untouched");
+    }
+
+    let ok = send_fee(&mut env, 10_000);
+    assert!(ok.is_ok(), "max allowed BatchTradeCpi fee_bps should still execute: {ok:?}");
+    let group = env.market_state().1;
+    assert!(group.insurance > before.insurance, "valid max fee accrues to insurance");
+    assert_eq!(group.vault, before.vault, "valid fee is internal capital->insurance");
+    assert!(group.vault >= group.c_tot + group.insurance, "senior conservation");
+}
+
 // BatchTradeCpi 14-leg fan-out through one batched matcher CPI, under the tx CU budget.
 #[test]
 fn v16_bpf_batch_trade_cpi_14_legs_under_tx_limit() {
