@@ -11682,6 +11682,216 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     );
 }
 
+// security.md sweep — optional ledger duplicate-account aliasing (#26/#35/#44): token-moving
+// paths accept an optional program-owned ledger account. Passing the MARKET itself as that optional
+// ledger is a duplicate mutable account attack: if accepted, the handler could rewrite market bytes
+// as a ledger or partially move SPL custody before failing. Every path must reject atomically.
+#[test]
+fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.top_up_insurance_domain_with_authority(&admin, 0, 100);
+    env.top_up_backing_bucket(1, 100, 10);
+    env.enable_live_insurance_withdrawal();
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].utilization_fee_earnings += 20;
+        group.vault += 20;
+    });
+    let vault_with_earnings = env.token_amount(env.vault) + 20;
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, vault_with_earnings);
+
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let assert_core_unchanged = |env: &V16CuEnv| {
+        assert_eq!(
+            env.svm.get_account(&portfolio).unwrap(),
+            portfolio_before,
+            "market-alias ledger rejection must not rewrite the funded portfolio"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "market-alias ledger rejection must leave market bytes unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "market-alias ledger rejection must leave vault custody unchanged"
+        );
+    };
+
+    let top_up_insurance_source = env.token_account(admin.pubkey(), 25);
+    env.svm.expire_blockhash();
+    let top_up_insurance = env.send(
+        ProgInstruction::TopUpInsurance { amount: 25 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(top_up_insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        top_up_insurance.is_err(),
+        "TopUpInsurance must reject the market account as the optional ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(env.token_amount(top_up_insurance_source), 25);
+
+    let top_up_domain_source = env.token_account(admin.pubkey(), 20);
+    env.svm.expire_blockhash();
+    let top_up_domain = env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 20,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(top_up_domain_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        top_up_domain.is_err(),
+        "TopUpInsuranceDomain must reject the market account as the optional ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(env.token_amount(top_up_domain_source), 20);
+
+    let top_up_backing_source = env.token_account(admin.pubkey(), 30);
+    env.svm.expire_blockhash();
+    let top_up_backing = env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 30,
+            expiry_slot: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(top_up_backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        top_up_backing.is_err(),
+        "TopUpBackingBucket must reject the market account as the optional ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(env.token_amount(top_up_backing_source), 30);
+
+    let insurance_dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let withdraw_insurance = env.send(
+        ProgInstruction::WithdrawInsuranceDomain {
+            domain: 0,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        withdraw_insurance.is_err(),
+        "WithdrawInsuranceDomain must reject the market account as the optional ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(env.token_amount(insurance_dest), 0);
+
+    let limited_dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let withdraw_limited = env.send(
+        ProgInstruction::WithdrawInsuranceLimited { amount: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(limited_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        withdraw_limited.is_err(),
+        "WithdrawInsuranceLimited must reject the market account as the optional ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(env.token_amount(limited_dest), 0);
+
+    let backing_dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let withdraw_backing = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        withdraw_backing.is_err(),
+        "WithdrawBackingBucket must reject the market account as the optional ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(env.token_amount(backing_dest), 0);
+
+    let earnings_dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let withdraw_earnings = env.send(
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(earnings_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        withdraw_earnings.is_err(),
+        "WithdrawBackingBucketEarnings must reject the market account as the ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(env.token_amount(earnings_dest), 0);
+}
+
 // security.md sweep — deposit source confusion (#35/#44): the deposit source must be a token account
 // owned by the depositor. Passing the VAULT (or any non-owned account) as the source must reject —
 // otherwise a vault->vault no-op transfer could credit capital for free (mint capital from nothing).
