@@ -18663,6 +18663,168 @@ fn v16_attack_insurance_limited_withdraw_rate_limited() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
 
+#[test]
+fn v16_attack_live_insurance_withdraw_rejects_exposed_target_effective_lag() {
+    const INITIAL_MARK: u64 = 100_000_000;
+    const TARGET_MARK: u64 = 90_000_000;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 24);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, INITIAL_MARK);
+    env.enable_live_insurance_withdrawal();
+    env.top_up_insurance(1_000_000);
+    env.top_up_insurance_domain_with_authority(&env.admin.insecure_clone(), 0, 1_000_000);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_portfolio = env.create_portfolio(&long_owner);
+    let short_portfolio = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_portfolio, 1_000_000_000);
+    env.deposit(&short_owner, short_portfolio, 1_000_000_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_portfolio,
+        &short_owner,
+        short_portfolio,
+        POS_SCALE as i128,
+        INITIAL_MARK,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, TARGET_MARK);
+    env.crank(
+        long_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    let g = env.market_state().1;
+    assert_eq!(g.assets[0].raw_oracle_target_price, TARGET_MARK);
+    assert_ne!(
+        g.assets[0].raw_oracle_target_price, g.assets[0].effective_price,
+        "test must create a real target/effective lag"
+    );
+    assert!(g.assets[0].oi_eff_long_q > 0 || g.assets[0].oi_eff_short_q > 0);
+    assert!(!g.bankruptcy_hlock_active, "durable hlock stays clear");
+    assert!(!g.threshold_stress_active, "threshold stress stays clear");
+    assert!(!g.loss_stale_active, "loss-stale stays clear");
+
+    let admin = env.admin.insecure_clone();
+    let limited_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let limited = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceLimited { amount: 100 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(limited_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        limited.is_err(),
+        "live WithdrawInsuranceLimited must reject while exposed target/effective lag is unresolved"
+    );
+
+    let domain = env.try_withdraw_insurance_domain_with_authority(&admin, 0, 100);
+    assert!(
+        domain.is_err(),
+        "live WithdrawInsuranceDomain must reject while its exposed asset has target/effective lag"
+    );
+    let g_after = env.market_state().1;
+    assert_eq!(g_after.insurance, g.insurance, "rejected withdrawals leave insurance untouched");
+    assert_eq!(
+        g_after.insurance_domain_budget[0],
+        g.insurance_domain_budget[0],
+        "rejected domain withdrawal leaves budget untouched"
+    );
+}
+
+#[test]
+fn v16_attack_unexposed_target_move_cannot_grief_live_insurance_withdrawals() {
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_price_move_bps_per_slot: 24,
+            ..V16CuMarketParams::default()
+        },
+        1,
+    );
+    env.activate_asset(1, 1, 100_000_000);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100_000_000);
+    env.enable_live_insurance_withdrawal();
+    env.top_up_insurance(1_000_000);
+    env.top_up_insurance_domain_with_authority(&env.admin.insecure_clone(), 0, 1_000_000);
+
+    let owner = Keypair::new();
+    let flat_portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, flat_portfolio, 1_000_000);
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 90_000_000);
+    env.crank(
+        flat_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    let g = env.market_state().1;
+    assert_eq!(
+        g.assets[1].raw_oracle_target_price, g.assets[1].effective_price,
+        "zero-OI asset catches effective price up to target immediately"
+    );
+    assert_eq!(g.assets[1].effective_price, 90_000_000);
+    assert_eq!(g.assets[1].oi_eff_long_q, 0, "asset 1 is unexposed long side");
+    assert_eq!(g.assets[1].oi_eff_short_q, 0, "asset 1 is unexposed short side");
+
+    let admin = env.admin.insecure_clone();
+    let limited_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let limited = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceLimited { amount: 100 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(limited_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        limited.is_ok(),
+        "unexposed lag on another asset must not DoS live limited insurance withdrawal"
+    );
+
+    env.svm.warp_to_slot(4);
+    let domain = env.try_withdraw_insurance_domain_with_authority(&admin, 0, 100);
+    assert!(
+        domain.is_ok(),
+        "unexposed lag on another asset must not DoS unrelated domain insurance withdrawal"
+    );
+}
+
 // security.md sweep — WithdrawInsuranceLimited deposits_only protection (#6/#23): when the policy is
 // deposits_only, the cap is min(max_bps cap, deposit_remaining), and deposit_remaining only accrues from
 // TopUpInsurance made WHILE deposits_only is active. Insurance accumulated otherwise (pre-policy deposits,

@@ -4805,7 +4805,32 @@ pub mod processor {
         {
             return Err(PercolatorError::EngineLockActive.into());
         }
+        reject_exposed_target_effective_lag_view(group, asset_index)?;
         Ok(false)
+    }
+
+    fn asset_has_exposed_target_effective_lag_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> Result<bool, ProgramError> {
+        let slot = group
+            .markets
+            .get(asset_index)
+            .ok_or(PercolatorError::InvalidInstruction)?;
+        let asset = &slot.engine.asset;
+        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+        Ok(exposed
+            && asset.raw_oracle_target_price.get() != asset.effective_price.get())
+    }
+
+    fn reject_exposed_target_effective_lag_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> ProgramResult {
+        if asset_has_exposed_target_effective_lag_view(group, asset_index)? {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        Ok(())
     }
 
     fn read_oracle_profile_for_asset(
@@ -8522,6 +8547,7 @@ pub mod processor {
             {
                 return Err(PercolatorError::EngineLockActive.into());
             }
+            reject_exposed_target_effective_lag_view(&group, 0)?;
             let clock_slot = Clock::get()
                 .map(|c| c.slot)
                 .unwrap_or(group.header.current_slot.get());
