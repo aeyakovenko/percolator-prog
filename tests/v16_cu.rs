@@ -15754,6 +15754,94 @@ fn v16_attack_oracle_feed_id_mismatch_rejected() {
     assert!(ok.is_ok(), "the matching configured feed id configures: {:?}", ok);
 }
 
+#[test]
+fn v16_attack_crank_oracle_feed_id_mismatch_rejects_without_mutation() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+    let expected_feed = [0x77u8; 32];
+    let wrong_feed = [0x78u8; 32];
+    let initial_acct = env.set_pyth_price_with_conf(&expected_feed, 200_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [expected_feed, [0u8; 32], [0u8; 32]],
+        &[initial_acct],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure matching one-leg hybrid oracle");
+
+    let cranker_owner = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    set_test_clock(&mut env, 2, 101);
+    let wrong_acct = env.set_pyth_price_with_conf(&wrong_feed, 500_000, -6, 0, 101);
+    let market_before = env.svm.get_account(&env.market).unwrap().data;
+    let portfolio_before = env.svm.get_account(&cranker_portfolio).unwrap().data;
+
+    env.svm.expire_blockhash();
+    let bad = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(cranker_portfolio, false),
+            AccountMeta::new_readonly(wrong_acct, false),
+        ],
+        &[],
+    );
+    assert!(
+        bad.is_err(),
+        "permissionless crank must reject a PriceUpdate for the wrong configured feed"
+    );
+    let err = bad.err().unwrap();
+    assert!(
+        err.contains("Custom(29)"),
+        "wrong feed id should reject as InvalidOracleKey (Custom 29), got: {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_before,
+        "wrong-feed crank must not partially update the oracle profile or market state"
+    );
+    assert_eq!(
+        env.svm.get_account(&cranker_portfolio).unwrap().data,
+        portfolio_before,
+        "wrong-feed crank must not mutate the cranker portfolio"
+    );
+
+    let correct_acct = env.set_pyth_price_with_conf(&expected_feed, 210_000, -6, 0, 101);
+    env.svm.expire_blockhash();
+    env.crank_with_oracle_tail(
+        cranker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &[correct_acct],
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.last_good_oracle_slot, 2);
+    assert_eq!(group.assets[0].raw_oracle_target_price, 210_000);
+}
+
 // security.md sweep — malformed oracle config rejects cleanly (#37/#44 robustness): a hybrid oracle
 // declaring N legs but supplied with fewer oracle accounts must reject WITHOUT partially configuring or
 // corrupting the market (no out-of-bounds read, no half-written oracle profile). Protection: the runtime
