@@ -11898,6 +11898,38 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
         "market B vault must be intact after the cross-market drain attempt"
     );
     assert_eq!(env.token_amount(dest), 0, "attacker received nothing");
+
+    // Make P_a otherwise closeable on its real market, then try to close it through market B.
+    // If the market provenance check were missing, this could zero the market-A portfolio while
+    // sweeping its rent to market B and leaving market A's materialized count stale.
+    let (a_dest, _) = env.withdraw_with_cu(&attacker, pa, 1_000_000);
+    assert_eq!(env.token_amount(a_dest), 1_000_000, "market-A funds recovered before close probe");
+    assert_eq!(env.portfolio_state(pa).capital, 0, "P_a is flat and otherwise closeable");
+    let pa_before_close = env.svm.get_account(&pa).unwrap();
+    let market_b_before_close = env.svm.get_account(&market_b).unwrap();
+    env.svm.expire_blockhash();
+    let close_foreign = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(pa, false),
+        ],
+        &[&attacker],
+    );
+    assert!(close_foreign.is_err(), "market B must not close a market-A-bound portfolio");
+    assert_eq!(env.svm.get_account(&pa).unwrap(), pa_before_close, "foreign close leaves P_a intact");
+    assert_eq!(
+        env.svm.get_account(&market_b).unwrap(),
+        market_b_before_close,
+        "foreign close sweeps no rent to market B and mutates no counter"
+    );
+
+    env.close_portfolio_with_cu(&attacker, pa);
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 0, "real market can still close P_a");
 }
 
 // security.md sweep — partial liquidation exactness (#2/#33): liquidating with close_q < the position
