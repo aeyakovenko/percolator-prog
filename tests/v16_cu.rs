@@ -11992,6 +11992,62 @@ fn v16_attack_permissionless_resolve_rejects_fresh_market() {
     assert_eq!(env2.token_amount(d2), 100_000, "market still Live after rejected fresh-oracle resolve");
 }
 
+// security.md sweep -- permissionless resolve slot spoof (#30 DoS): ResolveStalePermissionless is
+// public. A cranker must not be able to pass a far-future caller now_slot and resolve a still-fresh
+// market. The handler must authenticate against Clock; once the real Clock reaches the stale window,
+// the same instruction may resolve even if caller now_slot is stale/low.
+#[test]
+fn v16_attack_permissionless_resolve_uses_authenticated_clock_slot() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000_000);
+
+    env.svm.warp_to_slot(4);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let spoof = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: u64::MAX },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        spoof.is_err(),
+        "far-future caller now_slot must not resolve before the real Clock reaches stale_slots"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected spoofed resolve leaves market bytes unchanged"
+    );
+
+    let (dest, _) = env.withdraw_with_cu(&owner, portfolio, 100_000);
+    assert_eq!(
+        env.token_amount(dest),
+        100_000,
+        "market remains Live and user funds remain withdrawable after rejected spoof"
+    );
+
+    env.svm.warp_to_slot(5);
+    env.svm.expire_blockhash();
+    let real = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        real.is_ok(),
+        "once the real Clock reaches stale_slots, resolve succeeds even with a low caller now_slot: {real:?}"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.mode, percolator::MarketModeV16::Resolved);
+    assert_eq!(
+        group.resolved_slot, 5,
+        "resolved_slot is the authenticated Clock slot, not the caller's now_slot"
+    );
+}
+
 // security.md sweep — CloseSlab wind-down finality (#30/#48): a market may only be closed when fully
 // wound down (mode==Resolved AND vault==0 && insurance==0 && c_tot==0 && no materialized portfolios).
 // Closing while value/positions remain would strand funds — must reject.
