@@ -16599,3 +16599,54 @@ fn v16_attack_close_portfolio_with_capital_rejected_no_strand() {
     let dest = env.withdraw(&owner, p, 400_000);
     assert_eq!(env.token_amount(dest), 400_000, "owner can still withdraw the full balance");
 }
+
+// End-to-end adversarial coverage of the PRODUCTION single-fill path: a hostile matcher writes a
+// crafted tag-0 return into the ctx account (over-fill / reversed / forged echo / zero-price /
+// unflagged-partial). handle_trade_cpi reads the ctx return + validate_matcher_return must REJECT
+// every hostile mode (no position opened); only the faithful reply executes. Complements the batch
+// (tag-3 / return_data) hostile test and the validation unit test.
+#[test]
+fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(hostile, &std::fs::read(hostile_matcher_program_path()).unwrap());
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(&env.program_id, &env.market, &la, &hostile, &ctx);
+    env.svm.set_account(delegate, Account { lamports: 1_000_000_000, data: vec![], owner: Pubkey::default(), executable: false, rent_epoch: 0 }).unwrap();
+    let sz = (5 * POS_SCALE) as i128;
+    let metas = |env: &V16CuEnv| vec![
+        AccountMeta::new(taker.pubkey(), true),
+        AccountMeta::new(lp.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(ta, false),
+        AccountMeta::new(la, false),
+        AccountMeta::new_readonly(hostile, false),
+        AccountMeta::new(ctx, false),
+        AccountMeta::new_readonly(delegate, false),
+    ];
+    let send_mode = |env: &mut V16CuEnv, mode: u8| -> Result<u64, String> {
+        let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
+        data[0] = mode;
+        env.svm.set_account(ctx, Account { lamports: 1_000_000_000, data, owner: hostile, executable: false, rent_epoch: 0 }).unwrap();
+        env.svm.expire_blockhash();
+        let m = metas(env);
+        env.send(ProgInstruction::TradeCpi { asset_index: 0, size_q: sz, fee_bps: 100, limit_price: 0 }, m, &[&taker, &lp])
+    };
+    let labels = ["over-fill", "reversed-sign", "forged-asset", "forged-oracle", "forged-req_id", "forged-lp", "zero-price", "unflagged-partial"];
+    for (mode, label) in labels.iter().enumerate() {
+        let r = send_mode(&mut env, mode as u8);
+        assert!(r.is_err(), "single TradeCpi hostile mode '{label}' must be rejected");
+        let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
+        assert!(!has_active_leg_for_asset(&t, 0), "no position opened on a rejected hostile reply ({label})");
+    }
+    let ok = send_mode(&mut env, 9);
+    assert!(ok.is_ok(), "faithful matcher reply must execute through the single path: {ok:?}");
+    assert!(has_active_leg_for_asset(&state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap(), 0), "faithful reply fills");
+}
