@@ -4827,6 +4827,18 @@ pub mod processor {
         profile
     }
 
+    fn domain_authority_fields_complete(
+        insurance_authority: [u8; 32],
+        insurance_operator: [u8; 32],
+        backing_bucket_authority: [u8; 32],
+        oracle_authority: [u8; 32],
+    ) -> bool {
+        insurance_authority != [0u8; 32]
+            && insurance_operator != [0u8; 32]
+            && backing_bucket_authority != [0u8; 32]
+            && oracle_authority != [0u8; 32]
+    }
+
     #[derive(Clone, Copy)]
     struct DomainAuthoritiesV16 {
         insurance_authority: [u8; 32],
@@ -8935,11 +8947,12 @@ pub mod processor {
                         // insurance_authority makes that domain's insurance budget
                         // withdrawable by nobody (terminal_insurance_remaining rejects a
                         // zero authority), permanently bricking CloseSlab (Finding F).
-                        if insurance_authority == [0u8; 32]
-                            || insurance_operator == [0u8; 32]
-                            || backing_bucket_authority == [0u8; 32]
-                            || oracle_authority == [0u8; 32]
-                        {
+                        if !domain_authority_fields_complete(
+                            insurance_authority,
+                            insurance_operator,
+                            backing_bucket_authority,
+                            oracle_authority,
+                        ) {
                             return Err(PercolatorError::InvalidInstruction.into());
                         }
                         group
@@ -9098,6 +9111,14 @@ pub mod processor {
             let mut reset_profile = None;
             match action {
                 ASSET_ACTION_ACTIVATE => {
+                    if !domain_authority_fields_complete(
+                        insurance_authority,
+                        insurance_operator,
+                        backing_bucket_authority,
+                        oracle_authority,
+                    ) {
+                        return Err(PercolatorError::InvalidInstruction.into());
+                    }
                     let was_retired = group.markets[asset_index].engine.asset.lifecycle
                         == ASSET_LIFECYCLE_RETIRED;
                     group
@@ -9112,10 +9133,15 @@ pub mod processor {
                     if was_retired && cfg.free_market_slot_count != 0 {
                         cfg.free_market_slot_count -= 1;
                     }
-                    let profile = preserve_backing_fee_policy(
+                    let mut profile = preserve_backing_fee_policy(
                         state::manual_asset_oracle_profile(initial_price, authenticated_slot),
                         &existing_profile,
                     );
+                    profile.insurance_authority = insurance_authority;
+                    profile.insurance_operator = insurance_operator;
+                    profile.backing_bucket_authority = backing_bucket_authority;
+                    profile.oracle_authority = oracle_authority;
+                    profile.asset_admin = authority.key.to_bytes();
                     if asset_index == 0 {
                         mirror_manual_profile_to_base_config(&mut cfg, &profile, true);
                     }

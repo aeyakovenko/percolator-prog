@@ -3510,6 +3510,139 @@ fn v16_bpf_privileged_reactivate_uses_authenticated_slot() {
 }
 
 #[test]
+fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let old_creator = Keypair::new();
+    let new_insurance = Keypair::new();
+    let new_operator = Keypair::new();
+    let new_backing = Keypair::new();
+    let new_oracle = Keypair::new();
+    env.update_market_init_fee_policy_with_cu(1);
+
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &old_creator,
+        1,
+        1,
+        100,
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        1,
+    );
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let old_profile = state::read_asset_oracle_profile(&market_data, 1).unwrap();
+    assert_eq!(
+        old_profile.oracle_authority,
+        old_creator.pubkey().to_bytes(),
+        "setup: old permissionless creator owns the retired slot before reuse"
+    );
+
+    env.svm.warp_to_slot(3);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        3,
+        0,
+    );
+
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 4,
+            initial_price: 250,
+            insurance_authority: new_insurance.pubkey().to_bytes(),
+            insurance_operator: new_operator.pubkey().to_bytes(),
+            backing_bucket_authority: new_backing.pubkey().to_bytes(),
+            oracle_authority: new_oracle.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    )
+    .expect("admin reactivates the retired slot with fresh authorities");
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let reused_profile = state::read_asset_oracle_profile(&market_data, 1).unwrap();
+    assert_eq!(
+        reused_profile.asset_admin,
+        admin.pubkey().to_bytes(),
+        "admin reactivation must bootstrap asset_admin to the current activator"
+    );
+    assert_eq!(
+        reused_profile.insurance_authority,
+        new_insurance.pubkey().to_bytes(),
+        "admin reactivation must install the new insurance authority"
+    );
+    assert_eq!(
+        reused_profile.insurance_operator,
+        new_operator.pubkey().to_bytes(),
+        "admin reactivation must install the new insurance operator"
+    );
+    assert_eq!(
+        reused_profile.backing_bucket_authority,
+        new_backing.pubkey().to_bytes(),
+        "admin reactivation must install the new backing authority"
+    );
+    assert_eq!(
+        reused_profile.oracle_authority,
+        new_oracle.pubkey().to_bytes(),
+        "admin reactivation must not leave the old creator in oracle control"
+    );
+
+    env.svm.warp_to_slot(5);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let old_oracle_reconfig = env.send(
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: 1,
+            now_slot: 5,
+            initial_mark_e6: 300,
+        },
+        vec![
+            AccountMeta::new(old_creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&old_creator],
+    );
+    assert!(
+        old_oracle_reconfig.is_err(),
+        "old permissionless creator must not retain oracle control over the reused market slot"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale-authority oracle reconfig must not mutate the reused market"
+    );
+
+    env.ensure_signer_account(new_oracle.pubkey());
+    env.svm.expire_blockhash();
+    let new_oracle_reconfig = env.send(
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: 1,
+            now_slot: 5,
+            initial_mark_e6: 300,
+        },
+        vec![
+            AccountMeta::new(new_oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&new_oracle],
+    );
+    assert!(
+        new_oracle_reconfig.is_ok(),
+        "new oracle authority must control the reused market slot: {new_oracle_reconfig:?}"
+    );
+}
+
+#[test]
 fn v16_bpf_permissionless_oracle_liquidation_uses_only_its_own_domain_insurance() {
     let mut env = V16CuEnv::new();
     let victim_insurance = Keypair::new();
