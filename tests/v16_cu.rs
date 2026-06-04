@@ -11404,6 +11404,245 @@ fn v16_attack_backing_ledger_domain_binding_enforced() {
     assert!(r_ok.is_ok(), "correct-domain sync works: {:?}", r_ok);
 }
 
+// full-interface sweep (cron25): a correctly-shaped backing ledger is scoped to its market group.
+// Replaying market A's ledger against market B's funded backing bucket must not sync, withdraw
+// earnings, mutate either market, or move market B vault tokens.
+#[test]
+fn v16_attack_backing_ledger_market_binding_enforced() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+
+    let ledger_a = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger_a, 1, 100, 10);
+    let ledger_a_state =
+        state::read_backing_domain_ledger(&env.svm.get_account(&ledger_a).unwrap().data)
+            .unwrap();
+    assert_eq!(
+        ledger_a_state.market_group,
+        env.market.to_bytes(),
+        "setup must bind ledger A to market A"
+    );
+
+    let market_b = Pubkey::new_unique();
+    let vault_authority_b =
+        Pubkey::find_program_address(&[b"vault", market_b.as_ref()], &env.program_id).0;
+    let vault_b = canonical_vault_ata(vault_authority_b, env.mint);
+    env.svm
+        .set_account(
+            market_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; state::market_account_len_for_capacity(1).unwrap()],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            vault_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, vault_authority_b, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let p = V16CuMarketParams::default();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitMarket {
+            max_portfolio_assets: p.max_portfolio_assets,
+            h_min: p.h_min,
+            h_max: p.h_max,
+            initial_price: p.initial_price,
+            min_nonzero_mm_req: p.min_nonzero_mm_req,
+            min_nonzero_im_req: p.min_nonzero_im_req,
+            maintenance_margin_bps: p.maintenance_margin_bps,
+            initial_margin_bps: p.initial_margin_bps,
+            max_trading_fee_bps: p.max_trading_fee_bps,
+            trade_fee_base_bps: p.trade_fee_base_bps,
+            liquidation_fee_bps: p.liquidation_fee_bps,
+            liquidation_fee_cap: p.liquidation_fee_cap,
+            min_liquidation_abs: p.min_liquidation_abs,
+            max_price_move_bps_per_slot: p.max_price_move_bps_per_slot,
+            max_accrual_dt_slots: p.max_accrual_dt_slots,
+            max_abs_funding_e9_per_slot: p.max_abs_funding_e9_per_slot,
+            min_funding_lifetime_slots: p.min_funding_lifetime_slots,
+            max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
+            max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
+            max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
+            public_b_chunk_atoms: p.public_b_chunk_atoms,
+            maintenance_fee_per_slot: p.maintenance_fee_per_slot,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new_readonly(env.mint, false),
+        ],
+        &[&admin],
+    )
+    .expect("init market B");
+
+    let source_b = env.token_account(admin.pubkey(), 100);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 100,
+            expiry_slot: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(source_b, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("top up market-B backing bucket");
+    assert_eq!(env.token_amount(source_b), 0, "market-B bucket was funded");
+    {
+        let mut market_b_account = env.svm.get_account(&market_b).unwrap();
+        let (cfg, mut group) = state::read_market(&market_b_account.data).unwrap();
+        group.source_backing_buckets[1].utilization_fee_earnings = 30;
+        group.vault += 30;
+        state::write_market(&mut market_b_account.data, &cfg, &group).unwrap();
+        env.svm.set_account(market_b, market_b_account).unwrap();
+    }
+    env.set_token_account_amount(vault_b, env.mint, vault_authority_b, 130);
+
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let ledger_a_before = env.svm.get_account(&ledger_a).unwrap();
+    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
+    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+
+    env.svm.expire_blockhash();
+    let sync_wrong_market = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SyncBackingDomainLedger { domain: 1 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(ledger_a, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        sync_wrong_market.is_err(),
+        "market B must reject a backing ledger initialized for market A"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+    assert_eq!(env.svm.get_account(&ledger_a).unwrap(), ledger_a_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+
+    let bad_dest = env.token_account(admin.pubkey(), 0);
+    let bad_dest_before = env.svm.get_account(&bad_dest).unwrap();
+    env.svm.expire_blockhash();
+    let withdraw_wrong_market = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(ledger_a, false),
+            AccountMeta::new(bad_dest, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(vault_authority_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        withdraw_wrong_market.is_err(),
+        "market B must not pay provider earnings through market A's ledger"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+    assert_eq!(env.svm.get_account(&ledger_a).unwrap(), ledger_a_before);
+    assert_eq!(env.svm.get_account(&bad_dest).unwrap(), bad_dest_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+    assert_eq!(env.token_amount(bad_dest), 0);
+
+    let ledger_b = env.backing_domain_ledger_account();
+    env.svm.expire_blockhash();
+    let sync_b = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SyncBackingDomainLedger { domain: 1 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(ledger_b, false),
+        ],
+        &[&admin],
+    );
+    assert!(sync_b.is_ok(), "fresh market-B backing ledger syncs: {sync_b:?}");
+    let ledger_b_state =
+        state::read_backing_domain_ledger(&env.svm.get_account(&ledger_b).unwrap().data)
+            .unwrap();
+    assert_eq!(ledger_b_state.market_group, market_b.to_bytes());
+    assert_eq!(ledger_b_state.total_principal_atoms, 0);
+    assert_eq!(ledger_b_state.total_earnings_atoms, 0);
+    assert_eq!(ledger_b_state.last_observed_bucket_earnings_atoms, 30);
+
+    let good_dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let withdraw_b = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(ledger_b, false),
+            AccountMeta::new(good_dest, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(vault_authority_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(withdraw_b.is_ok(), "same-market backing earnings withdraw works: {withdraw_b:?}");
+    assert_eq!(env.token_amount(good_dest), 10);
+    let (_, group_b_after) =
+        state::read_market(&env.svm.get_account(&market_b).unwrap().data).unwrap();
+    assert_eq!(group_b_after.source_backing_buckets[1].utilization_fee_earnings, 20);
+    assert_eq!(group_b_after.vault, 120);
+    assert_eq!(env.token_amount(vault_b), 120);
+    let ledger_b_after =
+        state::read_backing_domain_ledger(&env.svm.get_account(&ledger_b).unwrap().data)
+            .unwrap();
+    assert_eq!(ledger_b_after.total_earnings_withdrawn_atoms, 10);
+    assert_eq!(ledger_b_after.last_observed_bucket_earnings_atoms, 20);
+}
+
 #[test]
 fn v16_attack_insurance_ledger_authority_binding_enforced() {
     let mut env = V16CuEnv::new();
