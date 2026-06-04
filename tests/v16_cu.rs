@@ -15416,6 +15416,62 @@ fn v16_attack_deposit_into_uninitialized_portfolio_rejects() {
     assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged (no phantom capital from an uninit account)");
 }
 
+// security.md sweep - ClosePortfolio on raw account (#44/#48 DoS): a never-initialized program-owned
+// account must not be closeable. Otherwise an attacker could underflow/decrement
+// materialized_portfolio_count or sweep arbitrary account rent into the market slab.
+#[test]
+fn v16_attack_close_uninitialized_portfolio_rejects_without_counter_change() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    env.ensure_signer_account(owner.pubkey());
+    let raw = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            raw,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; env.portfolio_account_len],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let market_lamports_before = env.svm.get_account(&env.market).unwrap().lamports;
+    let raw_lamports_before = env.svm.get_account(&raw).unwrap().lamports;
+    let (_, group_before) = env.market_state();
+    assert_eq!(
+        group_before.materialized_portfolio_count, 0,
+        "control starts with no materialized portfolios"
+    );
+
+    env.svm.expire_blockhash();
+    let r = env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(raw, false),
+        ],
+        &[&owner],
+    );
+    assert!(r.is_err(), "closing an uninitialized portfolio account must reject");
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count, 0,
+        "rejected close did not decrement the materialized counter"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports_before,
+        "rejected close did not sweep raw rent into the market"
+    );
+    assert_eq!(
+        env.svm.get_account(&raw).unwrap().lamports,
+        raw_lamports_before,
+        "raw account rent remains untouched"
+    );
+}
+
 // security.md sweep — deposit from a WRONG-MINT source rejects (#44): the deposit pulls collateral from
 // the caller's source token account; that account must hold the market's collateral mint. Attacker goal:
 // deposit from a token account of a DIFFERENT (worthless/attacker) mint to credit capital without paying
