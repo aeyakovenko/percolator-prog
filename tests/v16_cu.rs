@@ -14419,6 +14419,101 @@ fn v16_attack_liquidation_cranker_reward_bounded_by_fee() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation through fee'd liquidation");
 }
 
+// security.md sweep — liquidation cranker reward account aliasing (#3/#44): when cranker rewards are
+// enabled, the optional reward portfolio must be distinct from the portfolio being liquidated. Otherwise
+// a liquidated account could receive part of its own liquidation fee back in the same crank.
+#[test]
+fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let lo = Keypair::new(); let l = env.create_portfolio(&lo);
+    let so = Keypair::new(); let s = env.create_portfolio(&so);
+    let co = Keypair::new(); let c = env.create_portfolio(&co);
+    env.deposit(&lo, l, 100_000_000);
+    env.deposit(&so, s, 100_000);
+    env.deposit(&co, c, 1_000);
+    env.trade_asset_with_cu(0, &lo, l, &so, s, POS_SCALE as i128, 1_000_000, 0);
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: slot,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(s, false),
+            ],
+            &[],
+        );
+    }
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let short_before = env.svm.get_account(&s).unwrap();
+    let short_cap_before = env.portfolio_state(s).capital;
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 30,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(so.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(s, false),
+            AccountMeta::new(s, false),
+        ],
+        &[&so],
+    );
+    assert!(rejected.is_err(), "liquidation reward portfolio must not alias the liquidated account");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before, "alias rejection leaves market byte-identical");
+    assert_eq!(env.svm.get_account(&s).unwrap(), short_before, "alias rejection leaves liquidated account byte-identical");
+    assert_eq!(env.portfolio_state(s).capital, short_cap_before, "no self-reward paid into the victim account");
+
+    let cranker_cap_before = env.portfolio_state(c).capital;
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 30,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(co.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(s, false),
+            AccountMeta::new(c, false),
+        ],
+        &[&co],
+    );
+    assert!(accepted.is_ok(), "distinct reward portfolio liquidation succeeds: {:?}", accepted);
+    assert!(
+        env.portfolio_state(c).capital > cranker_cap_before,
+        "positive control: distinct cranker received a real reward"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(group.vault >= group.c_tot + group.insurance, "senior conservation");
+}
+
 // security.md sweep — liquidation fee is bounded by liquidation_fee_cap (#3/#33): the liquidation fee is
 // min(liquidation_fee_bps * notional, liquidation_fee_cap). Attacker/edge goal: a large liquidation
 // charges an unbounded fee (bps*notional) draining the victim / over-feeding insurance+cranker past the
