@@ -5327,6 +5327,58 @@ fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
 }
 
 #[test]
+fn v16_attack_underfunded_sync_with_cranker_reward_still_closes_payer() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 40,
+    );
+    env.update_maintenance_fee_policy_with_cu(5_000);
+    let payer_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.deposit(&payer_owner, payer_portfolio, 3);
+
+    env.svm.warp_to_slot(10);
+    let market_lamports_before_close = env.svm.get_account(&env.market).unwrap().lamports;
+    let payer_lamports_before_close = env.svm.get_account(&payer_portfolio).unwrap().lamports;
+    let cranker_cap_before = env.portfolio_state(cranker_portfolio).capital;
+    let sync_cu = env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
+    println!("v16 underfunded SyncMaintenanceFee with cranker reward CU: {sync_cu}");
+    assert_cu_within(
+        "underfunded SyncMaintenanceFee with cranker reward",
+        sync_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let (_, group_after_sync) = env.market_state();
+    assert_eq!(
+        group_after_sync.insurance, 2,
+        "underfunded sync retains the non-cranker share in insurance"
+    );
+    assert_eq!(
+        env.portfolio_state(cranker_portfolio).capital,
+        cranker_cap_before + 1,
+        "cranker receives only the configured share of the swept dust fee"
+    );
+    assert_eq!(
+        group_after_sync.materialized_portfolio_count, 1,
+        "dust payer is still closed even when a cranker reward is paid"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports_before_close + payer_lamports_before_close,
+        "dust-closed payer rent moves into the market slab"
+    );
+    if let Some(closed_payer_account) = env.svm.get_account(&payer_portfolio) {
+        assert_eq!(closed_payer_account.lamports, 0);
+        assert!(
+            closed_payer_account.data.is_empty()
+                || !state::is_initialized(&closed_payer_account.data)
+        );
+    }
+}
+
+#[test]
 fn v16_bpf_nonflat_fee_sync_settles_hidden_loss_before_sweeping_fee() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 100,
