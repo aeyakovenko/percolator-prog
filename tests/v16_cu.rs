@@ -5193,6 +5193,58 @@ fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
 }
 
 #[test]
+fn v16_attack_sync_maintenance_bad_cranker_rolls_back_fee() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    let payer_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    env.deposit(&payer_owner, payer_portfolio, 100_000_000);
+    env.update_maintenance_fee_policy_with_cu(4_000);
+
+    let bad_cranker_portfolio = env.program_account(env.portfolio_account_len);
+    let payer_before = env.svm.get_account(&payer_portfolio).unwrap().data;
+    let market_before = env.svm.get_account(&env.market).unwrap().data;
+    let bad_cranker_before = env.svm.get_account(&bad_cranker_portfolio).unwrap().data;
+
+    env.svm.warp_to_slot(10);
+    env.svm.expire_blockhash();
+    let err = env
+        .try_sync_maintenance_fee_with_cu(payer_portfolio, Some(bad_cranker_portfolio), 10)
+        .expect_err("malformed cranker reward account must reject");
+    assert!(
+        err.contains("TransactionError") || err.contains("InstructionError"),
+        "unexpected maintenance bad-cranker error: {err}"
+    );
+
+    assert_eq!(
+        env.svm.get_account(&payer_portfolio).unwrap().data,
+        payer_before,
+        "failed cranker maintenance sync must not charge the payer"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_before,
+        "failed cranker maintenance sync must not credit insurance or mutate market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&bad_cranker_portfolio).unwrap().data,
+        bad_cranker_before,
+        "failed cranker maintenance sync must not mutate the malformed reward account"
+    );
+
+    let cranker_owner = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.svm.expire_blockhash();
+    env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
+    assert_eq!(env.portfolio_state(payer_portfolio).last_fee_slot, 10);
+    assert!(
+        env.portfolio_state(cranker_portfolio).capital > 0,
+        "valid cranker reward path should still pay the cranker share"
+    );
+}
+
+#[test]
 fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 40,
