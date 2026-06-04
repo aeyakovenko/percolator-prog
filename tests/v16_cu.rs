@@ -6615,6 +6615,94 @@ fn v16_bpf_failed_close_resolved_transfer_rolls_back_payout_state() {
 }
 
 #[test]
+fn v16_attack_close_resolved_requires_owner_signature_during_exit_window() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.resolve();
+
+    let unsigned_dest = env.token_account(owner.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let dest_before = env.svm.get_account(&unsigned_dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let unsigned = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(unsigned_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        unsigned.is_err(),
+        "third-party CloseResolved must reject during the owner exit window"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "unsigned close inside the exit window must not mutate resolved market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "unsigned close inside the exit window must not burn the owner's payout state"
+    );
+    assert_eq!(
+        env.svm.get_account(&unsigned_dest).unwrap(),
+        dest_before,
+        "unsigned close inside the exit window must not pay the destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "unsigned close inside the exit window must not move vault tokens"
+    );
+
+    let signed_dest = env.token_account(owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let signed = env
+        .send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(signed_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .expect("owner-signed CloseResolved works during the exit window");
+    assert_cu_within("owner-signed CloseResolved during exit window", signed, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        env.token_amount(signed_dest),
+        1_000,
+        "the owner can still recover during the protected exit window"
+    );
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(account.capital, 0);
+}
+
+#[test]
 fn v16_bpf_failed_terminal_insurance_withdraw_rolls_back_market_and_ledger() {
     let mut env = V16CuEnv::new();
     env.top_up_insurance(100);
