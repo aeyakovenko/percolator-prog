@@ -12868,6 +12868,165 @@ fn v16_attack_backing_fee_policy_authority_gated() {
     assert_eq!(env.market_state().0.backing_trade_fee_insurance_share_bps_long, 5_000, "authority sets the insurance share");
 }
 
+// security.md sweep - permissionless asset authority isolation (#6/#33): the creator of asset N owns
+// that asset's local domain authorities, but must not be able to mutate market-wide knobs or market 0
+// policies. Discriminating control: the same creator CAN update asset N's own backing-fee domain.
+#[test]
+fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies() {
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(1);
+    let creator = Keypair::new();
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        1,
+    );
+    let cfg_before = env.market_state().0;
+    let profile = |env: &V16CuEnv, asset_index: usize| {
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, asset_index).unwrap()
+    };
+    assert_eq!(profile(&env, 1).insurance_authority, creator.pubkey().to_bytes());
+
+    let mut attempt = |ix: ProgInstruction| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ix,
+            vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&creator],
+        )
+    };
+
+    assert!(
+        attempt(ProgInstruction::UpdateTradeFeePolicy { trade_fee_base_bps: 123 }).is_err(),
+        "asset-1 authority must not control the market-wide trade fee"
+    );
+    assert!(
+        attempt(ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps: 5_000 }).is_err(),
+        "asset-1 authority must not control market-0 fee redirect"
+    );
+    assert!(
+        attempt(ProgInstruction::UpdateMarketInitFeePolicy { min_init_fee: 9 }).is_err(),
+        "asset-1 authority must not control permissionless init fee"
+    );
+    assert!(
+        attempt(ProgInstruction::UpdateInsurancePolicy {
+            max_bps: 5_000,
+            deposits_only: 0,
+            cooldown_slots: 50,
+        })
+        .is_err(),
+        "asset-1 authority must not control global insurance withdrawal policy"
+    );
+    assert!(
+        attempt(ProgInstruction::UpdateLiquidationFeePolicy { cranker_share_bps: 2_500 })
+            .is_err(),
+        "asset-1 authority must not control global liquidation-fee policy"
+    );
+    assert!(
+        attempt(ProgInstruction::UpdateMaintenanceFeePolicy { cranker_share_bps: 2_500 })
+            .is_err(),
+        "asset-1 authority must not control global maintenance-fee policy"
+    );
+    assert!(
+        attempt(ProgInstruction::UpdateBackingFeePolicy {
+            domain: 0,
+            fee_bps: 55,
+            insurance_share_bps: 5_000,
+        })
+        .is_err(),
+        "asset-1 authority must not control market-0 backing-fee policy"
+    );
+
+    let cfg_after_rejects = env.market_state().0;
+    assert_eq!(cfg_after_rejects.trade_fee_base_bps, cfg_before.trade_fee_base_bps);
+    assert_eq!(
+        cfg_after_rejects.fee_redirect_to_market_0_bps,
+        cfg_before.fee_redirect_to_market_0_bps
+    );
+    assert_eq!(
+        cfg_after_rejects.permissionless_market_init_fee,
+        cfg_before.permissionless_market_init_fee
+    );
+    assert_eq!(
+        cfg_after_rejects.insurance_withdraw_max_bps,
+        cfg_before.insurance_withdraw_max_bps
+    );
+    assert_eq!(
+        cfg_after_rejects.insurance_withdraw_deposits_only,
+        cfg_before.insurance_withdraw_deposits_only
+    );
+    assert_eq!(
+        cfg_after_rejects.insurance_withdraw_cooldown_slots,
+        cfg_before.insurance_withdraw_cooldown_slots
+    );
+    assert_eq!(
+        cfg_after_rejects.liquidation_cranker_fee_share_bps,
+        cfg_before.liquidation_cranker_fee_share_bps
+    );
+    assert_eq!(
+        cfg_after_rejects.maintenance_cranker_fee_share_bps,
+        cfg_before.maintenance_cranker_fee_share_bps
+    );
+    assert_eq!(
+        cfg_after_rejects.backing_trade_fee_bps_long,
+        cfg_before.backing_trade_fee_bps_long
+    );
+    assert_eq!(
+        cfg_after_rejects.backing_trade_fee_policy_count,
+        cfg_before.backing_trade_fee_policy_count
+    );
+
+    env.svm.expire_blockhash();
+    let local_ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateBackingFeePolicy {
+            domain: 2,
+            fee_bps: 111,
+            insurance_share_bps: 5_000,
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        local_ok.is_ok(),
+        "same asset-1 authority may update its own backing-fee domain: {local_ok:?}"
+    );
+    let cfg_after_local = env.market_state().0;
+    let asset1_profile = profile(&env, 1);
+    assert_eq!(asset1_profile.backing_trade_fee_bps_long, 111);
+    assert_eq!(
+        asset1_profile.backing_trade_fee_insurance_share_bps_long,
+        5_000
+    );
+    assert_eq!(
+        cfg_after_local.backing_trade_fee_policy_count,
+        cfg_before.backing_trade_fee_policy_count + 1
+    );
+    assert_eq!(
+        cfg_after_local.trade_fee_base_bps,
+        cfg_before.trade_fee_base_bps,
+        "local domain update did not mutate market-wide trade fee"
+    );
+}
+
 // security.md sweep — market 0 fees don't self-redirect (#32/#33) [fee-routing #2]: with
 // fee_redirect_to_market_0_bps set, a fee on MARKET 0 itself must stay 100% local (the asset_index==0
 // branch redirects 0). No spurious self-redirect / double-credit.
@@ -14648,6 +14807,92 @@ fn v16_attack_tradecpi_matcher_tail_cannot_carry_protocol_state() {
     env.svm.expire_blockhash();
     let ok = env.try_trade_cpi_with_cu_on_asset(&to, t, &mo, m, matcher_program, ctx, del, 0, (10 * POS_SCALE) as i128, 100);
     assert!(ok.is_ok(), "clean TradeCpi (no poisoned tail) executes: {:?}", ok);
+}
+
+// security.md sweep - BatchTradeCpi matcher-tail isolation (#9/#27): the batched CPI fill path also
+// forwards optional remaining accounts to an external matcher. It must reject the market account and
+// any Percolator-owned portfolio in that tail, then still accept a clean permissionless LP fill.
+#[test]
+fn v16_attack_batch_tradecpi_matcher_tail_cannot_carry_protocol_state() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let victim_owner = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    let victim = env.create_portfolio(&victim_owner);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+    env.deposit(&victim_owner, victim, 1_000_000);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, lp_account);
+    let before = env.market_state().1;
+    let victim_before = env.portfolio_state(victim);
+    let sz = (5 * POS_SCALE) as i128;
+    let ix = ProgInstruction::BatchTradeCpi {
+        legs: vec![
+            BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: sz,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            BatchTradeCpiLeg {
+                asset_index: 1,
+                size_q: -sz,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+        ],
+    };
+    let market = env.market;
+    let taker_key = taker.pubkey();
+    let lp_key = lp.pubkey();
+    let base = |extra: Option<Pubkey>| {
+        let mut metas = vec![
+            AccountMeta::new(taker_key, true),
+            AccountMeta::new_readonly(lp_key, false),
+            AccountMeta::new(market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ];
+        if let Some(extra) = extra {
+            metas.push(AccountMeta::new(extra, false));
+        }
+        metas
+    };
+
+    env.svm.expire_blockhash();
+    let market_tail = env.send(ix.clone(), base(Some(market)), &[&taker]);
+    assert!(
+        market_tail.is_err(),
+        "BatchTradeCpi matcher tail carrying the market account must reject"
+    );
+    env.svm.expire_blockhash();
+    let portfolio_tail = env.send(ix.clone(), base(Some(victim)), &[&taker]);
+    assert!(
+        portfolio_tail.is_err(),
+        "BatchTradeCpi matcher tail carrying any Percolator-owned portfolio must reject"
+    );
+    let after_reject = env.market_state().1;
+    assert_eq!(after_reject.assets[0].oi_eff_long_q, 0, "no asset-0 OI from rejected tail poison");
+    assert_eq!(after_reject.assets[1].oi_eff_long_q, 0, "no asset-1 OI from rejected tail poison");
+    assert_eq!(after_reject.vault, before.vault, "vault unchanged by rejected tail poison");
+    assert_eq!(env.portfolio_state(victim).capital, victim_before.capital, "victim portfolio untouched");
+
+    env.svm.expire_blockhash();
+    let ok = env.send(ix, base(None), &[&taker]);
+    assert!(ok.is_ok(), "clean BatchTradeCpi without poisoned tail executes: {ok:?}");
+    let taker_state = env.portfolio_state(taker_account);
+    assert!(has_active_leg_for_asset(&taker_state, 0), "clean batch fills asset 0");
+    assert!(has_active_leg_for_asset(&taker_state, 1), "clean batch fills asset 1");
 }
 
 // security.md sweep — oracle confidence filter rejects wide-confidence feeds (#37/#39): the hybrid
