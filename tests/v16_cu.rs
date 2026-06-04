@@ -20249,6 +20249,138 @@ fn v16_attack_backing_fee_policy_count_clears_batch_liveness() {
     assert_eq!(active_leg_for_asset(&env.portfolio_state(la), 0).basis_pos_q, -sz);
 }
 
+// security.md sweep: a backing-fee policy on an inactive retired slot must not leave batch trading
+// globally disabled. The policy count is a market-wide batch gate, so retiring an asset must remove
+// that asset's policy from the active count, old retired-slot authorities must not be able to set a new
+// policy on the inactive slot, and permissionless reuse with a fresh profile must keep the gate clear.
+#[test]
+fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.update_market_init_fee_policy_with_cu(1);
+
+    let old_creator = Keypair::new();
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &old_creator,
+        1,
+        1,
+        100,
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        1,
+    );
+
+    let update_policy = |env: &mut V16CuEnv, signer: &Keypair, fee_bps: u16| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::UpdateBackingFeePolicy {
+                domain: 2,
+                fee_bps,
+                insurance_share_bps: if fee_bps == 0 { 0 } else { 5_000 },
+            },
+            vec![
+                AccountMeta::new(signer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[signer],
+        )
+    };
+
+    update_policy(&mut env, &old_creator, 77).expect("old asset authority sets active policy");
+    let (cfg_with_policy, _) = env.market_state();
+    assert_eq!(cfg_with_policy.backing_trade_fee_policy_count, 1);
+    assert_eq!(
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap()
+            .backing_trade_fee_bps_long,
+        77
+    );
+
+    env.svm.warp_to_slot(2);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        2,
+        0,
+    );
+    let (retired_cfg, retired_group) = env.market_state();
+    assert_eq!(retired_group.assets[1].lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(
+        retired_cfg.backing_trade_fee_policy_count, 0,
+        "retired-slot backing fee must no longer hold the global batch gate"
+    );
+    assert!(
+        update_policy(&mut env, &old_creator, 88).is_err(),
+        "old authority must not set backing fees on an inactive retired slot"
+    );
+    assert_eq!(
+        env.market_state().0.backing_trade_fee_policy_count,
+        0,
+        "rejected retired-slot policy update must not re-enable the batch gate"
+    );
+
+    let new_creator = Keypair::new();
+    env.svm.warp_to_slot(3);
+    env.activate_permissionless_asset_with_fee(
+        &new_creator,
+        1,
+        3,
+        250,
+        new_creator.pubkey(),
+        new_creator.pubkey(),
+        new_creator.pubkey(),
+        new_creator.pubkey(),
+        1,
+    );
+    let (reused_cfg, reused_group) = env.market_state();
+    assert_eq!(reused_group.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(reused_cfg.backing_trade_fee_policy_count, 0);
+    let reused_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(
+        reused_profile.backing_trade_fee_bps_long, 0,
+        "permissionless reuse installs a fresh profile without the old creator's backing fee"
+    );
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+    let sz = (5 * POS_SCALE) as i128;
+    env.svm.expire_blockhash();
+    let batch = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![BatchTradeLeg {
+                asset_index: 0,
+                size_q: sz,
+                exec_price: 100,
+                fee_bps: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(
+        batch.is_ok(),
+        "asset-0 batch trade must stay live after retiring/reusing an asset whose old policy was cleared: {batch:?}"
+    );
+}
+
 // security.md sweep — BatchTradeCpi fee bounds on permissionless LP fills (#37/#49): in CPI mode the
 // taker supplies fee_bps while the LP owner does not sign the fill. An over-max fee must therefore
 // reject the whole batch, or a taker could drain an LP into protocol insurance through a matcher fill.

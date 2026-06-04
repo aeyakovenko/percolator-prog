@@ -4826,6 +4826,31 @@ pub mod processor {
         profile
     }
 
+    fn backing_fee_policy_count_from_profile(profile: &state::AssetOracleProfileV16) -> u16 {
+        (profile.backing_trade_fee_bps_long != 0) as u16
+            + (profile.backing_trade_fee_bps_short != 0) as u16
+    }
+
+    fn add_backing_fee_policy_count(cfg: &mut WrapperConfigV16, count: u16) -> ProgramResult {
+        if count != 0 {
+            cfg.backing_trade_fee_policy_count = cfg
+                .backing_trade_fee_policy_count
+                .checked_add(count)
+                .ok_or(PercolatorError::EngineCounterOverflow)?;
+        }
+        Ok(())
+    }
+
+    fn subtract_backing_fee_policy_count(cfg: &mut WrapperConfigV16, count: u16) -> ProgramResult {
+        if count != 0 {
+            cfg.backing_trade_fee_policy_count = cfg
+                .backing_trade_fee_policy_count
+                .checked_sub(count)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?;
+        }
+        Ok(())
+    }
+
     fn domain_authority_fields_complete(
         insurance_authority: [u8; 32],
         insurance_operator: [u8; 32],
@@ -9092,6 +9117,7 @@ pub mod processor {
 
         let cfg_after = {
             let mut data = market_ai.try_borrow_mut_data()?;
+            let existing_profile = state::read_asset_oracle_profile(&data, asset_index)?;
             let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
             if !live_authority_matches(&cfg.marketauth, authority.key) {
                 return Err(PercolatorError::Unauthorized.into());
@@ -9110,7 +9136,6 @@ pub mod processor {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
             let authenticated_slot = authenticated_slot_or_fallback(now_slot);
-            let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
             let mut reset_profile = None;
             match action {
                 ASSET_ACTION_ACTIVATE => {
@@ -9124,6 +9149,8 @@ pub mod processor {
                     }
                     let was_retired = group.markets[asset_index].engine.asset.lifecycle
                         == ASSET_LIFECYCLE_RETIRED;
+                    let preserved_policy_count =
+                        backing_fee_policy_count_from_profile(&existing_profile);
                     group
                         .header
                         .activate_empty_market_slot_not_atomic(
@@ -9135,6 +9162,9 @@ pub mod processor {
                         .map_err(map_v16_error)?;
                     if was_retired && cfg.free_market_slot_count != 0 {
                         cfg.free_market_slot_count -= 1;
+                    }
+                    if was_retired {
+                        add_backing_fee_policy_count(&mut cfg, preserved_policy_count)?;
                     }
                     let mut profile = preserve_backing_fee_policy(
                         state::manual_asset_oracle_profile(initial_price, authenticated_slot),
@@ -9174,6 +9204,8 @@ pub mod processor {
                         return Err(PercolatorError::EngineStale.into());
                     }
                     let lifecycle = group.markets[asset_index].engine.asset.lifecycle;
+                    let retired_policy_count =
+                        backing_fee_policy_count_from_profile(&existing_profile);
                     match lifecycle {
                         ASSET_LIFECYCLE_ACTIVE
                         | ASSET_LIFECYCLE_DRAIN_ONLY
@@ -9185,6 +9217,7 @@ pub mod processor {
                                 .free_market_slot_count
                                 .checked_add(1)
                                 .ok_or(PercolatorError::EngineCounterOverflow)?;
+                            subtract_backing_fee_policy_count(&mut cfg, retired_policy_count)?;
                         }
                         ASSET_LIFECYCLE_RETIRED => {
                             group
@@ -9409,8 +9442,11 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         let domain = domain as usize;
         let asset_index = domain / 2;
-        let (mut cfg, _, _, _, max_trading_fee_bps) =
+        let (mut cfg, mode, _, _, max_trading_fee_bps) =
             state::read_market_trade_preflight(&market_ai.try_borrow_data()?, asset_index)?;
+        if mode != MarketModeV16::Live {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
         {
             let market_data = market_ai.try_borrow_data()?;
             let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
@@ -9442,6 +9478,14 @@ pub mod processor {
                 Ok(())
             };
         let mut market_data = market_ai.try_borrow_mut_data()?;
+        {
+            let (_cfg, group) = state::market_view_mut(&mut market_data)?;
+            if asset_index >= group.markets.len()
+                || group.markets[asset_index].engine.asset.lifecycle == ASSET_LIFECYCLE_RETIRED
+            {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
+        }
         if asset_index == 0 {
             let mut profile = state::read_asset_oracle_profile(&market_data, asset_index)?;
             let old_fee = if long_side {
