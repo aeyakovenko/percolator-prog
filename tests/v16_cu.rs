@@ -14098,6 +14098,44 @@ fn v16_attack_close_slab_requires_secondary_vault_recovery() {
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before, "omitted-secondary close leaves market intact");
     assert_eq!(env.token_amount(secondary_vault), 50, "secondary reserve remains recoverable after rejected close");
 
+    env.svm.set_account(env.vault, Account {
+        lamports: 1_000_000_000,
+        data: make_token_data(env.mint, env.vault_authority, 7),
+        owner: spl_token::ID,
+        executable: false,
+        rent_epoch: 0,
+    }).unwrap();
+    let primary_dest = env.token_account(admin.pubkey(), 0);
+    let wrong_secondary_dest = env.token_account_for_mint(secondary_mint, Pubkey::new_unique(), 0);
+    env.svm.expire_blockhash();
+    let wrong_secondary_dest_close = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new(wrong_secondary_dest, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        wrong_secondary_dest_close.is_err(),
+        "CloseSlab must reject before closing any vault when the secondary destination is wrong"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "bad secondary destination leaves market intact"
+    );
+    assert_eq!(env.token_amount(env.vault), 7, "primary vault dust remains recoverable");
+    assert_eq!(env.token_amount(primary_dest), 0, "primary dust not paid before bad secondary validation");
+    assert_eq!(env.token_amount(secondary_vault), 50, "secondary vault remains recoverable");
+    assert_eq!(env.token_amount(wrong_secondary_dest), 0, "wrong secondary destination receives nothing");
+
     let primary_dest = env.token_account(admin.pubkey(), 0);
     let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
     env.svm.expire_blockhash();
@@ -14116,6 +14154,7 @@ fn v16_attack_close_slab_requires_secondary_vault_recovery() {
         &[&admin],
     );
     assert!(close_both.is_ok(), "CloseSlab closes both configured vaults: {:?}", close_both);
+    assert_eq!(env.token_amount(primary_dest), 7, "primary vault dust recovered to admin");
     assert_eq!(env.token_amount(secondary_dest), 50, "secondary reserve recovered to admin");
     assert!(env.svm.get_account(&env.market).unwrap().data.iter().all(|b| *b == 0), "market reclaimed only after both vaults close");
 }
