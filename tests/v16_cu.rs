@@ -14099,6 +14099,245 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
     assert_eq!(env.market_state().1.materialized_portfolio_count, 0, "real market can still close P_a");
 }
 
+// full-interface sweep (cron22) — PermissionlessCrank is intentionally unsigned for the target
+// portfolio. A foreign-market portfolio with the same asset_index/market_id shape must still reject
+// before any settlement/liquidation mutation; otherwise anyone could settle or liquidate a portfolio
+// under the wrong market's oracle/accounting state.
+#[test]
+fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
+    let mut env = V16CuEnv::new();
+
+    let market_b = Pubkey::new_unique();
+    let vault_authority_b =
+        Pubkey::find_program_address(&[b"vault", market_b.as_ref()], &env.program_id).0;
+    let vault_b = canonical_vault_ata(vault_authority_b, env.mint);
+    env.svm
+        .set_account(
+            market_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; state::market_account_len_for_capacity(1).unwrap()],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            vault_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, vault_authority_b, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let p = V16CuMarketParams::default();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitMarket {
+            max_portfolio_assets: p.max_portfolio_assets,
+            h_min: p.h_min,
+            h_max: p.h_max,
+            initial_price: p.initial_price,
+            min_nonzero_mm_req: p.min_nonzero_mm_req,
+            min_nonzero_im_req: p.min_nonzero_im_req,
+            maintenance_margin_bps: p.maintenance_margin_bps,
+            initial_margin_bps: p.initial_margin_bps,
+            max_trading_fee_bps: p.max_trading_fee_bps,
+            trade_fee_base_bps: p.trade_fee_base_bps,
+            liquidation_fee_bps: p.liquidation_fee_bps,
+            liquidation_fee_cap: p.liquidation_fee_cap,
+            min_liquidation_abs: p.min_liquidation_abs,
+            max_price_move_bps_per_slot: p.max_price_move_bps_per_slot,
+            max_accrual_dt_slots: p.max_accrual_dt_slots,
+            max_abs_funding_e9_per_slot: p.max_abs_funding_e9_per_slot,
+            min_funding_lifetime_slots: p.min_funding_lifetime_slots,
+            max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
+            max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
+            max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
+            public_b_chunk_atoms: p.public_b_chunk_atoms,
+            maintenance_fee_per_slot: p.maintenance_fee_per_slot,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new_readonly(env.mint, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("init market B");
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    env.ensure_signer_account(long_owner.pubkey());
+    env.ensure_signer_account(short_owner.pubkey());
+    let long_b = Pubkey::new_unique();
+    let short_b = Pubkey::new_unique();
+    for portfolio in [long_b, short_b] {
+        env.svm
+            .set_account(
+                portfolio,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: vec![0u8; env.portfolio_account_len],
+                    owner: env.program_id,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    }
+    for (owner, portfolio) in [(&long_owner, long_b), (&short_owner, short_b)] {
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(market_b, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[owner],
+        )
+        .expect("init market-B portfolio");
+
+        let source = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                source,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(env.mint, owner.pubkey(), 1_000_000),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::Deposit { amount: 1_000_000 },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(market_b, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(vault_b, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[owner],
+        )
+        .expect("deposit into market-B portfolio");
+    }
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(short_owner.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(long_b, false),
+            AccountMeta::new(short_b, false),
+        ],
+        &[&long_owner, &short_owner],
+    )
+    .expect("open a real market-B position");
+    assert!(
+        has_active_leg_for_asset(&state::read_portfolio(&env.svm.get_account(&long_b).unwrap().data).unwrap(), 0),
+        "setup must create a non-vacuous market-B target portfolio"
+    );
+
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let long_b_before = env.svm.get_account(&long_b).unwrap();
+    let short_b_before = env.svm.get_account(&short_b).unwrap();
+    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
+    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+
+    env.svm.warp_to_slot(5);
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 5,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_b, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "market A PermissionlessCrank must reject a market-B-bound target portfolio"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+    assert_eq!(
+        env.svm.get_account(&long_b).unwrap(),
+        long_b_before,
+        "foreign target crank rejection leaves target portfolio byte-identical"
+    );
+    assert_eq!(env.svm.get_account(&short_b).unwrap(), short_b_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 5,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(long_b, false),
+        ],
+        &[],
+    );
+    assert!(ok.is_ok(), "same-market market-B crank remains live: {ok:?}");
+    let (_, group_b_after) = state::read_market(&env.svm.get_account(&market_b).unwrap().data).unwrap();
+    assert_eq!(group_b_after.current_slot, 5, "positive control advanced market B");
+    assert!(
+        has_active_leg_for_asset(&state::read_portfolio(&env.svm.get_account(&long_b).unwrap().data).unwrap(), 0),
+        "same-market crank does not erase the market-B position"
+    );
+}
+
 // security.md sweep — partial liquidation exactness (#2/#33): liquidating with close_q < the position
 // must reduce the position by at most close_q (no over-close), conserve value (vault unchanged,
 // accounting==real), and never create value. Complements over-liquidation (batch 35).
