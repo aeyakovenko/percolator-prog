@@ -9309,6 +9309,152 @@ fn v16_attack_account_type_confusion_rejected() {
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
 }
 
+// security.md sweep - duplicate writable account aliasing (#26/#44/#48): several public helpers take
+// an arbitrary program-owned writable "portfolio" account. The market slab is also program-owned and
+// large enough to pass shallow storage checks; using it as the portfolio slot must reject atomically.
+#[test]
+fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 5_000, 10_000, 1_000, 25,
+    );
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_portfolio = env.create_portfolio(&long_owner);
+    let short_portfolio = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_portfolio, 1_000_000);
+    env.deposit(&short_owner, short_portfolio, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_portfolio,
+        &short_owner,
+        short_portfolio,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.svm.warp_to_slot(10);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let long_before = env.svm.get_account(&long_portfolio).unwrap();
+    let short_before = env.svm.get_account(&short_portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    let assert_unchanged = |env: &V16CuEnv, label: &str| {
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label}: market slab unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&long_portfolio).unwrap(),
+            long_before,
+            "{label}: real long portfolio unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&short_portfolio).unwrap(),
+            short_before,
+            "{label}: real short portfolio unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "{label}: vault custody unchanged"
+        );
+    };
+
+    env.svm.expire_blockhash();
+    let convert = env.send(
+        ProgInstruction::ConvertReleasedPnl { amount: 1 },
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&long_owner],
+    );
+    assert!(convert.is_err(), "ConvertReleasedPnl must reject market-as-portfolio alias");
+    assert_unchanged(&env, "ConvertReleasedPnl alias rejection");
+
+    env.svm.expire_blockhash();
+    let reduce = env.send(
+        ProgInstruction::RebalanceReduce {
+            asset_index: 0,
+            reduce_q: POS_SCALE,
+        },
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&long_owner],
+    );
+    assert!(reduce.is_err(), "RebalanceReduce must reject market-as-portfolio alias");
+    assert_unchanged(&env, "RebalanceReduce alias rejection");
+
+    env.svm.expire_blockhash();
+    let forfeit = env.send(
+        ProgInstruction::ForfeitRecoveryLeg {
+            asset_index: 0,
+            b_delta_budget: 1,
+        },
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&long_owner],
+    );
+    assert!(forfeit.is_err(), "ForfeitRecoveryLeg must reject market-as-portfolio alias");
+    assert_unchanged(&env, "ForfeitRecoveryLeg alias rejection");
+
+    env.svm.expire_blockhash();
+    let close = env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&long_owner],
+    );
+    assert!(close.is_err(), "ClosePortfolio must reject market-as-portfolio alias");
+    assert_unchanged(&env, "ClosePortfolio alias rejection");
+
+    env.svm.expire_blockhash();
+    let fee_sync = env.send(
+        ProgInstruction::SyncMaintenanceFee { now_slot: 10 },
+        vec![
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[],
+    );
+    assert!(fee_sync.is_err(), "SyncMaintenanceFee must reject market-as-portfolio alias");
+    assert_unchanged(&env, "SyncMaintenanceFee alias rejection");
+
+    env.svm.expire_blockhash();
+    let crank = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 10,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[],
+    );
+    assert!(crank.is_err(), "PermissionlessCrank must reject market-as-portfolio alias");
+    assert_unchanged(&env, "PermissionlessCrank alias rejection");
+}
+
 // security.md sweep — loss-of-funds / DoS (#22/#30): after maintenance fees accrue over a long
 // idle period, the user must still be able to withdraw their remaining (post-fee) capital. A bug
 // here = funds locked (LoF). Probe: deposit, accrue fees, sync, then withdraw everything left.
