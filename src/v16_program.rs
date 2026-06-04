@@ -2805,9 +2805,9 @@ pub mod ix {
         UpdateAuthority {
             new_pubkey: [u8; 32],
         },
-        /// Rotate one of a permissionless asset's (1..N) per-asset authorities. Gated by the asset's
-        /// own `asset_admin` (rotates any, incl. itself, burnable) or the current holder of that
-        /// authority (self-rotation / burn). Isolated to the given asset_index.
+        /// Rotate one of an asset's per-asset authorities. Gated by the asset's own `asset_admin`
+        /// (rotates any; only the admin authority itself is burnable) or the current holder of that
+        /// authority (self-rotation). Isolated to the given asset_index.
         UpdateAssetAuthority {
             asset_index: u16,
             kind: u8,

@@ -17764,48 +17764,74 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
 }
 
 // security.md sweep — zero required authority anti-brick (#6/#30/#48): activation rejects zero domain
-// authorities because they can strand domain funds during terminal wind-down. UpdateAssetAuthority must
-// preserve that invariant too: an admin/operator cannot burn the insurance/backing/oracle authorities
-// to zero after a funded domain exists. The domain remains withdrawable after resolve.
+// authorities because they can strand domain funds or oracle liveness during terminal wind-down.
+// UpdateAssetAuthority must preserve that invariant too: an admin/operator cannot burn the
+// insurance/operator/backing/oracle authorities to zero after activation. The domains remain
+// withdrawable after resolve.
 #[test]
 fn v16_attack_update_asset_authority_rejects_zero_domain_authority() {
     let mut env = V16CuEnv::new();
     let admin = env.admin.insecure_clone();
     env.top_up_insurance_domain_with_authority(&admin, 0, 500);
+    env.top_up_backing_bucket_with_authority(&admin, 0, 300, 100_000);
     let market_before = env.svm.get_account(&env.market).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let (_, group_before) = env.market_state();
     assert_eq!(group_before.insurance_domain_budget[0], 500, "funded domain makes the test non-vacuous");
+    assert_eq!(
+        group_before.source_backing_buckets[0].fresh_unliened_backing_num,
+        300 * BOUND_SCALE,
+        "funded backing bucket makes the backing-authority case non-vacuous"
+    );
 
-    env.svm.expire_blockhash();
-    let burn = send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::UpdateAssetAuthority {
-            asset_index: 0,
-            kind: processor::ASSET_AUTH_INSURANCE,
-            new_pubkey: [0u8; 32],
-        },
-        vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new_readonly(Pubkey::default(), false),
-            AccountMeta::new(env.market, false),
-        ],
-        &[&admin],
-    );
-    assert!(
-        burn.is_err(),
-        "burning a required domain authority would strand funded insurance after terminal resolve"
-    );
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before, "rejected burn leaves market state unchanged");
-    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before, "rejected burn does not touch real vault tokens");
+    for (kind, label) in [
+        (processor::ASSET_AUTH_INSURANCE, "insurance authority"),
+        (processor::ASSET_AUTH_INSURANCE_OPERATOR, "insurance operator"),
+        (processor::ASSET_AUTH_BACKING_BUCKET, "backing authority"),
+        (processor::ASSET_AUTH_ORACLE, "oracle authority"),
+    ] {
+        env.svm.expire_blockhash();
+        let burn = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::UpdateAssetAuthority {
+                asset_index: 0,
+                kind,
+                new_pubkey: [0u8; 32],
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new_readonly(Pubkey::default(), false),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            burn.is_err(),
+            "burning the {label} would strand funds or oracle liveness after terminal resolve"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "rejected {label} burn leaves market state unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "rejected {label} burn does not touch real vault tokens"
+        );
+    }
 
     env.resolve();
-    let (dest, cu) = env.withdraw_terminal_insurance_with_authority(&admin, 500);
-    assert_cu_within("terminal insurance after rejected zero-authority burn", cu, CUSTODY_CU_LIMIT);
-    assert_eq!(env.token_amount(dest), 500, "original insurance authority can recover the funded domain");
+    let (insurance_dest, insurance_cu) = env.withdraw_terminal_insurance_with_authority(&admin, 500);
+    assert_cu_within("terminal insurance after rejected zero-authority burn", insurance_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(insurance_dest), 500, "original insurance authority can recover the funded domain");
     assert_eq!(env.market_state().1.insurance, 0, "insurance fully drained for CloseSlab");
+    let backing_dest = env.token_account(admin.pubkey(), 0);
+    let backing_cu = env.withdraw_backing_bucket_to_admin_token_with_cu(backing_dest, 0, 300);
+    assert_cu_within("terminal backing after rejected zero-authority burn", backing_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(backing_dest), 300, "original backing authority can recover the funded bucket");
     env.close_slab_with_cu();
 }
 
