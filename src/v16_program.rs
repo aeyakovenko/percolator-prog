@@ -8718,6 +8718,12 @@ pub mod processor {
             ASSET_AUTH_ORACLE => profile.oracle_authority,
             _ => return Err(PercolatorError::InvalidInstruction.into()),
         };
+        // Required domain authorities must stay live after activation. A zero insurance/backing/oracle
+        // authority can strand funds or oracle liveness during wind-down; only the cold-storage
+        // asset_admin may be intentionally burned.
+        if new_pubkey == [0u8; 32] && kind != ASSET_AUTH_ADMIN {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
         if !admin_signed {
             expect_live_authority(&current_value, current.key)?;
         }

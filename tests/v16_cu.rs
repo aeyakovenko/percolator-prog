@@ -17689,9 +17689,10 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance() {
 
 // Product spec — per-asset cold-storage admin keys (governance): EVERY asset (including asset 0) has
 // its OWN admin that can rotate that asset's domain authorities (insurance/operator/backing/oracle)
-// and itself, and can be BURNED to 0; isolated — it can never act on another asset. Asset 0's
+// and itself, and the asset admin can be BURNED to 0; isolated — it can never act on another asset. Asset 0's
 // asset_admin is bootstrapped to the market admin at InitMarket and is rotated/burned through the same
-// UpdateAssetAuthority path as assets 1..N. Each domain authority can also self-rotate / burn.
+// UpdateAssetAuthority path as assets 1..N. Each domain authority can also self-rotate through a
+// co-signed handoff, but cannot be burned to zero after activation.
 #[test]
 fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
     let mut env = V16CuEnv::new(); // 1 slot (asset 0); asset 1 is APPENDED permissionlessly below
@@ -17760,6 +17761,52 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
     // 6) asset-0 admin can also BURN asset-0's own admin (same as 1..N).
     assert!(upd(&mut env, &admin, None, 0, processor::ASSET_AUTH_ADMIN, [0u8; 32]).is_ok(), "asset-0 admin can be burned");
     assert_eq!(prof(&env, 0).asset_admin, [0u8; 32], "asset-0 admin burned");
+}
+
+// security.md sweep — zero required authority anti-brick (#6/#30/#48): activation rejects zero domain
+// authorities because they can strand domain funds during terminal wind-down. UpdateAssetAuthority must
+// preserve that invariant too: an admin/operator cannot burn the insurance/backing/oracle authorities
+// to zero after a funded domain exists. The domain remains withdrawable after resolve.
+#[test]
+fn v16_attack_update_asset_authority_rejects_zero_domain_authority() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority(&admin, 0, 500);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let (_, group_before) = env.market_state();
+    assert_eq!(group_before.insurance_domain_budget[0], 500, "funded domain makes the test non-vacuous");
+
+    env.svm.expire_blockhash();
+    let burn = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateAssetAuthority {
+            asset_index: 0,
+            kind: processor::ASSET_AUTH_INSURANCE,
+            new_pubkey: [0u8; 32],
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(Pubkey::default(), false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        burn.is_err(),
+        "burning a required domain authority would strand funded insurance after terminal resolve"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before, "rejected burn leaves market state unchanged");
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before, "rejected burn does not touch real vault tokens");
+
+    env.resolve();
+    let (dest, cu) = env.withdraw_terminal_insurance_with_authority(&admin, 500);
+    assert_cu_within("terminal insurance after rejected zero-authority burn", cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(dest), 500, "original insurance authority can recover the funded domain");
+    assert_eq!(env.market_state().1.insurance, 0, "insurance fully drained for CloseSlab");
+    env.close_slab_with_cu();
 }
 
 // Product spec — cross-asset BACKING isolation (counterpart to the domain-insurance isolation test):
