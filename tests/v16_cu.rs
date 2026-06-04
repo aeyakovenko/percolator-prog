@@ -10921,6 +10921,17 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         &[&env.admin, &new_asset]);
     assert!(r_ok.is_ok(), "co-signed authority update succeeds: {:?}", r_ok);
     assert_eq!(env.market_state().0.marketauth, new_asset.pubkey().to_bytes(), "market authority updated to the co-signing key");
+    env.svm.expire_blockhash();
+    let stale_old_key = send_tx(&mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::UpdateAuthority { new_pubkey: env.admin.pubkey().to_bytes() },
+        vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new(env.market, false)],
+        &[&env.admin]);
+    assert!(stale_old_key.is_err(), "the previous market authority must lose rotation power after handoff");
+    assert_eq!(
+        env.market_state().0.marketauth,
+        new_asset.pubkey().to_bytes(),
+        "old authority replay did not rotate marketauth back",
+    );
 
     // --- per-asset handler for ASSET 0 (insurance authority now rotates via UpdateAssetAuthority) ---
     let prof0 = |env: &V16CuEnv|
