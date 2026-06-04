@@ -44,6 +44,7 @@ pub mod constants {
     pub const KIND_PORTFOLIO: u8 = 2;
     pub const KIND_BACKING_DOMAIN_LEDGER: u8 = 3;
     pub const KIND_INSURANCE_LEDGER: u8 = 4;
+    pub const KIND_MATCHER_AUTH: u8 = 5;
 
     pub const HEADER_LEN: usize = 16;
     pub const WRAPPER_CONFIG_LEN: usize = 432;
@@ -151,9 +152,9 @@ pub mod state {
     use crate::{
         constants::{
             ASSET_ORACLE_PROFILE_LEN, ASSET_ORACLE_WRAPPER_LEN, HEADER_LEN,
-            KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO, MAGIC,
-            MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN, ORACLE_LEG_CAP,
-            ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
+            KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_MATCHER_AUTH,
+            KIND_PORTFOLIO, MAGIC, MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN,
+            ORACLE_LEG_CAP, ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
             ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN,
             PORTFOLIO_STATE_LEN, VERSION, WRAPPER_CONFIG_LEN,
         },
@@ -790,6 +791,18 @@ pub mod state {
         pub last_observed_insurance_atoms: u128,
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+    pub struct MatcherAuthorizationAccountV16 {
+        pub market_group: [u8; 32],
+        pub lp_portfolio: [u8; 32],
+        pub lp_owner: [u8; 32],
+        pub matcher_program: [u8; 32],
+        pub matcher_context: [u8; 32],
+        pub matcher_delegate: [u8; 32],
+        pub enabled: u64,
+    }
+
     pub type AssetOracleStorageV16 = [u8; ASSET_ORACLE_WRAPPER_LEN];
     pub type MarketViewMutV16<'a> = MarketGroupV16ViewMut<'a, AssetOracleStorageV16>;
 
@@ -860,6 +873,10 @@ pub mod state {
 
     pub const fn insurance_ledger_account_len() -> usize {
         HEADER_LEN + core::mem::size_of::<InsuranceLedgerAccountV16>()
+    }
+
+    pub const fn matcher_authorization_account_len() -> usize {
+        HEADER_LEN + core::mem::size_of::<MatcherAuthorizationAccountV16>()
     }
 
     #[inline]
@@ -960,6 +977,59 @@ pub mod state {
         data.get_mut(HEADER_LEN..insurance_ledger_account_len())
             .ok_or(PercolatorError::InvalidAccountLen)?
             .copy_from_slice(bytemuck::bytes_of(ledger));
+        Ok(())
+    }
+
+    #[inline]
+    fn validate_matcher_authorization(
+        auth: &MatcherAuthorizationAccountV16,
+    ) -> Result<(), ProgramError> {
+        if auth.market_group == [0u8; 32]
+            || auth.lp_portfolio == [0u8; 32]
+            || auth.lp_owner == [0u8; 32]
+            || auth.matcher_program == [0u8; 32]
+            || auth.matcher_context == [0u8; 32]
+            || auth.matcher_delegate == [0u8; 32]
+            || auth.enabled > 1
+        {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn read_matcher_authorization(
+        data: &[u8],
+    ) -> Result<MatcherAuthorizationAccountV16, ProgramError> {
+        if data.len() < matcher_authorization_account_len() {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
+        check_header(data, KIND_MATCHER_AUTH)?;
+        let bytes = data
+            .get(HEADER_LEN..matcher_authorization_account_len())
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let auth = bytemuck::pod_read_unaligned(bytes);
+        validate_matcher_authorization(&auth)?;
+        Ok(auth)
+    }
+
+    #[inline]
+    pub fn write_matcher_authorization(
+        data: &mut [u8],
+        auth: &MatcherAuthorizationAccountV16,
+    ) -> Result<(), ProgramError> {
+        if data.len() < matcher_authorization_account_len() {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
+        validate_matcher_authorization(auth)?;
+        if is_initialized(data) {
+            check_header(data, KIND_MATCHER_AUTH)?;
+        } else {
+            write_header(data, KIND_MATCHER_AUTH)?;
+        }
+        data.get_mut(HEADER_LEN..matcher_authorization_account_len())
+            .ok_or(PercolatorError::InvalidAccountLen)?
+            .copy_from_slice(bytemuck::bytes_of(auth));
         Ok(())
     }
 
@@ -2771,6 +2841,9 @@ pub mod ix {
         BatchTradeCpi {
             legs: Vec<BatchTradeCpiLeg>,
         },
+        SetMatcherAuthorization {
+            enabled: u8,
+        },
         ClosePortfolio,
         TopUpInsurance {
             amount: u128,
@@ -3026,6 +3099,9 @@ pub mod ix {
                     }
                     Self::BatchTradeCpi { legs }
                 }
+                68 => Self::SetMatcherAuthorization {
+                    enabled: read_u8(&mut rest)?,
+                },
                 8 => Self::ClosePortfolio,
                 9 => Self::TopUpInsurance {
                     amount: read_u128(&mut rest)?,
@@ -3323,6 +3399,10 @@ pub mod ix {
                         push_u64(&mut out, leg.fee_bps);
                         push_u64(&mut out, leg.limit_price);
                     }
+                }
+                Self::SetMatcherAuthorization { enabled } => {
+                    out.push(68);
+                    out.push(enabled);
                 }
                 Self::ClosePortfolio => out.push(8),
                 Self::TopUpInsurance { amount } => {
@@ -5352,6 +5432,9 @@ pub mod processor {
             Instruction::BatchTradeCpi { legs } => {
                 handle_batch_trade_cpi(program_id, accounts, &legs)
             }
+            Instruction::SetMatcherAuthorization { enabled } => {
+                handle_set_matcher_authorization(program_id, accounts, enabled)
+            }
             Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
             Instruction::TopUpInsurance { amount } => {
                 handle_top_up_insurance(program_id, accounts, amount)
@@ -6561,6 +6644,84 @@ pub mod processor {
             .map_err(map_v16_error)
     }
 
+    fn verify_matcher_authorization_account(
+        program_id: &Pubkey,
+        auth_ai: &AccountInfo,
+        market_key: &Pubkey,
+        lp_portfolio: &Pubkey,
+        lp_owner: &Pubkey,
+        matcher_program: &Pubkey,
+        matcher_context: &Pubkey,
+        matcher_delegate: &Pubkey,
+    ) -> ProgramResult {
+        if auth_ai.is_writable {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        expect_owner(auth_ai, program_id)?;
+        let auth = state::read_matcher_authorization(&auth_ai.try_borrow_data()?)?;
+        if auth.enabled != 1
+            || auth.market_group != market_key.to_bytes()
+            || auth.lp_portfolio != lp_portfolio.to_bytes()
+            || auth.lp_owner != lp_owner.to_bytes()
+            || auth.matcher_program != matcher_program.to_bytes()
+            || auth.matcher_context != matcher_context.to_bytes()
+            || auth.matcher_delegate != matcher_delegate.to_bytes()
+        {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        Ok(())
+    }
+
+    fn matcher_tail_start_or_verify_auth<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        signer_b: &AccountInfo<'a>,
+        market_key: &Pubkey,
+        account_b_key: &Pubkey,
+        matcher_prog_key: &Pubkey,
+        matcher_ctx_key: &Pubkey,
+        matcher_delegate_key: &Pubkey,
+    ) -> Result<usize, ProgramError> {
+        if signer_b.is_signer {
+            return Ok(8);
+        }
+        let auth_ai = account(accounts, 8)?;
+        verify_matcher_authorization_account(
+            program_id,
+            auth_ai,
+            market_key,
+            account_b_key,
+            signer_b.key,
+            matcher_prog_key,
+            matcher_ctx_key,
+            matcher_delegate_key,
+        )?;
+        Ok(9)
+    }
+
+    fn validate_matcher_tail<'a>(
+        tail: &'a [AccountInfo<'a>],
+        market_ai: &AccountInfo,
+        account_a_ai: &AccountInfo,
+        account_b_ai: &AccountInfo,
+        program_id: &Pubkey,
+    ) -> ProgramResult {
+        if tail.len() > constants::MAX_MATCHER_TAIL_ACCOUNTS {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        for ai in tail {
+            if ai.key == market_ai.key
+                || ai.key == account_a_ai.key
+                || ai.key == account_b_ai.key
+                || ai.key == program_id
+                || ai.owner == program_id
+            {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+        }
+        Ok(())
+    }
+
     #[inline(never)]
     fn handle_trade_cpi<'a>(
         program_id: &Pubkey,
@@ -6578,7 +6739,6 @@ pub mod processor {
         let matcher_prog = account(accounts, 5)?;
         let matcher_ctx = account(accounts, 6)?;
         let matcher_delegate = account(accounts, 7)?;
-        let tail = &accounts[8..];
 
         expect_signer(signer_a)?;
         expect_writable(market_ai)?;
@@ -6590,21 +6750,11 @@ pub mod processor {
         expect_owner(account_b_ai, program_id)?;
         if account_a_ai.key == account_b_ai.key
             || !matcher_prog.executable
+            || matcher_ctx.executable
             || matcher_ctx.owner != matcher_prog.key
             || matcher_ctx.data_len() < constants::MATCHER_CONTEXT_MIN_LEN
-            || tail.len() > constants::MAX_MATCHER_TAIL_ACCOUNTS
         {
             return Err(PercolatorError::InvalidInstruction.into());
-        }
-        for ai in tail {
-            if ai.key == market_ai.key
-                || ai.key == account_a_ai.key
-                || ai.key == account_b_ai.key
-                || ai.key == program_id
-                || ai.owner == program_id
-            {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
         }
 
         let (cfg_pre, mode_pre, current_slot_pre, oracle_price, max_trading_fee_bps) =
@@ -6660,6 +6810,20 @@ pub mod processor {
             matcher_ctx.key,
         );
         expect_key(matcher_delegate, &delegate)?;
+        let tail_start = matcher_tail_start_or_verify_auth(
+            program_id,
+            accounts,
+            signer_b,
+            market_ai.key,
+            account_b_ai.key,
+            matcher_prog.key,
+            matcher_ctx.key,
+            matcher_delegate.key,
+        )?;
+        let tail = accounts
+            .get(tail_start..)
+            .ok_or(ProgramError::NotEnoughAccountKeys)?;
+        validate_matcher_tail(tail, market_ai, account_a_ai, account_b_ai, program_id)?;
         if size_q == 0 || size_q == i128::MIN {
             return Err(PercolatorError::InvalidInstruction.into());
         }
@@ -6730,6 +6894,72 @@ pub mod processor {
             fee_bps,
             max_market_slots,
         )
+    }
+
+    #[inline(never)]
+    fn handle_set_matcher_authorization<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        enabled: u8,
+    ) -> ProgramResult {
+        if enabled > 1 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let lp_owner = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let lp_portfolio_ai = account(accounts, 2)?;
+        let auth_ai = account(accounts, 3)?;
+        let matcher_prog = account(accounts, 4)?;
+        let matcher_ctx = account(accounts, 5)?;
+        let matcher_delegate = account(accounts, 6)?;
+        expect_signer(lp_owner)?;
+        expect_writable(auth_ai)?;
+        expect_owner(market_ai, program_id)?;
+        expect_owner(lp_portfolio_ai, program_id)?;
+        expect_owner(auth_ai, program_id)?;
+        if auth_ai.key == market_ai.key
+            || auth_ai.key == lp_portfolio_ai.key
+            || auth_ai.key == lp_owner.key
+            || auth_ai.key == matcher_prog.key
+            || auth_ai.key == matcher_ctx.key
+            || auth_ai.key == matcher_delegate.key
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        if !matcher_prog.executable
+            || matcher_ctx.executable
+            || matcher_ctx.owner != matcher_prog.key
+            || matcher_ctx.data_len() < constants::MATCHER_CONTEXT_MIN_LEN
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let (header, owner) =
+            state::read_portfolio_owner_preflight(&lp_portfolio_ai.try_borrow_data()?)?;
+        if header.market_group_id != market_ai.key.to_bytes()
+            || header.portfolio_account_id != lp_portfolio_ai.key.to_bytes()
+            || owner != lp_owner.key.to_bytes()
+        {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        let (delegate, _) = derive_matcher_delegate(
+            program_id,
+            market_ai.key,
+            lp_portfolio_ai.key,
+            lp_owner.key,
+            matcher_prog.key,
+            matcher_ctx.key,
+        );
+        expect_key(matcher_delegate, &delegate)?;
+        let auth = state::MatcherAuthorizationAccountV16 {
+            market_group: market_ai.key.to_bytes(),
+            lp_portfolio: lp_portfolio_ai.key.to_bytes(),
+            lp_owner: lp_owner.key.to_bytes(),
+            matcher_program: matcher_prog.key.to_bytes(),
+            matcher_context: matcher_ctx.key.to_bytes(),
+            matcher_delegate: matcher_delegate.key.to_bytes(),
+            enabled: enabled as u64,
+        };
+        state::write_matcher_authorization(&mut auth_ai.try_borrow_mut_data()?, &auth)
     }
 
     /// Maximum legs in a single matcher batch CPI: the matcher returns N*64 bytes via
@@ -6804,7 +7034,6 @@ pub mod processor {
         let matcher_prog = account(accounts, 5)?;
         let matcher_ctx = account(accounts, 6)?;
         let matcher_delegate = account(accounts, 7)?;
-        let tail = &accounts[8..];
 
         expect_signer(signer_a)?;
         expect_writable(market_ai)?;
@@ -6816,21 +7045,11 @@ pub mod processor {
         expect_owner(account_b_ai, program_id)?;
         if account_a_ai.key == account_b_ai.key
             || !matcher_prog.executable
+            || matcher_ctx.executable
             || matcher_ctx.owner != matcher_prog.key
             || matcher_ctx.data_len() < constants::MATCHER_CONTEXT_MIN_LEN
-            || tail.len() > constants::MAX_MATCHER_TAIL_ACCOUNTS
         {
             return Err(PercolatorError::InvalidInstruction.into());
-        }
-        for ai in tail {
-            if ai.key == market_ai.key
-                || ai.key == account_a_ai.key
-                || ai.key == account_b_ai.key
-                || ai.key == program_id
-                || ai.owner == program_id
-            {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
         }
 
         // Preflight: market must be Live, the taker owner must sign, the LP owner identity must
@@ -6872,6 +7091,20 @@ pub mod processor {
             matcher_ctx.key,
         );
         expect_key(matcher_delegate, &delegate)?;
+        let tail_start = matcher_tail_start_or_verify_auth(
+            program_id,
+            accounts,
+            signer_b,
+            market_ai.key,
+            account_b_ai.key,
+            matcher_prog.key,
+            matcher_ctx.key,
+            matcher_delegate.key,
+        )?;
+        let tail = accounts
+            .get(tail_start..)
+            .ok_or(ProgramError::NotEnoughAccountKeys)?;
+        validate_matcher_tail(tail, market_ai, account_a_ai, account_b_ai, program_id)?;
 
         let req_id = current_slot_pre.wrapping_add(1);
         let lp_account_id = matcher_lp_account_id(&delegate);
