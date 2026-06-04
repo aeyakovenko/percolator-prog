@@ -19801,6 +19801,53 @@ fn v16_attack_close_portfolio_with_capital_rejected_no_strand() {
     assert_eq!(env.token_amount(dest), 400_000, "owner can still withdraw the full balance");
 }
 
+// SOL-011 / DoS: an attacker can initialize an empty portfolio and disappear. If only the owner can
+// dematerialize that zero-value account, materialized_portfolio_count stays nonzero and CloseSlab is
+// permanently blocked after the market is otherwise empty. Live-market grief is still rejected by
+// v16_attack_non_owner_cannot_close_flat_portfolio; this terminal cleanup is marketauth-only.
+#[test]
+fn v16_attack_abandoned_empty_portfolio_cannot_block_slab_close() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let attacker = Keypair::new();
+    let abandoned = env.create_portfolio(&attacker);
+    assert_eq!(env.portfolio_state(abandoned).capital, 0, "abandoned account starts empty");
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 1, "empty account is materialized");
+
+    env.resolve();
+    let close_slab = |env: &mut V16CuEnv| -> Result<u64, String> {
+        let dest = env.token_account(admin.pubkey(), 0);
+        env.svm.expire_blockhash();
+        env.send(ProgInstruction::CloseSlab,
+            vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(env.market, false), AccountMeta::new(env.vault, false),
+                 AccountMeta::new_readonly(env.vault_authority, false), AccountMeta::new(dest, false), AccountMeta::new_readonly(spl_token::ID, false)],
+            &[&admin])
+    };
+    assert!(close_slab(&mut env).is_err(), "abandoned materialized portfolio blocks CloseSlab before cleanup");
+
+    let market_lamports_before = env.svm.get_account(&env.market).unwrap().lamports;
+    let abandoned_lamports = env.svm.get_account(&abandoned).unwrap().lamports;
+    env.svm.expire_blockhash();
+    let cleanup = env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(abandoned, false),
+        ],
+        &[&admin],
+    );
+    assert!(cleanup.is_ok(), "marketauth can close an abandoned empty portfolio after resolve: {cleanup:?}");
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 0, "terminal cleanup decrements the materialized count");
+    assert_eq!(env.svm.get_account(&env.market).unwrap().lamports, market_lamports_before + abandoned_lamports, "abandoned account rent moved to the market slab");
+    if let Some(closed) = env.svm.get_account(&abandoned) {
+        assert_eq!(closed.lamports, 0, "abandoned portfolio rent swept");
+        assert!(closed.data.is_empty() || !state::is_initialized(&closed.data), "abandoned portfolio dematerialized");
+    }
+
+    assert!(close_slab(&mut env).is_ok(), "after abandoned empty cleanup the slab can be reclaimed");
+}
+
 // End-to-end adversarial coverage of the PRODUCTION single-fill path: a hostile matcher writes a
 // crafted tag-0 return into the ctx account (over-fill / reversed / forged echo / zero-price /
 // unflagged-partial). handle_trade_cpi reads the ctx return + validate_matcher_return must REJECT

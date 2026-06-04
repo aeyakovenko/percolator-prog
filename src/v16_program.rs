@@ -6942,10 +6942,10 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
     ) -> ProgramResult {
-        let owner = account(accounts, 0)?;
+        let closer = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
         let portfolio_ai = account(accounts, 2)?;
-        expect_signer(owner)?;
+        expect_signer(closer)?;
         expect_writable(market_ai)?;
         expect_writable(portfolio_ai)?;
         expect_owner(market_ai, program_id)?;
@@ -6955,12 +6955,17 @@ pub mod processor {
         ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (_cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
             let portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
-            expect_portfolio_view_owner(&portfolio, owner.key)?;
+            let owner_signed = portfolio.header.owner == closer.key.to_bytes();
+            let terminal_marketauth_cleanup = group.header.mode == 1
+                && live_authority_matches(&cfg.marketauth, closer.key);
+            if !owner_signed && !terminal_marketauth_cleanup {
+                return Err(PercolatorError::Unauthorized.into());
+            }
             portfolio
                 .validate_with_market(&group.as_view())
                 .map_err(map_v16_error)?;
