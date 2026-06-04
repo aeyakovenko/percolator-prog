@@ -17979,7 +17979,18 @@ fn v16_attack_force_close_cannot_bypass_timeout_with_future_now_slot() {
     env.trade_asset_with_cu(1, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
     const SHUT: u64 = 10;
     env.svm.warp_to_slot(SHUT);
-    env.update_asset_lifecycle_as_admin_with_cu(percolator_prog::processor::ASSET_ACTION_SHUTDOWN, 1, SHUT, 0);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        u64::MAX,
+        0,
+    );
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let shutdown_profile = state::read_asset_oracle_profile(&market_data, 1).unwrap();
+    assert_eq!(
+        shutdown_profile.last_good_oracle_slot, SHUT,
+        "shutdown must store the authenticated clock slot, not the caller's spoofed now_slot"
+    );
 
     // REAL clock is still well inside the exit window, but the cranker LIES with a far-future now_slot.
     env.svm.warp_to_slot(SHUT + 1);
