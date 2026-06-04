@@ -15281,6 +15281,60 @@ fn v16_attack_oracle_feed_wrong_owner_rejected() {
     assert!(fake_err.unwrap().contains("IllegalOwner"), "must reject on the feed owner check (IllegalOwner)");
 }
 
+// security.md sweep - oracle feed-id binding (#37/#44): even a Pyth-owned PriceUpdate account must
+// carry the configured feed id. Otherwise an attacker could substitute a valid update for a different
+// asset and drive the configured market with the wrong oracle.
+#[test]
+fn v16_attack_oracle_feed_id_mismatch_rejected() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+    let expected_feed = [0x55u8; 32];
+    let wrong_feed = [0x56u8; 32];
+    let wrong_acct = env.set_pyth_price_with_conf(&wrong_feed, 200_000, -6, 0, 100);
+    let before = env.svm.get_account(&env.market).unwrap().data;
+
+    let bad = env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [expected_feed, [0u8; 32], [0u8; 32]],
+        &[wrong_acct],
+        1,
+        100,
+        0,
+        0,
+        100,
+        0,
+    );
+    assert!(bad.is_err(), "a PriceUpdate for the wrong feed id must reject");
+    let err = bad.err().unwrap();
+    assert!(
+        err.contains("Custom(29)"),
+        "wrong feed id should reject as InvalidOracleKey (Custom 29), got: {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before,
+        "rejected wrong-feed config must not mutate the market"
+    );
+
+    let correct_acct = env.set_pyth_price_with_conf(&expected_feed, 200_000, -6, 0, 100);
+    let ok = env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [expected_feed, [0u8; 32], [0u8; 32]],
+        &[correct_acct],
+        1,
+        100,
+        0,
+        0,
+        100,
+        0,
+    );
+    assert!(ok.is_ok(), "the matching configured feed id configures: {:?}", ok);
+}
+
 // security.md sweep — malformed oracle config rejects cleanly (#37/#44 robustness): a hybrid oracle
 // declaring N legs but supplied with fewer oracle accounts must reject WITHOUT partially configuring or
 // corrupting the market (no out-of-bounds read, no half-written oracle profile). Protection: the runtime
