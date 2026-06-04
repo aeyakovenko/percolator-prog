@@ -5464,6 +5464,55 @@ fn v16_bpf_close_portfolio_sweeps_rent_to_market_slab() {
 }
 
 #[test]
+fn v16_attack_non_owner_cannot_close_flat_portfolio() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "portfolio is materialized before the close attempt"
+    );
+
+    env.svm.expire_blockhash();
+    let bad_close = env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(mallory.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&mallory],
+    );
+    assert!(
+        bad_close.is_err(),
+        "a non-owner must not be able to dematerialize a flat victim portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "non-owner close must not decrement counters or receive rent into the market slab"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "non-owner close must leave the victim portfolio account intact"
+    );
+
+    env.close_portfolio_with_cu(&owner, portfolio);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "the real owner can still close the flat portfolio"
+    );
+}
+
+#[test]
 fn v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
