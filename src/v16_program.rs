@@ -8405,25 +8405,45 @@ pub mod processor {
 
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
         expect_key(vault_authority_ai, &vault_authority)?;
-        let vault_account =
-            verify_withdrawable_vault_token_account(vault_token, &vault_authority, &cfg_pre)?;
-        let stranded = vault_account.amount;
-        if stranded > 0 {
-            verify_user_token_account(dest_token, admin_dest.key, &vault_account.mint)?;
-            let bump_arr = [bump];
-            let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+        let primary_mint = primary_collateral_mint(&cfg_pre);
+        verify_vault_token_account(vault_token, &vault_authority, &primary_mint)?;
+        let vault_account = unpack_token_account(vault_token)?;
+        verify_user_token_account(dest_token, admin_dest.key, &primary_mint)?;
+        let bump_arr = [bump];
+        let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+        let secondary_close = if cfg_pre.secondary_collateral_mint != [0u8; 32] {
+            let secondary_vault_token = account(accounts, 6)?;
+            let secondary_dest_token = account(accounts, 7)?;
+            expect_writable(secondary_vault_token)?;
+            expect_writable(secondary_dest_token)?;
+            if secondary_vault_token.key == vault_token.key
+                || secondary_dest_token.key == dest_token.key
+            {
+                return Err(PercolatorError::InvalidVaultAccount.into());
+            }
+            let secondary_mint = secondary_collateral_mint(&cfg_pre)?;
+            verify_vault_token_account(secondary_vault_token, &vault_authority, &secondary_mint)?;
+            let secondary_vault_account = unpack_token_account(secondary_vault_token)?;
+            verify_user_token_account(secondary_dest_token, admin_dest.key, &secondary_mint)?;
+            Some((
+                secondary_vault_token,
+                secondary_dest_token,
+                secondary_vault_account.amount,
+            ))
+        } else {
+            None
+        };
+
+        if vault_account.amount > 0 {
             transfer_tokens_signed(
                 token_program,
                 vault_token,
                 dest_token,
                 vault_authority_ai,
-                stranded,
+                vault_account.amount,
                 signer_seeds,
             )?;
         }
-
-        let bump_arr = [bump];
-        let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
         let close_ix = spl_token::instruction::close_account(
             token_program.key,
             vault_token.key,
@@ -8441,6 +8461,38 @@ pub mod processor {
             ],
             signer_seeds,
         )?;
+
+        if let Some((secondary_vault_token, secondary_dest_token, secondary_amount)) =
+            secondary_close
+        {
+            if secondary_amount > 0 {
+                transfer_tokens_signed(
+                    token_program,
+                    secondary_vault_token,
+                    secondary_dest_token,
+                    vault_authority_ai,
+                    secondary_amount,
+                    signer_seeds,
+                )?;
+            }
+            let close_secondary_ix = spl_token::instruction::close_account(
+                token_program.key,
+                secondary_vault_token.key,
+                admin_dest.key,
+                vault_authority_ai.key,
+                &[],
+            )?;
+            invoke_signed(
+                &close_secondary_ix,
+                &[
+                    secondary_vault_token.clone(),
+                    admin_dest.clone(),
+                    vault_authority_ai.clone(),
+                    token_program.clone(),
+                ],
+                signer_seeds,
+            )?;
+        }
 
         for b in market_ai.try_borrow_mut_data()?.iter_mut() {
             *b = 0;
@@ -12130,25 +12182,6 @@ pub mod processor {
         mint.to_bytes() == cfg.collateral_mint
             || (cfg.secondary_collateral_mint != [0u8; 32]
                 && mint.to_bytes() == cfg.secondary_collateral_mint)
-    }
-
-    fn verify_withdrawable_vault_token_account(
-        token_ai: &AccountInfo,
-        expected_owner: &Pubkey,
-        cfg: &WrapperConfigV16,
-    ) -> Result<spl_token::state::Account, ProgramError> {
-        let token = unpack_token_account(token_ai)?;
-        if !is_withdrawable_collateral_mint(cfg, &token.mint) {
-            return Err(PercolatorError::InvalidMint.into());
-        }
-        if token.owner != *expected_owner
-            || token.state != spl_token::state::AccountState::Initialized
-            || token.delegate.is_some()
-            || token.close_authority.is_some()
-        {
-            return Err(PercolatorError::InvalidVaultAccount.into());
-        }
-        Ok(token)
     }
 
     fn verify_withdrawable_token_accounts(

@@ -13589,6 +13589,66 @@ fn v16_attack_swap_secondary_unauthorized_and_bounded() {
     assert_eq!(env.token_amount(secondary_vault), 0, "secondary reserve fully drained, not more");
 }
 
+// security.md sweep — CloseSlab with secondary collateral (#44/#48): if a secondary collateral mint is
+// configured, closing the slab must not zero the market after closing only the primary vault. Any
+// secondary reserve must be recovered atomically in the same close, or the PDA-held reserve is stranded.
+#[test]
+fn v16_attack_close_slab_requires_secondary_vault_recovery() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm.set_account(secondary_vault, Account {
+        lamports: 1_000_000_000,
+        data: make_token_data(secondary_mint, env.vault_authority, 50),
+        owner: spl_token::ID,
+        executable: false,
+        rent_epoch: 0,
+    }).unwrap();
+    env.resolve();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+
+    let primary_dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let primary_only = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(primary_only.is_err(), "CloseSlab must reject when a configured secondary vault is omitted");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before, "omitted-secondary close leaves market intact");
+    assert_eq!(env.token_amount(secondary_vault), 50, "secondary reserve remains recoverable after rejected close");
+
+    let primary_dest = env.token_account(admin.pubkey(), 0);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let close_both = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new(secondary_dest, false),
+        ],
+        &[&admin],
+    );
+    assert!(close_both.is_ok(), "CloseSlab closes both configured vaults: {:?}", close_both);
+    assert_eq!(env.token_amount(secondary_dest), 50, "secondary reserve recovered to admin");
+    assert!(env.svm.get_account(&env.market).unwrap().data.iter().all(|b| *b == 0), "market reclaimed only after both vaults close");
+}
+
 // security.md sweep — ForceCloseAbandonedAsset griefing protection (#2/#6/#9): the permissionless
 // force-close is meant ONLY for an asset whose oracle died and that has aged into RECOVERY lifecycle
 // past force_close_delay_slots. Attacker goal: a cranker force-closes a HEALTHY, actively-traded asset
