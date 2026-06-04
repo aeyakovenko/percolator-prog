@@ -19229,6 +19229,77 @@ fn v16_attack_maintenance_fee_spam_cannot_overdrain() {
     assert!(env.portfolio_state(p).capital < cap1, "advancing real time accrues additional fee");
 }
 
+// SOL-010 (reinitialization): InitMarket targets the shared market account. Reinitializing a funded
+// live market would reset c_tot/insurance/assets while the SPL vault still holds user tokens, stranding
+// all portfolios. The market header guard must reject even when the current market authority signs.
+#[test]
+fn v16_attack_init_market_cannot_reinitialize_funded_market() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 500_000);
+    env.top_up_insurance_domain_with_authority(&admin, 0, 100);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let params = V16CuMarketParams::default();
+
+    env.svm.expire_blockhash();
+    let reinit = env.send(
+        ProgInstruction::InitMarket {
+            max_portfolio_assets: params.max_portfolio_assets,
+            h_min: params.h_min,
+            h_max: params.h_max,
+            initial_price: params.initial_price,
+            min_nonzero_mm_req: params.min_nonzero_mm_req,
+            min_nonzero_im_req: params.min_nonzero_im_req,
+            maintenance_margin_bps: params.maintenance_margin_bps,
+            initial_margin_bps: params.initial_margin_bps,
+            max_trading_fee_bps: params.max_trading_fee_bps,
+            trade_fee_base_bps: params.trade_fee_base_bps,
+            liquidation_fee_bps: params.liquidation_fee_bps,
+            liquidation_fee_cap: params.liquidation_fee_cap,
+            min_liquidation_abs: params.min_liquidation_abs,
+            max_price_move_bps_per_slot: params.max_price_move_bps_per_slot,
+            max_accrual_dt_slots: params.max_accrual_dt_slots,
+            max_abs_funding_e9_per_slot: params.max_abs_funding_e9_per_slot,
+            min_funding_lifetime_slots: params.min_funding_lifetime_slots,
+            max_account_b_settlement_chunks: params.max_account_b_settlement_chunks,
+            max_bankrupt_close_chunks: params.max_bankrupt_close_chunks,
+            max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots,
+            public_b_chunk_atoms: params.public_b_chunk_atoms,
+            maintenance_fee_per_slot: params.maintenance_fee_per_slot,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        reinit.is_err(),
+        "InitMarket on an initialized market must reject, even when signed by market authority"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected market reinit must leave all market bytes and lamports unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected market reinit must not rewrite funded portfolio state"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected market reinit must not move or orphan vault custody"
+    );
+}
+
 // SOL-010 (reinitialization): InitPortfolio targets a program-owned account and SETS its owner. An
 // attacker could try to re-init a VICTIM's already-funded portfolio -- which would reset its capital
 // and reassign ownership, a severe LOF (victim's vaulted tokens orphaned). The is_initialized guard
