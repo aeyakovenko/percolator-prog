@@ -11138,6 +11138,231 @@ fn v16_attack_cure_deposit_exact_and_atomic() {
     let _ = g_mid;
 }
 
+// full-interface sweep (cron29): CureAndCancelClose validates token accounts before the engine cure
+// and transfers after the engine mutation. A market-A portfolio must not be curable through market B
+// with a valid market-B vault, or the source transfer could fund one market while canceling and
+// crediting an account bound to another.
+#[test]
+fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+
+    let portfolio_a = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio_a, 100);
+    env.seed_cancellable_close_progress(portfolio_a);
+
+    let market_b = Pubkey::new_unique();
+    let vault_authority_b =
+        Pubkey::find_program_address(&[b"vault", market_b.as_ref()], &env.program_id).0;
+    let vault_b = canonical_vault_ata(vault_authority_b, env.mint);
+    env.svm
+        .set_account(
+            market_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; state::market_account_len_for_capacity(1).unwrap()],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            vault_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, vault_authority_b, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let p = V16CuMarketParams::default();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitMarket {
+            max_portfolio_assets: p.max_portfolio_assets,
+            h_min: p.h_min,
+            h_max: p.h_max,
+            initial_price: p.initial_price,
+            min_nonzero_mm_req: p.min_nonzero_mm_req,
+            min_nonzero_im_req: p.min_nonzero_im_req,
+            maintenance_margin_bps: p.maintenance_margin_bps,
+            initial_margin_bps: p.initial_margin_bps,
+            max_trading_fee_bps: p.max_trading_fee_bps,
+            trade_fee_base_bps: p.trade_fee_base_bps,
+            liquidation_fee_bps: p.liquidation_fee_bps,
+            liquidation_fee_cap: p.liquidation_fee_cap,
+            min_liquidation_abs: p.min_liquidation_abs,
+            max_price_move_bps_per_slot: p.max_price_move_bps_per_slot,
+            max_accrual_dt_slots: p.max_accrual_dt_slots,
+            max_abs_funding_e9_per_slot: p.max_abs_funding_e9_per_slot,
+            min_funding_lifetime_slots: p.min_funding_lifetime_slots,
+            max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
+            max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
+            max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
+            public_b_chunk_atoms: p.public_b_chunk_atoms,
+            maintenance_fee_per_slot: p.maintenance_fee_per_slot,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new_readonly(env.mint, false),
+        ],
+        &[&admin],
+    )
+    .expect("init market B");
+
+    let source = env.token_account_for_mint(env.mint, owner.pubkey(), 50);
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let portfolio_a_before = env.svm.get_account(&portfolio_a).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
+    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::CureAndCancelClose {
+            optional_deposit: 50,
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(portfolio_a, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "CureAndCancelClose must reject a portfolio bound to another market"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_a_before,
+        "rejected cross-market cure must not mutate market A"
+    );
+    assert_eq!(
+        env.svm.get_account(&market_b).unwrap(),
+        market_b_before,
+        "rejected cross-market cure must not mutate market B"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio_a).unwrap(),
+        portfolio_a_before,
+        "rejected cross-market cure must not cancel or credit the market-A portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&source).unwrap(),
+        source_before,
+        "rejected cross-market cure must not pull the optional deposit"
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+
+    let portfolio_b =
+        env.program_account(state::portfolio_account_len_for_market_slots(1).unwrap());
+    env.ensure_signer_account(owner.pubkey());
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(portfolio_b, false),
+        ],
+        &[&owner],
+    )
+    .expect("init market-B portfolio");
+    let deposit_b = env.token_account_for_mint(env.mint, owner.pubkey(), 100);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::Deposit { amount: 100 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(portfolio_b, false),
+            AccountMeta::new(deposit_b, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    )
+    .expect("deposit into market-B portfolio");
+    {
+        let mut market_b_account = env.svm.get_account(&market_b).unwrap();
+        let mut portfolio_b_account = env.svm.get_account(&portfolio_b).unwrap();
+        let (cfg_b, mut group_b) = state::read_market(&market_b_account.data).unwrap();
+        let mut account_b = state::read_portfolio(&portfolio_b_account.data).unwrap();
+        account_b.close_progress = CloseProgressLedgerV16 {
+            active: true,
+            finalized: false,
+            canceled: false,
+            close_id: 1,
+            asset_index: 0,
+            market_id: group_b.assets[0].market_id,
+            domain_side: SideV16::Long,
+            gross_loss_at_close_start: 10,
+            drift_reference_slot: 0,
+            max_close_slot: 10,
+            residual_remaining: 10,
+            ..CloseProgressLedgerV16::EMPTY
+        };
+        group_b.pending_domain_loss_barriers[0] = 1;
+        state::write_market(&mut market_b_account.data, &cfg_b, &group_b).unwrap();
+        state::write_portfolio(&mut portfolio_b_account.data, &account_b).unwrap();
+        env.svm.set_account(market_b, market_b_account).unwrap();
+        env.svm.set_account(portfolio_b, portfolio_b_account).unwrap();
+    }
+    let source_b = env.token_account_for_mint(env.mint, owner.pubkey(), 50);
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::CureAndCancelClose {
+            optional_deposit: 50,
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(portfolio_b, false),
+            AccountMeta::new(source_b, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(ok.is_ok(), "same-market CureAndCancelClose succeeds: {ok:?}");
+    assert_eq!(env.token_amount(source_b), 0);
+    assert_eq!(env.token_amount(vault_b), 150);
+    let account_b = state::read_portfolio(&env.svm.get_account(&portfolio_b).unwrap().data)
+        .expect("market-B portfolio after cure");
+    assert_eq!(account_b.capital, 150);
+    assert!(account_b.close_progress.canceled);
+    let (_, group_b) = state::read_market(&env.svm.get_account(&market_b).unwrap().data).unwrap();
+    assert_eq!(group_b.vault, 150);
+    assert_eq!(group_b.c_tot, 150);
+}
+
 // security.md sweep — position flip margin (#19/#46 crosses_zero): a trade that flips a position
 // long->short must enforce initial_margin_bps on the RESULTING side. An attacker must not be able to
 // flip into a larger, under-margined opposite position.
