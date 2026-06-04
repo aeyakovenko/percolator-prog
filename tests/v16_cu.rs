@@ -3019,6 +3019,62 @@ fn v16_bpf_failed_insurance_topup_transfer_rolls_back_budget_and_ledger() {
 }
 
 #[test]
+fn v16_bpf_failed_domain_insurance_topup_transfer_rolls_back_budget_and_ledger() {
+    let mut env = V16CuEnv::new();
+    let ledger = env.insurance_ledger_account();
+    let source = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            source,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.admin.pubkey(), 100),
+                owner: Pubkey::new_unique(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let result = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 1,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&env.admin],
+    );
+
+    assert!(
+        result.is_err(),
+        "domain insurance top-up must fail when the transfer CPI cannot debit the source"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ledger).unwrap(), ledger_before);
+    assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance_domain_budget[1], 0);
+    assert_eq!(group.insurance_domain_budget_remaining_total, 0);
+    assert_eq!(group.insurance, 0);
+    assert_eq!(group.vault, 0);
+}
+
+#[test]
 fn v16_bpf_failed_backing_topup_transfer_rolls_back_bucket_and_ledger() {
     let mut env = V16CuEnv::new();
     let ledger = env.backing_domain_ledger_account();
