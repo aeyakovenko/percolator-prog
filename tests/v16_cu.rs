@@ -14099,6 +14099,251 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
     assert_eq!(env.market_state().1.materialized_portfolio_count, 0, "real market can still close P_a");
 }
 
+// full-interface sweep (cron23): resolved payout is a terminal value-moving path. A portfolio bound
+// to market A must not be closeable against resolved market B, even if its owner is named correctly and
+// market B has enough vault value. Missing provenance here would pay market B's victims to the market-A
+// portfolio owner or burn the market-A payout state.
+#[test]
+fn v16_attack_close_resolved_rejects_cross_market_portfolio_payout() {
+    let mut env = V16CuEnv::new();
+
+    let attacker = Keypair::new();
+    let pa = env.create_portfolio(&attacker);
+    env.deposit(&attacker, pa, 1_000_000);
+
+    let market_b = Pubkey::new_unique();
+    let vault_authority_b =
+        Pubkey::find_program_address(&[b"vault", market_b.as_ref()], &env.program_id).0;
+    let vault_b = canonical_vault_ata(vault_authority_b, env.mint);
+    env.svm
+        .set_account(
+            market_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; state::market_account_len_for_capacity(1).unwrap()],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            vault_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, vault_authority_b, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let p = V16CuMarketParams::default();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitMarket {
+            max_portfolio_assets: p.max_portfolio_assets,
+            h_min: p.h_min,
+            h_max: p.h_max,
+            initial_price: p.initial_price,
+            min_nonzero_mm_req: p.min_nonzero_mm_req,
+            min_nonzero_im_req: p.min_nonzero_im_req,
+            maintenance_margin_bps: p.maintenance_margin_bps,
+            initial_margin_bps: p.initial_margin_bps,
+            max_trading_fee_bps: p.max_trading_fee_bps,
+            trade_fee_base_bps: p.trade_fee_base_bps,
+            liquidation_fee_bps: p.liquidation_fee_bps,
+            liquidation_fee_cap: p.liquidation_fee_cap,
+            min_liquidation_abs: p.min_liquidation_abs,
+            max_price_move_bps_per_slot: p.max_price_move_bps_per_slot,
+            max_accrual_dt_slots: p.max_accrual_dt_slots,
+            max_abs_funding_e9_per_slot: p.max_abs_funding_e9_per_slot,
+            min_funding_lifetime_slots: p.min_funding_lifetime_slots,
+            max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
+            max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
+            max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
+            public_b_chunk_atoms: p.public_b_chunk_atoms,
+            maintenance_fee_per_slot: p.maintenance_fee_per_slot,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new_readonly(env.mint, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("init market B");
+
+    let victim = Keypair::new();
+    env.ensure_signer_account(victim.pubkey());
+    let pb = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            pb,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; env.portfolio_account_len],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(pb, false),
+        ],
+        &[&victim],
+    )
+    .expect("init market-B victim portfolio");
+    let source_b = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            source_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, victim.pubkey(), 1_000_000),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::Deposit { amount: 1_000_000 },
+        vec![
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(pb, false),
+            AccountMeta::new(source_b, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&victim],
+    )
+    .expect("victim deposits into market B");
+    assert_eq!(env.token_amount(vault_b), 1_000_000, "market B vault funded");
+
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ResolveMarket,
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("resolve market B");
+
+    let attack_dest = env.token_account_for_mint(env.mint, attacker.pubkey(), 0);
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let pa_before = env.svm.get_account(&pa).unwrap();
+    let pb_before = env.svm.get_account(&pb).unwrap();
+    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
+    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(attacker.pubkey(), false),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(pa, false),
+            AccountMeta::new(attack_dest, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(vault_authority_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "market-B CloseResolved must reject a market-A-bound portfolio"
+    );
+    assert_eq!(env.token_amount(attack_dest), 0, "attacker receives no market-B payout");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+    assert_eq!(
+        env.svm.get_account(&pa).unwrap(),
+        pa_before,
+        "rejected cross-market payout leaves market-A portfolio byte-identical"
+    );
+    assert_eq!(env.svm.get_account(&pb).unwrap(), pb_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+    assert_eq!(
+        env.svm.get_account(&vault_b).unwrap(),
+        vault_b_before,
+        "market-B vault remains intact"
+    );
+
+    let victim_dest = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            victim_dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, victim.pubkey(), 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let victim_close = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(victim.pubkey(), false),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(pb, false),
+            AccountMeta::new(victim_dest, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(vault_authority_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(victim_close.is_ok(), "real market-B CloseResolved still pays: {victim_close:?}");
+    assert_eq!(env.token_amount(victim_dest), 1_000_000);
+
+    env.resolve();
+    let attacker_dest = env.close_resolved(&attacker, pa);
+    assert_eq!(
+        env.token_amount(attacker_dest),
+        1_000_000,
+        "market-A portfolio remains claimable on its real market"
+    );
+}
+
 // full-interface sweep (cron22) — PermissionlessCrank is intentionally unsigned for the target
 // portfolio. A foreign-market portfolio with the same asset_index/market_id shape must still reject
 // before any settlement/liquidation mutation; otherwise anyone could settle or liquidate a portfolio
