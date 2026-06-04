@@ -16099,6 +16099,101 @@ fn v16_attack_tradenocpi_self_trade_rejected() {
     assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital intact");
 }
 
+#[test]
+fn v16_attack_batch_trade_self_trade_rejected() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    let batch_leg = BatchTradeLeg {
+        asset_index: 0,
+        size_q: POS_SCALE as i128,
+        exec_price: 100,
+        fee_bps: 100,
+    };
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&p).unwrap();
+    env.svm.expire_blockhash();
+    let direct = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![batch_leg],
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(p, false),
+        ],
+        &[&owner],
+    );
+    assert!(direct.is_err(), "BatchTradeNoCpi self-trade must reject");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "direct batch self-trade must not mutate market state"
+    );
+    assert_eq!(
+        env.svm.get_account(&p).unwrap(),
+        portfolio_before,
+        "direct batch self-trade must not mutate the portfolio"
+    );
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (ctx, delegate, _) = env.init_matcher_context(matcher_program, p);
+    let market_before_cpi = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before_cpi = env.svm.get_account(&p).unwrap();
+    let matcher_before = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let cpi = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: POS_SCALE as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&owner],
+    );
+    assert!(cpi.is_err(), "BatchTradeCpi self-trade must reject before matcher CPI");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_cpi,
+        "CPI batch self-trade must not mutate market state"
+    );
+    assert_eq!(
+        env.svm.get_account(&p).unwrap(),
+        portfolio_before_cpi,
+        "CPI batch self-trade must not mutate the portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        matcher_before,
+        "CPI batch self-trade must reject before the matcher context is touched"
+    );
+
+    let (_, group) = env.market_state();
+    assert_eq!(group.assets[0].oi_eff_long_q, 0, "no OI fabricated by batch self-trades");
+    assert_eq!(group.insurance, 0, "no fee churned by rejected batch self-trades");
+    assert!(percolator::active_bitmap_is_empty(env.portfolio_state(p).active_bitmap));
+    assert_eq!(env.portfolio_state(p).capital, 1_000_000);
+}
+
 // security.md sweep — deposit into an uninitialized portfolio rejects (#44/#45): an account that was
 // never InitPortfolio'd (zeroed data) is not a valid portfolio — its stored id is all-zero, not its key.
 // Attacker goal: deposit into a raw program-owned account to corrupt the accounting / create a portfolio
