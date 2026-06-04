@@ -11119,6 +11119,13 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     env.deposit(&owner, portfolio, 1_000);
     env.top_up_insurance_domain_with_authority(&admin, 0, 100);
     env.top_up_backing_bucket(1, 100, 10);
+    env.enable_live_insurance_withdrawal();
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].utilization_fee_earnings += 20;
+        group.vault += 20;
+    });
+    let vault_with_earnings = env.token_amount(env.vault) + 20;
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, vault_with_earnings);
 
     let portfolio_before = env.svm.get_account(&portfolio).unwrap();
     let market_before = env.svm.get_account(&env.market).unwrap();
@@ -11164,6 +11171,34 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
         env.token_amount(top_up_insurance_source),
         25,
         "wrong-kind insurance ledger must reject before pulling source tokens"
+    );
+
+    let top_up_domain_source = env.token_account(admin.pubkey(), 20);
+    env.svm.expire_blockhash();
+    let top_up_domain = env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 20,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(top_up_domain_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        top_up_domain.is_err(),
+        "TopUpInsuranceDomain must reject a portfolio account as the optional ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(
+        env.token_amount(top_up_domain_source),
+        20,
+        "wrong-kind domain insurance ledger must reject before pulling source tokens"
     );
 
     let top_up_backing_source = env.token_account(admin.pubkey(), 30);
@@ -11224,6 +11259,32 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
         "wrong-kind insurance withdraw ledger must reject before paying destination"
     );
 
+    let limited_dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let withdraw_limited = env.send(
+        ProgInstruction::WithdrawInsuranceLimited { amount: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(limited_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        withdraw_limited.is_err(),
+        "WithdrawInsuranceLimited must reject a portfolio account as the optional ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(
+        env.token_amount(limited_dest),
+        0,
+        "wrong-kind limited insurance ledger must reject before paying destination"
+    );
+
     let backing_dest = env.token_account(admin.pubkey(), 0);
     env.svm.expire_blockhash();
     let withdraw_backing = env.send(
@@ -11251,6 +11312,35 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
         env.token_amount(backing_dest),
         0,
         "wrong-kind backing withdraw ledger must reject before paying destination"
+    );
+
+    let earnings_dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let withdraw_earnings = env.send(
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(earnings_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        withdraw_earnings.is_err(),
+        "WithdrawBackingBucketEarnings must reject a portfolio account as the ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(
+        env.token_amount(earnings_dest),
+        0,
+        "wrong-kind backing earnings ledger must reject before paying destination"
     );
 }
 
