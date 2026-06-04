@@ -14597,6 +14597,148 @@ fn v16_attack_close_slab_bad_primary_dest_is_atomic() {
     );
 }
 
+// full-interface sweep (cron31): CloseSlab must pin the primary vault to the current market's vault
+// PDA before transferring dust, closing token accounts, or zeroing the slab. A canonical vault for a
+// different market must reject atomically; otherwise a final cleanup could close or drain foreign
+// market custody while reclaiming this market.
+#[test]
+fn v16_attack_close_slab_rejects_foreign_primary_vault() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.resolve();
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+
+    let market_b = Pubkey::new_unique();
+    let vault_authority_b =
+        Pubkey::find_program_address(&[b"vault", market_b.as_ref()], &env.program_id).0;
+    let vault_b = canonical_vault_ata(vault_authority_b, env.mint);
+    env.svm
+        .set_account(
+            market_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; state::market_account_len_for_capacity(1).unwrap()],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            vault_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, vault_authority_b, 9),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let p = V16CuMarketParams::default();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitMarket {
+            max_portfolio_assets: p.max_portfolio_assets,
+            h_min: p.h_min,
+            h_max: p.h_max,
+            initial_price: p.initial_price,
+            min_nonzero_mm_req: p.min_nonzero_mm_req,
+            min_nonzero_im_req: p.min_nonzero_im_req,
+            maintenance_margin_bps: p.maintenance_margin_bps,
+            initial_margin_bps: p.initial_margin_bps,
+            max_trading_fee_bps: p.max_trading_fee_bps,
+            trade_fee_base_bps: p.trade_fee_base_bps,
+            liquidation_fee_bps: p.liquidation_fee_bps,
+            liquidation_fee_cap: p.liquidation_fee_cap,
+            min_liquidation_abs: p.min_liquidation_abs,
+            max_price_move_bps_per_slot: p.max_price_move_bps_per_slot,
+            max_accrual_dt_slots: p.max_accrual_dt_slots,
+            max_abs_funding_e9_per_slot: p.max_abs_funding_e9_per_slot,
+            min_funding_lifetime_slots: p.min_funding_lifetime_slots,
+            max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
+            max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
+            max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
+            public_b_chunk_atoms: p.public_b_chunk_atoms,
+            maintenance_fee_per_slot: p.maintenance_fee_per_slot,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new_readonly(env.mint, false),
+        ],
+        &[&admin],
+    )
+    .expect("init market B");
+
+    let dest = env.token_account(admin.pubkey(), 0);
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
+    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    let close_with_vault = |env: &mut V16CuEnv, vault: Pubkey| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+    };
+
+    let rejected = close_with_vault(&mut env, vault_b);
+    assert!(
+        rejected.is_err(),
+        "CloseSlab must reject a primary vault owned by another market PDA"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_a_before,
+        "rejected foreign-vault close must not reclaim market A"
+    );
+    assert_eq!(
+        env.svm.get_account(&market_b).unwrap(),
+        market_b_before,
+        "rejected foreign-vault close must not mutate market B"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_a_before,
+        "rejected foreign-vault close must not touch market A's vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&vault_b).unwrap(),
+        vault_b_before,
+        "rejected foreign-vault close must not drain or close market B's vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "rejected foreign-vault close must not pay the admin destination"
+    );
+
+    let vault_a = env.vault;
+    let ok = close_with_vault(&mut env, vault_a);
+    assert!(ok.is_ok(), "same-market CloseSlab succeeds after rejection: {ok:?}");
+    assert_eq!(env.token_amount(dest), 7);
+    assert_eq!(env.token_amount(vault_b), 9);
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(closed_market.lamports, 0);
+    assert!(closed_market.data.iter().all(|b| *b == 0));
+}
+
 // security.md sweep — WithdrawInsuranceDomain operator authorization (#6): a per-domain insurance
 // withdrawal must be signed by THAT domain's insurance_operator. A non-operator must reject — no
 // draining a domain's insurance by an unauthorized caller.
