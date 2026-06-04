@@ -17168,18 +17168,17 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
     assert_eq!(env.market_state().0.marketauth, new_admin.pubkey().to_bytes(), "market authority rotated by the genuine holder");
 }
 
-// security.md sweep — admin renounce anti-brick (#6/#30): renouncing the admin (new_pubkey = zero) is
-// only permitted if a PERMISSIONLESS fallback exists (permissionless_resolve_stale_slots != 0 AND
-// force_close_delay_slots != 0), src/v16_program.rs:8413. Attacker/footgun goal: renounce admin with no
-// permissionless path so the market is PERMANENTLY bricked (no admin to resolve, no permissionless
-// resolution). Protection: renounce-to-zero rejects unless the fallback is configured first.
+// security.md sweep — marketauth renounce anti-brick (#6/#30/#48): renouncing marketauth to zero
+// permanently disables CloseSlab, so the market slab lamports and any direct vault dust can no longer
+// be recovered even if permissionless resolve/force-close fallback exists. Rotation is supported, but
+// burn-to-zero is always rejected.
 #[test]
-fn v16_attack_admin_renounce_without_fallback_rejected() {
+fn v16_attack_marketauth_renounce_rejected_even_with_fallback() {
     let mut env = V16CuEnv::new(); // default: permissionless_resolve_stale_slots == 0 (no fallback)
     let (cfg0, _) = env.market_state();
     let zero = Pubkey::default();
 
-    // ATTACK/FOOTGUN: renounce marketauth (-> zero) with NO permissionless fallback -> reject (no brick).
+    // ATTACK/FOOTGUN: renounce marketauth (-> zero) with NO permissionless fallback -> reject.
     env.svm.expire_blockhash();
     let r = send_tx(&mut env.svm, env.program_id, &env.payer,
         ProgInstruction::UpdateAuthority { new_pubkey: [0u8; 32] },
@@ -17191,14 +17190,14 @@ fn v16_attack_admin_renounce_without_fallback_rejected() {
     // configure a permissionless fallback (stale + force-close delay both > 0).
     env.configure_permissionless_resolve_with_cu(100, 100);
 
-    // NOW renouncing marketauth is permitted (the market can still be resolved permissionlessly).
+    // Even with fallback, renounce still rejects: CloseSlab/final slab reclaim requires a live marketauth.
     env.svm.expire_blockhash();
-    let ok = send_tx(&mut env.svm, env.program_id, &env.payer,
+    let with_fallback = send_tx(&mut env.svm, env.program_id, &env.payer,
         ProgInstruction::UpdateAuthority { new_pubkey: [0u8; 32] },
         vec![AccountMeta::new(env.admin.pubkey(), true), AccountMeta::new_readonly(zero, false), AccountMeta::new(env.market, false)],
         &[&env.admin]);
-    assert!(ok.is_ok(), "renouncing market authority WITH a permissionless fallback is allowed: {:?}", ok);
-    assert_eq!(env.market_state().0.marketauth, [0u8; 32], "market authority renounced to zero (fallback present)");
+    assert!(with_fallback.is_err(), "renouncing market authority with fallback still bricks final CloseSlab");
+    assert_eq!(env.market_state().0.marketauth, cfg0.marketauth, "fallback config does not make marketauth burnable");
 }
 
 // security.md sweep — auth-mark push is authority-gated (#6/#37): pushing the settlement mark requires

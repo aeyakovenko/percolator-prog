@@ -109,9 +109,9 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   at `InitMarket`, not via `UpdateAssetLifecycle`).
 - **Each asset (0..N) has a cold-storage admin** that can **rotate that asset's other keys**
   (insurance/operator/backing/oracle) and **can be burned (set to 0)** — a credibly admin-free asset
-  that can't be revived. **✅** For asset 0 this means the market admin can force-replace or burn the
-  shared insurance operator/authority via `UpdateAssetAuthority`, and burning `asset_admin` makes those
-  delegations sticky (admin-free).
+  that can't be revived. **✅** For asset 0 this means the market admin can force-replace the shared
+  insurance operator/authority via `UpdateAssetAuthority`, while required domain authorities
+  themselves cannot be burned to zero.
 - **One market-level key: `marketauth`.** **✅** All market-level governance collapses into a single
   `WrapperConfigV16.marketauth` key (it replaced the former separate `admin` / `asset_authority` /
   `base_unit_authority`). `marketauth` is the only key that can: **create market 0** (`InitMarket`),
@@ -119,12 +119,13 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   permissionless asset 1..N** (`ASSET_ACTION_SHUTDOWN` → RECOVERY with the `force_close_delay_slots`
   exit window so traders can exit — a non-`marketauth` signer is rejected), **resolve/close the market**
   (`ResolveMarket`/`CloseSlab`), **market policies**, and **rotate/swap the base-unit
-  mint**. It is rotated/burned via `UpdateAuthority { new_pubkey }` (current `marketauth` signs, non-zero
-  replacement co-signs; burn-to-zero blocked while Live unless permissionless-resolve + force-close are
-  configured). Everything else — insurance/operator/backing/oracle on **every** asset including 0 — is
-  per-asset (`asset_admin` + `UpdateAssetAuthority`), never `marketauth`.
-- **Each other asset key can rotate itself or be set to 0.** **✅** (a domain authority self-rotates
-  even after the asset admin is burned). All verified by
+  mint**. It is rotated via `UpdateAuthority { new_pubkey }` (current `marketauth` signs and the
+  non-zero replacement co-signs; burn-to-zero is rejected). Everything else —
+  insurance/operator/backing/oracle on **every** asset including 0 — is per-asset (`asset_admin` +
+  `UpdateAssetAuthority`), never `marketauth`.
+- **Each other asset key can rotate itself; only `asset_admin` can be set to 0.** **✅** (a domain
+  authority self-rotates even after the asset admin is burned; required domain authorities cannot be
+  burned). All verified by
   `v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable`.
 - **Market admin can run a scheduled market close** — fully shut the market down and **reclaim the
   account id** — with **safe delays that cannot steal user funds** but **eventually drain an
@@ -290,10 +291,9 @@ This section describes intent and operational ordering, not argument-by-argument
 - **InitMarket**
   - initializes slab header/config + calls `RiskEngine::init_in_place(risk_params, clock.slot, init_price)`
   - binds the collateral mint, initializes asset 0, and sets `marketauth` to the init signer
-- **UpdateAuthority** (tag 32) — single-purpose: rotate/burn the one market-level `marketauth` key
+- **UpdateAuthority** (tag 32) — single-purpose: rotate the one market-level `marketauth` key
   - `UpdateAuthority { new_pubkey }`: current `marketauth` signs; a non-zero replacement co-signs
-  - setting `new_pubkey` to all zeros burns `marketauth` permanently (admin-free market)
-  - burning is guarded by permissionless resolution / force-close liveness checks
+  - setting `new_pubkey` to all zeros is rejected; `marketauth` must remain live for final slab reclaim
   - per-asset authorities (insurance/operator/backing/oracle, incl. asset 0) are rotated via
     `UpdateAssetAuthority`, not this instruction
 
@@ -586,7 +586,7 @@ The LiteSVM integration tests exercise the economic behavior through SBF paths, 
 ### Who runs what?
 - **Users / LPs**: init + deposits + trades
 - **Keepers (permissionless)**: call `PermissionlessCrank` regularly
-- **`marketauth` / scoped authorities**: may update policies or rotate/burn scoped authorities, unless the relevant authority was burned
+- **`marketauth` / scoped authorities**: may update policies or rotate scoped authorities; only `asset_admin` can be burned
 
 ### PermissionlessCrank cadence
 Run `PermissionlessCrank` often enough to satisfy engine freshness rules:
@@ -613,10 +613,9 @@ At minimum, monitor:
 - liquidation frequency spikes
 
 ### Governance / authority handling
-- `UpdateAuthority` rotates or burns individual capabilities.
-- Non-burn transfers require both the current authority and the new key to sign.
-- Burning `marketauth` is irreversible and disables market-level policy/resolve actions forever.
-- Burning the mark, insurance, or live insurance operator authority removes only that capability.
+- `UpdateAuthority` rotates `marketauth`; the current authority and the new key must both sign.
+- `UpdateAssetAuthority` rotates per-asset authorities; non-admin self-rotation also requires the new key.
+- Burning is limited to `asset_admin`. Required market/domain authorities cannot be set to zero.
 
 ---
 
@@ -705,26 +704,26 @@ mark/insurance/operator) are reachable until asset-0's `asset_admin` is rotated 
 These are governance powers, not bugs:
 
 1. `UpdateAuthority { new_pubkey }`
-   - rotate `marketauth` to an attacker key or burn it to zero.
-   - impact: governance capture or permanent governance lockout.
+   - rotate `marketauth` to an attacker key.
+   - impact: governance capture.
 2. Policy updates / `UpdateMarketInitFeePolicy` / `UpdateBaseUnitMints` / asset create+retire+force-shutdown
    - change funding/cap policy knobs (within validation bounds), the create fee, the base-unit mint, and the asset set — all now under the one `marketauth` key.
    - impact: economics/market shape can become unfavorable to users (force-shutdown still honors the trader exit window).
 3. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_ORACLE }` (while marketauth holds asset-0's `asset_admin`)
-   - choose or burn who can push asset-0 AuthMark/EwmaMark updates.
+   - choose who can push asset-0 AuthMark/EwmaMark updates.
    - impact: authority mark input control/censorship surface.
 4. `ResolveMarket`
    - transition market to resolved mode using stored authority price.
    - impact: trading/deposits/new accounts are halted; market enters wind-down.
 5. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_INSURANCE }` (while marketauth holds asset-0's `asset_admin`)
-   - choose or burn who can withdraw resolved-market insurance.
-   - impact: resolved insurance extraction capability is delegated or permanently removed.
+   - choose who can withdraw resolved-market insurance.
+   - impact: resolved insurance extraction capability is delegated.
 6. `WithdrawInsurance` (post-resolution, after positions are closed)
    - withdraw insurance buffer to admin ATA.
    - impact: no insurance backstop remains.
 7. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_INSURANCE_OPERATOR }` (while marketauth holds asset-0's `asset_admin`)
-   - choose or burn who can call bounded live insurance withdrawal.
-   - impact: bounded live insurance extraction capability is delegated or permanently removed.
+   - choose who can call bounded live insurance withdrawal.
+   - impact: bounded live insurance extraction capability is delegated.
 8. `CloseSlab` (when market is fully empty)
     - decommission market account and recover slab lamports.
     - impact: market is permanently closed.
@@ -732,15 +731,14 @@ These are governance powers, not bugs:
 > **Authority model (items 3, 5, 7).** Asset-0's insurance/operator/oracle(mark)/backing authorities now
 > use the **same per-asset `asset_admin` model as assets 1..N** (`UpdateAssetAuthority { asset_index = 0 }`).
 > Asset 0's `asset_admin` is bootstrapped to the **market admin** at `InitMarket`, so a malicious admin
-> **can** rotate or burn the shared insurance operator/authority and the mark pusher (items 3/5/7) —
-> exactly the powers the asset_admin has over any asset. Two ways to make those delegations stick:
-> burn the **sub-authority** itself (set to 0 — capability permanently removed), or burn asset-0's
-> **`asset_admin`** (set to 0 — no key can rotate asset-0's sub-authorities again, and the current holders
-> are frozen). The market-wide `UpdateAuthority` (tag 32) rotates only `marketauth`; the per-asset
+> **can** rotate the shared insurance operator/authority and the mark pusher (items 3/5/7) —
+> exactly the powers the asset_admin has over any asset. To make those delegations sticky, burn
+> asset-0's **`asset_admin`** (set to 0); no key can rotate asset-0's sub-authorities again, and the
+> current holders are frozen. The market-wide `UpdateAuthority` (tag 32) rotates only `marketauth`; the per-asset
 > `ASSET_ADMIN`/`ORACLE`/`INSURANCE`/`INSURANCE_OPERATOR`/`BACKING` kinds are tag-65
 > `UpdateAssetAuthority`. Verified by
-> `v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable` (asset-0 `asset_admin` rotates/burns
-> asset-0's sub-authorities, isolated from other assets),
+> `v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable` (asset-0 `asset_admin` rotates
+> asset-0's sub-authorities and can burn itself, isolated from other assets),
 > `v16_attack_update_authority_non_holder_cannot_rotate`, and
 > `v16_attack_update_authority_requires_new_authority_signature`.
 
@@ -753,8 +751,8 @@ These are intended hard boundaries enforced in code and test suites:
    - covered by `v16_attack_non_admin_cannot_resolve_or_configure`.
 2. Cannot use old `marketauth` after rotation.
    - covered by `v16_attack_update_authority_non_holder_cannot_rotate`.
-3. Cannot burn `marketauth` in Live without permissionless wind-down liveness configured.
-   - covered by `v16_attack_admin_renounce_without_fallback_rejected`.
+3. Cannot burn `marketauth` to zero, even when permissionless wind-down liveness is configured.
+   - covered by `v16_attack_marketauth_renounce_rejected_even_with_fallback`.
 4. Cannot push authority oracle prices unless signer == `oracle_authority`.
    - covered by `v16_attack_non_authority_cannot_push_auth_mark`.
 5. Cannot resolve without an authority price, or resolve twice.
@@ -793,9 +791,9 @@ Recovery:
 - adjust market config (if governance allows)
 - ensure keepers are running so freshness rules remain satisfied
 
-### `marketauth` burned
-Once `marketauth` is burned (all zeros), market-level ops are permanently disabled.
-Recovery is "by design impossible" (this is a one-way governance lock).
+### `marketauth` burn attempt
+Setting `marketauth` to all zeros is rejected. Rotate to a live replacement key instead; final
+market reclaim (`CloseSlab`) requires a live market authority.
 
 ---
 

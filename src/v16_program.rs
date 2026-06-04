@@ -2799,9 +2799,8 @@ pub mod ix {
         CloseResolved {
             fee_rate_per_slot: u128,
         },
-        /// Rotate or burn the single market-level authority (`marketauth`). The current `marketauth`
-        /// must sign; a non-zero replacement must co-sign. Burning to zero is blocked while Live unless
-        /// permissionless-resolve + force-close liveness are configured.
+        /// Rotate the single market-level authority (`marketauth`). The current `marketauth` must sign;
+        /// the non-zero replacement must co-sign. Burning `marketauth` to zero is rejected.
         UpdateAuthority {
             new_pubkey: [u8; 32],
         },
@@ -8648,25 +8647,18 @@ pub mod processor {
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
 
-        // A non-zero incoming key must co-sign (proves control); burning to 0 needs only the rotator.
-        if new_pubkey != [0u8; 32] {
-            expect_signer(new_authority)?;
-            if new_authority.key.to_bytes() != new_pubkey {
-                return Err(PercolatorError::Unauthorized.into());
-            }
-        }
-
-        let (mut cfg, mode, _, _) =
-            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        expect_live_authority(&cfg.marketauth, current.key)?;
-        // Burn-guard: cannot burn the single market authority to zero while the market is Live unless
-        // permissionless-resolve + force-close liveness are configured (so the market can still wind down).
-        if new_pubkey == [0u8; 32]
-            && mode == MarketModeV16::Live
-            && (cfg.permissionless_resolve_stale_slots == 0 || cfg.force_close_delay_slots == 0)
-        {
+        if new_pubkey == [0u8; 32] {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        // Incoming key must co-sign (proves control).
+        expect_signer(new_authority)?;
+        if new_authority.key.to_bytes() != new_pubkey {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+
+        let (mut cfg, _, _, _) =
+            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        expect_live_authority(&cfg.marketauth, current.key)?;
         cfg.marketauth = new_pubkey;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
     }
@@ -8705,9 +8697,9 @@ pub mod processor {
         }
         let mut profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
 
-        // The asset's own cold-storage admin may rotate ANY of its authorities (incl. itself, and burn
-        // to 0); otherwise the current holder of THIS authority self-rotates (or burns itself). Scoped
-        // to this asset's profile only — it can never act on another asset.
+        // The asset's own cold-storage admin may rotate ANY of its authorities, and only the admin
+        // authority itself may be burned to 0; otherwise the current holder of THIS authority
+        // self-rotates. Scoped to this asset's profile only — it can never act on another asset.
         let admin_signed =
             profile.asset_admin != [0u8; 32] && profile.asset_admin == current.key.to_bytes();
         let current_value = match kind {
