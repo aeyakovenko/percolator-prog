@@ -11977,6 +11977,322 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
     assert_eq!(ledger_b_after.last_observed_insurance_atoms, 60);
 }
 
+// full-interface sweep (cron27): inbound value paths accept optional ledger accounts. A real
+// market-A ledger must not be reusable on market-B top-ups, or funds could be pulled into one vault
+// while another market's accounting ledger is updated. Rejections must happen before SPL transfer.
+#[test]
+fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+
+    let insurance_ledger_a = env.insurance_ledger_account();
+    env.top_up_insurance_with_ledger_with_cu(insurance_ledger_a, 100);
+    let backing_ledger_a = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(backing_ledger_a, 1, 100, 10);
+    assert_eq!(
+        state::read_insurance_ledger(&env.svm.get_account(&insurance_ledger_a).unwrap().data)
+            .unwrap()
+            .market_group,
+        env.market.to_bytes()
+    );
+    assert_eq!(
+        state::read_backing_domain_ledger(&env.svm.get_account(&backing_ledger_a).unwrap().data)
+            .unwrap()
+            .market_group,
+        env.market.to_bytes()
+    );
+
+    let market_b = Pubkey::new_unique();
+    let vault_authority_b =
+        Pubkey::find_program_address(&[b"vault", market_b.as_ref()], &env.program_id).0;
+    let vault_b = canonical_vault_ata(vault_authority_b, env.mint);
+    env.svm
+        .set_account(
+            market_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; state::market_account_len_for_capacity(1).unwrap()],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            vault_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, vault_authority_b, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let p = V16CuMarketParams::default();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitMarket {
+            max_portfolio_assets: p.max_portfolio_assets,
+            h_min: p.h_min,
+            h_max: p.h_max,
+            initial_price: p.initial_price,
+            min_nonzero_mm_req: p.min_nonzero_mm_req,
+            min_nonzero_im_req: p.min_nonzero_im_req,
+            maintenance_margin_bps: p.maintenance_margin_bps,
+            initial_margin_bps: p.initial_margin_bps,
+            max_trading_fee_bps: p.max_trading_fee_bps,
+            trade_fee_base_bps: p.trade_fee_base_bps,
+            liquidation_fee_bps: p.liquidation_fee_bps,
+            liquidation_fee_cap: p.liquidation_fee_cap,
+            min_liquidation_abs: p.min_liquidation_abs,
+            max_price_move_bps_per_slot: p.max_price_move_bps_per_slot,
+            max_accrual_dt_slots: p.max_accrual_dt_slots,
+            max_abs_funding_e9_per_slot: p.max_abs_funding_e9_per_slot,
+            min_funding_lifetime_slots: p.min_funding_lifetime_slots,
+            max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
+            max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
+            max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
+            public_b_chunk_atoms: p.public_b_chunk_atoms,
+            maintenance_fee_per_slot: p.maintenance_fee_per_slot,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new_readonly(env.mint, false),
+        ],
+        &[&admin],
+    )
+    .expect("init market B");
+
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let insurance_ledger_a_before = env.svm.get_account(&insurance_ledger_a).unwrap();
+    let backing_ledger_a_before = env.svm.get_account(&backing_ledger_a).unwrap();
+    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
+    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+    let assert_core_unchanged = |env: &V16CuEnv| {
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+        assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+        assert_eq!(
+            env.svm.get_account(&insurance_ledger_a).unwrap(),
+            insurance_ledger_a_before
+        );
+        assert_eq!(
+            env.svm.get_account(&backing_ledger_a).unwrap(),
+            backing_ledger_a_before
+        );
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+        assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+    };
+
+    let insurance_source = env.token_account(admin.pubkey(), 25);
+    let insurance_source_before = env.svm.get_account(&insurance_source).unwrap();
+    env.svm.expire_blockhash();
+    let insurance_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsurance { amount: 25 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(insurance_source, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(insurance_ledger_a, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        insurance_reject.is_err(),
+        "market B TopUpInsurance must reject market A's insurance ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(
+        env.svm.get_account(&insurance_source).unwrap(),
+        insurance_source_before,
+        "rejected insurance top-up must not pull source tokens"
+    );
+
+    let domain_source = env.token_account(admin.pubkey(), 30);
+    let domain_source_before = env.svm.get_account(&domain_source).unwrap();
+    env.svm.expire_blockhash();
+    let domain_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 30,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(domain_source, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(insurance_ledger_a, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        domain_reject.is_err(),
+        "market B TopUpInsuranceDomain must reject market A's insurance ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(
+        env.svm.get_account(&domain_source).unwrap(),
+        domain_source_before,
+        "rejected domain top-up must not pull source tokens"
+    );
+
+    let backing_source = env.token_account(admin.pubkey(), 40);
+    let backing_source_before = env.svm.get_account(&backing_source).unwrap();
+    env.svm.expire_blockhash();
+    let backing_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 40,
+            expiry_slot: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(backing_ledger_a, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        backing_reject.is_err(),
+        "market B TopUpBackingBucket must reject market A's backing ledger"
+    );
+    assert_core_unchanged(&env);
+    assert_eq!(
+        env.svm.get_account(&backing_source).unwrap(),
+        backing_source_before,
+        "rejected backing top-up must not pull source tokens"
+    );
+
+    let insurance_ledger_b = env.insurance_ledger_account();
+    let insurance_ok_source = env.token_account(admin.pubkey(), 25);
+    env.svm.expire_blockhash();
+    let insurance_ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsurance { amount: 25 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(insurance_ok_source, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(insurance_ledger_b, false),
+        ],
+        &[&admin],
+    );
+    assert!(insurance_ok.is_ok(), "same-market TopUpInsurance works: {insurance_ok:?}");
+    assert_eq!(env.token_amount(insurance_ok_source), 0);
+    let insurance_ledger_b_state =
+        state::read_insurance_ledger(&env.svm.get_account(&insurance_ledger_b).unwrap().data)
+            .unwrap();
+    assert_eq!(insurance_ledger_b_state.market_group, market_b.to_bytes());
+    assert_eq!(insurance_ledger_b_state.total_principal_atoms, 25);
+    assert_eq!(insurance_ledger_b_state.total_deposited_atoms, 25);
+    assert_eq!(insurance_ledger_b_state.last_observed_insurance_atoms, 25);
+
+    let domain_ledger_b = env.insurance_ledger_account();
+    let domain_ok_source = env.token_account(admin.pubkey(), 30);
+    env.svm.expire_blockhash();
+    let domain_ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 30,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(domain_ok_source, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(domain_ledger_b, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        domain_ok.is_ok(),
+        "same-market TopUpInsuranceDomain works: {domain_ok:?}"
+    );
+    assert_eq!(env.token_amount(domain_ok_source), 0);
+    let domain_ledger_b_state =
+        state::read_insurance_ledger(&env.svm.get_account(&domain_ledger_b).unwrap().data)
+            .unwrap();
+    assert_eq!(domain_ledger_b_state.market_group, market_b.to_bytes());
+    assert_eq!(domain_ledger_b_state.total_principal_atoms, 30);
+    assert_eq!(domain_ledger_b_state.total_deposited_atoms, 30);
+
+    let backing_ledger_b = env.backing_domain_ledger_account();
+    let backing_ok_source = env.token_account(admin.pubkey(), 40);
+    env.svm.expire_blockhash();
+    let backing_ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 40,
+            expiry_slot: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(backing_ok_source, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(backing_ledger_b, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        backing_ok.is_ok(),
+        "same-market TopUpBackingBucket works: {backing_ok:?}"
+    );
+    assert_eq!(env.token_amount(backing_ok_source), 0);
+    let backing_ledger_b_state =
+        state::read_backing_domain_ledger(&env.svm.get_account(&backing_ledger_b).unwrap().data)
+            .unwrap();
+    assert_eq!(backing_ledger_b_state.market_group, market_b.to_bytes());
+    assert_eq!(backing_ledger_b_state.domain, 1);
+    assert_eq!(backing_ledger_b_state.total_principal_atoms, 40);
+    assert_eq!(backing_ledger_b_state.total_deposited_atoms, 40);
+
+    let (_, group_b_after) =
+        state::read_market(&env.svm.get_account(&market_b).unwrap().data).unwrap();
+    assert_eq!(group_b_after.vault, 95);
+    assert_eq!(group_b_after.insurance, 55);
+    assert_eq!(group_b_after.insurance_domain_budget[0], 42);
+    assert_eq!(group_b_after.insurance_domain_budget[1], 13);
+    assert_eq!(
+        group_b_after.source_backing_buckets[1].fresh_unliened_backing_num,
+        40 * BOUND_SCALE
+    );
+    assert_eq!(env.token_amount(vault_b), 95);
+}
+
 // security.md sweep — ledger account-kind confusion (#44/#35): SyncBackingDomainLedger and
 // SyncInsuranceLedger accept an arbitrary program-owned writable ledger account. Passing a real
 // portfolio account must reject on the persisted account kind before any write; otherwise an
