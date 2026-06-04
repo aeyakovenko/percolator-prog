@@ -10903,6 +10903,115 @@ fn v16_bpf_tradecpi_permissionless_lp_fill_does_not_need_lp_owner_signature() {
 }
 
 #[test]
+fn v16_attack_revoked_matcher_authorization_blocks_unsigned_lp_fills() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+    let auth = matcher_auth_key(
+        &env.program_id,
+        &env.market,
+        &lp,
+        &lp_owner.pubkey(),
+        &matcher_program,
+        &ctx,
+    );
+
+    env.set_matcher_authorization(matcher_program, &lp_owner, lp, ctx, delegate, 0);
+    let auth_state = state::read_matcher_authorization(&env.svm.get_account(&auth).unwrap().data)
+        .expect("revoked auth account is still a valid auth record");
+    assert_eq!(auth_state.enabled, 0, "LP owner revoked unsigned matcher fills");
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker).unwrap();
+    let lp_before = env.svm.get_account(&lp).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+
+    env.svm.expire_blockhash();
+    let single = env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        ctx,
+        delegate,
+        0,
+        (5 * POS_SCALE) as i128,
+        100,
+    );
+    assert!(
+        single.is_err(),
+        "revoked matcher authorization must block unsigned LP TradeCpi fills"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+    assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+
+    env.svm.expire_blockhash();
+    let batch = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: (5 * POS_SCALE) as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new_readonly(lp_owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+            AccountMeta::new_readonly(auth, false),
+        ],
+        &[&taker_owner],
+    );
+    assert!(
+        batch.is_err(),
+        "revoked matcher authorization must block unsigned LP BatchTradeCpi fills"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+    assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+
+    env.set_matcher_authorization(matcher_program, &lp_owner, lp, ctx, delegate, 1);
+    env.svm.expire_blockhash();
+    let ok = env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        ctx,
+        delegate,
+        0,
+        (5 * POS_SCALE) as i128,
+        100,
+    );
+    assert!(
+        ok.is_ok(),
+        "LP owner can re-enable the exact matcher tuple after revocation: {ok:?}"
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(taker), 0).basis_pos_q,
+        (5 * POS_SCALE) as i128
+    );
+}
+
+#[test]
 fn v16_attack_tradecpi_matcher_auth_arguments_must_match_account_bytes() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
     env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
