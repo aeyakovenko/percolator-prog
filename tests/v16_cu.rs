@@ -14104,6 +14104,84 @@ fn v16_attack_force_close_healthy_asset_rejected() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
 
+// security.md sweep — ForceCloseAbandonedAsset pair-shape gate (#2/#44): once an asset is abandoned and
+// past its exit window, anyone may close a LONG/SHORT pair at the frozen mark. A cranker must NOT be able
+// to pass two same-side accounts and mutate them or the book; malformed pairings reject atomically, while
+// a valid opposite-side pair still closes.
+#[test]
+fn v16_attack_force_close_requires_opposite_sides() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    const DELAY: u64 = 5;
+    const SHUT: u64 = 10;
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+
+    let long_owner_a = Keypair::new();
+    let short_owner_a = Keypair::new();
+    let long_owner_b = Keypair::new();
+    let short_owner_b = Keypair::new();
+    let long_a = env.create_portfolio(&long_owner_a);
+    let short_a = env.create_portfolio(&short_owner_a);
+    let long_b = env.create_portfolio(&long_owner_b);
+    let short_b = env.create_portfolio(&short_owner_b);
+    for (owner, portfolio) in [
+        (&long_owner_a, long_a),
+        (&short_owner_a, short_a),
+        (&long_owner_b, long_b),
+        (&short_owner_b, short_b),
+    ] {
+        env.deposit(owner, portfolio, 1_000_000);
+    }
+    env.trade_asset_with_cu(1, &long_owner_a, long_a, &short_owner_a, short_a, POS_SCALE as i128, 100, 0);
+    env.trade_asset_with_cu(1, &long_owner_b, long_b, &short_owner_b, short_b, POS_SCALE as i128, 100, 0);
+    assert_eq!(active_leg_for_asset(&env.portfolio_state(long_a), 1).side, SideV16::Long);
+    assert_eq!(active_leg_for_asset(&env.portfolio_state(long_b), 1).side, SideV16::Long);
+    assert_eq!(env.market_state().1.assets[1].oi_eff_long_q, 2 * POS_SCALE);
+
+    env.svm.warp_to_slot(SHUT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        SHUT,
+        0,
+    );
+    env.svm.warp_to_slot(SHUT + DELAY + 1);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let long_a_before = env.svm.get_account(&long_a).unwrap();
+    let long_b_before = env.svm.get_account(&long_b).unwrap();
+    let cranker = Keypair::new();
+    let same_side = env.try_force_close_abandoned_asset_with_cu(
+        &cranker,
+        long_a,
+        long_b,
+        1,
+        SHUT + DELAY + 1,
+        POS_SCALE,
+    );
+    assert!(same_side.is_err(), "force-close must reject two same-side accounts");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before, "same-side force-close leaves market byte-identical");
+    assert_eq!(env.svm.get_account(&long_a).unwrap(), long_a_before, "same-side force-close leaves first account byte-identical");
+    assert_eq!(env.svm.get_account(&long_b).unwrap(), long_b_before, "same-side force-close leaves second account byte-identical");
+
+    let ok = env.try_force_close_abandoned_asset_with_cu(
+        &cranker,
+        long_a,
+        short_a,
+        1,
+        SHUT + DELAY + 1,
+        POS_SCALE,
+    );
+    assert!(ok.is_ok(), "valid opposite-side force-close still succeeds: {ok:?}");
+    let group = env.market_state().1;
+    assert_eq!(group.assets[1].oi_eff_long_q, POS_SCALE, "one long remains after closing one valid pair");
+    assert_eq!(group.assets[1].oi_eff_short_q, POS_SCALE, "one short remains after closing one valid pair");
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(long_a), 1));
+    assert!(has_active_leg_for_asset(&env.portfolio_state(long_b), 1));
+    assert_eq!(group.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(group.vault >= group.c_tot + group.insurance, "senior conservation");
+}
+
 // security.md sweep — off-market exec_price wash trade (#9/#22/#33): exec_price is validated only as
 // 0 < exec_price <= MAX_ORACLE_PRICE (NOT clamped to the oracle), so two colluding accounts can open a
 // position at a price far from the mark, handing one side an instant profit. Attacker goal: print
