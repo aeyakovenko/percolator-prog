@@ -19920,6 +19920,104 @@ fn v16_attack_marketauth_terminal_close_cannot_skip_resolved_payout() {
     );
 }
 
+// Same terminal-cleanup boundary, but for the deferred top-up receipt lane: after a partial resolved
+// payout the portfolio can have zero capital while still carrying unpaid user value. Marketauth must
+// not be able to dematerialize that receipt before ClaimResolvedPayoutTopup finishes it.
+#[test]
+fn v16_attack_marketauth_terminal_close_cannot_burn_pending_payout_topup() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    {
+        let mut market_account = env.svm.get_account(&env.market).expect("market account");
+        let mut portfolio_account = env
+            .svm
+            .get_account(&portfolio)
+            .expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 100 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 100,
+            paid_effective: 40,
+            finalized: false,
+        };
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        env.svm.set_account(env.market, market_account).unwrap();
+        env.svm.set_account(portfolio, portfolio_account).unwrap();
+    }
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 60);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let terminal_close = env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        terminal_close.is_err(),
+        "marketauth terminal cleanup must reject a portfolio with pending payout top-up"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "pending receipt must not be dematerialized"
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    let good_dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+    env.claim_resolved_payout_topup_with_cu(owner.pubkey(), portfolio, good_dest);
+    assert_eq!(env.token_amount(good_dest), 60, "owner receives the pending top-up");
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
+    assert!(account.resolved_payout_receipt.finalized);
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    )
+    .expect("owner can close after pending payout top-up is finalized");
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "receipt-finalized account is closable"
+    );
+}
+
 // End-to-end adversarial coverage of the PRODUCTION single-fill path: a hostile matcher writes a
 // crafted tag-0 return into the ctx account (over-fill / reversed / forged echo / zero-price /
 // unflagged-partial). handle_trade_cpi reads the ctx return + validate_matcher_return must REJECT
