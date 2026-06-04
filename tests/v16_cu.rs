@@ -16685,6 +16685,87 @@ fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit(
     assert_eq!(funded_group.vault - group_before.vault, FEE, "fee credited to accounting vault");
 }
 
+// security.md sweep — dynamic append rollback (#44/#48): the append path reallocs the market account
+// before activate_dynamic_asset_slot rejects zero authorities. A rejected append must roll back account
+// length, slot counters, fee collection, and all market-0 budget credits.
+#[test]
+fn v16_attack_permissionless_append_zero_authority_rolls_back_realloc_and_fee() {
+    const FEE: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(FEE);
+    env.svm.warp_to_slot(1);
+
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let source = env.token_account(creator.pubkey(), FEE as u64);
+    let (_, group_before) = env.market_state();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: [0u8; 32],
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(rejected.is_err(), "permissionless append with a zero authority must reject");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected append rolls back the pre-write market realloc"
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before, "vault token account unchanged");
+    assert_eq!(env.token_amount(source), FEE as u64, "fee was not pulled by rejected append");
+    let (_, rejected_group) = env.market_state();
+    assert_eq!(rejected_group.config.max_market_slots, group_before.config.max_market_slots);
+    assert_eq!(rejected_group.insurance, group_before.insurance);
+    assert_eq!(rejected_group.vault, group_before.vault);
+    assert_eq!(rejected_group.insurance_domain_budget, group_before.insurance_domain_budget);
+
+    let valid_source = env.token_account(creator.pubkey(), FEE as u64);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(valid_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    )
+    .expect("valid permissionless append succeeds after rejected zero-authority attempt");
+    let (_, valid_group) = env.market_state();
+    assert_eq!(env.token_amount(valid_source), 0, "valid append pulls fee");
+    assert_eq!(valid_group.config.max_market_slots, group_before.config.max_market_slots + 1);
+    assert_eq!(valid_group.assets[1].lifecycle, AssetLifecycleV16::Active);
+}
+
 // security.md sweep — permissionless create fee funds asset-0 insurance (#5 / README L59): the fee a
 // stranger pays to permissionlessly create asset N flows entirely into asset-0's insurance (the market
 // insurance pool + asset-0's per-domain budgets), conserving every atom.
