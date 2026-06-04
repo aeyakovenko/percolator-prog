@@ -19822,6 +19822,112 @@ fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
     assert_eq!(active_leg_for_asset(&t, 1).basis_pos_q, -sz);
 }
 
+// security.md sweep — batch trades must not silently skip backing-domain fee accounting. Backing
+// fees are collected on single-leg trades when source-credit backing grows; batch fee splitting does
+// not implement that accounting yet, so both batch surfaces must reject atomically while the policy is
+// active. A normal TradeNoCpi control still succeeds under the same policy, proving this is a narrow
+// batch gate rather than a market-wide trade lock.
+#[test]
+fn v16_attack_batch_trades_reject_with_backing_fee_policy() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    env.update_backing_fee_policy_with_cu(0, 77, 5_000);
+    let (cfg, _) = env.market_state();
+    assert_eq!(
+        cfg.backing_trade_fee_policy_count, 1,
+        "test setup must activate the backing-fee policy gate"
+    );
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+    let sz = (5 * POS_SCALE) as i128;
+
+    let market_before = env.svm.get_account(&env.market).unwrap().data;
+    let taker_before = env.svm.get_account(&ta).unwrap().data;
+    let lp_before = env.svm.get_account(&la).unwrap().data;
+    env.svm.expire_blockhash();
+    let nocpi = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![BatchTradeLeg {
+                asset_index: 0,
+                size_q: sz,
+                exec_price: 100,
+                fee_bps: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(
+        nocpi.is_err(),
+        "BatchTradeNoCpi must reject while backing-fee policy accounting is active"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap().data, market_before);
+    assert_eq!(env.svm.get_account(&ta).unwrap().data, taker_before);
+    assert_eq!(env.svm.get_account(&la).unwrap().data, lp_before);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, la);
+    let market_before = env.svm.get_account(&env.market).unwrap().data;
+    let taker_before = env.svm.get_account(&ta).unwrap().data;
+    let lp_before = env.svm.get_account(&la).unwrap().data;
+    let ctx_before = env.svm.get_account(&ctx).unwrap().data;
+    env.svm.expire_blockhash();
+    let cpi = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: sz,
+                fee_bps: 0,
+                limit_price: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new_readonly(lp.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker],
+    );
+    assert!(
+        cpi.is_err(),
+        "BatchTradeCpi must reject while backing-fee policy accounting is active"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap().data, market_before);
+    assert_eq!(env.svm.get_account(&ta).unwrap().data, taker_before);
+    assert_eq!(env.svm.get_account(&la).unwrap().data, lp_before);
+    assert_eq!(env.svm.get_account(&ctx).unwrap().data, ctx_before);
+
+    env.svm.expire_blockhash();
+    let single = env.try_trade_asset_with_cu(0, &taker, ta, &lp, la, sz, 100, 0);
+    assert!(
+        single.is_ok(),
+        "single-leg TradeNoCpi must still work under an active backing-fee policy: {single:?}"
+    );
+    let taker_after = env.portfolio_state(ta);
+    let lp_after = env.portfolio_state(la);
+    assert_eq!(active_leg_for_asset(&taker_after, 0).basis_pos_q, sz);
+    assert_eq!(active_leg_for_asset(&lp_after, 0).basis_pos_q, -sz);
+}
+
 // security.md sweep — BatchTradeCpi fee bounds on permissionless LP fills (#37/#49): in CPI mode the
 // taker supplies fee_bps while the LP owner does not sign the fill. An over-max fee must therefore
 // reject the whole batch, or a taker could drain an LP into protocol insurance through a matcher fill.
