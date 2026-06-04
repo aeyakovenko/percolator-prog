@@ -1,0 +1,13 @@
+[package]
+name = "auth-matcher"
+version = "0.1.0"
+edition = "2021"
+
+# Isolate from the parent workspace so program tests do not build it as a normal member.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = "2.0"
