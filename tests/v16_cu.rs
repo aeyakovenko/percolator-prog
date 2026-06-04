@@ -5434,6 +5434,155 @@ fn v16_attack_sync_maintenance_bad_cranker_rolls_back_fee() {
 }
 
 #[test]
+fn v16_attack_sync_maintenance_rejects_cross_market_cranker_reward() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    let payer_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    env.deposit(&payer_owner, payer_portfolio, 100_000_000);
+    env.update_maintenance_fee_policy_with_cu(4_000);
+
+    let market_b = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            market_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; state::market_account_len_for_capacity(1).unwrap()],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let p = V16CuMarketParams::default();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitMarket {
+            max_portfolio_assets: p.max_portfolio_assets,
+            h_min: p.h_min,
+            h_max: p.h_max,
+            initial_price: p.initial_price,
+            min_nonzero_mm_req: p.min_nonzero_mm_req,
+            min_nonzero_im_req: p.min_nonzero_im_req,
+            maintenance_margin_bps: p.maintenance_margin_bps,
+            initial_margin_bps: p.initial_margin_bps,
+            max_trading_fee_bps: p.max_trading_fee_bps,
+            trade_fee_base_bps: p.trade_fee_base_bps,
+            liquidation_fee_bps: p.liquidation_fee_bps,
+            liquidation_fee_cap: p.liquidation_fee_cap,
+            min_liquidation_abs: p.min_liquidation_abs,
+            max_price_move_bps_per_slot: p.max_price_move_bps_per_slot,
+            max_accrual_dt_slots: p.max_accrual_dt_slots,
+            max_abs_funding_e9_per_slot: p.max_abs_funding_e9_per_slot,
+            min_funding_lifetime_slots: p.min_funding_lifetime_slots,
+            max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
+            max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
+            max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
+            public_b_chunk_atoms: p.public_b_chunk_atoms,
+            maintenance_fee_per_slot: p.maintenance_fee_per_slot,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new_readonly(env.mint, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("init market B");
+
+    let foreign_cranker_owner = Keypair::new();
+    env.ensure_signer_account(foreign_cranker_owner.pubkey());
+    let foreign_cranker_portfolio = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            foreign_cranker_portfolio,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; env.portfolio_account_len],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(foreign_cranker_owner.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(foreign_cranker_portfolio, false),
+        ],
+        &[&foreign_cranker_owner],
+    )
+    .expect("init foreign cranker portfolio on market B");
+
+    let payer_before = env.svm.get_account(&payer_portfolio).unwrap().data;
+    let market_a_before = env.svm.get_account(&env.market).unwrap().data;
+    let market_b_before = env.svm.get_account(&market_b).unwrap().data;
+    let foreign_before = env
+        .svm
+        .get_account(&foreign_cranker_portfolio)
+        .unwrap()
+        .data;
+
+    env.svm.warp_to_slot(10);
+    env.svm.expire_blockhash();
+    let rejected = env
+        .try_sync_maintenance_fee_with_cu(
+            payer_portfolio,
+            Some(foreign_cranker_portfolio),
+            10,
+        )
+        .expect_err("foreign-market cranker reward account must reject");
+    assert!(
+        rejected.contains("TransactionError") || rejected.contains("InstructionError"),
+        "unexpected cross-market cranker rejection: {rejected}"
+    );
+    assert_eq!(
+        env.svm.get_account(&payer_portfolio).unwrap().data,
+        payer_before,
+        "cross-market reward rejection must not charge the payer"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_a_before,
+        "cross-market reward rejection must not mutate market A"
+    );
+    assert_eq!(
+        env.svm.get_account(&market_b).unwrap().data,
+        market_b_before,
+        "cross-market reward rejection must not mutate market B"
+    );
+    assert_eq!(
+        env.svm
+            .get_account(&foreign_cranker_portfolio)
+            .unwrap()
+            .data,
+        foreign_before,
+        "cross-market reward rejection must not credit the foreign portfolio"
+    );
+
+    let local_cranker_owner = Keypair::new();
+    let local_cranker_portfolio = env.create_portfolio(&local_cranker_owner);
+    env.svm.expire_blockhash();
+    env.sync_maintenance_fee_with_cu(payer_portfolio, Some(local_cranker_portfolio), 10);
+    assert_eq!(env.portfolio_state(payer_portfolio).last_fee_slot, 10);
+    assert!(
+        env.portfolio_state(local_cranker_portfolio).capital > 0,
+        "same-market cranker still receives the reward"
+    );
+}
+
+#[test]
 fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 40,
