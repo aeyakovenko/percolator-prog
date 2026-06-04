@@ -16085,6 +16085,212 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
     assert!(group.vault >= group.c_tot + group.insurance, "senior conservation");
 }
 
+// security.md sweep — liquidation cranker reward market binding (#3/#44): when cranker rewards are
+// enabled, the reward portfolio must belong to the same market as the liquidated account. A foreign
+// market portfolio can otherwise try to receive value from this market's insurance while validating under
+// different market provenance. Rejection must be atomic; a same-market cranker remains the positive path.
+#[test]
+fn v16_attack_liquidation_rejects_cross_market_cranker_reward() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let lo = Keypair::new(); let l = env.create_portfolio(&lo);
+    let so = Keypair::new(); let s = env.create_portfolio(&so);
+    env.deposit(&lo, l, 100_000_000);
+    env.deposit(&so, s, 100_000);
+    env.trade_asset_with_cu(0, &lo, l, &so, s, POS_SCALE as i128, 1_000_000, 0);
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: slot,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(s, false),
+            ],
+            &[],
+        );
+    }
+    assert!(
+        env.portfolio_state(s).health_cert.certified_liq_deficit != 0,
+        "short is liquidatable before the reward-account substitution attempt"
+    );
+
+    let market_b = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            market_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; state::market_account_len_for_capacity(1).unwrap()],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let p = V16CuMarketParams::default();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitMarket {
+            max_portfolio_assets: p.max_portfolio_assets,
+            h_min: p.h_min,
+            h_max: p.h_max,
+            initial_price: p.initial_price,
+            min_nonzero_mm_req: p.min_nonzero_mm_req,
+            min_nonzero_im_req: p.min_nonzero_im_req,
+            maintenance_margin_bps: p.maintenance_margin_bps,
+            initial_margin_bps: p.initial_margin_bps,
+            max_trading_fee_bps: p.max_trading_fee_bps,
+            trade_fee_base_bps: p.trade_fee_base_bps,
+            liquidation_fee_bps: p.liquidation_fee_bps,
+            liquidation_fee_cap: p.liquidation_fee_cap,
+            min_liquidation_abs: p.min_liquidation_abs,
+            max_price_move_bps_per_slot: p.max_price_move_bps_per_slot,
+            max_accrual_dt_slots: p.max_accrual_dt_slots,
+            max_abs_funding_e9_per_slot: p.max_abs_funding_e9_per_slot,
+            min_funding_lifetime_slots: p.min_funding_lifetime_slots,
+            max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
+            max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
+            max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
+            public_b_chunk_atoms: p.public_b_chunk_atoms,
+            maintenance_fee_per_slot: p.maintenance_fee_per_slot,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new_readonly(env.mint, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("init market B");
+
+    let foreign_owner = Keypair::new();
+    env.ensure_signer_account(foreign_owner.pubkey());
+    let foreign_cranker = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            foreign_cranker,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; env.portfolio_account_len],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(foreign_owner.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(foreign_cranker, false),
+        ],
+        &[&foreign_owner],
+    )
+    .expect("init foreign cranker portfolio on market B");
+
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let short_before = env.svm.get_account(&s).unwrap();
+    let foreign_before = env.svm.get_account(&foreign_cranker).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 30,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(foreign_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(s, false),
+            AccountMeta::new(foreign_cranker, false),
+        ],
+        &[&foreign_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "foreign-market cranker reward portfolio must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_a_before,
+        "cross-market reward rejection leaves market A byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&market_b).unwrap(),
+        market_b_before,
+        "cross-market reward rejection leaves market B byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&s).unwrap(),
+        short_before,
+        "cross-market reward rejection leaves the liquidated account byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&foreign_cranker).unwrap(),
+        foreign_before,
+        "cross-market reward rejection does not credit the foreign cranker"
+    );
+
+    let local_cranker = env.create_portfolio(&foreign_owner);
+    let local_cap_before = env.portfolio_state(local_cranker).capital;
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 30,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(foreign_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(s, false),
+            AccountMeta::new(local_cranker, false),
+        ],
+        &[&foreign_owner],
+    );
+    assert!(
+        accepted.is_ok(),
+        "same-market cranker reward liquidation still succeeds: {:?}",
+        accepted
+    );
+    assert!(
+        env.portfolio_state(local_cranker).capital > local_cap_before,
+        "positive control: same-market cranker receives a real reward"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault as u64, env.token_amount(env.vault), "accounting == real vault");
+    assert!(group.vault >= group.c_tot + group.insurance, "senior conservation");
+}
+
 // security.md sweep — liquidation fee is bounded by liquidation_fee_cap (#3/#33): the liquidation fee is
 // min(liquidation_fee_bps * notional, liquidation_fee_cap). Attacker/edge goal: a large liquidation
 // charges an unbounded fee (bps*notional) draining the victim / over-feeding insurance+cranker past the
