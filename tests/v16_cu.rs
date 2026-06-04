@@ -11723,6 +11723,111 @@ fn v16_attack_insurance_topup_pinned_to_canonical_vault() {
     assert_eq!(env.token_amount(src), 500, "source untouched");
 }
 
+// security.md sweep - inbound domain value paths are vault-pinned (#44): TopUpInsuranceDomain and
+// TopUpBackingBucket both credit domain-specific engine accounting before the SPL transfer. They must
+// reject a vault-authority-owned fragment account and route only to the canonical vault ATA.
+#[test]
+fn v16_attack_domain_topups_pinned_to_canonical_vault() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+
+    let (_domain_src_ok, _) = env.top_up_insurance_domain_with_authority_and_cu(&admin, 0, 100);
+    let (_, g_after_domain_ok) = env.market_state();
+    assert_eq!(g_after_domain_ok.insurance_domain_budget[0], 100);
+    assert_eq!(g_after_domain_ok.insurance, 100);
+    assert_eq!(g_after_domain_ok.vault as u64, env.token_amount(env.vault));
+
+    let fake_vault = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            fake_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let domain_src = env.token_account_for_mint(env.mint, admin.pubkey(), 500);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let source_before = env.svm.get_account(&domain_src).unwrap();
+    let fake_before = env.svm.get_account(&fake_vault).unwrap();
+    env.svm.expire_blockhash();
+    let domain_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 500,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(domain_src, false),
+            AccountMeta::new(fake_vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        domain_reject.is_err(),
+        "domain insurance top-up to a non-canonical vault must reject"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&domain_src).unwrap(), source_before);
+    assert_eq!(env.svm.get_account(&fake_vault).unwrap(), fake_before);
+
+    let (_backing_src_ok, _) = env.top_up_backing_bucket_with_cu(1, 100, 10_000);
+    let (_, g_after_backing_ok) = env.market_state();
+    assert!(
+        g_after_backing_ok.source_backing_buckets[1].fresh_unliened_backing_num > 0,
+        "canonical backing top-up funded the bucket"
+    );
+    assert_eq!(
+        g_after_backing_ok.vault as u64,
+        env.token_amount(env.vault),
+        "canonical vault balance matches accounting after controls"
+    );
+
+    let backing_src = env.token_account_for_mint(env.mint, admin.pubkey(), 700);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let source_before = env.svm.get_account(&backing_src).unwrap();
+    let fake_before = env.svm.get_account(&fake_vault).unwrap();
+    env.svm.expire_blockhash();
+    let backing_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 700,
+            expiry_slot: 10_000,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_src, false),
+            AccountMeta::new(fake_vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        backing_reject.is_err(),
+        "backing bucket top-up to a non-canonical vault must reject"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&backing_src).unwrap(), source_before);
+    assert_eq!(env.svm.get_account(&fake_vault).unwrap(), fake_before);
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == canonical vault");
+    assert_eq!(env.token_amount(fake_vault), 0, "fragment vault received nothing");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
+
 // security.md sweep — funding direction symmetry (#33/#9): with the mark BELOW the index (opposite of
 // batch 19), funding must flow the other way (shorts pay longs) and still be value-conserving. Probes
 // the negative-premium branch of premium_funding_rate_e9.
