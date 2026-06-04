@@ -21706,6 +21706,90 @@ fn v16_attack_init_market_cannot_reinitialize_funded_market() {
     );
 }
 
+// SOL-010 / account-kind confusion: InitPortfolio is permissionless and targets a program-owned
+// writable account. Passing the market slab itself as the portfolio target must reject atomically;
+// otherwise a user could rewrite the market into a portfolio and strand every account/vault.
+#[test]
+fn v16_attack_init_portfolio_cannot_use_market_as_portfolio_account() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let funded_portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, funded_portfolio, 500_000);
+
+    let attacker = Keypair::new();
+    env.ensure_signer_account(attacker.pubkey());
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let funded_before = env.svm.get_account(&funded_portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let alias_init = env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&attacker],
+    );
+    assert!(
+        alias_init.is_err(),
+        "InitPortfolio must reject the market account as the portfolio target"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected alias init must leave market bytes and lamports unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&funded_portfolio).unwrap(),
+        funded_before,
+        "rejected alias init must not touch existing portfolios"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected alias init must not move or orphan vault custody"
+    );
+
+    let normal_owner = Keypair::new();
+    env.ensure_signer_account(normal_owner.pubkey());
+    let normal_portfolio = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            normal_portfolio,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; env.portfolio_account_len],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let normal_init = env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(normal_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(normal_portfolio, false),
+        ],
+        &[&normal_owner],
+    );
+    assert!(
+        normal_init.is_ok(),
+        "valid InitPortfolio must still work after rejected alias attempt: {normal_init:?}"
+    );
+    let initialized = env.portfolio_state(normal_portfolio);
+    assert_eq!(initialized.owner, normal_owner.pubkey().to_bytes());
+    assert_eq!(
+        initialized.provenance_header.market_group_id,
+        env.market.to_bytes()
+    );
+    assert_eq!(initialized.capital, 0);
+}
+
 // SOL-010 (reinitialization): InitPortfolio targets a program-owned account and SETS its owner. An
 // attacker could try to re-init a VICTIM's already-funded portfolio -- which would reset its capital
 // and reassign ownership, a severe LOF (victim's vaulted tokens orphaned). The is_initialized guard
