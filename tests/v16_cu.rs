@@ -17926,6 +17926,186 @@ fn v16_attack_swap_secondary_unauthorized_and_bounded() {
     assert_eq!(env.token_amount(secondary_vault), 0, "secondary reserve fully drained, not more");
 }
 
+// full-interface sweep (cron30): SwapSecondaryForPrimary must pin the secondary reserve to the
+// current market's vault PDA. A valid secondary-mint token account owned by another market's vault PDA
+// must not be usable as the reserve, or one market's base-unit authority could drain another market's
+// secondary collateral while depositing primary into its own vault.
+#[test]
+fn v16_attack_swap_secondary_rejects_foreign_market_vault() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+
+    let secondary_vault_a = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault_a,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market_b = Pubkey::new_unique();
+    let vault_authority_b =
+        Pubkey::find_program_address(&[b"vault", market_b.as_ref()], &env.program_id).0;
+    let secondary_vault_b = canonical_vault_ata(vault_authority_b, secondary_mint);
+    env.svm
+        .set_account(
+            market_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; state::market_account_len_for_capacity(1).unwrap()],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let p = V16CuMarketParams::default();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitMarket {
+            max_portfolio_assets: p.max_portfolio_assets,
+            h_min: p.h_min,
+            h_max: p.h_max,
+            initial_price: p.initial_price,
+            min_nonzero_mm_req: p.min_nonzero_mm_req,
+            min_nonzero_im_req: p.min_nonzero_im_req,
+            maintenance_margin_bps: p.maintenance_margin_bps,
+            initial_margin_bps: p.initial_margin_bps,
+            max_trading_fee_bps: p.max_trading_fee_bps,
+            trade_fee_base_bps: p.trade_fee_base_bps,
+            liquidation_fee_bps: p.liquidation_fee_bps,
+            liquidation_fee_cap: p.liquidation_fee_cap,
+            min_liquidation_abs: p.min_liquidation_abs,
+            max_price_move_bps_per_slot: p.max_price_move_bps_per_slot,
+            max_accrual_dt_slots: p.max_accrual_dt_slots,
+            max_abs_funding_e9_per_slot: p.max_abs_funding_e9_per_slot,
+            min_funding_lifetime_slots: p.min_funding_lifetime_slots,
+            max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
+            max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
+            max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
+            public_b_chunk_atoms: p.public_b_chunk_atoms,
+            maintenance_fee_per_slot: p.maintenance_fee_per_slot,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new_readonly(env.mint, false),
+        ],
+        &[&admin],
+    )
+    .expect("init market B");
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: secondary_mint.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(secondary_mint, false),
+        ],
+        &[&admin],
+    )
+    .expect("configure market B secondary mint");
+    env.svm
+        .set_account(
+            secondary_vault_b,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, vault_authority_b, 70),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 10);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_vault_a_before = env.svm.get_account(&secondary_vault_a).unwrap();
+    let secondary_vault_b_before = env.svm.get_account(&secondary_vault_b).unwrap();
+    let source_before = env.svm.get_account(&primary_source).unwrap();
+    let dest_before = env.svm.get_account(&secondary_dest).unwrap();
+
+    let swap_with_secondary_vault =
+        |env: &mut V16CuEnv, secondary_vault: Pubkey| -> Result<u64, String> {
+            env.svm.expire_blockhash();
+            send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new_readonly(env.market, false),
+                    AccountMeta::new(primary_source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new(secondary_dest, false),
+                    AccountMeta::new(secondary_vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&admin],
+            )
+        };
+
+    let rejected = swap_with_secondary_vault(&mut env, secondary_vault_b);
+    assert!(
+        rejected.is_err(),
+        "SwapSecondaryForPrimary must reject a reserve owned by a foreign market vault PDA"
+    );
+    assert_eq!(
+        env.svm.get_account(&primary_source).unwrap(),
+        source_before,
+        "rejected foreign-vault swap must not pull primary collateral"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        dest_before,
+        "rejected foreign-vault swap must not pay secondary collateral"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "rejected foreign-vault swap must not credit the current primary vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault_a).unwrap(),
+        secondary_vault_a_before,
+        "current market secondary reserve is untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault_b).unwrap(),
+        secondary_vault_b_before,
+        "foreign market secondary reserve is untouched"
+    );
+
+    let ok = swap_with_secondary_vault(&mut env, secondary_vault_a);
+    assert!(ok.is_ok(), "same-market secondary reserve swap succeeds: {ok:?}");
+    assert_eq!(env.token_amount(primary_source), 0);
+    assert_eq!(env.token_amount(env.vault), 10);
+    assert_eq!(env.token_amount(secondary_dest), 10);
+    assert_eq!(env.token_amount(secondary_vault_a), 40);
+    assert_eq!(env.token_amount(secondary_vault_b), 70);
+}
+
 // security.md sweep — CloseSlab with secondary collateral (#44/#48): if a secondary collateral mint is
 // configured, closing the slab must not zero the market after closing only the primary vault. Any
 // secondary reserve must be recovered atomically in the same close, or the PDA-held reserve is stranded.
