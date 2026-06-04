@@ -672,8 +672,8 @@ pub mod state {
     pub struct WrapperConfigV16 {
         /// Single market-level authority key. Set to the init signer at InitMarket. Can: create
         /// market 0, activate/retire assets + set the permissionless-create-fee policy, force-shutdown
-        /// permissionless assets 1..N (RECOVERY with exit window), ResolveMarket / CloseSlab /
-        /// AdminForceCloseAccount, UpdateConfig, and base-unit mint rotation/swap. Rotated/burned via
+        /// permissionless assets 1..N (RECOVERY with exit window), ResolveMarket / CloseSlab,
+        /// market-policy updates, and base-unit mint rotation/swap. Rotated/burned via
         /// UpdateAuthority (tag 32). Replaces the former separate admin / asset_authority /
         /// base_unit_authority keys (which were always the same init signer).
         pub marketauth: [u8; 32],
@@ -6664,7 +6664,6 @@ pub mod processor {
         let tail = &accounts[8..];
 
         expect_signer(signer_a)?;
-        expect_signer(signer_b)?;
         expect_writable(market_ai)?;
         expect_writable(account_a_ai)?;
         expect_writable(account_b_ai)?;
@@ -6690,15 +6689,6 @@ pub mod processor {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
         }
-
-        let (delegate, bump) = derive_matcher_delegate(
-            program_id,
-            market_ai.key,
-            account_b_ai.key,
-            matcher_prog.key,
-            matcher_ctx.key,
-        );
-        expect_key(matcher_delegate, &delegate)?;
 
         let (cfg_pre, mode_pre, current_slot_pre, oracle_price, max_trading_fee_bps) =
             state::read_market_trade_preflight(
@@ -6744,6 +6734,15 @@ pub mod processor {
         {
             return Err(PercolatorError::Unauthorized.into());
         }
+        let (delegate, bump) = derive_matcher_delegate(
+            program_id,
+            market_ai.key,
+            account_b_ai.key,
+            signer_b.key,
+            matcher_prog.key,
+            matcher_ctx.key,
+        );
+        expect_key(matcher_delegate, &delegate)?;
         if size_q == 0 || size_q == i128::MIN {
             return Err(PercolatorError::InvalidInstruction.into());
         }
@@ -6767,6 +6766,7 @@ pub mod processor {
                 b"matcher",
                 market_ai.key.as_ref(),
                 account_b_ai.key.as_ref(),
+                signer_b.key.as_ref(),
                 matcher_prog.key.as_ref(),
                 matcher_ctx.key.as_ref(),
                 &[bump],
@@ -6890,7 +6890,6 @@ pub mod processor {
         let tail = &accounts[8..];
 
         expect_signer(signer_a)?;
-        expect_signer(signer_b)?;
         expect_writable(market_ai)?;
         expect_writable(account_a_ai)?;
         expect_writable(account_b_ai)?;
@@ -6917,17 +6916,8 @@ pub mod processor {
             }
         }
 
-        let (delegate, bump) = derive_matcher_delegate(
-            program_id,
-            market_ai.key,
-            account_b_ai.key,
-            matcher_prog.key,
-            matcher_ctx.key,
-        );
-        expect_key(matcher_delegate, &delegate)?;
-
-        // Preflight: market must be Live, both accounts owned by their signers and self-consistent,
-        // and read each leg's oracle price (for the matcher request + return binding).
+        // Preflight: market must be Live, the taker owner must sign, the LP owner identity must
+        // match account_b, and each leg's oracle price is read for matcher request/return binding.
         let mut asset_indices: Vec<u16> = Vec::with_capacity(legs.len());
         for leg in legs {
             if leg.size_q == 0 || leg.size_q == i128::MIN {
@@ -6956,6 +6946,15 @@ pub mod processor {
         if account_a_owner != signer_a.key.to_bytes() || account_b_owner != signer_b.key.to_bytes() {
             return Err(PercolatorError::Unauthorized.into());
         }
+        let (delegate, bump) = derive_matcher_delegate(
+            program_id,
+            market_ai.key,
+            account_b_ai.key,
+            signer_b.key,
+            matcher_prog.key,
+            matcher_ctx.key,
+        );
+        expect_key(matcher_delegate, &delegate)?;
 
         let req_id = current_slot_pre.wrapping_add(1);
         let lp_account_id = matcher_lp_account_id(&delegate);
@@ -6981,6 +6980,7 @@ pub mod processor {
                 b"matcher",
                 market_ai.key.as_ref(),
                 account_b_ai.key.as_ref(),
+                signer_b.key.as_ref(),
                 matcher_prog.key.as_ref(),
                 matcher_ctx.key.as_ref(),
                 &[bump],
@@ -11960,6 +11960,7 @@ pub mod processor {
         program_id: &Pubkey,
         market_key: &Pubkey,
         maker_account: &Pubkey,
+        maker_owner: &Pubkey,
         matcher_program: &Pubkey,
         matcher_context: &Pubkey,
     ) -> (Pubkey, u8) {
@@ -11968,6 +11969,7 @@ pub mod processor {
                 b"matcher",
                 market_key.as_ref(),
                 maker_account.as_ref(),
+                maker_owner.as_ref(),
                 matcher_program.as_ref(),
                 matcher_context.as_ref(),
             ],

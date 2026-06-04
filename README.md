@@ -6,7 +6,7 @@
 
 Percolator is a Solana program that wraps the `percolator` crate's v16 account-local risk engine and exposes a composable instruction set for deploying and operating perpetual markets.
 
-This README is intentionally **high-level**: it explains the trust model, account layout, operational flows, and the parts that are easy to get wrong (CPI binding, nonce discipline, oracle usage, and side-mode gating). It does **not** restate code structure or obvious Rust/Solana boilerplate.
+This README is intentionally **high-level**: it explains the trust model, account layout, operational flows, and the parts that are easy to get wrong (CPI binding, request echo binding, oracle usage, and side-mode gating). It does **not** restate code structure or obvious Rust/Solana boilerplate.
 
 ---
 
@@ -56,7 +56,7 @@ The economic and governance model for a permissionless multi-asset market. Statu
 - The **`marketauth` key sets the fee to create assets 1..N permissionlessly**. **A fee of zero means
   creation is NOT permissionless** — market-wide authority is then required to add an asset. **✅**
   (`UpdateMarketInitFeePolicy`; the append path charges `permissionless_market_init_fee_for_asset`
-  and returns `Unauthorized` for a non-authority when the fee is 0, `v16_program.rs:8598`;
+  and returns `Unauthorized` for a non-authority when the fee is 0;
   `v16_attack_permissionless_create_requires_nonzero_fee`.)
 
 ### Assets 1..N
@@ -64,8 +64,7 @@ The economic and governance model for a permissionless multi-asset market. Statu
 - **Permissionless to create for a fee, and that fee goes to asset-0 insurance.** **✅**
   (`v16_attack_permissionless_create_fee_funds_asset0_insurance` asserts the whole fee lands in the
   asset-0 insurance pool + its per-domain budgets, conserved.)
-  (`handle_update_asset_lifecycle` append → `credit_market_insurance_budget_view(group, 0, fee)`,
-  `v16_program.rs:8723/8758`.)
+  (`handle_update_asset_lifecycle` append/reuse → `credit_market_insurance_budget_view(group, 0, fee)`.)
 - Each asset has its **own insurance + backing**. **✅**
 - **Fee routing (configured percentages):**
   - a % of **all trading fees → asset-0 insurance** (`fee_redirect_to_market_0_bps`). **✅**
@@ -119,7 +118,7 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   **create/retire assets and set the permissionless-create-fee policy**, **safely force-shutdown a
   permissionless asset 1..N** (`ASSET_ACTION_SHUTDOWN` → RECOVERY with the `force_close_delay_slots`
   exit window so traders can exit — a non-`marketauth` signer is rejected), **resolve/close the market**
-  (`ResolveMarket`/`CloseSlab`/`AdminForceCloseAccount`), **`UpdateConfig`**, and **rotate the base-unit
+  (`ResolveMarket`/`CloseSlab`), **market policies**, and **rotate/swap the base-unit
   mint**. It is rotated/burned via `UpdateAuthority { new_pubkey }` (current `marketauth` signs, non-zero
   replacement co-signs; burn-to-zero blocked while Live unless permissionless-resolve + force-close are
   configured). Everything else — insurance/operator/backing/oracle on **every** asset including 0 — is
@@ -185,8 +184,8 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
 ### One market group + account-local portfolios
 A v16 market is represented by a **program-owned market-group account** plus independently supplied **program-owned portfolio accounts**:
 
-- **Header**: magic/version/admin + scoped insurance authorities + reserved nonce bytes
-- **Wrapper config**: mint/vault/oracle keys + policy knobs
+- **Header**: magic/version, global accounting, progress counters, and per-asset engine state
+- **Wrapper config**: collateral mints, policy knobs, and the market-level `marketauth`
 - **MarketGroupV16Account / PortfolioAccountV16Account**: Pod account-state layouts used for account-byte access
 
 Benefits:
@@ -224,11 +223,11 @@ Percolator enforces three layers with distinct responsibilities:
 - reads oracle prices
 - runs optional matcher CPI for `TradeCpi`
 - enforces wrapper-level policy around account authority, oracle input, bounded live insurance withdrawal, matcher CPI, and crank routing
-- ensures coupling invariants (identity binding, nonce discipline, "use exec_size not requested size")
+- ensures coupling invariants (identity binding, request echo binding, "use exec_size not requested size")
 
 ### 3) Matcher program (LP-scoped trust)
 - provides execution result (`exec_price`, `exec_size`) and "accept/reject/partial" flags
-- trusted **only by the LP that registered it**, not by the protocol as a whole
+- trusted **only by the LP that supplied it for that trade**, not by the protocol as a whole
 - Percolator treats matcher as adversarial except for LP-chosen semantics and validates strict ABI constraints.
 
 ---
@@ -247,13 +246,12 @@ The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-
 - **Layout**: header + `PortfolioAccountV16Account`
 - Holds one user's capital, PnL, source claims/liens, health certificate, close progress, and active legs.
 
-Market header authority fields are:
-- **admin**: market governance/config authority
-- **insurance_authority**: resolved-market, unbounded insurance withdrawal authority
-- **insurance_operator**: live, bounded `WithdrawInsuranceLimited` authority
+Authority fields are split by scope:
+- **`WrapperConfigV16.marketauth`**: one market-level governance key for market policies, asset lifecycle, resolution/close, and base-unit controls
+- **`AssetOracleProfileV16.asset_admin`**: per-asset cold key that rotates that asset's scoped authorities
+- **`AssetOracleProfileV16.insurance_authority` / `insurance_operator` / `backing_bucket_authority` / `oracle_authority`**: per-asset operational authorities
 
-Reserved market header bytes are used for:
-- **request nonce**: monotonic `u64` used to bind matcher responses to a specific request
+Matcher requests do not use a persisted market nonce. The wrapper invokes the matcher and requires the response to echo the request id, LP identity, asset index, oracle price, and requested size/sign constraints.
 
 ### Vault token account (market collateral)
 - SPL Token account holding collateral for this market
@@ -263,11 +261,11 @@ Reserved market header bytes are used for:
 Vault authority PDA:
 - seeds: `["vault", market_group_pubkey]`
 
-### LP PDA (TradeCpi-only signer identity)
-A per-LP PDA is used only as a CPI signer to the matcher.
+### Matcher delegate PDA (TradeCpi-only signer identity)
+A per-matcher delegate PDA is used only as a CPI signer to the matcher.
 
-LP PDA:
-- seeds: `["lp", market_group_pubkey, lp_idx_le]`
+Matcher delegate PDA:
+- seeds: `["matcher", market_group_pubkey, lp_portfolio_pubkey, lp_owner_pubkey, matcher_program_pubkey, matcher_context_pubkey]`
 - required **shape constraints**:
   - system-owned
   - empty data
@@ -277,6 +275,8 @@ This makes it a "pure identity signer" and prevents it from becoming an attack s
 
 ### Matcher context (TradeCpi)
 - account owned by matcher program
+- matcher programs should initialize/configure the context under their own LP-owner signature
+  policy and store/check the expected delegate PDA
 - matcher writes its return prefix into the first bytes
 - Percolator reads and validates the prefix after CPI
 
@@ -289,8 +289,7 @@ This section describes intent and operational ordering, not argument-by-argument
 ### Market lifecycle
 - **InitMarket**
   - initializes slab header/config + calls `RiskEngine::init_in_place(risk_params, clock.slot, init_price)`
-  - binds vault token account + oracle keys into config
-  - initializes the matcher nonce to zero
+  - binds the collateral mint, initializes asset 0, and sets `marketauth` to the init signer
 - **UpdateAuthority** (tag 32) — single-purpose: rotate/burn the one market-level `marketauth` key
   - `UpdateAuthority { new_pubkey }`: current `marketauth` signs; a non-zero replacement co-signs
   - setting `new_pubkey` to all zeros burns `marketauth` permanently (admin-free market)
@@ -299,21 +298,20 @@ This section describes intent and operational ordering, not argument-by-argument
     `UpdateAssetAuthority`, not this instruction
 
 ### Participant lifecycle
-- **InitUser**
-  - adds a user entry to the engine and binds `owner = signer`
-- **InitLP**
-  - adds an LP entry, records `(matcher_program, matcher_context)`, binds `owner = signer`
-- **DepositCollateral**
+- **InitPortfolio** (tag 2)
+  - initializes a program-owned portfolio account and binds `owner = signer`
+- **Deposit** (tag 3)
   - transfers collateral into vault; credits engine balance for that account
-- **WithdrawCollateral**
+- **Withdraw** (tag 4)
   - performs oracle-read + engine checks; withdraws from vault via PDA signer; debits engine
-- **CloseAccount**
-  - settles and withdraws remaining funds (subject to engine rules)
-  - live closes go through the engine's account-close path after oracle/accrual checks; resolved closes use the engine's fee-aware resolved close path
+- **ClosePortfolio** (tag 8)
+  - closes a flat, empty portfolio account and sweeps its rent to the market slab
+- **CloseResolved** (tag 30)
+  - resolved-market payout/finalization path for a supplied portfolio; pays only the stored owner token account
 
 ### Risk / maintenance
-- **KeeperCrank**
-  - permissionless global maintenance entrypoint
+- **PermissionlessCrank** (tag 5)
+  - permissionless maintenance entrypoint for a supplied asset/account path
   - authenticates clock/oracle state in the wrapper, then delegates bounded public progress to the engine
   - candidate accounts are untrusted hints, not a liveness precondition; honest keepers should include the worst known stale/bankrupt/liquidatable accounts, but the engine also makes cursored progress
   - may perform bounded catchup/recovery, liquidation, touch-only settlement, round-robin lifecycle progress, and empty-account reclaim
@@ -339,7 +337,9 @@ This section describes intent and operational ordering, not argument-by-argument
   - atomic multi-leg batch (up to the portfolio asset cap) against one taker/LP pair; each leg's
     **signed** `size_q` sets its direction, so a single batch can carry a mixed long/short spread.
     The engine settles both accounts once, applies every leg, then runs a **single end-state
-    initial-margin check** — interim legs need not be individually margin-feasible.
+    initial-margin check** — interim legs need not be individually margin-feasible. Current v1 batch
+    execution rejects if any backing-domain trade-fee policy is configured, so those fees are not
+    silently skipped.
 - **BatchTradeCpi** (tag 67)
   - same atomic multi-leg batch routed through an external matcher: **one** batched matcher CPI
     (matcher tag 3) fills every leg against a single LP, each return is validated under the same
@@ -355,12 +355,12 @@ This section describes intent and operational ordering, not argument-by-argument
 ### Insurance management
 - **WithdrawInsurance** (tag 41)
   - unbounded resolved-market insurance withdrawal
-  - gated by `insurance_authority`
+  - gated by the asset-0 insurance authority, with additional shutdown-drain cases gated by `marketauth`
   - requires market resolved and all accounts closed
 - **WithdrawInsuranceLimited** (tag 23)
-  - disabled by default; admin must explicitly opt in with `UpdateInsurancePolicy`
+  - disabled by default; `marketauth` must explicitly opt in with `UpdateInsurancePolicy`
   - rate-limited insurance withdrawal with per-market caps (`insurance_withdraw_max_bps`, `insurance_withdraw_cooldown_slots`)
-  - gated by `insurance_operator`, which is disjoint from `insurance_authority`
+  - gated by the asset-0 `insurance_operator`, which is disjoint from the asset-0 `insurance_authority`
   - live-market only; resolved markets use tag 41
   - rejected while the market is unhealthy, lagged, h-lock/stress-active, or has negative senior residual
 
@@ -376,11 +376,10 @@ This section describes intent and operational ordering, not argument-by-argument
 - **RefineResolvedUnreceiptedBound** (tag 47)
   - admin-gated monotonic decrease of the resolved unreceipted bound; cannot increase obligations
 
-### Post-resolution admin
-- **AdminForceCloseAccount**
-  - force-close abandoned accounts after market resolution
-  - uses the engine resolved close path to handle terminal PnL, fees, payout, and slot freeing
-  - verifies destination ATA owner matches stored account owner
+### Post-resolution / terminal close
+- **CloseResolved** (tag 30)
+  - handles resolved-market terminal PnL, fees, payout, and slot freeing for the supplied portfolio
+  - verifies payout routing against the stored owner account
 
 ---
 
@@ -389,15 +388,20 @@ This section describes intent and operational ordering, not argument-by-argument
 Percolator treats a matcher like a price/size oracle **with rules** chosen by the LP, but enforces a hard safety envelope.
 
 ### What Percolator enforces (non-negotiable)
-- **Signer checks**: user and LP owner must sign
-- **LP identity signer**: LP PDA is derived, not provided by the user
-- **Matcher identity binding**: matcher program + context must equal what the LP registered
+- **Signer checks**: the taker/user signs matcher fills; `TradeNoCpi` / `BatchTradeNoCpi`
+  require both owners to sign
+- **LP owner identity**: the supplied LP owner account must match the owner stored in the LP
+  portfolio, but the LP owner does not sign each matcher-routed fill
+- **Matcher delegate signer**: delegate PDA is derived from the market, LP portfolio, LP owner,
+  matcher program, and matcher context
+- **Matcher identity binding**: matcher program/context/delegate must match the derived tuple for
+  that LP portfolio and owner
 - **Matcher account shape**:
   - matcher program must be executable
   - context must not be executable
   - context owner must be matcher program
   - context length must be sufficient for the return prefix
-- **Nonce binding**: response must echo the current request id derived from slab nonce
+- **Request echo binding**: response must echo the request id and echoed request fields
 - **ABI validation**: strict validation of return prefix fields
 - **Execution size discipline**: engine trade uses matcher's `exec_size` (never the user's requested size)
 
@@ -411,8 +415,7 @@ The matcher return is treated as adversarial input. It must:
 - match ABI version
 - set `VALID` flag
 - not set `REJECTED` flag
-- echo request identifiers and fields (LP account id, oracle price, req_id)
-- have reserved/padding fields set to zero
+- echo request identifiers and fields (LP account id, oracle price, asset index, req_id)
 - enforce size constraints (`|exec_size| <= |req_size|`, sign match when req_size != 0)
 - handle `i128::MIN` safely via `unsigned_abs` semantics (no `.abs()` panics)
 
@@ -426,8 +429,8 @@ Trade gating when the market is under-insured is handled **internally by the eng
 ### Insurance authorities
 The current wrapper has no `SetRiskThreshold` / insurance-floor instruction. Insurance extraction is split by authority and market mode:
 
-- `insurance_authority` can call unbounded `WithdrawInsurance` only after resolution and after all accounts are closed.
-- `insurance_operator` can call live `WithdrawInsuranceLimited`, but only within the configured bps/cooldown/deposit-only policy and only through the healthy-market gate.
+- a per-asset `insurance_authority` can call domain-scoped unbounded withdrawal only through the terminal/recovery gates for that domain.
+- the asset-0 `insurance_operator` can call live `WithdrawInsuranceLimited`, but only within the configured bps/cooldown/deposit-only policy and only through the healthy-market gate.
 
 This split is load-bearing: burning or delegating the live operator key does not grant the resolved unbounded withdrawal capability, and burning the resolved insurance authority does not bypass live limits.
 
@@ -531,7 +534,7 @@ This is the A/K/B design goal: worst-case bankruptcies and stale accounts are ha
 
 ### Permissionless progress
 
-`KeeperCrank` is the public progress entrypoint for live markets. The wrapper authenticates accounts, time, oracle input, and policy bounds, then calls the engine's permissionless progress API.
+`PermissionlessCrank` is the public progress entrypoint for live markets. The wrapper authenticates accounts, time, oracle input, and policy bounds, then calls the engine's permissionless progress API.
 
 The engine may choose a progress-priority branch, including:
 
@@ -565,18 +568,16 @@ The cap does not guarantee safety if keepers disappear. It slows effective loss 
 
 ### Verification anchors
 
-The wrapper proof suite does not re-prove engine conservation. It proves wrapper policy and routing properties around the engine boundary, while the pinned engine crate owns arithmetic/accounting invariants.
+The wrapper proof suite does not re-prove engine conservation. It proves wrapper ABI/routing properties around the engine boundary, while the pinned engine crate owns arithmetic/accounting invariants.
 
-Relevant wrapper anchors include:
+Current wrapper Kani anchors live in `tests/v16_kani.rs` and cover:
 
-- clamp law: `kani_effective_price_zero_oi_adopts_target` and the clamp staircase proofs in `tests/kani.rs`
-- "user path rejects, crank progresses" policy: `kani_issue33_exposed_price_move_rejected_by_user_paths_but_crank_progresses` and `kani_issue33_exposed_funding_rejected_by_user_paths_but_crank_progresses`
-- target/effective lag gates: `kani_target_lag_pending_universal`, `kani_target_lag_after_read_universal`, `kani_user_value_op_allowed_iff_no_target_lag`, and `kani_trade_cpi_pre_cpi_allowed_despite_post_read_lag`
-- partial crank state persistence: `kani_partial_crank_config_write_field_sources`
-- live insurance withdrawal health/residual gate: `kani_live_insurance_withdraw_residual_gate_is_preserved_by_withdrawal`, `kani_live_insurance_withdraw_market_health_rejects_stress_envelope`, and `kani_live_insurance_withdraw_residual_gate_rejects_senior_overflow`
-- permissionless resolve horizon policy: `kani_permissionless_resolve_horizon_policy_independent_from_accrual_window`
+- instruction decode/encode preservation for active wrapper payloads, including authority, oracle, policy, lifecycle, and custody instructions
+- rejection of unknown tags, truncated payloads, and trailing bytes
+- matcher-return validation against malformed/malicious fills (`kani_v16_matcher_return_accepts_only_bound_echoed_fills`)
+- premium funding-rate clamp/sign behavior (`kani_v16_premium_funding_rate_is_clamped_and_signed`)
 
-The integration tests exercise the same behavior through SBF/LiteSVM paths, including stale-catchup, target lag, risk-buffer refill, live insurance withdrawal optionality, and permissionless resolution after outages longer than the live accrual window.
+The LiteSVM integration tests exercise the economic behavior through SBF paths, including stale-catchup, target lag, risk-buffer refill, insurance withdrawal optionality, permissionless shutdown/force-close/reuse, and permissionless resolution after outages longer than the live accrual window.
 
 ---
 
@@ -584,22 +585,22 @@ The integration tests exercise the same behavior through SBF/LiteSVM paths, incl
 
 ### Who runs what?
 - **Users / LPs**: init + deposits + trades
-- **Keepers (permissionless)**: call `KeeperCrank` regularly
-- **Admin / scoped authorities**: may update config or rotate/burn scoped authorities, unless the relevant authority was burned
+- **Keepers (permissionless)**: call `PermissionlessCrank` regularly
+- **`marketauth` / scoped authorities**: may update policies or rotate/burn scoped authorities, unless the relevant authority was burned
 
-### KeeperCrank cadence
-Run `KeeperCrank` often enough to satisfy engine freshness rules:
+### PermissionlessCrank cadence
+Run `PermissionlessCrank` often enough to satisfy engine freshness rules:
 - engine may enforce staleness bounds (e.g., `max_crank_staleness_slots`)
 - in stressed markets, higher cadence reduces liquidation latency and funding drift
 
 The keeper candidate list is a hint channel. A keeper bot should:
 1. Off-chain: identify the worst known liquidatable, bankrupt, stale, or close-continuation accounts
-2. On-chain: submit `KeeperCrank` with those hints so the bounded engine progress unit spends CU on the most useful accounts
+2. On-chain: submit `PermissionlessCrank` with those hints so the bounded engine progress unit spends CU on the most useful accounts
 
 Empty or imperfect candidate lists should still let the engine make structural cursored progress. Candidate quality affects how quickly a bad market clears, not whether the public progress API exists.
 
 A typical ops approach:
-- a keeper bot that calls `KeeperCrank` every N slots (or every M seconds) and retries on failure
+- a keeper bot that calls `PermissionlessCrank` every N slots (or every M seconds) and retries on failure
 - alerting on prolonged inability to crank (errors, oracle stale, account issues)
 
 ### Monitoring checklist
@@ -614,7 +615,7 @@ At minimum, monitor:
 ### Governance / authority handling
 - `UpdateAuthority` rotates or burns individual capabilities.
 - Non-burn transfers require both the current authority and the new key to sign.
-- Burning admin is irreversible and disables admin-gated config/resolve actions forever.
+- Burning `marketauth` is irreversible and disables market-level policy/resolve actions forever.
 - Burning the mark, insurance, or live insurance operator authority removes only that capability.
 
 ---
@@ -632,28 +633,26 @@ Create:
 
 ### Step 1: InitMarket
 Call `InitMarket` with:
-- admin signer
+- `marketauth` signer
 - slab (writable)
-- mint + vault
-- oracle pubkeys
-- staleness/conf filter params
-- `RiskParams` (warmup, margins, fees, liquidation knobs, crank staleness, etc.)
+- collateral mint
+- risk params (margins, fees, liquidation knobs, price/funding caps, maintenance fee, etc.)
 
 ### Step 2: Onboard LPs and users
 - LP:
   - deploy or choose matcher program
   - create matcher context account owned by matcher program
-  - call `InitLP(matcher_program, matcher_context, fee_payment)`
-  - deposit collateral
+  - create a portfolio with `InitPortfolio`
+  - deposit collateral with `Deposit`
 - User:
-  - `InitUser(fee_payment)`
-  - deposit collateral
+  - create a portfolio with `InitPortfolio`
+  - deposit collateral with `Deposit`
 
 ### Step 3: Fund insurance
 Call `TopUpInsurance` as needed.
 
 ### Step 4: Start keepers
-Run `KeeperCrank` continuously.
+Run `PermissionlessCrank` continuously.
 
 ### Step 5: Enable trading
 - Use `TradeNoCpi` for local testing or deterministic environments
@@ -666,19 +665,14 @@ Run `KeeperCrank` continuously.
 Percolator's security model is "engine correctness + wrapper enforcement".
 
 ### Wrapper-level properties (Kani-proven)
-Kani harnesses are designed to prove program-level coupling invariants, including:
+The current Kani suite is in `tests/v16_kani.rs`. It proves wrapper ABI and local validation properties:
 
-- matcher ABI validation rejects malformed/malicious returns
-- owner/signer enforcement
-- admin authorization + burned admin handling
-- CPI identity binding (matcher program/context must match LP registration)
-- matcher account shape validation
-- PDA key mismatch rejection
-- nonce monotonicity (unchanged on reject, +1 on accept)
-- CPI uses `exec_size` (never requested size)
-- i128 edge cases (`i128::MIN`) do not panic and are validated correctly
+- instruction payload decoding preserves wire fields for active instructions
+- unknown tags, truncated payloads, and trailing bytes reject
+- matcher-return validation rejects malformed/malicious fills and accepts only bound, echoed fills
+- premium funding-rate computation is clamped and sign-preserving
 
-> Note: Kani does not model full CPI execution or internal engine accounting; it targets wrapper security properties and binding logic.
+> Note: Kani does not model full CPI execution or internal engine accounting. Owner/signer enforcement, token movement, authority gates, liveness paths, and economic conservation are covered by LiteSVM integration tests plus the pinned engine crate's proof suite.
 
 ### Engine properties
 Engine-specific invariants (conservation, warmup, liquidation properties, etc.) live in the `percolator` crate's verification suite. The program relies on engine correctness but does not restate it.
@@ -687,8 +681,8 @@ Engine-specific invariants (conservation, warmup, liquidation properties, etc.) 
 The code and test harnesses are the source of truth for counts and exact CU numbers. The active suites are:
 
 - host unit and LiteSVM integration tests under `tests/`
-- SBF-backed alignment and CU benchmark tests
-- wrapper Kani proofs in `tests/kani.rs`
+- SBF-backed alignment/CU tests in `tests/v16_cu.rs`
+- wrapper Kani proofs in `tests/v16_kani.rs`
 - engine arithmetic/accounting proofs in the pinned `percolator` crate
 
 Before publishing a bounty, run the commands in [Build & test](#build--test) and record the exact output for the current commit.
@@ -713,7 +707,7 @@ These are governance powers, not bugs:
 1. `UpdateAuthority { new_pubkey }`
    - rotate `marketauth` to an attacker key or burn it to zero.
    - impact: governance capture or permanent governance lockout.
-2. `UpdateConfig` / `UpdateMarketInitFeePolicy` / `UpdateBaseUnitMints` / asset create+retire+force-shutdown
+2. Policy updates / `UpdateMarketInitFeePolicy` / `UpdateBaseUnitMints` / asset create+retire+force-shutdown
    - change funding/cap policy knobs (within validation bounds), the create fee, the base-unit mint, and the asset set — all now under the one `marketauth` key.
    - impact: economics/market shape can become unfavorable to users (force-shutdown still honors the trader exit window).
 3. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_ORACLE }` (while marketauth holds asset-0's `asset_admin`)
@@ -731,10 +725,7 @@ These are governance powers, not bugs:
 7. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_INSURANCE_OPERATOR }` (while marketauth holds asset-0's `asset_admin`)
    - choose or burn who can call bounded live insurance withdrawal.
    - impact: bounded live insurance extraction capability is delegated or permanently removed.
-8. `AdminForceCloseAccount` (post-resolution only)
-   - force-close abandoned accounts (no position-zero precondition required).
-   - impact: users are forcibly settled/closed by admin action.
-9. `CloseSlab` (when market is fully empty)
+8. `CloseSlab` (when market is fully empty)
     - decommission market account and recover slab lamports.
     - impact: market is permanently closed.
 
@@ -745,10 +736,9 @@ These are governance powers, not bugs:
 > exactly the powers the asset_admin has over any asset. Two ways to make those delegations stick:
 > burn the **sub-authority** itself (set to 0 — capability permanently removed), or burn asset-0's
 > **`asset_admin`** (set to 0 — no key can rotate asset-0's sub-authorities again, and the current holders
-> are frozen). The market-wide `UpdateAuthority` (tag 32) now rotates **only** the truly market-level keys
-> — `ADMIN`, `ASSET` (create-fee gate), `BASE_UNIT` — each requiring its current holder to sign plus a
-> co-signing replacement (`expect_live_authority(&cfg.<role>, current.key)`); the per-asset
-> `MARK/INSURANCE/INSURANCE_OPERATOR/BACKING` kinds were removed. Verified by
+> are frozen). The market-wide `UpdateAuthority` (tag 32) rotates only `marketauth`; the per-asset
+> `ASSET_ADMIN`/`ORACLE`/`INSURANCE`/`INSURANCE_OPERATOR`/`BACKING` kinds are tag-65
+> `UpdateAssetAuthority`. Verified by
 > `v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable` (asset-0 `asset_admin` rotates/burns
 > asset-0's sub-authorities, isolated from other assets),
 > `v16_attack_update_authority_non_holder_cannot_rotate`, and
@@ -758,47 +748,39 @@ These are governance powers, not bugs:
 
 These are intended hard boundaries enforced in code and test suites:
 
-1. Cannot run admin ops without matching signer.
-   - non-admin attempts fail (`EngineUnauthorized`).
-   - covered by tests like `test_attack_admin_op_as_user`, `test_attack_resolve_market_non_admin`, `test_attack_withdraw_insurance_non_admin`.
-2. Cannot use old admin key after rotation.
-   - covered by `test_attack_old_admin_blocked_after_transfer`.
-3. Cannot perform admin ops after admin is burned to `[0;32]`.
-   - covered by `test_attack_burned_admin_cannot_act`, `test_attack_update_admin_to_zero_locks_out`.
+1. Cannot run market-level ops without matching signer.
+   - non-`marketauth` attempts fail (`EngineUnauthorized`).
+   - covered by `v16_attack_non_admin_cannot_resolve_or_configure`.
+2. Cannot use old `marketauth` after rotation.
+   - covered by `v16_attack_update_authority_non_holder_cannot_rotate`.
+3. Cannot burn `marketauth` in Live without permissionless wind-down liveness configured.
+   - covered by `v16_attack_admin_renounce_without_fallback_rejected`.
 4. Cannot push authority oracle prices unless signer == `oracle_authority`.
-   - covered by `test_attack_oracle_authority_wrong_signer`.
+   - covered by `v16_attack_non_authority_cannot_push_auth_mark`.
 5. Cannot resolve without an authority price, or resolve twice.
-   - covered by `test_attack_resolve_market_without_oracle_price` and double-resolution tests.
+   - covered by resolved-mode and oracle-management tests.
 6. Cannot withdraw insurance before resolution or while any account still has open position.
-   - covered by `test_attack_withdraw_insurance_before_resolution`, `test_attack_withdraw_insurance_with_open_positions`.
+   - covered by `v16_attack_withdraw_insurance_requires_full_wind_down`.
 7. Cannot mutate risk/oracle/fee config after resolution.
-   - covered by post-resolution `UpdateConfig`, `PushEwmaMark`, and `UpdateAuthority` rejection tests.
-8. Cannot force-close accounts on a live (non-resolved) market.
-   - `AdminForceCloseAccount` requires resolved mode.
-   - covered by `test_admin_force_close_account_requires_resolved`.
-9. Cannot redirect user close payouts to arbitrary token accounts in owner-gated paths.
-   - user paths (`WithdrawCollateral`, `CloseAccount`) require owner signer and owner ATA checks.
-   - `AdminForceCloseAccount` verifies destination ATA owner matches stored account owner.
-10. Cannot close slab while funds/state remain (default build).
+   - covered by `v16_attack_resolved_mode_gates_all_live_ops`.
+8. Cannot force-close a live healthy asset or bypass the shutdown exit window.
+   - covered by `v16_attack_force_close_healthy_asset_rejected` and `v16_attack_force_close_cannot_bypass_timeout_with_future_now_slot`.
+9. Cannot redirect user close payouts to arbitrary token accounts.
+   - user withdrawal paths require owner signer and owner ATA checks; resolved-close payout routing is stored-owner bound.
+   - covered by `v16_attack_close_resolved_dest_validation`.
+10. Cannot close slab while funds/state remain.
     - requires zero vault, zero insurance, zero used accounts, zero dust.
-    - covered by tests like `test_attack_close_slab_with_insurance_remaining`,
-      `test_attack_close_slab_with_vault_tokens`,
-      `test_attack_close_slab_blocked_by_dormant_account`.
-
-### Critical caveat
-
-If compiled with feature `unsafe_close`, `CloseSlab` intentionally skips safety checks to reduce CU.
-Do not enable `unsafe_close` in production builds.
+    - covered by `v16_attack_close_slab_requires_full_winddown` and `v16_attack_scheduled_close_cannot_strand_funds_then_reclaims`.
 
 ---
 
 ## Failure modes and recovery
 
 ### Common rejection causes (TradeCpi)
-- matcher identity mismatch (LP registered different program/context)
+- matcher identity mismatch (program/context/delegate tuple does not match the LP portfolio)
 - bad matcher shape (non-executable program, executable ctx, wrong ctx owner, short ctx)
-- LP PDA mismatch / wrong PDA shape
-- ABI prefix invalid (flags, echoed fields, reserved bytes, size constraints)
+- matcher delegate PDA mismatch / wrong PDA shape
+- ABI prefix invalid (flags, echoed fields, size constraints)
 
 These are expected and should be treated as **hard safety rejections**, not transient errors.
 
@@ -811,8 +793,8 @@ Recovery:
 - adjust market config (if governance allows)
 - ensure keepers are running so freshness rules remain satisfied
 
-### Admin burned
-Once admin is burned (all zeros), admin ops are permanently disabled.
+### `marketauth` burned
+Once `marketauth` is burned (all zeros), market-level ops are permanently disabled.
 Recovery is "by design impossible" (this is a one-way governance lock).
 
 ---
@@ -828,13 +810,9 @@ cargo build-sbf --tools-version v1.52
 # Legacy local compatibility build without the Anchor v2 entrypoint.
 cargo build-sbf --no-default-features
 
-# All tests (integration, unit, alignment)
-cargo test
-
-# CU benchmark (requires BPF binary)
-cargo test --release --test cu_benchmark -- --nocapture
+# All tests (integration, unit, alignment; LiteSVM loads target/deploy/percolator_prog.so)
+cargo test --all-targets
 
 # Kani harnesses (requires kani toolchain)
 cargo kani --tests
 ```
-

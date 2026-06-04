@@ -103,6 +103,7 @@ fn matcher_delegate_key(
     program_id: &Pubkey,
     market: &Pubkey,
     maker: &Pubkey,
+    maker_owner: &Pubkey,
     matcher_program: &Pubkey,
     matcher_context: &Pubkey,
 ) -> Pubkey {
@@ -111,6 +112,7 @@ fn matcher_delegate_key(
             b"matcher",
             market.as_ref(),
             maker.as_ref(),
+            maker_owner.as_ref(),
             matcher_program.as_ref(),
             matcher_context.as_ref(),
         ],
@@ -1240,10 +1242,20 @@ impl V16CuEnv {
         init_data: Vec<u8>,
     ) -> (Pubkey, Pubkey, u64) {
         let ctx = Pubkey::new_unique();
+        let (_, maker_owner) = state::read_portfolio_owner_preflight(
+            &self
+                .svm
+                .get_account(&maker_account)
+                .expect("maker portfolio account")
+                .data,
+        )
+        .expect("maker portfolio owner");
+        let maker_owner = Pubkey::new_from_array(maker_owner);
         let delegate = matcher_delegate_key(
             &self.program_id,
             &self.market,
             &maker_account,
+            &maker_owner,
             &matcher_program,
             &ctx,
         );
@@ -1365,7 +1377,7 @@ impl V16CuEnv {
             },
             vec![
                 AccountMeta::new(owner_a.pubkey(), true),
-                AccountMeta::new(owner_b.pubkey(), true),
+                AccountMeta::new_readonly(owner_b.pubkey(), false),
                 AccountMeta::new(self.market, false),
                 AccountMeta::new(account_a, false),
                 AccountMeta::new(account_b, false),
@@ -1373,7 +1385,7 @@ impl V16CuEnv {
                 AccountMeta::new(matcher_context, false),
                 AccountMeta::new_readonly(matcher_delegate, false),
             ],
-            &[owner_a, owner_b],
+            &[owner_a],
         )
     }
 
@@ -9761,8 +9773,9 @@ fn v16_attack_withdraw_wrong_mint_dest_rejected() {
 }
 
 // security.md sweep — TradeCpi matcher identity binding (#44/#49): the matcher_delegate is a PDA
-// bound to (slab, maker, matcher_program, matcher_context). Routing a TradeCpi through a SPOOFED
-// delegate or a wrong/non-program matcher must reject — no trade executes, no value moves.
+// bound to (slab, maker portfolio, maker owner, matcher_program, matcher_context). Routing a
+// TradeCpi through a SPOOFED delegate or a wrong/non-program matcher must reject — no trade
+// executes, no value moves.
 #[test]
 fn v16_attack_tradecpi_spoofed_matcher_binding_rejected() {
     let mut env = V16CuEnv::new();
@@ -9805,6 +9818,111 @@ fn v16_attack_tradecpi_spoofed_matcher_binding_rejected() {
     env.svm.expire_blockhash();
     let ok = env.try_trade_cpi_with_cu_on_asset(&taker_owner, taker, &maker_owner, maker, matcher_program, matcher_ctx, matcher_delegate, 0, (10 * POS_SCALE) as i128, 100);
     assert!(ok.is_ok(), "correctly-bound matcher executes: {:?}", ok);
+}
+
+#[test]
+fn v16_bpf_tradecpi_permissionless_lp_fill_does_not_need_lp_owner_signature() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let (matcher_ctx, matcher_delegate, _) = env.init_matcher_context(matcher_program, lp);
+
+    env.svm.expire_blockhash();
+    let cu = env
+        .try_trade_cpi_with_cu_on_asset(
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            matcher_ctx,
+            matcher_delegate,
+            0,
+            (10 * POS_SCALE) as i128,
+            100,
+        )
+        .expect("matcher CPI fill succeeds with only the taker signing");
+    println!("v16 permissionless LP TradeCpi CU: {cu}");
+
+    let taker_state = env.portfolio_state(taker);
+    let lp_state = env.portfolio_state(lp);
+    assert_eq!(active_leg_for_asset(&taker_state, 0).side, SideV16::Long);
+    assert_eq!(active_leg_for_asset(&lp_state, 0).side, SideV16::Short);
+    assert_eq!(active_leg_for_asset(&taker_state, 0).basis_pos_q, (10 * POS_SCALE) as i128);
+}
+
+#[test]
+fn v16_attack_nocpi_trades_still_require_lp_owner_signature() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+
+    env.svm.expire_blockhash();
+    let single = env.send(
+        ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: (10 * POS_SCALE) as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new_readonly(lp_owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(lp, false),
+        ],
+        &[&taker_owner],
+    );
+    assert!(single.is_err(), "TradeNoCpi without the LP owner signature must reject");
+
+    env.svm.expire_blockhash();
+    let batch = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![
+                BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: (5 * POS_SCALE) as i128,
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                BatchTradeLeg {
+                    asset_index: 1,
+                    size_q: -(5 * POS_SCALE as i128),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new_readonly(lp_owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(lp, false),
+        ],
+        &[&taker_owner],
+    );
+    assert!(batch.is_err(), "BatchTradeNoCpi without the LP owner signature must reject");
+
+    let group = env.market_state().1;
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group.assets[1].oi_eff_long_q, 0);
+    assert_eq!(env.portfolio_state(taker).legs[0].basis_pos_q, 0);
+    assert_eq!(env.portfolio_state(lp).legs[0].basis_pos_q, 0);
 }
 
 // security.md sweep — TradeCpi limit_price slippage guard (#19/#39): with a spread matcher filling
@@ -10008,7 +10126,7 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
 }
 
 // security.md sweep — admin-instruction authorization (#6): privileged ops (ResolveMarket,
-// ConfigureAuthMark, UpdateConfig) must reject a non-admin signer. A permissionless resolve would be
+// ConfigureAuthMark, policy updates) must reject a non-admin signer. A permissionless resolve would be
 // a catastrophic griefing/wind-down trigger.
 #[test]
 fn v16_attack_non_admin_cannot_resolve_or_configure() {
@@ -16319,7 +16437,7 @@ fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
             },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
-                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new_readonly(lp.pubkey(), false),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(ta, false),
                 AccountMeta::new(la, false),
@@ -16327,9 +16445,9 @@ fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
                 AccountMeta::new(ctx, false),
                 AccountMeta::new_readonly(delegate, false),
             ],
-            &[&taker, &lp],
+            &[&taker],
         )
-        .expect("batch CPI mixed spread must execute through the matcher");
+        .expect("batch CPI mixed spread must execute through the matcher without LP signing fill");
     println!("v16 batch CPI mixed-direction 2-leg CU: {cu}");
     let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
     let l = state::read_portfolio(&env.svm.get_account(&la).unwrap().data).unwrap();
@@ -16644,7 +16762,7 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
     env.deposit(&taker, ta, 1_000_000);
     env.deposit(&lp, la, 1_000_000);
     let ctx = Pubkey::new_unique();
-    let delegate = matcher_delegate_key(&env.program_id, &env.market, &la, &hostile, &ctx);
+    let delegate = matcher_delegate_key(&env.program_id, &env.market, &la, &lp.pubkey(), &hostile, &ctx);
     env.svm.set_account(delegate, Account { lamports: 1_000_000_000, data: vec![], owner: Pubkey::default(), executable: false, rent_epoch: 0 }).unwrap();
     let sz = (5 * POS_SCALE) as i128;
     let send_mode = |env: &mut V16CuEnv, mode: u8| -> Result<u64, String> {
@@ -16804,7 +16922,7 @@ fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
     env.deposit(&taker, ta, 1_000_000);
     env.deposit(&lp, la, 1_000_000);
     let ctx = Pubkey::new_unique();
-    let delegate = matcher_delegate_key(&env.program_id, &env.market, &la, &hostile, &ctx);
+    let delegate = matcher_delegate_key(&env.program_id, &env.market, &la, &lp.pubkey(), &hostile, &ctx);
     env.svm.set_account(delegate, Account { lamports: 1_000_000_000, data: vec![], owner: Pubkey::default(), executable: false, rent_epoch: 0 }).unwrap();
     let sz = (5 * POS_SCALE) as i128;
     let metas = |env: &V16CuEnv| vec![

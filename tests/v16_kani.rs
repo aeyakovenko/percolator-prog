@@ -580,6 +580,30 @@ fn kani_v16_permissionless_crank_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_update_authority_decode_preserves_wire_fields() {
+    let mut new_pubkey = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        new_pubkey[i] = kani::any();
+        i += 1;
+    }
+
+    let mut data = [0u8; 33];
+    data[0] = 32;
+    data[1..33].copy_from_slice(&new_pubkey);
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::UpdateAuthority {
+            new_pubkey: got_pubkey,
+        } => {
+            assert_eq!(got_pubkey, new_pubkey);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
+    let asset_index: u16 = kani::any();
     let kind: u8 = kani::any();
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
@@ -588,16 +612,19 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
         i += 1;
     }
 
-    let mut data = [0u8; 34];
-    data[0] = 32;
-    data[1] = kind;
-    data[2..34].copy_from_slice(&new_pubkey);
+    let mut data = [0u8; 36];
+    data[0] = 65;
+    data[1..3].copy_from_slice(&asset_index.to_le_bytes());
+    data[3] = kind;
+    data[4..36].copy_from_slice(&new_pubkey);
 
     match Instruction::decode(&data).unwrap() {
-        Instruction::UpdateAuthority {
+        Instruction::UpdateAssetAuthority {
+            asset_index: got_asset_index,
             kind: got_kind,
             new_pubkey: got_pubkey,
         } => {
+            assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_kind, kind);
             assert_eq!(got_pubkey, new_pubkey);
         }
@@ -1082,6 +1109,13 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(Instruction::ResolveMarket, extra);
     assert_rejects_trailing_byte(
         Instruction::UpdateAuthority {
+            new_pubkey: [1u8; 32],
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::UpdateAssetAuthority {
+            asset_index: 1,
             kind: 0,
             new_pubkey: [1u8; 32],
         },
@@ -1372,8 +1406,11 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
     let close_resolved = [30u8; 16];
     assert!(Instruction::decode(&close_resolved).is_err());
 
-    let update_authority = [32u8; 33];
+    let update_authority = [32u8; 32];
     assert!(Instruction::decode(&update_authority).is_err());
+
+    let update_asset_authority = [65u8; 35];
+    assert!(Instruction::decode(&update_asset_authority).is_err());
 
     let update_insurance = [33u8; 11];
     assert!(Instruction::decode(&update_insurance).is_err());
