@@ -6602,7 +6602,7 @@ fn v16_bpf_current_full_14_leg_tradenocpi_is_under_tx_limit() {
 }
 
 #[test]
-fn v16_bpf_stale_full_14_leg_tradenocpi_is_under_tx_limit() {
+fn v16_bpf_stale_full_14_leg_tradenocpi_rejects_before_cu_cliff() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
@@ -6612,7 +6612,11 @@ fn v16_bpf_stale_full_14_leg_tradenocpi_is_under_tx_limit() {
     env.deposit(&short_owner, short_account, 100_000);
     env.seed_n_leg_position_for_benchmark(long_account, short_account, 14);
     env.svm.warp_to_slot(16);
-    let trade_cu = env.trade_with_cu(
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let long_before = env.svm.get_account(&long_account).unwrap();
+    let short_before = env.svm.get_account(&short_account).unwrap();
+    let stale_trade = env.try_trade_asset_with_cu(
+        0,
         &long_owner,
         long_account,
         &short_owner,
@@ -6621,25 +6625,22 @@ fn v16_bpf_stale_full_14_leg_tradenocpi_is_under_tx_limit() {
         95,
         0,
     );
-    println!("v16 stale full-14-leg TradeNoCpi CU: {trade_cu}");
+    let stale_err = stale_trade.expect_err("stale active accounts must pre-crank before trading");
     assert!(
-        trade_cu <= 1_400_000,
-        "stale full-14-leg TradeNoCpi CU {} exceeded limit {}",
-        trade_cu,
-        1_400_000
+        stale_err.contains("Custom(19)") || stale_err.contains("custom program error: 0x13"),
+        "stale active trade should reject as EngineStale, got: {stale_err}"
     );
+    assert!(
+        !stale_err.contains("exceeded CUs"),
+        "stale active trade must reject before the CU cliff: {stale_err}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&long_account).unwrap(), long_before);
+    assert_eq!(env.svm.get_account(&short_account).unwrap(), short_before);
 
-    let long_data = env.svm.get_account(&long_account).unwrap().data;
-    let short_data = env.svm.get_account(&short_account).unwrap().data;
-    let long = state::read_portfolio(&long_data).unwrap();
-    let short = state::read_portfolio(&short_data).unwrap();
-    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 14);
-    assert_eq!(
-        percolator::active_bitmap_count_ones(short.active_bitmap),
-        14
-    );
-    assert_eq!(long.legs[0].basis_pos_q, (9 * POS_SCALE) as i128);
-    assert_eq!(short.legs[0].basis_pos_q, -((9 * POS_SCALE) as i128));
+    // The successful side of the contract is covered by the adjacent
+    // v16_bpf_full_14_leg_refresh_crank_is_under_tx_limit and
+    // v16_bpf_current_full_14_leg_tradenocpi_is_under_tx_limit tests.
 }
 
 #[test]
@@ -16781,6 +16782,122 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
         ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 2, mark_e6: 150 },
         vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(env.market, false)], &[&admin]);
     assert!(ok.is_ok(), "the genuine mark authority's push is accepted: {:?}", ok);
+}
+
+// hostile public-interface sweep: even the legitimate oracle authority must not be able to
+// reconfigure an oracle anchor/mode after traders have live exposure. Otherwise a compromised or
+// adversarial authority could reset the official price basis under open positions and cause LoF/DoS.
+#[test]
+fn v16_attack_oracle_reconfiguration_rejects_after_positions_enter_market() {
+    let mut env = V16CuEnv::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 10_000);
+    env.deposit(&short_owner, short_account, 10_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    let before = env.svm.get_account(&env.market).unwrap().data;
+    let (_, before_group) = state::read_market(&before).unwrap();
+    assert_eq!(before_group.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(before_group.assets[0].oi_eff_short_q, POS_SCALE);
+
+    env.svm.warp_to_slot(1);
+    env.svm.expire_blockhash();
+    let auth_reconfig = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: 500,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&env.admin],
+    );
+    assert!(auth_reconfig.is_err(), "AuthMark reconfiguration with live OI must reject");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before,
+        "failed AuthMark reconfiguration must not mutate market state"
+    );
+
+    env.svm.expire_blockhash();
+    let ewma_reconfig = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureEwmaMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: 500,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&env.admin],
+    );
+    assert!(ewma_reconfig.is_err(), "EwmaMark reconfiguration with live OI must reject");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before,
+        "failed EwmaMark reconfiguration must not mutate market state"
+    );
+
+    let feed = [42u8; 32];
+    let pyth = env.set_pyth_price(&feed, 500, 0, 1);
+    let mut feeds = [[0u8; 32]; percolator_prog::constants::ORACLE_LEG_CAP];
+    feeds[0] = feed;
+    env.svm.expire_blockhash();
+    let hybrid_reconfig = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureHybridOracle {
+            asset_index: 0,
+            now_slot: 1,
+            now_unix_ts: 1,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 3,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: feeds,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(pyth, false),
+        ],
+        &[&env.admin],
+    );
+    assert!(hybrid_reconfig.is_err(), "Hybrid reconfiguration with live OI must reject");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before,
+        "failed Hybrid reconfiguration must not mutate market state"
+    );
 }
 
 // security.md sweep — EWMA-mark mode respects the per-slot circuit breaker (#6/#9/#37): the auth-mark

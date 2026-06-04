@@ -4555,9 +4555,12 @@ pub mod processor {
     }
 
     fn authenticated_market_slot_or_fallback_view(group: &state::MarketViewMutV16<'_>) -> u64 {
-        Clock::get()
-            .map(|c| c.slot)
-            .unwrap_or(group.header.current_slot.get())
+        core::cmp::max(
+            Clock::get()
+                .map(|c| c.slot)
+                .unwrap_or(group.header.current_slot.get()),
+            group.header.current_slot.get(),
+        )
     }
 
     fn decode_side(value: u8) -> Result<SideV16, ProgramError> {
@@ -5917,6 +5920,12 @@ pub mod processor {
                 exec_price: fee_basis_price,
                 fee_bps,
             };
+            ensure_trade_portfolios_current_for_requests_view(
+                &group,
+                &account_a,
+                &account_b,
+                core::slice::from_ref(&req),
+            )?;
             let backing_before = if cfg.backing_trade_fee_policy_count == 0 {
                 None
             } else {
@@ -6161,6 +6170,9 @@ pub mod processor {
                     abs_size,
                 ));
             }
+            ensure_trade_portfolios_current_for_requests_view(
+                &group, &account_a, &account_b, &requests,
+            )?;
 
             let source_lien_before_a =
                 source_lien_effective_reserved_snapshot_for_trade_view(&account_a)?;
@@ -10557,6 +10569,97 @@ pub mod processor {
         Ok(())
     }
 
+    fn portfolio_has_active_asset_view(
+        group: &state::MarketViewMutV16<'_>,
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> Result<bool, ProgramError> {
+        if asset_index >= group.markets.len() {
+            return Err(PercolatorError::EngineInvalidConfig.into());
+        }
+        let asset = group.markets[asset_index].engine.asset;
+        if asset.stored_pos_count_long.get() == 0 && asset.stored_pos_count_short.get() == 0 {
+            return Ok(false);
+        }
+        let market_id = asset.market_id.get();
+        let mut slot = 0usize;
+        while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = portfolio.header.legs[slot]
+                .try_to_runtime()
+                .map_err(map_v16_error)?;
+            if leg.active && leg.asset_index as usize == asset_index && leg.market_id == market_id {
+                return Ok(true);
+            }
+            slot += 1;
+        }
+        Ok(false)
+    }
+
+    fn ensure_trade_portfolio_current_for_requests_view(
+        group: &state::MarketViewMutV16<'_>,
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+        requests: &[TradeRequestV16],
+    ) -> ProgramResult {
+        let active_bitmap = portfolio
+            .header
+            .active_bitmap
+            .map(percolator::V16PodU64::get);
+        let mut touches_existing_asset = false;
+        for request in requests {
+            if portfolio_has_active_asset_view(group, portfolio, request.asset_index)? {
+                touches_existing_asset = true;
+                break;
+            }
+        }
+        if !touches_existing_asset {
+            return Ok(());
+        }
+        let cert = portfolio
+            .header
+            .health_cert
+            .try_to_runtime()
+            .map_err(map_v16_error)?;
+        if percolator::active_bitmap_is_empty(cert.active_bitmap_at_cert)
+            || (cert.certified_initial_req == 0
+                && cert.certified_maintenance_req == 0
+                && cert.certified_worst_case_loss == 0)
+        {
+            return Ok(());
+        }
+        // Avoid the pathological 2N stale-leg settlement cliff. Smaller stale
+        // portfolios remain engine-handled so first-open and normal UX are not
+        // blocked by conservative wrapper currentness heuristics.
+        if percolator::active_bitmap_count_ones(cert.active_bitmap_at_cert) < 8 {
+            return Ok(());
+        }
+        if portfolio.header.b_stale_state != 0 {
+            return Err(PercolatorError::EngineBStale.into());
+        }
+        if portfolio.header.stale_state != 0 {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        if !cert.valid
+            || cert.cert_oracle_epoch != group.header.oracle_epoch.get()
+            || cert.cert_funding_epoch != group.header.funding_epoch.get()
+            || cert.cert_risk_epoch != group.header.risk_epoch.get()
+            || cert.cert_asset_set_epoch != group.header.asset_set_epoch.get()
+            || cert.active_bitmap_at_cert != active_bitmap
+        {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        Ok(())
+    }
+
+    fn ensure_trade_portfolios_current_for_requests_view(
+        group: &state::MarketViewMutV16<'_>,
+        account_a: &percolator::PortfolioV16ViewMut<'_>,
+        account_b: &percolator::PortfolioV16ViewMut<'_>,
+        requests: &[TradeRequestV16],
+    ) -> ProgramResult {
+        ensure_trade_portfolio_current_for_requests_view(group, account_a, requests)?;
+        ensure_trade_portfolio_current_for_requests_view(group, account_b, requests)
+    }
+
     fn portfolio_view_is_closable(
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
     ) -> Result<bool, ProgramError> {
@@ -10972,9 +11075,7 @@ pub mod processor {
         if oracle_v16::profile_is_auth_mark(profile) {
             return Ok(base);
         }
-        let now_slot = Clock::get()
-            .map(|c| c.slot)
-            .unwrap_or(group.header.current_slot.get());
+        let now_slot = authenticated_market_slot_or_fallback_view(group);
         if oracle_v16::profile_is_hybrid(profile)
             && !oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot)
         {
@@ -11157,9 +11258,7 @@ pub mod processor {
         exec_price: u64,
         fee_paid: u128,
     ) -> Result<(), ProgramError> {
-        let now_slot = Clock::get()
-            .map(|c| c.slot)
-            .unwrap_or(group.header.current_slot.get());
+        let now_slot = authenticated_market_slot_or_fallback_view(group);
         let ewma_updates_from_trade = oracle_v16::profile_is_ewma_mark(profile)
             || (oracle_v16::profile_is_hybrid(profile)
                 && oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot));
