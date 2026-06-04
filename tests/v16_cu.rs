@@ -11443,6 +11443,84 @@ fn v16_attack_sync_ledgers_cannot_overwrite_portfolio_accounts() {
     );
 }
 
+// security.md sweep - ledger duplicate-account aliasing (#26/#35/#44): the standalone ledger sync
+// instructions accept a writable program-owned ledger account. Passing the market itself as that ledger
+// must reject atomically, or a sync could rewrite the market slab as a ledger and brick/strand funds.
+#[test]
+fn v16_attack_sync_ledgers_cannot_overwrite_market_account() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.top_up_backing_bucket(1, 100, 10);
+    env.top_up_insurance_domain_with_authority(&admin, 0, 100);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let backing_sync = env.send(
+        ProgInstruction::SyncBackingDomainLedger { domain: 1 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        backing_sync.is_err(),
+        "SyncBackingDomainLedger must reject the market account as the ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "backing-ledger market alias rejection must leave market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "backing-ledger market alias rejection must not rewrite portfolios"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "backing-ledger market alias rejection must not touch vault custody"
+    );
+
+    env.svm.expire_blockhash();
+    let insurance_sync = env.send(
+        ProgInstruction::SyncInsuranceLedger,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        insurance_sync.is_err(),
+        "SyncInsuranceLedger must reject the market account as the ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "insurance-ledger market alias rejection must leave market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "insurance-ledger market alias rejection must not rewrite portfolios"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "insurance-ledger market alias rejection must not touch vault custody"
+    );
+}
+
 // security.md sweep — optional ledger account-kind confusion on token-moving paths (#44/#35):
 // top-up and withdraw instructions update engine accounting before/around SPL transfers. If their
 // optional ledger validation accepted or rewrote a portfolio account, an authorized operator could
