@@ -8346,6 +8346,118 @@ fn v16_audit_resolved_maintenance_fee_insurance_stays_recoverable() {
     );
 }
 
+// security.md sweep - resolved top-up custody (#33/#44/#48): ClaimResolvedPayoutTopup is
+// intentionally unsigned so a third party can help finish a user's payout, but it must only pay to
+// the portfolio owner's valid collateral account. A bad destination must not burn the receipt.
+#[test]
+fn v16_attack_resolved_payout_topup_bad_dest_does_not_burn_receipt() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    {
+        let mut market_account = env.svm.get_account(&env.market).expect("market account");
+        let mut portfolio_account = env
+            .svm
+            .get_account(&portfolio)
+            .expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 100 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 100,
+            paid_effective: 40,
+            finalized: false,
+        };
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        env.svm.set_account(env.market, market_account).unwrap();
+        env.svm.set_account(portfolio, portfolio_account).unwrap();
+    }
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 60);
+
+    let attacker = Keypair::new();
+    let foreign_dest = env.token_account_for_mint(env.mint, attacker.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let foreign = env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(foreign_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        foreign.is_err(),
+        "top-up to a third-party destination must reject"
+    );
+    assert_eq!(env.token_amount(foreign_dest), 0, "no payout to attacker dest");
+
+    let wrong_mint = Pubkey::new_unique();
+    let wrong_mint_dest = env.token_account_for_mint(wrong_mint, owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let wrong_mint_claim = env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(wrong_mint_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        wrong_mint_claim.is_err(),
+        "top-up to a wrong-mint destination must reject"
+    );
+
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(
+        account.resolved_payout_receipt.paid_effective, 40,
+        "rejected bad destinations must not burn the pending receipt"
+    );
+    assert!(
+        !account.resolved_payout_receipt.finalized,
+        "receipt remains claimable after rejected bad destinations"
+    );
+    assert_eq!(env.market_state().1.vault, 60, "accounting vault unchanged");
+    assert_eq!(env.token_amount(env.vault), 60, "real vault unchanged");
+
+    let good_dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+    let cu = env.claim_resolved_payout_topup_with_cu(owner.pubkey(), portfolio, good_dest);
+    assert_cu_within("ClaimResolvedPayoutTopup bad-dest regression", cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(good_dest), 60, "correct destination receives the pending top-up");
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
+    assert!(account.resolved_payout_receipt.finalized);
+    assert_eq!(env.market_state().1.vault, 0);
+}
+
 // regression (security.md sweep): MTM settlement under a price move (§6.1 loss->capital,
 // §6.2 profit->pnl warmup). After full winner->loser->winner cranking, total equity is
 // conserved, the winner's +PnL is backed by the loser's realized-loss residual, and senior
