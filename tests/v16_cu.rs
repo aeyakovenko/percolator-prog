@@ -20140,6 +20140,115 @@ fn v16_attack_batch_trades_reject_with_backing_fee_policy() {
     assert_eq!(active_leg_for_asset(&lp_after, 0).basis_pos_q, -sz);
 }
 
+// security.md sweep — the batch-trade backing-fee gate must not become a sticky DoS. The wrapper
+// keeps a global count of nonzero per-domain backing-fee policies because batch fee splitting is
+// intentionally disabled while any policy is active. Updating one policy nonzero->nonzero must not
+// double-count, clearing one side must leave the gate active if another side remains, and clearing all
+// policies must drop the count to zero so batch trading works again.
+#[test]
+fn v16_attack_backing_fee_policy_count_clears_batch_liveness() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+
+    env.update_backing_fee_policy_with_cu(0, 77, 5_000);
+    let (cfg, _) = env.market_state();
+    assert_eq!(cfg.backing_trade_fee_policy_count, 1);
+    assert_eq!(cfg.backing_trade_fee_bps_long, 77);
+
+    env.update_backing_fee_policy_with_cu(0, 88, 2_500);
+    let (cfg, _) = env.market_state();
+    assert_eq!(
+        cfg.backing_trade_fee_policy_count, 1,
+        "nonzero->nonzero update must not double-count the same domain side"
+    );
+    assert_eq!(cfg.backing_trade_fee_bps_long, 88);
+
+    env.update_backing_fee_policy_with_cu(1, 44, 1_000);
+    let (cfg, _) = env.market_state();
+    assert_eq!(
+        cfg.backing_trade_fee_policy_count, 2,
+        "long and short policy sides are counted independently"
+    );
+    assert_eq!(cfg.backing_trade_fee_bps_short, 44);
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+    let sz = (5 * POS_SCALE) as i128;
+
+    let assert_batch_rejects_without_mutation = |env: &mut V16CuEnv, label: &str| {
+        let market_before = env.svm.get_account(&env.market).unwrap().data;
+        let taker_before = env.svm.get_account(&ta).unwrap().data;
+        let lp_before = env.svm.get_account(&la).unwrap().data;
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: sz,
+                    exec_price: 100,
+                    fee_bps: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+            ],
+            &[&taker, &lp],
+        );
+        assert!(rejected.is_err(), "{label}: batch must reject while any backing-fee policy remains");
+        assert_eq!(env.svm.get_account(&env.market).unwrap().data, market_before);
+        assert_eq!(env.svm.get_account(&ta).unwrap().data, taker_before);
+        assert_eq!(env.svm.get_account(&la).unwrap().data, lp_before);
+    };
+    assert_batch_rejects_without_mutation(&mut env, "two active policies");
+
+    env.update_backing_fee_policy_with_cu(0, 0, 0);
+    let (cfg, _) = env.market_state();
+    assert_eq!(cfg.backing_trade_fee_policy_count, 1);
+    assert_eq!(cfg.backing_trade_fee_bps_long, 0);
+    assert_eq!(cfg.backing_trade_fee_bps_short, 44);
+    assert_batch_rejects_without_mutation(&mut env, "short policy still active");
+
+    env.update_backing_fee_policy_with_cu(1, 0, 0);
+    let (cfg, _) = env.market_state();
+    assert_eq!(cfg.backing_trade_fee_policy_count, 0);
+    assert_eq!(cfg.backing_trade_fee_bps_long, 0);
+    assert_eq!(cfg.backing_trade_fee_bps_short, 0);
+
+    env.svm.expire_blockhash();
+    let reopened = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![BatchTradeLeg {
+                asset_index: 0,
+                size_q: sz,
+                exec_price: 100,
+                fee_bps: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(
+        reopened.is_ok(),
+        "clearing every backing-fee policy must restore BatchTradeNoCpi liveness: {reopened:?}"
+    );
+    assert_eq!(active_leg_for_asset(&env.portfolio_state(ta), 0).basis_pos_q, sz);
+    assert_eq!(active_leg_for_asset(&env.portfolio_state(la), 0).basis_pos_q, -sz);
+}
+
 // security.md sweep — BatchTradeCpi fee bounds on permissionless LP fills (#37/#49): in CPI mode the
 // taker supplies fee_bps while the LP owner does not sign the fill. An over-max fee must therefore
 // reject the whole batch, or a taker could drain an LP into protocol insurance through a matcher fill.
