@@ -11026,6 +11026,85 @@ fn v16_attack_insurance_ledger_authority_binding_enforced() {
     assert_eq!(group.vault as u64, env.token_amount(env.vault));
 }
 
+// security.md sweep — ledger account-kind confusion (#44/#35): SyncBackingDomainLedger and
+// SyncInsuranceLedger accept an arbitrary program-owned writable ledger account. Passing a real
+// portfolio account must reject on the persisted account kind before any write; otherwise an
+// authorized operator could overwrite a funded user portfolio as a ledger and strand vault funds.
+#[test]
+fn v16_attack_sync_ledgers_cannot_overwrite_portfolio_accounts() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.top_up_backing_bucket(1, 100, 10);
+    env.top_up_insurance_domain_with_authority(&admin, 0, 100);
+
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let backing_sync = env.send(
+        ProgInstruction::SyncBackingDomainLedger { domain: 1 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        backing_sync.is_err(),
+        "SyncBackingDomainLedger must reject a portfolio account as the ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "backing-ledger sync must not rewrite the portfolio bytes or lamports"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "backing-ledger sync rejection must leave market state unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "backing-ledger sync rejection must not touch vault custody"
+    );
+
+    env.svm.expire_blockhash();
+    let insurance_sync = env.send(
+        ProgInstruction::SyncInsuranceLedger,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        insurance_sync.is_err(),
+        "SyncInsuranceLedger must reject a portfolio account as the ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "insurance-ledger sync must not rewrite the portfolio bytes or lamports"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "insurance-ledger sync rejection must leave market state unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "insurance-ledger sync rejection must not touch vault custody"
+    );
+}
+
 // security.md sweep — deposit source confusion (#35/#44): the deposit source must be a token account
 // owned by the depositor. Passing the VAULT (or any non-owned account) as the source must reject —
 // otherwise a vault->vault no-op transfer could credit capital for free (mint capital from nothing).
