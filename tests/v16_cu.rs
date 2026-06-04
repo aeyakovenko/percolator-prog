@@ -13319,6 +13319,78 @@ fn v16_attack_close_slab_requires_full_winddown() {
     assert_eq!(env.token_amount(cr), 1_000_000, "user recovers funds via CloseResolved");
 }
 
+// security.md sweep - CloseSlab final-custody validation (#33/#44/#48): once accounting is fully
+// drained, CloseSlab may still recover direct vault dust before zeroing the market slab. A wrong
+// primary destination must reject before the vault is closed or the market is reclaimed.
+#[test]
+fn v16_attack_close_slab_bad_primary_dest_is_atomic() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.resolve();
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    let close_slab_to = |env: &mut V16CuEnv, dest: Pubkey| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+    };
+    let assert_rejected_close_unchanged = |env: &V16CuEnv, label: &str| {
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label}: market slab must not be zeroed"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "{label}: primary vault must not be transferred or closed"
+        );
+    };
+
+    let wrong_mint = Pubkey::new_unique();
+    let wrong_mint_dest = env.token_account_for_mint(wrong_mint, admin.pubkey(), 0);
+    let wrong_mint_close = close_slab_to(&mut env, wrong_mint_dest);
+    assert!(
+        wrong_mint_close.is_err(),
+        "CloseSlab must reject a wrong-mint primary destination"
+    );
+    assert_eq!(env.token_amount(wrong_mint_dest), 0, "wrong-mint dest receives nothing");
+    assert_rejected_close_unchanged(&env, "wrong-mint primary dest rejection");
+
+    let foreign_dest = env.token_account_for_mint(env.mint, Pubkey::new_unique(), 0);
+    let foreign_close = close_slab_to(&mut env, foreign_dest);
+    assert!(
+        foreign_close.is_err(),
+        "CloseSlab must reject a third-party primary destination"
+    );
+    assert_eq!(env.token_amount(foreign_dest), 0, "foreign dest receives nothing");
+    assert_rejected_close_unchanged(&env, "foreign primary dest rejection");
+
+    let good_dest = env.token_account(admin.pubkey(), 0);
+    let good_close = close_slab_to(&mut env, good_dest);
+    assert!(good_close.is_ok(), "valid CloseSlab still recovers final vault dust: {good_close:?}");
+    assert_eq!(env.token_amount(good_dest), 7, "primary vault dust recovered to admin");
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(closed_market.lamports, 0, "market lamports reclaimed after valid close");
+    assert!(
+        closed_market.data.iter().all(|b| *b == 0),
+        "market data zeroed only after a valid close"
+    );
+}
+
 // security.md sweep — WithdrawInsuranceDomain operator authorization (#6): a per-domain insurance
 // withdrawal must be signed by THAT domain's insurance_operator. A non-operator must reject — no
 // draining a domain's insurance by an unauthorized caller.
