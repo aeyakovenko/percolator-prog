@@ -98,6 +98,20 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   limit** (engine cap 16 assets / program cap 14 per account). **✅** A trader may hold **unlimited
   position accounts**; to use more assets, open more accounts (never grow one account past the cap).
 
+### Trading freshness UX
+- **Trading a fresh asset does not require users to explicitly refresh their portfolio first.** If the
+  market/oracle state for the traded asset is already fresh, `TradeCpi` and `TradeNoCpi` settle and
+  re-certify the participating portfolios' stale bounded legs on demand inside the trade. This includes
+  the common production case where a user already has a stale leg in the **same asset being traded** and
+  the matcher fill arrives through `TradeCpi`: the user submits the trade, not a separate refresh
+  instruction. **✅** (`v16_bpf_tradecpi_refreshes_stale_traded_portfolio_leg_on_demand`; the related
+  multi-asset case is covered by `v16_bpf_trade_refreshes_stale_related_portfolio_leg_on_demand`.)
+- The trade path still does **not** fetch or authenticate new oracle data itself; keepers/callers must
+  make the asset's market mark current through the appropriate oracle/mark crank first. Extremely stale
+  high-leg portfolios remain bounded by the pre-crank path rather than requiring one oversized trade.
+  **✅** (`v16_bpf_stale_full_14_leg_tradenocpi_rejects_before_cu_cliff`,
+  `v16_bpf_force_close_liveness_survives_14_stale_leg_grief_via_precrank`.)
+
 ### Governance & admin keys
 - **Per-asset admin keys, isolated — uniform across all assets including asset 0** — one asset's admin
   can never be used against another asset. **✅** Every asset (0..N) carries its own `asset_admin`
@@ -186,7 +200,8 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
 > (sparse-portfolio refactor, engine `c120fce`). Every product-spec item above is now **✅** — each
 > backed by a dedicated LiteSVM test against the production BPF asserting the attacker-success
 > criterion (isolation, exit-window, fee-split conservation, base-unit deposit/withdraw routing and
-> swap atomicity, permissionless-create fee gating, bounded admin, and scheduled-close reclaim).
+> swap atomicity, permissionless-create fee gating, bounded admin, scheduled-close reclaim, and
+> trade-time portfolio refresh UX).
 
 ---
 
