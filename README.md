@@ -546,7 +546,13 @@ Hybrid after-hours mode is a single external-oracle configuration with dynamic m
 - `RiskParams.max_trading_fee_bps = 10_000`
 - `trade_fee_base_bps < max_trading_fee_bps`
 
-In the v16 multi-asset wrapper, this configured hybrid/AuthMark/EwmaMark oracle lane is scoped to asset index `0`. Additional asset slots can be activated, drained, retired, and reused independently; their public cranks use their own stored per-asset oracle profile and do not inherit asset `0`'s mark or composite oracle state. Reused slots get a new monotonic `market_id`, and stale portfolio legs/source claims/close ledgers from the retired id fail closed.
+In the v16 multi-asset wrapper, Hybrid/AuthMark/EwmaMark configuration is per asset. Every active
+asset `0..N` has its own stored oracle profile and is reconfigured only by that asset's
+`oracle_authority`; asset `0` is mirrored into the legacy wrapper-config oracle fields for
+compatibility, but other assets do not inherit asset `0`'s mark or composite oracle state. Additional
+asset slots can be activated, drained, retired, and reused independently. Reused slots get a new
+monotonic `market_id`, and stale portfolio legs/source claims/close ledgers from the retired id fail
+closed.
 
 While the external oracle is fresh, the wrapper uses the external composite as the index and refreshes the fallback mark baseline to that accepted external price. If the supplied Pyth update is stale but the market's own `last_good_oracle_slot` has not crossed the soft-stale window, the wrapper rejects instead of falling back; a caller-chosen stale account is not proof that the feed is after-hours. Once the soft-stale window has elapsed, price-taking paths fall back to the fee-weighted EWMA mark and `TradeCpi`/`TradeNoCpi` charge:
 

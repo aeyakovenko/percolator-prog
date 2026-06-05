@@ -15307,6 +15307,75 @@ fn v16_attack_cure_deposit_exact_and_atomic() {
     let _ = g_mid;
 }
 
+// security.md sweep - CureAndCancelClose owner gating (#6/#48): canceling a close-progress ledger is
+// liveness-sensitive. A non-owner must not be able to cancel a victim's forced-close recovery state or
+// move optional-deposit tokens; the real owner must still be able to cure afterward.
+#[test]
+fn v16_attack_cure_and_cancel_close_owner_gated() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let victim = env.create_portfolio(&owner);
+    env.deposit(&owner, victim, 100);
+    env.seed_cancellable_close_progress(victim);
+
+    let attacker = Keypair::new();
+    env.ensure_signer_account(attacker.pubkey());
+    let attacker_source = env.token_account_for_mint(env.mint, attacker.pubkey(), 50);
+    let before_market = env.svm.get_account(&env.market).unwrap().data;
+    let before_victim = env.svm.get_account(&victim).unwrap().data;
+    let before_source = env.token_amount(attacker_source);
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CureAndCancelClose {
+            optional_deposit: 50,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new(attacker_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&attacker],
+    );
+    assert!(
+        rejected.is_err(),
+        "non-owner must not cancel a victim close-progress ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before_market,
+        "rejected non-owner cure must not mutate market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&victim).unwrap().data,
+        before_victim,
+        "rejected non-owner cure must leave the victim close ledger unchanged"
+    );
+    assert_eq!(
+        env.token_amount(attacker_source),
+        before_source,
+        "rejected non-owner cure must not pull optional-deposit tokens"
+    );
+    assert!(
+        !env.portfolio_state(victim).close_progress.canceled,
+        "victim close-progress remains active after attacker rejection"
+    );
+
+    let owner_source = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+    env.cure_and_cancel_close_with_cu(&owner, victim, owner_source, 0);
+    let cured = env.portfolio_state(victim);
+    assert!(
+        cured.close_progress.canceled,
+        "real owner can still cure and cancel after rejected attacker attempt"
+    );
+    assert_eq!(
+        cured.capital, 100,
+        "zero-deposit cure does not change capital"
+    );
+}
+
 // full-interface sweep (cron29): CureAndCancelClose validates token accounts before the engine cure
 // and transfers after the engine mutation. A market-A portfolio must not be curable through market B
 // with a valid market-B vault, or the source transfer could fund one market while canceling and
@@ -31957,6 +32026,137 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
         ok.is_ok(),
         "the genuine mark authority's push is accepted: {:?}",
         ok
+    );
+}
+
+// security.md sweep - oracle reconfiguration authority (#6/#37): changing oracle MODE/anchor is as
+// sensitive as pushing a mark. A non-oracle-authority must not switch an empty market between EWMA,
+// AUTH_MARK, or HYBRID modes and thereby seize future price control before users arrive.
+#[test]
+fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
+    let mut env = V16CuEnv::new();
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+    env.svm.warp_to_slot(1);
+
+    let before = env.svm.get_account(&env.market).unwrap().data;
+    env.svm.expire_blockhash();
+    let ewma = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureEwmaMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: 200,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        vec![
+            AccountMeta::new(mallory.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&mallory],
+    );
+    assert!(
+        ewma.is_err(),
+        "non-oracle-authority must not switch the asset to EWMA mode"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before,
+        "rejected EWMA reconfiguration must not mutate market state"
+    );
+
+    env.svm.expire_blockhash();
+    let auth_mark = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: 200,
+        },
+        vec![
+            AccountMeta::new(mallory.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&mallory],
+    );
+    assert!(
+        auth_mark.is_err(),
+        "non-oracle-authority must not switch the asset to AuthMark mode"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before,
+        "rejected AuthMark reconfiguration must not mutate market state"
+    );
+
+    let feed = [7u8; 32];
+    let pyth = env.set_pyth_price(&feed, 200, 0, 1);
+    let mut feeds = [[0u8; 32]; percolator_prog::constants::ORACLE_LEG_CAP];
+    feeds[0] = feed;
+    env.svm.expire_blockhash();
+    let hybrid = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureHybridOracle {
+            asset_index: 0,
+            now_slot: 1,
+            now_unix_ts: 1,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 3,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: feeds,
+        },
+        vec![
+            AccountMeta::new(mallory.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(pyth, false),
+        ],
+        &[&mallory],
+    );
+    assert!(
+        hybrid.is_err(),
+        "non-oracle-authority must not switch the asset to Hybrid mode"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before,
+        "rejected Hybrid reconfiguration must not mutate market state"
+    );
+
+    env.svm.expire_blockhash();
+    let admin = env.admin.insecure_clone();
+    let control = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureEwmaMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: 200,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        control.is_ok(),
+        "the configured oracle authority can perform the same well-formed reconfiguration: {control:?}"
     );
 }
 
