@@ -240,9 +240,9 @@ Positions and PnL use native `i128`/`u128` (`POS_SCALE = 1_000_000`, `ADL_ONE = 
 
 ### Two trade paths
 - **TradeNoCpi**: no external matcher; used for baseline integration, local testing, and deterministic program-test scenarios.
-- **TradeCpi**: production path; calls an external matcher program that the LP either signs for
-  directly or pre-authorizes with `SetMatcherAuthorization`, validates the returned prefix, then
-  executes the engine trade using the matcher's `exec_price` / `exec_size`.
+- **TradeCpi**: production matcher path; the LP owner configures a matcher program/context once on
+  the LP portfolio with `SetMatcherConfig` (tag 68). Fills then run without the LP owner
+  signing each transaction. Direct LP-signed bilateral trading is `TradeNoCpi`.
 
 ### MatchingEngine trait
 The `MatchingEngine` trait is defined in the Percolator program (not in the engine crate). The engine is a pure recorder of state transitions and does not define the matching interface. Two implementations exist: `NoOpMatcher` (TradeNoCpi) and `CpiMatcher` (TradeCpi).
@@ -286,7 +286,7 @@ The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-
 
 ### Portfolio account
 - **Owner**: Percolator program id
-- **Layout**: header + `PortfolioAccountV16Account`
+- **Layout**: header + `PortfolioAccountV16Account` + wrapper-owned matcher config tail
 - Holds one user's capital, PnL, source claims/liens, health certificate, close progress, and active legs.
 
 Authority fields are split by scope:
@@ -316,20 +316,17 @@ Matcher delegate PDA:
 
 This makes it a "pure identity signer" and prevents it from becoming an attack surface.
 
-### Matcher authorization (TradeCpi / BatchTradeCpi)
-Unsigned LP matcher fills require the canonical Percolator-owned authorization PDA. Its seeds are:
+### LP matcher config (TradeCpi / BatchTradeCpi)
+Unsigned LP matcher fills require an enabled matcher config stored directly on the LP portfolio.
 
-`["matcher-auth", market_group_pubkey, lp_portfolio_pubkey, lp_owner_pubkey, matcher_program_pubkey, matcher_context_pubkey]`
+`SetMatcherConfig` (tag 68) is signed by the LP owner and writes:
 
-`SetMatcherAuthorization` (tag 68) is signed by the LP owner and writes the exact tuple:
+`matcher_program, matcher_context, matcher_delegate, enabled`
 
-`market_group, lp_portfolio, lp_owner, matcher_program, matcher_context, matcher_delegate, enabled`
-
-During `TradeCpi` / `BatchTradeCpi`, if the LP owner does not sign, account 8 must be this canonical
-authorization PDA, read-only, owned by Percolator, `enabled == 1`, and byte-for-byte matching the
-instruction's market/LP/matcher arguments. Extra matcher CPI tail accounts begin after it.
-Attacker-owned bytes, writable auth accounts, disabled records, noncanonical auth accounts, or
-replaying an auth record against different matcher args all reject.
+During `TradeCpi` / `BatchTradeCpi`, Percolator reads this LP-account config and requires the
+instruction's matcher program, matcher context, and matcher delegate PDA to match it byte-for-byte.
+Extra matcher CPI tail accounts begin immediately after the matcher delegate. Disabled configs,
+wrong matcher program/context/delegate, wrong LP owner, or wrong LP portfolio all reject.
 
 ### Matcher context (TradeCpi)
 - account owned by matcher program
@@ -400,8 +397,8 @@ This section describes intent and operational ordering, not argument-by-argument
 - **TradeNoCpi**
   - trade without external matcher (used for testing / deterministic scenarios)
 - **TradeCpi**
-  - trade via LP-chosen matcher CPI with strict binding + validation. If the LP owner does not sign
-    the fill, include the LP's read-only matcher authorization account after the matcher delegate.
+  - trade via LP-chosen matcher CPI with strict binding + validation. The LP portfolio must already
+    store an enabled matcher config for the passed matcher program/context/delegate tuple.
 - **BatchTradeNoCpi** (tag 66)
   - atomic multi-leg batch (up to the portfolio asset cap) against one taker/LP pair; each leg's
     **signed** `size_q` sets its direction, so a single batch can carry a mixed long/short spread.
@@ -414,10 +411,9 @@ This section describes intent and operational ordering, not argument-by-argument
     (matcher tag 3) fills every leg against a single LP, each return is validated under the same
     anti-spoof binding as `TradeCpi`, then all fills apply through the batch path. Bounded to 16
     legs (the matcher's return-data cap).
-- **SetMatcherAuthorization** (tag 68)
-  - LP-owner-signed opt-in/out for unsigned LP matcher fills. The stored tuple must exactly match
-    the `TradeCpi` / `BatchTradeCpi` market, LP portfolio, LP owner, matcher program, matcher
-    context, and matcher delegate arguments.
+- **SetMatcherConfig** (tag 68)
+  - LP-owner-signed opt-in/out for unsigned LP matcher fills. This writes the matcher config tail
+    on the LP portfolio: matcher program, matcher context, matcher delegate, and enabled flag.
 
 ### Oracle / mark management
 - External-oracle markets read configured oracle account(s) directly in live price-taking instructions.
@@ -464,15 +460,15 @@ Percolator treats a matcher like a price/size oracle **with rules** chosen by th
 ### What Percolator enforces (non-negotiable)
 - **Signer checks**: the taker/user signs matcher fills; `TradeNoCpi` / `BatchTradeNoCpi`
   require both owners to sign
-- **LP owner identity**: the supplied LP owner account must match the owner stored in the LP
-  portfolio. The LP either signs the matcher-routed fill directly, or the fill supplies a
-  Percolator-owned, read-only matcher authorization account signed into existence by that LP owner.
+- **LP owner identity**: matcher-routed fills read the LP owner from the LP portfolio; no LP owner
+  account is supplied at fill time. Unsigned matcher-routed fills require an enabled matcher config
+  set by that LP owner.
 - **Matcher delegate signer**: delegate PDA is derived from the market, LP portfolio, LP owner,
   matcher program, and matcher context
 - **Matcher identity binding**: matcher program/context/delegate must match the derived tuple for
   that LP portfolio and owner
-- **Matcher authorization binding**: unsigned LP fills require an enabled auth record whose stored
-  market/LP/matcher tuple exactly matches the instruction arguments
+- **Matcher config binding**: LP fills require the LP portfolio's stored matcher
+  program/context/delegate tuple to exactly match the instruction arguments
 - **Matcher account shape**:
   - matcher program must be executable
   - context must not be executable
@@ -724,9 +720,8 @@ Call `InitMarket` with:
 - LP:
   - deploy or choose matcher program
   - create matcher context account owned by matcher program
-  - create a Percolator-owned matcher authorization account and call `SetMatcherAuthorization`
-    with the LP owner signing the exact matcher program/context/delegate tuple
   - create a portfolio with `InitPortfolio`
+  - call `SetMatcherConfig` with the LP owner signing the exact matcher program/context/delegate tuple
   - deposit collateral with `Deposit`
 - User:
   - create a portfolio with `InitPortfolio`
@@ -864,8 +859,7 @@ These are intended hard boundaries enforced in code and test suites:
 
 ### Common rejection causes (TradeCpi)
 - matcher identity mismatch (program/context/delegate tuple does not match the LP portfolio)
-- missing, disabled, writable, attacker-owned, noncanonical, or argument-mismatched matcher
-  authorization account when the LP owner does not sign
+- missing, disabled, or argument-mismatched LP matcher config
 - bad matcher shape (non-executable program, executable ctx, wrong ctx owner, short ctx)
 - matcher delegate PDA mismatch / wrong PDA shape
 - ABI prefix invalid (flags, echoed fields, size constraints)

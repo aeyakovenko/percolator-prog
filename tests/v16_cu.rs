@@ -226,28 +226,6 @@ fn matcher_delegate_key(
     .0
 }
 
-fn matcher_auth_key(
-    program_id: &Pubkey,
-    market: &Pubkey,
-    maker: &Pubkey,
-    maker_owner: &Pubkey,
-    matcher_program: &Pubkey,
-    matcher_context: &Pubkey,
-) -> Pubkey {
-    Pubkey::find_program_address(
-        &[
-            b"matcher-auth",
-            market.as_ref(),
-            maker.as_ref(),
-            maker_owner.as_ref(),
-            matcher_program.as_ref(),
-            matcher_context.as_ref(),
-        ],
-        program_id,
-    )
-    .0
-}
-
 fn encode_matcher_init_passive(max_fill_abs: u128) -> Vec<u8> {
     encode_matcher_init_passive_with_spread(max_fill_abs, 0, 100)
 }
@@ -965,6 +943,11 @@ impl V16CuEnv {
         state::read_portfolio(&account.data).unwrap()
     }
 
+    fn portfolio_matcher_config(&self, portfolio: Pubkey) -> state::PortfolioMatcherConfigV16 {
+        let account = self.svm.get_account(&portfolio).expect("portfolio account");
+        state::read_portfolio_matcher_config(&account.data).unwrap()
+    }
+
     fn mutate_market<F>(&mut self, f: F)
     where
         F: FnOnce(&mut state::WrapperConfigV16, &mut MarketGroupV16),
@@ -1464,6 +1447,69 @@ impl V16CuEnv {
         (ctx, delegate, cu)
     }
 
+    fn init_matcher_context_authorized(
+        &mut self,
+        matcher_program: Pubkey,
+        maker_owner: &Keypair,
+        maker_account: Pubkey,
+    ) -> (Pubkey, Pubkey, u64) {
+        let (ctx, delegate, cu) = self.init_matcher_context(matcher_program, maker_account);
+        self.set_matcher_config(
+            matcher_program,
+            maker_owner,
+            maker_account,
+            ctx,
+            delegate,
+            1,
+        );
+        (ctx, delegate, cu)
+    }
+
+    fn init_matcher_context_with_passive_spread_authorized(
+        &mut self,
+        matcher_program: Pubkey,
+        maker_owner: &Keypair,
+        maker_account: Pubkey,
+        base_spread_bps: u32,
+        max_total_bps: u32,
+    ) -> (Pubkey, Pubkey, u64) {
+        let (ctx, delegate, cu) = self.init_matcher_context_with_passive_spread(
+            matcher_program,
+            maker_account,
+            base_spread_bps,
+            max_total_bps,
+        );
+        self.set_matcher_config(
+            matcher_program,
+            maker_owner,
+            maker_account,
+            ctx,
+            delegate,
+            1,
+        );
+        (ctx, delegate, cu)
+    }
+
+    fn init_matcher_context_with_data_authorized(
+        &mut self,
+        matcher_program: Pubkey,
+        maker_owner: &Keypair,
+        maker_account: Pubkey,
+        init_data: Vec<u8>,
+    ) -> (Pubkey, Pubkey, u64) {
+        let (ctx, delegate, cu) =
+            self.init_matcher_context_with_data(matcher_program, maker_account, init_data);
+        self.set_matcher_config(
+            matcher_program,
+            maker_owner,
+            maker_account,
+            ctx,
+            delegate,
+            1,
+        );
+        (ctx, delegate, cu)
+    }
+
     fn init_auth_matcher_context(
         &mut self,
         matcher_program: Pubkey,
@@ -1488,7 +1534,7 @@ impl V16CuEnv {
                 delegate,
             )
             .expect("init auth matcher context");
-        self.set_matcher_authorization(
+        self.set_matcher_config(
             matcher_program,
             maker_owner,
             maker_account,
@@ -1499,7 +1545,7 @@ impl V16CuEnv {
         (ctx, delegate, cu)
     }
 
-    fn set_matcher_authorization(
+    fn set_matcher_config(
         &mut self,
         matcher_program: Pubkey,
         maker_owner: &Keypair,
@@ -1508,7 +1554,7 @@ impl V16CuEnv {
         matcher_delegate: Pubkey,
         enabled: u8,
     ) -> Pubkey {
-        self.try_set_matcher_authorization(
+        self.try_set_matcher_config(
             matcher_program,
             maker_owner,
             maker_account,
@@ -1516,10 +1562,10 @@ impl V16CuEnv {
             matcher_delegate,
             enabled,
         )
-        .expect("set matcher authorization")
+        .expect("set matcher config")
     }
 
-    fn try_set_matcher_authorization(
+    fn try_set_matcher_config(
         &mut self,
         matcher_program: Pubkey,
         maker_owner: &Keypair,
@@ -1528,43 +1574,25 @@ impl V16CuEnv {
         matcher_delegate: Pubkey,
         enabled: u8,
     ) -> Result<Pubkey, String> {
-        let auth = matcher_auth_key(
-            &self.program_id,
-            &self.market,
-            &maker_account,
-            &maker_owner.pubkey(),
-            &matcher_program,
-            &matcher_context,
-        );
-        if self.svm.get_account(&auth).is_none() {
-            self.svm
-                .set_account(
-                    auth,
-                    Account {
-                        lamports: 1_000_000_000,
-                        data: vec![0u8; state::matcher_authorization_account_len()],
-                        owner: self.program_id,
-                        executable: false,
-                        rent_epoch: 0,
-                    },
-                )
-                .unwrap();
-        }
         self.svm.expire_blockhash();
-        self.send(
-            ProgInstruction::SetMatcherAuthorization { enabled },
-            vec![
-                AccountMeta::new(maker_owner.pubkey(), true),
-                AccountMeta::new_readonly(self.market, false),
-                AccountMeta::new_readonly(maker_account, false),
-                AccountMeta::new(auth, false),
+        let mut accounts = vec![
+            AccountMeta::new(maker_owner.pubkey(), true),
+            AccountMeta::new_readonly(self.market, false),
+            AccountMeta::new(maker_account, false),
+        ];
+        if enabled != 0 {
+            accounts.extend([
                 AccountMeta::new_readonly(matcher_program, false),
                 AccountMeta::new_readonly(matcher_context, false),
                 AccountMeta::new_readonly(matcher_delegate, false),
-            ],
+            ]);
+        }
+        self.send(
+            ProgInstruction::SetMatcherConfig { enabled },
+            accounts,
             &[maker_owner],
         )?;
-        Ok(auth)
+        Ok(matcher_delegate)
     }
 
     fn try_init_auth_matcher_context_with_delegate(
@@ -1678,7 +1706,7 @@ impl V16CuEnv {
         &mut self,
         owner_a: &Keypair,
         account_a: Pubkey,
-        owner_b: &Keypair,
+        _owner_b: &Keypair,
         account_b: Pubkey,
         matcher_program: Pubkey,
         matcher_context: Pubkey,
@@ -1687,18 +1715,8 @@ impl V16CuEnv {
         size_q: i128,
         fee_bps: u64,
     ) -> Result<u64, String> {
-        let auth = matcher_auth_key(
-            &self.program_id,
-            &self.market,
-            &account_b,
-            &owner_b.pubkey(),
-            &matcher_program,
-            &matcher_context,
-        );
-        let has_auth = self.svm.get_account(&auth).is_some();
-        let mut metas = vec![
+        let metas = vec![
             AccountMeta::new(owner_a.pubkey(), true),
-            AccountMeta::new_readonly(owner_b.pubkey(), !has_auth),
             AccountMeta::new(self.market, false),
             AccountMeta::new(account_a, false),
             AccountMeta::new(account_b, false),
@@ -1706,12 +1724,6 @@ impl V16CuEnv {
             AccountMeta::new(matcher_context, false),
             AccountMeta::new_readonly(matcher_delegate, false),
         ];
-        let signers: Vec<&Keypair> = if has_auth {
-            metas.push(AccountMeta::new_readonly(auth, false));
-            vec![owner_a]
-        } else {
-            vec![owner_a, owner_b]
-        };
         self.send(
             ProgInstruction::TradeCpi {
                 asset_index,
@@ -1720,7 +1732,7 @@ impl V16CuEnv {
                 limit_price: 0,
             },
             metas,
-            &signers,
+            &[owner_a],
         )
     }
 
@@ -5383,7 +5395,7 @@ enum SourceCreditWatermarkDirection {
 fn try_source_credit_watermark_trade(
     env: &mut V16CuEnv,
     path: SourceCreditWatermarkTradePath,
-    matcher_program: Option<Pubkey>,
+    matcher_accounts: Option<(Pubkey, Pubkey, Pubkey)>,
     owner_a: &Keypair,
     account_a: Pubkey,
     owner_b: &Keypair,
@@ -5405,9 +5417,8 @@ fn try_source_credit_watermark_trade(
             fee_bps,
         ),
         SourceCreditWatermarkTradePath::Cpi => {
-            let matcher_program = matcher_program.expect("matcher program");
-            let (matcher_ctx, matcher_delegate, _) =
-                env.init_matcher_context(matcher_program, account_b);
+            let (matcher_program, matcher_ctx, matcher_delegate) =
+                matcher_accounts.expect("matcher accounts");
             env.try_trade_cpi_with_cu_on_asset(
                 owner_a,
                 account_a,
@@ -5455,6 +5466,11 @@ fn run_source_credit_watermark_trade_case(
     let counterparty_account = env.create_portfolio(&counterparty_owner);
     env.deposit(&cross_owner, cross_account, DEPOSIT);
     env.deposit(&counterparty_owner, counterparty_account, 1_000);
+    let matcher_accounts = matcher_program.map(|program| {
+        let (ctx, delegate, _) =
+            env.init_matcher_context_authorized(program, &counterparty_owner, counterparty_account);
+        (program, ctx, delegate)
+    });
 
     let (winning_domain, asset0_mark, asset1_mark, side_sign) = match direction {
         SourceCreditWatermarkDirection::PositiveSize => (1usize, 105, 95, 1i128),
@@ -5549,7 +5565,7 @@ fn run_source_credit_watermark_trade_case(
     let over_watermark = try_source_credit_watermark_trade(
         &mut env,
         path,
-        matcher_program,
+        matcher_accounts,
         &cross_owner,
         cross_account,
         &counterparty_owner,
@@ -5591,7 +5607,7 @@ fn run_source_credit_watermark_trade_case(
     let inside_watermark = try_source_credit_watermark_trade(
         &mut env,
         path,
-        matcher_program,
+        matcher_accounts,
         &cross_owner,
         cross_account,
         &counterparty_owner,
@@ -7040,7 +7056,7 @@ fn v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
     env.deposit(&maker_owner, maker_account, 1_000_000);
 
     let (matcher_ctx, matcher_delegate, init_matcher_cu) =
-        env.init_matcher_context(matcher_program, maker_account);
+        env.init_matcher_context_authorized(matcher_program, &maker_owner, maker_account);
     let trade_cpi_cu = env.trade_cpi_with_cu(
         &taker_owner,
         taker_account,
@@ -7108,7 +7124,7 @@ fn v16_bpf_tradecpi_external_matcher_executes_on_added_asset() {
     env.deposit(&maker_owner, maker_account, 1_000_000);
 
     let (matcher_ctx, matcher_delegate, _) =
-        env.init_matcher_context(matcher_program, maker_account);
+        env.init_matcher_context_authorized(matcher_program, &maker_owner, maker_account);
     let trade_cpi_cu = env.trade_cpi_with_cu_on_asset(
         &taker_owner,
         taker_account,
@@ -7354,8 +7370,14 @@ fn v16_bpf_tradecpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
             recovery_reason: 0,
         },
     );
-    let (matcher_ctx, matcher_delegate, _) =
-        env.init_matcher_context_with_passive_spread(matcher_program, extractor, 9_000, 9_000);
+    let (matcher_ctx, matcher_delegate, _) = env
+        .init_matcher_context_with_passive_spread_authorized(
+            matcher_program,
+            &extractor_owner,
+            extractor,
+            9_000,
+            9_000,
+        );
     let before_market = env.svm.get_account(&env.market).unwrap();
     let before_extractor = env.svm.get_account(&extractor).unwrap();
     let before_probe = env.svm.get_account(&probe).unwrap();
@@ -7507,8 +7529,14 @@ fn v16_bpf_tradecpi_rejects_when_counterparty_starts_bankrupt() {
             recovery_reason: 0,
         },
     );
-    let (matcher_ctx, matcher_delegate, _) =
-        env.init_matcher_context_with_passive_spread(matcher_program, extractor, 9_000, 9_000);
+    let (matcher_ctx, matcher_delegate, _) = env
+        .init_matcher_context_with_passive_spread_authorized(
+            matcher_program,
+            &extractor_owner,
+            extractor,
+            9_000,
+            9_000,
+        );
 
     let before_market = env.svm.get_account(&env.market).unwrap();
     let before_extractor = env.svm.get_account(&extractor).unwrap();
@@ -9726,20 +9754,12 @@ fn auth_matcher_for_lp(
     env: &mut V16CuEnv,
     lp_owner: &Keypair,
     lp_account: Pubkey,
-) -> (Pubkey, Pubkey, Pubkey, Pubkey) {
+) -> (Pubkey, Pubkey, Pubkey) {
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
     env.svm.add_program(matcher_program, &matcher_bytes);
     let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, lp_owner, lp_account);
-    let auth = matcher_auth_key(
-        &env.program_id,
-        &env.market,
-        &lp_account,
-        &lp_owner.pubkey(),
-        &matcher_program,
-        &ctx,
-    );
-    (matcher_program, ctx, delegate, auth)
+    (matcher_program, ctx, delegate)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9765,8 +9785,7 @@ fn execute_backing_residual_counter_trade_path(
             0,
         ),
         BackingResidualCounterTradePath::TradeCpi => {
-            let (matcher_program, ctx, delegate, _) =
-                auth_matcher_for_lp(env, lp_owner, lp_account);
+            let (matcher_program, ctx, delegate) = auth_matcher_for_lp(env, lp_owner, lp_account);
             env.trade_cpi_with_cu_on_asset(
                 taker_owner,
                 taker_account,
@@ -9801,8 +9820,7 @@ fn execute_backing_residual_counter_trade_path(
             )
             .expect("BatchTradeNoCpi residual-counter trade"),
         BackingResidualCounterTradePath::BatchTradeCpi => {
-            let (matcher_program, ctx, delegate, auth) =
-                auth_matcher_for_lp(env, lp_owner, lp_account);
+            let (matcher_program, ctx, delegate) = auth_matcher_for_lp(env, lp_owner, lp_account);
             env.send(
                 ProgInstruction::BatchTradeCpi {
                     legs: vec![BatchTradeCpiLeg {
@@ -9814,14 +9832,12 @@ fn execute_backing_residual_counter_trade_path(
                 },
                 vec![
                     AccountMeta::new(taker_owner.pubkey(), true),
-                    AccountMeta::new_readonly(lp_owner.pubkey(), false),
                     AccountMeta::new(env.market, false),
                     AccountMeta::new(taker_account, false),
                     AccountMeta::new(lp_account, false),
                     AccountMeta::new_readonly(matcher_program, false),
                     AccountMeta::new(ctx, false),
                     AccountMeta::new_readonly(delegate, false),
-                    AccountMeta::new_readonly(auth, false),
                 ],
                 &[taker_owner],
             )
@@ -13930,7 +13946,8 @@ fn v16_attack_tradecpi_spoofed_matcher_binding_rejected() {
     let maker = env.create_portfolio(&maker_owner);
     env.deposit(&taker_owner, taker, 1_000_000);
     env.deposit(&maker_owner, maker, 1_000_000);
-    let (matcher_ctx, matcher_delegate, _) = env.init_matcher_context(matcher_program, maker);
+    let (matcher_ctx, matcher_delegate, _) =
+        env.init_matcher_context_authorized(matcher_program, &maker_owner, maker);
     let (_, g0) = env.market_state();
 
     // ATTACK 1: random (unbound) delegate.
@@ -14064,7 +14081,7 @@ fn v16_bpf_tradecpi_permissionless_lp_fill_does_not_need_lp_owner_signature() {
 }
 
 #[test]
-fn v16_attack_revoked_matcher_authorization_blocks_unsigned_lp_fills() {
+fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
@@ -14076,18 +14093,9 @@ fn v16_attack_revoked_matcher_authorization_blocks_unsigned_lp_fills() {
     env.deposit(&taker_owner, taker, 1_000_000);
     env.deposit(&lp_owner, lp, 1_000_000);
     let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
-    let auth = matcher_auth_key(
-        &env.program_id,
-        &env.market,
-        &lp,
-        &lp_owner.pubkey(),
-        &matcher_program,
-        &ctx,
-    );
 
-    env.set_matcher_authorization(matcher_program, &lp_owner, lp, ctx, delegate, 0);
-    let auth_state = state::read_matcher_authorization(&env.svm.get_account(&auth).unwrap().data)
-        .expect("revoked auth account is still a valid auth record");
+    env.set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 0);
+    let auth_state = env.portfolio_matcher_config(lp);
     assert_eq!(
         auth_state.enabled, 0,
         "LP owner revoked unsigned matcher fills"
@@ -14098,21 +14106,27 @@ fn v16_attack_revoked_matcher_authorization_blocks_unsigned_lp_fills() {
     let ctx_before = env.svm.get_account(&ctx).unwrap();
 
     env.svm.expire_blockhash();
-    let single = env.try_trade_cpi_with_cu_on_asset(
-        &taker_owner,
-        taker,
-        &lp_owner,
-        lp,
-        matcher_program,
-        ctx,
-        delegate,
-        0,
-        (5 * POS_SCALE) as i128,
-        100,
+    let single = env.send(
+        ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q: (5 * POS_SCALE) as i128,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+        vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker_owner],
     );
     assert!(
         single.is_err(),
-        "revoked matcher authorization must block unsigned LP TradeCpi fills"
+        "disabled LP matcher config must block TradeCpi fills"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
@@ -14131,27 +14145,25 @@ fn v16_attack_revoked_matcher_authorization_blocks_unsigned_lp_fills() {
         },
         vec![
             AccountMeta::new(taker_owner.pubkey(), true),
-            AccountMeta::new_readonly(lp_owner.pubkey(), false),
             AccountMeta::new(env.market, false),
             AccountMeta::new(taker, false),
             AccountMeta::new(lp, false),
             AccountMeta::new_readonly(matcher_program, false),
             AccountMeta::new(ctx, false),
             AccountMeta::new_readonly(delegate, false),
-            AccountMeta::new_readonly(auth, false),
         ],
         &[&taker_owner],
     );
     assert!(
         batch.is_err(),
-        "revoked matcher authorization must block unsigned LP BatchTradeCpi fills"
+        "disabled LP matcher config must block BatchTradeCpi fills"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
     assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
     assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
 
-    env.set_matcher_authorization(matcher_program, &lp_owner, lp, ctx, delegate, 1);
+    env.set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 1);
     env.svm.expire_blockhash();
     let ok = env.try_trade_cpi_with_cu_on_asset(
         &taker_owner,
@@ -14176,113 +14188,7 @@ fn v16_attack_revoked_matcher_authorization_blocks_unsigned_lp_fills() {
 }
 
 #[test]
-fn v16_attack_noncanonical_matcher_authorization_account_cannot_authorize_unsigned_fills() {
-    let mut env = V16CuEnv::new();
-    let matcher_program = Pubkey::new_unique();
-    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
-    env.svm.add_program(matcher_program, &matcher_bytes);
-    let taker_owner = Keypair::new();
-    let lp_owner = Keypair::new();
-    let taker = env.create_portfolio(&taker_owner);
-    let lp = env.create_portfolio(&lp_owner);
-    env.deposit(&taker_owner, taker, 1_000_000);
-    env.deposit(&lp_owner, lp, 1_000_000);
-    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
-
-    let canonical_auth = matcher_auth_key(
-        &env.program_id,
-        &env.market,
-        &lp,
-        &lp_owner.pubkey(),
-        &matcher_program,
-        &ctx,
-    );
-    let noncanonical_auth = Pubkey::new_unique();
-    assert_ne!(noncanonical_auth, canonical_auth);
-    let mut auth_data = vec![0u8; state::matcher_authorization_account_len()];
-    state::write_matcher_authorization(
-        &mut auth_data,
-        &state::MatcherAuthorizationAccountV16 {
-            market_group: env.market.to_bytes(),
-            lp_portfolio: lp.to_bytes(),
-            lp_owner: lp_owner.pubkey().to_bytes(),
-            matcher_program: matcher_program.to_bytes(),
-            matcher_context: ctx.to_bytes(),
-            matcher_delegate: delegate.to_bytes(),
-            enabled: 1,
-        },
-    )
-    .expect("write forged duplicate auth bytes");
-    env.svm
-        .set_account(
-            noncanonical_auth,
-            Account {
-                lamports: 1_000_000_000,
-                data: auth_data,
-                owner: env.program_id,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let taker_before = env.svm.get_account(&taker).unwrap();
-    let lp_before = env.svm.get_account(&lp).unwrap();
-    let ctx_before = env.svm.get_account(&ctx).unwrap();
-
-    env.svm.expire_blockhash();
-    let forged = env.send(
-        ProgInstruction::TradeCpi {
-            asset_index: 0,
-            size_q: (5 * POS_SCALE) as i128,
-            fee_bps: 100,
-            limit_price: 0,
-        },
-        vec![
-            AccountMeta::new(taker_owner.pubkey(), true),
-            AccountMeta::new_readonly(lp_owner.pubkey(), false),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(taker, false),
-            AccountMeta::new(lp, false),
-            AccountMeta::new_readonly(matcher_program, false),
-            AccountMeta::new(ctx, false),
-            AccountMeta::new_readonly(delegate, false),
-            AccountMeta::new_readonly(noncanonical_auth, false),
-        ],
-        &[&taker_owner],
-    );
-    assert!(
-        forged.is_err(),
-        "valid-looking matcher auth bytes at a noncanonical account must not authorize unsigned fills"
-    );
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
-    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
-    assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
-
-    env.svm.expire_blockhash();
-    let overwrite = env.send(
-        ProgInstruction::SetMatcherAuthorization { enabled: 1 },
-        vec![
-            AccountMeta::new(lp_owner.pubkey(), true),
-            AccountMeta::new_readonly(env.market, false),
-            AccountMeta::new_readonly(lp, false),
-            AccountMeta::new(noncanonical_auth, false),
-            AccountMeta::new_readonly(matcher_program, false),
-            AccountMeta::new_readonly(ctx, false),
-            AccountMeta::new_readonly(delegate, false),
-        ],
-        &[&lp_owner],
-    );
-    assert!(
-        overwrite.is_err(),
-        "SetMatcherAuthorization must only write the canonical matcher-auth PDA"
-    );
-}
-
-#[test]
-fn v16_attack_non_owner_cannot_revoke_matcher_authorization() {
+fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
@@ -14296,50 +14202,31 @@ fn v16_attack_non_owner_cannot_revoke_matcher_authorization() {
     env.deposit(&taker_owner, taker, 1_000_000);
     env.deposit(&lp_owner, lp, 1_000_000);
     let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
-    let auth = matcher_auth_key(
-        &env.program_id,
-        &env.market,
-        &lp,
-        &lp_owner.pubkey(),
-        &matcher_program,
-        &ctx,
-    );
-    let auth_before = env.svm.get_account(&auth).unwrap();
     let market_before = env.svm.get_account(&env.market).unwrap();
     let lp_before = env.svm.get_account(&lp).unwrap();
     let ctx_before = env.svm.get_account(&ctx).unwrap();
 
     env.svm.expire_blockhash();
     let revoke = env.send(
-        ProgInstruction::SetMatcherAuthorization { enabled: 0 },
+        ProgInstruction::SetMatcherConfig { enabled: 0 },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
-            AccountMeta::new_readonly(lp, false),
-            AccountMeta::new(auth, false),
-            AccountMeta::new_readonly(matcher_program, false),
-            AccountMeta::new_readonly(ctx, false),
-            AccountMeta::new_readonly(delegate, false),
+            AccountMeta::new(lp, false),
         ],
         &[&attacker],
     );
     assert!(
         revoke.is_err(),
-        "a non-owner signer must not be able to revoke an LP's matcher authorization"
-    );
-    assert_eq!(
-        env.svm.get_account(&auth).unwrap(),
-        auth_before,
-        "rejected non-owner revocation leaves auth bytes unchanged"
+        "a non-owner signer must not be able to change an LP's matcher config"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
     assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
-    let auth_state = state::read_matcher_authorization(&env.svm.get_account(&auth).unwrap().data)
-        .expect("auth remains readable");
+    let auth_state = env.portfolio_matcher_config(lp);
     assert_eq!(
         auth_state.enabled, 1,
-        "auth remains enabled after attacker attempt"
+        "LP matcher config remains enabled after attacker attempt"
     );
 
     env.svm.expire_blockhash();
@@ -14362,7 +14249,7 @@ fn v16_attack_non_owner_cannot_revoke_matcher_authorization() {
 }
 
 #[test]
-fn v16_attack_cross_lp_cannot_overwrite_matcher_authorization_account() {
+fn v16_attack_cross_lp_cannot_overwrite_lp_matcher_config() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
@@ -14380,27 +14267,17 @@ fn v16_attack_cross_lp_cannot_overwrite_matcher_authorization_account() {
         env.init_auth_matcher_context(matcher_program, &victim_owner, victim_lp);
     let (attacker_ctx, attacker_delegate, _) =
         env.init_auth_matcher_context(matcher_program, &attacker_owner, attacker_lp);
-    let victim_auth = matcher_auth_key(
-        &env.program_id,
-        &env.market,
-        &victim_lp,
-        &victim_owner.pubkey(),
-        &matcher_program,
-        &victim_ctx,
-    );
-    let victim_auth_before = env.svm.get_account(&victim_auth).unwrap();
     let market_before = env.svm.get_account(&env.market).unwrap();
     let victim_before = env.svm.get_account(&victim_lp).unwrap();
     let attacker_before = env.svm.get_account(&attacker_lp).unwrap();
 
     env.svm.expire_blockhash();
     let overwrite = env.send(
-        ProgInstruction::SetMatcherAuthorization { enabled: 0 },
+        ProgInstruction::SetMatcherConfig { enabled: 0 },
         vec![
             AccountMeta::new(attacker_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
-            AccountMeta::new_readonly(attacker_lp, false),
-            AccountMeta::new(victim_auth, false),
+            AccountMeta::new(victim_lp, false),
             AccountMeta::new_readonly(matcher_program, false),
             AccountMeta::new_readonly(attacker_ctx, false),
             AccountMeta::new_readonly(attacker_delegate, false),
@@ -14409,12 +14286,7 @@ fn v16_attack_cross_lp_cannot_overwrite_matcher_authorization_account() {
     );
     assert!(
         overwrite.is_err(),
-        "one LP must not overwrite another LP's matcher authorization account with its own tuple"
-    );
-    assert_eq!(
-        env.svm.get_account(&victim_auth).unwrap(),
-        victim_auth_before,
-        "rejected cross-LP overwrite leaves victim auth bytes unchanged"
+        "one LP must not overwrite another LP's matcher config with its own tuple"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(env.svm.get_account(&victim_lp).unwrap(), victim_before);
@@ -14440,7 +14312,7 @@ fn v16_attack_cross_lp_cannot_overwrite_matcher_authorization_account() {
 }
 
 #[test]
-fn v16_attack_tradecpi_matcher_auth_arguments_must_match_account_bytes() {
+fn v16_attack_tradecpi_matcher_config_arguments_must_match_account_bytes() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
     env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
     let honest = Pubkey::new_unique();
@@ -14460,14 +14332,6 @@ fn v16_attack_tradecpi_matcher_auth_arguments_must_match_account_bytes() {
     env.deposit(&lp_owner, lp, 1_000_000);
 
     let (honest_ctx, honest_delegate, _) = env.init_auth_matcher_context(honest, &lp_owner, lp);
-    let auth = matcher_auth_key(
-        &env.program_id,
-        &env.market,
-        &lp,
-        &lp_owner.pubkey(),
-        &honest,
-        &honest_ctx,
-    );
     let hostile_ctx = Pubkey::new_unique();
     let hostile_delegate = matcher_delegate_key(
         &env.program_id,
@@ -14507,8 +14371,7 @@ fn v16_attack_tradecpi_matcher_auth_arguments_must_match_account_bytes() {
     let send = |env: &mut V16CuEnv,
                 matcher_program: Pubkey,
                 matcher_context: Pubkey,
-                matcher_delegate: Pubkey,
-                auth_meta: AccountMeta| {
+                matcher_delegate: Pubkey| {
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::TradeCpi {
@@ -14519,14 +14382,12 @@ fn v16_attack_tradecpi_matcher_auth_arguments_must_match_account_bytes() {
             },
             vec![
                 AccountMeta::new(taker_owner.pubkey(), true),
-                AccountMeta::new_readonly(lp_owner.pubkey(), false),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(taker, false),
                 AccountMeta::new(lp, false),
                 AccountMeta::new_readonly(matcher_program, false),
                 AccountMeta::new(matcher_context, false),
                 AccountMeta::new_readonly(matcher_delegate, false),
-                auth_meta,
             ],
             &[&taker_owner],
         )
@@ -14536,59 +14397,16 @@ fn v16_attack_tradecpi_matcher_auth_arguments_must_match_account_bytes() {
     let taker_before = env.svm.get_account(&taker).unwrap();
     let lp_before = env.svm.get_account(&lp).unwrap();
     let ctx_before = env.svm.get_account(&hostile_ctx).unwrap();
-    let replay = send(
-        &mut env,
-        hostile,
-        hostile_ctx,
-        hostile_delegate,
-        AccountMeta::new_readonly(auth, false),
-    );
+    let replay = send(&mut env, hostile, hostile_ctx, hostile_delegate);
     assert!(
         replay.is_err(),
-        "a real LP auth record for one matcher tuple must not authorize different instruction args"
+        "LP-account matcher config for one tuple must not authorize different instruction args"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
     assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
     assert_eq!(env.svm.get_account(&hostile_ctx).unwrap(), ctx_before);
 
-    let forged_auth = Pubkey::new_unique();
-    let real_auth_data = env.svm.get_account(&auth).unwrap().data;
-    env.svm
-        .set_account(
-            forged_auth,
-            Account {
-                lamports: 1_000_000_000,
-                data: real_auth_data,
-                owner: taker_owner.pubkey(),
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    let forged = send(
-        &mut env,
-        honest,
-        honest_ctx,
-        honest_delegate,
-        AccountMeta::new_readonly(forged_auth, false),
-    );
-    assert!(
-        forged.is_err(),
-        "attacker-owned bytes that look like an auth record must not stand in for LP consent"
-    );
-
-    let writable = send(
-        &mut env,
-        honest,
-        honest_ctx,
-        honest_delegate,
-        AccountMeta::new(auth, false),
-    );
-    assert!(
-        writable.is_err(),
-        "fills must only read matcher authorization; writable auth records are rejected"
-    );
     assert_eq!(
         env.market_state().1.assets[0].oi_eff_long_q,
         0,
@@ -14597,13 +14415,7 @@ fn v16_attack_tradecpi_matcher_auth_arguments_must_match_account_bytes() {
     assert_eq!(env.portfolio_state(taker).legs[0].basis_pos_q, 0);
     assert_eq!(env.portfolio_state(lp).legs[0].basis_pos_q, 0);
 
-    let ok = send(
-        &mut env,
-        honest,
-        honest_ctx,
-        honest_delegate,
-        AccountMeta::new_readonly(auth, false),
-    );
+    let ok = send(&mut env, honest, honest_ctx, honest_delegate);
     assert!(
         ok.is_ok(),
         "the exact LP-authorized matcher tuple still fills: {ok:?}"
@@ -14615,7 +14427,7 @@ fn v16_attack_tradecpi_matcher_auth_arguments_must_match_account_bytes() {
 }
 
 #[test]
-fn v16_attack_batch_tradecpi_matcher_auth_arguments_must_match_account_bytes() {
+fn v16_attack_batch_tradecpi_matcher_config_arguments_must_match_account_bytes() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
     env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
     env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
@@ -14635,15 +14447,7 @@ fn v16_attack_batch_tradecpi_matcher_auth_arguments_must_match_account_bytes() {
     env.deposit(&taker_owner, taker, 1_000_000);
     env.deposit(&lp_owner, lp, 1_000_000);
 
-    let (honest_ctx, _, _) = env.init_auth_matcher_context(honest, &lp_owner, lp);
-    let auth = matcher_auth_key(
-        &env.program_id,
-        &env.market,
-        &lp,
-        &lp_owner.pubkey(),
-        &honest,
-        &honest_ctx,
-    );
+    let (honest_ctx, honest_delegate, _) = env.init_auth_matcher_context(honest, &lp_owner, lp);
     let hostile_ctx = Pubkey::new_unique();
     let hostile_delegate = matcher_delegate_key(
         &env.program_id,
@@ -14705,20 +14509,18 @@ fn v16_attack_batch_tradecpi_matcher_auth_arguments_must_match_account_bytes() {
         },
         vec![
             AccountMeta::new(taker_owner.pubkey(), true),
-            AccountMeta::new_readonly(lp_owner.pubkey(), false),
             AccountMeta::new(env.market, false),
             AccountMeta::new(taker, false),
             AccountMeta::new(lp, false),
             AccountMeta::new_readonly(hostile, false),
             AccountMeta::new(hostile_ctx, false),
             AccountMeta::new_readonly(hostile_delegate, false),
-            AccountMeta::new_readonly(auth, false),
         ],
         &[&taker_owner],
     );
     assert!(
         r.is_err(),
-        "a real LP auth record for one matcher tuple must not authorize different BatchTradeCpi args"
+        "LP-account matcher config for one tuple must not authorize different BatchTradeCpi args"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
@@ -14726,6 +14528,32 @@ fn v16_attack_batch_tradecpi_matcher_auth_arguments_must_match_account_bytes() {
     assert_eq!(env.svm.get_account(&hostile_ctx).unwrap(), ctx_before);
     assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, 0);
     assert_eq!(env.market_state().1.assets[1].oi_eff_long_q, 0);
+
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: sz,
+                fee_bps: 100,
+                limit_price: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(honest, false),
+            AccountMeta::new(honest_ctx, false),
+            AccountMeta::new_readonly(honest_delegate, false),
+        ],
+        &[&taker_owner],
+    );
+    assert!(
+        ok.is_ok(),
+        "the exact LP-configured matcher tuple still batch-fills: {ok:?}"
+    );
 }
 
 #[test]
@@ -14770,7 +14598,7 @@ fn v16_bpf_auth_matcher_init_rejects_wrong_pda_accepts_right_pda() {
 }
 
 #[test]
-fn v16_attack_set_matcher_authorization_cannot_overwrite_protocol_accounts() {
+fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
@@ -14789,15 +14617,14 @@ fn v16_attack_set_matcher_authorization_cannot_overwrite_protocol_accounts() {
     env.try_init_auth_matcher_context_with_delegate(matcher_program, &lp_owner, lp, ctx, delegate)
         .expect("init auth matcher context without setting percolator auth");
 
-    let send_with_auth_account = |env: &mut V16CuEnv, auth_account: Pubkey| {
+    let send_with_lp_account = |env: &mut V16CuEnv, lp_account: Pubkey| {
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::SetMatcherAuthorization { enabled: 1 },
+            ProgInstruction::SetMatcherConfig { enabled: 1 },
             vec![
                 AccountMeta::new(lp_owner.pubkey(), true),
                 AccountMeta::new_readonly(env.market, false),
-                AccountMeta::new_readonly(lp, false),
-                AccountMeta::new(auth_account, false),
+                AccountMeta::new(lp_account, false),
                 AccountMeta::new_readonly(matcher_program, false),
                 AccountMeta::new_readonly(ctx, false),
                 AccountMeta::new_readonly(delegate, false),
@@ -14809,33 +14636,27 @@ fn v16_attack_set_matcher_authorization_cannot_overwrite_protocol_accounts() {
     let market = env.market;
     let market_before = env.svm.get_account(&market).unwrap();
     let lp_before = env.svm.get_account(&lp).unwrap();
-    let market_alias = send_with_auth_account(&mut env, market);
+    let market_alias = send_with_lp_account(&mut env, market);
     assert!(
         market_alias.is_err(),
-        "SetMatcherAuthorization must not be able to overwrite the market account"
+        "SetMatcherConfig must not treat the market as an LP account"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
 
-    let portfolio_alias = send_with_auth_account(&mut env, lp);
-    assert!(
-        portfolio_alias.is_err(),
-        "SetMatcherAuthorization must not be able to overwrite a portfolio account"
-    );
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
-
-    let auth = env.set_matcher_authorization(matcher_program, &lp_owner, lp, ctx, delegate, 1);
-    let auth_state = state::read_matcher_authorization(&env.svm.get_account(&auth).unwrap().data)
-        .expect("valid matcher auth state");
+    env.set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 1);
+    let auth_state = env.portfolio_matcher_config(lp);
     assert_eq!(
         auth_state.enabled, 1,
-        "a real standalone auth account still initializes"
+        "a real LP account stores the matcher program/context config"
     );
+    assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
+    assert_eq!(auth_state.matcher_context, ctx.to_bytes());
+    assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
 }
 
 #[test]
-fn v16_attack_permissionless_lp_cpi_rejects_wrong_lp_owner_or_account_binding() {
+fn v16_attack_permissionless_lp_cpi_rejects_wrong_delegate_owner_or_account_binding() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
@@ -14850,27 +14671,47 @@ fn v16_attack_permissionless_lp_cpi_rejects_wrong_lp_owner_or_account_binding() 
     env.deposit(&taker_owner, taker, 1_000_000);
     env.deposit(&lp_owner, lp, 1_000_000);
     env.deposit(&lp_owner, other_lp_same_owner, 1_000_000);
-    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+    let (ctx, _delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
     let (other_ctx, other_delegate, _) =
         env.init_auth_matcher_context(matcher_program, &lp_owner, other_lp_same_owner);
+    let wrong_owner_delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp,
+        &wrong_lp_owner.pubkey(),
+        &matcher_program,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            wrong_owner_delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
     let sz = (5 * POS_SCALE) as i128;
 
     env.svm.expire_blockhash();
-    let wrong_owner_single = env.try_trade_cpi_with_cu_on_asset(
+    let wrong_delegate_single = env.try_trade_cpi_with_cu_on_asset(
         &taker_owner,
         taker,
         &wrong_lp_owner,
         lp,
         matcher_program,
         ctx,
-        delegate,
+        wrong_owner_delegate,
         0,
         sz,
         100,
     );
     assert!(
-        wrong_owner_single.is_err(),
-        "single TradeCpi must reject when supplied LP owner does not own account_b"
+        wrong_delegate_single.is_err(),
+        "single TradeCpi must reject a delegate derived from the wrong LP owner"
     );
 
     env.svm.expire_blockhash();
@@ -14901,53 +14742,31 @@ fn v16_attack_permissionless_lp_cpi_rejects_wrong_lp_owner_or_account_binding() 
     };
     let taker_owner_key = taker_owner.pubkey();
     let market = env.market;
-    let auth = matcher_auth_key(
-        &env.program_id,
-        &env.market,
-        &lp,
-        &lp_owner.pubkey(),
-        &matcher_program,
-        &ctx,
-    );
-    let other_auth = matcher_auth_key(
-        &env.program_id,
-        &env.market,
-        &other_lp_same_owner,
-        &lp_owner.pubkey(),
-        &matcher_program,
-        &other_ctx,
-    );
-    let metas = |owner: Pubkey, context: Pubkey, del: Pubkey, auth: Pubkey| {
+    let metas = |context: Pubkey, del: Pubkey| {
         vec![
             AccountMeta::new(taker_owner_key, true),
-            AccountMeta::new_readonly(owner, false),
             AccountMeta::new(market, false),
             AccountMeta::new(taker, false),
             AccountMeta::new(lp, false),
             AccountMeta::new_readonly(matcher_program, false),
             AccountMeta::new(context, false),
             AccountMeta::new_readonly(del, false),
-            AccountMeta::new_readonly(auth, false),
         ]
     };
 
     env.svm.expire_blockhash();
-    let wrong_owner_batch = env.send(
+    let wrong_delegate_batch = env.send(
         batch_ix.clone(),
-        metas(wrong_lp_owner.pubkey(), ctx, delegate, auth),
+        metas(ctx, wrong_owner_delegate),
         &[&taker_owner],
     );
     assert!(
-        wrong_owner_batch.is_err(),
-        "BatchTradeCpi must reject when supplied LP owner does not own account_b"
+        wrong_delegate_batch.is_err(),
+        "BatchTradeCpi must reject a delegate derived from the wrong LP owner"
     );
 
     env.svm.expire_blockhash();
-    let wrong_account_batch = env.send(
-        batch_ix,
-        metas(lp_owner.pubkey(), other_ctx, other_delegate, other_auth),
-        &[&taker_owner],
-    );
+    let wrong_account_batch = env.send(batch_ix, metas(other_ctx, other_delegate), &[&taker_owner]);
     assert!(
         wrong_account_batch.is_err(),
         "BatchTradeCpi must reject a delegate/context bound to a different LP portfolio"
@@ -14992,7 +14811,6 @@ fn v16_attack_nocpi_trades_still_require_lp_owner_signature() {
         },
         vec![
             AccountMeta::new(taker_owner.pubkey(), true),
-            AccountMeta::new_readonly(lp_owner.pubkey(), false),
             AccountMeta::new(env.market, false),
             AccountMeta::new(taker, false),
             AccountMeta::new(lp, false),
@@ -15024,7 +14842,6 @@ fn v16_attack_nocpi_trades_still_require_lp_owner_signature() {
         },
         vec![
             AccountMeta::new(taker_owner.pubkey(), true),
-            AccountMeta::new_readonly(lp_owner.pubkey(), false),
             AccountMeta::new(env.market, false),
             AccountMeta::new(taker, false),
             AccountMeta::new(lp, false),
@@ -15059,8 +14876,13 @@ fn v16_attack_tradecpi_limit_price_enforced() {
     env.deposit(&taker_owner, taker, 1_000_000);
     env.deposit(&maker_owner, maker, 1_000_000);
     // spread matcher: fills off oracle (oracle=100), base spread 500 bps -> taker buy ask > 100.
-    let (ctx, delegate, _) =
-        env.init_matcher_context_with_passive_spread(matcher_program, maker, 500, 1_000);
+    let (ctx, delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+        matcher_program,
+        &maker_owner,
+        maker,
+        500,
+        1_000,
+    );
     let do_trade = |env: &mut V16CuEnv, limit: u64| -> Result<u64, String> {
         env.svm.expire_blockhash();
         env.send(
@@ -15072,7 +14894,6 @@ fn v16_attack_tradecpi_limit_price_enforced() {
             },
             vec![
                 AccountMeta::new(taker_owner.pubkey(), true),
-                AccountMeta::new(maker_owner.pubkey(), true),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(taker, false),
                 AccountMeta::new(maker, false),
@@ -15080,7 +14901,7 @@ fn v16_attack_tradecpi_limit_price_enforced() {
                 AccountMeta::new(ctx, false),
                 AccountMeta::new_readonly(delegate, false),
             ],
-            &[&taker_owner, &maker_owner],
+            &[&taker_owner],
         )
     };
     let (_, g0) = env.market_state();
@@ -15127,8 +14948,12 @@ fn v16_attack_tradecpi_zero_fill_is_clean() {
     env.deposit(&taker_owner, taker, 1_000_000);
     env.deposit(&maker_owner, maker, 1_000_000);
     // matcher with ZERO fill capacity.
-    let (ctx, delegate, _) =
-        env.init_matcher_context_with_data(matcher_program, maker, encode_matcher_init_passive(0));
+    let (ctx, delegate, _) = env.init_matcher_context_with_data_authorized(
+        matcher_program,
+        &maker_owner,
+        maker,
+        encode_matcher_init_passive(0),
+    );
     let (_, g0) = env.market_state();
     env.svm.expire_blockhash();
     let r = env.try_trade_cpi_with_cu_on_asset(
@@ -18872,7 +18697,6 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
-            AccountMeta::new_readonly(victim.pubkey(), false),
             AccountMeta::new(env.market, false),
         ],
         &[&env.admin],
@@ -19039,7 +18863,8 @@ fn v16_attack_tradecpi_thin_maker_margin_protected() {
     let maker = env.create_portfolio(&maker_owner);
     env.deposit(&taker_owner, taker, 100_000_000); // taker well funded
     env.deposit(&maker_owner, maker, 1_000); // maker THIN
-    let (ctx, delegate, _) = env.init_matcher_context(matcher_program, maker);
+    let (ctx, delegate, _) =
+        env.init_matcher_context_authorized(matcher_program, &maker_owner, maker);
     let (_, g0) = env.market_state();
 
     // taker tries to trade a LARGE size against the thin maker -> maker can't margin it -> reject.
@@ -21471,7 +21296,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
 
     {
         let mut reject_atomically =
-            |label: &str, ix: ProgInstruction, accounts: Vec<AccountMeta>| {
+            |label: &str, ix: ProgInstruction, accounts: Vec<AccountMeta>, signers: &[&Keypair]| {
                 let market_a_before = env.svm.get_account(&env.market).unwrap();
                 let market_b_before = env.svm.get_account(&market_b).unwrap();
                 let pa_before = env.svm.get_account(&pa).unwrap();
@@ -21485,7 +21310,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                     &env.payer,
                     ix,
                     accounts,
-                    &[&attacker, &victim],
+                    signers,
                 );
                 assert!(
                     result.is_err(),
@@ -21538,6 +21363,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                 AccountMeta::new(pa, false),
                 AccountMeta::new(pb, false),
             ],
+            &[&attacker, &victim],
         );
         reject_atomically(
             "BatchTradeNoCpi",
@@ -21556,6 +21382,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                 AccountMeta::new(pa, false),
                 AccountMeta::new(pb, false),
             ],
+            &[&attacker, &victim],
         );
         reject_atomically(
             "TradeCpi",
@@ -21567,7 +21394,6 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             },
             vec![
                 AccountMeta::new(attacker.pubkey(), true),
-                AccountMeta::new(victim.pubkey(), true),
                 AccountMeta::new(market_b, false),
                 AccountMeta::new(pa, false),
                 AccountMeta::new(pb, false),
@@ -21575,6 +21401,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                 AccountMeta::new(ctx, false),
                 AccountMeta::new_readonly(delegate, false),
             ],
+            &[&attacker],
         );
         reject_atomically(
             "BatchTradeCpi",
@@ -21588,7 +21415,6 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             },
             vec![
                 AccountMeta::new(attacker.pubkey(), true),
-                AccountMeta::new(victim.pubkey(), true),
                 AccountMeta::new(market_b, false),
                 AccountMeta::new(pa, false),
                 AccountMeta::new(pb, false),
@@ -21596,6 +21422,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                 AccountMeta::new(ctx, false),
                 AccountMeta::new_readonly(delegate, false),
             ],
+            &[&attacker],
         );
     }
 
@@ -21698,6 +21525,22 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             },
         )
         .unwrap();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        vec![
+            AccountMeta::new(cpi_lp.pubkey(), true),
+            AccountMeta::new_readonly(market_b, false),
+            AccountMeta::new(p_cpi_lp, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new_readonly(ctx_ok, false),
+            AccountMeta::new_readonly(delegate_ok, false),
+        ],
+        &[&cpi_lp],
+    )
+    .expect("set market-B LP matcher config");
     env.svm.expire_blockhash();
     let batch_cpi_ok = send_tx(
         &mut env.svm,
@@ -21713,7 +21556,6 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         },
         vec![
             AccountMeta::new(cpi_taker.pubkey(), true),
-            AccountMeta::new(cpi_lp.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new(p_cpi_taker, false),
             AccountMeta::new(p_cpi_lp, false),
@@ -21721,7 +21563,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             AccountMeta::new(ctx_ok, false),
             AccountMeta::new_readonly(delegate_ok, false),
         ],
-        &[&cpi_taker, &cpi_lp],
+        &[&cpi_taker],
     );
     assert!(
         batch_cpi_ok.is_ok(),
@@ -24226,8 +24068,9 @@ fn v16_attack_tradecpi_atomic_fill_vs_capacity() {
     let maker = env.create_portfolio(&maker_owner);
     env.deposit(&taker_owner, taker, 100_000_000);
     env.deposit(&maker_owner, maker, 100_000_000);
-    let (ctx, delegate, _) = env.init_matcher_context_with_data(
+    let (ctx, delegate, _) = env.init_matcher_context_with_data_authorized(
         matcher_program,
+        &maker_owner,
         maker,
         encode_matcher_init_passive(POS_SCALE),
     );
@@ -29921,8 +29764,9 @@ fn v16_attack_tradecpi_short_fill_rejects_atomically() {
 
     // matcher capped at 5*POS_SCALE.
     let cap: u128 = 5 * POS_SCALE;
-    let (matcher_ctx, matcher_delegate, _) = env.init_matcher_context_with_data(
+    let (matcher_ctx, matcher_delegate, _) = env.init_matcher_context_with_data_authorized(
         matcher_program,
+        &maker_owner,
         maker_account,
         encode_matcher_init_passive(cap),
     );
@@ -30012,8 +29856,9 @@ fn v16_attack_tradecpi_fee_is_mark_pinned_not_matcher_quoted() {
         let m = env.create_portfolio(&mo);
         env.deposit(&to, t, 100_000_000);
         env.deposit(&mo, m, 100_000_000);
-        let (ctx, del, _) = env.init_matcher_context_with_passive_spread(
+        let (ctx, del, _) = env.init_matcher_context_with_passive_spread_authorized(
             matcher_program,
+            &mo,
             m,
             base_spread,
             max_total,
@@ -30078,7 +29923,7 @@ fn v16_attack_tradecpi_enforces_maker_margin() {
     let m = env.create_portfolio(&mo);
     env.deposit(&to, t, 100_000_000); // taker well funded
     env.deposit(&mo, m, 100); // maker thin: cannot margin a 10*POS_SCALE leg (IM=100% -> req 1000)
-    let (ctx, del, _) = env.init_matcher_context(matcher_program, m);
+    let (ctx, del, _) = env.init_matcher_context_authorized(matcher_program, &mo, m);
     let (_, g0) = env.market_state();
 
     // ATTACK: 10*POS_SCALE fill -> the maker would owe IM ~1000 >> its 100 capital -> reject.
@@ -30165,21 +30010,20 @@ fn v16_attack_tradecpi_matcher_tail_cannot_carry_protocol_state() {
     env.deposit(&to, t, 1_000_000);
     env.deposit(&mo, m, 1_000_000);
     env.deposit(&vo, victim, 1_000_000);
-    let (ctx, del, _) = env.init_matcher_context(matcher_program, m);
+    let (ctx, del, _) = env.init_matcher_context_authorized(matcher_program, &mo, m);
     let (_, g0) = env.market_state();
 
     let market = env.market;
     let base = |extra: Pubkey| {
         vec![
             AccountMeta::new(to.pubkey(), true),
-            AccountMeta::new(mo.pubkey(), true),
             AccountMeta::new(market, false),
             AccountMeta::new(t, false),
             AccountMeta::new(m, false),
             AccountMeta::new_readonly(matcher_program, false),
             AccountMeta::new(ctx, false),
             AccountMeta::new_readonly(del, false),
-            AccountMeta::new(extra, false), // tail account[8] -> handed to the matcher CPI
+            AccountMeta::new(extra, false), // tail account[7] -> handed to the matcher CPI
         ]
     };
     let ix = |asset_index, size_q| ProgInstruction::TradeCpi {
@@ -30191,22 +30035,14 @@ fn v16_attack_tradecpi_matcher_tail_cannot_carry_protocol_state() {
 
     // ATTACK 1: forward the MARKET account into the matcher tail -> reject.
     env.svm.expire_blockhash();
-    let r1 = env.send(
-        ix(0u16, (10 * POS_SCALE) as i128),
-        base(market),
-        &[&to, &mo],
-    );
+    let r1 = env.send(ix(0u16, (10 * POS_SCALE) as i128), base(market), &[&to]);
     assert!(
         r1.is_err(),
         "matcher tail carrying the market account must reject"
     );
     // ATTACK 2: forward a third (percolator-owned) portfolio into the tail -> reject (ai.owner == program).
     env.svm.expire_blockhash();
-    let r2 = env.send(
-        ix(0u16, (10 * POS_SCALE) as i128),
-        base(victim),
-        &[&to, &mo],
-    );
+    let r2 = env.send(ix(0u16, (10 * POS_SCALE) as i128), base(victim), &[&to]);
     assert!(
         r2.is_err(),
         "matcher tail carrying a protocol-owned portfolio must reject"
@@ -30266,14 +30102,6 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_carry_protocol_state() {
     env.deposit(&lp, lp_account, 1_000_000);
     env.deposit(&victim_owner, victim, 1_000_000);
     let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, lp_account);
-    let auth = matcher_auth_key(
-        &env.program_id,
-        &env.market,
-        &lp_account,
-        &lp.pubkey(),
-        &matcher_program,
-        &ctx,
-    );
     let before = env.market_state().1;
     let victim_before = env.portfolio_state(victim);
     let sz = (5 * POS_SCALE) as i128;
@@ -30295,18 +30123,15 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_carry_protocol_state() {
     };
     let market = env.market;
     let taker_key = taker.pubkey();
-    let lp_key = lp.pubkey();
     let base = |extra: Option<Pubkey>| {
         let mut metas = vec![
             AccountMeta::new(taker_key, true),
-            AccountMeta::new_readonly(lp_key, false),
             AccountMeta::new(market, false),
             AccountMeta::new(taker_account, false),
             AccountMeta::new(lp_account, false),
             AccountMeta::new_readonly(matcher_program, false),
             AccountMeta::new(ctx, false),
             AccountMeta::new_readonly(delegate, false),
-            AccountMeta::new_readonly(auth, false),
         ];
         if let Some(extra) = extra {
             metas.push(AccountMeta::new(extra, false));
@@ -31196,7 +31021,7 @@ fn v16_attack_batch_trade_self_trade_rejected() {
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
     env.svm.add_program(matcher_program, &matcher_bytes);
-    let (ctx, delegate, _) = env.init_matcher_context(matcher_program, p);
+    let (ctx, delegate, _) = env.init_matcher_context_authorized(matcher_program, &owner, p);
     let market_before_cpi = env.svm.get_account(&env.market).unwrap();
     let portfolio_before_cpi = env.svm.get_account(&p).unwrap();
     let matcher_before = env.svm.get_account(&ctx).unwrap();
@@ -31212,7 +31037,6 @@ fn v16_attack_batch_trade_self_trade_rejected() {
         },
         vec![
             AccountMeta::new(owner.pubkey(), true),
-            AccountMeta::new_readonly(owner.pubkey(), false),
             AccountMeta::new(env.market, false),
             AccountMeta::new(p, false),
             AccountMeta::new(p, false),
@@ -34888,14 +34712,6 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
     let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
     env.svm.add_program(matcher_program, &matcher_bytes);
     let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, la);
-    let auth = matcher_auth_key(
-        &env.program_id,
-        &env.market,
-        &la,
-        &lp.pubkey(),
-        &matcher_program,
-        &ctx,
-    );
     env.svm.expire_blockhash();
     let duplicate_cpi = env.send(
         ProgInstruction::BatchTradeCpi {
@@ -34916,14 +34732,12 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
         },
         vec![
             AccountMeta::new(taker.pubkey(), true),
-            AccountMeta::new_readonly(lp.pubkey(), false),
             AccountMeta::new(env.market, false),
             AccountMeta::new(ta, false),
             AccountMeta::new(la, false),
             AccountMeta::new_readonly(matcher_program, false),
             AccountMeta::new(ctx, false),
             AccountMeta::new_readonly(delegate, false),
-            AccountMeta::new_readonly(auth, false),
         ],
         &[&taker],
     );
@@ -34971,14 +34785,12 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
         },
         vec![
             AccountMeta::new(taker.pubkey(), true),
-            AccountMeta::new_readonly(lp.pubkey(), false),
             AccountMeta::new(env.market, false),
             AccountMeta::new(ta, false),
             AccountMeta::new(la, false),
             AccountMeta::new_readonly(matcher_program, false),
             AccountMeta::new(ctx, false),
             AccountMeta::new_readonly(delegate, false),
-            AccountMeta::new_readonly(auth, false),
         ],
         &[&taker],
     );
@@ -35132,14 +34944,6 @@ fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
     env.deposit(&taker, ta, 1_000_000);
     env.deposit(&lp, la, 1_000_000);
     let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, la);
-    let auth = matcher_auth_key(
-        &env.program_id,
-        &env.market,
-        &la,
-        &lp.pubkey(),
-        &matcher_program,
-        &ctx,
-    );
     let sz = (5 * POS_SCALE) as i128;
     env.svm.expire_blockhash();
     let cu = env
@@ -35162,14 +34966,12 @@ fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
             },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
-                AccountMeta::new_readonly(lp.pubkey(), false),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(ta, false),
                 AccountMeta::new(la, false),
                 AccountMeta::new_readonly(matcher_program, false),
                 AccountMeta::new(ctx, false),
                 AccountMeta::new_readonly(delegate, false),
-                AccountMeta::new_readonly(auth, false),
             ],
             &[&taker],
         )
@@ -35247,14 +35049,6 @@ fn v16_attack_batch_trades_reject_with_backing_fee_policy() {
     let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
     env.svm.add_program(matcher_program, &matcher_bytes);
     let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, la);
-    let auth = matcher_auth_key(
-        &env.program_id,
-        &env.market,
-        &la,
-        &lp.pubkey(),
-        &matcher_program,
-        &ctx,
-    );
     let market_before = env.svm.get_account(&env.market).unwrap().data;
     let taker_before = env.svm.get_account(&ta).unwrap().data;
     let lp_before = env.svm.get_account(&la).unwrap().data;
@@ -35271,14 +35065,12 @@ fn v16_attack_batch_trades_reject_with_backing_fee_policy() {
         },
         vec![
             AccountMeta::new(taker.pubkey(), true),
-            AccountMeta::new_readonly(lp.pubkey(), false),
             AccountMeta::new(env.market, false),
             AccountMeta::new(ta, false),
             AccountMeta::new(la, false),
             AccountMeta::new_readonly(matcher_program, false),
             AccountMeta::new(ctx, false),
             AccountMeta::new_readonly(delegate, false),
-            AccountMeta::new_readonly(auth, false),
         ],
         &[&taker],
     );
@@ -35579,14 +35371,6 @@ fn v16_attack_batch_cpi_fee_bps_bounded_for_permissionless_lp() {
     env.deposit(&taker, taker_account, 1_000_000);
     env.deposit(&lp, lp_account, 1_000_000);
     let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, lp_account);
-    let auth = matcher_auth_key(
-        &env.program_id,
-        &env.market,
-        &lp_account,
-        &lp.pubkey(),
-        &matcher_program,
-        &ctx,
-    );
     let before = env.market_state().1;
     let taker_before = env.portfolio_state(taker_account);
     let lp_before = env.portfolio_state(lp_account);
@@ -35603,14 +35387,12 @@ fn v16_attack_batch_cpi_fee_bps_bounded_for_permissionless_lp() {
             },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
-                AccountMeta::new_readonly(lp.pubkey(), false),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(taker_account, false),
                 AccountMeta::new(lp_account, false),
                 AccountMeta::new_readonly(matcher_program, false),
                 AccountMeta::new(ctx, false),
                 AccountMeta::new_readonly(delegate, false),
-                AccountMeta::new_readonly(auth, false),
             ],
             &[&taker],
         )
@@ -35684,7 +35466,7 @@ fn v16_bpf_batch_trade_cpi_14_legs_under_tx_limit() {
     let la = env.create_portfolio(&lp);
     env.deposit(&taker, ta, 10_000_000);
     env.deposit(&lp, la, 10_000_000);
-    let (ctx, delegate, _) = env.init_matcher_context(matcher_program, la);
+    let (ctx, delegate, _) = env.init_matcher_context_authorized(matcher_program, &lp, la);
     let legs: Vec<BatchTradeCpiLeg> = (0..14u16)
         .map(|a| BatchTradeCpiLeg {
             asset_index: a,
@@ -35699,7 +35481,6 @@ fn v16_bpf_batch_trade_cpi_14_legs_under_tx_limit() {
             ProgInstruction::BatchTradeCpi { legs },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
-                AccountMeta::new(lp.pubkey(), true),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(ta, false),
                 AccountMeta::new(la, false),
@@ -35707,7 +35488,7 @@ fn v16_bpf_batch_trade_cpi_14_legs_under_tx_limit() {
                 AccountMeta::new(ctx, false),
                 AccountMeta::new_readonly(delegate, false),
             ],
-            &[&taker, &lp],
+            &[&taker],
         )
         .expect("14-leg batch CPI must execute");
     println!("v16 batch 14-leg BatchTradeCpi (one matcher CPI) CU: {cu}");
@@ -35917,13 +35698,17 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
     env.deposit(&taker, ta, 1_000_000);
     env.deposit(&lp, la, 1_000_000);
     // spread matcher: oracle 100, base spread 500 bps -> buy ask = 105 on every leg.
-    let (ctx, delegate, _) =
-        env.init_matcher_context_with_passive_spread(matcher_program, la, 500, 1_000);
+    let (ctx, delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+        matcher_program,
+        &lp,
+        la,
+        500,
+        1_000,
+    );
     let sz = (5 * POS_SCALE) as i128;
     let metas = |env: &V16CuEnv| {
         vec![
             AccountMeta::new(taker.pubkey(), true),
-            AccountMeta::new(lp.pubkey(), true),
             AccountMeta::new(env.market, false),
             AccountMeta::new(ta, false),
             AccountMeta::new(la, false),
@@ -35952,7 +35737,7 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
             ],
         },
         metas(&env),
-        &[&taker, &lp],
+        &[&taker],
     );
     assert!(
         r.is_err(),
@@ -35983,7 +35768,7 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
             ],
         },
         metas(&env),
-        &[&taker, &lp],
+        &[&taker],
     );
     assert!(
         ok.is_ok(),
@@ -36141,6 +35926,19 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
             },
         )
         .unwrap();
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; MATCHER_CONTEXT_LEN],
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
     let sz = (5 * POS_SCALE) as i128;
     let send_mode = |env: &mut V16CuEnv,
                      mode: u8|
@@ -36183,7 +35981,6 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
             },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
-                AccountMeta::new(lp.pubkey(), true),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(ta, false),
                 AccountMeta::new(la, false),
@@ -36191,7 +35988,7 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
                 AccountMeta::new(ctx, false),
                 AccountMeta::new_readonly(delegate, false),
             ],
-            &[&taker, &lp],
+            &[&taker],
         );
         (result, market_before, taker_before, lp_before, ctx_before)
     };
@@ -36256,7 +36053,7 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
 // full-interface sweep / issue: removing the LP signer from TradeCpi is only safe if Percolator
 // verifies that the LP owner explicitly authorized this matcher program/context. A hostile matcher can
 // otherwise return a perfectly well-formed oracle-priced fill and force a victim LP portfolio into a
-// position. This is the single-fill reproducer: no LP signature and no Percolator matcher auth record
+// position. This is the single-fill reproducer: no LP signature and no Percolator matcher config
 // must reject before any position is opened.
 #[test]
 fn v16_attack_tradecpi_rejects_unapproved_unsigned_lp_matcher() {
@@ -36325,7 +36122,6 @@ fn v16_attack_tradecpi_rejects_unapproved_unsigned_lp_matcher() {
         },
         vec![
             AccountMeta::new(taker.pubkey(), true),
-            AccountMeta::new_readonly(lp.pubkey(), false),
             AccountMeta::new(env.market, false),
             AccountMeta::new(ta, false),
             AccountMeta::new(la, false),
@@ -36349,9 +36145,9 @@ fn v16_attack_tradecpi_rejects_unapproved_unsigned_lp_matcher() {
     ));
 }
 
-// Same authorization boundary for the batched matcher CPI path. A hostile matcher that emits valid
-// return-data for every leg is still unapproved for the LP unless the LP signed this fill or a
-// Percolator-owned matcher authorization record is supplied.
+// Same config boundary for the batched matcher CPI path. A hostile matcher that emits valid
+// return-data for every leg is still unapproved for the LP unless the LP stored that matcher tuple
+// on its portfolio.
 #[test]
 fn v16_attack_batch_tradecpi_rejects_unapproved_unsigned_lp_matcher() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
@@ -36431,7 +36227,6 @@ fn v16_attack_batch_tradecpi_rejects_unapproved_unsigned_lp_matcher() {
         },
         vec![
             AccountMeta::new(taker.pubkey(), true),
-            AccountMeta::new_readonly(lp.pubkey(), false),
             AccountMeta::new(env.market, false),
             AccountMeta::new(ta, false),
             AccountMeta::new(la, false),
@@ -37047,11 +36842,23 @@ fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
             },
         )
         .unwrap();
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; MATCHER_CONTEXT_LEN],
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
     let sz = (5 * POS_SCALE) as i128;
     let metas = |env: &V16CuEnv| {
         vec![
             AccountMeta::new(taker.pubkey(), true),
-            AccountMeta::new(lp.pubkey(), true),
             AccountMeta::new(env.market, false),
             AccountMeta::new(ta, false),
             AccountMeta::new(la, false),
@@ -37091,7 +36898,7 @@ fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
                 limit_price: 0,
             },
             m,
-            &[&taker, &lp],
+            &[&taker],
         );
         (result, market_before, taker_before, lp_before, ctx_before)
     };
