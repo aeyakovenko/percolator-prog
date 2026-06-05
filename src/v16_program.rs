@@ -776,6 +776,31 @@ pub mod state {
         pub _padding: [u8; 14],
     }
 
+    impl BackingDomainLedgerAccountV16 {
+        /// Farm-facing deterministic reward counter for this backing authority/domain.
+        ///
+        /// This is the LP-side `residual_received` scalar: a monotonic sum of realized
+        /// backing loss observed by `SyncBackingDomainLedger`. The backing bucket's
+        /// unavailable-principal delta is the trader-side cap source; the farm snapshots
+        /// this value and rewards only `end - start`, optionally capped by its own
+        /// fee-support policy.
+        pub fn residual_received_atoms(&self) -> u128 {
+            self.cumulative_loss_atoms
+        }
+
+        /// Monotonic recovery counter, kept separate so `residual_received_atoms` remains
+        /// deterministic for start/end reward snapshots.
+        pub fn residual_recovered_atoms(&self) -> u128 {
+            self.cumulative_recovery_atoms
+        }
+
+        pub fn residual_received_delta_since(&self, snapshot: u128) -> Result<u128, ProgramError> {
+            self.residual_received_atoms()
+                .checked_sub(snapshot)
+                .ok_or(PercolatorError::InvalidInstruction.into())
+        }
+    }
+
     /// Aggregate insurance accounting for an authority-controlled vault.
     /// This is not a user account and does not assign shares.
     #[repr(C)]
@@ -7546,6 +7571,11 @@ pub mod processor {
         }
         ledger.last_observed_bucket_earnings_atoms = bucket_earnings_atoms;
 
+        // Deterministic farm rewards are represented as capped counter transfers:
+        // the backing bucket's unavailable-principal delta is the realized-loss cap
+        // source, and `cumulative_loss_atoms` is the LP-side residual_received
+        // counter that a farm snapshots. Recoveries are tracked separately and do
+        // not decrement residual_received.
         let unavailable_atoms = backing_unavailable_principal_atoms(bucket)?;
         if unavailable_atoms >= ledger.last_observed_unavailable_principal_atoms {
             ledger.cumulative_loss_atoms = ledger

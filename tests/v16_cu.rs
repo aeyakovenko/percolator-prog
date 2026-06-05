@@ -9630,6 +9630,16 @@ fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
     let ledger_data = pnl_env.svm.get_account(&pnl_ledger).unwrap().data;
     let ledger_state = state::read_backing_domain_ledger(&ledger_data).unwrap();
     assert_eq!(ledger_state.cumulative_loss_atoms, 40);
+    assert_eq!(
+        ledger_state.residual_received_atoms(),
+        40,
+        "farm-facing residual_received aliases the monotonic backing loss counter"
+    );
+    assert_eq!(
+        ledger_state.residual_received_delta_since(0).unwrap(),
+        40,
+        "farm start/end snapshot delta is deterministic"
+    );
     assert_eq!(ledger_state.last_observed_unavailable_principal_atoms, 40);
 
     let mut insurance_env = V16CuEnv::new();
@@ -9687,6 +9697,76 @@ fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
     let ledger_state = state::read_insurance_ledger(&ledger_data).unwrap();
     assert_eq!(ledger_state.cumulative_loss_atoms, 20);
     assert_eq!(ledger_state.last_observed_insurance_atoms, 110);
+}
+
+#[test]
+fn v16_bpf_backing_residual_reward_counter_is_snapshot_deterministic() {
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10);
+
+    let read_ledger = |env: &V16CuEnv| {
+        state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap()
+    };
+    let start = read_ledger(&env).residual_received_atoms();
+    assert_eq!(start, 0, "farm starts from an explicit zero snapshot");
+
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].consumed_liened_backing_num = 40 * BOUND_SCALE;
+    });
+    env.svm.expire_blockhash();
+    env.sync_backing_domain_ledger_with_cu(ledger, 1);
+    let first_loss = read_ledger(&env);
+    assert_eq!(first_loss.cumulative_loss_atoms, 40);
+    assert_eq!(first_loss.residual_received_atoms(), 40);
+    assert_eq!(first_loss.residual_recovered_atoms(), 0);
+    assert_eq!(first_loss.residual_received_delta_since(start).unwrap(), 40);
+
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].consumed_liened_backing_num = 10 * BOUND_SCALE;
+    });
+    env.svm.expire_blockhash();
+    env.sync_backing_domain_ledger_with_cu(ledger, 1);
+    let after_recovery = read_ledger(&env);
+    assert_eq!(
+        after_recovery.residual_received_atoms(),
+        40,
+        "recovery must not decrement the farm reward counter"
+    );
+    assert_eq!(after_recovery.residual_recovered_atoms(), 30);
+    assert_eq!(
+        after_recovery.residual_received_delta_since(start).unwrap(),
+        40,
+        "same start/end reward delta after recovery remains deterministic"
+    );
+
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].consumed_liened_backing_num = 60 * BOUND_SCALE;
+    });
+    env.svm.expire_blockhash();
+    env.sync_backing_domain_ledger_with_cu(ledger, 1);
+    let second_loss = read_ledger(&env);
+    assert_eq!(
+        second_loss.residual_received_atoms(),
+        90,
+        "new realized loss after recovery adds only the new unavailable-principal delta"
+    );
+    assert_eq!(second_loss.residual_recovered_atoms(), 30);
+    assert_eq!(
+        second_loss.residual_received_delta_since(start).unwrap(),
+        90
+    );
+    assert_eq!(
+        second_loss
+            .residual_received_delta_since(first_loss.residual_received_atoms())
+            .unwrap(),
+        50,
+        "later farm windows get exactly their own monotonic delta"
+    );
+    assert!(
+        second_loss.residual_received_delta_since(91).is_err(),
+        "snapshots above the current counter are invalid, never underflowed"
+    );
 }
 
 #[test]

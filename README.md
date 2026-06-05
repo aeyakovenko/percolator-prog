@@ -112,6 +112,19 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   **✅** (`v16_bpf_stale_full_14_leg_tradenocpi_rejects_before_cu_cliff`,
   `v16_bpf_force_close_liveness_survives_14_stale_leg_grief_via_precrank`.)
 
+### Deterministic LP rewards
+- **Residual-backed LP rewards use monotonic counters, not event logs.** For the current pooled
+  backing-authority model, `BackingDomainLedger.cumulative_loss_atoms` is the farm-facing
+  `residual_received` counter for `(market, authority, domain)`. A farm registers a start snapshot,
+  later reads an end snapshot, and rewards exactly `end - start`, optionally capped by its own
+  fee-support / holding-window rules. Recoveries are recorded separately in
+  `cumulative_recovery_atoms`, so they never make the reward counter go backward or depend on sync
+  ordering. **✅** (`v16_bpf_backing_residual_reward_counter_is_snapshot_deterministic`.)
+- **The counter only moves on realized backing loss.** The wrapper syncs it from the backing bucket's
+  unavailable-principal delta, so the trader-side cap is the actual crystallized residual loss that
+  backing absorbed; it is not notional, mark-to-market paper PnL, or caller-supplied data. **✅**
+  (`v16_bpf_accounting_ledger_tags_are_bounded_and_update_state`.)
+
 ### Governance & admin keys
 - **Per-asset admin keys, isolated — uniform across all assets including asset 0** — one asset's admin
   can never be used against another asset. **✅** Every asset (0..N) carries its own `asset_admin`
@@ -201,7 +214,7 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
 > backed by a dedicated LiteSVM test against the production BPF asserting the attacker-success
 > criterion (isolation, exit-window, fee-split conservation, base-unit deposit/withdraw routing and
 > swap atomicity, permissionless-create fee gating, bounded admin, scheduled-close reclaim, and
-> trade-time portfolio refresh UX).
+> trade-time portfolio refresh UX, deterministic LP reward counters).
 
 ---
 
