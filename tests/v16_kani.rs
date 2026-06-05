@@ -633,6 +633,59 @@ fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_restart_asset0_oracle_decode_preserves_wire_fields() {
+    let now_slot: u64 = kani::any();
+    let initial_price: u64 = kani::any();
+
+    let data = Instruction::RestartAsset0Oracle {
+        now_slot,
+        initial_price,
+    }
+    .encode();
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::RestartAsset0Oracle {
+            now_slot: got_slot,
+            initial_price: got_price,
+        } => {
+            assert_eq!(got_slot, now_slot);
+            assert_eq!(got_price, initial_price);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset0_oracle() {
+    let asset_index: u16 = kani::any();
+    let size_q: i128 = kani::any();
+    let exec_price: u64 = kani::any();
+    let fee_bps: u64 = kani::any();
+
+    let data = Instruction::BatchTradeNoCpi {
+        legs: vec![percolator_prog::ix::BatchTradeLeg {
+            asset_index,
+            size_q,
+            exec_price,
+            fee_bps,
+        }],
+    }
+    .encode();
+
+    assert_eq!(data[0], 66);
+    match Instruction::decode(&data).unwrap() {
+        Instruction::BatchTradeNoCpi { legs } => {
+            assert_eq!(legs.len(), 1);
+            assert_eq!(legs[0].asset_index, asset_index);
+            assert_eq!(legs[0].size_q, size_q);
+            assert_eq!(legs[0].exec_price, exec_price);
+            assert_eq!(legs[0].fee_bps, fee_bps);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
 fn kani_v16_update_insurance_policy_decode_preserves_wire_fields() {
     let max_bps: u16 = kani::any();
     let deposits_only: u8 = kani::any();

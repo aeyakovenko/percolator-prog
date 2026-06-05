@@ -166,17 +166,17 @@ pub mod state {
     use alloc::vec::Vec;
     #[cfg(not(target_os = "solana"))]
     use percolator::v16_domain_pair_for_asset_index;
+    #[cfg(not(target_os = "solana"))]
+    use percolator::{
+        v16_domain_count_for_market_slots, BackingBucketV16, CloseProgressLedgerV16, HealthCertV16,
+        InsuranceCreditReservationV16, PermissionlessRecoveryReasonV16, PortfolioLegV16,
+        PortfolioSourceDomainV16Account, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16,
+        SourceCreditStateV16, V16ActiveBitmap, V16_MAX_PORTFOLIO_ASSETS_N,
+    };
     use percolator::{
         AssetStateV16, EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount,
         MarketGroupV16ViewMut, MarketModeV16, PortfolioAccountV16Account, PortfolioV16ViewMut,
         ProvenanceHeaderV16, V16Config, V16Error, V16PodU64,
-    };
-    #[cfg(not(target_os = "solana"))]
-    use percolator::{
-        v16_domain_count_for_market_slots, BackingBucketV16, CloseProgressLedgerV16,
-        HealthCertV16, InsuranceCreditReservationV16, PermissionlessRecoveryReasonV16,
-        PortfolioLegV16, PortfolioSourceDomainV16Account, ResolvedPayoutLedgerV16,
-        ResolvedPayoutReceiptV16, SourceCreditStateV16, V16ActiveBitmap, V16_MAX_PORTFOLIO_ASSETS_N,
     };
     use solana_program::program_error::ProgramError;
 
@@ -2374,9 +2374,15 @@ pub mod state {
                 domain: percolator::V16PodU32::new(
                     u32::try_from(d).map_err(|_| PercolatorError::InvalidAccountLen)?,
                 ),
-                source_claim_market_id: percolator::V16PodU64::new(account.source_claim_market_id[d]),
-                source_claim_bound_num: percolator::V16PodU128::new(account.source_claim_bound_num[d]),
-                source_claim_liened_num: percolator::V16PodU128::new(account.source_claim_liened_num[d]),
+                source_claim_market_id: percolator::V16PodU64::new(
+                    account.source_claim_market_id[d],
+                ),
+                source_claim_bound_num: percolator::V16PodU128::new(
+                    account.source_claim_bound_num[d],
+                ),
+                source_claim_liened_num: percolator::V16PodU128::new(
+                    account.source_claim_liened_num[d],
+                ),
                 source_claim_counterparty_liened_num: percolator::V16PodU128::new(
                     account.source_claim_counterparty_liened_num[d],
                 ),
@@ -2606,7 +2612,11 @@ pub mod state {
             let slot = asset_slot_wire(data, asset_index as usize)?;
             prices.push(slot.asset.effective_price.get());
         }
-        Ok((decode_market_mode(wire.mode)?, wire.current_slot.get(), prices))
+        Ok((
+            decode_market_mode(wire.mode)?,
+            wire.current_slot.get(),
+            prices,
+        ))
     }
 
     #[cfg(not(target_os = "solana"))]
@@ -2967,6 +2977,10 @@ pub mod ix {
             now_slot: u64,
             close_q: u128,
         },
+        RestartAsset0Oracle {
+            now_slot: u64,
+            initial_price: u64,
+        },
         UpdateAssetLifecycle {
             action: u8,
             asset_index: u16,
@@ -3184,6 +3198,10 @@ pub mod ix {
                     asset_index: read_u16(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     close_q: read_u128(&mut rest)?,
+                },
+                69 => Self::RestartAsset0Oracle {
+                    now_slot: read_u64(&mut rest)?,
+                    initial_price: read_u64(&mut rest)?,
                 },
                 52 => Self::WithdrawBackingBucketEarnings {
                     domain: read_u8(&mut rest)?,
@@ -3616,6 +3634,14 @@ pub mod ix {
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, now_slot);
                     push_u128(&mut out, close_q);
+                }
+                Self::RestartAsset0Oracle {
+                    now_slot,
+                    initial_price,
+                } => {
+                    out.push(69);
+                    push_u64(&mut out, now_slot);
+                    push_u64(&mut out, initial_price);
                 }
                 Self::UpdateAssetLifecycle {
                     action,
@@ -4800,8 +4826,7 @@ pub mod processor {
             .ok_or(PercolatorError::InvalidInstruction)?;
         let asset = &slot.engine.asset;
         let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
-        Ok(exposed
-            && asset.raw_oracle_target_price.get() != asset.effective_price.get())
+        Ok(exposed && asset.raw_oracle_target_price.get() != asset.effective_price.get())
     }
 
     fn reject_exposed_target_effective_lag_view(
@@ -5599,6 +5624,10 @@ pub mod processor {
                 now_slot,
                 close_q,
             ),
+            Instruction::RestartAsset0Oracle {
+                now_slot,
+                initial_price,
+            } => handle_restart_asset0_oracle(program_id, accounts, now_slot, initial_price),
             Instruction::UpdateAssetLifecycle {
                 action,
                 asset_index,
@@ -6131,7 +6160,11 @@ pub mod processor {
     /// outcome. Mirrors engine `trade_notional_floor` (floor) + `checked_fee_bps` (ceil) on the
     /// fast u128 path; extreme sizes that would need the engine's U256 widening error out (the
     /// batch then rejects rather than mis-accounting — see the aggregate cross-check below).
-    fn batch_leg_fee(abs_size_q: u128, exec_price: u64, fee_bps: u64) -> Result<u128, ProgramError> {
+    fn batch_leg_fee(
+        abs_size_q: u128,
+        exec_price: u64,
+        fee_bps: u64,
+    ) -> Result<u128, ProgramError> {
         if abs_size_q == 0 || fee_bps == 0 {
             return Ok(0);
         }
@@ -6222,14 +6255,10 @@ pub mod processor {
             }
             let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
             let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
-            let mut account_a = state::portfolio_view_mut_for_market_slots(
-                &mut account_a_data,
-                max_market_slots,
-            )?;
-            let mut account_b = state::portfolio_view_mut_for_market_slots(
-                &mut account_b_data,
-                max_market_slots,
-            )?;
+            let mut account_a =
+                state::portfolio_view_mut_for_market_slots(&mut account_a_data, max_market_slots)?;
+            let mut account_b =
+                state::portfolio_view_mut_for_market_slots(&mut account_b_data, max_market_slots)?;
             expect_portfolio_view_account_key(&account_a, account_a_ai.key)?;
             expect_portfolio_view_account_key(&account_b, account_b_ai.key)?;
             expect_portfolio_view_owner(&account_a, signer_a.key)?;
@@ -6307,8 +6336,14 @@ pub mod processor {
             // aggregate or we refuse the batch (no silent mis-accounting).
             let mut reconstructed_total: u128 = 0;
             let mut cfg_dirty = false;
-            for (asset_index, oracle_profile, reported_price, fee_basis_price, fee_bps_eff, abs_size) in
-                leg_ctx.iter_mut()
+            for (
+                asset_index,
+                oracle_profile,
+                reported_price,
+                fee_basis_price,
+                fee_bps_eff,
+                abs_size,
+            ) in leg_ctx.iter_mut()
             {
                 let fee_leg = batch_leg_fee(*abs_size, *fee_basis_price, *fee_bps_eff)?;
                 credit_trade_fees_to_market_budgets_view(
@@ -6557,7 +6592,6 @@ pub mod processor {
         let mut market_data = market_ai.try_borrow_mut_data()?;
         let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
         if group.header.mode != 0
-            || asset_index_usize == 0
             || asset_index_usize >= group.header.config.max_market_slots.get() as usize
             || asset_index_usize >= group.markets.len()
             || cfg.force_close_delay_slots == 0
@@ -7108,7 +7142,8 @@ pub mod processor {
         {
             return Err(PercolatorError::EngineProvenanceMismatch.into());
         }
-        if account_a_owner != signer_a.key.to_bytes() || account_b_owner != signer_b.key.to_bytes() {
+        if account_a_owner != signer_a.key.to_bytes() || account_b_owner != signer_b.key.to_bytes()
+        {
             return Err(PercolatorError::Unauthorized.into());
         }
         let (delegate, bump) = derive_matcher_delegate(
@@ -7167,8 +7202,8 @@ pub mod processor {
         )?;
 
         // Read the N back-to-back returns the matcher emitted via set_return_data.
-        let (ret_program, ret_data) =
-            solana_program::program::get_return_data().ok_or(PercolatorError::InvalidInstruction)?;
+        let (ret_program, ret_data) = solana_program::program::get_return_data()
+            .ok_or(PercolatorError::InvalidInstruction)?;
         if ret_program != *matcher_prog.key
             || ret_data.len() != legs.len() * matcher_abi::MATCHER_RETURN_BYTES
         {
@@ -7248,8 +7283,8 @@ pub mod processor {
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
             let owner_signed = portfolio.header.owner == closer.key.to_bytes();
-            let terminal_marketauth_cleanup = group.header.mode == 1
-                && live_authority_matches(&cfg.marketauth, closer.key);
+            let terminal_marketauth_cleanup =
+                group.header.mode == 1 && live_authority_matches(&cfg.marketauth, closer.key);
             if !owner_signed && !terminal_marketauth_cleanup {
                 return Err(PercolatorError::Unauthorized.into());
             }
@@ -7288,8 +7323,7 @@ pub mod processor {
         verify_token_program(token_program)?;
         let (cfg_pre, mode, asset0_insurance_authority) = {
             let market_data = market_ai.try_borrow_data()?;
-            let (cfg_pre, mode, _, _) =
-                state::read_market_config_mode_and_capacity(&market_data)?;
+            let (cfg_pre, mode, _, _) = state::read_market_config_mode_and_capacity(&market_data)?;
             let profile0 = read_oracle_profile_for_asset(&market_data, &cfg_pre, 0)?;
             (cfg_pre, mode, profile0.insurance_authority)
         };
@@ -7770,11 +7804,7 @@ pub mod processor {
                 None
             };
             group
-                .deposit_fresh_counterparty_backing_not_atomic(
-                    domain_usize,
-                    amount,
-                    expiry_slot,
-                )
+                .deposit_fresh_counterparty_backing_not_atomic(domain_usize, amount, expiry_slot)
                 .map_err(map_v16_error)?;
             if let Some((ledger, _)) = ledger_state.as_mut() {
                 ledger.total_principal_atoms = ledger
@@ -8495,8 +8525,7 @@ pub mod processor {
 
         let (cfg_pre, mode, asset0_insurance_operator) = {
             let market_data = market_ai.try_borrow_data()?;
-            let (cfg_pre, mode, _, _) =
-                state::read_market_config_mode_and_capacity(&market_data)?;
+            let (cfg_pre, mode, _, _) = state::read_market_config_mode_and_capacity(&market_data)?;
             let profile0 = read_oracle_profile_for_asset(&market_data, &cfg_pre, 0)?;
             (cfg_pre, mode, profile0.insurance_operator)
         };
@@ -9127,6 +9156,179 @@ pub mod processor {
         )
     }
 
+    fn restart_asset0_engine_slot_preserving_insurance_budget(
+        group: &mut state::MarketViewMutV16<'_>,
+        authenticated_slot: u64,
+        initial_price: u64,
+        budget_long: percolator::V16PodU128,
+        budget_short: percolator::V16PodU128,
+    ) -> ProgramResult {
+        let market_id = group.header.next_market_id.get();
+        if market_id == 0 {
+            return Err(PercolatorError::EngineInvalidConfig.into());
+        }
+        let next_market_id = market_id
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineCounterOverflow)?;
+        let next_activation_count = group
+            .header
+            .asset_activation_count
+            .get()
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineCounterOverflow)?;
+        let next_asset_set_epoch = group
+            .header
+            .asset_set_epoch
+            .get()
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineCounterOverflow)?;
+        let next_risk_epoch = group
+            .header
+            .risk_epoch
+            .get()
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineCounterOverflow)?;
+
+        let mut asset = percolator::AssetStateV16::default();
+        asset.market_id = market_id;
+        asset.lifecycle = percolator::AssetLifecycleV16::Active;
+        asset.raw_oracle_target_price = initial_price;
+        asset.effective_price = initial_price;
+        asset.fund_px_last = initial_price;
+        asset.slot_last = authenticated_slot;
+        let mut slot = percolator::EngineAssetSlotV16Account::empty_for_market(market_id);
+        slot.asset = percolator::AssetStateV16Account::from_runtime(&asset);
+        slot.insurance_domain_budget_long = budget_long;
+        slot.insurance_domain_budget_short = budget_short;
+        group.markets[0].engine = slot;
+        group.header.next_market_id = percolator::V16PodU64::new(next_market_id);
+        group.header.current_slot = percolator::V16PodU64::new(authenticated_slot);
+        group.header.asset_activation_count = percolator::V16PodU64::new(next_activation_count);
+        group.header.last_asset_activation_slot = percolator::V16PodU64::new(authenticated_slot);
+        group.header.asset_set_epoch = percolator::V16PodU64::new(next_asset_set_epoch);
+        group.header.risk_epoch = percolator::V16PodU64::new(next_risk_epoch);
+        Ok(())
+    }
+
+    fn canonicalize_retired_asset_slot_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> ProgramResult {
+        let slot = group
+            .markets
+            .get_mut(asset_index)
+            .ok_or(PercolatorError::InvalidInstruction)?;
+        let asset = slot.engine.asset.try_to_runtime().map_err(map_v16_error)?;
+        if asset.lifecycle != percolator::AssetLifecycleV16::Retired
+            || asset.market_id == 0
+            || asset.retired_slot == 0
+            || slot.engine.insurance_domain_budget_long.get() != 0
+            || slot.engine.insurance_domain_budget_short.get() != 0
+            || slot.engine.insurance_domain_spent_long.get() != 0
+            || slot.engine.insurance_domain_spent_short.get() != 0
+            || slot.engine.pending_domain_loss_barrier_long.get() != 0
+            || slot.engine.pending_domain_loss_barrier_short.get() != 0
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        let backing_long = slot
+            .engine
+            .backing_long
+            .try_to_runtime()
+            .map_err(map_v16_error)?;
+        let backing_short = slot
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .map_err(map_v16_error)?;
+        if backing_long.utilization_fee_earnings != 0 || backing_short.utilization_fee_earnings != 0
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+
+        let mut canonical_asset = percolator::AssetStateV16::default();
+        canonical_asset.market_id = asset.market_id;
+        canonical_asset.retired_slot = asset.retired_slot;
+        canonical_asset.lifecycle = percolator::AssetLifecycleV16::Retired;
+        canonical_asset.raw_oracle_target_price = asset.raw_oracle_target_price;
+        canonical_asset.effective_price = asset.effective_price;
+        canonical_asset.fund_px_last = asset.fund_px_last;
+        canonical_asset.slot_last = asset.slot_last;
+
+        let mut canonical_slot =
+            percolator::EngineAssetSlotV16Account::empty_for_market(asset.market_id);
+        canonical_slot.asset = percolator::AssetStateV16Account::from_runtime(&canonical_asset);
+        slot.engine = canonical_slot;
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn handle_restart_asset0_oracle<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        now_slot: u64,
+        initial_price: u64,
+    ) -> ProgramResult {
+        let authority = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        expect_signer(authority)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+        if now_slot == 0 || initial_price == 0 || initial_price > percolator::MAX_ORACLE_PRICE {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let authenticated_slot = authenticated_slot_or_fallback(now_slot);
+        let cfg_after = {
+            let mut data = market_ai.try_borrow_mut_data()?;
+            let existing_profile = state::read_asset_oracle_profile(&data, 0)?;
+            let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
+            expect_live_authority(&cfg.marketauth, authority.key)?;
+            if group.header.mode != 0 {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
+            if group.header.config.max_market_slots.get() == 0 || group.markets.is_empty() {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            if authenticated_slot < group.header.current_slot.get() {
+                return Err(PercolatorError::EngineStale.into());
+            }
+            if group.markets[0].engine.asset.lifecycle != ASSET_LIFECYCLE_RECOVERY {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
+            if asset_local_has_position_or_loss_state_view(&group, 0) {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
+
+            let budget_long = group.markets[0].engine.insurance_domain_budget_long;
+            let budget_short = group.markets[0].engine.insurance_domain_budget_short;
+            group
+                .retire_empty_asset_not_atomic(0, authenticated_slot)
+                .map_err(map_v16_error)?;
+            restart_asset0_engine_slot_preserving_insurance_budget(
+                &mut group,
+                authenticated_slot,
+                initial_price,
+                budget_long,
+                budget_short,
+            )?;
+
+            let mut profile = preserve_backing_fee_policy(
+                state::manual_asset_oracle_profile(initial_price, authenticated_slot),
+                &existing_profile,
+            );
+            profile.asset_admin = existing_profile.asset_admin;
+            profile.insurance_authority = existing_profile.insurance_authority;
+            profile.insurance_operator = existing_profile.insurance_operator;
+            profile.backing_bucket_authority = existing_profile.backing_bucket_authority;
+            profile.oracle_authority = existing_profile.oracle_authority;
+            mirror_manual_profile_to_base_config(&mut cfg, &profile, true);
+            write_oracle_profile_to_view(&mut group, 0, &profile)?;
+            group.validate_shape().map_err(map_v16_error)?;
+            cfg
+        };
+        state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg_after)
+    }
+
     #[inline(never)]
     fn handle_update_asset_lifecycle<'a>(
         program_id: &Pubkey,
@@ -9152,8 +9354,8 @@ pub mod processor {
         if mode_pre != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        let is_asset_authority = cfg_pre.marketauth != [0u8; 32]
-            && cfg_pre.marketauth == authority.key.to_bytes();
+        let is_asset_authority =
+            cfg_pre.marketauth != [0u8; 32] && cfg_pre.marketauth == authority.key.to_bytes();
         let permissionless_reuse_target = action == ASSET_ACTION_ACTIVATE
             && !is_asset_authority
             && asset_index < configured_slots_pre
@@ -9205,8 +9407,8 @@ pub mod processor {
                 let mut reuse_activated = false;
                 {
                     let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
-                    let still_asset_authority = cfg.marketauth != [0u8; 32]
-                        && cfg.marketauth == authority.key.to_bytes();
+                    let still_asset_authority =
+                        cfg.marketauth != [0u8; 32] && cfg.marketauth == authority.key.to_bytes();
                     if !still_asset_authority {
                         let expected_fee = permissionless_market_init_fee_for_asset(
                             cfg.permissionless_market_init_fee,
@@ -9326,52 +9528,61 @@ pub mod processor {
         }
         if action == ASSET_ACTION_SHUTDOWN {
             expect_live_authority(&cfg_pre.marketauth, authority.key)?;
-            if asset_index == 0
-                || now_slot == 0
-                || initial_price != 0
-                || cfg_pre.force_close_delay_slots == 0
-            {
+            if now_slot == 0 || initial_price != 0 || cfg_pre.force_close_delay_slots == 0 {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
             let authenticated_slot = authenticated_slot_or_fallback(now_slot);
-            let mut data = market_ai.try_borrow_mut_data()?;
-            let (cfg, mut group) = state::market_view_mut(&mut data)?;
-            expect_live_authority(&cfg.marketauth, authority.key)?;
-            if group.header.mode != 0 {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
-            let configured_slots = group.header.config.max_market_slots.get() as usize;
-            if asset_index >= configured_slots || asset_index >= group.markets.len() {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
-            if authenticated_slot < group.header.current_slot.get() {
-                return Err(PercolatorError::EngineStale.into());
-            }
-            match group.markets[asset_index].engine.asset.lifecycle {
-                ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY => {
-                    let frozen_mark = group.markets[asset_index]
-                        .engine
-                        .asset
-                        .effective_price
-                        .get();
-                    if frozen_mark == 0 || frozen_mark > percolator::MAX_ORACLE_PRICE {
-                        return Err(PercolatorError::OracleInvalid.into());
-                    }
-                    group
-                        .force_asset_recovery_not_atomic(asset_index, authenticated_slot)
-                        .map_err(map_v16_error)?;
-                    let mut profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
-                    profile.mark_ewma_e6 = frozen_mark;
-                    profile.mark_ewma_last_slot = authenticated_slot;
-                    profile.oracle_target_price_e6 = frozen_mark;
-                    profile.oracle_target_publish_time = 0;
-                    profile.last_good_oracle_slot = authenticated_slot;
-                    write_oracle_profile_to_view_if_separate(&mut group, asset_index, &profile)?;
+            let cfg_after = {
+                let mut data = market_ai.try_borrow_mut_data()?;
+                let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
+                expect_live_authority(&cfg.marketauth, authority.key)?;
+                if group.header.mode != 0 {
+                    return Err(PercolatorError::EngineLockActive.into());
                 }
-                ASSET_LIFECYCLE_RECOVERY => {}
-                _ => return Err(PercolatorError::EngineLockActive.into()),
-            }
-            return group.validate_shape().map_err(map_v16_error);
+                let configured_slots = group.header.config.max_market_slots.get() as usize;
+                if asset_index >= configured_slots || asset_index >= group.markets.len() {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                if authenticated_slot < group.header.current_slot.get() {
+                    return Err(PercolatorError::EngineStale.into());
+                }
+                match group.markets[asset_index].engine.asset.lifecycle {
+                    ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY => {
+                        let frozen_mark = group.markets[asset_index]
+                            .engine
+                            .asset
+                            .effective_price
+                            .get();
+                        if frozen_mark == 0 || frozen_mark > percolator::MAX_ORACLE_PRICE {
+                            return Err(PercolatorError::OracleInvalid.into());
+                        }
+                        group
+                            .force_asset_recovery_not_atomic(asset_index, authenticated_slot)
+                            .map_err(map_v16_error)?;
+                        let mut profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
+                        profile.mark_ewma_e6 = frozen_mark;
+                        profile.mark_ewma_last_slot = authenticated_slot;
+                        profile.oracle_target_price_e6 = frozen_mark;
+                        profile.oracle_target_publish_time = 0;
+                        profile.last_good_oracle_slot = authenticated_slot;
+                        if asset_index == 0 {
+                            mirror_manual_profile_to_base_config(&mut cfg, &profile, true);
+                            write_oracle_profile_to_view(&mut group, asset_index, &profile)?;
+                        } else {
+                            write_oracle_profile_to_view_if_separate(
+                                &mut group,
+                                asset_index,
+                                &profile,
+                            )?;
+                        }
+                    }
+                    ASSET_LIFECYCLE_RECOVERY => {}
+                    _ => return Err(PercolatorError::EngineLockActive.into()),
+                }
+                group.validate_shape().map_err(map_v16_error)?;
+                cfg
+            };
+            return state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg_after);
         }
         // Activate (privileged, fee-free) / retire are gated solely on `marketauth`.
         if !live_authority_matches(&cfg_pre.marketauth, authority.key) {
@@ -9476,6 +9687,7 @@ pub mod processor {
                             group
                                 .retire_empty_asset_not_atomic(asset_index, authenticated_slot)
                                 .map_err(map_v16_error)?;
+                            canonicalize_retired_asset_slot_view(&mut group, asset_index)?;
                             cfg.free_market_slot_count = cfg
                                 .free_market_slot_count
                                 .checked_add(1)
@@ -9486,6 +9698,7 @@ pub mod processor {
                             group
                                 .retire_empty_asset_not_atomic(asset_index, authenticated_slot)
                                 .map_err(map_v16_error)?;
+                            canonicalize_retired_asset_slot_view(&mut group, asset_index)?;
                         }
                         _ => return Err(PercolatorError::EngineLockActive.into()),
                     }
@@ -11089,7 +11302,11 @@ pub mod processor {
         Ok(out.into_boxed_slice())
     }
 
-    fn domain_fee_add(fees: &mut DomainFeeTotals, domain: u32, fee: u128) -> Result<(), ProgramError> {
+    fn domain_fee_add(
+        fees: &mut DomainFeeTotals,
+        domain: u32,
+        fee: u128,
+    ) -> Result<(), ProgramError> {
         let mut i = 0usize;
         while i < fees.len() {
             if fees[i].0 == domain {
@@ -11204,13 +11421,7 @@ pub mod processor {
                 .checked_sub(insurance_fee)
                 .ok_or(PercolatorError::EngineCounterUnderflow)?;
             group
-                .charge_account_backing_fee_not_atomic(
-                    account,
-                    d,
-                    provider_fee,
-                    d,
-                    insurance_fee,
-                )
+                .charge_account_backing_fee_not_atomic(account, d, provider_fee, d, insurance_fee)
                 .map_err(map_v16_error)?;
         }
         Ok(())
