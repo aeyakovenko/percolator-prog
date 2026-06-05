@@ -2980,6 +2980,151 @@ fn assert_cu_within(label: &str, cu: u64, limit: u64) {
     );
 }
 
+fn init_independent_market_same_mint(
+    env: &mut V16CuEnv,
+    params: V16CuMarketParams,
+) -> (Pubkey, Pubkey, Pubkey) {
+    let market = Pubkey::new_unique();
+    let vault_authority =
+        Pubkey::find_program_address(&[b"vault", market.as_ref()], &env.program_id).0;
+    let vault = canonical_vault_ata(vault_authority, env.mint);
+    env.svm
+        .set_account(
+            market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(params.max_portfolio_assets as usize)
+                        .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitMarket {
+            max_portfolio_assets: params.max_portfolio_assets,
+            h_min: params.h_min,
+            h_max: params.h_max,
+            initial_price: params.initial_price,
+            min_nonzero_mm_req: params.min_nonzero_mm_req,
+            min_nonzero_im_req: params.min_nonzero_im_req,
+            maintenance_margin_bps: params.maintenance_margin_bps,
+            initial_margin_bps: params.initial_margin_bps,
+            max_trading_fee_bps: params.max_trading_fee_bps,
+            trade_fee_base_bps: params.trade_fee_base_bps,
+            liquidation_fee_bps: params.liquidation_fee_bps,
+            liquidation_fee_cap: params.liquidation_fee_cap,
+            min_liquidation_abs: params.min_liquidation_abs,
+            max_price_move_bps_per_slot: params.max_price_move_bps_per_slot,
+            max_accrual_dt_slots: params.max_accrual_dt_slots,
+            max_abs_funding_e9_per_slot: params.max_abs_funding_e9_per_slot,
+            min_funding_lifetime_slots: params.min_funding_lifetime_slots,
+            max_account_b_settlement_chunks: params.max_account_b_settlement_chunks,
+            max_bankrupt_close_chunks: params.max_bankrupt_close_chunks,
+            max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots,
+            public_b_chunk_atoms: params.public_b_chunk_atoms,
+            maintenance_fee_per_slot: params.maintenance_fee_per_slot,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new_readonly(env.mint, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("init independent market");
+    (market, vault_authority, vault)
+}
+
+fn init_portfolio_on_market(
+    env: &mut V16CuEnv,
+    market: Pubkey,
+    owner: &Keypair,
+    max_market_slots: usize,
+) -> Pubkey {
+    let portfolio = Pubkey::new_unique();
+    env.ensure_signer_account(owner.pubkey());
+    env.svm
+        .set_account(
+            portfolio,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::portfolio_account_len_for_market_slots(max_market_slots).unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[owner],
+    )
+    .expect("init portfolio on explicit market");
+    portfolio
+}
+
+fn deposit_to_market(
+    env: &mut V16CuEnv,
+    market: Pubkey,
+    vault: Pubkey,
+    owner: &Keypair,
+    portfolio: Pubkey,
+    amount: u128,
+) -> Pubkey {
+    let source = env.token_account(owner.pubkey(), amount as u64);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::Deposit { amount },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[owner],
+    )
+    .expect("deposit to explicit market");
+    source
+}
+
 #[test]
 fn v16_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
     let mut env = V16CuEnv::new();
@@ -16379,6 +16524,301 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
 
     env.close_portfolio_with_cu(&attacker, pa);
     assert_eq!(env.market_state().1.materialized_portfolio_count, 0, "real market can still close P_a");
+}
+
+// full-interface sweep (cron/audit-scan-off) — every public trade entrypoint must reject a portfolio
+// initialized under a different market, even though the account id and owner signer are otherwise
+// correct. This proves the default deployed build does not rely on the engine's cfg-gated
+// `audit-scan` helpers for trade provenance. The CPI probes use a faithful matcher reply, so the only
+// rejected precondition is the foreign-market portfolio binding; the entire tx must roll back,
+// including matcher ctx writes.
+#[test]
+fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
+    let mut env = V16CuEnv::new();
+    let attacker = Keypair::new();
+    let pa = env.create_portfolio(&attacker);
+    env.deposit(&attacker, pa, 1_000_000);
+
+    let params = V16CuMarketParams::default();
+    let (market_b, _vault_authority_b, vault_b) =
+        init_independent_market_same_mint(&mut env, params);
+    let victim = Keypair::new();
+    let pb = init_portfolio_on_market(
+        &mut env,
+        market_b,
+        &victim,
+        params.max_portfolio_assets as usize,
+    );
+    deposit_to_market(&mut env, market_b, vault_b, &victim, pb, 1_000_000);
+    assert_eq!(env.token_amount(vault_b), 1_000_000, "market B vault is genuinely funded");
+    assert_eq!(
+        env.portfolio_state(pa).provenance_header.market_group_id,
+        env.market.to_bytes(),
+        "attack account is bound to market A"
+    );
+    assert_eq!(
+        env.portfolio_state(pb).provenance_header.market_group_id,
+        market_b.to_bytes(),
+        "counterparty is bound to market B"
+    );
+
+    let hostile = Pubkey::new_unique();
+    env.svm
+        .add_program(hostile, &std::fs::read(hostile_matcher_program_path()).unwrap());
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &market_b,
+        &pb,
+        &victim.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 9; // hostile fixture's faithful mode: returns a valid oracle-priced fill.
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    {
+        let mut reject_atomically =
+            |label: &str, ix: ProgInstruction, accounts: Vec<AccountMeta>| {
+                let market_a_before = env.svm.get_account(&env.market).unwrap();
+                let market_b_before = env.svm.get_account(&market_b).unwrap();
+                let pa_before = env.svm.get_account(&pa).unwrap();
+                let pb_before = env.svm.get_account(&pb).unwrap();
+                let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+                let ctx_before = env.svm.get_account(&ctx).unwrap();
+                env.svm.expire_blockhash();
+                let result = send_tx(
+                    &mut env.svm,
+                    env.program_id,
+                    &env.payer,
+                    ix,
+                    accounts,
+                    &[&attacker, &victim],
+                );
+                assert!(result.is_err(), "{label} must reject a market-A portfolio under market B");
+                assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before, "{label}: market A unchanged");
+                assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before, "{label}: market B unchanged");
+                assert_eq!(env.svm.get_account(&pa).unwrap(), pa_before, "{label}: foreign portfolio unchanged");
+                assert_eq!(env.svm.get_account(&pb).unwrap(), pb_before, "{label}: local counterparty unchanged");
+                assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before, "{label}: market B vault unchanged");
+                assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before, "{label}: matcher ctx writes rolled back");
+            };
+
+        reject_atomically(
+            "TradeNoCpi",
+            ProgInstruction::TradeNoCpi {
+                asset_index: 0,
+                size_q: POS_SCALE as i128,
+                exec_price: 100,
+                fee_bps: 100,
+            },
+            vec![
+                AccountMeta::new(attacker.pubkey(), true),
+                AccountMeta::new(victim.pubkey(), true),
+                AccountMeta::new(market_b, false),
+                AccountMeta::new(pa, false),
+                AccountMeta::new(pb, false),
+            ],
+        );
+        reject_atomically(
+            "BatchTradeNoCpi",
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: POS_SCALE as i128,
+                    exec_price: 100,
+                    fee_bps: 100,
+                }],
+            },
+            vec![
+                AccountMeta::new(attacker.pubkey(), true),
+                AccountMeta::new(victim.pubkey(), true),
+                AccountMeta::new(market_b, false),
+                AccountMeta::new(pa, false),
+                AccountMeta::new(pb, false),
+            ],
+        );
+        reject_atomically(
+            "TradeCpi",
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q: POS_SCALE as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            vec![
+                AccountMeta::new(attacker.pubkey(), true),
+                AccountMeta::new(victim.pubkey(), true),
+                AccountMeta::new(market_b, false),
+                AccountMeta::new(pa, false),
+                AccountMeta::new(pb, false),
+                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+        );
+        reject_atomically(
+            "BatchTradeCpi",
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 100,
+                    limit_price: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(attacker.pubkey(), true),
+                AccountMeta::new(victim.pubkey(), true),
+                AccountMeta::new(market_b, false),
+                AccountMeta::new(pa, false),
+                AccountMeta::new(pb, false),
+                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+        );
+    }
+
+    let good_a = Keypair::new();
+    let good_b = Keypair::new();
+    let p_good_a = init_portfolio_on_market(
+        &mut env,
+        market_b,
+        &good_a,
+        params.max_portfolio_assets as usize,
+    );
+    let p_good_b = init_portfolio_on_market(
+        &mut env,
+        market_b,
+        &good_b,
+        params.max_portfolio_assets as usize,
+    );
+    deposit_to_market(&mut env, market_b, vault_b, &good_a, p_good_a, 1_000_000);
+    deposit_to_market(&mut env, market_b, vault_b, &good_b, p_good_b, 1_000_000);
+    env.svm.expire_blockhash();
+    let direct_ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 100,
+        },
+        vec![
+            AccountMeta::new(good_a.pubkey(), true),
+            AccountMeta::new(good_b.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(p_good_a, false),
+            AccountMeta::new(p_good_b, false),
+        ],
+        &[&good_a, &good_b],
+    );
+    assert!(direct_ok.is_ok(), "same-market TradeNoCpi control must execute: {direct_ok:?}");
+
+    let cpi_taker = Keypair::new();
+    let cpi_lp = Keypair::new();
+    let p_cpi_taker = init_portfolio_on_market(
+        &mut env,
+        market_b,
+        &cpi_taker,
+        params.max_portfolio_assets as usize,
+    );
+    let p_cpi_lp = init_portfolio_on_market(
+        &mut env,
+        market_b,
+        &cpi_lp,
+        params.max_portfolio_assets as usize,
+    );
+    deposit_to_market(&mut env, market_b, vault_b, &cpi_taker, p_cpi_taker, 1_000_000);
+    deposit_to_market(&mut env, market_b, vault_b, &cpi_lp, p_cpi_lp, 1_000_000);
+    let ctx_ok = Pubkey::new_unique();
+    let delegate_ok = matcher_delegate_key(
+        &env.program_id,
+        &market_b,
+        &p_cpi_lp,
+        &cpi_lp.pubkey(),
+        &hostile,
+        &ctx_ok,
+    );
+    env.svm
+        .set_account(
+            delegate_ok,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_ok_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_ok_data[0] = 9;
+    env.svm
+        .set_account(
+            ctx_ok,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_ok_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let batch_cpi_ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: POS_SCALE as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(cpi_taker.pubkey(), true),
+            AccountMeta::new(cpi_lp.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(p_cpi_taker, false),
+            AccountMeta::new(p_cpi_lp, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx_ok, false),
+            AccountMeta::new_readonly(delegate_ok, false),
+        ],
+        &[&cpi_taker, &cpi_lp],
+    );
+    assert!(batch_cpi_ok.is_ok(), "same-market BatchTradeCpi control must execute: {batch_cpi_ok:?}");
 }
 
 // full-interface sweep (cron23): resolved payout is a terminal value-moving path. A portfolio bound
