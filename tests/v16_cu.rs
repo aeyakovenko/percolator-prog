@@ -22,6 +22,7 @@ use solana_sdk::{
     program_pack::Pack,
     pubkey::Pubkey,
     signature::{Keypair, Signer},
+    system_instruction,
     transaction::Transaction,
 };
 use spl_token::state::{Account as TokenAccount, AccountState, Mint};
@@ -1543,6 +1544,64 @@ impl V16CuEnv {
             1,
         );
         (ctx, delegate, cu)
+    }
+
+    fn init_auth_matcher_context_via_system_create(
+        &mut self,
+        matcher_program: Pubkey,
+        maker_owner: &Keypair,
+        maker_account: Pubkey,
+    ) -> (Pubkey, Pubkey, u64) {
+        self.ensure_signer_account(maker_owner.pubkey());
+        let ctx = Keypair::new();
+        let create_cu = send_raw_tx(
+            &mut self.svm,
+            &self.payer,
+            system_instruction::create_account(
+                &self.payer.pubkey(),
+                &ctx.pubkey(),
+                1_000_000_000,
+                MATCHER_CONTEXT_LEN as u64,
+                &matcher_program,
+            ),
+            &[&ctx],
+        )
+        .expect("system-create matcher context");
+        let delegate = matcher_delegate_key(
+            &self.program_id,
+            &self.market,
+            &maker_account,
+            &maker_owner.pubkey(),
+            &matcher_program,
+            &ctx.pubkey(),
+        );
+        let init_cu = send_raw_tx(
+            &mut self.svm,
+            &self.payer,
+            Instruction {
+                program_id: matcher_program,
+                accounts: vec![
+                    AccountMeta::new_readonly(maker_owner.pubkey(), true),
+                    AccountMeta::new_readonly(delegate, false),
+                    AccountMeta::new(ctx.pubkey(), false),
+                    AccountMeta::new_readonly(self.program_id, false),
+                    AccountMeta::new_readonly(self.market, false),
+                    AccountMeta::new_readonly(maker_account, false),
+                ],
+                data: vec![2],
+            },
+            &[maker_owner],
+        )
+        .expect("auth matcher init after system create");
+        self.set_matcher_config(
+            matcher_program,
+            maker_owner,
+            maker_account,
+            ctx.pubkey(),
+            delegate,
+            1,
+        );
+        (ctx.pubkey(), delegate, create_cu + init_cu)
     }
 
     fn set_matcher_config(
@@ -14050,8 +14109,8 @@ fn v16_bpf_tradecpi_permissionless_lp_fill_does_not_need_lp_owner_signature() {
     let lp = env.create_portfolio(&lp_owner);
     env.deposit(&taker_owner, taker, 1_000_000);
     env.deposit(&lp_owner, lp, 1_000_000);
-    let (matcher_ctx, matcher_delegate, _) =
-        env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+    let (matcher_ctx, matcher_delegate, init_cu) =
+        env.init_auth_matcher_context_via_system_create(matcher_program, &lp_owner, lp);
 
     env.svm.expire_blockhash();
     let cu = env
@@ -14068,7 +14127,7 @@ fn v16_bpf_tradecpi_permissionless_lp_fill_does_not_need_lp_owner_signature() {
             100,
         )
         .expect("matcher CPI fill succeeds with only the taker signing");
-    println!("v16 permissionless LP TradeCpi CU: {cu}");
+    println!("v16 permissionless LP matcher system-init CU: {init_cu}, TradeCpi CU: {cu}");
 
     let taker_state = env.portfolio_state(taker);
     let lp_state = env.portfolio_state(lp);
@@ -34943,7 +35002,8 @@ fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
     let la = env.create_portfolio(&lp);
     env.deposit(&taker, ta, 1_000_000);
     env.deposit(&lp, la, 1_000_000);
-    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, la);
+    let (ctx, delegate, init_cu) =
+        env.init_auth_matcher_context_via_system_create(matcher_program, &lp, la);
     let sz = (5 * POS_SCALE) as i128;
     env.svm.expire_blockhash();
     let cu = env
@@ -34976,7 +35036,7 @@ fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
             &[&taker],
         )
         .expect("batch CPI mixed spread must execute through the matcher without LP signing fill");
-    println!("v16 batch CPI mixed-direction 2-leg CU: {cu}");
+    println!("v16 batch matcher system-init CU: {init_cu}, mixed-direction 2-leg CU: {cu}");
     let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
     let l = state::read_portfolio(&env.svm.get_account(&la).unwrap().data).unwrap();
     assert_eq!(active_leg_for_asset(&t, 0).side, SideV16::Long);
