@@ -57,6 +57,32 @@ fn has_active_leg_for_asset(account: &PortfolioAccountV16, asset_index: usize) -
         .any(|leg| leg.active && leg.asset_index as usize == asset_index)
 }
 
+fn assert_domain_budget_remaining_total_consistent(group: &MarketGroupV16, label: &str) {
+    assert_eq!(
+        group.insurance_domain_budget.len(),
+        group.insurance_domain_spent.len(),
+        "{label}: budget/spent domain arrays have matching length",
+    );
+    let mut remaining_total = 0u128;
+    for (domain, (&budget, &spent)) in group
+        .insurance_domain_budget
+        .iter()
+        .zip(group.insurance_domain_spent.iter())
+        .enumerate()
+    {
+        let remaining = budget
+            .checked_sub(spent)
+            .unwrap_or_else(|| panic!("{label}: domain {domain} spent exceeds budget"));
+        remaining_total = remaining_total
+            .checked_add(remaining)
+            .unwrap_or_else(|| panic!("{label}: remaining-total overflow"));
+    }
+    assert_eq!(
+        group.insurance_domain_budget_remaining_total, remaining_total,
+        "{label}: aggregate remaining budget matches per-domain budget minus spent",
+    );
+}
+
 fn program_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("target/deploy/percolator_prog.so");
@@ -5486,6 +5512,7 @@ fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
     assert_eq!(payer.capital, 100_000_000 - 580);
     assert_eq!(cranker.capital, 232);
     assert_eq!(group.insurance, 348);
+    assert_domain_budget_remaining_total_consistent(&group, "maintenance fee with cranker share");
 }
 
 #[test]
@@ -15706,8 +15733,9 @@ fn v16_attack_recovery_tools_owner_gated() {
 }
 
 // security.md sweep — permissionless reset finalizer (#31/#44): anyone may finalize a reset-pending
-// side, but only after both stored and stale counters for that side are zero. A public finalizer must
-// not be able to unlock trading while positions still need recovery/cranking.
+// side, but only after all engine reset blockers for that side are zero. A public finalizer must not
+// be able to unlock trading while positions, stale accounts, pending obligations, or domain-loss
+// barriers still need recovery/cranking.
 #[test]
 fn v16_attack_finalize_reset_side_requires_empty_side_counts() {
     let mut env = V16CuEnv::new();
@@ -15753,7 +15781,89 @@ fn v16_attack_finalize_reset_side_requires_empty_side_counts() {
     );
 
     env.mutate_market(|_, group| {
+        group.assets[0].mode_long = SideModeV16::ResetPending;
         group.assets[0].stale_account_count_long = 0;
+        group.assets[0].pending_obligation_count_long = 1;
+    });
+    assert_eq!(
+        env.market_state().1.assets[0].mode_long,
+        SideModeV16::ResetPending,
+        "test precondition: side is reset-pending",
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].pending_obligation_count_long,
+        1,
+        "test precondition: pending obligation is persisted",
+    );
+    {
+        let mut raw = env.svm.get_account(&env.market).unwrap();
+        let (_cfg, view) = state::market_view_mut(&mut raw.data).unwrap();
+        let asset = view.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert_eq!(
+            asset.pending_obligation_count_long, 1,
+            "test precondition: zero-copy view sees pending obligation",
+        );
+        assert_eq!(
+            asset.mode_long,
+            SideModeV16::ResetPending,
+            "test precondition: zero-copy view sees reset-pending side",
+        );
+    }
+    env.svm.expire_blockhash();
+    let r_obligation = env.send(
+        ProgInstruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 0,
+        },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        r_obligation.is_err(),
+        "pending obligations must block reset finalization",
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].mode_long,
+        SideModeV16::ResetPending,
+        "pending-obligation rejection must leave the side locked",
+    );
+
+    env.mutate_market(|_, group| {
+        group.assets[0].mode_long = SideModeV16::ResetPending;
+        group.assets[0].pending_obligation_count_long = 0;
+        group.pending_domain_loss_barriers[0] = 1;
+    });
+    assert_eq!(
+        env.market_state().1.assets[0].mode_long,
+        SideModeV16::ResetPending,
+        "test precondition: side is reset-pending",
+    );
+    assert_eq!(
+        env.market_state().1.pending_domain_loss_barriers[0],
+        1,
+        "test precondition: domain-loss barrier is persisted",
+    );
+    env.svm.expire_blockhash();
+    let r_barrier = env.send(
+        ProgInstruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 0,
+        },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        r_barrier.is_err(),
+        "pending domain-loss barriers must block reset finalization",
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].mode_long,
+        SideModeV16::ResetPending,
+        "domain-barrier rejection must leave the side locked",
+    );
+
+    env.mutate_market(|_, group| {
+        group.pending_domain_loss_barriers[0] = 0;
     });
     env.svm.expire_blockhash();
     let r_empty = env.send(
@@ -15906,6 +16016,7 @@ fn v16_attack_maintenance_fee_with_open_position_conserves() {
     assert_eq!(env.portfolio_state(pa).legs[0].basis_pos_q, basis0, "fee accrual did not disturb the position");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
     assert_eq!(g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q, "OI still balanced");
+    assert_domain_budget_remaining_total_consistent(&g1, "maintenance fee open position");
 }
 // security.md sweep — deposit with parked pnl (#32/#33): depositing while holding junior (parked) pnl
 // must credit capital exactly and leave the pnl and its residual backing untouched. No double-count,
@@ -17125,6 +17236,7 @@ fn v16_attack_funding_and_fee_combined_conserve() {
     assert_eq!(g.vault, 2 * DEPOSIT, "vault == total deposited (funding zero-sum + fees internal)");
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting vault == real on-chain vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation under funding + fees");
+    assert_domain_budget_remaining_total_consistent(&g, "funding plus maintenance fee");
     let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
     let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
     let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
@@ -18157,6 +18269,7 @@ fn v16_attack_fee_redirect_split_lands_correctly() {
     let (_, g) = env.market_state();
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    assert_domain_budget_remaining_total_consistent(&g, "trade fee redirect split");
 }
 
 // security.md sweep — backing-fee policy authorization (#6) [fee-routing #7]: UpdateBackingFeePolicy
@@ -18373,6 +18486,7 @@ fn v16_attack_market0_fees_stay_local() {
     let (_, g) = env.market_state();
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    assert_domain_budget_remaining_total_consistent(&g, "market0 trade fees stay local");
 }
 
 // security.md sweep — fee-redirect 100% boundary (#32/#33) [fee-routing #4]: with redirect=10000, ALL
@@ -18403,6 +18517,7 @@ fn v16_attack_fee_redirect_full_boundary() {
     let (_, g) = env.market_state();
     assert_eq!(g.vault as u64, env.token_amount(env.vault), "accounting == real vault");
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    assert_domain_budget_remaining_total_consistent(&g, "full fee redirect boundary");
 }
 
 // security.md sweep — WithdrawInsurance wind-down gate: the global terminal WithdrawInsurance must be
@@ -23172,6 +23287,7 @@ fn v16_attack_backing_fee_split_conserves() {
     assert_eq!(budget_delta, insurance_delta, "per-domain insurance budget mirrors the insurance share");
     // c_tot drops by exactly the fee debited from collateral (insurance + provider leave c_tot).
     assert_eq!(ctot_before - ga.c_tot, charged, "c_tot decreases by exactly the charged fee");
+    assert_domain_budget_remaining_total_consistent(&ga, "backing fee insurance share");
 }
 
 // security.md sweep — permissionless asset-create fee gate (#5 / README L52): when the configured
@@ -23256,6 +23372,7 @@ fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit(
     assert_eq!(rejected_group.insurance, group_before.insurance, "rejected create did not credit insurance");
     assert_eq!(rejected_group.vault, group_before.vault, "rejected create did not credit accounting vault");
     assert_eq!(rejected_group.insurance_domain_budget, group_before.insurance_domain_budget);
+    assert_domain_budget_remaining_total_consistent(&rejected_group, "underfunded create rollback");
 
     let funded_source = env.token_account(creator.pubkey(), FEE as u64);
     env.svm.expire_blockhash();
@@ -23286,6 +23403,7 @@ fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit(
     assert_eq!(funded_group.assets[1].lifecycle, AssetLifecycleV16::Active);
     assert_eq!(funded_group.insurance - group_before.insurance, FEE, "fee credited to market-0 insurance");
     assert_eq!(funded_group.vault - group_before.vault, FEE, "fee credited to accounting vault");
+    assert_domain_budget_remaining_total_consistent(&funded_group, "funded permissionless create");
 }
 
 // security.md sweep - sparse append DoS: permissionless activation may append exactly the next
@@ -23473,6 +23591,7 @@ fn v16_attack_permissionless_create_fee_funds_asset0_insurance() {
     assert_eq!(b0 + b1, FEE, "fee earmarked into asset-0's insurance domains (0=long,1=short), no leakage");
     assert_eq!(after.assets[1].lifecycle, AssetLifecycleV16::Active);
     assert!(after.vault >= after.c_tot + after.insurance, "senior conservation");
+    assert_domain_budget_remaining_total_consistent(&after, "permissionless create fee");
 }
 
 // security.md sweep — base-unit deposit/withdraw mint routing (#5 / README L122): deposits accept ONLY
@@ -24807,6 +24926,7 @@ fn v16_attack_batch_fees_isolated_to_each_asset_domain() {
         a1 > a0,
         "asset1 (fee_bps 500) credit {a1} > asset0 (fee_bps 100) credit {a0}: per-asset, not aggregated/cross-credited"
     );
+    assert_domain_budget_remaining_total_consistent(&after, "batch fee domain isolation");
 }
 
 // LOF: the batch's single end-state initial-margin check protects the COUNTERPARTY too. A funded

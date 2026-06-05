@@ -4627,7 +4627,6 @@ pub mod processor {
     const ASSET_LIFECYCLE_DRAIN_ONLY: u8 = 3;
     const ASSET_LIFECYCLE_RETIRED: u8 = 4;
     const ASSET_LIFECYCLE_RECOVERY: u8 = 5;
-    const SIDE_MODE_NORMAL: u8 = 0;
 
     fn authenticated_slot_or_fallback(fallback_slot: u64) -> u64 {
         Clock::get().map(|c| c.slot).unwrap_or(fallback_slot)
@@ -4648,24 +4647,6 @@ pub mod processor {
             1 => Ok(SideV16::Short),
             _ => Err(PercolatorError::InvalidInstruction.into()),
         }
-    }
-
-    fn fraction_ge_wide(
-        lhs_num: u128,
-        lhs_den: u128,
-        rhs_num: u128,
-        rhs_den: u128,
-    ) -> Result<bool, ProgramError> {
-        if lhs_den == 0 || rhs_den == 0 {
-            return Err(PercolatorError::EngineInvalidConfig.into());
-        }
-        let lhs = percolator::wide_math::U256::from_u128(lhs_num)
-            .checked_mul(percolator::wide_math::U256::from_u128(rhs_den))
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        let rhs = percolator::wide_math::U256::from_u128(rhs_num)
-            .checked_mul(percolator::wide_math::U256::from_u128(lhs_den))
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        Ok(lhs >= rhs)
     }
 
     #[inline(always)]
@@ -5029,22 +5010,6 @@ pub mod processor {
         })
     }
 
-    // Domain-budget mutations route through the engine's aggregate-maintaining API
-    // (`insurance_domain_budget_remaining_total` is kept in lockstep there); the wrapper must not
-    // write `insurance_domain_budget_*` directly or the O(1) market-aggregate totals drift.
-    fn add_to_domain_budget_view(
-        group: &mut state::MarketViewMutV16<'_>,
-        domain: usize,
-        amount: u128,
-    ) -> ProgramResult {
-        if amount == 0 {
-            return Ok(());
-        }
-        group
-            .credit_domain_insurance_budget_not_atomic(domain, amount)
-            .map_err(map_v16_error)
-    }
-
     fn domain_budget_remaining_view(
         group: &state::MarketViewMutV16<'_>,
         domain: usize,
@@ -5067,8 +5032,12 @@ pub mod processor {
         let short_amount = amount
             .checked_sub(long_amount)
             .ok_or(PercolatorError::EngineCounterUnderflow)?;
-        add_to_domain_budget_view(group, asset_index * 2, long_amount)?;
-        add_to_domain_budget_view(group, asset_index * 2 + 1, short_amount)
+        group
+            .credit_domain_insurance_budget_not_atomic(asset_index * 2, long_amount)
+            .map_err(map_v16_error)?;
+        group
+            .credit_domain_insurance_budget_not_atomic(asset_index * 2 + 1, short_amount)
+            .map_err(map_v16_error)
     }
 
     fn deposit_market_zero_insurance_view(
@@ -5218,7 +5187,9 @@ pub mod processor {
         let domain_amount = amount
             .checked_sub(redirect)
             .ok_or(PercolatorError::EngineCounterUnderflow)?;
-        add_to_domain_budget_view(group, domain, domain_amount)?;
+        group
+            .credit_domain_insurance_budget_not_atomic(domain, domain_amount)
+            .map_err(map_v16_error)?;
         credit_market_insurance_budget_view(group, 0, redirect)
     }
 
@@ -9555,37 +9526,10 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         let side = decode_side(side)?;
         let mut data = market_ai.try_borrow_mut_data()?;
-        let (_cfg, group) = state::market_view_mut(&mut data)?;
-        let asset_index = asset_index as usize;
-        if asset_index >= group.header.config.max_market_slots.get() as usize
-            || asset_index >= group.markets.len()
-        {
-            return Err(PercolatorError::EngineInvalidLeg.into());
-        }
-        let asset = &mut group.markets[asset_index].engine.asset;
-        match side {
-            SideV16::Long => {
-                if asset.mode_long == 2 {
-                    if asset.stored_pos_count_long.get() != 0
-                        || asset.stale_account_count_long.get() != 0
-                    {
-                        return Err(PercolatorError::EngineStale.into());
-                    }
-                    asset.mode_long = SIDE_MODE_NORMAL;
-                }
-            }
-            SideV16::Short => {
-                if asset.mode_short == 2 {
-                    if asset.stored_pos_count_short.get() != 0
-                        || asset.stale_account_count_short.get() != 0
-                    {
-                        return Err(PercolatorError::EngineStale.into());
-                    }
-                    asset.mode_short = SIDE_MODE_NORMAL;
-                }
-            }
-        }
-        group.validate_shape().map_err(map_v16_error)
+        let (_cfg, mut group) = state::market_view_mut(&mut data)?;
+        group
+            .finalize_side_reset_not_atomic(asset_index as usize, side)
+            .map_err(map_v16_error)
     }
 
     #[inline(never)]
@@ -9603,50 +9547,11 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let mut data = market_ai.try_borrow_mut_data()?;
-        let (cfg, group) = state::market_view_mut(&mut data)?;
+        let (cfg, mut group) = state::market_view_mut(&mut data)?;
         expect_live_authority(&cfg.marketauth, admin.key)?;
-        if group.header.mode != 1 || group.header.payout_snapshot_captured == 0 {
-            return Err(PercolatorError::EngineLockActive.into());
-        }
-        let ledger = &mut group.header.resolved_payout_ledger;
-        if ledger.payout_halted > 1 || ledger.finalized > 1 {
-            return Err(ProgramError::InvalidAccountData);
-        }
-        let old_num = ledger.current_payout_rate_num.get();
-        let old_den = ledger.current_payout_rate_den.get();
-        let next_bound = ledger
-            .terminal_claim_bound_unreceipted_num
-            .get()
-            .checked_sub(decrease_num)
-            .ok_or(PercolatorError::EngineCounterUnderflow)?;
-        ledger.terminal_claim_bound_unreceipted_num = percolator::V16PodU128::new(next_bound);
-        let total_bound_num = ledger
-            .terminal_claim_exact_receipts_num
-            .get()
-            .checked_add(next_bound)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        if total_bound_num == 0 {
-            ledger.current_payout_rate_num = percolator::V16PodU128::new(1);
-            ledger.current_payout_rate_den = percolator::V16PodU128::new(1);
-        } else {
-            let next_num = ledger
-                .snapshot_residual
-                .get()
-                .checked_mul(BOUND_SCALE)
-                .ok_or(PercolatorError::EngineArithmeticOverflow)?
-                .min(total_bound_num);
-            ledger.current_payout_rate_num = percolator::V16PodU128::new(next_num);
-            ledger.current_payout_rate_den = percolator::V16PodU128::new(total_bound_num);
-        }
-        if !fraction_ge_wide(
-            ledger.current_payout_rate_num.get(),
-            ledger.current_payout_rate_den.get(),
-            old_num,
-            old_den,
-        )? {
-            return Err(PercolatorError::EngineInvalidConfig.into());
-        }
-        group.validate_shape().map_err(map_v16_error)
+        group
+            .refine_resolved_unreceipted_bound_not_atomic(decrease_num)
+            .map_err(map_v16_error)
     }
 
     #[inline(never)]
