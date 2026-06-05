@@ -6333,6 +6333,147 @@ fn v16_bpf_trade_refreshes_stale_related_portfolio_leg_on_demand() {
 }
 
 #[test]
+fn v16_bpf_tradecpi_refreshes_stale_traded_portfolio_leg_on_demand() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(1, 0, 100);
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker_account = env.create_portfolio(&taker_owner);
+    let lp_account = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker_account, 1_000_000_000);
+    env.deposit(&lp_owner, lp_account, 1_000_000_000);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp_account);
+
+    let initial_size = (10 * POS_SCALE) as i128;
+    env.trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker_account,
+        &lp_owner,
+        lp_account,
+        matcher_program,
+        ctx,
+        delegate,
+        1,
+        initial_size,
+        100,
+    );
+
+    let crank_long_owner = Keypair::new();
+    let crank_short_owner = Keypair::new();
+    let crank_long_account = env.create_portfolio(&crank_long_owner);
+    let crank_short_account = env.create_portfolio(&crank_short_owner);
+    env.deposit(&crank_long_owner, crank_long_account, 1_000_000_000);
+    env.deposit(&crank_short_owner, crank_short_account, 1_000_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &crank_long_owner,
+        crank_long_account,
+        &crank_short_owner,
+        crank_short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_for_asset_as_admin(1, 1, 105);
+    env.crank(
+        crank_long_account,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+
+    let (_, group_after_mark) = env.market_state();
+    let taker_stale = env.portfolio_state(taker_account);
+    let lp_stale = env.portfolio_state(lp_account);
+    assert_eq!(group_after_mark.assets[1].effective_price, 105);
+    assert_eq!(
+        group_after_mark.assets[1].slot_last, 1,
+        "test setup must make the traded market asset fresh"
+    );
+    assert!(
+        taker_stale.health_cert.cert_oracle_epoch < group_after_mark.oracle_epoch,
+        "mark crank made the taker's traded asset leg stale"
+    );
+    assert!(
+        lp_stale.health_cert.cert_oracle_epoch < group_after_mark.oracle_epoch,
+        "mark crank made the LP's traded asset leg stale"
+    );
+    assert_ne!(
+        active_leg_for_asset(&taker_stale, 1).k_snap,
+        group_after_mark.assets[1].k_long,
+        "taker traded leg snapshot is stale before TradeCpi"
+    );
+    assert_ne!(
+        active_leg_for_asset(&lp_stale, 1).k_snap,
+        group_after_mark.assets[1].k_short,
+        "LP traded leg snapshot is stale before TradeCpi"
+    );
+
+    let trade_cu = env.trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker_account,
+        &lp_owner,
+        lp_account,
+        matcher_program,
+        ctx,
+        delegate,
+        1,
+        POS_SCALE as i128,
+        100,
+    );
+    println!("v16 TradeCpi refreshes stale traded leg on-demand CU: {trade_cu}");
+    assert_cu_within(
+        "TradeCpi on-demand refresh of stale traded leg",
+        trade_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+
+    let (_, group_after_trade) = env.market_state();
+    let taker_after = env.portfolio_state(taker_account);
+    let lp_after = env.portfolio_state(lp_account);
+    assert_eq!(
+        taker_after.health_cert.cert_oracle_epoch, group_after_trade.oracle_epoch,
+        "TradeCpi refreshed and re-certified the taker"
+    );
+    assert_eq!(
+        lp_after.health_cert.cert_oracle_epoch, group_after_trade.oracle_epoch,
+        "TradeCpi refreshed and re-certified the LP"
+    );
+    assert_eq!(
+        active_leg_for_asset(&taker_after, 1).k_snap,
+        group_after_trade.assets[1].k_long,
+        "TradeCpi settled the stale traded taker leg"
+    );
+    assert_eq!(
+        active_leg_for_asset(&lp_after, 1).k_snap,
+        group_after_trade.assets[1].k_short,
+        "TradeCpi settled the stale traded LP leg"
+    );
+    assert_eq!(
+        active_leg_for_asset(&taker_after, 1).basis_pos_q,
+        initial_size + POS_SCALE as i128,
+        "TradeCpi increased the stale traded taker leg"
+    );
+    assert_eq!(
+        active_leg_for_asset(&lp_after, 1).basis_pos_q,
+        -(initial_size + POS_SCALE as i128),
+        "TradeCpi increased the opposite stale traded LP leg"
+    );
+}
+
+#[test]
 fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 58,
