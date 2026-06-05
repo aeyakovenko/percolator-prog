@@ -9584,8 +9584,18 @@ fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
     let ledger_data = env.svm.get_account(&ledger).unwrap().data;
     let ledger_state = state::read_backing_domain_ledger(&ledger_data).unwrap();
     assert_eq!(ledger_state.total_principal_atoms, 100);
+    assert_eq!(
+        ledger_state.residual_received_atoms(),
+        0,
+        "principal top-up is not rewardable residual"
+    );
     assert_eq!(ledger_state.last_observed_bucket_earnings_atoms, 30);
     assert_eq!(ledger_state.total_earnings_atoms, 30);
+    assert_eq!(
+        ledger_state.residual_received_atoms(),
+        0,
+        "utilization earnings are not rewardable residual"
+    );
 
     let dest = env.token_account_for_mint(env.mint, env.admin.pubkey(), 0);
     let withdraw_earnings_cu =
@@ -9601,6 +9611,11 @@ fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
     let (_, group) = env.market_state();
     assert_eq!(ledger_state.total_earnings_withdrawn_atoms, 20);
     assert_eq!(ledger_state.last_observed_bucket_earnings_atoms, 10);
+    assert_eq!(
+        ledger_state.residual_received_atoms(),
+        0,
+        "earnings withdrawal is not rewardable residual"
+    );
     assert_eq!(group.source_backing_buckets[1].utilization_fee_earnings, 10);
     assert_eq!(group.vault, 110);
 
@@ -9766,6 +9781,80 @@ fn v16_bpf_backing_residual_reward_counter_is_snapshot_deterministic() {
     assert!(
         second_loss.residual_received_delta_since(91).is_err(),
         "snapshots above the current counter are invalid, never underflowed"
+    );
+}
+
+#[test]
+fn v16_bpf_backing_residual_reward_counter_is_domain_isolated_and_sync_gated() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    let ledger_domain_1 = env.backing_domain_ledger_account();
+    let ledger_domain_2 = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger_domain_1, 1, 100, 10);
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger_domain_2, 2, 100, 10);
+
+    let read_ledger = |env: &V16CuEnv, ledger: Pubkey| {
+        state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap()
+    };
+
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].consumed_liened_backing_num = 25 * BOUND_SCALE;
+        group.source_backing_buckets[2].consumed_liened_backing_num = 70 * BOUND_SCALE;
+    });
+    assert_eq!(
+        read_ledger(&env, ledger_domain_1).residual_received_atoms(),
+        0,
+        "counter only changes when its ledger is synced"
+    );
+    assert_eq!(
+        read_ledger(&env, ledger_domain_2).residual_received_atoms(),
+        0,
+        "other domain also remains unchanged before sync"
+    );
+
+    env.svm.expire_blockhash();
+    env.sync_backing_domain_ledger_with_cu(ledger_domain_1, 1);
+    let d1_after = read_ledger(&env, ledger_domain_1);
+    let d2_unsynced = read_ledger(&env, ledger_domain_2);
+    assert_eq!(d1_after.residual_received_atoms(), 25);
+    assert_eq!(
+        d2_unsynced.residual_received_atoms(),
+        0,
+        "syncing domain 1 must not credit domain 2 rewards"
+    );
+
+    env.svm.expire_blockhash();
+    env.sync_backing_domain_ledger_with_cu(ledger_domain_1, 1);
+    assert_eq!(
+        read_ledger(&env, ledger_domain_1).residual_received_atoms(),
+        25,
+        "idempotent re-sync without a new loss delta cannot double count"
+    );
+
+    env.svm.expire_blockhash();
+    env.sync_backing_domain_ledger_with_cu(ledger_domain_2, 2);
+    assert_eq!(
+        read_ledger(&env, ledger_domain_2).residual_received_atoms(),
+        70,
+        "domain 2 receives exactly its own realized-loss delta once synced"
+    );
+
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].utilization_fee_earnings += 33;
+        group.source_backing_buckets[1].consumed_liened_backing_num = 25 * BOUND_SCALE;
+        group.vault += 33;
+    });
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 233);
+    env.svm.expire_blockhash();
+    env.sync_backing_domain_ledger_with_cu(ledger_domain_1, 1);
+    let d1_after_earnings = read_ledger(&env, ledger_domain_1);
+    assert_eq!(
+        d1_after_earnings.residual_received_atoms(),
+        25,
+        "earnings sync cannot inflate residual rewards"
+    );
+    assert_eq!(
+        d1_after_earnings.total_earnings_atoms, 33,
+        "control: the same sync did observe non-residual earnings"
     );
 }
 
