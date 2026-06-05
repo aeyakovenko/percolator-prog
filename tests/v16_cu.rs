@@ -20192,6 +20192,210 @@ fn v16_attack_force_close_requires_opposite_sides() {
     assert!(group.vault >= group.c_tot + group.insurance, "senior conservation");
 }
 
+// security.md sweep — ForceCloseAbandonedAsset has no portfolio-owner signatures by design after a
+// shutdown timeout, so it must prove portfolio provenance itself. A cranker must not be able to pair a
+// market-A portfolio with a market-B abandoned asset and mutate either market/account. Same-market
+// control proves the rejected path is specifically the foreign portfolio binding.
+#[test]
+fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
+    const DELAY: u64 = 5;
+    const SHUT: u64 = 20;
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+
+    let a_long_owner = Keypair::new();
+    let a_short_owner = Keypair::new();
+    let a_long = env.create_portfolio(&a_long_owner);
+    let a_short = env.create_portfolio(&a_short_owner);
+    env.deposit(&a_long_owner, a_long, 1_000_000);
+    env.deposit(&a_short_owner, a_short, 1_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &a_long_owner,
+        a_long,
+        &a_short_owner,
+        a_short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    assert_eq!(
+        env.portfolio_state(a_long).provenance_header.market_group_id,
+        env.market.to_bytes(),
+        "foreign candidate is genuinely bound to market A"
+    );
+    assert_eq!(active_leg_for_asset(&env.portfolio_state(a_long), 1).side, SideV16::Long);
+
+    let params = V16CuMarketParams {
+        max_portfolio_assets: 2,
+        ..V16CuMarketParams::default()
+    };
+    let (market_b, _vault_authority_b, vault_b) =
+        init_independent_market_same_mint(&mut env, params);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: 1,
+            now_slot: 1,
+            initial_mark_e6: 100,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("configure market B asset-1 auth mark");
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 100,
+            force_close_delay_slots: DELAY,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("configure market B force-close delay");
+
+    let b_long_owner = Keypair::new();
+    let b_short_owner = Keypair::new();
+    let b_long = init_portfolio_on_market(
+        &mut env,
+        market_b,
+        &b_long_owner,
+        params.max_portfolio_assets as usize,
+    );
+    let b_short = init_portfolio_on_market(
+        &mut env,
+        market_b,
+        &b_short_owner,
+        params.max_portfolio_assets as usize,
+    );
+    deposit_to_market(&mut env, market_b, vault_b, &b_long_owner, b_long, 1_000_000);
+    deposit_to_market(&mut env, market_b, vault_b, &b_short_owner, b_short, 1_000_000);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        vec![
+            AccountMeta::new(b_long_owner.pubkey(), true),
+            AccountMeta::new(b_short_owner.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(b_long, false),
+            AccountMeta::new(b_short, false),
+        ],
+        &[&b_long_owner, &b_short_owner],
+    )
+    .expect("open market B asset-1 position");
+    let (_, market_b_open) = state::read_market(&env.svm.get_account(&market_b).unwrap().data)
+        .expect("read market B");
+    assert_eq!(market_b_open.assets[1].oi_eff_long_q, POS_SCALE);
+    assert_eq!(market_b_open.assets[1].oi_eff_short_q, POS_SCALE);
+
+    env.svm.warp_to_slot(SHUT);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+            asset_index: 1,
+            now_slot: SHUT,
+            initial_price: 0,
+            insurance_authority: env.admin.pubkey().to_bytes(),
+            insurance_operator: env.admin.pubkey().to_bytes(),
+            backing_bucket_authority: env.admin.pubkey().to_bytes(),
+            oracle_authority: env.admin.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("shut down market B asset 1");
+    env.svm.warp_to_slot(SHUT + DELAY + 1);
+
+    let cranker = Keypair::new();
+    env.ensure_signer_account(cranker.pubkey());
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let a_long_before = env.svm.get_account(&a_long).unwrap();
+    let b_short_before = env.svm.get_account(&b_short).unwrap();
+    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ForceCloseAbandonedAsset {
+            asset_index: 1,
+            now_slot: SHUT + DELAY + 1,
+            close_q: POS_SCALE,
+        },
+        vec![
+            AccountMeta::new(cranker.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(a_long, false),
+            AccountMeta::new(b_short, false),
+        ],
+        &[&cranker],
+    );
+    assert!(
+        rejected.is_err(),
+        "permissionless force-close must reject a market-A portfolio under market B"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+    assert_eq!(env.svm.get_account(&a_long).unwrap(), a_long_before);
+    assert_eq!(env.svm.get_account(&b_short).unwrap(), b_short_before);
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ForceCloseAbandonedAsset {
+            asset_index: 1,
+            now_slot: SHUT + DELAY + 1,
+            close_q: POS_SCALE,
+        },
+        vec![
+            AccountMeta::new(cranker.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(b_long, false),
+            AccountMeta::new(b_short, false),
+        ],
+        &[&cranker],
+    );
+    assert!(ok.is_ok(), "same-market abandoned pair force-closes: {ok:?}");
+    let (_, market_b_after) = state::read_market(&env.svm.get_account(&market_b).unwrap().data)
+        .expect("read market B after force-close");
+    assert_eq!(market_b_after.assets[1].oi_eff_long_q, 0);
+    assert_eq!(market_b_after.assets[1].oi_eff_short_q, 0);
+    assert_eq!(market_b_after.vault as u64, env.token_amount(vault_b));
+    assert!(market_b_after.vault >= market_b_after.c_tot + market_b_after.insurance);
+}
+
 // security.md sweep — off-market exec_price wash trade (#9/#22/#33): exec_price is validated only as
 // 0 < exec_price <= MAX_ORACLE_PRICE (NOT clamped to the oracle), so two colluding accounts can open a
 // position at a price far from the mark, handing one side an instant profit. Attacker goal: print
