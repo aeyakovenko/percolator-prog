@@ -9714,6 +9714,284 @@ fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
     assert_eq!(ledger_state.last_observed_insurance_atoms, 110);
 }
 
+#[derive(Clone, Copy, Debug)]
+enum BackingResidualCounterTradePath {
+    TradeNoCpi,
+    TradeCpi,
+    BatchTradeNoCpi,
+    BatchTradeCpi,
+}
+
+fn auth_matcher_for_lp(
+    env: &mut V16CuEnv,
+    lp_owner: &Keypair,
+    lp_account: Pubkey,
+) -> (Pubkey, Pubkey, Pubkey, Pubkey) {
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, lp_owner, lp_account);
+    let auth = matcher_auth_key(
+        &env.program_id,
+        &env.market,
+        &lp_account,
+        &lp_owner.pubkey(),
+        &matcher_program,
+        &ctx,
+    );
+    (matcher_program, ctx, delegate, auth)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_backing_residual_counter_trade_path(
+    env: &mut V16CuEnv,
+    path: BackingResidualCounterTradePath,
+    taker_owner: &Keypair,
+    taker_account: Pubkey,
+    lp_owner: &Keypair,
+    lp_account: Pubkey,
+    size_q: i128,
+    exec_price: u64,
+) -> u64 {
+    match path {
+        BackingResidualCounterTradePath::TradeNoCpi => env.trade_asset_with_cu(
+            0,
+            taker_owner,
+            taker_account,
+            lp_owner,
+            lp_account,
+            size_q,
+            exec_price,
+            0,
+        ),
+        BackingResidualCounterTradePath::TradeCpi => {
+            let (matcher_program, ctx, delegate, _) =
+                auth_matcher_for_lp(env, lp_owner, lp_account);
+            env.trade_cpi_with_cu_on_asset(
+                taker_owner,
+                taker_account,
+                lp_owner,
+                lp_account,
+                matcher_program,
+                ctx,
+                delegate,
+                0,
+                size_q,
+                0,
+            )
+        }
+        BackingResidualCounterTradePath::BatchTradeNoCpi => env
+            .send(
+                ProgInstruction::BatchTradeNoCpi {
+                    legs: vec![BatchTradeLeg {
+                        asset_index: 0,
+                        size_q,
+                        exec_price,
+                        fee_bps: 0,
+                    }],
+                },
+                vec![
+                    AccountMeta::new(taker_owner.pubkey(), true),
+                    AccountMeta::new(lp_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker_account, false),
+                    AccountMeta::new(lp_account, false),
+                ],
+                &[taker_owner, lp_owner],
+            )
+            .expect("BatchTradeNoCpi residual-counter trade"),
+        BackingResidualCounterTradePath::BatchTradeCpi => {
+            let (matcher_program, ctx, delegate, auth) =
+                auth_matcher_for_lp(env, lp_owner, lp_account);
+            env.send(
+                ProgInstruction::BatchTradeCpi {
+                    legs: vec![BatchTradeCpiLeg {
+                        asset_index: 0,
+                        size_q,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    }],
+                },
+                vec![
+                    AccountMeta::new(taker_owner.pubkey(), true),
+                    AccountMeta::new_readonly(lp_owner.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker_account, false),
+                    AccountMeta::new(lp_account, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new(ctx, false),
+                    AccountMeta::new_readonly(delegate, false),
+                    AccountMeta::new_readonly(auth, false),
+                ],
+                &[taker_owner],
+            )
+            .expect("BatchTradeCpi residual-counter trade")
+        }
+    }
+}
+
+fn run_backing_residual_counter_trade_path_case(path: BackingResidualCounterTradePath) {
+    const INITIAL_PRICE: u64 = 100;
+    const MARK_AFTER_MOVE: u64 = 105;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const EXPECTED_PNL: u128 = 100;
+    const WINNING_DOMAIN: u8 = 1;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, WINNING_DOMAIN, 150, 10);
+
+    let read_ledger = |env: &V16CuEnv| {
+        state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap()
+    };
+    let start = read_ledger(&env).residual_received_atoms();
+    assert_eq!(start, 0, "{path:?} farm reward snapshot starts at zero");
+
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let winner_account = env.create_portfolio(&winner_owner);
+    let loser_account = env.create_portfolio(&loser_owner);
+    env.deposit(&winner_owner, winner_account, 1_000);
+    env.deposit(&loser_owner, loser_account, 1_000);
+
+    let open_cu = execute_backing_residual_counter_trade_path(
+        &mut env,
+        path,
+        &winner_owner,
+        winner_account,
+        &loser_owner,
+        loser_account,
+        SIZE_Q,
+        INITIAL_PRICE,
+    );
+    assert_cu_within(
+        &format!("{path:?} residual-counter open"),
+        open_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, MARK_AFTER_MOVE);
+    for account in [loser_account, winner_account] {
+        env.crank(
+            account,
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: 2,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+        );
+    }
+
+    let winner_before_convert = env.portfolio_state(winner_account);
+    assert_eq!(
+        winner_before_convert.pnl, EXPECTED_PNL as i128,
+        "{path:?} setup must produce the source-backed positive PnL through the trade path"
+    );
+    assert!(
+        has_active_leg_for_asset(&winner_before_convert, 0),
+        "{path:?} positive claim must exist while the real trade leg remains open"
+    );
+    let (_, before_convert_group) = env.market_state();
+    assert_eq!(
+        before_convert_group.source_credit[WINNING_DOMAIN as usize].positive_claim_bound_num,
+        EXPECTED_PNL * BOUND_SCALE,
+        "{path:?} setup must reserve the positive claim in the winning backing domain"
+    );
+    assert_eq!(
+        read_ledger(&env).residual_received_atoms(),
+        0,
+        "{path:?} trade and crank alone must not move the farm counter before ledger sync"
+    );
+
+    env.svm.expire_blockhash();
+    let close_cu = execute_backing_residual_counter_trade_path(
+        &mut env,
+        path,
+        &winner_owner,
+        winner_account,
+        &loser_owner,
+        loser_account,
+        -SIZE_Q,
+        MARK_AFTER_MOVE,
+    );
+    assert_cu_within(
+        &format!("{path:?} residual-counter close"),
+        close_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    let winner_after_close = env.portfolio_state(winner_account);
+    assert!(
+        !has_active_leg_for_asset(&winner_after_close, 0),
+        "{path:?} close path must release the PnL by flattening the real trade leg"
+    );
+    assert_eq!(
+        winner_after_close.pnl, EXPECTED_PNL as i128,
+        "{path:?} close path must preserve the source-backed PnL before conversion"
+    );
+
+    let convert_cu = env.convert_released_pnl_with_cu(&winner_owner, winner_account, EXPECTED_PNL);
+    assert_cu_within(
+        &format!("{path:?} residual-counter convert"),
+        convert_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let winner_after_convert = env.portfolio_state(winner_account);
+    assert_eq!(
+        winner_after_convert.capital,
+        1_000 + EXPECTED_PNL,
+        "{path:?} backed released PnL converts into senior capital"
+    );
+    let (_, after_convert_group) = env.market_state();
+    assert_eq!(
+        after_convert_group.source_backing_buckets[WINNING_DOMAIN as usize]
+            .consumed_liened_backing_num,
+        EXPECTED_PNL * BOUND_SCALE,
+        "{path:?} converted PnL consumes exactly the source backing principal"
+    );
+    assert_eq!(
+        read_ledger(&env).residual_received_atoms(),
+        0,
+        "{path:?} farm counter remains snapshot-gated until SyncBackingDomainLedger"
+    );
+
+    env.sync_backing_domain_ledger_with_cu(ledger, WINNING_DOMAIN);
+    let synced = read_ledger(&env);
+    assert_eq!(
+        synced.residual_received_atoms(),
+        EXPECTED_PNL,
+        "{path:?} residual reward counter tracks the trade-sourced backing loss"
+    );
+    assert_eq!(
+        synced.residual_received_delta_since(start).unwrap(),
+        EXPECTED_PNL,
+        "{path:?} farm start/end reward delta is deterministic"
+    );
+    assert_eq!(
+        synced.residual_recovered_atoms(),
+        0,
+        "{path:?} conversion is a rewardable residual receive, not a recovery"
+    );
+}
+
+#[test]
+fn v16_bpf_backing_residual_reward_counter_covers_all_trade_paths() {
+    for path in [
+        BackingResidualCounterTradePath::TradeNoCpi,
+        BackingResidualCounterTradePath::TradeCpi,
+        BackingResidualCounterTradePath::BatchTradeNoCpi,
+        BackingResidualCounterTradePath::BatchTradeCpi,
+    ] {
+        run_backing_residual_counter_trade_path_case(path);
+    }
+}
+
 #[test]
 fn v16_bpf_backing_residual_reward_counter_is_snapshot_deterministic() {
     let mut env = V16CuEnv::new();

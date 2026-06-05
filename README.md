@@ -120,7 +120,8 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   fee-support / holding-window rules. Recoveries are recorded separately in
   `cumulative_recovery_atoms`, so they never make the reward counter go backward or depend on sync
   ordering. **✅** (`v16_bpf_backing_residual_reward_counter_is_snapshot_deterministic`,
-  `v16_bpf_backing_residual_reward_counter_is_domain_isolated_and_sync_gated`.)
+  `v16_bpf_backing_residual_reward_counter_is_domain_isolated_and_sync_gated`,
+  `v16_bpf_backing_residual_reward_counter_covers_all_trade_paths`.)
 - **The counter only moves on realized backing loss.** The wrapper syncs it from the backing bucket's
   unavailable-principal delta, so the trader-side cap is the actual crystallized residual loss that
   backing absorbed; it is not notional, mark-to-market paper PnL, or caller-supplied data. **✅**
