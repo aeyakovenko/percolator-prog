@@ -3519,17 +3519,38 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
     )
     .expect("sync system-created insurance ledger");
 
+    send_tx(
+        &mut svm,
+        program_id,
+        &payer,
+        ProgInstruction::Withdraw { amount: 23 },
+        vec![
+            AccountMeta::new(user.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new(portfolio.pubkey(), false),
+            AccountMeta::new(user_ata, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&user],
+    )
+    .expect("withdraw through real SPL token accounts");
+
     let user_token = TokenAccount::unpack(&svm.get_account(&user_ata).unwrap().data).unwrap();
     let admin_token = TokenAccount::unpack(&svm.get_account(&admin_ata).unwrap().data).unwrap();
     let vault_token = TokenAccount::unpack(&svm.get_account(&vault).unwrap().data).unwrap();
-    assert_eq!(user_token.amount, 0, "deposit drained the user source ATA");
+    assert_eq!(
+        user_token.amount, 23,
+        "withdraw returned value to the user's canonical ATA"
+    );
     assert_eq!(
         admin_token.amount, 0,
         "backing top-up drained the admin source ATA"
     );
     assert_eq!(
-        vault_token.amount, 233,
-        "canonical vault ATA received all SPL transfers"
+        vault_token.amount, 210,
+        "canonical vault ATA reflects deposits, top-ups, and withdrawal"
     );
     assert_eq!(vault_token.owner, vault_authority);
     assert_eq!(vault_token.mint, mint.pubkey());
@@ -3545,10 +3566,10 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         state::read_insurance_ledger(&svm.get_account(&insurance_ledger.pubkey()).unwrap().data)
             .expect("read initialized insurance ledger");
     assert_eq!(cfg.collateral_mint, mint.pubkey().to_bytes());
-    assert_eq!(group.vault, 233);
-    assert_eq!(group.c_tot, 123);
+    assert_eq!(group.vault, 210);
+    assert_eq!(group.c_tot, 100);
     assert_eq!(group.insurance, 33);
-    assert_eq!(account.capital, 123);
+    assert_eq!(account.capital, 100);
     assert_eq!(
         group.source_backing_buckets[1].status,
         BackingBucketStatusV16::Fresh
