@@ -5030,38 +5030,22 @@ pub mod processor {
         }
     }
 
-    fn domain_budget_parts_view(
-        group: &state::MarketViewMutV16<'_>,
-        domain: usize,
-    ) -> Result<(u128, u128), ProgramError> {
-        let asset_index = domain / 2;
-        if domain >= (group.header.config.max_market_slots.get() as usize).saturating_mul(2)
-            || asset_index >= group.markets.len()
-        {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
-        let slot = &group.markets[asset_index].engine;
-        Ok(if domain % 2 == 0 {
-            (
-                slot.insurance_domain_budget_long.get(),
-                slot.insurance_domain_spent_long.get(),
-            )
-        } else {
-            (
-                slot.insurance_domain_budget_short.get(),
-                slot.insurance_domain_spent_short.get(),
-            )
-        })
-    }
-
     fn domain_budget_remaining_view(
         group: &state::MarketViewMutV16<'_>,
         domain: usize,
     ) -> Result<u128, ProgramError> {
-        let (budget, spent) = domain_budget_parts_view(group, domain)?;
-        budget
-            .checked_sub(spent)
-            .ok_or(PercolatorError::EngineCounterUnderflow.into())
+        group
+            .domain_insurance_budget_remaining(domain)
+            .map_err(map_v16_error)
+    }
+
+    fn domain_withdraw_capacity_view(
+        group: &state::MarketViewMutV16<'_>,
+        domain: usize,
+    ) -> Result<u128, ProgramError> {
+        group
+            .domain_insurance_withdraw_capacity(domain)
+            .map_err(map_v16_error)
     }
 
     fn credit_market_insurance_budget_view(
@@ -5115,7 +5099,25 @@ pub mod processor {
         Ok(budget.min(group.header.insurance.get()))
     }
 
-    fn terminal_insurance_remaining_for_authority_view(
+    fn market_insurance_withdraw_capacity_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> Result<u128, ProgramError> {
+        let long = domain_withdraw_capacity_view(group, asset_index * 2)?;
+        let short = domain_withdraw_capacity_view(group, asset_index * 2 + 1)?;
+        let capacity = long
+            .checked_add(short)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let global_available = group.header.insurance.get().saturating_sub(
+            group
+                .header
+                .source_insurance_credit_reserved_total_atoms
+                .get(),
+        );
+        Ok(capacity.min(global_available).min(group.header.vault.get()))
+    }
+
+    fn terminal_insurance_withdraw_capacity_for_authority_view(
         group: &state::MarketViewMutV16<'_>,
         cfg: &WrapperConfigV16,
         authority: &Pubkey,
@@ -5133,12 +5135,18 @@ pub mod processor {
             let authorities = domain_authorities_from_view(group, cfg, domain)?;
             if authorities.insurance_authority == authority_bytes {
                 total = total
-                    .checked_add(domain_budget_remaining_view(group, domain)?)
+                    .checked_add(domain_withdraw_capacity_view(group, domain)?)
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?;
             }
             domain += 1;
         }
-        Ok(total.min(group.header.insurance.get()))
+        let global_available = group.header.insurance.get().saturating_sub(
+            group
+                .header
+                .source_insurance_credit_reserved_total_atoms
+                .get(),
+        );
+        Ok(total.min(global_available).min(group.header.vault.get()))
     }
 
     fn debit_terminal_insurance_budgets_for_authority_view(
@@ -5161,7 +5169,7 @@ pub mod processor {
         while domain < domain_count && amount != 0 {
             let authorities = domain_authorities_from_view(group, cfg, domain)?;
             if authorities.insurance_authority == authority_bytes {
-                let remaining = domain_budget_remaining_view(group, domain)?;
+                let remaining = domain_withdraw_capacity_view(group, domain)?;
                 let debit = remaining.min(amount);
                 if debit != 0 {
                     // Atomic insurance/vault/budget withdraw per domain (maintains the budget total).
@@ -5191,7 +5199,7 @@ pub mod processor {
         }
         let long_domain = asset_index * 2;
         let short_domain = long_domain + 1;
-        let long_remaining = domain_budget_remaining_view(group, long_domain)?;
+        let long_remaining = domain_withdraw_capacity_view(group, long_domain)?;
         let long_debit = long_remaining.min(amount);
         if long_debit != 0 {
             group
@@ -5202,7 +5210,7 @@ pub mod processor {
                 .ok_or(PercolatorError::EngineCounterUnderflow)?;
         }
         if amount != 0 {
-            let short_remaining = domain_budget_remaining_view(group, short_domain)?;
+            let short_remaining = domain_withdraw_capacity_view(group, short_domain)?;
             if amount > short_remaining {
                 return Err(PercolatorError::EngineCounterUnderflow.into());
             }
@@ -5847,7 +5855,7 @@ pub mod processor {
         }
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (cfg, group) = state::market_view_mut(&mut market_data)?;
+            let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
@@ -5868,14 +5876,9 @@ pub mod processor {
                 .as_view()
                 .validate_with_market(&group.as_view())
                 .map_err(map_v16_error)?;
-            let next = group
-                .header
-                .materialized_portfolio_count
-                .get()
-                .checked_add(1)
-                .ok_or(PercolatorError::EngineCounterOverflow)?;
-            group.header.materialized_portfolio_count = percolator::V16PodU64::new(next);
-            group.validate_shape().map_err(map_v16_error)?;
+            group
+                .register_empty_materialized_portfolio_not_atomic(&portfolio.as_view())
+                .map_err(map_v16_error)?;
         }
         let _ = (cfg, source_domain_count);
         Ok(())
@@ -7217,9 +7220,9 @@ pub mod processor {
             portfolio
                 .validate_with_market(&group.as_view())
                 .map_err(map_v16_error)?;
-            ensure_portfolio_view_closable(&portfolio)?;
-            decrement_materialized_portfolio_count(&mut group)?;
-            group.validate_shape().map_err(map_v16_error)?;
+            group
+                .deregister_empty_materialized_portfolio_not_atomic(&portfolio.as_view())
+                .map_err(map_v16_error)?;
         }
         close_portfolio_account_to_market_slab(portfolio_ai, market_ai)?;
         Ok(())
@@ -8093,8 +8096,11 @@ pub mod processor {
         let cfg_pre = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
-            let available_insurance =
-                terminal_insurance_remaining_for_authority_view(&group, &cfg, authority.key)?;
+            let available_insurance = terminal_insurance_withdraw_capacity_for_authority_view(
+                &group,
+                &cfg,
+                authority.key,
+            )?;
             if group.header.mode != 1
                 || group.header.materialized_portfolio_count.get() != 0
                 || group.header.c_tot.get() != 0
@@ -8241,7 +8247,7 @@ pub mod processor {
             } else {
                 authorities.insurance_authority
             };
-            let available = market_insurance_remaining_view(&group, asset_index)?;
+            let available = market_insurance_withdraw_capacity_view(&group, asset_index)?;
             if amount > available
                 || amount > group.header.insurance.get()
                 || amount > group.header.vault.get()
@@ -8696,11 +8702,8 @@ pub mod processor {
                     .map_err(map_v16_error)?;
             }
 
-            let close_payer_portfolio = portfolio_view_is_closable(&portfolio)?;
-            if close_payer_portfolio {
-                decrement_materialized_portfolio_count(&mut group)?;
-                group.validate_shape().map_err(map_v16_error)?;
-            }
+            let close_payer_portfolio =
+                deregister_materialized_portfolio_if_empty(&mut group, &portfolio)?;
             close_payer_portfolio
         };
         if close_payer_portfolio {
@@ -10848,61 +10851,15 @@ pub mod processor {
         ensure_trade_portfolio_current_for_requests_view(group, account_b, requests)
     }
 
-    fn portfolio_view_is_closable(
+    fn deregister_materialized_portfolio_if_empty(
+        group: &mut state::MarketViewMutV16<'_>,
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
     ) -> Result<bool, ProgramError> {
-        if !percolator::active_bitmap_is_empty(
-            portfolio
-                .header
-                .active_bitmap
-                .map(percolator::V16PodU64::get),
-        ) || portfolio.header.capital.get() != 0
-            || portfolio.header.pnl.get() != 0
-            || portfolio.header.reserved_pnl.get() != 0
-            || portfolio.header.fee_credits.get() != 0
-            || portfolio.header.cancel_deposit_escrow.get() != 0
-            || portfolio.header.stale_state != 0
-            || portfolio.header.b_stale_state != 0
-            || portfolio
-                .header
-                .close_progress
-                .try_to_runtime()
-                .map_err(map_v16_error)?
-                .has_pending_residual()
-            || (portfolio.header.resolved_payout_receipt.present != 0
-                && portfolio.header.resolved_payout_receipt.finalized == 0)
-        {
-            return Ok(false);
+        match group.deregister_empty_materialized_portfolio_not_atomic(&portfolio.as_view()) {
+            Ok(()) => Ok(true),
+            Err(percolator::V16Error::LockActive) => Ok(false),
+            Err(err) => Err(map_v16_error(err)),
         }
-        for slot in portfolio.header.source_domains.iter() {
-            if slot.source_claim_bound_num.get() != 0 {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    fn ensure_portfolio_view_closable(
-        portfolio: &percolator::PortfolioV16ViewMut<'_>,
-    ) -> ProgramResult {
-        if !portfolio_view_is_closable(portfolio)? {
-            return Err(PercolatorError::EngineLockActive.into());
-        }
-        Ok(())
-    }
-
-    fn decrement_materialized_portfolio_count(
-        group: &mut state::MarketViewMutV16<'_>,
-    ) -> ProgramResult {
-        group.header.materialized_portfolio_count = percolator::V16PodU64::new(
-            group
-                .header
-                .materialized_portfolio_count
-                .get()
-                .checked_sub(1)
-                .ok_or(PercolatorError::EngineCounterUnderflow)?,
-        );
-        Ok(())
     }
 
     fn close_portfolio_account_to_market_slab(
@@ -10983,8 +10940,8 @@ pub mod processor {
 
     // Sparse: (domain, value) per occupied source-domain slot (<= PORTFOLIO_SOURCE_DOMAIN_CAP).
     type SourceBackingSnapshot = alloc::boxed::Box<[(u32, u128)]>;
-    // Sparse accumulator: (domain, fee) entries, keyed by domain.
-    type DomainFeeTotals = Vec<(u32, u128)>;
+    // Sparse accumulator: (domain, provider_fee, insurance_fee) entries, keyed by domain.
+    type DomainFeeTotals = Vec<(u32, u128, u128)>;
 
     fn source_counterparty_backing_snapshot_view(
         account: &percolator::PortfolioV16ViewMut<'_>,
@@ -11004,20 +10961,25 @@ pub mod processor {
     fn domain_fee_add(
         fees: &mut DomainFeeTotals,
         domain: u32,
-        fee: u128,
+        provider_fee: u128,
+        insurance_fee: u128,
     ) -> Result<(), ProgramError> {
         let mut i = 0usize;
         while i < fees.len() {
             if fees[i].0 == domain {
                 fees[i].1 = fees[i]
                     .1
-                    .checked_add(fee)
+                    .checked_add(provider_fee)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                fees[i].2 = fees[i]
+                    .2
+                    .checked_add(insurance_fee)
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?;
                 return Ok(());
             }
             i += 1;
         }
-        fees.push((domain, fee));
+        fees.push((domain, provider_fee, insurance_fee));
         Ok(())
     }
 
@@ -11042,17 +11004,6 @@ pub mod processor {
         })
     }
 
-    fn fee_bps_ceil(amount: u128, bps: u16) -> Result<u128, ProgramError> {
-        if amount == 0 || bps == 0 {
-            return Ok(0);
-        }
-        let num = amount
-            .checked_mul(bps as u128)
-            .and_then(|v| v.checked_add(9_999))
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        Ok(num / 10_000)
-    }
-
     fn collect_backing_domain_fees_for_account_view(
         group: &state::MarketViewMutV16<'_>,
         cfg: &WrapperConfigV16,
@@ -11073,16 +11024,23 @@ pub mod processor {
             let before_val = sparse_domain_value_lookup(before, domain);
             if after > before_val {
                 let delta_num = after - before_val;
-                if delta_num % BOUND_SCALE != 0 {
-                    return Err(PercolatorError::EngineInvalidLeg.into());
-                }
-                let delta = delta_num / BOUND_SCALE;
-                let (bps, _) = backing_fee_policy_for_domain_view(group, cfg, domain as usize)?;
-                let fee = fee_bps_ceil(delta, bps)?;
-                if fee != 0 {
-                    domain_fee_add(fees_by_domain, domain, fee)?;
+                let (bps, insurance_share_bps) =
+                    backing_fee_policy_for_domain_view(group, cfg, domain as usize)?;
+                let split = percolator::backing_domain_fee_split_for_lien_delta_num(
+                    delta_num,
+                    bps,
+                    insurance_share_bps,
+                )
+                .map_err(map_v16_error)?;
+                if split.total_fee != 0 {
+                    domain_fee_add(
+                        fees_by_domain,
+                        domain,
+                        split.provider_fee,
+                        split.insurance_fee,
+                    )?;
                     total = total
-                        .checked_add(fee)
+                        .checked_add(split.total_fee)
                         .ok_or(PercolatorError::EngineArithmeticOverflow)?;
                 }
             }
@@ -11101,24 +11059,18 @@ pub mod processor {
     }
 
     fn charge_account_backing_domain_fees_view(
-        cfg: &WrapperConfigV16,
         group: &mut state::MarketViewMutV16<'_>,
         account: &mut percolator::PortfolioV16ViewMut<'_>,
-        fees_by_domain: &[(u32, u128)],
+        fees_by_domain: &[(u32, u128, u128)],
     ) -> Result<(), ProgramError> {
         let mut fee_idx = 0usize;
         while fee_idx < fees_by_domain.len() {
-            let (domain, fee) = fees_by_domain[fee_idx];
+            let (domain, provider_fee, insurance_fee) = fees_by_domain[fee_idx];
             fee_idx += 1;
-            if fee == 0 {
+            if provider_fee == 0 && insurance_fee == 0 {
                 continue;
             }
             let d = domain as usize;
-            let (_, insurance_share_bps) = backing_fee_policy_for_domain_view(group, cfg, d)?;
-            let insurance_fee = fee_share_floor(fee, insurance_share_bps)?;
-            let provider_fee = fee
-                .checked_sub(insurance_fee)
-                .ok_or(PercolatorError::EngineCounterUnderflow)?;
             group
                 .charge_account_backing_fee_not_atomic(account, d, provider_fee, d, insurance_fee)
                 .map_err(map_v16_error)?;
@@ -11153,8 +11105,8 @@ pub mod processor {
         if fee_a == 0 && fee_b == 0 {
             return Ok(0);
         }
-        charge_account_backing_domain_fees_view(cfg, group, account_a, &fees_a_by_domain)?;
-        charge_account_backing_domain_fees_view(cfg, group, account_b, &fees_b_by_domain)?;
+        charge_account_backing_domain_fees_view(group, account_a, &fees_a_by_domain)?;
+        charge_account_backing_domain_fees_view(group, account_b, &fees_b_by_domain)?;
         group.validate_shape().map_err(map_v16_error)?;
         account_a
             .validate_with_market(&group.as_view())

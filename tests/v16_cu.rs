@@ -1287,7 +1287,7 @@ impl V16CuEnv {
                     .unwrap();
             for asset_index in 0..n {
                 group
-                    .execute_trade_with_fee_in_place_not_atomic(
+                    .execute_trade_with_fee_loss_stale_scoped_not_atomic(
                         &mut long,
                         &mut short,
                         TradeRequestV16 {
@@ -1335,7 +1335,7 @@ impl V16CuEnv {
                     .unwrap();
             for asset_index in 0..n {
                 group
-                    .execute_trade_with_fee_in_place_not_atomic(
+                    .execute_trade_with_fee_loss_stale_scoped_not_atomic(
                         &mut long,
                         &mut short,
                         TradeRequestV16 {
@@ -7994,6 +7994,67 @@ fn v16_attack_non_owner_cannot_close_flat_portfolio() {
 }
 
 #[test]
+fn v16_attack_close_portfolio_rejects_occupied_source_domain_without_claim_bound() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let market_id = env.market_state().1.assets[0].market_id;
+
+    let mut portfolio_account = env.svm.get_account(&portfolio).unwrap();
+    let (_, _, max_market_slots, _) = state::read_market_config_mode_and_capacity(
+        &env.svm.get_account(&env.market).unwrap().data,
+    )
+    .unwrap();
+    {
+        let view = state::portfolio_view_mut_for_market_slots(
+            &mut portfolio_account.data,
+            max_market_slots,
+        )
+        .unwrap();
+        view.header.source_domains[0].domain = percolator::V16PodU32::new(0);
+        view.header.source_domains[0].source_claim_market_id =
+            percolator::V16PodU64::new(market_id);
+        view.header.source_domains[0].source_lien_capital_at_risk_fee_revenue =
+            percolator::V16PodU128::new(7);
+        assert_eq!(
+            view.header.source_domains[0].source_claim_bound_num.get(),
+            0,
+            "test precondition: old wrapper close check only inspected claim bound"
+        );
+    }
+    env.svm.set_account(portfolio, portfolio_account).unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 1);
+
+    env.svm.expire_blockhash();
+    let close = env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        close.is_err(),
+        "ClosePortfolio must use engine dematerialization emptiness, not wrapper-local claim-bound checks"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected close must not decrement materialized_portfolio_count or collect rent"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected close must leave the occupied source-domain state intact"
+    );
+}
+
+#[test]
 fn v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
@@ -11446,7 +11507,7 @@ fn v16_bpf_resolved_payout_tags_are_bounded_and_update_state() {
 // face. The receipt's `finalized` flag is set ONLY when paid_effective ==
 // terminal_positive_claim_face (the FULL face), so under a haircut it can never
 // finalize. If that is a real gap, the winner's portfolio can never be
-// dematerialized (portfolio_view_is_closable requires a finalized-or-absent
+// dematerialized (engine dematerialization requires a finalized-or-absent
 // receipt), materialized_portfolio_count is stuck >= 1, and the market can never
 // WithdrawInsurance or CloseSlab -> permanent fund/rent strand.
 //
@@ -11600,8 +11661,8 @@ fn v16_audit_permissionless_reuse_rejects_zero_insurance_authority() {
 // Coverage probe (audit, Finding G): close_resolved_account_not_atomic charges an
 // accrued maintenance fee into group.insurance (handle_close_resolved passes
 // cfg.maintenance_fee_per_slot) but the wrapper does NOT credit any per-domain
-// insurance budget for it. WithdrawInsurance caps each authority's claim at
-// Σ(domain budget remaining) (terminal_insurance_remaining_for_authority_view),
+// insurance budget for it. WithdrawInsurance caps each authority's claim through
+// terminal_insurance_withdraw_capacity_for_authority_view,
 // not group.insurance, so this fee is withdrawable by NOBODY and permanently
 // blocks CloseSlab (requires insurance==0). This asserts the CORRECT invariant
 // (all of group.insurance is attributable to a withdrawable domain budget); it
