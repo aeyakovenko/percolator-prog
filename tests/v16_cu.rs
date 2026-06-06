@@ -15053,26 +15053,44 @@ fn v16_bpf_auth_matcher_init_rejects_wrong_pda_accepts_right_pda() {
     let lp_owner = Keypair::new();
     let lp = env.create_portfolio(&lp_owner);
 
-    let bad_ctx = Pubkey::new_unique();
+    let bad_ctx = Keypair::new();
     let bad_delegate = Pubkey::new_unique();
-    let bad = env.try_init_auth_matcher_context_with_delegate(
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &bad_ctx,
+        MATCHER_CONTEXT_LEN,
         matcher_program,
-        &lp_owner,
-        lp,
-        bad_ctx,
-        bad_delegate,
+    );
+    let bad = send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        Instruction {
+            program_id: matcher_program,
+            accounts: vec![
+                AccountMeta::new_readonly(lp_owner.pubkey(), true),
+                AccountMeta::new_readonly(bad_delegate, false),
+                AccountMeta::new(bad_ctx.pubkey(), false),
+                AccountMeta::new_readonly(env.program_id, false),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new_readonly(lp, false),
+            ],
+            data: vec![2],
+        },
+        &[&lp_owner],
     );
     assert!(
         bad.is_err(),
         "auth matcher init must reject a delegate PDA with the wrong seeds"
     );
     assert_eq!(
-        env.svm.get_account(&bad_ctx).unwrap().data[64],
+        env.svm.get_account(&bad_ctx.pubkey()).unwrap().data[64],
         0,
         "failed init must not mark the matcher context initialized"
     );
 
-    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+    let (ctx, delegate, _) =
+        env.init_auth_matcher_context_via_system_create(matcher_program, &lp_owner, lp);
     let data = env.svm.get_account(&ctx).unwrap().data;
     assert_eq!(
         data[64], 1,
