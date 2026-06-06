@@ -5036,6 +5036,24 @@ pub mod processor {
         Ok(domain_authorities_from_profile(cfg, &profile, asset_index))
     }
 
+    fn require_domain_accepts_live_topup_view(
+        group: &state::MarketViewMutV16<'_>,
+        domain: usize,
+    ) -> ProgramResult {
+        let asset_index = domain / 2;
+        if domain >= (group.header.config.max_market_slots.get() as usize).saturating_mul(2)
+            || asset_index >= group.markets.len()
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        match group.markets[asset_index].engine.asset.lifecycle {
+            ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY | ASSET_LIFECYCLE_RECOVERY => {
+                Ok(())
+            }
+            _ => Err(PercolatorError::EngineLockActive.into()),
+        }
+    }
+
     fn domain_budget_parts_view(
         group: &state::MarketViewMutV16<'_>,
         domain: usize,
@@ -7364,17 +7382,18 @@ pub mod processor {
         verify_token_program(token_program)?;
         let domain = domain as usize;
         let (cfg_pre, authorities) = {
-            let market_data = market_ai.try_borrow_data()?;
-            let (cfg, mode, configured_slots, _) =
-                state::read_market_config_mode_and_capacity(&market_data)?;
+            let mut market_data = market_ai.try_borrow_mut_data()?;
+            let (cfg, group) = state::market_view_mut(&mut market_data)?;
+            let configured_slots = group.header.config.max_market_slots.get() as usize;
             let asset_index = domain / 2;
-            if mode != MarketModeV16::Live
+            if group.header.mode != 0
                 || domain >= configured_slots.saturating_mul(2)
                 || asset_index >= configured_slots
             {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
-            let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
+            require_domain_accepts_live_topup_view(&group, domain)?;
+            let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
             (cfg, authorities)
         };
@@ -7392,6 +7411,7 @@ pub mod processor {
                 return Err(PercolatorError::EngineLockActive.into());
             }
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
+            require_domain_accepts_live_topup_view(&group, domain)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain)?;
             expect_live_authority(&authorities.insurance_authority, signer.key)?;
             let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
@@ -7697,17 +7717,18 @@ pub mod processor {
         verify_token_program(token_program)?;
         let domain_usize = domain as usize;
         let (cfg_pre, authorities) = {
-            let market_data = market_ai.try_borrow_data()?;
-            let (cfg, mode, configured_slots, _) =
-                state::read_market_config_mode_and_capacity(&market_data)?;
+            let mut market_data = market_ai.try_borrow_mut_data()?;
+            let (cfg, group) = state::market_view_mut(&mut market_data)?;
+            let configured_slots = group.header.config.max_market_slots.get() as usize;
             let asset_index = domain_usize / 2;
-            if mode != MarketModeV16::Live
+            if group.header.mode != 0
                 || domain_usize >= configured_slots.saturating_mul(2)
                 || asset_index >= configured_slots
             {
                 return Err(PercolatorError::EngineLockActive.into());
             }
-            let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
+            require_domain_accepts_live_topup_view(&group, domain_usize)?;
+            let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
             (cfg, authorities)
         };
@@ -7725,6 +7746,7 @@ pub mod processor {
                 return Err(PercolatorError::EngineLockActive.into());
             }
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
+            require_domain_accepts_live_topup_view(&group, domain_usize)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             expect_live_authority(&authorities.backing_bucket_authority, signer.key)?;
             let mut ledger_data = if let Some(ledger_ai) = ledger_ai {

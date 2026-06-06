@@ -4450,6 +4450,86 @@ fn v16_bpf_privileged_reactivate_uses_authenticated_slot() {
 }
 
 #[test]
+fn v16_attack_marketauth_cannot_reactivate_or_rekey_active_slot_with_open_interest() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    let admin = env.admin.insecure_clone();
+    env.activate_asset(1, 1, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let long_before = env.svm.get_account(&long_account).unwrap();
+    let short_before = env.svm.get_account(&short_account).unwrap();
+    let before_profile = state::read_asset_oracle_profile(&market_before.data, 1).unwrap();
+    let (_, before_group) = env.market_state();
+    assert_eq!(before_group.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(before_group.assets[1].oi_eff_long_q, POS_SCALE);
+    assert_eq!(before_group.assets[1].oi_eff_short_q, POS_SCALE);
+
+    let new_insurance = Keypair::new();
+    let new_operator = Keypair::new();
+    let new_backing = Keypair::new();
+    let new_oracle = Keypair::new();
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    let reactivation = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 2,
+            initial_price: 999,
+            insurance_authority: new_insurance.pubkey().to_bytes(),
+            insurance_operator: new_operator.pubkey().to_bytes(),
+            backing_bucket_authority: new_backing.pubkey().to_bytes(),
+            oracle_authority: new_oracle.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        reactivation.is_err(),
+        "marketauth must not reactivate/rekey an active slot with live open interest"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected active-slot reactivation must leave market bytes unchanged"
+    );
+    assert_eq!(env.svm.get_account(&long_account).unwrap(), long_before);
+    assert_eq!(env.svm.get_account(&short_account).unwrap(), short_before);
+
+    let market_after = env.svm.get_account(&env.market).unwrap();
+    let after_profile = state::read_asset_oracle_profile(&market_after.data, 1).unwrap();
+    assert_eq!(
+        after_profile, before_profile,
+        "rejected active-slot reactivation must not install new authorities or reset oracle state"
+    );
+    let (_, after_group) = env.market_state();
+    assert_eq!(after_group.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(after_group.assets[1].effective_price, 100);
+    assert_eq!(after_group.assets[1].oi_eff_long_q, POS_SCALE);
+    assert_eq!(after_group.assets[1].oi_eff_short_q, POS_SCALE);
+}
+
+#[test]
 fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
     let mut env = V16CuEnv::new();
     let admin = env.admin.insecure_clone();
@@ -5008,6 +5088,148 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
             bytemuck::bytes_of(&expected_reused_slot),
         ),
         "reuse must change only the canonical fresh-activation bytes and no stale retired-slot residue may leak"
+    );
+}
+
+#[test]
+fn v16_attack_retired_asset_domain_authority_cannot_refund_slot_and_block_reuse() {
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(1);
+    let old_creator = Keypair::new();
+    let rekeyed_insurance_authority = Keypair::new();
+    let rekeyed_backing_authority = Keypair::new();
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &old_creator,
+        1,
+        1,
+        100,
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        1,
+    );
+
+    env.svm.warp_to_slot(3);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        3,
+        0,
+    );
+    let (retired_cfg, retired_group) = env.market_state();
+    assert_eq!(retired_cfg.free_market_slot_count, 1);
+    assert_eq!(
+        retired_group.assets[1].lifecycle,
+        AssetLifecycleV16::Retired
+    );
+
+    env.try_update_per_asset_authority_with_cu(
+        &old_creator,
+        Some(&rekeyed_insurance_authority),
+        1,
+        processor::ASSET_AUTH_INSURANCE,
+        rekeyed_insurance_authority.pubkey().to_bytes(),
+    )
+    .expect("retired insurance authority can self-rotate but must not reactivate the domain");
+    env.try_update_per_asset_authority_with_cu(
+        &old_creator,
+        Some(&rekeyed_backing_authority),
+        1,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        rekeyed_backing_authority.pubkey().to_bytes(),
+    )
+    .expect("retired backing authority can self-rotate but must not reactivate the domain");
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let insurance_source = env.token_account(rekeyed_insurance_authority.pubkey(), 77);
+    let insurance_source_before = env.svm.get_account(&insurance_source).unwrap();
+    env.svm.expire_blockhash();
+    let insurance_topup = env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 2,
+            amount: 77,
+        },
+        vec![
+            AccountMeta::new(rekeyed_insurance_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&rekeyed_insurance_authority],
+    );
+    assert!(
+        insurance_topup.is_err(),
+        "rekeyed retired-slot insurance authority must not be able to refund an inactive domain"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(
+        env.svm.get_account(&insurance_source).unwrap(),
+        insurance_source_before
+    );
+
+    let backing_source = env.token_account(rekeyed_backing_authority.pubkey(), 88);
+    let backing_source_before = env.svm.get_account(&backing_source).unwrap();
+    env.svm.expire_blockhash();
+    let backing_topup = env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 2,
+            amount: 88,
+            expiry_slot: 10,
+        },
+        vec![
+            AccountMeta::new(rekeyed_backing_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&rekeyed_backing_authority],
+    );
+    assert!(
+        backing_topup.is_err(),
+        "rekeyed retired-slot backing authority must not be able to refund an inactive domain"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(
+        env.svm.get_account(&backing_source).unwrap(),
+        backing_source_before
+    );
+
+    let new_creator = Keypair::new();
+    env.svm.warp_to_slot(4);
+    env.activate_permissionless_asset_with_fee(
+        &new_creator,
+        1,
+        4,
+        250,
+        new_creator.pubkey(),
+        new_creator.pubkey(),
+        new_creator.pubkey(),
+        new_creator.pubkey(),
+        1,
+    );
+    let (reused_cfg, reused_group) = env.market_state();
+    assert_eq!(reused_cfg.free_market_slot_count, 0);
+    assert_eq!(reused_group.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(reused_group.assets[1].effective_price, 250);
+    let reused_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(
+        reused_profile.insurance_authority,
+        new_creator.pubkey().to_bytes(),
+        "reused slot must overwrite any rekeyed retired insurance authority"
+    );
+    assert_eq!(
+        reused_profile.backing_bucket_authority,
+        new_creator.pubkey().to_bytes(),
+        "reused slot must overwrite any rekeyed retired backing authority"
     );
 }
 
@@ -8783,6 +9005,144 @@ fn v16_attack_close_resolved_requires_owner_signature_during_exit_window() {
     assert_eq!(group.vault, 0);
     assert_eq!(group.c_tot, 0);
     assert_eq!(account.capital, 0);
+}
+
+#[test]
+fn v16_attack_close_resolved_after_exit_window_is_permissionless_but_not_stealable() {
+    let mut env = V16CuEnv::new();
+    const EXIT_DELAY: u64 = 5;
+    env.configure_permissionless_resolve_with_cu(100, EXIT_DELAY);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.resolve();
+
+    env.svm.warp_to_slot(EXIT_DELAY + 1);
+    env.svm.expire_blockhash();
+
+    let attacker = Keypair::new();
+    let attacker_dest = env.token_account(attacker.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let attacker_dest_before = env.svm.get_account(&attacker_dest).unwrap();
+    let steal = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(attacker_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        steal.is_err(),
+        "post-timeout CloseResolved is permissionless, but payout must still go to the portfolio owner"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(
+        env.svm.get_account(&attacker_dest).unwrap(),
+        attacker_dest_before
+    );
+
+    let owner_dest = env.token_account(owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let permissionless = env
+        .send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(owner_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("post-timeout CloseResolved can be cranked without owner signature");
+    assert_cu_within(
+        "post-timeout permissionless CloseResolved",
+        permissionless,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(owner_dest),
+        1_000,
+        "permissionless close pays the owner-controlled destination"
+    );
+    assert_eq!(
+        env.token_amount(attacker_dest),
+        0,
+        "attacker-controlled destination receives nothing"
+    );
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(account.capital, 0);
+}
+
+#[test]
+fn v16_attack_claim_resolved_topup_rejects_live_market_without_mutation() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+
+    let attacker = Keypair::new();
+    let attacker_dest = env.token_account(attacker.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&attacker_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let live_claim = env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(attacker_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        live_claim.is_err(),
+        "unsigned resolved-payout top-up must reject while the market is still Live"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.svm.get_account(&attacker_dest).unwrap(), dest_before);
+
+    let (owner_dest, _) = env.withdraw_with_cu(&owner, portfolio, 1_000);
+    assert_eq!(
+        env.token_amount(owner_dest),
+        1_000,
+        "owner can still withdraw after rejected live top-up attempt"
+    );
+    assert_eq!(
+        env.token_amount(attacker_dest),
+        0,
+        "attacker destination receives nothing"
+    );
 }
 
 #[test]
@@ -33743,6 +34103,145 @@ fn v16_attack_force_shutdown_timeout_lets_traders_exit_before_close() {
         env.token_amount(env.vault),
         "accounting == real vault"
     );
+}
+
+// lifecycle sweep — explicit DrainOnly is a public UpdateAssetLifecycle action, distinct from
+// shutdown/recovery. It must be marketauth-gated, reject malformed slot/price args, block new risk,
+// and still let existing matched positions reduce to zero.
+#[test]
+fn v16_attack_drain_only_blocks_new_risk_but_allows_reduce() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    let admin = env.admin.insecure_clone();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    let before = env.svm.get_account(&env.market).unwrap();
+
+    let stranger = Keypair::new();
+    env.ensure_signer_account(stranger.pubkey());
+    env.svm.expire_blockhash();
+    let unauthorized = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+            asset_index: 0,
+            now_slot: 0,
+            initial_price: 0,
+            insurance_authority: stranger.pubkey().to_bytes(),
+            insurance_operator: stranger.pubkey().to_bytes(),
+            backing_bucket_authority: stranger.pubkey().to_bytes(),
+            oracle_authority: stranger.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(stranger.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&stranger],
+    );
+    assert!(
+        unauthorized.is_err(),
+        "non-marketauth DrainOnly must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before,
+        "rejected DrainOnly by non-marketauth leaves the market unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    let malformed = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+            asset_index: 0,
+            now_slot: 1,
+            initial_price: 0,
+            insurance_authority: admin.pubkey().to_bytes(),
+            insurance_operator: admin.pubkey().to_bytes(),
+            backing_bucket_authority: admin.pubkey().to_bytes(),
+            oracle_authority: admin.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        malformed.is_err(),
+        "DrainOnly must reject caller-supplied now_slot/price material"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before,
+        "malformed DrainOnly leaves the market unchanged"
+    );
+
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+        0,
+        0,
+        0,
+    );
+    let (_, drain_group) = env.market_state();
+    assert_eq!(
+        drain_group.assets[0].lifecycle,
+        AssetLifecycleV16::DrainOnly
+    );
+    assert_eq!(drain_group.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(drain_group.assets[0].oi_eff_short_q, POS_SCALE);
+
+    let new_long_owner = Keypair::new();
+    let new_short_owner = Keypair::new();
+    let new_long_account = env.create_portfolio(&new_long_owner);
+    let new_short_account = env.create_portfolio(&new_short_owner);
+    env.deposit(&new_long_owner, new_long_account, 1_000_000);
+    env.deposit(&new_short_owner, new_short_account, 1_000_000);
+    let open = env.try_trade_asset_with_cu(
+        0,
+        &new_long_owner,
+        new_long_account,
+        &new_short_owner,
+        new_short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    assert!(
+        open.is_err(),
+        "DrainOnly must reject a new risk-increasing open"
+    );
+    assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, POS_SCALE);
+
+    let close = env.try_trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        -(POS_SCALE as i128),
+        100,
+        0,
+    );
+    assert!(
+        close.is_ok(),
+        "DrainOnly must still allow existing matched risk to reduce: {close:?}"
+    );
+    let (_, closed_group) = env.market_state();
+    assert_eq!(closed_group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(closed_group.assets[0].oi_eff_short_q, 0);
+    assert!(closed_group.vault >= closed_group.c_tot + closed_group.insurance);
 }
 
 // security.md sweep — §6.2 backing-yield fee split (#5): when a risk-increasing trade GROWS an
