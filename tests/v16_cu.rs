@@ -3466,6 +3466,59 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
     )
     .expect("sync system-created backing ledger");
 
+    send_raw_tx(
+        &mut svm,
+        &payer,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &mint.pubkey(),
+            &admin_ata,
+            &admin.pubkey(),
+            &[],
+            33,
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .expect("mint insurance collateral");
+    let insurance_ledger = Keypair::new();
+    system_create_account_for_test(
+        &mut svm,
+        &payer,
+        &insurance_ledger,
+        state::insurance_ledger_account_len(),
+        program_id,
+    );
+    send_tx(
+        &mut svm,
+        program_id,
+        &payer,
+        ProgInstruction::TopUpInsurance { amount: 33 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new(admin_ata, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(insurance_ledger.pubkey(), false),
+        ],
+        &[&admin],
+    )
+    .expect("top up insurance through real SPL token accounts and ledger");
+    send_tx(
+        &mut svm,
+        program_id,
+        &payer,
+        ProgInstruction::SyncInsuranceLedger,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new(insurance_ledger.pubkey(), false),
+        ],
+        &[&admin],
+    )
+    .expect("sync system-created insurance ledger");
+
     let user_token = TokenAccount::unpack(&svm.get_account(&user_ata).unwrap().data).unwrap();
     let admin_token = TokenAccount::unpack(&svm.get_account(&admin_ata).unwrap().data).unwrap();
     let vault_token = TokenAccount::unpack(&svm.get_account(&vault).unwrap().data).unwrap();
@@ -3475,8 +3528,8 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         "backing top-up drained the admin source ATA"
     );
     assert_eq!(
-        vault_token.amount, 200,
-        "canonical vault ATA received both SPL transfers"
+        vault_token.amount, 233,
+        "canonical vault ATA received all SPL transfers"
     );
     assert_eq!(vault_token.owner, vault_authority);
     assert_eq!(vault_token.mint, mint.pubkey());
@@ -3488,9 +3541,13 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
     let ledger_state =
         state::read_backing_domain_ledger(&svm.get_account(&ledger.pubkey()).unwrap().data)
             .expect("read initialized backing ledger");
+    let insurance_ledger_state =
+        state::read_insurance_ledger(&svm.get_account(&insurance_ledger.pubkey()).unwrap().data)
+            .expect("read initialized insurance ledger");
     assert_eq!(cfg.collateral_mint, mint.pubkey().to_bytes());
-    assert_eq!(group.vault, 200);
+    assert_eq!(group.vault, 233);
     assert_eq!(group.c_tot, 123);
+    assert_eq!(group.insurance, 33);
     assert_eq!(account.capital, 123);
     assert_eq!(
         group.source_backing_buckets[1].status,
@@ -3502,6 +3559,8 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
     );
     assert_eq!(ledger_state.total_principal_atoms, 77);
     assert_eq!(ledger_state.total_deposited_atoms, 77);
+    assert_eq!(insurance_ledger_state.total_principal_atoms, 33);
+    assert_eq!(insurance_ledger_state.total_deposited_atoms, 33);
 }
 
 fn init_independent_market_same_mint(
