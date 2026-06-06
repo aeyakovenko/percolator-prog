@@ -79,7 +79,6 @@ pub mod constants {
     pub const SWITCHBOARD_RESULT_SCALE: u128 = 1_000_000_000_000;
     pub const DEFAULT_MARK_EWMA_HALFLIFE_SLOTS: u64 = 600;
     pub const MAX_DYNAMIC_TRADE_FEE_BPS: u64 = 10_000;
-    pub const MIN_INSURANCE_WITHDRAW_FLOOR_UNITS: u128 = 10;
     pub const MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS: u64 = 6_480_000;
     pub const MAX_FORCE_CLOSE_DELAY_SLOTS: u64 = 10_000_000;
     // v16 exposes up to 64 market slots, but one portfolio may only carry the
@@ -2889,9 +2888,6 @@ pub mod ix {
         },
         CloseSlab,
         ResolveMarket,
-        WithdrawInsuranceLimited {
-            amount: u128,
-        },
         TopUpBackingBucket {
             domain: u8,
             amount: u128,
@@ -2919,11 +2915,6 @@ pub mod ix {
             asset_index: u16,
             kind: u8,
             new_pubkey: [u8; 32],
-        },
-        UpdateInsurancePolicy {
-            max_bps: u16,
-            deposits_only: u8,
-            cooldown_slots: u64,
         },
         UpdateLiquidationFeePolicy {
             cranker_share_bps: u16,
@@ -3019,8 +3010,8 @@ pub mod ix {
         WithdrawInsurance {
             amount: u128,
         },
-        WithdrawInsuranceDomain {
-            domain: u8,
+        WithdrawInsuranceAsset {
+            asset_index: u16,
             amount: u128,
         },
         CureAndCancelClose {
@@ -3151,9 +3142,6 @@ pub mod ix {
                 },
                 13 => Self::CloseSlab,
                 19 => Self::ResolveMarket,
-                23 => Self::WithdrawInsuranceLimited {
-                    amount: read_u128(&mut rest)?,
-                },
                 24 => Self::TopUpBackingBucket {
                     domain: read_u8(&mut rest)?,
                     amount: read_u128(&mut rest)?,
@@ -3176,11 +3164,6 @@ pub mod ix {
                     asset_index: read_u16(&mut rest)?,
                     kind: read_u8(&mut rest)?,
                     new_pubkey: read_bytes32(&mut rest)?,
-                },
-                33 => Self::UpdateInsurancePolicy {
-                    max_bps: read_u16(&mut rest)?,
-                    deposits_only: read_u8(&mut rest)?,
-                    cooldown_slots: read_u64(&mut rest)?,
                 },
                 37 => Self::UpdateLiquidationFeePolicy {
                     cranker_share_bps: read_u16(&mut rest)?,
@@ -3287,8 +3270,8 @@ pub mod ix {
                 41 => Self::WithdrawInsurance {
                     amount: read_u128(&mut rest)?,
                 },
-                57 => Self::WithdrawInsuranceDomain {
-                    domain: read_u8(&mut rest)?,
+                57 => Self::WithdrawInsuranceAsset {
+                    asset_index: read_u16(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 42 => Self::CureAndCancelClose {
@@ -3459,10 +3442,6 @@ pub mod ix {
                 }
                 Self::CloseSlab => out.push(13),
                 Self::ResolveMarket => out.push(19),
-                Self::WithdrawInsuranceLimited { amount } => {
-                    out.push(23);
-                    push_u128(&mut out, amount);
-                }
                 Self::TopUpBackingBucket {
                     domain,
                     amount,
@@ -3499,16 +3478,6 @@ pub mod ix {
                     push_u16(&mut out, asset_index);
                     out.push(kind);
                     out.extend_from_slice(&new_pubkey);
-                }
-                Self::UpdateInsurancePolicy {
-                    max_bps,
-                    deposits_only,
-                    cooldown_slots,
-                } => {
-                    out.push(33);
-                    push_u16(&mut out, max_bps);
-                    out.push(deposits_only);
-                    push_u64(&mut out, cooldown_slots);
                 }
                 Self::UpdateLiquidationFeePolicy { cranker_share_bps } => {
                     out.push(37);
@@ -3692,9 +3661,12 @@ pub mod ix {
                     out.push(41);
                     push_u128(&mut out, amount);
                 }
-                Self::WithdrawInsuranceDomain { domain, amount } => {
+                Self::WithdrawInsuranceAsset {
+                    asset_index,
+                    amount,
+                } => {
                     out.push(57);
-                    out.push(domain);
+                    push_u16(&mut out, asset_index);
                     push_u128(&mut out, amount);
                 }
                 Self::CureAndCancelClose { optional_deposit } => {
@@ -5508,9 +5480,6 @@ pub mod processor {
             }
             Instruction::CloseSlab => handle_close_slab(program_id, accounts),
             Instruction::ResolveMarket => handle_resolve_market(program_id, accounts),
-            Instruction::WithdrawInsuranceLimited { amount } => {
-                handle_withdraw_insurance_limited(program_id, accounts, amount)
-            }
             Instruction::TopUpBackingBucket {
                 domain,
                 amount,
@@ -5533,17 +5502,6 @@ pub mod processor {
                 kind,
                 new_pubkey,
             } => handle_update_asset_authority(program_id, accounts, asset_index, kind, new_pubkey),
-            Instruction::UpdateInsurancePolicy {
-                max_bps,
-                deposits_only,
-                cooldown_slots,
-            } => handle_update_insurance_policy(
-                program_id,
-                accounts,
-                max_bps,
-                deposits_only,
-                cooldown_slots,
-            ),
             Instruction::UpdateLiquidationFeePolicy { cranker_share_bps } => {
                 handle_update_liquidation_fee_policy(program_id, accounts, cranker_share_bps)
             }
@@ -5695,9 +5653,10 @@ pub mod processor {
             Instruction::WithdrawInsurance { amount } => {
                 handle_withdraw_insurance(program_id, accounts, amount)
             }
-            Instruction::WithdrawInsuranceDomain { domain, amount } => {
-                handle_withdraw_insurance_domain(program_id, accounts, domain, amount)
-            }
+            Instruction::WithdrawInsuranceAsset {
+                asset_index,
+                amount,
+            } => handle_withdraw_insurance_asset(program_id, accounts, asset_index, amount),
             Instruction::CureAndCancelClose { optional_deposit } => {
                 handle_cure_and_cancel_close(program_id, accounts, optional_deposit)
             }
@@ -8203,10 +8162,10 @@ pub mod processor {
     }
 
     #[inline(never)]
-    fn handle_withdraw_insurance_domain<'a>(
+    fn handle_withdraw_insurance_asset<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        domain: u8,
+        asset_index: u16,
         amount: u128,
     ) -> ProgramResult {
         let operator = account(accounts, 0)?;
@@ -8229,7 +8188,10 @@ pub mod processor {
         if amount == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        let domain = domain as usize;
+        let asset_index = asset_index as usize;
+        let long_domain = asset_index
+            .checked_mul(2)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         let (bump, amount_u64) = verify_domain_withdrawal_preflight(
             program_id,
             market_ai,
@@ -8237,7 +8199,7 @@ pub mod processor {
             dest_token,
             vault_token,
             vault_authority_ai,
-            domain,
+            long_domain,
             amount,
             true,
             DOMAIN_WITHDRAW_AUTH_INSURANCE,
@@ -8248,13 +8210,18 @@ pub mod processor {
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
+            let configured_slots = group.header.config.max_market_slots.get() as usize;
+            if asset_index >= configured_slots || asset_index >= group.markets.len() {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
             let shutdown_drain =
-                live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain)?;
-            let authorities = domain_authorities_from_view(&group, &cfg, domain)?;
+                live_domain_withdraw_health_or_shutdown_view(&cfg, &group, long_domain)?;
+            let authorities = domain_authorities_from_view(&group, &cfg, long_domain)?;
             let local_authorized =
                 live_authority_matches(&authorities.insurance_operator, operator.key);
-            let admin_shutdown_authorized =
-                shutdown_drain && live_authority_matches(&cfg.marketauth, operator.key);
+            let admin_shutdown_authorized = asset_index != 0
+                && shutdown_drain
+                && live_authority_matches(&cfg.marketauth, operator.key);
             if !local_authorized && !admin_shutdown_authorized {
                 return Err(PercolatorError::Unauthorized.into());
             }
@@ -8263,7 +8230,7 @@ pub mod processor {
             } else {
                 authorities.insurance_authority
             };
-            let available = domain_budget_remaining_view(&group, domain)?;
+            let available = market_insurance_remaining_view(&group, asset_index)?;
             if amount > available
                 || amount > group.header.insurance.get()
                 || amount > group.header.vault.get()
@@ -8289,9 +8256,7 @@ pub mod processor {
             };
             // Atomic insurance/vault/budget withdraw through the engine (maintains the
             // insurance_domain_budget_remaining_total aggregate).
-            group
-                .withdraw_domain_insurance_not_atomic(domain, amount)
-                .map_err(map_v16_error)?;
+            debit_market_insurance_budget_view(&mut group, asset_index, amount)?;
             if let Some((ledger, _)) = ledger_state.as_mut() {
                 ledger.total_withdrawn_atoms = ledger
                     .total_withdrawn_atoms
@@ -8459,166 +8424,6 @@ pub mod processor {
             .checked_add(market_lamports)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         Ok(())
-    }
-
-    #[inline(never)]
-    fn handle_withdraw_insurance_limited<'a>(
-        program_id: &Pubkey,
-        accounts: &'a [AccountInfo<'a>],
-        amount: u128,
-    ) -> ProgramResult {
-        let operator = account(accounts, 0)?;
-        let market_ai = account(accounts, 1)?;
-        let dest_token = account(accounts, 2)?;
-        let vault_token = account(accounts, 3)?;
-        let vault_authority_ai = account(accounts, 4)?;
-        let token_program = account(accounts, 5)?;
-        let ledger_ai = accounts.get(6);
-        expect_signer(operator)?;
-        expect_writable(market_ai)?;
-        expect_writable(dest_token)?;
-        expect_writable(vault_token)?;
-        expect_owner(market_ai, program_id)?;
-        if let Some(ledger_ai) = ledger_ai {
-            expect_writable(ledger_ai)?;
-            expect_owner(ledger_ai, program_id)?;
-        }
-        verify_token_program(token_program)?;
-        if amount == 0 {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
-
-        let (cfg_pre, mode, asset0_insurance_operator) = {
-            let market_data = market_ai.try_borrow_data()?;
-            let (cfg_pre, mode, _, _) = state::read_market_config_mode_and_capacity(&market_data)?;
-            let profile0 = read_oracle_profile_for_asset(&market_data, &cfg_pre, 0)?;
-            (cfg_pre, mode, profile0.insurance_operator)
-        };
-        expect_live_authority(&asset0_insurance_operator, operator.key)?;
-        if mode != MarketModeV16::Live {
-            return Err(PercolatorError::EngineLockActive.into());
-        }
-        let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
-        expect_key(vault_authority_ai, &vault_authority)?;
-        verify_withdrawable_token_accounts(
-            dest_token,
-            operator.key,
-            vault_token,
-            &vault_authority,
-            &cfg_pre,
-        )?;
-        let amount_u64 = amount_to_u64(amount)?;
-        require_token_balance(vault_token, amount_u64)?;
-        let cfg_after = {
-            let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
-            let asset0_authorities = domain_authorities_from_view(&group, &cfg, 0)?;
-            expect_live_authority(&asset0_authorities.insurance_operator, operator.key)?;
-            if group.header.mode != 0 {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
-            reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
-            if group.header.bankruptcy_hlock_active != 0
-                || group.header.threshold_stress_active != 0
-                || group.header.loss_stale_active != 0
-                || group
-                    .header
-                    .recovery_reason
-                    .try_to_runtime()
-                    .map_err(map_v16_error)?
-                    .is_some()
-            {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
-            reject_exposed_target_effective_lag_view(&group, 0)?;
-            let clock_slot = Clock::get()
-                .map(|c| c.slot)
-                .unwrap_or(group.header.current_slot.get());
-            if cfg.insurance_withdraw_max_bps == 0 {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
-            if cfg.last_insurance_withdraw_slot != 0
-                && cfg.insurance_withdraw_cooldown_slots != 0
-                && clock_slot.saturating_sub(cfg.last_insurance_withdraw_slot)
-                    < cfg.insurance_withdraw_cooldown_slots
-            {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
-            let insurance = market_insurance_remaining_view(&group, 0)?;
-            let vault = group.header.vault.get();
-            let mut cap = insurance
-                .checked_mul(cfg.insurance_withdraw_max_bps as u128)
-                .ok_or(PercolatorError::EngineArithmeticOverflow)?
-                / 10_000;
-            if cap == 0 && insurance >= constants::MIN_INSURANCE_WITHDRAW_FLOOR_UNITS {
-                cap = constants::MIN_INSURANCE_WITHDRAW_FLOOR_UNITS;
-            }
-            if cfg.insurance_withdraw_deposits_only != 0 {
-                cap = core::cmp::min(cap, cfg.insurance_withdraw_deposit_remaining);
-            }
-            if amount > cap
-                || amount > insurance
-                || amount > group.header.insurance.get()
-                || amount > vault
-            {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
-            let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
-                Some(ledger_ai.try_borrow_mut_data()?)
-            } else {
-                None
-            };
-            let mut ledger_state = if let Some(data) = ledger_data.as_deref() {
-                let (mut ledger, initialized) = read_or_new_insurance_ledger(
-                    data,
-                    market_ai.key.to_bytes(),
-                    asset0_authorities.insurance_authority,
-                    insurance,
-                )?;
-                sync_insurance_ledger(&mut ledger, insurance)?;
-                Some((ledger, initialized))
-            } else {
-                None
-            };
-            // insurance + vault + budget decremented atomically per domain inside the engine withdraw.
-            debit_market_insurance_budget_view(&mut group, 0, amount)?;
-            if let Some((ledger, _)) = ledger_state.as_mut() {
-                ledger.total_withdrawn_atoms = ledger
-                    .total_withdrawn_atoms
-                    .checked_add(amount)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-                ledger.total_principal_atoms = ledger.total_principal_atoms.saturating_sub(amount);
-                ledger.last_observed_insurance_atoms = ledger
-                    .last_observed_insurance_atoms
-                    .checked_sub(amount)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?;
-            }
-            if cfg.insurance_withdraw_deposits_only != 0 {
-                cfg.insurance_withdraw_deposit_remaining = cfg
-                    .insurance_withdraw_deposit_remaining
-                    .checked_sub(amount)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?;
-            }
-            cfg.last_insurance_withdraw_slot = clock_slot;
-            group.validate_shape().map_err(map_v16_error)?;
-            if let (Some(data), Some((ledger, initialized))) =
-                (ledger_data.as_deref_mut(), ledger_state.as_ref())
-            {
-                write_or_init_insurance_ledger(data, ledger, *initialized)?;
-            }
-            cfg
-        };
-        let bump_arr = [bump];
-        let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
-        transfer_tokens_signed(
-            token_program,
-            vault_token,
-            dest_token,
-            vault_authority_ai,
-            amount_u64,
-            signer_seeds,
-        )?;
-        state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg_after)
     }
 
     #[inline(never)]
@@ -9730,34 +9535,6 @@ pub mod processor {
         group
             .refine_resolved_unreceipted_bound_not_atomic(decrease_num)
             .map_err(map_v16_error)
-    }
-
-    #[inline(never)]
-    fn handle_update_insurance_policy<'a>(
-        program_id: &Pubkey,
-        accounts: &'a [AccountInfo<'a>],
-        max_bps: u16,
-        deposits_only: u8,
-        cooldown_slots: u64,
-    ) -> ProgramResult {
-        let admin = account(accounts, 0)?;
-        let market_ai = account(accounts, 1)?;
-        expect_signer(admin)?;
-        expect_writable(market_ai)?;
-        expect_owner(market_ai, program_id)?;
-        if !state::insurance_withdraw_policy_shape_ok(max_bps, deposits_only, cooldown_slots) {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
-        let (mut cfg, _, _, _) =
-            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        expect_live_authority(&cfg.marketauth, admin.key)?;
-        cfg.insurance_withdraw_max_bps = max_bps;
-        cfg.insurance_withdraw_deposits_only = deposits_only;
-        cfg.insurance_withdraw_cooldown_slots = cooldown_slots;
-        if deposits_only == 0 {
-            cfg.insurance_withdraw_deposit_remaining = 0;
-        }
-        state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
     }
 
     #[inline(never)]

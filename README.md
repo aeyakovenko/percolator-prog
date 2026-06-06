@@ -427,17 +427,15 @@ This section describes intent and operational ordering, not argument-by-argument
   - gated by the asset-0 insurance authority, with shutdown-drain cases for nonzero assets gated by
     `marketauth`; asset-0 shutdown/restart does not give `marketauth` a domain-insurance drain bypass
   - requires market resolved and all accounts closed
-- **WithdrawInsuranceDomain** (tag 57)
-  - live/recovery domain-scoped withdrawal from one funded domain budget
-  - gated by that domain's `insurance_operator`; `marketauth` can only use the shutdown-drain path
+- **WithdrawInsuranceAsset** (tag 57)
+  - live/recovery asset-scoped withdrawal from that asset's funded long+short insurance budget
+  - gated by that asset's `insurance_operator`; `marketauth` can only use the shutdown-drain path
     for nonzero assets after the shutdown timeout and after the asset is empty
-  - the domain `insurance_authority` funds the domain and owns terminal recovery accounting, but it
-    is not the hot live-withdrawal key unless it is also configured as the operator
-- **WithdrawInsuranceLimited** (tag 23)
-  - disabled by default; `marketauth` must explicitly opt in with `UpdateInsurancePolicy`
-  - rate-limited insurance withdrawal with per-market caps (`insurance_withdraw_max_bps`, `insurance_withdraw_cooldown_slots`)
-  - gated by the asset-0 `insurance_operator`, which is disjoint from the asset-0 `insurance_authority`
-  - live-market only; resolved markets use tag 41
+  - the asset `insurance_authority` funds the asset domains and owns terminal recovery accounting,
+    but it is not the hot live-withdrawal key unless it is also configured as the operator
+  - uses the same API for asset 0 and permissionless assets 1..N; the only asset-0-specific recovery
+    API is `RestartAsset0Oracle`
+  - live/recovery markets only; resolved markets use tag 41
   - rejected while the market is unhealthy, lagged, h-lock/stress-active, or has negative senior residual
 
 ### Close / recovery progress
@@ -508,13 +506,12 @@ Trade gating when the market is under-insured is handled **internally by the eng
 ### Insurance authorities
 The current wrapper has no `SetRiskThreshold` / insurance-floor instruction. Insurance extraction is split by authority and market mode:
 
-- a per-asset `insurance_operator` can call live domain-scoped withdrawal against that domain's
-  funded budget; `marketauth` can use the same tag only for nonzero-asset shutdown drain after the
-  exit timeout and once the asset is empty.
+- a per-asset `insurance_operator` can call live asset-scoped withdrawal against that asset's
+  funded long+short budget; `marketauth` can use the same tag only for nonzero-asset shutdown drain
+  after the exit timeout and once the asset is empty.
 - a per-asset `insurance_authority` funds the domain and recovers terminal insurance after full market
   resolution; it is not the hot live domain-withdrawal key unless the asset config deliberately sets
   authority and operator to the same pubkey.
-- the asset-0 `insurance_operator` can call live `WithdrawInsuranceLimited`, but only within the configured bps/cooldown/deposit-only policy and only through the healthy-market gate.
 
 This split is load-bearing: burning or delegating the live operator key does not grant the resolved unbounded withdrawal capability, and holding the resolved insurance authority does not bypass live operator gating.
 
@@ -642,13 +639,10 @@ Recovery is not normal live trading. It is a policy-bound terminal or conservati
 There are two different insurance withdrawal surfaces:
 
 - resolved/terminal insurance withdrawal, which runs after the market is resolved and positions are closed
-- live `WithdrawInsuranceLimited`, which is a bounded operator path
+- live `WithdrawInsuranceAsset`, which is a per-asset operator path bounded by that asset's funded
+  long+short insurance budget
 
 Live insurance withdrawal is intentionally stricter. It is expected to be allowed only when the live market is flat or loss-current, target/effective-lag-free, stress-free, h-lock-free, and has non-negative senior residual. In other words, live insurance can be withdrawn from an empty or fully healthy market, but not while the insurance fund is still protecting unresolved loss or bankruptcy work.
-
-Deposit-only mode limits live withdrawals to explicit `TopUpInsurance` principal. The default mode can withdraw fee-grown insurance too, but only through the same healthy-market gate.
-
-Non-deposit-only live withdrawal cannot be configured as a single-transaction full drain: nonzero policies require a nonzero cooldown and `max_bps < 10_000`. Deposit-only mode may use `max_bps = 10_000` because it is capped to tracked top-up principal rather than fee-grown insurance.
 
 ### Product intuition
 

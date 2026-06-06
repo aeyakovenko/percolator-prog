@@ -1942,22 +1942,8 @@ impl V16CuEnv {
     }
 
     fn enable_live_insurance_withdrawal(&mut self) {
-        send_tx(
-            &mut self.svm,
-            self.program_id,
-            &self.payer,
-            ProgInstruction::UpdateInsurancePolicy {
-                max_bps: 5_000,
-                deposits_only: 0,
-                cooldown_slots: 1,
-            },
-            vec![
-                AccountMeta::new(self.admin.pubkey(), true),
-                AccountMeta::new(self.market, false),
-            ],
-            &[&self.admin],
-        )
-        .expect("enable live insurance withdrawal");
+        // Live insurance withdrawal is uniformly asset-scoped now; no global
+        // asset-0-only policy must be enabled.
     }
 
     fn set_pyth_price(
@@ -2692,7 +2678,10 @@ impl V16CuEnv {
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::WithdrawInsuranceLimited { amount },
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index: 0,
+                amount,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2717,7 +2706,10 @@ impl V16CuEnv {
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::WithdrawInsuranceDomain { domain, amount },
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index: (domain / 2) as u16,
+                amount,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2819,6 +2811,15 @@ impl V16CuEnv {
         domain: u8,
         amount: u128,
     ) -> Result<(Pubkey, u64), String> {
+        self.try_withdraw_insurance_asset_with_authority(authority, (domain / 2) as u16, amount)
+    }
+
+    fn try_withdraw_insurance_asset_with_authority(
+        &mut self,
+        authority: &Keypair,
+        asset_index: u16,
+        amount: u128,
+    ) -> Result<(Pubkey, u64), String> {
         let dest = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -2836,7 +2837,10 @@ impl V16CuEnv {
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::WithdrawInsuranceDomain { domain, amount },
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index,
+                amount,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -17169,8 +17173,8 @@ fn v16_attack_insurance_ledger_authority_binding_enforced() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsuranceDomain {
-            domain: 0,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
             amount: 40,
         },
         vec![
@@ -17216,8 +17220,8 @@ fn v16_attack_insurance_ledger_authority_binding_enforced() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsuranceDomain {
-            domain: 0,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
             amount: 40,
         },
         vec![
@@ -17396,8 +17400,8 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsuranceDomain {
-            domain: 0,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
             amount: 40,
         },
         vec![
@@ -17454,8 +17458,8 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsuranceDomain {
-            domain: 0,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
             amount: 40,
         },
         vec![
@@ -18295,8 +18299,8 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     let insurance_dest = env.token_account(admin.pubkey(), 0);
     env.svm.expire_blockhash();
     let withdraw_insurance = env.send(
-        ProgInstruction::WithdrawInsuranceDomain {
-            domain: 0,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
             amount: 10,
         },
         vec![
@@ -18312,39 +18316,13 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     );
     assert!(
         withdraw_insurance.is_err(),
-        "WithdrawInsuranceDomain must reject a portfolio account as the optional ledger"
+        "WithdrawInsuranceAsset must reject a portfolio account as the optional ledger"
     );
     assert_core_unchanged(&env);
     assert_eq!(
         env.token_amount(insurance_dest),
         0,
         "wrong-kind insurance withdraw ledger must reject before paying destination"
-    );
-
-    let limited_dest = env.token_account(admin.pubkey(), 0);
-    env.svm.expire_blockhash();
-    let withdraw_limited = env.send(
-        ProgInstruction::WithdrawInsuranceLimited { amount: 10 },
-        vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(limited_dest, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(env.vault_authority, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-            AccountMeta::new(portfolio, false),
-        ],
-        &[&admin],
-    );
-    assert!(
-        withdraw_limited.is_err(),
-        "WithdrawInsuranceLimited must reject a portfolio account as the optional ledger"
-    );
-    assert_core_unchanged(&env);
-    assert_eq!(
-        env.token_amount(limited_dest),
-        0,
-        "wrong-kind limited insurance ledger must reject before paying destination"
     );
 
     let backing_dest = env.token_account(admin.pubkey(), 0);
@@ -18526,8 +18504,8 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     let insurance_dest = env.token_account(admin.pubkey(), 0);
     env.svm.expire_blockhash();
     let withdraw_insurance = env.send(
-        ProgInstruction::WithdrawInsuranceDomain {
-            domain: 0,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
             amount: 10,
         },
         vec![
@@ -18543,32 +18521,10 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     );
     assert!(
         withdraw_insurance.is_err(),
-        "WithdrawInsuranceDomain must reject the market account as the optional ledger"
+        "WithdrawInsuranceAsset must reject the market account as the optional ledger"
     );
     assert_core_unchanged(&env);
     assert_eq!(env.token_amount(insurance_dest), 0);
-
-    let limited_dest = env.token_account(admin.pubkey(), 0);
-    env.svm.expire_blockhash();
-    let withdraw_limited = env.send(
-        ProgInstruction::WithdrawInsuranceLimited { amount: 10 },
-        vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(limited_dest, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(env.vault_authority, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-            AccountMeta::new(env.market, false),
-        ],
-        &[&admin],
-    );
-    assert!(
-        withdraw_limited.is_err(),
-        "WithdrawInsuranceLimited must reject the market account as the optional ledger"
-    );
-    assert_core_unchanged(&env);
-    assert_eq!(env.token_amount(limited_dest), 0);
 
     let backing_dest = env.token_account(admin.pubkey(), 0);
     env.svm.expire_blockhash();
@@ -19232,8 +19188,8 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsuranceDomain {
-            domain: BAD_DOMAIN,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: BAD_DOMAIN as u16,
             amount: 1,
         },
         vec![
@@ -19248,7 +19204,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
     );
     assert!(
         withdraw_ins.is_err(),
-        "phantom insurance domain withdraw must reject"
+        "phantom insurance asset withdraw must reject"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(env.svm.get_account(&insurance_dest).unwrap(), dest_before);
@@ -20753,11 +20709,11 @@ fn v16_attack_close_slab_rejects_foreign_primary_vault() {
     assert!(closed_market.data.iter().all(|b| *b == 0));
 }
 
-// security.md sweep — WithdrawInsuranceDomain operator authorization (#6): a per-domain insurance
-// withdrawal must be signed by THAT domain's insurance_operator. A non-operator must reject — no
-// draining a domain's insurance by an unauthorized caller.
+// security.md sweep — WithdrawInsuranceAsset operator authorization (#6): a per-asset insurance
+// withdrawal must be signed by THAT asset's insurance_operator. A non-operator must reject — no
+// draining an asset's insurance by an unauthorized caller.
 #[test]
-fn v16_attack_withdraw_insurance_domain_operator_gated() {
+fn v16_attack_withdraw_insurance_asset_operator_gated() {
     let mut env = V16CuEnv::new();
     env.top_up_insurance(1_000_000);
     let mallory = Keypair::new();
@@ -20770,8 +20726,8 @@ fn v16_attack_withdraw_insurance_domain_operator_gated() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsuranceDomain {
-            domain: 0,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
             amount: 500_000,
         },
         vec![
@@ -20786,7 +20742,7 @@ fn v16_attack_withdraw_insurance_domain_operator_gated() {
     );
     assert!(
         r.is_err(),
-        "non-operator domain insurance withdrawal must reject"
+        "non-operator asset insurance withdrawal must reject"
     );
     assert_eq!(
         env.token_amount(dest),
@@ -20799,12 +20755,12 @@ fn v16_attack_withdraw_insurance_domain_operator_gated() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
 
-// security.md sweep — live domain insurance has a two-key split. The insurance_authority can fund
-// the domain and recover terminal insurance after resolution; live domain withdrawals are gated to the
+// security.md sweep — live asset insurance has a two-key split. The insurance_authority can fund
+// the domain and recover terminal insurance after resolution; live asset withdrawals are gated to the
 // insurance_operator. This keeps the key split explicit instead of accidentally letting the funding
 // authority act as the hot withdrawal operator.
 #[test]
-fn v16_attack_live_domain_insurance_withdraw_uses_operator_not_authority() {
+fn v16_attack_live_asset_insurance_withdraw_uses_operator_not_authority() {
     let mut env = V16CuEnv::new();
     let insurance_authority = Keypair::new();
     let insurance_operator = Keypair::new();
@@ -20853,8 +20809,8 @@ fn v16_attack_live_domain_insurance_withdraw_uses_operator_not_authority() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::WithdrawInsuranceDomain {
-            domain: 2,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 1,
             amount: 40,
         },
         vec![
@@ -25995,15 +25951,6 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
         "asset-1 authority must not control permissionless init fee"
     );
     assert!(
-        attempt(ProgInstruction::UpdateInsurancePolicy {
-            max_bps: 5_000,
-            deposits_only: 0,
-            cooldown_slots: 50,
-        })
-        .is_err(),
-        "asset-1 authority must not control global insurance withdrawal policy"
-    );
-    assert!(
         attempt(ProgInstruction::UpdateLiquidationFeePolicy {
             cranker_share_bps: 2_500
         })
@@ -26039,18 +25986,6 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
     assert_eq!(
         cfg_after_rejects.permissionless_market_init_fee,
         cfg_before.permissionless_market_init_fee
-    );
-    assert_eq!(
-        cfg_after_rejects.insurance_withdraw_max_bps,
-        cfg_before.insurance_withdraw_max_bps
-    );
-    assert_eq!(
-        cfg_after_rejects.insurance_withdraw_deposits_only,
-        cfg_before.insurance_withdraw_deposits_only
-    );
-    assert_eq!(
-        cfg_after_rejects.insurance_withdraw_cooldown_slots,
-        cfg_before.insurance_withdraw_cooldown_slots
     );
     assert_eq!(
         cfg_after_rejects.liquidation_cranker_fee_share_bps,
@@ -26287,10 +26222,10 @@ fn v16_attack_withdraw_insurance_requires_full_wind_down() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
 
-// security.md sweep — per-domain WithdrawInsuranceDomain budget conservation (#6): the domain insurance
-// authority may withdraw accrued domain budget in LIVE mode, but NEVER more than the domain's remaining
-// budget, and partial withdrawals must debit the remaining budget so it cannot be double-drained.
-// Attacker goal: withdraw a domain's insurance twice (or over its budget) to extract more than accrued.
+// security.md sweep — per-asset WithdrawInsuranceAsset budget conservation (#6): the asset insurance
+// operator may withdraw accrued asset budget in LIVE mode, but NEVER more than the asset's remaining
+// long+short budget, and partial withdrawals must debit the remaining budget so it cannot be double-drained.
+// Attacker goal: withdraw an asset's insurance twice (or over its budget) to extract more than accrued.
 #[test]
 fn v16_attack_withdraw_insurance_domain_budget_cannot_be_overdrawn() {
     let mut env = V16CuEnv::new();
@@ -26363,77 +26298,100 @@ fn v16_attack_withdraw_insurance_domain_budget_cannot_be_overdrawn() {
     conserve(&env);
 }
 
-// security.md sweep - live insurance policy shape (#6/#23): non-deposit-only live insurance
-// withdrawal must never be configurable as a one-call full drain. The strongest valid
-// non-deposit policy still leaves at least one basis point behind and needs a nonzero cooldown.
+// security.md sweep — uniform live insurance API (#6/#23/#57): asset 0 and permissionless assets 1..N
+// both withdraw through the same asset-indexed tag. The signer must be that asset's insurance_operator,
+// and the withdrawal is bounded to that asset's own long+short insurance budget.
 #[test]
-fn v16_attack_live_insurance_policy_cannot_enable_one_call_full_drain() {
+fn v16_attack_live_insurance_asset_withdraw_uniform_for_asset0_and_permissionless_asset() {
     let mut env = V16CuEnv::new();
-    env.svm.warp_to_slot(1_000);
-    env.top_up_insurance(1_000_000);
     let admin = env.admin.insecure_clone();
-    let cfg0 = env.market_state().0;
+    let creator = Keypair::new();
+    let cp = creator.pubkey();
 
-    let set_policy = |env: &mut V16CuEnv, max_bps: u16, deposits_only: u8, cooldown_slots: u64| {
-        env.svm.expire_blockhash();
-        send_tx(
-            &mut env.svm,
-            env.program_id,
-            &env.payer,
-            ProgInstruction::UpdateInsurancePolicy {
-                max_bps,
-                deposits_only,
-                cooldown_slots,
-            },
-            vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(env.market, false),
-            ],
-            &[&admin],
-        )
-    };
+    env.update_market_init_fee_policy_with_cu(10);
+    let (_fee_source, _cu) =
+        env.activate_permissionless_asset_with_fee(&creator, 1, 1, 100, cp, cp, cp, cp, 10);
+
+    // Permissionless create fee credits asset 0 insurance 5/5. Top up to exact 300/200.
+    env.top_up_insurance_domain_with_authority(&admin, 0, 295);
+    env.top_up_insurance_domain_with_authority(&admin, 1, 195);
+    env.top_up_insurance_domain_with_authority(&creator, 2, 100);
+    env.top_up_insurance_domain_with_authority(&creator, 3, 70);
+
+    let g0 = env.market_state().1;
+    assert_eq!(g0.insurance_domain_budget[0], 300);
+    assert_eq!(g0.insurance_domain_budget[1], 200);
+    assert_eq!(g0.insurance_domain_budget[2], 100);
+    assert_eq!(g0.insurance_domain_budget[3], 70);
 
     assert!(
-        set_policy(&mut env, 10_000, 0, 100).is_err(),
-        "non-deposit-only max_bps=10000 would allow a one-call full drain and must reject"
+        env.try_withdraw_insurance_asset_with_authority(&creator, 0, 1)
+            .is_err(),
+        "permissionless asset creator must not operate asset-0 insurance"
     );
     assert!(
-        set_policy(&mut env, 9_999, 0, 0).is_err(),
-        "non-deposit-only live withdrawal must require a nonzero cooldown"
+        env.try_withdraw_insurance_asset_with_authority(&admin, 1, 1)
+            .is_err(),
+        "marketauth must not operate a live permissionless asset's insurance"
     );
-    assert!(
-        set_policy(&mut env, 10_001, 1, 0).is_err(),
-        "max_bps above 10000 must reject even in deposits-only mode"
-    );
-    assert!(
-        set_policy(&mut env, 1, 2, 1).is_err(),
-        "invalid deposits_only flag must reject"
-    );
-    let cfg_rejected = env.market_state().0;
+
+    let (asset0_dest, _cu0) = env
+        .try_withdraw_insurance_asset_with_authority(&admin, 0, 450)
+        .expect("asset-0 operator withdraws through unified tag");
+    assert_eq!(env.token_amount(asset0_dest), 450);
+
+    let (asset1_dest, _cu1) = env
+        .try_withdraw_insurance_asset_with_authority(&creator, 1, 120)
+        .expect("permissionless asset operator withdraws through unified tag");
+    assert_eq!(env.token_amount(asset1_dest), 120);
+
+    let g = env.market_state().1;
     assert_eq!(
-        cfg_rejected.insurance_withdraw_max_bps, cfg0.insurance_withdraw_max_bps,
-        "rejected policies must not mutate max_bps"
+        g.insurance_domain_budget[0], 0,
+        "asset-0 withdraw drains long side first"
     );
+    assert_eq!(g.insurance_domain_budget[1], 50);
     assert_eq!(
-        cfg_rejected.insurance_withdraw_deposits_only, cfg0.insurance_withdraw_deposits_only,
-        "rejected policies must not mutate deposits_only"
+        g.insurance_domain_budget[2], 0,
+        "asset-1 withdraw drains long side first"
     );
+    assert_eq!(g.insurance_domain_budget[3], 50);
     assert_eq!(
-        cfg_rejected.insurance_withdraw_cooldown_slots, cfg0.insurance_withdraw_cooldown_slots,
-        "rejected policies must not mutate cooldown"
+        g.insurance, 100,
+        "only each asset's remaining budget stays insured"
     );
+    assert!(
+        env.try_withdraw_insurance_asset_with_authority(&creator, 1, 51)
+            .is_err(),
+        "asset operator cannot withdraw beyond its own remaining long+short budget"
+    );
+    let g = env.market_state().1;
+    assert_eq!(g.vault as u64, env.token_amount(env.vault));
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
 
-    set_policy(&mut env, 9_999, 0, 1).expect("strongest valid non-deposit policy");
+// security.md sweep — removed live-insurance policy tags (#6/#23): live insurance withdrawal is now
+// uniformly asset-scoped through tag 57. The old asset-0-only rate-limit tag and its policy-update tag
+// must reject raw instruction bytes without mutating state.
+#[test]
+fn v16_attack_removed_limited_insurance_tags_reject_without_mutation() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority(&admin, 0, 1_000);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest = env.token_account(admin.pubkey(), 0);
 
-    let try_withdraw = |env: &mut V16CuEnv, amount: u128| -> Result<u64, String> {
-        let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
-        env.svm.expire_blockhash();
-        send_tx(
-            &mut env.svm,
-            env.program_id,
-            &env.payer,
-            ProgInstruction::WithdrawInsuranceLimited { amount },
-            vec![
+    let mut old_limited = vec![23u8];
+    old_limited.extend_from_slice(&100u128.to_le_bytes());
+    env.svm.expire_blockhash();
+    let limited = send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        Instruction {
+            program_id: env.program_id,
+            data: old_limited,
+            accounts: vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(dest, false),
@@ -26441,32 +26399,34 @@ fn v16_attack_live_insurance_policy_cannot_enable_one_call_full_drain() {
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
             ],
-            &[&admin],
-        )
-    };
+        },
+        &[&admin],
+    );
+    assert!(limited.is_err(), "old tag 23 must reject");
 
-    assert!(
-        try_withdraw(&mut env, 1_000_000).is_err(),
-        "strongest valid non-deposit policy still cannot withdraw 100% in one call"
+    let mut old_policy = vec![33u8];
+    old_policy.extend_from_slice(&5_000u16.to_le_bytes());
+    old_policy.push(0);
+    old_policy.extend_from_slice(&10u64.to_le_bytes());
+    env.svm.expire_blockhash();
+    let policy = send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        Instruction {
+            program_id: env.program_id,
+            data: old_policy,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+        },
+        &[&admin],
     );
-    assert_eq!(
-        env.market_state().1.insurance,
-        1_000_000,
-        "rejected full-drain attempt leaves insurance untouched"
-    );
+    assert!(policy.is_err(), "old tag 33 must reject");
 
-    try_withdraw(&mut env, 999_900).expect("9999 bps of 1,000,000 is withdrawable");
-    let g = env.market_state().1;
-    assert_eq!(
-        g.insurance, 100,
-        "at least one basis point remains after the strongest valid withdrawal"
-    );
-    assert_eq!(
-        g.vault as u64,
-        env.token_amount(env.vault),
-        "accounting == real vault"
-    );
-    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.token_amount(dest), 0);
 }
 
 // security.md sweep — backing bucket top-up/withdraw input gates (#33/#44): a backing top-up with an
@@ -26611,107 +26571,6 @@ fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
 
-// security.md sweep — WithdrawInsuranceLimited rate-limit (#6/#23): the Live-mode insurance-operator
-// withdrawal is bounded per call by insurance_withdraw_max_bps of remaining insurance AND throttled by
-// insurance_withdraw_cooldown_slots. Attacker goal: an operator drains the whole insurance fund in one
-// shot, or hammers withdrawals back-to-back to bypass the throttle.
-#[test]
-fn v16_attack_insurance_limited_withdraw_rate_limited() {
-    let mut env = V16CuEnv::new();
-    // Warp to a realistic (non-zero) slot first: the cooldown guard is `last_insurance_withdraw_slot != 0`,
-    // so recording a withdrawal at genuine slot 0 would disable it (a slot-0 artifact, never on mainnet).
-    env.svm.warp_to_slot(1_000);
-    env.top_up_insurance(1_000_000);
-    // policy: max 50% of remaining insurance per call, no deposits-only restriction, 100-slot cooldown.
-    send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::UpdateInsurancePolicy {
-            max_bps: 5_000,
-            deposits_only: 0,
-            cooldown_slots: 100,
-        },
-        vec![
-            AccountMeta::new(env.admin.pubkey(), true),
-            AccountMeta::new(env.market, false),
-        ],
-        &[&env.admin],
-    )
-    .expect("set insurance policy");
-    let admin = env.admin.insecure_clone();
-
-    let try_withdraw = |env: &mut V16CuEnv, amount: u128| -> Result<u64, String> {
-        let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
-        env.svm.expire_blockhash();
-        send_tx(
-            &mut env.svm,
-            env.program_id,
-            &env.payer,
-            ProgInstruction::WithdrawInsuranceLimited { amount },
-            vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(dest, false),
-                AccountMeta::new(env.vault, false),
-                AccountMeta::new_readonly(env.vault_authority, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ],
-            &[&admin],
-        )
-    };
-
-    let ins0 = env.market_state().1.insurance;
-
-    // (1) over the per-call cap (>50% of 1M) must reject — no one-shot drain.
-    assert!(
-        try_withdraw(&mut env, 900_000).is_err(),
-        "withdraw > max_bps cap must reject"
-    );
-    assert_eq!(
-        env.market_state().1.insurance,
-        ins0,
-        "insurance untouched by rejected over-cap withdraw"
-    );
-
-    // (2) within the cap succeeds.
-    try_withdraw(&mut env, 100_000).expect("within-cap withdraw ok");
-    let ins1 = env.market_state().1.insurance;
-    assert_eq!(
-        ins1,
-        ins0 - 100_000,
-        "insurance debited by exactly the withdrawn amount"
-    );
-
-    // (3) a second withdraw within the cooldown window must reject — throttle holds even for a tiny amount.
-    assert!(
-        try_withdraw(&mut env, 1).is_err(),
-        "second withdraw within cooldown must reject"
-    );
-    assert_eq!(
-        env.market_state().1.insurance,
-        ins1,
-        "insurance untouched by throttled withdraw"
-    );
-
-    // (4) after warping past the cooldown, a fresh within-cap withdraw succeeds again.
-    let now = env.svm.get_sysvar::<Clock>().slot;
-    env.svm.warp_to_slot(now + 200);
-    try_withdraw(&mut env, 50_000).expect("post-cooldown withdraw ok");
-    let g = env.market_state().1;
-    assert_eq!(
-        g.insurance,
-        ins1 - 50_000,
-        "post-cooldown withdraw debits insurance"
-    );
-    assert_eq!(
-        g.vault as u64,
-        env.token_amount(env.vault),
-        "accounting == real vault"
-    );
-    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
-}
-
 #[test]
 fn v16_attack_live_insurance_withdraw_rejects_exposed_target_effective_lag() {
     const INITIAL_MARK: u64 = 100_000_000;
@@ -26766,32 +26625,10 @@ fn v16_attack_live_insurance_withdraw_rejects_exposed_target_effective_lag() {
     assert!(!g.loss_stale_active, "loss-stale stays clear");
 
     let admin = env.admin.insecure_clone();
-    let limited_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
-    env.svm.expire_blockhash();
-    let limited = send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::WithdrawInsuranceLimited { amount: 100 },
-        vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(limited_dest, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(env.vault_authority, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[&admin],
-    );
+    let asset = env.try_withdraw_insurance_asset_with_authority(&admin, 0, 100);
     assert!(
-        limited.is_err(),
-        "live WithdrawInsuranceLimited must reject while exposed target/effective lag is unresolved"
-    );
-
-    let domain = env.try_withdraw_insurance_domain_with_authority(&admin, 0, 100);
-    assert!(
-        domain.is_err(),
-        "live WithdrawInsuranceDomain must reject while its exposed asset has target/effective lag"
+        asset.is_err(),
+        "live WithdrawInsuranceAsset must reject while its exposed asset has target/effective lag"
     );
     let g_after = env.market_state().1;
     assert_eq!(
@@ -26800,7 +26637,7 @@ fn v16_attack_live_insurance_withdraw_rejects_exposed_target_effective_lag() {
     );
     assert_eq!(
         g_after.insurance_domain_budget[0], g.insurance_domain_budget[0],
-        "rejected domain withdrawal leaves budget untouched"
+        "rejected asset withdrawal leaves budget untouched"
     );
 }
 
@@ -26852,123 +26689,11 @@ fn v16_attack_unexposed_target_move_cannot_grief_live_insurance_withdrawals() {
     );
 
     let admin = env.admin.insecure_clone();
-    let limited_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
-    env.svm.expire_blockhash();
-    let limited = send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::WithdrawInsuranceLimited { amount: 100 },
-        vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(limited_dest, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(env.vault_authority, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[&admin],
-    );
+    let asset = env.try_withdraw_insurance_asset_with_authority(&admin, 0, 100);
     assert!(
-        limited.is_ok(),
-        "unexposed lag on another asset must not DoS live limited insurance withdrawal"
+        asset.is_ok(),
+        "unexposed lag on another asset must not DoS unrelated asset insurance withdrawal"
     );
-
-    env.svm.warp_to_slot(4);
-    let domain = env.try_withdraw_insurance_domain_with_authority(&admin, 0, 100);
-    assert!(
-        domain.is_ok(),
-        "unexposed lag on another asset must not DoS unrelated domain insurance withdrawal"
-    );
-}
-
-// security.md sweep — WithdrawInsuranceLimited deposits_only protection (#6/#23): when the policy is
-// deposits_only, the cap is min(max_bps cap, deposit_remaining), and deposit_remaining only accrues from
-// TopUpInsurance made WHILE deposits_only is active. Insurance accumulated otherwise (pre-policy deposits,
-// or fees) is NOT withdrawable by the operator. Attacker goal: an operator pulls the protocol's earned /
-// pre-existing insurance out via the limited path under deposits_only.
-#[test]
-fn v16_attack_insurance_deposits_only_protects_protocol_funds() {
-    let mut env = V16CuEnv::new();
-    env.svm.warp_to_slot(1_000);
-    // (i) 300k topped up BEFORE deposits_only is enabled -> does NOT count toward deposit_remaining.
-    env.top_up_insurance(300_000);
-    // (ii) enable deposits_only with a non-binding bps cap (100%) and no cooldown.
-    send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::UpdateInsurancePolicy {
-            max_bps: 10_000,
-            deposits_only: 1,
-            cooldown_slots: 0,
-        },
-        vec![
-            AccountMeta::new(env.admin.pubkey(), true),
-            AccountMeta::new(env.market, false),
-        ],
-        &[&env.admin],
-    )
-    .expect("set deposits_only policy");
-    // (iii) 500k topped up WHILE deposits_only is active -> deposit_remaining = 500k.
-    env.top_up_insurance(500_000);
-    let admin = env.admin.insecure_clone();
-    let ins_total = env.market_state().1.insurance;
-    assert_eq!(ins_total, 800_000, "insurance holds both tranches");
-
-    let try_withdraw = |env: &mut V16CuEnv, amount: u128| -> Result<u64, String> {
-        let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
-        env.svm.expire_blockhash();
-        send_tx(
-            &mut env.svm,
-            env.program_id,
-            &env.payer,
-            ProgInstruction::WithdrawInsuranceLimited { amount },
-            vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(dest, false),
-                AccountMeta::new(env.vault, false),
-                AccountMeta::new_readonly(env.vault_authority, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ],
-            &[&admin],
-        )
-    };
-
-    // cap = min(100% of 800k, deposit_remaining=500k) = 500k. Over that must reject.
-    assert!(
-        try_withdraw(&mut env, 500_001).is_err(),
-        "withdraw > deposit_remaining must reject"
-    );
-    assert_eq!(
-        env.market_state().1.insurance,
-        800_000,
-        "insurance untouched by rejected withdraw"
-    );
-
-    // Withdraw exactly the deposited principal (500k) -> success.
-    try_withdraw(&mut env, 500_000).expect("withdraw of deposited principal ok");
-    assert_eq!(
-        env.market_state().1.insurance,
-        300_000,
-        "only the 300k protocol tranche remains"
-    );
-
-    // The remaining 300k was NOT deposited under deposits_only -> deposit_remaining is now 0 -> the
-    // operator cannot touch it via the limited path, even though insurance is still 300k > 0.
-    assert!(
-        try_withdraw(&mut env, 1).is_err(),
-        "protocol-retained insurance must NOT be operator-withdrawable"
-    );
-    let g = env.market_state().1;
-    assert_eq!(g.insurance, 300_000, "protocol tranche fully protected");
-    assert_eq!(
-        g.vault as u64,
-        env.token_amount(env.vault),
-        "accounting == real vault"
-    );
-    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
 
 // security.md sweep — SwapSecondaryForPrimary authority + balance bounds (#6/#33/#44): the 1:1 par
@@ -35180,8 +34905,8 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
     let admin_dest = env.token_account(admin.pubkey(), 0);
     env.svm.expire_blockhash();
     let r_foreign = env.send(
-        ProgInstruction::WithdrawInsuranceDomain {
-            domain: 2,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 1,
             amount: 500,
         },
         vec![
@@ -35208,8 +34933,8 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
     let strn_dest = env.token_account(stranger.pubkey(), 0);
     env.svm.expire_blockhash();
     let r_owner = env.send(
-        ProgInstruction::WithdrawInsuranceDomain {
-            domain: 2,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 1,
             amount: 200,
         },
         vec![

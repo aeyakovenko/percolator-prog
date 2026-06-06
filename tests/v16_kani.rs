@@ -145,7 +145,6 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
         tag == 3
             || tag == 4
             || tag == 9
-            || tag == 23
             || tag == 28
             || tag == 30
             || tag == 41
@@ -162,9 +161,6 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
         (3, Instruction::Deposit { amount: got }) => assert_eq!(got, amount),
         (4, Instruction::Withdraw { amount: got }) => assert_eq!(got, amount),
         (9, Instruction::TopUpInsurance { amount: got }) => assert_eq!(got, amount),
-        (23, Instruction::WithdrawInsuranceLimited { amount: got }) => {
-            assert_eq!(got, amount)
-        }
         (28, Instruction::ConvertReleasedPnl { amount: got }) => assert_eq!(got, amount),
         (30, Instruction::CloseResolved { fee_rate_per_slot }) => {
             assert_eq!(fee_rate_per_slot, amount)
@@ -184,8 +180,9 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v16_domain_insurance_decode_preserves_wire_fields() {
+fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
     let domain: u8 = kani::any();
+    let asset_index: u16 = kani::any();
     let amount: u128 = kani::any();
 
     let mut top_up = [0u8; 18];
@@ -203,16 +200,16 @@ fn kani_v16_domain_insurance_decode_preserves_wire_fields() {
         _ => unreachable!(),
     }
 
-    let mut withdraw = [0u8; 18];
+    let mut withdraw = [0u8; 19];
     withdraw[0] = 57;
-    withdraw[1] = domain;
-    withdraw[2..18].copy_from_slice(&amount.to_le_bytes());
+    withdraw[1..3].copy_from_slice(&asset_index.to_le_bytes());
+    withdraw[3..19].copy_from_slice(&amount.to_le_bytes());
     match Instruction::decode(&withdraw).unwrap() {
-        Instruction::WithdrawInsuranceDomain {
-            domain: got_domain,
+        Instruction::WithdrawInsuranceAsset {
+            asset_index: got_asset,
             amount: got_amount,
         } => {
-            assert_eq!(got_domain, domain);
+            assert_eq!(got_asset, asset_index);
             assert_eq!(got_amount, amount);
         }
         _ => unreachable!(),
@@ -686,32 +683,6 @@ fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset0_oracle
 }
 
 #[kani::proof]
-fn kani_v16_update_insurance_policy_decode_preserves_wire_fields() {
-    let max_bps: u16 = kani::any();
-    let deposits_only: u8 = kani::any();
-    let cooldown_slots: u64 = kani::any();
-
-    let mut data = [0u8; 12];
-    data[0] = 33;
-    data[1..3].copy_from_slice(&max_bps.to_le_bytes());
-    data[3] = deposits_only;
-    data[4..12].copy_from_slice(&cooldown_slots.to_le_bytes());
-
-    match Instruction::decode(&data).unwrap() {
-        Instruction::UpdateInsurancePolicy {
-            max_bps: got_max_bps,
-            deposits_only: got_deposits_only,
-            cooldown_slots: got_cooldown,
-        } => {
-            assert_eq!(got_max_bps, max_bps);
-            assert_eq!(got_deposits_only, deposits_only);
-            assert_eq!(got_cooldown, cooldown_slots);
-        }
-        _ => unreachable!(),
-    }
-}
-
-#[kani::proof]
 fn kani_v16_update_liquidation_fee_policy_decode_preserves_wire_fields() {
     let cranker_share_bps: u16 = kani::any();
 
@@ -957,7 +928,6 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
-    let mark_raw: u16 = kani::any();
 
     let now_slot: u64 = kani::any();
     let initial_mark_e6: u64 = kani::any();
@@ -1113,7 +1083,13 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
         extra,
     );
     assert_rejects_trailing_byte(Instruction::WithdrawInsurance { amount: 1 }, extra);
-    assert_rejects_trailing_byte(Instruction::WithdrawInsuranceLimited { amount: 1 }, extra);
+    assert_rejects_trailing_byte(
+        Instruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 1,
+        },
+        extra,
+    );
     assert_rejects_trailing_byte(Instruction::SwapSecondaryForPrimary { amount: 1 }, extra);
 }
 
@@ -1171,14 +1147,6 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
             asset_index: 1,
             kind: 0,
             new_pubkey: [1u8; 32],
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::UpdateInsurancePolicy {
-            max_bps: 10_000,
-            deposits_only: 1,
-            cooldown_slots: 1,
         },
         extra,
     );
