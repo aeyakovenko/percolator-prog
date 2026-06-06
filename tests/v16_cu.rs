@@ -5831,6 +5831,51 @@ fn v16_attack_restart_asset_oracle_rejects_backing_state_without_mutation() {
 }
 
 #[test]
+fn v16_attack_restart_asset_oracle_rejects_backing_fee_earnings_without_mutation() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&admin, 0, 2)
+        .expect("asset admin shuts down empty asset 0");
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[0] = percolator::BackingBucketV16 {
+            market_id: group.assets[0].market_id,
+            utilization_fee_earnings: 7,
+            expiry_slot: 1,
+            status: BackingBucketStatusV16::Expired,
+            ..percolator::BackingBucketV16::EMPTY
+        };
+    });
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[0].utilization_fee_earnings,
+        7,
+        "test precondition: provider fee earnings are still owed on the asset domain"
+    );
+
+    let before_restart = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let restart = env.try_restart_asset_oracle_with_authority(&admin, 0, 3, 150);
+    assert!(
+        restart.is_err(),
+        "restart must not wipe backing-provider utilization fee earnings"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_restart,
+        "rejected restart leaves provider earnings and market bytes unchanged"
+    );
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[0].utilization_fee_earnings,
+        7,
+        "owed provider earnings remain recoverable after rejected restart"
+    );
+}
+
+#[test]
 fn v16_bpf_tradenocpi_executes_and_is_bounded() {
     let mut env = V16CuEnv::new();
     let long_owner = Keypair::new();

@@ -8937,129 +8937,6 @@ pub mod processor {
         )
     }
 
-    fn restart_asset_engine_slot_preserving_insurance_budget(
-        group: &mut state::MarketViewMutV16<'_>,
-        asset_index: usize,
-        authenticated_slot: u64,
-        initial_price: u64,
-        budget_long: percolator::V16PodU128,
-        budget_short: percolator::V16PodU128,
-    ) -> ProgramResult {
-        if asset_index >= group.header.config.max_market_slots.get() as usize
-            || asset_index >= group.markets.len()
-        {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
-        let market_id = group.header.next_market_id.get();
-        if market_id == 0 {
-            return Err(PercolatorError::EngineInvalidConfig.into());
-        }
-        let next_market_id = market_id
-            .checked_add(1)
-            .ok_or(PercolatorError::EngineCounterOverflow)?;
-        let next_activation_count = group
-            .header
-            .asset_activation_count
-            .get()
-            .checked_add(1)
-            .ok_or(PercolatorError::EngineCounterOverflow)?;
-        let next_asset_set_epoch = group
-            .header
-            .asset_set_epoch
-            .get()
-            .checked_add(1)
-            .ok_or(PercolatorError::EngineCounterOverflow)?;
-        let next_risk_epoch = group
-            .header
-            .risk_epoch
-            .get()
-            .checked_add(1)
-            .ok_or(PercolatorError::EngineCounterOverflow)?;
-
-        let mut asset = percolator::AssetStateV16::default();
-        asset.market_id = market_id;
-        asset.lifecycle = percolator::AssetLifecycleV16::Active;
-        asset.raw_oracle_target_price = initial_price;
-        asset.effective_price = initial_price;
-        asset.fund_px_last = initial_price;
-        asset.slot_last = authenticated_slot;
-        let mut slot = percolator::EngineAssetSlotV16Account::empty_for_market(market_id);
-        slot.asset = percolator::AssetStateV16Account::from_runtime(&asset);
-        slot.insurance_domain_budget_long = budget_long;
-        slot.insurance_domain_budget_short = budget_short;
-        group.markets[asset_index].engine = slot;
-        group.header.next_market_id = percolator::V16PodU64::new(next_market_id);
-        group.header.current_slot = percolator::V16PodU64::new(authenticated_slot);
-        group.header.asset_activation_count = percolator::V16PodU64::new(next_activation_count);
-        group.header.last_asset_activation_slot = percolator::V16PodU64::new(authenticated_slot);
-        group.header.asset_set_epoch = percolator::V16PodU64::new(next_asset_set_epoch);
-        group.header.risk_epoch = percolator::V16PodU64::new(next_risk_epoch);
-        Ok(())
-    }
-
-    fn source_credit_account_is_empty_for_restart(
-        state: &percolator::SourceCreditStateV16Account,
-    ) -> bool {
-        state.positive_claim_bound_num.get() == 0
-            && state.exact_positive_claim_num.get() == 0
-            && state.fresh_reserved_backing_num.get() == 0
-            && state.spent_backing_num.get() == 0
-            && state.provider_receivable_num.get() == 0
-            && state.valid_liened_backing_num.get() == 0
-            && state.impaired_liened_backing_num.get() == 0
-            && state.insurance_credit_reserved_num.get() == 0
-            && state.valid_liened_insurance_num.get() == 0
-            && state.impaired_liened_insurance_num.get() == 0
-    }
-
-    fn backing_bucket_account_is_empty_for_restart(
-        state: &percolator::BackingBucketV16Account,
-    ) -> bool {
-        state.fresh_unliened_backing_num.get() == 0
-            && state.valid_liened_backing_num.get() == 0
-            && state.consumed_liened_backing_num.get() == 0
-            && state.impaired_liened_backing_num.get() == 0
-    }
-
-    fn insurance_reservation_account_is_empty_for_restart(
-        state: &percolator::InsuranceCreditReservationV16Account,
-    ) -> bool {
-        state.insurance_credit_reserved_num.get() == 0
-            && state.valid_liened_insurance_num.get() == 0
-            && state.impaired_liened_insurance_num.get() == 0
-            && state.consumed_insurance_num.get() == 0
-            && state.source_credit_epoch.get() == 0
-    }
-
-    fn asset_slot_has_restart_blocking_state_view(
-        group: &state::MarketViewMutV16<'_>,
-        asset_index: usize,
-    ) -> ProgramResult {
-        let slot = group
-            .markets
-            .get(asset_index)
-            .ok_or(PercolatorError::InvalidInstruction)?;
-        let engine = &slot.engine;
-        if engine.insurance_domain_spent_long.get() != 0
-            || engine.insurance_domain_spent_short.get() != 0
-            || engine.pending_domain_loss_barrier_long.get() != 0
-            || engine.pending_domain_loss_barrier_short.get() != 0
-            || !source_credit_account_is_empty_for_restart(&engine.source_credit_long)
-            || !source_credit_account_is_empty_for_restart(&engine.source_credit_short)
-            || !backing_bucket_account_is_empty_for_restart(&engine.backing_long)
-            || !backing_bucket_account_is_empty_for_restart(&engine.backing_short)
-            || !insurance_reservation_account_is_empty_for_restart(
-                &engine.insurance_reservation_long,
-            )
-            || !insurance_reservation_account_is_empty_for_restart(
-                &engine.insurance_reservation_short,
-            )
-        {
-            return Err(PercolatorError::EngineLockActive.into());
-        }
-        Ok(())
-    }
-
     fn canonicalize_retired_asset_slot_view(
         group: &mut state::MarketViewMutV16<'_>,
         asset_index: usize,
@@ -9146,30 +9023,15 @@ pub mod processor {
             if group.markets[asset_index].engine.asset.lifecycle != ASSET_LIFECYCLE_RECOVERY {
                 return Err(PercolatorError::EngineLockActive.into());
             }
-            if asset_local_has_position_or_loss_state_view(&group, asset_index) {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
-            asset_slot_has_restart_blocking_state_view(&group, asset_index)?;
             let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
             expect_live_authority(&existing_profile.asset_admin, authority.key)?;
-
-            let budget_long = group.markets[asset_index]
-                .engine
-                .insurance_domain_budget_long;
-            let budget_short = group.markets[asset_index]
-                .engine
-                .insurance_domain_budget_short;
             group
-                .retire_empty_asset_not_atomic(asset_index, authenticated_slot)
+                .restart_empty_asset_preserving_insurance_budget_not_atomic(
+                    asset_index,
+                    initial_price,
+                    authenticated_slot,
+                )
                 .map_err(map_v16_error)?;
-            restart_asset_engine_slot_preserving_insurance_budget(
-                &mut group,
-                asset_index,
-                authenticated_slot,
-                initial_price,
-                budget_long,
-                budget_short,
-            )?;
 
             let mut profile = preserve_backing_fee_policy(
                 state::manual_asset_oracle_profile(initial_price, authenticated_slot),
