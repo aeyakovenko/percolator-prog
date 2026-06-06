@@ -181,14 +181,14 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
-    let domain: u8 = kani::any();
+    let domain: u16 = kani::any();
     let asset_index: u16 = kani::any();
     let amount: u128 = kani::any();
 
-    let mut top_up = [0u8; 18];
+    let mut top_up = [0u8; 19];
     top_up[0] = 56;
-    top_up[1] = domain;
-    top_up[2..18].copy_from_slice(&amount.to_le_bytes());
+    top_up[1..3].copy_from_slice(&domain.to_le_bytes());
+    top_up[3..19].copy_from_slice(&amount.to_le_bytes());
     match Instruction::decode(&top_up).unwrap() {
         Instruction::TopUpInsuranceDomain {
             domain: got_domain,
@@ -302,15 +302,15 @@ fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
-    let domain: u8 = kani::any();
+    let domain: u16 = kani::any();
     let amount: u128 = kani::any();
     let expiry_slot: u64 = kani::any();
 
-    let mut data = [0u8; 26];
+    let mut data = [0u8; 27];
     data[0] = 24;
-    data[1] = domain;
-    data[2..18].copy_from_slice(&amount.to_le_bytes());
-    data[18..26].copy_from_slice(&expiry_slot.to_le_bytes());
+    data[1..3].copy_from_slice(&domain.to_le_bytes());
+    data[3..19].copy_from_slice(&amount.to_le_bytes());
+    data[19..27].copy_from_slice(&expiry_slot.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::TopUpBackingBucket {
@@ -328,7 +328,7 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_withdraw_backing_bucket_decode_preserves_wire_fields() {
-    let domain: u8 = kani::any();
+    let domain: u16 = kani::any();
     let amount: u128 = kani::any();
 
     let data = Instruction::WithdrawBackingBucket { domain, amount }.encode();
@@ -720,15 +720,15 @@ fn kani_v16_update_maintenance_fee_policy_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_update_backing_fee_policy_decode_preserves_wire_fields() {
-    let domain: u8 = kani::any();
+    let domain: u16 = kani::any();
     let fee_bps: u16 = kani::any();
     let insurance_share_bps: u16 = kani::any();
 
-    let mut data = [0u8; 6];
+    let mut data = [0u8; 7];
     data[0] = 51;
-    data[1] = domain;
-    data[2..4].copy_from_slice(&fee_bps.to_le_bytes());
-    data[4..6].copy_from_slice(&insurance_share_bps.to_le_bytes());
+    data[1..3].copy_from_slice(&domain.to_le_bytes());
+    data[3..5].copy_from_slice(&fee_bps.to_le_bytes());
+    data[5..7].copy_from_slice(&insurance_share_bps.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateBackingFeePolicy {

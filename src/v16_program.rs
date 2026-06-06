@@ -81,9 +81,10 @@ pub mod constants {
     pub const MAX_DYNAMIC_TRADE_FEE_BPS: u64 = 10_000;
     pub const MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS: u64 = 6_480_000;
     pub const MAX_FORCE_CLOSE_DELAY_SLOTS: u64 = 10_000_000;
-    // v16 exposes up to 64 market slots, but one portfolio may only carry the
-    // largest active-leg count that fits the audited stale-trade and crank CU
-    // envelope. Additional markets remain usable through separate portfolios.
+    // v16 market slots are dynamic and bounded by SVM account allocation, but
+    // one portfolio may only carry the largest active-leg count that fits the
+    // audited stale-trade and crank CU envelope. Additional markets remain
+    // usable through separate portfolios.
     pub const WRAPPER_MAX_PORTFOLIO_ASSETS: u16 = 14;
 }
 
@@ -191,6 +192,9 @@ pub mod state {
         pub capital: u128,
         pub pnl: i128,
         pub reserved_pnl: u128,
+        pub residual_crystallized_loss_atoms_total: u128,
+        pub residual_spent_principal_atoms_total: u128,
+        pub residual_received_atoms_total: u128,
         pub source_claim_market_id: Vec<u64>,
         pub source_claim_bound_num: Vec<u128>,
         pub source_claim_liened_num: Vec<u128>,
@@ -2222,6 +2226,9 @@ pub mod state {
             core::ptr::addr_of_mut!((*ptr).capital).write(0);
             core::ptr::addr_of_mut!((*ptr).pnl).write(0);
             core::ptr::addr_of_mut!((*ptr).reserved_pnl).write(0);
+            core::ptr::addr_of_mut!((*ptr).residual_crystallized_loss_atoms_total).write(0);
+            core::ptr::addr_of_mut!((*ptr).residual_spent_principal_atoms_total).write(0);
+            core::ptr::addr_of_mut!((*ptr).residual_received_atoms_total).write(0);
             core::ptr::addr_of_mut!((*ptr).source_claim_market_id).write(source_claim_market_id);
             core::ptr::addr_of_mut!((*ptr).source_claim_bound_num).write(source_claim_bound_num);
             core::ptr::addr_of_mut!((*ptr).source_claim_liened_num).write(source_claim_liened_num);
@@ -2298,6 +2305,11 @@ pub mod state {
         account.capital = wire.capital.get();
         account.pnl = wire.pnl.get();
         account.reserved_pnl = wire.reserved_pnl.get();
+        account.residual_crystallized_loss_atoms_total =
+            wire.residual_crystallized_loss_atoms_total.get();
+        account.residual_spent_principal_atoms_total =
+            wire.residual_spent_principal_atoms_total.get();
+        account.residual_received_atoms_total = wire.residual_received_atoms_total.get();
         account.fee_credits = wire.fee_credits.get();
         account.cancel_deposit_escrow = wire.cancel_deposit_escrow.get();
         account.active_bitmap = wire.active_bitmap.map(|v| v.get());
@@ -2366,6 +2378,12 @@ pub mod state {
         wire.capital = percolator::V16PodU128::new(account.capital);
         wire.pnl = percolator::V16PodI128::new(account.pnl);
         wire.reserved_pnl = percolator::V16PodU128::new(account.reserved_pnl);
+        wire.residual_crystallized_loss_atoms_total =
+            percolator::V16PodU128::new(account.residual_crystallized_loss_atoms_total);
+        wire.residual_spent_principal_atoms_total =
+            percolator::V16PodU128::new(account.residual_spent_principal_atoms_total);
+        wire.residual_received_atoms_total =
+            percolator::V16PodU128::new(account.residual_received_atoms_total);
         wire.fee_credits = percolator::V16PodI128::new(account.fee_credits);
         wire.cancel_deposit_escrow = percolator::V16PodU128::new(account.cancel_deposit_escrow);
         wire.last_fee_slot = percolator::V16PodU64::new(account.last_fee_slot);
@@ -2883,18 +2901,18 @@ pub mod ix {
             amount: u128,
         },
         TopUpInsuranceDomain {
-            domain: u8,
+            domain: u16,
             amount: u128,
         },
         CloseSlab,
         ResolveMarket,
         TopUpBackingBucket {
-            domain: u8,
+            domain: u16,
             amount: u128,
             expiry_slot: u64,
         },
         WithdrawBackingBucket {
-            domain: u8,
+            domain: u16,
             amount: u128,
         },
         ConvertReleasedPnl {
@@ -2923,7 +2941,7 @@ pub mod ix {
             cranker_share_bps: u16,
         },
         UpdateBackingFeePolicy {
-            domain: u8,
+            domain: u16,
             fee_bps: u16,
             insurance_share_bps: u16,
         },
@@ -2937,11 +2955,11 @@ pub mod ix {
             min_init_fee: u128,
         },
         WithdrawBackingBucketEarnings {
-            domain: u8,
+            domain: u16,
             amount: u128,
         },
         SyncBackingDomainLedger {
-            domain: u8,
+            domain: u16,
         },
         SyncInsuranceLedger,
         ConfigurePermissionlessResolve {
@@ -3138,18 +3156,18 @@ pub mod ix {
                     amount: read_u128(&mut rest)?,
                 },
                 56 => Self::TopUpInsuranceDomain {
-                    domain: read_u8(&mut rest)?,
+                    domain: read_u16(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 13 => Self::CloseSlab,
                 19 => Self::ResolveMarket,
                 24 => Self::TopUpBackingBucket {
-                    domain: read_u8(&mut rest)?,
+                    domain: read_u16(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                     expiry_slot: read_u64(&mut rest)?,
                 },
                 50 => Self::WithdrawBackingBucket {
-                    domain: read_u8(&mut rest)?,
+                    domain: read_u16(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 28 => Self::ConvertReleasedPnl {
@@ -3173,7 +3191,7 @@ pub mod ix {
                     cranker_share_bps: read_u16(&mut rest)?,
                 },
                 51 => Self::UpdateBackingFeePolicy {
-                    domain: read_u8(&mut rest)?,
+                    domain: read_u16(&mut rest)?,
                     fee_bps: read_u16(&mut rest)?,
                     insurance_share_bps: read_u16(&mut rest)?,
                 },
@@ -3214,11 +3232,11 @@ pub mod ix {
                     initial_price: read_u64(&mut rest)?,
                 },
                 52 => Self::WithdrawBackingBucketEarnings {
-                    domain: read_u8(&mut rest)?,
+                    domain: read_u16(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 53 => Self::SyncBackingDomainLedger {
-                    domain: read_u8(&mut rest)?,
+                    domain: read_u16(&mut rest)?,
                 },
                 54 => Self::SyncInsuranceLedger,
                 38 => Self::ConfigurePermissionlessResolve {
@@ -3439,7 +3457,7 @@ pub mod ix {
                 }
                 Self::TopUpInsuranceDomain { domain, amount } => {
                     out.push(56);
-                    out.push(domain);
+                    push_u16(&mut out, domain);
                     push_u128(&mut out, amount);
                 }
                 Self::CloseSlab => out.push(13),
@@ -3450,13 +3468,13 @@ pub mod ix {
                     expiry_slot,
                 } => {
                     out.push(24);
-                    out.push(domain);
+                    push_u16(&mut out, domain);
                     push_u128(&mut out, amount);
                     push_u64(&mut out, expiry_slot);
                 }
                 Self::WithdrawBackingBucket { domain, amount } => {
                     out.push(50);
-                    out.push(domain);
+                    push_u16(&mut out, domain);
                     push_u128(&mut out, amount);
                 }
                 Self::ConvertReleasedPnl { amount } => {
@@ -3495,7 +3513,7 @@ pub mod ix {
                     insurance_share_bps,
                 } => {
                     out.push(51);
-                    out.push(domain);
+                    push_u16(&mut out, domain);
                     push_u16(&mut out, fee_bps);
                     push_u16(&mut out, insurance_share_bps);
                 }
@@ -3525,12 +3543,12 @@ pub mod ix {
                 }
                 Self::WithdrawBackingBucketEarnings { domain, amount } => {
                     out.push(52);
-                    out.push(domain);
+                    push_u16(&mut out, domain);
                     push_u128(&mut out, amount);
                 }
                 Self::SyncBackingDomainLedger { domain } => {
                     out.push(53);
-                    out.push(domain);
+                    push_u16(&mut out, domain);
                 }
                 Self::SyncInsuranceLedger => out.push(54),
                 Self::ConfigurePermissionlessResolve {
@@ -7334,7 +7352,7 @@ pub mod processor {
     fn handle_top_up_insurance_domain<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        domain: u8,
+        domain: u16,
         amount: u128,
     ) -> ProgramResult {
         let signer = account(accounts, 0)?;
@@ -7668,7 +7686,7 @@ pub mod processor {
     fn handle_top_up_backing_bucket<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        domain: u8,
+        domain: u16,
         amount: u128,
         expiry_slot: u64,
     ) -> ProgramResult {
@@ -7733,7 +7751,7 @@ pub mod processor {
                     data,
                     market_ai.key.to_bytes(),
                     authorities.backing_bucket_authority,
-                    domain as u16,
+                    domain,
                     &bucket,
                 )?;
                 sync_backing_domain_ledger(&mut ledger, &bucket)?;
@@ -7769,7 +7787,7 @@ pub mod processor {
     fn handle_withdraw_backing_bucket<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        domain: u8,
+        domain: u16,
         amount: u128,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
@@ -7793,7 +7811,7 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
 
-        let domain = domain as usize;
+        let domain_usize = domain as usize;
         let (bump, amount_u64) = verify_domain_withdrawal_preflight(
             program_id,
             market_ai,
@@ -7801,7 +7819,7 @@ pub mod processor {
             dest_token,
             vault_token,
             vault_authority_ai,
-            domain,
+            domain_usize,
             amount,
             false,
             DOMAIN_WITHDRAW_AUTH_BACKING,
@@ -7810,9 +7828,9 @@ pub mod processor {
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
-            let authorities = domain_authorities_from_view(&group, &cfg, domain)?;
+            let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             let shutdown_drain = match group.header.mode {
-                0 => live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain)?,
+                0 => live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain_usize)?,
                 1 => {
                     if group.header.materialized_portfolio_count.get() != 0
                         || group.header.c_tot.get() != 0
@@ -7836,7 +7854,7 @@ pub mod processor {
                 authorities.backing_bucket_authority
             };
 
-            let (_, bucket) = backing_domain_parts_view(&group, domain)?;
+            let (_, bucket) = backing_domain_parts_view(&group, domain_usize)?;
             let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
                 Some(ledger_ai.try_borrow_mut_data()?)
             } else {
@@ -7847,7 +7865,7 @@ pub mod processor {
                     data,
                     market_ai.key.to_bytes(),
                     ledger_authority,
-                    domain as u16,
+                    domain,
                     &bucket,
                 )?;
                 sync_backing_domain_ledger(&mut ledger, &bucket)?;
@@ -7859,7 +7877,7 @@ pub mod processor {
                 None
             };
             group
-                .withdraw_fresh_counterparty_backing_not_atomic(domain, amount)
+                .withdraw_fresh_counterparty_backing_not_atomic(domain_usize, amount)
                 .map_err(map_v16_error)?;
             if let Some((ledger, _)) = ledger_state.as_mut() {
                 ledger.total_principal_atoms = ledger
@@ -7896,7 +7914,7 @@ pub mod processor {
     fn handle_withdraw_backing_bucket_earnings<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        domain: u8,
+        domain: u16,
         amount: u128,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
@@ -7970,7 +7988,7 @@ pub mod processor {
                 &ledger_data,
                 market_ai.key.to_bytes(),
                 ledger_authority,
-                domain as u16,
+                domain,
                 &bucket,
             )?;
             sync_backing_domain_ledger(&mut ledger, &bucket)?;
@@ -8006,7 +8024,7 @@ pub mod processor {
     fn handle_sync_backing_domain_ledger<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        domain: u8,
+        domain: u16,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -8028,7 +8046,7 @@ pub mod processor {
             &ledger_data,
             market_ai.key.to_bytes(),
             authorities.backing_bucket_authority,
-            domain as u16,
+            domain,
             &bucket,
         )?;
         sync_backing_domain_ledger(&mut ledger, &bucket)?;
@@ -9543,7 +9561,7 @@ pub mod processor {
     fn handle_update_backing_fee_policy<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        domain: u8,
+        domain: u16,
         fee_bps: u16,
         insurance_share_bps: u16,
     ) -> ProgramResult {

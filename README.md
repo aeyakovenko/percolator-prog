@@ -38,14 +38,16 @@ The economic and governance model for a permissionless multi-asset market. Statu
 ### Market = one slab of N assets
 - A **market is one account ("slab") holding an array of N assets**: `engine header + [Asset<T>]`
   slice, resizable by the program. The engine operates **one market at a time**. **✅**
-- A **10 MB slab fits ~5,800 assets** (per-asset slot is 1797 B; Solana caps an account at 10 MiB), and
+- A **10 MiB slab fits 5,834 assets** with the current layout (per-asset slot is 1797 B; 5,835 would exceed Solana's 10 MiB account cap), and
   per-trader CU stays bounded **independent of N** (a trader pays only for the assets they actually
   touch, not all N). **✅** — no 64-asset cap (`v16_attack_market_exceeds_64_assets_position_holds_any_14_legs`),
-  and a real BPF trade on asset **index 4999 of a 5,000-asset / 8.99 MB market costs ~76k CU** — flat
-  vs. small-N, proving O(1)-in-N (`v16_bpf_5000_asset_market_trades_with_bounded_cu`). The portfolio's
-  source-domains are a **fixed sparse array** (engine `c120fce`), so the position account and
-  per-instruction CU are O(1) in N — bounded only by the per-position asset cap. The 14-leg worst-case
-  trade is under the 1.4M CU limit (`v16_bpf_stale_full_14_leg_tradenocpi_is_under_tx_limit`).
+  and a real BPF trade on asset **index 5833 of a 5,834-asset / near-10 MiB market is under the tx CU limit** — flat
+  vs. small-N, proving O(1)-in-N (`v16_bpf_10m_market_over_5000_assets_trades_with_bounded_cu`). The same
+  regression also exercises high public domain indices above 11,000, proving backing/insurance management
+  is not capped at one-byte domain ids. The portfolio's
+  source-domains are a **fixed sparse array** in the pinned engine, so the position account and
+  per-instruction CU are O(1) in N — bounded only by the per-position asset cap. A current 14-leg
+  trade is under the 1.4M CU limit (`v16_bpf_current_full_14_leg_tradenocpi_is_under_tx_limit`).
   (A literal 10k assets in one slab would need the per-asset slot trimmed 1797 B → ≤ ~1048 B; the
   O(1)-in-N scaling property holds regardless.)
 
@@ -106,9 +108,10 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   the matcher fill arrives through `TradeCpi`: the user submits the trade, not a separate refresh
   instruction. **✅** (`v16_bpf_tradecpi_refreshes_stale_traded_portfolio_leg_on_demand`; the related
   multi-asset case is covered by `v16_bpf_trade_refreshes_stale_related_portfolio_leg_on_demand`.)
-- The trade path still does **not** fetch or authenticate new oracle data itself; keepers/callers must
-  make the asset's market mark current through the appropriate oracle/mark crank first. Extremely stale
-  high-leg portfolios remain bounded by the pre-crank path rather than requiring one oversized trade.
+- The trade path still does **not** parse external oracle accounts or advance the market oracle target
+  itself; keepers/callers must make the asset's stored effective mark current through the appropriate
+  oracle/mark crank or mark-push path first. Extremely stale high-leg portfolios remain bounded by the
+  pre-crank path rather than requiring one oversized trade.
   **✅** (`v16_bpf_stale_full_14_leg_tradenocpi_rejects_before_cu_cliff`,
   `v16_bpf_force_close_liveness_survives_14_stale_leg_grief_via_precrank`.)
 
@@ -126,6 +129,18 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   unavailable-principal delta, so the trader-side cap is the actual crystallized residual loss that
   backing absorbed; it is not notional, mark-to-market paper PnL, or caller-supplied data. **✅**
   (`v16_bpf_accounting_ledger_tags_are_bounded_and_update_state`.)
+- **Account-level residual rewards are capped by real principal, not leverage.** Each portfolio header
+  carries fixed monotonic scalars:
+  `residual_crystallized_loss_atoms_total`, `residual_spent_principal_atoms_total`, and
+  `residual_received_atoms_total`. Real crystallized loss creates the spendable budget; matched fills
+  spend at most the new initial-margin principal posted by that fill, then credit the LP/counterparty's
+  received counter. The invariant `spent <= crystallized` is shape-validated, counters never affect
+  solvency/margin directly, and the API is deterministic across `TradeNoCpi`, `TradeCpi`,
+  `BatchTradeNoCpi`, and `BatchTradeCpi`. **✅**
+  (`v16_bpf_account_residual_reward_counter_covers_all_trade_paths`,
+  `v16_bpf_account_residual_reward_counter_caps_available_crystallized_loss`,
+  `v16_bpf_account_residual_reward_counter_accumulates_across_batch_legs`,
+  `v16_attack_account_residual_spent_above_crystallized_rejects_trade_without_mutation`.)
 
 ### Governance & admin keys
 - **Per-asset admin keys, isolated — uniform across all assets including asset 0** — one asset's admin
@@ -216,7 +231,7 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   `v16_attack_update_base_unit_mints_guarded`. **✅**
 
 > **Coverage note.** The O(1)-in-N CU / scaling requirement is implemented and verified end-to-end
-> (sparse-portfolio refactor, engine `c120fce`). Every product-spec item above is now **✅** — each
+> (sparse-portfolio refactor in the pinned engine). Every product-spec item above is now **✅** — each
 > backed by a dedicated LiteSVM test against the production BPF asserting the attacker-success
 > criterion (isolation, exit-window, fee-split conservation, base-unit deposit/withdraw routing and
 > swap atomicity, permissionless-create fee gating, bounded admin, scheduled-close reclaim, and
@@ -291,7 +306,13 @@ The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-
 ### Portfolio account
 - **Owner**: Percolator program id
 - **Layout**: header + `PortfolioAccountV16Account` + wrapper-owned matcher config tail
-- Holds one user's capital, PnL, source claims/liens, health certificate, close progress, and active legs.
+- **Fixed-size engine layout**: the engine portfolio account stores a fixed active-leg array
+  (`V16_MAX_PORTFOLIO_ASSETS_N`, currently 16 slots with the wrapper limiting user-active legs to 14)
+  and a fixed sparse source-domain array. A one-leg and a fourteen-leg account allocate the same
+  engine state size; per-trade CU is bounded by touched/active legs, not by the total market asset
+  count.
+- Holds one user's capital, PnL, deterministic residual reward counters, source claims/liens, health
+  certificate, close progress, and active legs.
 
 Authority fields are split by scope:
 - **`WrapperConfigV16.marketauth`**: one market-level governance key for market policies, asset lifecycle, resolution/close, and base-unit controls
@@ -368,7 +389,7 @@ This section describes intent and operational ordering, not argument-by-argument
     returns the asset to ACTIVE so normal trading can resume
 
 ### Participant lifecycle
-- **InitPortfolio** (tag 2)
+- **InitPortfolio** (tag 1)
   - initializes a program-owned portfolio account and binds `owner = signer`
 - **Deposit** (tag 3)
   - transfers collateral into vault; credits engine balance for that account
@@ -395,7 +416,7 @@ This section describes intent and operational ordering, not argument-by-argument
 - **FinalizeResetSide** (tag 45)
   - permissionless side-reset finalization for engine-ready asset sides
   - validates side encoding and engine readiness; it is not an admin override
-- **TopUpInsurance**
+- **TopUpInsurance** (tag 9)
   - transfers collateral into vault; credits insurance fund in engine
 
 ### Trading
@@ -421,7 +442,9 @@ This section describes intent and operational ordering, not argument-by-argument
     on the LP portfolio: matcher program, matcher context, matcher delegate, and enabled flag.
 
 ### Oracle / mark management
-- External-oracle markets read configured oracle account(s) directly in live price-taking instructions.
+- External-oracle markets authenticate configured oracle account(s) in the oracle configuration/crank
+  paths; `TradeCpi` / `TradeNoCpi` use the already-stored effective mark for fee and settlement
+  accounting.
 - AuthMark markets use **ConfigureAuthMark** (tag 62) and **PushAuthMark** (tag 63), signed by the configured mark authority, to store a direct authority mark without EWMA smoothing.
 - EwmaMark markets use **ConfigureEwmaMark** (tag 35) and **PushEwmaMark** (tag 36), signed by the configured mark authority, to update a smoothed EWMA mark input.
 - The per-slot effective-price movement cap is a risk parameter set at init; there is no standalone `SetOraclePriceCap` instruction in the current ABI.
@@ -856,10 +879,10 @@ These are intended hard boundaries enforced in code and test suites:
    - covered by `v16_attack_force_close_healthy_asset_rejected` and `v16_attack_force_close_cannot_bypass_timeout_with_future_now_slot`.
 9. Cannot redirect user close payouts to arbitrary token accounts.
    - user withdrawal paths require owner signer and owner ATA checks; resolved-close payout routing is stored-owner bound.
+   - covered by `v16_attack_close_resolved_dest_validation`.
 10. Cannot use ordinary asset retire/reuse on asset 0, restart any asset while positions/loss or value-bearing source/backing/reservation state remain, restart an asset without that asset's `asset_admin`, or use asset-0 shutdown as a domain-insurance drain bypass.
    - covered by `v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts`, `v16_bpf_restart_asset_oracle_is_uniform_for_local_asset_admins`, and `v16_attack_restart_asset_oracle_rejects_backing_state_without_mutation`.
-   - covered by `v16_attack_close_resolved_dest_validation`.
-10. Cannot close slab while funds/state remain.
+11. Cannot close slab while funds/state remain.
     - requires zero vault, zero insurance, zero used accounts, zero dust.
     - covered by `v16_attack_close_slab_requires_full_winddown` and `v16_attack_scheduled_close_cannot_strand_funds_then_reclaims`.
 

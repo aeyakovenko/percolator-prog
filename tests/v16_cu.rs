@@ -37,7 +37,11 @@ const MATCHER_CONTEXT_LEN: usize = 320;
 fn active_bitmap_with(indices: &[usize]) -> percolator::V16ActiveBitmap {
     let mut bitmap = percolator::active_bitmap_empty();
     for &idx in indices {
-        percolator::active_bitmap_set(&mut bitmap, idx).unwrap();
+        assert!(
+            idx < percolator::V16_MAX_PORTFOLIO_ASSETS_N,
+            "active bitmap test index out of range"
+        );
+        bitmap[idx / 64] |= 1u64 << (idx % 64);
     }
     bitmap
 }
@@ -759,7 +763,7 @@ impl V16CuEnv {
 
     fn update_backing_fee_policy_with_cu(
         &mut self,
-        domain: u8,
+        domain: u16,
         fee_bps: u16,
         insurance_share_bps: u16,
     ) -> u64 {
@@ -1429,6 +1433,25 @@ impl V16CuEnv {
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_data.data, &portfolio).unwrap();
         self.svm.set_account(self.market, market_account).unwrap();
+        self.svm.set_account(portfolio_key, portfolio_data).unwrap();
+    }
+
+    fn set_residual_reward_counters_for_test(
+        &mut self,
+        portfolio_key: Pubkey,
+        crystallized_loss_atoms: u128,
+        spent_principal_atoms: u128,
+        received_atoms: u128,
+    ) {
+        let mut portfolio_data = self
+            .svm
+            .get_account(&portfolio_key)
+            .expect("portfolio account");
+        let mut portfolio = state::read_portfolio(&portfolio_data.data).unwrap();
+        portfolio.residual_crystallized_loss_atoms_total = crystallized_loss_atoms;
+        portfolio.residual_spent_principal_atoms_total = spent_principal_atoms;
+        portfolio.residual_received_atoms_total = received_atoms;
+        state::write_portfolio(&mut portfolio_data.data, &portfolio).unwrap();
         self.svm.set_account(portfolio_key, portfolio_data).unwrap();
     }
 
@@ -2432,14 +2455,14 @@ impl V16CuEnv {
     fn top_up_insurance_domain_with_authority(
         &mut self,
         authority: &Keypair,
-        domain: u8,
+        domain: u16,
         amount: u128,
     ) -> Pubkey {
         self.top_up_insurance_domain_with_authority_and_cu(authority, domain, amount)
             .0
     }
 
-    fn top_up_backing_bucket(&mut self, domain: u8, amount: u128, expiry_slot: u64) -> Pubkey {
+    fn top_up_backing_bucket(&mut self, domain: u16, amount: u128, expiry_slot: u64) -> Pubkey {
         self.top_up_backing_bucket_with_cu(domain, amount, expiry_slot)
             .0
     }
@@ -2465,7 +2488,7 @@ impl V16CuEnv {
     fn top_up_backing_bucket_from_admin_token_with_cu(
         &mut self,
         source: Pubkey,
-        domain: u8,
+        domain: u16,
         amount: u128,
         expiry_slot: u64,
     ) -> u64 {
@@ -2562,7 +2585,7 @@ impl V16CuEnv {
     fn top_up_insurance_domain_with_authority_and_cu(
         &mut self,
         authority: &Keypair,
-        domain: u8,
+        domain: u16,
         amount: u128,
     ) -> (Pubkey, u64) {
         self.ensure_signer_account(authority.pubkey());
@@ -2599,7 +2622,7 @@ impl V16CuEnv {
 
     fn top_up_backing_bucket_with_cu(
         &mut self,
-        domain: u8,
+        domain: u16,
         amount: u128,
         expiry_slot: u64,
     ) -> (Pubkey, u64) {
@@ -2641,7 +2664,7 @@ impl V16CuEnv {
     fn top_up_backing_bucket_with_ledger_with_cu(
         &mut self,
         ledger: Pubkey,
-        domain: u8,
+        domain: u16,
         amount: u128,
         expiry_slot: u64,
     ) -> (Pubkey, u64) {
@@ -2684,7 +2707,7 @@ impl V16CuEnv {
     fn top_up_backing_bucket_with_authority(
         &mut self,
         authority: &Keypair,
-        domain: u8,
+        domain: u16,
         amount: u128,
         expiry_slot: u64,
     ) -> Pubkey {
@@ -2751,7 +2774,7 @@ impl V16CuEnv {
     fn withdraw_insurance_domain_to_admin_token_with_cu(
         &mut self,
         dest: Pubkey,
-        domain: u8,
+        domain: u16,
         amount: u128,
     ) -> u64 {
         send_tx(
@@ -2778,7 +2801,7 @@ impl V16CuEnv {
     fn withdraw_backing_bucket_to_admin_token_with_cu(
         &mut self,
         dest: Pubkey,
-        domain: u8,
+        domain: u16,
         amount: u128,
     ) -> u64 {
         send_tx(
@@ -2799,7 +2822,7 @@ impl V16CuEnv {
         .expect("withdraw backing bucket to admin token")
     }
 
-    fn sync_backing_domain_ledger_with_cu(&mut self, ledger: Pubkey, domain: u8) -> u64 {
+    fn sync_backing_domain_ledger_with_cu(&mut self, ledger: Pubkey, domain: u16) -> u64 {
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -2819,7 +2842,7 @@ impl V16CuEnv {
         &mut self,
         ledger: Pubkey,
         dest: Pubkey,
-        domain: u8,
+        domain: u16,
         amount: u128,
     ) -> u64 {
         send_tx(
@@ -2860,7 +2883,7 @@ impl V16CuEnv {
     fn try_withdraw_insurance_domain_with_authority(
         &mut self,
         authority: &Keypair,
-        domain: u8,
+        domain: u16,
         amount: u128,
     ) -> Result<(Pubkey, u64), String> {
         self.try_withdraw_insurance_asset_with_authority(authority, (domain / 2) as u16, amount)
@@ -5021,10 +5044,10 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
     let admin_key = env.admin.pubkey();
     let admin_recovery = env.token_account(admin_key, 0);
     for (domain, amount) in [(2u8, 6u128), (3u8, 4u128)] {
-        env.withdraw_insurance_domain_to_admin_token_with_cu(admin_recovery, domain, amount);
+        env.withdraw_insurance_domain_to_admin_token_with_cu(admin_recovery, domain.into(), amount);
     }
     for (domain, amount) in [(2u8, 20u128), (3u8, 25u128)] {
-        env.withdraw_backing_bucket_to_admin_token_with_cu(admin_recovery, domain, amount);
+        env.withdraw_backing_bucket_to_admin_token_with_cu(admin_recovery, domain.into(), amount);
     }
     assert_eq!(
         env.token_amount(admin_recovery),
@@ -6428,7 +6451,7 @@ fn run_source_credit_watermark_trade_case(
         SourceCreditWatermarkDirection::PositiveSize => (1usize, 105, 95, 1i128),
         SourceCreditWatermarkDirection::NegativeSize => (0usize, 95, 105, -1i128),
     };
-    env.top_up_backing_bucket(winning_domain as u8, 150, 10);
+    env.top_up_backing_bucket(winning_domain as u16, 150, 10);
 
     env.trade_asset_with_cu(
         0,
@@ -6501,7 +6524,7 @@ fn run_source_credit_watermark_trade_case(
     let watermark_withdraw_dest = env.token_account(env.admin.pubkey(), 0);
     env.withdraw_backing_bucket_to_admin_token_with_cu(
         watermark_withdraw_dest,
-        winning_domain as u8,
+        winning_domain as u16,
         surplus_backing,
     );
     let (_, exact_watermark_group) = env.market_state();
@@ -6544,7 +6567,7 @@ fn run_source_credit_watermark_trade_case(
         before_counterparty.data
     );
 
-    env.top_up_backing_bucket(winning_domain as u8, 5_000, 10);
+    env.top_up_backing_bucket(winning_domain as u16, 5_000, 10);
     let second_pass_deposit = match direction {
         SourceCreditWatermarkDirection::PositiveSize => 50,
         SourceCreditWatermarkDirection::NegativeSize => 200,
@@ -10910,6 +10933,348 @@ enum BackingResidualCounterTradePath {
     BatchTradeCpi,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum AccountResidualCounterTradePath {
+    TradeNoCpi,
+    TradeCpi,
+    BatchTradeNoCpi,
+    BatchTradeCpi,
+}
+
+fn auth_matcher_for_lp_via_system_create(
+    env: &mut V16CuEnv,
+    lp_owner: &Keypair,
+    lp_account: Pubkey,
+) -> (Pubkey, Pubkey, Pubkey) {
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (ctx, delegate, _) =
+        env.init_auth_matcher_context_via_system_create(matcher_program, lp_owner, lp_account);
+    (matcher_program, ctx, delegate)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_account_residual_counter_trade_path(
+    env: &mut V16CuEnv,
+    path: AccountResidualCounterTradePath,
+    taker_owner: &Keypair,
+    taker_account: Pubkey,
+    lp_owner: &Keypair,
+    lp_account: Pubkey,
+    size_q: i128,
+    exec_price: u64,
+) -> u64 {
+    env.svm.expire_blockhash();
+    match path {
+        AccountResidualCounterTradePath::TradeNoCpi => env.trade_asset_with_cu(
+            0,
+            taker_owner,
+            taker_account,
+            lp_owner,
+            lp_account,
+            size_q,
+            exec_price,
+            0,
+        ),
+        AccountResidualCounterTradePath::TradeCpi => {
+            let (matcher_program, ctx, delegate) =
+                auth_matcher_for_lp_via_system_create(env, lp_owner, lp_account);
+            env.trade_cpi_with_cu_on_asset(
+                taker_owner,
+                taker_account,
+                lp_owner,
+                lp_account,
+                matcher_program,
+                ctx,
+                delegate,
+                0,
+                size_q,
+                0,
+            )
+        }
+        AccountResidualCounterTradePath::BatchTradeNoCpi => env
+            .send(
+                ProgInstruction::BatchTradeNoCpi {
+                    legs: vec![BatchTradeLeg {
+                        asset_index: 0,
+                        size_q,
+                        exec_price,
+                        fee_bps: 0,
+                    }],
+                },
+                vec![
+                    AccountMeta::new(taker_owner.pubkey(), true),
+                    AccountMeta::new(lp_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker_account, false),
+                    AccountMeta::new(lp_account, false),
+                ],
+                &[taker_owner, lp_owner],
+            )
+            .expect("BatchTradeNoCpi account residual-counter trade"),
+        AccountResidualCounterTradePath::BatchTradeCpi => {
+            let (matcher_program, ctx, delegate) =
+                auth_matcher_for_lp_via_system_create(env, lp_owner, lp_account);
+            env.send(
+                ProgInstruction::BatchTradeCpi {
+                    legs: vec![BatchTradeCpiLeg {
+                        asset_index: 0,
+                        size_q,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    }],
+                },
+                vec![
+                    AccountMeta::new(taker_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker_account, false),
+                    AccountMeta::new(lp_account, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new(ctx, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ],
+                &[taker_owner],
+            )
+            .expect("BatchTradeCpi account residual-counter trade")
+        }
+    }
+}
+
+fn run_account_residual_counter_credit_case(
+    path: AccountResidualCounterTradePath,
+    size_q: i128,
+    crystallized_loss_atoms: u128,
+    expected_credit: u128,
+) {
+    const PRICE: u64 = 1_000;
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 500, 500, 24);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker_account = env.create_portfolio(&taker_owner);
+    let lp_account = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker_account, 10_000);
+    env.deposit(&lp_owner, lp_account, 10_000);
+
+    let taker_initial = env.portfolio_state(taker_account);
+    let lp_initial = env.portfolio_state(lp_account);
+    assert_eq!(taker_initial.residual_crystallized_loss_atoms_total, 0);
+    assert_eq!(taker_initial.residual_spent_principal_atoms_total, 0);
+    assert_eq!(taker_initial.residual_received_atoms_total, 0);
+    assert_eq!(lp_initial.residual_received_atoms_total, 0);
+
+    env.set_residual_reward_counters_for_test(taker_account, crystallized_loss_atoms, 0, 0);
+    let cu = execute_account_residual_counter_trade_path(
+        &mut env,
+        path,
+        &taker_owner,
+        taker_account,
+        &lp_owner,
+        lp_account,
+        size_q,
+        PRICE,
+    );
+    assert_cu_within(
+        &format!("{path:?} account residual-counter trade"),
+        cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+
+    let taker_after = env.portfolio_state(taker_account);
+    let lp_after = env.portfolio_state(lp_account);
+    assert_eq!(
+        taker_after.residual_crystallized_loss_atoms_total, crystallized_loss_atoms,
+        "{path:?}: trading consumes reward budget but never reduces crystallized loss"
+    );
+    assert_eq!(
+        taker_after.residual_spent_principal_atoms_total, expected_credit,
+        "{path:?}: taker spends only real principal from the residual budget"
+    );
+    assert_eq!(
+        taker_after.residual_received_atoms_total, 0,
+        "{path:?}: the source trader does not self-credit LP rewards"
+    );
+    assert_eq!(
+        lp_after.residual_received_atoms_total, expected_credit,
+        "{path:?}: LP receives the deterministic residual credit"
+    );
+    assert_eq!(
+        lp_after.residual_spent_principal_atoms_total, 0,
+        "{path:?}: passive LP did not spend its own residual budget"
+    );
+    assert_ne!(
+        lp_after.residual_received_atoms_total, PRICE as u128,
+        "{path:?}: counter must not credit leveraged notional"
+    );
+}
+
+#[test]
+fn v16_bpf_account_residual_reward_counter_covers_all_trade_paths() {
+    for path in [
+        AccountResidualCounterTradePath::TradeNoCpi,
+        AccountResidualCounterTradePath::TradeCpi,
+        AccountResidualCounterTradePath::BatchTradeNoCpi,
+        AccountResidualCounterTradePath::BatchTradeCpi,
+    ] {
+        run_account_residual_counter_credit_case(path, POS_SCALE as i128, 10_000, 50);
+        run_account_residual_counter_credit_case(path, -(POS_SCALE as i128), 10_000, 50);
+    }
+}
+
+#[test]
+fn v16_bpf_account_residual_reward_counter_caps_available_crystallized_loss() {
+    for path in [
+        AccountResidualCounterTradePath::TradeNoCpi,
+        AccountResidualCounterTradePath::TradeCpi,
+        AccountResidualCounterTradePath::BatchTradeNoCpi,
+        AccountResidualCounterTradePath::BatchTradeCpi,
+    ] {
+        run_account_residual_counter_credit_case(path, POS_SCALE as i128, 30, 30);
+    }
+}
+
+#[test]
+fn v16_bpf_account_residual_reward_counter_accumulates_across_batch_legs() {
+    const PRICE: u64 = 1_000;
+    for cpi in [false, true] {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 500, 500, 24);
+        env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+        env.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
+        let taker_owner = Keypair::new();
+        let lp_owner = Keypair::new();
+        let taker_account = env.create_portfolio(&taker_owner);
+        let lp_account = env.create_portfolio(&lp_owner);
+        env.deposit(&taker_owner, taker_account, 10_000);
+        env.deposit(&lp_owner, lp_account, 10_000);
+        env.set_residual_reward_counters_for_test(taker_account, 10_000, 0, 0);
+        env.svm.expire_blockhash();
+        let cu = if cpi {
+            let (matcher_program, ctx, delegate) =
+                auth_matcher_for_lp_via_system_create(&mut env, &lp_owner, lp_account);
+            env.send(
+                ProgInstruction::BatchTradeCpi {
+                    legs: vec![
+                        BatchTradeCpiLeg {
+                            asset_index: 0,
+                            size_q: POS_SCALE as i128,
+                            fee_bps: 0,
+                            limit_price: 0,
+                        },
+                        BatchTradeCpiLeg {
+                            asset_index: 1,
+                            size_q: -(POS_SCALE as i128),
+                            fee_bps: 0,
+                            limit_price: 0,
+                        },
+                    ],
+                },
+                vec![
+                    AccountMeta::new(taker_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker_account, false),
+                    AccountMeta::new(lp_account, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new(ctx, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ],
+                &[&taker_owner],
+            )
+            .expect("BatchTradeCpi residual counters must accumulate across legs")
+        } else {
+            env.send(
+                ProgInstruction::BatchTradeNoCpi {
+                    legs: vec![
+                        BatchTradeLeg {
+                            asset_index: 0,
+                            size_q: POS_SCALE as i128,
+                            exec_price: PRICE,
+                            fee_bps: 0,
+                        },
+                        BatchTradeLeg {
+                            asset_index: 1,
+                            size_q: -(POS_SCALE as i128),
+                            exec_price: PRICE,
+                            fee_bps: 0,
+                        },
+                    ],
+                },
+                vec![
+                    AccountMeta::new(taker_owner.pubkey(), true),
+                    AccountMeta::new(lp_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker_account, false),
+                    AccountMeta::new(lp_account, false),
+                ],
+                &[&taker_owner, &lp_owner],
+            )
+            .expect("BatchTradeNoCpi residual counters must accumulate across legs")
+        };
+        assert_cu_within(
+            "two-leg residual-counter batch",
+            cu,
+            MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+        );
+        let taker_after = env.portfolio_state(taker_account);
+        let lp_after = env.portfolio_state(lp_account);
+        assert_eq!(
+            taker_after.residual_spent_principal_atoms_total, 100,
+            "two 50-atom principal increases spend exactly 100 atoms"
+        );
+        assert_eq!(
+            lp_after.residual_received_atoms_total, 100,
+            "batch LP receives the sum of per-leg real-principal credits"
+        );
+    }
+}
+
+#[test]
+fn v16_attack_account_residual_spent_above_crystallized_rejects_trade_without_mutation() {
+    for bad_taker in [true, false] {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 500, 500, 24);
+        env.configure_auth_mark_for_asset_as_admin(0, 1, 1_000);
+        let taker_owner = Keypair::new();
+        let lp_owner = Keypair::new();
+        let taker_account = env.create_portfolio(&taker_owner);
+        let lp_account = env.create_portfolio(&lp_owner);
+        env.deposit(&taker_owner, taker_account, 10_000);
+        env.deposit(&lp_owner, lp_account, 10_000);
+        let bad_account = if bad_taker { taker_account } else { lp_account };
+        env.set_residual_reward_counters_for_test(bad_account, 10, 11, 0);
+        let market_before = env.market_state().1;
+        let taker_before = env.portfolio_state(taker_account);
+        let lp_before = env.portfolio_state(lp_account);
+
+        env.svm.expire_blockhash();
+        let rejected = env.try_trade_asset_with_cu(
+            0,
+            &taker_owner,
+            taker_account,
+            &lp_owner,
+            lp_account,
+            POS_SCALE as i128,
+            1_000,
+            0,
+        );
+        assert!(
+            rejected.is_err(),
+            "spent > crystallized must reject before a trade can use malformed counters"
+        );
+        assert_eq!(env.portfolio_state(taker_account), taker_before);
+        assert_eq!(env.portfolio_state(lp_account), lp_before);
+        let market_after = env.market_state().1;
+        assert_eq!(
+            market_after.assets[0].oi_eff_long_q,
+            market_before.assets[0].oi_eff_long_q
+        );
+        assert_eq!(
+            market_after.assets[0].oi_eff_short_q,
+            market_before.assets[0].oi_eff_short_q
+        );
+        assert_eq!(market_after.vault, market_before.vault);
+    }
+}
+
 fn auth_matcher_for_lp(
     env: &mut V16CuEnv,
     lp_owner: &Keypair,
@@ -11017,7 +11382,7 @@ fn run_backing_residual_counter_trade_path_case(path: BackingResidualCounterTrad
     env.svm.warp_to_slot(1);
     env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
     let ledger = env.backing_domain_ledger_account();
-    env.top_up_backing_bucket_with_ledger_with_cu(ledger, WINNING_DOMAIN, 150, 10);
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, WINNING_DOMAIN.into(), 150, 10);
 
     let read_ledger = |env: &V16CuEnv| {
         state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap()
@@ -11137,7 +11502,7 @@ fn run_backing_residual_counter_trade_path_case(path: BackingResidualCounterTrad
         "{path:?} farm counter remains snapshot-gated until SyncBackingDomainLedger"
     );
 
-    env.sync_backing_domain_ledger_with_cu(ledger, WINNING_DOMAIN);
+    env.sync_backing_domain_ledger_with_cu(ledger, WINNING_DOMAIN.into());
     let synced = read_ledger(&env);
     assert_eq!(
         synced.residual_received_atoms(),
@@ -19402,7 +19767,7 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
 fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
     let mut env = V16CuEnv::new();
     let admin = env.admin.insecure_clone();
-    const BAD_DOMAIN: u8 = 2;
+    const BAD_DOMAIN: u16 = 2;
 
     env.top_up_insurance(1_000);
     env.top_up_backing_bucket_with_cu(0, 1_000, 10_000);
@@ -33467,9 +33832,8 @@ fn v16_attack_haircut_rounding_many_winners_no_mint() {
 }
 
 // security.md sweep — market capacity: >64 assets per market + a position holding any 14 legs (#22/#32).
-// The "v16 exposes up to 64 market slots" comment (src/v16_program.rs:81) is STALE: the real per-market
-// asset count is config.max_market_slots (u32), grown one slot at a time by the append path in
-// handle_update_asset_lifecycle (src/v16_program.rs:8620 realloc + :8728 activate_dynamic_asset_slot).
+// The real per-market asset count is config.max_market_slots (u32), grown one slot at a time by
+// handle_update_asset_lifecycle's append/realloc path.
 // There is NO hardcoded 64 cap. This test proves: (1) a single market grows to >64 assets, (2) the per-
 // position leg cap stays at WRAPPER_MAX_PORTFOLIO_ASSETS=14 INDEPENDENT of the market's asset count, and
 // (3) a position can carry 14 legs drawn from arbitrary HIGH indices across the full set (not just 0..13).
@@ -34422,7 +34786,7 @@ fn v16_attack_backing_fee_split_conserves() {
     env.svm.warp_to_slot(1);
     env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
     env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
-    env.update_backing_fee_policy_with_cu(WINNING_DOMAIN as u8, FEE_BPS, INSURANCE_SHARE_BPS);
+    env.update_backing_fee_policy_with_cu(WINNING_DOMAIN as u16, FEE_BPS, INSURANCE_SHARE_BPS);
     // Reconfigure the asset-0 oracle after setting the policy. Asset 0 carries both market-wide
     // config and a stored per-asset profile; the fee policy must survive this path because the
     // backing-fee collector reads the stored profile.
@@ -34435,7 +34799,7 @@ fn v16_attack_backing_fee_split_conserves() {
     let counterparty_account = env.create_portfolio(&counterparty_owner);
     env.deposit(&cross_owner, cross_account, DEPOSIT);
     env.deposit(&counterparty_owner, counterparty_account, 10_000);
-    env.top_up_backing_bucket(WINNING_DOMAIN as u8, 1_500, 10);
+    env.top_up_backing_bucket(WINNING_DOMAIN as u16, 1_500, 10);
 
     // Build cross_account's source-backed positive PnL on asset0 (a long that wins as the mark rises).
     env.trade_asset_with_cu(
@@ -34495,9 +34859,9 @@ fn v16_attack_backing_fee_split_conserves() {
         / BOUND_SCALE;
     if surplus > 0 {
         let dest = env.token_account(env.admin.pubkey(), 0);
-        env.withdraw_backing_bucket_to_admin_token_with_cu(dest, WINNING_DOMAIN as u8, surplus);
+        env.withdraw_backing_bucket_to_admin_token_with_cu(dest, WINNING_DOMAIN as u16, surplus);
     }
-    env.top_up_backing_bucket(WINNING_DOMAIN as u8, 50_000, 10);
+    env.top_up_backing_bucket(WINNING_DOMAIN as u16, 50_000, 10);
     env.deposit(&cross_owner, cross_account, 500);
     env.deposit(&counterparty_owner, counterparty_account, 500);
     env.svm.warp_to_slot(3);
@@ -35466,30 +35830,31 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
     );
 }
 
-// Scale proof — a 5,000-asset market (~8.57 MB account, the largest that fits Solana's 10 MiB
-// account cap) is valid AND a real BPF trade on a HIGH asset index executes with O(1)-in-N compute.
+// Scale proof — the largest current market that fits Solana's 10 MiB account cap is valid AND a
+// real BPF trade on a HIGH asset index executes with O(1)-in-N compute.
 //
-// We cannot activate 5,000 assets via 5,000 UpdateAssetLifecycle txs (far too slow), so we CONSTRUCT
-// the market state directly: start from a known-good 1-asset market, make asset 0 active+flat via
-// ConfigureAuthMark, grow the on-chain account to market_account_len_for_capacity(5000), then via the
-// host mirror set max_market_slots=5000 and clone asset 0's active state into a high traded index
-// (index 4999). All intermediate slots stay canonical DISABLED slots (validate_shape accepts them).
-// A real BPF TradeNoCpi on index 4999 then opens a balanced position; its CU is compared to a
-// small-N trade to prove per-trade compute does NOT scale with the 5,000 asset count.
+// We cannot activate thousands of assets via thousands of UpdateAssetLifecycle txs (far too slow), so
+// we CONSTRUCT the market state directly: start from a known-good 1-asset market, make asset 0
+// active+flat via ConfigureAuthMark, grow the on-chain account to market_account_len_for_capacity(5834),
+// then via the host mirror set max_market_slots=5834 and clone asset 0's active state into a high
+// traded index (index 5833). All intermediate slots stay canonical DISABLED slots (validate_shape accepts them).
+// A real BPF TradeNoCpi on index 5833 then opens a balanced position; its CU is compared to a
+// small-N trade to prove per-trade compute does NOT scale with the thousands-of-assets count.
 //
 // Mechanism notes worth recording (verified against the pinned engine + wrapper):
 //   * The production validate_shape() is HEADER-ONLY (O(1)); the O(N) per-slot audit scan is gated
 //     behind the `audit-scan`/test/kani features, which are OFF in the deployed `.so`.
 //   * handle_trade_nocpi reads the market as a zero-copy view and indexes group.markets[asset_index]
-//     directly — it never iterates the 5,000 slots, so trade CU is O(1) in N.
-//   * The trade path enforces backing_bucket.market_id == asset.market_id (engine v16.rs:4112), so the
-//     cloned high-index asset's two domain backing buckets must carry the same market_id.
+//     directly — it never iterates the 5,834 slots, so trade CU is O(1) in N.
+//   * The trade path enforces backing_bucket.market_id == asset.market_id, so the cloned high-index
+//     asset's two domain backing buckets must carry the same market_id.
 //   * Each asset's oracle profile lives in the per-slot wrapper prefix; we copy asset 0's AUTH_MARK
 //     profile bytes into the high slot so the high index has a valid, current (non-stale) mark.
 #[test]
-fn v16_bpf_5000_asset_market_trades_with_bounded_cu() {
-    const N: usize = 5_000;
-    const TRADED: usize = N - 1; // 4999 — a HIGH index, proving the trade isn't special to asset 0.
+fn v16_bpf_10m_market_over_5000_assets_trades_with_bounded_cu() {
+    const N: usize = 5_834;
+    const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
+    const TRADED: usize = N - 1; // 5833 — a HIGH index, proving the trade isn't special to asset 0.
     const PRICE: u64 = 100;
     const TRADE_SLOT: u64 = 10;
 
@@ -35505,14 +35870,15 @@ fn v16_bpf_5000_asset_market_trades_with_bounded_cu() {
     );
     let template = g0.assets[0]; // active-but-flat AssetStateV16 to clone into the high index.
 
-    // 2) Grow the on-chain market account to the 5,000-slot capacity (~8.57 MB). Preserve the existing
+    // 2) Grow the on-chain market account to the max current 10 MiB capacity. Preserve the existing
     //    header/asset-0 bytes (so check_header still passes); the appended tail is zero-filled, which
     //    reads back as canonical DISABLED slots.
     let new_len = state::market_account_len_for_capacity(N).unwrap();
+    let next_len = state::market_account_len_for_capacity(N + 1).unwrap();
     let small_len = state::market_account_len_for_capacity(1).unwrap();
     assert!(
-        new_len >= 8_000_000 && new_len <= 10 * 1024 * 1024,
-        "5,000-asset market account is ~8.57 MB and fits Solana's 10 MiB cap (got {new_len} bytes)"
+        N > 5_000 && new_len <= SOLANA_MAX_ACCOUNT_DATA_LEN && next_len > SOLANA_MAX_ACCOUNT_DATA_LEN,
+        "10 MiB market capacity should be >5,000 assets and maximal at N={N}: len={new_len}, next={next_len}"
     );
     {
         let mut acct = env.svm.get_account(&env.market).unwrap();
@@ -35527,11 +35893,11 @@ fn v16_bpf_5000_asset_market_trades_with_bounded_cu() {
         env.svm.set_account(env.market, acct).unwrap();
     }
 
-    // 3) Build the 5,000-asset mirror: bump max_market_slots to N and clone asset 0's active state into
+    // 3) Build the large-market mirror: bump max_market_slots to N and clone asset 0's active state into
     //    the high traded index (fixing its per-asset market_id + matching domain backing buckets).
     let high_market_id: u64 = (TRADED as u64) + 1; // canonical market_id = index + 1.
     env.mutate_market(|_cfg, group| {
-        // Reading the grown account already yields 5,000 assets (asset 0 active, 1..N disabled) and
+        // Reading the grown account already yields N assets (asset 0 active, 1..N disabled) and
         // per-domain Vecs of length 2*N; just bump the configured slot count and activate the high one.
         assert_eq!(group.assets.len(), N, "grown read yields N asset slots");
         assert_eq!(
@@ -35555,7 +35921,7 @@ fn v16_bpf_5000_asset_market_trades_with_bounded_cu() {
             percolator::BackingBucketV16::empty_for_market(high_market_id);
     });
 
-    // 4) Copy asset 0's AUTH_MARK oracle profile into the high slot so index 4999 has a valid, current
+    // 4) Copy asset 0's AUTH_MARK oracle profile into the high slot so TRADED has a valid, current
     //    (non-stale) mark to trade against.
     {
         let mut acct = env.svm.get_account(&env.market).unwrap();
@@ -35564,13 +35930,13 @@ fn v16_bpf_5000_asset_market_trades_with_bounded_cu() {
         env.svm.set_account(env.market, acct).unwrap();
     }
 
-    // Sanity: the constructed 5,000-asset state round-trips and the high index is active.
+    // Sanity: the constructed near-10 MiB state round-trips and the high index is active.
     let (_, g) = env.market_state();
     assert_eq!(
         g.config.max_market_slots as usize, N,
-        "market now reports 5,000 configured slots"
+        "market now reports {N} configured slots"
     );
-    assert_eq!(g.assets.len(), N, "5,000 asset slots present");
+    assert_eq!(g.assets.len(), N, "{N} asset slots present");
     assert_eq!(
         g.assets[TRADED].lifecycle,
         AssetLifecycleV16::Active,
@@ -35587,10 +35953,43 @@ fn v16_bpf_5000_asset_market_trades_with_bounded_cu() {
     let actual_account_len = env.svm.get_account(&env.market).unwrap().data.len();
     assert_eq!(
         actual_account_len, new_len,
-        "on-chain market account is the 8.57 MB buffer"
+        "on-chain market account is the near-10 MiB buffer"
     );
 
-    // 5) Pre-size portfolios for the grown market, fund them, and execute a real BPF trade on index 4999.
+    // 5) The high asset's public domain APIs must work too. Its long/short domains are >11,000,
+    // which catches accidental u8 domain truncation while proving backing/insurance management is not
+    // capped at the first 128 assets.
+    let high_long_domain = (2 * TRADED) as u16;
+    let high_long_domain_usize = high_long_domain as usize;
+    let admin = env.admin.insecure_clone();
+    let insurance_before = env.market_state().1.insurance_domain_budget[high_long_domain_usize];
+    env.top_up_insurance_domain_with_authority_and_cu(&admin, high_long_domain, 123);
+    env.update_backing_fee_policy_with_cu(high_long_domain, 25, 1_000);
+    let backing_ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(
+        backing_ledger,
+        high_long_domain,
+        456,
+        TRADE_SLOT + 100,
+    );
+    env.sync_backing_domain_ledger_with_cu(backing_ledger, high_long_domain);
+    let (cfg_after_domain, domain_group) = env.market_state();
+    assert_eq!(
+        domain_group.insurance_domain_budget[high_long_domain_usize],
+        insurance_before + 123,
+        "high-index domain insurance top-up is addressable"
+    );
+    assert_eq!(
+        domain_group.source_backing_buckets[high_long_domain_usize].fresh_unliened_backing_num,
+        456 * BOUND_SCALE,
+        "high-index backing domain is addressable"
+    );
+    assert_eq!(
+        cfg_after_domain.backing_trade_fee_policy_count, 1,
+        "high-index backing fee policy update is addressable"
+    );
+
+    // 6) Pre-size portfolios for the grown market, fund them, and execute a real BPF trade on the high index.
     env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
@@ -35613,9 +36012,9 @@ fn v16_bpf_5000_asset_market_trades_with_bounded_cu() {
     );
 
     println!(
-        "v16 5000-asset market: account_len={actual_account_len} bytes ({:.2} MB), \
+        "v16 10MiB market: assets={N}, account_len={actual_account_len} bytes ({:.2} MiB), \
          trade on asset[{TRADED}] BPF CU={trade_cu}",
-        actual_account_len as f64 / 1_000_000.0
+        actual_account_len as f64 / (1024.0 * 1024.0)
     );
 
     // The trade actually opened a balanced position on the HIGH index.
@@ -35640,7 +36039,7 @@ fn v16_bpf_5000_asset_market_trades_with_bounded_cu() {
         -((10 * POS_SCALE) as i128),
         "short leg basis"
     );
-    // Conservation across the 8.57 MB market.
+    // Conservation across the near-10 MiB market.
     assert_eq!(
         gt.vault as u64,
         env.token_amount(env.vault),
@@ -35648,15 +36047,15 @@ fn v16_bpf_5000_asset_market_trades_with_bounded_cu() {
     );
     assert!(
         gt.vault >= gt.c_tot + gt.insurance,
-        "senior conservation at N=5000"
+        "senior conservation at N={N}"
     );
 
-    // HEADLINE: per-trade CU is O(1) in N — a 5,000-asset trade costs about the same as a small-N
+    // HEADLINE: per-trade CU is O(1) in N — a 5,834-asset trade costs about the same as a small-N
     // trade and is FAR under the 1.4M tx limit. Bound it well below the single-trade guardrail.
-    assert_cu_within("5000-asset trade", trade_cu, TRADE_CU_LIMIT);
+    assert_cu_within("10MiB >5000-asset trade", trade_cu, TRADE_CU_LIMIT);
     assert!(
         trade_cu < 1_400_000,
-        "5000-asset trade CU {trade_cu} is under the 1.4M tx limit"
+        "10MiB >5000-asset trade CU {trade_cu} is under the 1.4M tx limit"
     );
 }
 
