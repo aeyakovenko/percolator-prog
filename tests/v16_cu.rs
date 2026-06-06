@@ -10010,6 +10010,15 @@ fn v16_bpf_policy_authority_and_base_unit_tags_are_bounded_and_persist() {
     let (cfg, _) = env.market_state();
     assert_eq!(cfg.liquidation_cranker_fee_share_bps, 1_234);
 
+    let maintenance_cu = env.update_maintenance_fee_policy_with_cu(2_345);
+    assert_cu_within(
+        "UpdateMaintenanceFeePolicy",
+        maintenance_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (cfg, _) = env.market_state();
+    assert_eq!(cfg.maintenance_cranker_fee_share_bps, 2_345);
+
     let backing_cu = env.update_backing_fee_policy_with_cu(0, 77, 5_000);
     assert_cu_within("UpdateBackingFeePolicy", backing_cu, CUSTODY_CU_LIMIT);
     let (cfg, _) = env.market_state();
