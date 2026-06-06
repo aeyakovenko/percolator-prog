@@ -205,6 +205,26 @@ fn spl_token_program_path() -> PathBuf {
     panic!("could not find LiteSVM SPL Token BPF under {registry_src:?}");
 }
 
+fn associated_token_program_path() -> PathBuf {
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+            home.push(".cargo");
+            home
+        });
+    let registry_src = cargo_home.join("registry/src");
+    for registry in std::fs::read_dir(&registry_src).expect("registry/src") {
+        let registry = registry.expect("registry entry").path();
+        let candidate =
+            registry.join("litesvm-0.1.0/src/spl/programs/spl_associated_token_account-1.1.1.so");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    panic!("could not find LiteSVM Associated Token BPF under {registry_src:?}");
+}
+
 fn matcher_delegate_key(
     program_id: &Pubkey,
     market: &Pubkey,
@@ -263,15 +283,18 @@ fn make_mint_data() -> Vec<u8> {
 
 /// The canonical vault address the wrapper now pins to (F-VAULT-FRAG fix): the Associated Token
 /// Account of the vault_authority PDA for the given mint.
+fn associated_token_program_id() -> Pubkey {
+    solana_sdk::pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+}
+
 fn canonical_vault_ata(vault_authority: Pubkey, mint: Pubkey) -> Pubkey {
-    let ata_program = solana_sdk::pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
     Pubkey::find_program_address(
         &[
             vault_authority.as_ref(),
             spl_token::ID.as_ref(),
             mint.as_ref(),
         ],
-        &ata_program,
+        &associated_token_program_id(),
     )
     .0
 }
@@ -3148,11 +3171,337 @@ fn send_raw_tx(
         .map_err(|e| format!("{e:?}"))
 }
 
+fn send_raw_ixs(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    instructions: Vec<Instruction>,
+    extra_signers: &[&Keypair],
+) -> Result<u64, String> {
+    let mut signer_refs = Vec::with_capacity(1 + extra_signers.len());
+    signer_refs.push(payer);
+    signer_refs.extend_from_slice(extra_signers);
+    let tx = Transaction::new_signed_with_payer(
+        &instructions,
+        Some(&payer.pubkey()),
+        &signer_refs,
+        svm.latest_blockhash(),
+    );
+    svm.send_transaction(tx)
+        .map(|meta| meta.compute_units_consumed)
+        .map_err(|e| format!("{e:?}"))
+}
+
+fn system_create_account_for_test(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    account: &Keypair,
+    data_len: usize,
+    owner: Pubkey,
+) -> u64 {
+    send_raw_tx(
+        svm,
+        payer,
+        system_instruction::create_account(
+            &payer.pubkey(),
+            &account.pubkey(),
+            1_000_000_000,
+            data_len as u64,
+            &owner,
+        ),
+        &[account],
+    )
+    .expect("system create account")
+}
+
+fn create_ata_for_test(svm: &mut LiteSVM, payer: &Keypair, wallet: Pubkey, mint: Pubkey) -> Pubkey {
+    let ata = Pubkey::find_program_address(
+        &[wallet.as_ref(), spl_token::ID.as_ref(), mint.as_ref()],
+        &associated_token_program_id(),
+    )
+    .0;
+    send_raw_tx(
+        svm,
+        payer,
+        Instruction {
+            program_id: associated_token_program_id(),
+            accounts: vec![
+                AccountMeta::new(payer.pubkey(), true),
+                AccountMeta::new(ata, false),
+                AccountMeta::new_readonly(wallet, false),
+                AccountMeta::new_readonly(mint, false),
+                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(solana_sdk::sysvar::rent::ID, false),
+            ],
+            data: vec![],
+        },
+        &[],
+    )
+    .expect("create associated token account");
+    ata
+}
+
 fn assert_cu_within(label: &str, cu: u64, limit: u64) {
     assert!(
         cu <= limit,
         "{label} consumed {cu} CU, above the {limit} CU guardrail"
     );
+}
+
+#[test]
+fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
+    let mut svm = LiteSVM::new();
+    let program_id = percolator_prog::id();
+    svm.add_program(
+        program_id,
+        &std::fs::read(program_path()).expect("read BPF"),
+    );
+    svm.add_program(
+        spl_token::ID,
+        &std::fs::read(spl_token_program_path()).expect("read token BPF"),
+    );
+    svm.add_program(
+        associated_token_program_id(),
+        &std::fs::read(associated_token_program_path()).expect("read ATA BPF"),
+    );
+
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    let user = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+    svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
+    svm.airdrop(&user.pubkey(), 1_000_000_000).unwrap();
+
+    let mint = Keypair::new();
+    send_raw_ixs(
+        &mut svm,
+        &payer,
+        vec![
+            system_instruction::create_account(
+                &payer.pubkey(),
+                &mint.pubkey(),
+                1_000_000_000,
+                Mint::LEN as u64,
+                &spl_token::ID,
+            ),
+            spl_token::instruction::initialize_mint(
+                &spl_token::ID,
+                &mint.pubkey(),
+                &admin.pubkey(),
+                None,
+                0,
+            )
+            .unwrap(),
+        ],
+        &[&mint],
+    )
+    .expect("create and initialize mint");
+
+    let market = Keypair::new();
+    let params = V16CuMarketParams::default();
+    system_create_account_for_test(
+        &mut svm,
+        &payer,
+        &market,
+        state::market_account_len_for_capacity(params.max_portfolio_assets as usize).unwrap(),
+        program_id,
+    );
+    let vault_authority =
+        Pubkey::find_program_address(&[b"vault", market.pubkey().as_ref()], &program_id).0;
+    let vault = create_ata_for_test(&mut svm, &payer, vault_authority, mint.pubkey());
+    assert_eq!(
+        vault,
+        canonical_vault_ata(vault_authority, mint.pubkey()),
+        "ATA program created the canonical vault account"
+    );
+    send_tx(
+        &mut svm,
+        program_id,
+        &payer,
+        ProgInstruction::InitMarket {
+            max_portfolio_assets: params.max_portfolio_assets,
+            h_min: params.h_min,
+            h_max: params.h_max,
+            initial_price: params.initial_price,
+            min_nonzero_mm_req: params.min_nonzero_mm_req,
+            min_nonzero_im_req: params.min_nonzero_im_req,
+            maintenance_margin_bps: params.maintenance_margin_bps,
+            initial_margin_bps: params.initial_margin_bps,
+            max_trading_fee_bps: params.max_trading_fee_bps,
+            trade_fee_base_bps: params.trade_fee_base_bps,
+            liquidation_fee_bps: params.liquidation_fee_bps,
+            liquidation_fee_cap: params.liquidation_fee_cap,
+            min_liquidation_abs: params.min_liquidation_abs,
+            max_price_move_bps_per_slot: params.max_price_move_bps_per_slot,
+            max_accrual_dt_slots: params.max_accrual_dt_slots,
+            max_abs_funding_e9_per_slot: params.max_abs_funding_e9_per_slot,
+            min_funding_lifetime_slots: params.min_funding_lifetime_slots,
+            max_account_b_settlement_chunks: params.max_account_b_settlement_chunks,
+            max_bankrupt_close_chunks: params.max_bankrupt_close_chunks,
+            max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots,
+            public_b_chunk_atoms: params.public_b_chunk_atoms,
+            maintenance_fee_per_slot: params.maintenance_fee_per_slot,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new_readonly(mint.pubkey(), false),
+        ],
+        &[&admin],
+    )
+    .expect("init market from system-created account");
+
+    let portfolio = Keypair::new();
+    system_create_account_for_test(
+        &mut svm,
+        &payer,
+        &portfolio,
+        state::portfolio_account_len_for_market_slots(params.max_portfolio_assets as usize)
+            .unwrap(),
+        program_id,
+    );
+    send_tx(
+        &mut svm,
+        program_id,
+        &payer,
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(user.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new(portfolio.pubkey(), false),
+        ],
+        &[&user],
+    )
+    .expect("init portfolio from system-created account");
+
+    let user_ata = create_ata_for_test(&mut svm, &payer, user.pubkey(), mint.pubkey());
+    let admin_ata = create_ata_for_test(&mut svm, &payer, admin.pubkey(), mint.pubkey());
+    send_raw_tx(
+        &mut svm,
+        &payer,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &mint.pubkey(),
+            &user_ata,
+            &admin.pubkey(),
+            &[],
+            123,
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .expect("mint user collateral");
+    send_raw_tx(
+        &mut svm,
+        &payer,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &mint.pubkey(),
+            &admin_ata,
+            &admin.pubkey(),
+            &[],
+            77,
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .expect("mint backing collateral");
+
+    send_tx(
+        &mut svm,
+        program_id,
+        &payer,
+        ProgInstruction::Deposit { amount: 123 },
+        vec![
+            AccountMeta::new(user.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new(portfolio.pubkey(), false),
+            AccountMeta::new(user_ata, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&user],
+    )
+    .expect("deposit through real SPL token accounts");
+
+    let ledger = Keypair::new();
+    system_create_account_for_test(
+        &mut svm,
+        &payer,
+        &ledger,
+        state::backing_domain_ledger_account_len(),
+        program_id,
+    );
+    send_tx(
+        &mut svm,
+        program_id,
+        &payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 77,
+            expiry_slot: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new(admin_ata, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger.pubkey(), false),
+        ],
+        &[&admin],
+    )
+    .expect("top up backing bucket through real SPL token accounts and ledger");
+    send_tx(
+        &mut svm,
+        program_id,
+        &payer,
+        ProgInstruction::SyncBackingDomainLedger { domain: 1 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new(ledger.pubkey(), false),
+        ],
+        &[&admin],
+    )
+    .expect("sync system-created backing ledger");
+
+    let user_token = TokenAccount::unpack(&svm.get_account(&user_ata).unwrap().data).unwrap();
+    let admin_token = TokenAccount::unpack(&svm.get_account(&admin_ata).unwrap().data).unwrap();
+    let vault_token = TokenAccount::unpack(&svm.get_account(&vault).unwrap().data).unwrap();
+    assert_eq!(user_token.amount, 0, "deposit drained the user source ATA");
+    assert_eq!(
+        admin_token.amount, 0,
+        "backing top-up drained the admin source ATA"
+    );
+    assert_eq!(
+        vault_token.amount, 200,
+        "canonical vault ATA received both SPL transfers"
+    );
+    assert_eq!(vault_token.owner, vault_authority);
+    assert_eq!(vault_token.mint, mint.pubkey());
+
+    let (cfg, group) = state::read_market(&svm.get_account(&market.pubkey()).unwrap().data)
+        .expect("read initialized market");
+    let account = state::read_portfolio(&svm.get_account(&portfolio.pubkey()).unwrap().data)
+        .expect("read initialized portfolio");
+    let ledger_state =
+        state::read_backing_domain_ledger(&svm.get_account(&ledger.pubkey()).unwrap().data)
+            .expect("read initialized backing ledger");
+    assert_eq!(cfg.collateral_mint, mint.pubkey().to_bytes());
+    assert_eq!(group.vault, 200);
+    assert_eq!(group.c_tot, 123);
+    assert_eq!(account.capital, 123);
+    assert_eq!(
+        group.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Fresh
+    );
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num,
+        77 * BOUND_SCALE
+    );
+    assert_eq!(ledger_state.total_principal_atoms, 77);
+    assert_eq!(ledger_state.total_deposited_atoms, 77);
 }
 
 fn init_independent_market_same_mint(
