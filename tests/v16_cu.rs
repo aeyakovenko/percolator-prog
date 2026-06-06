@@ -20799,6 +20799,104 @@ fn v16_attack_withdraw_insurance_domain_operator_gated() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
 
+// security.md sweep — live domain insurance has a two-key split. The insurance_authority can fund
+// the domain and recover terminal insurance after resolution; live domain withdrawals are gated to the
+// insurance_operator. This keeps the key split explicit instead of accidentally letting the funding
+// authority act as the hot withdrawal operator.
+#[test]
+fn v16_attack_live_domain_insurance_withdraw_uses_operator_not_authority() {
+    let mut env = V16CuEnv::new();
+    let insurance_authority = Keypair::new();
+    let insurance_operator = Keypair::new();
+    env.ensure_signer_account(insurance_operator.pubkey());
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        insurance_authority.pubkey(),
+        insurance_operator.pubkey(),
+        env.admin.pubkey(),
+        env.admin.pubkey(),
+    );
+    env.top_up_insurance_domain_with_authority(&insurance_authority, 2, 100);
+    let (_, group_before) = env.market_state();
+    assert_eq!(
+        group_before.insurance_domain_budget[2], 100,
+        "authority-funded domain makes the withdrawal check non-vacuous"
+    );
+
+    let authority_live_withdraw =
+        env.try_withdraw_insurance_domain_with_authority(&insurance_authority, 2, 40);
+    assert!(
+        authority_live_withdraw.is_err(),
+        "insurance_authority alone must not be the live domain withdrawal operator"
+    );
+    let (_, group_after_reject) = env.market_state();
+    assert_eq!(
+        group_after_reject.insurance_domain_budget[2], 100,
+        "rejected authority withdrawal leaves domain budget intact"
+    );
+    assert_eq!(
+        group_after_reject.insurance, group_before.insurance,
+        "rejected authority withdrawal leaves insurance intact"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        group_before.vault as u64,
+        "rejected authority withdrawal leaves real vault tokens intact"
+    );
+
+    let operator_dest = env.token_account(insurance_operator.pubkey(), 0);
+    let ledger = env.insurance_ledger_account();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceDomain {
+            domain: 2,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(insurance_operator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(operator_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&insurance_operator],
+    )
+    .expect("insurance_operator can live-withdraw the funded domain");
+    assert_eq!(
+        env.token_amount(operator_dest),
+        40,
+        "operator receives the live domain withdrawal"
+    );
+    let ledger_state = state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data)
+        .expect("operator withdrawal initializes the insurance ledger");
+    assert_eq!(
+        ledger_state.authority,
+        insurance_authority.pubkey().to_bytes(),
+        "domain withdrawal ledger is keyed to the cold insurance authority, not the hot operator"
+    );
+    assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+    let (_, group_after_operator) = env.market_state();
+    assert_eq!(group_after_operator.insurance_domain_budget[2], 60);
+    assert_eq!(
+        group_after_operator.insurance,
+        group_before.insurance - 40,
+        "operator withdrawal debits only the funded domain insurance"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        group_after_operator.vault as u64,
+        "engine vault accounting matches SPL vault after operator withdrawal"
+    );
+}
+
 // security.md sweep — RebalanceReduce owner gating (#6/#46): RebalanceReduce is OWNER-gated
 // self-service risk reduction (with_one_portfolio_view enforces owner signs + matches the portfolio).
 // A non-owner must NOT be able to force-reduce a victim's position (griefing); the owner may reduce

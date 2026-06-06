@@ -427,6 +427,12 @@ This section describes intent and operational ordering, not argument-by-argument
   - gated by the asset-0 insurance authority, with shutdown-drain cases for nonzero assets gated by
     `marketauth`; asset-0 shutdown/restart does not give `marketauth` a domain-insurance drain bypass
   - requires market resolved and all accounts closed
+- **WithdrawInsuranceDomain** (tag 57)
+  - live/recovery domain-scoped withdrawal from one funded domain budget
+  - gated by that domain's `insurance_operator`; `marketauth` can only use the shutdown-drain path
+    for nonzero assets after the shutdown timeout and after the asset is empty
+  - the domain `insurance_authority` funds the domain and owns terminal recovery accounting, but it
+    is not the hot live-withdrawal key unless it is also configured as the operator
 - **WithdrawInsuranceLimited** (tag 23)
   - disabled by default; `marketauth` must explicitly opt in with `UpdateInsurancePolicy`
   - rate-limited insurance withdrawal with per-market caps (`insurance_withdraw_max_bps`, `insurance_withdraw_cooldown_slots`)
@@ -502,10 +508,15 @@ Trade gating when the market is under-insured is handled **internally by the eng
 ### Insurance authorities
 The current wrapper has no `SetRiskThreshold` / insurance-floor instruction. Insurance extraction is split by authority and market mode:
 
-- a per-asset `insurance_authority` can call domain-scoped unbounded withdrawal only through the terminal/recovery gates for that domain.
+- a per-asset `insurance_operator` can call live domain-scoped withdrawal against that domain's
+  funded budget; `marketauth` can use the same tag only for nonzero-asset shutdown drain after the
+  exit timeout and once the asset is empty.
+- a per-asset `insurance_authority` funds the domain and recovers terminal insurance after full market
+  resolution; it is not the hot live domain-withdrawal key unless the asset config deliberately sets
+  authority and operator to the same pubkey.
 - the asset-0 `insurance_operator` can call live `WithdrawInsuranceLimited`, but only within the configured bps/cooldown/deposit-only policy and only through the healthy-market gate.
 
-This split is load-bearing: burning or delegating the live operator key does not grant the resolved unbounded withdrawal capability, and burning the resolved insurance authority does not bypass live limits.
+This split is load-bearing: burning or delegating the live operator key does not grant the resolved unbounded withdrawal capability, and holding the resolved insurance authority does not bypass live operator gating.
 
 ---
 
