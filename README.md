@@ -137,22 +137,23 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   (it's the insurance-redirect target) and that it **cannot be permissionlessly created** (it's created
   at `InitMarket`, not via `UpdateAssetLifecycle`).
 - **Each asset (0..N) has a cold-storage admin** that can **rotate that asset's other keys**
-  (insurance/operator/backing/oracle) and **can be burned (set to 0)** — a credibly admin-free asset
-  that can't be revived. **✅** For asset 0 this means the market admin can force-replace the shared
-  insurance operator/authority via `UpdateAssetAuthority`, while required domain authorities
-  themselves cannot be burned to zero.
+  (insurance/operator/backing/oracle), **shut down/restart that asset after the exit+empty gates**,
+  and **can be burned (set to 0)** — a credibly admin-free asset that can't be locally revived after
+  shutdown. **✅** For asset 0 this means the market admin starts as the asset-0 admin and can
+  force-replace the shared insurance operator/authority via `UpdateAssetAuthority`, while required
+  domain authorities themselves cannot be burned to zero.
 - **One market-level key: `marketauth`.** **✅** All market-level governance collapses into a single
   `WrapperConfigV16.marketauth` key (it replaced the former separate `admin` / `asset_authority` /
   `base_unit_authority`). `marketauth` is the only key that can: **create market 0** (`InitMarket`),
   **create/retire assets 1..N and set the permissionless-create-fee policy**, **safely force-shutdown
   any asset including asset 0** (`ASSET_ACTION_SHUTDOWN` → RECOVERY with the `force_close_delay_slots`
-  exit window so traders can exit — a non-`marketauth` signer is rejected), **restart asset 0 after it
-  is empty** (`RestartAsset0Oracle`; asset-0 authorities and insurance budgets persist), **resolve/close
-  the market** (`ResolveMarket`/`CloseSlab`), **market policies**, and **rotate/swap the base-unit
-  mint**. It is rotated via `UpdateAuthority { new_pubkey }` (current `marketauth` signs and the
-  non-zero replacement co-signs; burn-to-zero is rejected). Everything else —
-  insurance/operator/backing/oracle on **every** asset including 0 — is per-asset (`asset_admin` +
-  `UpdateAssetAuthority`), never `marketauth`.
+  exit window so traders can exit), **resolve/close the market** (`ResolveMarket`/`CloseSlab`),
+  **market policies**, and **rotate/swap the base-unit mint**. It is rotated via
+  `UpdateAuthority { new_pubkey }` (current `marketauth` signs and the non-zero replacement co-signs;
+  burn-to-zero is rejected). Everything else — restart, insurance/operator/backing/oracle on
+  **every** asset including 0 — is per-asset (`asset_admin` + `UpdateAssetAuthority`), never a separate
+  marketauth-only path. `marketauth` can restart an asset only while it is also that asset's
+  `asset_admin` (the asset-0 bootstrap state).
 - **Each other asset key can rotate itself; only `asset_admin` can be set to 0.** **✅** (a domain
   authority self-rotates even after the asset admin is burned; required domain authorities cannot be
   burned). All verified by
@@ -165,22 +166,25 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   is fully drained; the abandoned-market path is the permissionless-resolve fallback
   (`v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free`, bounded + oracle-free).
 - **The `marketauth` key can force-shutdown assets 0..N without rugging traders** — `ASSET_ACTION_SHUTDOWN`
-  is gated on `marketauth` (a non-`marketauth` signer is rejected); it moves the asset to RECOVERY with
-  a frozen mark, and the wind-down force-close is gated behind `force_close_delay_slots` so there is an
-  **exit window**. **✅**
+  accepts either `marketauth` (global liveness) or that asset's `asset_admin` (local shutdown); any
+  other signer is rejected. It moves the asset to RECOVERY with a frozen mark, and the wind-down
+  force-close is gated behind `force_close_delay_slots` so there is an **exit window**. **✅**
   `v16_attack_force_shutdown_timeout_lets_traders_exit_before_close` asserts shutdown → RECOVERY,
   force-close **rejects before** the delay and **succeeds after**; plus
   `v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot` and
   `v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts` cover nonzero assets and
   asset 0 respectively; `v16_attack_force_close_healthy_asset_rejected` covers the live-asset boundary.
-- **Asset 0 is restartable but not reusable.** Ordinary `UpdateAssetLifecycle { action: RETIRE,
-  asset_index: 0 }` rejects, so asset 0 is never returned to the permissionless reusable-slot pool.
-  Once asset 0 is in RECOVERY and every asset-0 position/loss state is gone, `RestartAsset0Oracle`
-  atomically retires the old asset-0 market id, activates a fresh asset-0 market id at the supplied
-  initial price, preserves asset-0 `asset_admin` / insurance authority / insurance operator / backing
-  authority / oracle authority, and preserves the funded asset-0 insurance-domain budgets. The restarted
-  asset can trade normally, and new legs bind to the new monotonic `market_id`. **✅**
-  (`v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts`.)
+- **Asset oracle restart is uniform; asset 0 is restartable but not reusable.** Ordinary
+  `UpdateAssetLifecycle { action: RETIRE, asset_index: 0 }` rejects, so asset 0 is never returned to
+  the permissionless reusable-slot pool. Once any asset 0..N is in RECOVERY and every position/loss plus
+  value-bearing source/backing/reservation state for that asset is gone,
+  `RestartAssetOracle { asset_index, ... }` signed by that asset's `asset_admin` atomically retires the old market id,
+  activates a fresh market id at the supplied initial price, preserves that asset's authority keys and
+  funded insurance-domain budgets, and returns the asset to ACTIVE. New legs bind to the new monotonic
+  `market_id`; stale legs cannot leak through restart. **✅**
+  (`v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts`,
+  `v16_bpf_restart_asset_oracle_is_uniform_for_local_asset_admins`,
+  `v16_attack_restart_asset_oracle_rejects_backing_state_without_mutation`.)
 - **No trader can block cleanup — the timeout guarantees liveness as well as safety.** The same
   `force_close_delay_slots` gate is two-sided: **before** it elapses it protects traders (exit
   window, above); **after** it elapses the wind-down force-close becomes **permissionless** — any
@@ -354,13 +358,14 @@ This section describes intent and operational ordering, not argument-by-argument
   - appends/reactivates/retires assets 1..N, including permissionless create/reuse when the configured
     create fee is nonzero
   - `ASSET_ACTION_SHUTDOWN` moves any asset 0..N to RECOVERY at a frozen mark, with force-close blocked
-    until `force_close_delay_slots` elapses
-  - ordinary `RETIRE` rejects `asset_index = 0`; asset 0 is restarted only through tag 69
-- **RestartAsset0Oracle** (tag 69)
-  - `marketauth`-signed asset-0-only restart path after asset 0 is already RECOVERY and empty
-  - atomically retires the old asset-0 market id, activates a fresh asset-0 market id at the supplied
-    initial price, preserves asset-0 authority keys and funded asset-0 insurance-domain budgets, then
-    returns asset 0 to ACTIVE so normal trading can resume
+    until `force_close_delay_slots` elapses; signer is `marketauth` or that asset's `asset_admin`
+  - ordinary `RETIRE` rejects `asset_index = 0`; asset 0 is restarted, not reused
+- **RestartAssetOracle** (tag 69)
+  - `RestartAssetOracle { asset_index, now_slot, initial_price }`, signed by that asset's `asset_admin`
+  - after the target asset is already RECOVERY and empty of positions/loss plus value-bearing
+    source/backing/reservation state, atomically retires the old market id, activates a fresh market id
+    at the supplied initial price, preserves authority keys and funded insurance-domain budgets, then
+    returns the asset to ACTIVE so normal trading can resume
 
 ### Participant lifecycle
 - **InitPortfolio** (tag 2)
@@ -433,8 +438,8 @@ This section describes intent and operational ordering, not argument-by-argument
     for nonzero assets after the shutdown timeout and after the asset is empty
   - the asset `insurance_authority` funds the asset domains and owns terminal recovery accounting,
     but it is not the hot live-withdrawal key unless it is also configured as the operator
-  - uses the same API for asset 0 and permissionless assets 1..N; the only asset-0-specific recovery
-    API is `RestartAsset0Oracle`
+  - uses the same API for asset 0 and permissionless assets 1..N; asset 0's special recovery rule is
+    that ordinary `RETIRE` rejects it, so it can restart but cannot be returned to the reusable-slot pool
   - live/recovery markets only; resolved markets use tag 41
   - rejected while the market is unhealthy, lagged, h-lock/stress-active, or has negative senior residual
 
@@ -791,9 +796,9 @@ These are governance powers, not bugs:
 1. `UpdateAuthority { new_pubkey }`
    - rotate `marketauth` to an attacker key.
    - impact: governance capture.
-2. Policy updates / `UpdateMarketInitFeePolicy` / `UpdateBaseUnitMints` / asset create+retire+force-shutdown / asset-0 restart
+2. Policy updates / `UpdateMarketInitFeePolicy` / `UpdateBaseUnitMints` / asset create+retire+force-shutdown
    - change funding/cap policy knobs (within validation bounds), the create fee, the base-unit mint, and the asset set — all now under the one `marketauth` key.
-   - force-shutdown asset 0, then after it is empty call `RestartAsset0Oracle` to set the fresh asset-0 initial price and resume trading under the existing asset-0 authority keys.
+   - force-shutdown any asset including asset 0. Restart is not a separate marketauth power: it requires the target asset's `asset_admin`; marketauth can restart asset 0 only while it still holds the asset-0 admin role.
    - impact: economics/market shape can become unfavorable to users (force-shutdown still honors the trader exit window).
 3. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_ORACLE }` (while marketauth holds asset-0's `asset_admin`)
    - choose who can push asset-0 AuthMark/EwmaMark updates.
@@ -851,8 +856,8 @@ These are intended hard boundaries enforced in code and test suites:
    - covered by `v16_attack_force_close_healthy_asset_rejected` and `v16_attack_force_close_cannot_bypass_timeout_with_future_now_slot`.
 9. Cannot redirect user close payouts to arbitrary token accounts.
    - user withdrawal paths require owner signer and owner ATA checks; resolved-close payout routing is stored-owner bound.
-10. Cannot use ordinary asset retire/reuse on asset 0, restart asset 0 while positions/loss state remain, or use asset-0 shutdown as a domain-insurance drain bypass.
-   - covered by `v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts`.
+10. Cannot use ordinary asset retire/reuse on asset 0, restart any asset while positions/loss or value-bearing source/backing/reservation state remain, restart an asset without that asset's `asset_admin`, or use asset-0 shutdown as a domain-insurance drain bypass.
+   - covered by `v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts`, `v16_bpf_restart_asset_oracle_is_uniform_for_local_asset_admins`, and `v16_attack_restart_asset_oracle_rejects_backing_state_without_mutation`.
    - covered by `v16_attack_close_resolved_dest_validation`.
 10. Cannot close slab while funds/state remain.
     - requires zero vault, zero insurance, zero used accounts, zero dust.

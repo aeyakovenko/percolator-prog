@@ -690,6 +690,58 @@ impl V16CuEnv {
         .expect("update asset lifecycle as admin")
     }
 
+    fn try_shutdown_asset_with_authority(
+        &mut self,
+        authority: &Keypair,
+        asset_index: u16,
+        now_slot: u64,
+    ) -> Result<u64, String> {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+                asset_index,
+                now_slot,
+                initial_price: 0,
+                insurance_authority: authority.pubkey().to_bytes(),
+                insurance_operator: authority.pubkey().to_bytes(),
+                backing_bucket_authority: authority.pubkey().to_bytes(),
+                oracle_authority: authority.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    fn try_restart_asset_oracle_with_authority(
+        &mut self,
+        authority: &Keypair,
+        asset_index: u16,
+        now_slot: u64,
+        initial_price: u64,
+    ) -> Result<u64, String> {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::RestartAssetOracle {
+                asset_index,
+                now_slot,
+                initial_price,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     fn update_liquidation_fee_policy_with_cu(&mut self, cranker_share_bps: u16) -> u64 {
         send_tx(
             &mut self.svm,
@@ -5361,8 +5413,10 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
 
     env.svm.warp_to_slot(2);
     env.svm.expire_blockhash();
-    let before_non_marketauth_shutdown = env.svm.get_account(&env.market).unwrap().data;
-    let non_marketauth_shutdown = send_tx(
+    let stranger = Keypair::new();
+    env.ensure_signer_account(stranger.pubkey());
+    let before_stranger_shutdown = env.svm.get_account(&env.market).unwrap().data;
+    let stranger_shutdown = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
@@ -5371,25 +5425,25 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
             asset_index: 0,
             now_slot: 2,
             initial_price: 0,
-            insurance_authority: asset_admin.pubkey().to_bytes(),
-            insurance_operator: asset_admin.pubkey().to_bytes(),
-            backing_bucket_authority: asset_admin.pubkey().to_bytes(),
-            oracle_authority: asset_admin.pubkey().to_bytes(),
+            insurance_authority: stranger.pubkey().to_bytes(),
+            insurance_operator: stranger.pubkey().to_bytes(),
+            backing_bucket_authority: stranger.pubkey().to_bytes(),
+            oracle_authority: stranger.pubkey().to_bytes(),
         },
         vec![
-            AccountMeta::new(asset_admin.pubkey(), true),
+            AccountMeta::new(stranger.pubkey(), true),
             AccountMeta::new(env.market, false),
         ],
-        &[&asset_admin],
+        &[&stranger],
     );
     assert!(
-        non_marketauth_shutdown.is_err(),
-        "asset-0 shutdown must require the marketauth signature, not just asset-admin authority"
+        stranger_shutdown.is_err(),
+        "asset shutdown must require either marketauth or the local asset_admin"
     );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap().data,
-        before_non_marketauth_shutdown,
-        "rejected asset-0 shutdown by non-marketauth must leave market bytes unchanged"
+        before_stranger_shutdown,
+        "rejected asset-0 shutdown by stranger must leave market bytes unchanged"
     );
 
     env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 0, 2, 0);
@@ -5425,7 +5479,8 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::RestartAsset0Oracle {
+        ProgInstruction::RestartAssetOracle {
+            asset_index: 0,
             now_slot: 3,
             initial_price: 250,
         },
@@ -5491,30 +5546,12 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
     .expect("asset-0 admin rotates oracle before restart");
     env.svm.warp_to_slot(8);
     env.svm.expire_blockhash();
-    let restart_by_asset_admin = send_tx(
+    let restart_by_marketauth = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::RestartAsset0Oracle {
-            now_slot: 8,
-            initial_price: 250,
-        },
-        vec![
-            AccountMeta::new(asset_admin.pubkey(), true),
-            AccountMeta::new(env.market, false),
-        ],
-        &[&asset_admin],
-    );
-    assert!(
-        restart_by_asset_admin.is_err(),
-        "asset-0 restart is marketauth-only; asset admin rotates keys but does not restart"
-    );
-    env.svm.expire_blockhash();
-    let restart = send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::RestartAsset0Oracle {
+        ProgInstruction::RestartAssetOracle {
+            asset_index: 0,
             now_slot: 8,
             initial_price: 250,
         },
@@ -5525,8 +5562,28 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         &[&marketauth],
     );
     assert!(
+        restart_by_marketauth.is_err(),
+        "marketauth may force-shutdown asset 0 but cannot restart after asset_admin is rotated away"
+    );
+    env.svm.expire_blockhash();
+    let restart = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::RestartAssetOracle {
+            asset_index: 0,
+            now_slot: 8,
+            initial_price: 250,
+        },
+        vec![
+            AccountMeta::new(asset_admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&asset_admin],
+    );
+    assert!(
         restart.is_ok(),
-        "marketauth restarts empty asset 0: {restart:?}"
+        "local asset_admin restarts empty asset 0: {restart:?}"
     );
     let restarted_data = env.svm.get_account(&env.market).unwrap().data;
     let (restarted_cfg, restarted_group) = state::read_market(&restarted_data).unwrap();
@@ -5547,7 +5604,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
     assert_eq!(
         market_engine_slot_bytes(&restarted_data, 0),
         bytemuck::bytes_of(&expected_asset0_slot),
-        "after RestartAsset0Oracle, the raw asset-0 engine slot bytes must match a canonical fresh active slot with only market_id/price/slot and preserved insurance budgets set"
+        "after RestartAssetOracle, the raw asset-0 engine slot bytes must match a canonical fresh active slot with only market_id/price/slot and preserved insurance budgets set"
     );
     let actual_changed_offsets = changed_byte_offsets(
         market_engine_slot_bytes(&clean_start_data, 0),
@@ -5634,6 +5691,142 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
     assert_eq!(
         env.market_state().1.assets[0].lifecycle,
         AssetLifecycleV16::Active
+    );
+}
+
+#[test]
+fn v16_bpf_restart_asset_oracle_is_uniform_for_local_asset_admins() {
+    let mut env = V16CuEnv::new();
+    let marketauth = env.admin.insecure_clone();
+    let asset0_admin = Keypair::new();
+    let creator = Keypair::new();
+    let creator_pubkey = creator.pubkey();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.try_update_per_asset_authority_with_cu(
+        &marketauth,
+        Some(&asset0_admin),
+        0,
+        processor::ASSET_AUTH_ADMIN,
+        asset0_admin.pubkey().to_bytes(),
+    )
+    .expect("asset-0 admin rotates to local key");
+
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&asset0_admin, 0, 2)
+        .expect("local asset-0 admin can shut down asset 0");
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+    assert!(
+        env.try_restart_asset_oracle_with_authority(&marketauth, 0, 3, 111)
+            .is_err(),
+        "marketauth cannot restart asset 0 after asset_admin is delegated"
+    );
+    env.svm.warp_to_slot(3);
+    env.try_restart_asset_oracle_with_authority(&asset0_admin, 0, 3, 111)
+        .expect("local asset-0 admin can restart empty asset 0");
+    let asset0_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(asset0_profile.asset_admin, asset0_admin.pubkey().to_bytes());
+    assert_eq!(env.market_state().1.assets[0].effective_price, 111);
+
+    let mut env = V16CuEnv::new();
+    let marketauth = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.update_market_init_fee_policy_with_cu(10);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        4,
+        200,
+        creator_pubkey,
+        creator_pubkey,
+        creator_pubkey,
+        creator_pubkey,
+        10,
+    );
+    let asset1_before = env.market_state().1.assets[1].market_id;
+    env.svm.warp_to_slot(5);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&creator, 1, 5)
+        .expect("permissionless asset creator/admin can shut down its own asset");
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+    assert!(
+        env.try_restart_asset_oracle_with_authority(&marketauth, 1, 6, 250)
+            .is_err(),
+        "marketauth can force-shutdown but cannot restart another admin's asset"
+    );
+    env.svm.warp_to_slot(6);
+    env.try_restart_asset_oracle_with_authority(&creator, 1, 6, 250)
+        .expect("permissionless asset admin can restart empty own asset");
+    let data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, group) = state::read_market(&data).unwrap();
+    let asset1_profile = state::read_asset_oracle_profile(&data, 1).unwrap();
+    assert_eq!(group.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(group.assets[1].effective_price, 250);
+    assert_ne!(
+        group.assets[1].market_id, asset1_before,
+        "restart assigns a fresh market id"
+    );
+    assert_eq!(asset1_profile.asset_admin, creator_pubkey.to_bytes());
+    assert_eq!(asset1_profile.oracle_authority, creator_pubkey.to_bytes());
+    assert_eq!(
+        market_engine_slot_bytes(&data, 1),
+        bytemuck::bytes_of(&canonical_active_engine_slot(
+            group.assets[1].market_id,
+            250,
+            6,
+            group.insurance_domain_budget[2],
+            group.insurance_domain_budget[3],
+        )),
+        "nonzero restart leaves a canonical fresh engine slot with only insurance budgets preserved",
+    );
+}
+
+#[test]
+fn v16_attack_restart_asset_oracle_rejects_backing_state_without_mutation() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.top_up_backing_bucket(0, 500, 1_000);
+    let funded = env.market_state().1;
+    assert!(
+        funded.source_backing_buckets[0].fresh_unliened_backing_num > 0,
+        "test precondition: asset-0 backing bucket is funded"
+    );
+
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&admin, 0, 2)
+        .expect("asset admin shuts down empty asset 0");
+    let before_restart = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let restart = env.try_restart_asset_oracle_with_authority(&admin, 0, 3, 150);
+    assert!(
+        restart.is_err(),
+        "restart must not wipe live backing/source-credit/reservation state"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_restart,
+        "rejected restart leaves the funded backing bucket and market bytes unchanged"
+    );
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[0].fresh_unliened_backing_num,
+        funded.source_backing_buckets[0].fresh_unliened_backing_num,
+        "funded backing bucket is still recoverable after rejected restart"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery
     );
 }
 
@@ -33838,8 +34031,8 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_backing() {
     );
 }
 
-// Product spec — force-shutdown with a timeout so traders can exit (no rug): the asset-0 admin can
-// shut down asset 1..N (ASSET_ACTION_SHUTDOWN -> RECOVERY with a frozen mark), but the permissionless
+// Product spec — force-shutdown with a timeout so traders can exit (no rug): marketauth can
+// shut down any asset (ASSET_ACTION_SHUTDOWN -> RECOVERY with a frozen mark), but the permissionless
 // force-close (which winds the asset down) is gated behind force_close_delay_slots. So there is a
 // window after shutdown during which the asset is NOT yet force-closed — traders can exit — and only
 // after the delay can the wind-down proceed. Asserts: shutdown -> RECOVERY; force-close REJECTS before
@@ -33861,8 +34054,8 @@ fn v16_attack_force_shutdown_timeout_lets_traders_exit_before_close() {
     env.deposit(&lb, pb, 1_000_000);
     env.trade_asset_with_cu(1, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
 
-    // GATE: only `marketauth` may force-shutdown a permissionless asset. A non-marketauth signer
-    // (here a fresh key that is not the init signer) is rejected before any state changes.
+    // GATE: only `marketauth` or the asset's local asset_admin may shut an asset down. A fresh key
+    // that is neither is rejected before any state changes.
     const SHUT: u64 = 10;
     env.svm.warp_to_slot(SHUT);
     env.svm.expire_blockhash();
@@ -33890,7 +34083,7 @@ fn v16_attack_force_shutdown_timeout_lets_traders_exit_before_close() {
     );
     assert!(
         stranger.is_err(),
-        "a non-marketauth signer must NOT be able to force-shutdown an asset"
+        "a signer that is neither marketauth nor asset_admin must NOT be able to force-shutdown an asset"
     );
     assert_eq!(
         env.market_state().1.assets[1].lifecycle,

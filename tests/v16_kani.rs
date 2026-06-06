@@ -630,21 +630,25 @@ fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v16_restart_asset0_oracle_decode_preserves_wire_fields() {
+fn kani_v16_restart_asset_oracle_decode_preserves_wire_fields() {
+    let asset_index: u16 = kani::any();
     let now_slot: u64 = kani::any();
     let initial_price: u64 = kani::any();
 
-    let data = Instruction::RestartAsset0Oracle {
+    let data = Instruction::RestartAssetOracle {
+        asset_index,
         now_slot,
         initial_price,
     }
     .encode();
 
     match Instruction::decode(&data).unwrap() {
-        Instruction::RestartAsset0Oracle {
+        Instruction::RestartAssetOracle {
+            asset_index: got_asset_index,
             now_slot: got_slot,
             initial_price: got_price,
         } => {
+            assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_slot, now_slot);
             assert_eq!(got_price, initial_price);
         }
@@ -653,7 +657,7 @@ fn kani_v16_restart_asset0_oracle_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset0_oracle() {
+fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset_oracle() {
     let asset_index: u16 = kani::any();
     let size_q: i128 = kani::any();
     let exec_price: u64 = kani::any();
