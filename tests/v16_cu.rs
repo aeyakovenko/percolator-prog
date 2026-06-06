@@ -29655,6 +29655,40 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
         "no self-reward paid into the victim account"
     );
 
+    env.svm.expire_blockhash();
+    let rejected_market_reward = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 30,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(so.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(s, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&so],
+    );
+    assert!(
+        rejected_market_reward.is_err(),
+        "liquidation reward portfolio must not alias the market slab"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "market-slab reward alias rejection leaves market byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&s).unwrap(),
+        short_before,
+        "market-slab reward alias rejection leaves liquidated account byte-identical"
+    );
+
     let cranker_cap_before = env.portfolio_state(c).capital;
     env.svm.expire_blockhash();
     let accepted = env.send(
