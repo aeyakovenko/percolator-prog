@@ -39089,3 +39089,42 @@ fn v16_attack_switchboard_stale_feed_rejected() {
         "a stale Switchboard feed must be rejected (OracleStale), not seed the oracle"
     );
 }
+
+// Fee-RATE evasion: execute_trade floors the caller-supplied fee_bps to the config base
+// (hybrid_trade_fee_bps_view: base = max(caller_fee_bps, cfg.trade_fee_base_bps), src/v16_program.rs).
+// A trader passing fee_bps=0 must still pay the config trade_fee_base_bps -- complements the exec_price
+// BASIS-evasion guard (v16_attack_tradenocpi_fee_cannot_be_evaded_via_exec_price). The default market is
+// manual-priced (no dynamic mark-externality fee), so the only fee source is the base via the floor.
+#[test]
+fn v16_attack_trade_caller_fee_bps_floored_to_config_base() {
+    let mut env = V16CuEnv::new();
+    env.update_trade_fee_policy_with_cu(500); // config base fee = 5%
+    let la = Keypair::new();
+    let pa = env.create_portfolio(&la);
+    let lb = Keypair::new();
+    let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    let ins0 = env.market_state().1.insurance;
+
+    // Trader passes fee_bps = 0 trying to evade the fee.
+    env.svm.expire_blockhash();
+    let r = env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    assert!(
+        r.is_ok(),
+        "fee_bps=0 must be FLOORED to the config base (not rejected): {r:?}"
+    );
+
+    let (_, g1) = env.market_state();
+    assert!(
+        g1.insurance > ins0,
+        "caller fee_bps=0 must be floored to trade_fee_base_bps (config base fee charged), not evaded; \
+         insurance {ins0} -> {}",
+        g1.insurance
+    );
+    assert_eq!(
+        g1.vault,
+        g1.c_tot + g1.insurance,
+        "exact conservation after the floored-fee trade"
+    );
+}
