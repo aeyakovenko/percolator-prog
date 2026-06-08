@@ -39509,3 +39509,46 @@ fn v16_attack_withdraw_rejected_when_resolve_matured() {
     );
     assert!(r.is_err(), "withdraw must reject once the market is resolve-matured (#66 solvency gate)");
 }
+
+// Per-asset oracle-authority isolation: PushAuthMark validates the signer against THE TARGET ASSET's
+// oracle_authority (handle_push_auth_mark reads asset_index's profile -> domain_authorities_from_profile ->
+// expect_live_authority, v16_program ~10188). A key that is a *valid* oracle_authority for asset 1 must NOT be
+// able to push asset 0's mark. Distinct from v16_attack_non_authority_cannot_push_auth_mark (random key): a
+// wrong-asset-index authority read would still reject a random key but WRONGLY ACCEPT asset-1's real authority.
+#[test]
+fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100); // asset 0 auth-mark, oracle_authority = admin
+    // Activate asset 1 with a DISTINCT oracle_authority A1 (a real per-asset authority).
+    let a1 = Keypair::new();
+    env.ensure_signer_account(a1.pubkey());
+    env.activate_asset_with_authorities(1, 1, 100, a1.pubkey(), a1.pubkey(), a1.pubkey(), a1.pubkey());
+
+    // ATTACK: A1 (asset-1's oracle_authority) pushes ASSET 0's mark -> reject (per-asset isolation).
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    let r = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 2, mark_e6: 9_999_999 },
+        vec![AccountMeta::new(a1.pubkey(), true), AccountMeta::new(env.market, false)],
+        &[&a1],
+    );
+    assert!(r.is_err(), "asset-1's oracle_authority must NOT push asset-0's mark (per-asset isolation)");
+    assert_eq!(env.market_state().1.assets[0].effective_price, 100, "asset-0 mark unchanged by cross-asset push");
+
+    // CONTROL: asset-0's own authority (admin) pushes asset 0 -> accepted (proves the rejection was the
+    // per-asset authority gate, not an unrelated failure).
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 2, mark_e6: 150 },
+        vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(env.market, false)],
+        &[&admin],
+    );
+    assert!(ok.is_ok(), "asset-0's own authority pushes asset-0 (proves the rejection was the per-asset gate): {ok:?}");
+}
