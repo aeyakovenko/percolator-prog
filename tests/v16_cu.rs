@@ -38953,3 +38953,22 @@ fn v16_attack_push_ewma_mark_same_slot_does_not_compound() {
         "advancing a slot resumes EWMA movement: {m3} vs {m2}"
     );
 }
+
+#[test]
+fn v16_audit_per_asset_slot_growth_within_realloc_limit() {
+    // Solana caps a single account realloc at MAX_PERMITTED_DATA_INCREASE = 10_240 bytes per tx.
+    // A permissionless append grows the market by exactly one asset slot (asset_index == configured_slots).
+    // If one slot exceeds the cap, the realloc fails and permissionless append is BROKEN on mainnet.
+    const MAX_PERMITTED_DATA_INCREASE: usize = 10_240;
+    let l1 = state::market_account_len_for_capacity(1).unwrap();
+    let l2 = state::market_account_len_for_capacity(2).unwrap();
+    let l3 = state::market_account_len_for_capacity(3).unwrap();
+    let per_slot_12 = l2 - l1;
+    let per_slot_23 = l3 - l2;
+    println!("cap1={l1} cap2={l2} cap3={l3} per_slot(1->2)={per_slot_12} per_slot(2->3)={per_slot_23}");
+    assert!(
+        per_slot_12 <= MAX_PERMITTED_DATA_INCREASE && per_slot_23 <= MAX_PERMITTED_DATA_INCREASE,
+        "one asset slot grows the market by {per_slot_12}/{per_slot_23} bytes > {MAX_PERMITTED_DATA_INCREASE} \
+         (MAX_PERMITTED_DATA_INCREASE) -> a permissionless append's realloc would fail on mainnet (append DoS)"
+    );
+}
