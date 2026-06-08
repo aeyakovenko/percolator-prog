@@ -39164,3 +39164,36 @@ fn v16_bpf_oracle_invert_produces_correct_reciprocal() {
         cfg.oracle_target_price_e6
     );
 }
+
+// Oracle composite cross-rate VALUE: DIVIDE-leg flags compute leg0/(leg1*leg2) via sequential
+// compose (acc*1e6/leg). Existing 3-leg tests only assert mark > 0 (run_hybrid_fresh_oracle_trade_case)
+// or clock/slot -- not the composed VALUE. A wrong compose formula/scaling would mis-price every
+// cross-rate market with a wrong-but-nonzero mark. Clean exact case: 6 / (2 * 3) = 1.00.
+#[test]
+fn v16_bpf_oracle_composite_divide_legs_produce_correct_cross_rate() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 10, 1_000);
+    let feeds = [[0xd1u8; 32], [0xd2u8; 32], [0xd3u8; 32]];
+    let leg0 = env.set_pyth_price(&feeds[0], 6_000_000, -6, 1_000); // $6
+    let leg1 = env.set_pyth_price(&feeds[1], 2_000_000, -6, 1_000); // $2 (divisor)
+    let leg2 = env.set_pyth_price(&feeds[2], 3_000_000, -6, 1_000); // $3 (divisor)
+    env.try_configure_hybrid_with_cu(
+        3,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        feeds,
+        &[leg0, leg1, leg2],
+        10,
+        1_000,
+        0,
+        0,
+        3,
+    )
+    .expect("configure 3-leg divide composite");
+    let (cfg, _g) = env.market_state();
+    // leg0 / (leg1 * leg2) in e6 = 6 / (2*3) = 1.00 = 1_000_000.
+    assert_eq!(
+        cfg.oracle_target_price_e6, 1_000_000,
+        "composite cross-rate must be leg0/(leg1*leg2) = 6/(2*3) = 1.00, got {}",
+        cfg.oracle_target_price_e6
+    );
+}
