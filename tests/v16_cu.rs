@@ -27344,6 +27344,61 @@ fn v16_attack_live_insurance_withdraw_rejects_exposed_target_effective_lag() {
     );
 }
 
+// security.md sweep — live insurance withdrawal must reject while insurance is still protecting
+// unresolved loss (SOL-021/SOL-022 terminal/encumbered gating). live_domain_withdraw_health_or_shutdown
+// _view (v16_program 4812) blocks WithdrawInsuranceAsset on a live market whenever bankruptcy_hlock_active
+// / threshold_stress_active / loss_stale_active / recovery_reason is set — exactly the states where the
+// fund is the users' backstop for in-flight loss/bankruptcy work. If an operator could drain insurance
+// then, users lose their protection (LOF). The exposed target/effective lag branch is covered by
+// v16_attack_live_insurance_withdraw_rejects_exposed_target_effective_lag; the DISTINCT stress/h-lock/
+// loss-stale OR-branch (4822-4831) was untested. This sets each flag on an otherwise-healthy FLAT market
+// (where the same withdrawal demonstrably succeeds) and asserts the withdrawal rejects with insurance +
+// domain budget byte-unchanged — proving the stress flag is the sole blocker (non-vacuous).
+#[test]
+fn v16_attack_live_insurance_withdraw_rejects_while_stressed_or_hlocked() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 24);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100_000_000);
+    env.enable_live_insurance_withdrawal();
+    env.top_up_insurance(1_000_000);
+    env.top_up_insurance_domain_with_authority(&env.admin.insecure_clone(), 0, 1_000_000);
+    let admin = env.admin.insecure_clone();
+
+    // Sanity: on a healthy, flat, lag-free market the live asset withdrawal succeeds — so any rejection
+    // below is caused specifically by the stress/h-lock flag, not by some unrelated precondition.
+    env.svm.expire_blockhash();
+    env.try_withdraw_insurance_asset_with_authority(&admin, 0, 100)
+        .expect("flat healthy live insurance withdrawal must succeed");
+
+    // Each engine "insurance still protecting loss" flag must independently block the withdrawal.
+    let cases: [(&str, fn(&mut MarketGroupV16, bool)); 3] = [
+        ("bankruptcy_hlock_active", |g, v| g.bankruptcy_hlock_active = v),
+        ("threshold_stress_active", |g, v| g.threshold_stress_active = v),
+        ("loss_stale_active", |g, v| g.loss_stale_active = v),
+    ];
+    for (label, set) in cases {
+        env.mutate_market(|_cfg, group| set(group, true));
+        let before = env.market_state().1;
+        env.svm.expire_blockhash();
+        let r = env.try_withdraw_insurance_asset_with_authority(&admin, 0, 100);
+        assert!(
+            r.is_err(),
+            "live WithdrawInsuranceAsset must reject while {label} is set (insurance protecting loss)"
+        );
+        let after = env.market_state().1;
+        assert_eq!(
+            after.insurance, before.insurance,
+            "rejected withdrawal under {label} must leave insurance untouched"
+        );
+        assert_eq!(
+            after.insurance_domain_budget[0], before.insurance_domain_budget[0],
+            "rejected withdrawal under {label} must leave the domain budget untouched"
+        );
+        // clear the flag so the next iteration tests its flag in isolation.
+        env.mutate_market(|_cfg, group| set(group, false));
+    }
+}
+
 #[test]
 fn v16_attack_unexposed_target_move_cannot_grief_live_insurance_withdrawals() {
     let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
