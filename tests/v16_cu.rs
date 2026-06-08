@@ -340,6 +340,31 @@ fn make_pyth_data(
     data
 }
 
+// Craft a Switchboard On-Demand PullFeed account (mirrors read_switchboard_price_e6 / SB_OFF_* in
+// src/v16_program.rs). Layout: 8-byte discriminator + fields at the documented absolute offsets.
+fn make_switchboard_data(
+    feed_hash: &[u8; 32],
+    value: i128,
+    std_dev: i128,
+    publish_time: i64,
+    num_samples: u8,
+    min_sample_size: u8,
+    result_slot: u64,
+) -> Vec<u8> {
+    const SB_LEN: usize = 3_208;
+    const DISC: [u8; 8] = [196, 27, 108, 196, 10, 215, 219, 40];
+    let mut data = vec![0u8; SB_LEN];
+    data[0..8].copy_from_slice(&DISC);
+    data[2120..2152].copy_from_slice(feed_hash); // SB_OFF_FEED_HASH = 8 + 2112
+    data[2215] = min_sample_size; // SB_OFF_MIN_SAMPLE_SIZE = 8 + 2207
+    data[2216..2224].copy_from_slice(&publish_time.to_le_bytes()); // SB_OFF_LAST_UPDATE_TIMESTAMP = 8 + 2208
+    data[2264..2280].copy_from_slice(&value.to_le_bytes()); // SB_OFF_RESULT_VALUE = 8 + 2256
+    data[2280..2296].copy_from_slice(&std_dev.to_le_bytes()); // SB_OFF_RESULT_STD_DEV = 8 + 2272
+    data[2360] = num_samples; // SB_OFF_RESULT_NUM_SAMPLES = 8 + 2352
+    data[2368..2376].copy_from_slice(&result_slot.to_le_bytes()); // SB_OFF_RESULT_SLOT = 8 + 2360
+    data
+}
+
 fn cu_ix() -> Instruction {
     ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)
 }
@@ -2047,6 +2072,31 @@ impl V16CuEnv {
                     lamports: 1_000_000_000,
                     data: make_pyth_data(feed, price, expo, conf, publish_time),
                     owner: oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        key
+    }
+
+    // Set a Switchboard On-Demand feed account (owned by the Switchboard program). The leg binds by
+    // ACCOUNT KEY (read_switchboard_price_e6 checks price_ai.key == expected_feed_key), so the returned
+    // pubkey is what goes into oracle_leg_feeds.
+    fn set_switchboard_price(
+        &mut self,
+        value: i128,
+        std_dev: i128,
+        publish_time: i64,
+    ) -> Pubkey {
+        let key = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_switchboard_data(&[0xABu8; 32], value, std_dev, publish_time, 3, 1, 1),
+                    owner: oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
                     executable: false,
                     rent_epoch: 0,
                 },
@@ -38970,5 +39020,72 @@ fn v16_audit_per_asset_slot_growth_within_realloc_limit() {
         per_slot_12 <= MAX_PERMITTED_DATA_INCREASE && per_slot_23 <= MAX_PERMITTED_DATA_INCREASE,
         "one asset slot grows the market by {per_slot_12}/{per_slot_23} bytes > {MAX_PERMITTED_DATA_INCREASE} \
          (MAX_PERMITTED_DATA_INCREASE) -> a permissionless append's realloc would fail on mainnet (append DoS)"
+    );
+}
+
+// Switchboard oracle source coverage: the entire read_switchboard_price_e6 path (owner check, key
+// binding, discriminator, sample-size, staleness, std-dev conf filter, /1e12 scale) had ZERO
+// integration tests (only the Pyth path was covered). This crafts a valid Switchboard On-Demand feed,
+// configures a single Switchboard leg, and asserts the read works end-to-end: the feed value/1e12 seeds
+// the asset-0 oracle target. A wrong offset/scale/owner would make ConfigureHybridOracle reject.
+#[test]
+fn v16_bpf_switchboard_oracle_feed_read_and_applied() {
+    let mut env = V16CuEnv::new();
+    env.svm.warp_to_slot(10);
+    let mut clock = env.svm.get_sysvar::<Clock>();
+    clock.unix_timestamp = 1_000;
+    env.svm.set_sysvar(&clock);
+    let now_unix = 1_000i64;
+
+    // out = value / SWITCHBOARD_RESULT_SCALE (1e12). Pick out == initial_price (100) to avoid any jump.
+    let out: i128 = 100;
+    let value: i128 = out * 1_000_000_000_000;
+    let sb = env.set_switchboard_price(value, 1, now_unix);
+
+    env.try_configure_hybrid_with_cu(
+        1,
+        0,
+        [sb.to_bytes(), [0u8; 32], [0u8; 32]],
+        &[sb],
+        10,
+        now_unix,
+        0,
+        0,
+        3,
+    )
+    .expect("configure 1-leg switchboard oracle (read must succeed)");
+
+    let (cfg, _g) = env.market_state();
+    assert_eq!(
+        cfg.oracle_target_price_e6, out as u64,
+        "switchboard feed value/1e12 must seed the oracle target end-to-end"
+    );
+}
+
+// Switchboard staleness gate: a feed whose last_update_timestamp is far in the past must be rejected
+// (read_switchboard_price_e6: age > max_staleness_secs -> OracleStale), same as the Pyth path.
+#[test]
+fn v16_attack_switchboard_stale_feed_rejected() {
+    let mut env = V16CuEnv::new();
+    env.svm.warp_to_slot(10);
+    let mut clock = env.svm.get_sysvar::<Clock>();
+    clock.unix_timestamp = 100_000;
+    env.svm.set_sysvar(&clock);
+    // publish_time = 1, authenticated now = 100_000 -> age ~100_000 >> max_staleness_secs -> stale.
+    let sb = env.set_switchboard_price(100 * 1_000_000_000_000, 1, 1);
+    let r = env.try_configure_hybrid_with_cu(
+        1,
+        0,
+        [sb.to_bytes(), [0u8; 32], [0u8; 32]],
+        &[sb],
+        10,
+        100_000,
+        0,
+        0,
+        3,
+    );
+    assert!(
+        r.is_err(),
+        "a stale Switchboard feed must be rejected (OracleStale), not seed the oracle"
     );
 }
