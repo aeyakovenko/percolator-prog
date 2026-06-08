@@ -39339,3 +39339,67 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
         "valid timer must be stored"
     );
 }
+
+// Backing-withdrawal stress gate (the insurance path is tested by v16_attack_live_insurance_withdraw_rejects_
+// exposed_target_effective_lag 27623; the BACKING path uses the SAME live_domain_withdraw_health_or_shutdown_
+// view gate but was untested). Scenario the user flagged: an LP withdrawing (fresh) backing from an exposed,
+// lagging asset -- i.e. escaping with uncommitted backing just before a loss socializes. Must reject.
+#[test]
+fn v16_attack_live_backing_withdraw_rejects_exposed_target_effective_lag() {
+    const INITIAL_MARK: u64 = 100_000_000;
+    const TARGET_MARK: u64 = 90_000_000;
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 24);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, INITIAL_MARK);
+    env.top_up_backing_bucket(0, 500_000, 1_000_000); // fund domain-0 (asset-0 long) backing
+    let backing0 = env.market_state().1.source_backing_buckets[0].fresh_unliened_backing_num;
+    assert!(backing0 > 0, "backing funded (non-vacuous)");
+
+    // Open OI so the asset is exposed (the target/effective lag matters).
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_portfolio = env.create_portfolio(&long_owner);
+    let short_portfolio = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_portfolio, 1_000_000_000);
+    env.deposit(&short_owner, short_portfolio, 1_000_000_000);
+    env.trade_with_cu(&long_owner, long_portfolio, &short_owner, short_portfolio, POS_SCALE as i128, INITIAL_MARK, 0);
+
+    // NON-VACUOUS: while healthy (no lag), the same backing withdrawal SUCCEEDS.
+    let admin = env.admin.insecure_clone();
+    let dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    env.withdraw_backing_bucket_to_admin_token_with_cu(dest, 0, 100);
+    let backing_after_healthy = env.market_state().1.source_backing_buckets[0].fresh_unliened_backing_num;
+    assert!(backing_after_healthy < backing0, "healthy backing withdrawal works (gate open when healthy)");
+
+    // Adverse mark move + crank -> exposed target/effective lag.
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, TARGET_MARK);
+    env.crank(long_portfolio, ProgInstruction::PermissionlessCrank {
+        action: 0, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0,
+    });
+    let g = env.market_state().1;
+    assert_ne!(g.assets[0].raw_oracle_target_price, g.assets[0].effective_price, "real target/effective lag created");
+
+    // ATTACK: withdraw backing during the exposed lag -> must REJECT (same health gate as insurance).
+    env.svm.expire_blockhash();
+    let r = send_tx(
+        &mut env.svm, env.program_id, &env.payer,
+        ProgInstruction::WithdrawBackingBucket { domain: 0, amount: 100 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(r.is_err(), "live WithdrawBackingBucket must reject while its exposed asset has target/effective lag");
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[0].fresh_unliened_backing_num,
+        backing_after_healthy,
+        "rejected backing withdrawal leaves the bucket byte-unchanged"
+    );
+}
