@@ -7696,6 +7696,45 @@ fn v16_attack_sync_maintenance_rejects_cross_market_cranker_reward() {
     );
 }
 
+// security.md sweep — SyncMaintenanceFee clock-spoof over-charge (Copenhagen SOL-001): SyncMaintenanceFee
+// is PERMISSIONLESS and takes a caller-supplied `now_slot`. A malicious cranker could pass a far-FUTURE
+// now_slot so elapsed_slots = now_slot - last_fee_slot explodes, charging maintenance_fee_per_slot *
+// huge and draining a VICTIM's capital (capped only at their remaining capital) far ahead of real time.
+// The wrapper must clamp now_slot to the real Clock slot (authenticated_slot_or_fallback, v16_program
+// 4676 -> Clock::get().slot). Existing maintenance tests all pass now_slot == real slot, so none proves
+// the spoofed slot is ignored; the only clock-spoof test (9689) targets PermissionlessCrank activation
+// timing, not the fee-draining path. This pins the fee path specifically: at real slot 10 a spoofed
+// now_slot of 1_000_000 must still charge only 58*10 = 580 (NOT 58*1_000_000 capped at capital), and
+// last_fee_slot must advance to 10, not the spoof.
+#[test]
+fn v16_attack_sync_maintenance_fee_ignores_spoofed_future_now_slot() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    env.deposit(&victim_owner, victim, 100_000_000);
+
+    env.svm.warp_to_slot(10);
+    env.svm.expire_blockhash();
+    // Attacker (no signer required — permissionless) syncs the victim's fee with a far-future slot.
+    let spoofed_now_slot = 1_000_000u64;
+    env.sync_maintenance_fee_with_cu(victim, None, spoofed_now_slot);
+
+    let v = env.portfolio_state(victim);
+    assert_eq!(
+        v.capital,
+        100_000_000 - 580,
+        "fee must be charged on the REAL slot (58*10=580), not the spoofed future slot"
+    );
+    assert_eq!(
+        v.last_fee_slot, 10,
+        "last_fee_slot must advance to the authenticated Clock slot, not the spoofed now_slot"
+    );
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault, g.c_tot + g.insurance, "conservation after fee sync");
+}
+
 #[test]
 fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
