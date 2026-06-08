@@ -12157,6 +12157,86 @@ fn v16_audit_permissionless_reuse_rejects_zero_insurance_authority() {
     );
 }
 
+// Coverage probe (Finding-G-adjacent): the RETIRE side of UpdateAssetLifecycle calls canonicalize_
+// retired_asset_slot_view (v16_program 8928), which REJECTS unless the slot's insurance_domain_budget
+// (long/short), spent, pending-loss-barrier, and backing utilization-earnings are ALL zero. If that
+// guard were missing, RETIRE-ing an asset with a funded insurance domain budget would STRAND that
+// value in a retired/reusable slot (withdrawable by nobody once retired, and inflating the aggregate
+// vs. withdrawable) -> CloseSlab anti-strand check bricks. Existing tests cover the RESTART side
+// (5817/5857); this covers the RETIRE side. Asserts: RETIRE rejects while funded (no mutation), and
+// succeeds once the budget is drained (proving the budget is the sole blocker).
+#[test]
+fn v16_attack_retire_rejects_funded_insurance_domain_budget() {
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(1);
+    let attacker = Keypair::new();
+    env.ensure_signer_account(attacker.pubkey());
+    env.svm.warp_to_slot(1);
+    // Permissionlessly append asset-1 with the attacker as all four domain authorities.
+    env.activate_permissionless_asset_with_fee(
+        &attacker, 1, 1, 100,
+        attacker.pubkey(), attacker.pubkey(), attacker.pubkey(), attacker.pubkey(), 1,
+    );
+    // Fund asset-1's long insurance domain (domain 2); attacker is its insurance_authority.
+    env.top_up_insurance_domain_with_authority(&attacker, 2, 5_000);
+    let (_, g_pre) = env.market_state();
+    assert!(g_pre.insurance_domain_budget[2] > 0, "asset-1 domain funded (non-vacuous)");
+
+    let admin = env.admin.insecure_clone();
+    let market = env.market;
+    let admin_key = admin.pubkey();
+    let retire_ix = |now_slot: u64| ProgInstruction::UpdateAssetLifecycle {
+        action: percolator_prog::processor::ASSET_ACTION_RETIRE,
+        asset_index: 1,
+        now_slot,
+        initial_price: 0,
+        insurance_authority: admin_key.to_bytes(),
+        insurance_operator: admin_key.to_bytes(),
+        backing_bucket_authority: admin_key.to_bytes(),
+        oracle_authority: admin_key.to_bytes(),
+    };
+    let retire_metas = || {
+        vec![
+            AccountMeta::new(admin_key, true),
+            AccountMeta::new(market, false),
+        ]
+    };
+
+    // marketauth RETIRE while the domain budget is funded -> must REJECT, no mutation.
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.warp_to_slot(3);
+    env.svm.expire_blockhash();
+    let retire = env.send(retire_ix(3), retire_metas(), &[&admin]);
+    assert!(
+        retire.is_err(),
+        "RETIRE must reject while the asset's insurance domain budget is funded (would strand it)"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected RETIRE must not mutate the market"
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Active,
+        "asset-1 stays Active after the rejected RETIRE"
+    );
+
+    // Drain the domain budget (the operator can), then RETIRE succeeds -> budget was the sole blocker.
+    env.svm.expire_blockhash();
+    env.try_withdraw_insurance_asset_with_authority(&attacker, 1, 5_000)
+        .expect("operator drains asset-1's domain budget");
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    let retire2 = env.send(retire_ix(4), retire_metas(), &[&admin]);
+    assert!(retire2.is_ok(), "RETIRE succeeds once the domain budget is drained: {retire2:?}");
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Retired,
+        "asset-1 retired after the budget is drained"
+    );
+}
+
 // Coverage probe (audit, Finding G): close_resolved_account_not_atomic charges an
 // accrued maintenance fee into group.insurance (handle_close_resolved passes
 // cfg.maintenance_fee_per_slot) but the wrapper does NOT credit any per-domain
