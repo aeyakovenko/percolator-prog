@@ -39403,3 +39403,55 @@ fn v16_attack_live_backing_withdraw_rejects_exposed_target_effective_lag() {
         "rejected backing withdrawal leaves the bucket byte-unchanged"
     );
 }
+
+// Asset-activation cooldown (anti-churn / anti-bloat) is engine-enforced (elapsed < asset_activation_cooldown_
+// slots -> LockActive, v16.rs ~4954) but UNGUARDED by tests -- v16_attack_market_exceeds_64_assets works AROUND
+// it (advances slots) rather than asserting the rejection. Without the cooldown an attacker could churn assets
+// rapidly (append/reuse) to bloat the slot count faster. Default cooldown = 1 slot.
+#[test]
+fn v16_attack_asset_activation_cooldown_enforced() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let price = 100u64;
+    let first = env.market_state().1.config.max_market_slots as u16; // next append index
+
+    // Append at `first` (slot 5) -> sets last_asset_activation_slot = 5, grows slots to first+1.
+    env.activate_asset(first, 5, price);
+    assert_eq!(env.market_state().1.config.max_market_slots as u16, first + 1, "first append grew slots");
+
+    let metas = vec![
+        AccountMeta::new(admin.pubkey(), true),
+        AccountMeta::new(env.market, false),
+    ];
+    let ix = |idx: u16, slot: u64| ProgInstruction::UpdateAssetLifecycle {
+        action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+        asset_index: idx,
+        now_slot: slot,
+        initial_price: price,
+        insurance_authority: admin.pubkey().to_bytes(),
+        insurance_operator: admin.pubkey().to_bytes(),
+        backing_bucket_authority: admin.pubkey().to_bytes(),
+        oracle_authority: admin.pubkey().to_bytes(),
+    };
+
+    // ATTACK: append the NEXT asset in the SAME slot 5 -> elapsed 0 < cooldown(1) -> reject (anti-churn).
+    env.svm.expire_blockhash();
+    let r_same = send_tx(&mut env.svm, env.program_id, &env.payer, ix(first + 1, 5), metas.clone(), &[&admin]);
+    assert!(r_same.is_err(), "same-slot activation within the cooldown must reject");
+    assert_eq!(
+        env.market_state().1.config.max_market_slots as u16,
+        first + 1,
+        "rejected within-cooldown activation must not add a slot"
+    );
+
+    // After the cooldown (>= 1 slot elapsed), the same activation succeeds.
+    env.svm.warp_to_slot(6);
+    env.svm.expire_blockhash();
+    let r_after = send_tx(&mut env.svm, env.program_id, &env.payer, ix(first + 1, 6), metas, &[&admin]);
+    assert!(r_after.is_ok(), "activation after the cooldown should succeed: {r_after:?}");
+    assert_eq!(
+        env.market_state().1.config.max_market_slots as u16,
+        first + 2,
+        "post-cooldown activation appended the asset"
+    );
+}
