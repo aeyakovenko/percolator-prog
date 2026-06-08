@@ -39263,3 +39263,79 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
     );
     assert!(r_zero.is_err(), "b_delta_budget == 0 must be rejected");
 }
+
+// ConfigurePermissionlessResolve gating + input bounds. Sets the resolve timer (too short -> premature
+// permissionless resolution winding users out on a brief oracle blip; absurd values -> stuck). The non-
+// admin gating wasn't tested (v16_attack_non_admin_cannot_resolve_or_configure covers ResolveMarket +
+// ConfigureAuthMark only), nor the stale_slots==0 / >MAX bounds.
+#[test]
+fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let market = env.market;
+    let metas = |signer: Pubkey| {
+        vec![
+            AccountMeta::new(signer, true),
+            AccountMeta::new(market, false),
+        ]
+    };
+
+    // ATTACK: a non-admin sets the resolve timer -> reject (marketauth-gated).
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+    env.svm.expire_blockhash();
+    let r_grief = env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 1_000,
+            force_close_delay_slots: 1_000,
+        },
+        metas(mallory.pubkey()),
+        &[&mallory],
+    );
+    assert!(
+        r_grief.is_err(),
+        "non-admin ConfigurePermissionlessResolve must reject (could force premature resolution)"
+    );
+
+    // INPUT BOUNDS (admin): stale_slots == 0 and > MAX rejected.
+    env.svm.expire_blockhash();
+    let r_zero = env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 0,
+            force_close_delay_slots: 1_000,
+        },
+        metas(admin.pubkey()),
+        &[&admin],
+    );
+    assert!(r_zero.is_err(), "stale_slots == 0 must reject");
+    env.svm.expire_blockhash();
+    let r_huge = env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 6_480_001,
+            force_close_delay_slots: 1_000,
+        },
+        metas(admin.pubkey()),
+        &[&admin],
+    );
+    assert!(
+        r_huge.is_err(),
+        "stale_slots > MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS must reject"
+    );
+
+    // LEGITIMATE: admin sets a valid timer -> ok, and it sticks.
+    env.svm.expire_blockhash();
+    let r_ok = env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 1_000,
+            force_close_delay_slots: 1_000,
+        },
+        metas(admin.pubkey()),
+        &[&admin],
+    );
+    assert!(r_ok.is_ok(), "admin valid ConfigurePermissionlessResolve should succeed: {r_ok:?}");
+    assert_eq!(
+        env.market_state().0.permissionless_resolve_stale_slots,
+        1_000,
+        "valid timer must be stored"
+    );
+}
