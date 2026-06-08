@@ -39197,3 +39197,69 @@ fn v16_bpf_oracle_composite_divide_legs_produce_correct_cross_rate() {
         cfg.oracle_target_price_e6
     );
 }
+
+// ForfeitRecoveryLeg owner-gating + input guard (sibling of v16_attack_rebalance_reduce_owner_gated, which
+// was tested while ForfeitRecoveryLeg was not). handle_forfeit_recovery_leg uses with_one_portfolio_view
+// (owner_must_sign=true), so a non-owner forfeiting a victim's recovery leg -- which would force the victim
+// to realize a loss -- must reject before any engine mutation. Also guards the b_delta_budget==0 reject.
+#[test]
+fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    let la = Keypair::new();
+    let pa = env.create_portfolio(&la);
+    let lb = Keypair::new();
+    let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q;
+    assert!(basis0 != 0, "la opened a position");
+    let (_, g0) = env.market_state();
+
+    // ATTACK: a non-owner forfeits la's recovery leg -> reject (owner mismatch, before engine).
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+    env.svm.expire_blockhash();
+    let r_grief = env.send(
+        ProgInstruction::ForfeitRecoveryLeg {
+            asset_index: 0,
+            b_delta_budget: 1_000,
+        },
+        vec![
+            AccountMeta::new(mallory.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(pa, false),
+        ],
+        &[&mallory],
+    );
+    assert!(
+        r_grief.is_err(),
+        "non-owner forfeit of a victim's recovery leg must reject"
+    );
+    assert_eq!(
+        env.portfolio_state(pa).legs[0].basis_pos_q,
+        basis0,
+        "victim's position untouched by rejected griefing forfeit"
+    );
+    assert_eq!(
+        env.market_state().1.vault,
+        g0.vault,
+        "vault unchanged by rejected griefing forfeit"
+    );
+
+    // INPUT GUARD: b_delta_budget == 0 rejected (checked before with_one_portfolio_view).
+    env.svm.expire_blockhash();
+    let r_zero = env.send(
+        ProgInstruction::ForfeitRecoveryLeg {
+            asset_index: 0,
+            b_delta_budget: 0,
+        },
+        vec![
+            AccountMeta::new(la.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(pa, false),
+        ],
+        &[&la],
+    );
+    assert!(r_zero.is_err(), "b_delta_budget == 0 must be rejected");
+}
