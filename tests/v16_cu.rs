@@ -39128,3 +39128,39 @@ fn v16_attack_trade_caller_fee_bps_floored_to_config_base() {
         "exact conservation after the floored-fee trade"
     );
 }
+
+// Oracle invert correctness: apply_transform computes price = 1e12 / raw when invert=1 (inverse pairs,
+// e.g. a BASE/QUOTE feed flipped to QUOTE/BASE). The zero-edge is covered (32090) but the happy-path
+// reciprocal VALUE was untested -- a wrong constant/formula would mis-price every inverse market.
+#[test]
+fn v16_bpf_oracle_invert_produces_correct_reciprocal() {
+    let mut env = V16CuEnv::new();
+    env.svm.warp_to_slot(10);
+    let mut clock = env.svm.get_sysvar::<Clock>();
+    clock.unix_timestamp = 1_000;
+    env.svm.set_sysvar(&clock);
+    let now_unix = 1_000i64;
+
+    // raw leg price = 2_000_000 (e6, "$2"); invert -> 1e12 / 2_000_000 = 500_000 ("$0.50" = 1/2).
+    let feed = [0x77u8; 32];
+    let leg = env.set_pyth_price(&feed, 2_000_000, -6, now_unix);
+    env.try_configure_hybrid_with_cu(
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[leg],
+        10,
+        now_unix,
+        1, // invert
+        0,
+        3,
+    )
+    .expect("configure inverted 1-leg oracle");
+
+    let (cfg, _g) = env.market_state();
+    assert_eq!(
+        cfg.oracle_target_price_e6, 500_000,
+        "invert must produce 1e12/raw = 1e12/2_000_000 = 500_000, got {}",
+        cfg.oracle_target_price_e6
+    );
+}
