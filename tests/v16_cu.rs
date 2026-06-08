@@ -7696,6 +7696,66 @@ fn v16_attack_sync_maintenance_rejects_cross_market_cranker_reward() {
     );
 }
 
+// OPEN BUG #113 — permissionless cross-asset maintenance-fee siphon.
+// credit_maintenance_fee_to_active_market_budgets_view (v16_program 5298) splits every maintenance
+// fee EQUALLY across all ACTIVE assets' insurance domains (base_share = amount/active_count, 5320)
+// with NO positions/activity requirement. A non-admin appends a do-nothing asset (itself as
+// insurance_operator) and captures 1/N of every honest trader's maintenance fee, then withdraws it
+// via WithdrawInsuranceAsset. SECURITY PROPERTY (currently VIOLATED): a parasitic zero-activity asset
+// must earn ZERO of the maintenance fee. This asserts the correct behavior, so it fails until #113 is
+// fixed (credit only the generating/OI-bearing asset). #[ignore] keeps the suite green; un-ignore on fix.
+#[test]
+#[ignore = "OPEN BUG #113: maintenance-fee siphon to parasitic asset; un-ignore when fixed"]
+fn v16_attack_bug113_maintenance_fee_siphon_to_parasitic_asset() {
+    // capacity 1 (asset-1 is appended at index == configured_slots, growing to 2), maintenance fee 58/slot.
+    let mut env =
+        V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(1, 10_000, 10_000, 10_000, 58);
+    env.update_market_init_fee_policy_with_cu(1); // permissionless create enabled (nonzero fee)
+
+    // Honest depositor H on the real market (asset 0).
+    let h_owner = Keypair::new();
+    let h = env.create_portfolio(&h_owner);
+    env.deposit(&h_owner, h, 100_000_000);
+
+    // Attacker permissionlessly appends a do-nothing asset 1 with ITSELF as insurance_operator.
+    let attacker = Keypair::new();
+    env.ensure_signer_account(attacker.pubkey());
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &attacker, 1, 1, 100,
+        attacker.pubkey(), attacker.pubkey(), attacker.pubkey(), attacker.pubkey(), 1,
+    );
+    let (_, g_pre) = env.market_state();
+    assert_eq!(g_pre.assets[1].lifecycle, AssetLifecycleV16::Active, "parasite asset-1 active");
+    // asset-1 domains (2 = long, 3 = short) start empty: it has no positions and was never funded.
+    assert_eq!(g_pre.insurance_domain_budget[2], 0);
+    assert_eq!(g_pre.insurance_domain_budget[3], 0);
+
+    // Charge H's maintenance fee (58 * 10 slots = 580).
+    env.svm.warp_to_slot(10);
+    let h_cap_before = env.portfolio_state(h).capital;
+    env.svm.expire_blockhash();
+    env.sync_maintenance_fee_with_cu(h, None, 10);
+    let fee_paid = h_cap_before - env.portfolio_state(h).capital;
+    assert!(fee_paid > 0, "H actually paid a maintenance fee (non-vacuous)");
+
+    // SECURITY PROPERTY: the parasitic zero-activity asset-1 must have captured NOTHING of H's fee.
+    let (_, g) = env.market_state();
+    let parasite_share = g.insurance_domain_budget[2] + g.insurance_domain_budget[3];
+    assert_eq!(
+        parasite_share, 0,
+        "BUG #113: parasitic asset-1 captured {parasite_share} of H's {fee_paid} maintenance fee"
+    );
+
+    // And the attacker must not be able to withdraw any of it as that asset's insurance_operator.
+    env.svm.expire_blockhash();
+    let siphon = env.try_withdraw_insurance_asset_with_authority(&attacker, 1, 1);
+    assert!(
+        siphon.is_err(),
+        "BUG #113: attacker siphoned honest maintenance fees via WithdrawInsuranceAsset(asset 1)"
+    );
+}
+
 #[test]
 fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
