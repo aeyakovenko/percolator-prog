@@ -39455,3 +39455,57 @@ fn v16_attack_asset_activation_cooldown_enforced() {
         "post-cooldown activation appended the asset"
     );
 }
+
+// #66 guard: WithdrawCollateral must be blocked once the market is resolve-matured (oracle stale past the
+// permissionless-resolve threshold) -- reject_permissionless_resolve_matured_live_view (v16_program 4738, the
+// #66 fix) is applied to withdraw (5972) + 7 other value-out ops, but its rejection on a value-out op was never
+// asserted. Without it a user withdraws against stale equity before the market settles (solvency envelope).
+#[test]
+fn v16_attack_withdraw_rejected_when_resolve_matured() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5); // resolve-stale threshold = 5 slots
+    env.configure_auth_mark_with_cu(0, 100);
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+
+    // Mark the oracle fresh at slot 3.
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+    env.svm.expire_blockhash();
+    let _ = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 0, asset_index: 0, now_slot: 3, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+        ],
+        &[],
+    );
+
+    // NON-VACUOUS: while the oracle is fresh (slot 4, 1 < 5 stale) the same withdraw SUCCEEDS.
+    env.svm.warp_to_slot(4);
+    let (d, _) = env.withdraw_with_cu(&owner, p, 100_000);
+    assert_eq!(env.token_amount(d), 100_000, "fresh-oracle withdraw succeeds (non-vacuous)");
+
+    // Warp far past the stale threshold -> market is resolve-matured.
+    env.svm.warp_to_slot(40);
+    env.svm.expire_blockhash();
+    let dest = env.token_account(owner.pubkey(), 0);
+    let r = env.send(
+        ProgInstruction::Withdraw { amount: 100_000 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(r.is_err(), "withdraw must reject once the market is resolve-matured (#66 solvency gate)");
+}
