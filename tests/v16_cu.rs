@@ -7696,16 +7696,14 @@ fn v16_attack_sync_maintenance_rejects_cross_market_cranker_reward() {
     );
 }
 
-// OPEN BUG #113 — permissionless cross-asset maintenance-fee siphon.
-// credit_maintenance_fee_to_active_market_budgets_view (v16_program 5298) splits every maintenance
-// fee EQUALLY across all ACTIVE assets' insurance domains (base_share = amount/active_count, 5320)
-// with NO positions/activity requirement. A non-admin appends a do-nothing asset (itself as
-// insurance_operator) and captures 1/N of every honest trader's maintenance fee, then withdraws it
-// via WithdrawInsuranceAsset. SECURITY PROPERTY (currently VIOLATED): a parasitic zero-activity asset
-// must earn ZERO of the maintenance fee. This asserts the correct behavior, so it fails until #113 is
-// fixed (credit only the generating/OI-bearing asset). #[ignore] keeps the suite green; un-ignore on fix.
+// Regression for #113 — permissionless cross-asset maintenance-fee siphon (FIXED).
+// credit_maintenance_fee_to_active_market_budgets_view (v16_program 5298) previously split every
+// maintenance fee equally across all ACTIVE assets' insurance domains with no positions/activity
+// requirement, so a non-admin could append a do-nothing asset (itself as insurance_operator) and
+// capture 1/N of every honest trader's maintenance fee, then withdraw it via WithdrawInsuranceAsset.
+// The fix credits the account-level maintenance fee solely to asset-0 (the canonical base insurance,
+// not permissionlessly creatable), so a parasitic zero-activity asset earns ZERO. This guards the fix.
 #[test]
-#[ignore = "OPEN BUG #113: maintenance-fee siphon to parasitic asset; un-ignore when fixed"]
 fn v16_attack_bug113_maintenance_fee_siphon_to_parasitic_asset() {
     // capacity 1 (asset-1 is appended at index == configured_slots, growing to 2), maintenance fee 58/slot.
     let mut env =

@@ -5303,51 +5303,18 @@ pub mod processor {
         if amount == 0 {
             return Ok(());
         }
-        let configured = group.header.config.max_market_slots.get() as usize;
-        let mut active_count = 0usize;
-        let mut i = 0usize;
-        while i < configured {
-            if i < group.markets.len()
-                && group.markets[i].engine.asset.lifecycle == ASSET_LIFECYCLE_ACTIVE
-            {
-                active_count += 1;
-            }
-            i += 1;
-        }
-        if active_count == 0 {
-            return credit_market_insurance_budget_view(group, 0, amount);
-        }
-        let base_share = amount / active_count as u128;
-        let mut remainder = amount
-            .checked_sub(
-                base_share
-                    .checked_mul(active_count as u128)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?,
-            )
-            .ok_or(PercolatorError::EngineCounterUnderflow)?;
-        let mut i = 0usize;
-        while i < configured {
-            if i < group.markets.len()
-                && group.markets[i].engine.asset.lifecycle == ASSET_LIFECYCLE_ACTIVE
-            {
-                let extra = if remainder != 0 {
-                    remainder -= 1;
-                    1
-                } else {
-                    0
-                };
-                credit_market_fee_split_across_domains_view(
-                    cfg,
-                    group,
-                    i,
-                    base_share
-                        .checked_add(extra)
-                        .ok_or(PercolatorError::EngineArithmeticOverflow)?,
-                )?;
-            }
-            i += 1;
-        }
-        Ok(())
+        // FIX #113 (permissionless cross-asset maintenance-fee siphon): the maintenance fee is an
+        // ACCOUNT-level charge (maintenance_fee_per_slot * elapsed), not tied to any asset's activity.
+        // The previous logic split it equally across every ACTIVE asset's insurance domain, so a
+        // permissionless attacker could append a do-nothing asset (itself as insurance_operator) and
+        // siphon 1/N of every honest trader's maintenance fee via WithdrawInsuranceAsset (k/(k+1) with
+        // k parasites). Credit it solely to asset-0 (the canonical base insurance, which cannot be
+        // permissionlessly created): a zero-activity asset now earns nothing. This also makes the path
+        // O(1) in N — the per-active-asset loop was the wrapper's only per-instruction O(N)-in-
+        // max_market_slots cost, which a parasite-append bloat could push over the CU limit, bricking
+        // SyncMaintenanceFee/CloseResolved and the market's eventual closability.
+        let _ = cfg;
+        credit_market_insurance_budget_view(group, 0, amount)
     }
 
     fn require_asset_active_for_oracle_reconfiguration_view(
