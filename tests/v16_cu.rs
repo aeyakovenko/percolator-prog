@@ -9460,6 +9460,70 @@ fn v16_attack_close_resolved_after_exit_window_is_permissionless_but_not_stealab
     assert_eq!(account.capital, 0);
 }
 
+// security.md sweep — CloseResolved caller-supplied fee_rate_per_slot must be IGNORED (Copenhagen
+// SOL-001-class spoofed-param / SOL-023 fee-rounding-away-from-user): CloseResolved is permissionless
+// after the exit window (force_close_delay_slots==0 -> always permissionless), and it carries a
+// caller-supplied `fee_rate_per_slot`. handle_close_resolved (v16_program 10285) names it `_fee_rate_
+// per_slot` and passes cfg.maintenance_fee_per_slot (10317) to the engine instead. If the param were
+// honored, a hostile third party finalizing a victim's resolved account could pass a huge rate to
+// over-charge the victim's accrued maintenance fee at terminal close, draining the payout into
+// insurance (victim LOF). Every existing CloseResolved test passes fee_rate_per_slot: 0, so this
+// ignore property is unpinned. With cfg maintenance_fee=0 and slots elapsed, the victim must receive
+// the FULL deposit regardless of a u128::MAX spoofed rate; a regression that wired the param in would
+// drain it to ~0.
+#[test]
+fn v16_attack_close_resolved_ignores_spoofed_fee_rate_param() {
+    let mut env = V16CuEnv::new(); // default maintenance_fee_per_slot = 0, force_close_delay_slots = 0
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    env.deposit(&victim_owner, victim, 1_000_000);
+    env.resolve();
+    // Advance many slots so elapsed_slots is large: a leaked spoofed rate would charge rate*elapsed.
+    env.svm.warp_to_slot(10_000);
+
+    let dest = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, victim_owner.pubkey(), 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    env.svm.expire_blockhash();
+    // Permissionless finalize (no signer) with a maximally-spoofed fee rate.
+    env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: u128::MAX,
+        },
+        vec![
+            AccountMeta::new_readonly(victim_owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    )
+    .expect("permissionless close-resolved with spoofed fee rate");
+
+    assert_eq!(
+        env.token_amount(dest),
+        1_000_000,
+        "victim must receive the FULL deposit; the caller-supplied fee_rate_per_slot must be ignored"
+    );
+    let (_, g) = env.market_state();
+    assert_eq!(env.portfolio_state(victim).capital, 0, "account fully closed");
+    assert_eq!(g.vault, g.c_tot + g.insurance, "conservation after terminal close");
+}
+
 #[test]
 fn v16_attack_claim_resolved_topup_rejects_live_market_without_mutation() {
     let mut env = V16CuEnv::new();
