@@ -26925,6 +26925,77 @@ fn v16_attack_withdraw_insurance_requires_full_wind_down() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
 
+// security.md sweep — resolved-mode backing withdrawal wind-down gate (SOL-021/022): LP backing is the
+// loss-absorption layer behind users. In RESOLVED mode handle_withdraw_backing_bucket (v16_program 7834)
+// permits a withdrawal ONLY once materialized_portfolio_count == 0 AND c_tot == 0 — i.e. every user has
+// been paid out and closed. If the backing_bucket_authority (or marketauth) could pull backing while
+// resolved users still hold capital/claims, the vault would drop below what those users are owed (LOF).
+// This is the backing parallel of v16_attack_withdraw_insurance_requires_full_wind_down (insurance), but a
+// DISTINCT code path with a distinct condition (count+c_tot vs insurance wind-down). It was untested:
+// 15135 covers the LIVE liened-winner case, not resolved-mode open capital. Non-vacuous: the same
+// withdrawal succeeds on the live empty market first.
+#[test]
+fn v16_attack_resolved_backing_withdraw_requires_full_user_wind_down() {
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, 1_000, 100_000); // domain 1 (asset-0 short) backing, admin-authorized
+    let dest = env.token_account(env.admin.pubkey(), 0);
+
+    // Sanity: on a live, user-free market the backing authority CAN withdraw — proves authority + path
+    // are fine, so the resolved-mode rejection below is caused by the wind-down gate, not a precondition.
+    env.svm.expire_blockhash();
+    env.withdraw_backing_bucket_to_admin_token_with_cu(dest, 1, 100);
+
+    // Open user capital, then resolve. c_tot + materialized_portfolio_count stay > 0.
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 600_000);
+    env.resolve();
+    let g = env.market_state().1;
+    assert_eq!(g.mode, percolator::MarketModeV16::Resolved, "resolved");
+    assert!(g.c_tot > 0, "user capital still open after resolve (non-vacuous gate)");
+    assert!(
+        g.materialized_portfolio_count > 0,
+        "user portfolio still materialized after resolve"
+    );
+
+    let vault_before = g.vault;
+    let dest_before = env.token_amount(dest);
+    env.svm.expire_blockhash();
+    let r = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&env.admin.insecure_clone()],
+    );
+    assert!(
+        r.is_err(),
+        "resolved-mode backing withdrawal must reject while users still hold capital/claims"
+    );
+    let g_after = env.market_state().1;
+    assert_eq!(
+        g_after.vault, vault_before,
+        "rejected resolved backing withdrawal must leave the vault untouched"
+    );
+    assert_eq!(
+        env.token_amount(dest),
+        dest_before,
+        "no backing tokens may leave to the authority before users are wound down"
+    );
+    assert!(g_after.vault >= g_after.c_tot + g_after.insurance, "senior conservation intact");
+}
+
 // security.md sweep — per-asset WithdrawInsuranceAsset budget conservation (#6): the asset insurance
 // operator may withdraw accrued asset budget in LIVE mode, but NEVER more than the asset's remaining
 // long+short budget, and partial withdrawals must debit the remaining budget so it cannot be double-drained.
