@@ -12277,6 +12277,55 @@ fn v16_audit_resolved_maintenance_fee_insurance_stays_recoverable() {
     );
 }
 
+// Finding-G follow-up (post-#113-fix): the #113 fix routes the account-level maintenance fee solely to
+// asset-0 via credit_maintenance_fee_to_active_market_budgets_view, which handle_close_resolved also calls
+// (10288). The existing Finding-G regression (v16_audit_resolved_maintenance_fee_insurance_stays_recoverable)
+// is SINGLE-asset; this guards the MULTI-asset resolved-close path: with an appended asset-1 present, the
+// resolved maintenance fee must still be attributable to a withdrawable domain budget (sum(budgets) >=
+// insurance) and land in asset-0, never stranded on the parasite or in a non-credited aggregate.
+#[test]
+fn v16_audit_resolved_maintenance_fee_multi_asset_stays_recoverable() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 5,
+    );
+    env.update_market_init_fee_policy_with_cu(1);
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+
+    // Append a do-nothing asset-1 so the market is MULTI-asset when the resolved maintenance fee routes.
+    let appender = Keypair::new();
+    env.ensure_signer_account(appender.pubkey());
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &appender, 1, 1, 100,
+        appender.pubkey(), appender.pubkey(), appender.pubkey(), appender.pubkey(), 1,
+    );
+
+    // Accrue ~100 slots of maintenance fee, then resolve and close.
+    env.svm.warp_to_slot(100);
+    env.resolve();
+    env.close_resolved(&owner, portfolio);
+
+    let (_, group) = env.market_state();
+    // Finding-G invariant in MULTI-asset mode: all of group.insurance attributable to a withdrawable domain budget.
+    let sum_budgets: u128 = group.insurance_domain_budget.iter().sum();
+    assert!(
+        sum_budgets >= group.insurance,
+        "multi-asset resolved: insurance={} but sum(domain budgets)={} -> {} stranded forever",
+        group.insurance,
+        sum_budgets,
+        group.insurance.saturating_sub(sum_budgets),
+    );
+    // #113 routing in resolved mode: the parasite asset-1 (domains 2/3) earns NOTHING from the maintenance fee.
+    assert_eq!(
+        group.insurance_domain_budget[2] + group.insurance_domain_budget[3],
+        0,
+        "resolved maintenance fee must not land on the appended asset-1 (domains 2/3)"
+    );
+    assert_domain_budget_remaining_total_consistent(&group, "multi-asset resolved maintenance fee");
+}
+
 // security.md sweep - resolved top-up custody (#33/#44/#48): ClaimResolvedPayoutTopup is
 // intentionally unsigned so a third party can help finish a user's payout, but it must only pay to
 // the portfolio owner's valid collateral account. A bad destination must not burn the receipt.
