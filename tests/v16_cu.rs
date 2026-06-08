@@ -7745,6 +7745,18 @@ fn v16_attack_bug113_maintenance_fee_siphon_to_parasitic_asset() {
         "BUG #113: parasitic asset-1 captured {parasite_share} of H's {fee_paid} maintenance fee"
     );
 
+    // Positive side of the fix: the whole retained fee (no cranker here) landed in ASSET-0's insurance
+    // domains (0 = long, 1 = short), and the domain-budget aggregate stays consistent with group.insurance
+    // (a desync here would be a "weird state" — engine fee charge + wrapper credit double-counting).
+    let asset0_before = g_pre.insurance_domain_budget[0] + g_pre.insurance_domain_budget[1];
+    let asset0_after = g.insurance_domain_budget[0] + g.insurance_domain_budget[1];
+    assert_eq!(
+        asset0_after - asset0_before,
+        fee_paid,
+        "the full retained maintenance fee must land in asset-0 insurance"
+    );
+    assert_domain_budget_remaining_total_consistent(&g, "after #113-fix maintenance fee to asset-0");
+
     // And the attacker must not be able to withdraw any of it as that asset's insurance_operator.
     env.svm.expire_blockhash();
     let siphon = env.try_withdraw_insurance_asset_with_authority(&attacker, 1, 1);
