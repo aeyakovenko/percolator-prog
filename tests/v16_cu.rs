@@ -15198,6 +15198,74 @@ fn v16_attack_convert_then_withdraw_pays_exactly_backed_amount() {
     );
 }
 
+// LoF sweep — deposit/withdraw amount > u64::MAX must reject, never truncate (SOL-014). The instruction
+// `amount` is u128 but SPL token balances are u64: the wrapper credits the ENGINE `amount` (u128) while
+// transferring `amount_to_u64(amount)` tokens. `amount_to_u64` is `u64::try_from`, so amounts above
+// u64::MAX reject. If it instead used `amount as u64`, a deposit of `u64::MAX + 1` would credit the engine
+// ~1.8e19 base units while transferring `(u64::MAX+1) as u64 == 0` tokens — minting collateral from
+// nothing (drain). This drives the boundary: deposit and withdraw with amount == u64::MAX + 1 both reject
+// (InvalidInstruction) with the engine vault/c_tot and the user balances untouched. The existing
+// `large_amount_deposit_withdraw_exact` only exercises the TVL cap (~1e16, far below u64::MAX).
+#[test]
+fn v16_attack_deposit_withdraw_amount_over_u64_max_rejects_no_truncation() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000); // a normal funded position to withdraw against
+
+    let over: u128 = u64::MAX as u128 + 1; // (over as u64) == 0 — the truncation trap
+    let (_, g0) = env.market_state();
+    let cap0 = env.portfolio_state(p).capital;
+
+    // DEPOSIT over u64::MAX: must reject before any engine credit / token pull.
+    let src = env.token_account(owner.pubkey(), 1_000);
+    env.svm.expire_blockhash();
+    let r_dep = env.send(
+        ProgInstruction::Deposit { amount: over },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(src, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(r_dep.is_err(), "deposit of amount > u64::MAX must reject (no truncation credit)");
+    assert!(
+        r_dep.unwrap_err().contains("Custom(9)"),
+        "over-u64 deposit must be InvalidInstruction (Custom 9)"
+    );
+    assert_eq!(env.token_amount(src), 1_000, "rejected over-u64 deposit pulled no tokens");
+    assert_eq!(env.portfolio_state(p).capital, cap0, "no engine credit minted by truncation");
+    assert_eq!(env.market_state().1.c_tot, g0.c_tot, "c_tot unchanged");
+
+    // WITHDRAW over u64::MAX: must also reject before any engine debit / token transfer.
+    let dest = env.token_account(owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let r_wd = env.send(
+        ProgInstruction::Withdraw { amount: over },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(r_wd.is_err(), "withdraw of amount > u64::MAX must reject (no truncation debit)");
+    assert!(
+        r_wd.unwrap_err().contains("Custom(9)"),
+        "over-u64 withdraw must be InvalidInstruction (Custom 9)"
+    );
+    assert_eq!(env.token_amount(dest), 0, "rejected over-u64 withdraw delivered nothing");
+    assert_eq!(env.portfolio_state(p).capital, cap0, "capital unchanged by rejected over-u64 withdraw");
+}
+
 // security.md sweep — zero-amount input validation (#39): zero-amount operations must reject or be
 // clean no-ops across deposit/withdraw/trade/topup — never corrupt state or conservation.
 #[test]
