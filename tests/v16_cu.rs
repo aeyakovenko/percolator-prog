@@ -3914,6 +3914,80 @@ fn deposit_to_market(
     source
 }
 
+fn top_up_backing_bucket_to_market(
+    env: &mut V16CuEnv,
+    market: Pubkey,
+    vault: Pubkey,
+    domain: u16,
+    amount: u128,
+    expiry_slot: u64,
+) -> Pubkey {
+    let source = env.token_account(env.admin.pubkey(), amount as u64);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain,
+            amount,
+            expiry_slot,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("top up explicit market backing bucket");
+    source
+}
+
+fn add_source_positive_pnl_to_market(
+    env: &mut V16CuEnv,
+    market: Pubkey,
+    portfolio: Pubkey,
+    domain: usize,
+    amount: u128,
+) {
+    let mut market_account = env.svm.get_account(&market).expect("market account");
+    let mut portfolio_account = env.svm.get_account(&portfolio).expect("portfolio account");
+    let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+    let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+    group
+        .add_account_source_positive_pnl_not_atomic(&mut account, domain, amount)
+        .unwrap();
+    state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+    state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+    env.svm.set_account(market, market_account).unwrap();
+    env.svm.set_account(portfolio, portfolio_account).unwrap();
+}
+
+fn crank_portfolio_on_market(
+    env: &mut V16CuEnv,
+    market: Pubkey,
+    portfolio: Pubkey,
+    ix: ProgInstruction,
+) -> u64 {
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ix,
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[],
+    )
+    .expect("crank portfolio on explicit market")
+}
+
 #[test]
 fn v16_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
     let mut env = V16CuEnv::new();
@@ -14124,6 +14198,155 @@ fn v16_attack_convert_released_pnl_respects_caller_cap() {
     assert_eq!(
         g1.vault, g0.vault,
         "ConvertReleasedPnl moves no vault tokens"
+    );
+}
+
+// security.md sweep - ConvertReleasedPnl market isolation (#2/#33/#44): owner authorization alone is not
+// enough. A market-A portfolio with released source-backed PnL must not be convertible through market B's
+// accounting slab, where it could consume B backing or corrupt B's senior capital counters.
+#[test]
+fn v16_attack_convert_released_pnl_rejects_cross_market_portfolio_substitution() {
+    const RELEASED: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, RELEASED, 10_000);
+    let foreign_owner = Keypair::new();
+    let foreign = env.create_portfolio(&foreign_owner);
+    env.add_source_positive_pnl(foreign, 1, RELEASED);
+    env.crank(
+        foreign,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 0,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    assert_eq!(
+        env.portfolio_state(foreign)
+            .provenance_header
+            .market_group_id,
+        env.market.to_bytes(),
+        "foreign conversion target is genuinely bound to market A"
+    );
+    assert_eq!(
+        env.portfolio_state(foreign).pnl,
+        RELEASED as i128,
+        "foreign setup has released positive PnL before the substitution attempt"
+    );
+
+    let params = V16CuMarketParams::default();
+    let (market_b, _vault_authority_b, vault_b) =
+        init_independent_market_same_mint(&mut env, params);
+    top_up_backing_bucket_to_market(&mut env, market_b, vault_b, 1, RELEASED, 10_000);
+    let local_owner = Keypair::new();
+    let local = init_portfolio_on_market(
+        &mut env,
+        market_b,
+        &local_owner,
+        params.max_portfolio_assets as usize,
+    );
+    add_source_positive_pnl_to_market(&mut env, market_b, local, 1, RELEASED);
+    crank_portfolio_on_market(
+        &mut env,
+        market_b,
+        local,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 0,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    assert_eq!(
+        env.portfolio_state(local).provenance_header.market_group_id,
+        market_b.to_bytes(),
+        "control conversion target is genuinely bound to market B"
+    );
+    assert_eq!(
+        env.portfolio_state(local).pnl,
+        RELEASED as i128,
+        "control setup has released positive PnL on market B"
+    );
+
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let foreign_before = env.svm.get_account(&foreign).unwrap();
+    let local_before = env.svm.get_account(&local).unwrap();
+    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
+    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConvertReleasedPnl { amount: RELEASED },
+        vec![
+            AccountMeta::new(foreign_owner.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(foreign, false),
+        ],
+        &[&foreign_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "ConvertReleasedPnl must reject a market-A portfolio under market B"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+    assert_eq!(
+        env.svm.get_account(&foreign).unwrap(),
+        foreign_before,
+        "foreign portfolio is not converted or re-certified"
+    );
+    assert_eq!(
+        env.svm.get_account(&local).unwrap(),
+        local_before,
+        "local market-B portfolio is not touched by the rejected substitution"
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConvertReleasedPnl { amount: RELEASED },
+        vec![
+            AccountMeta::new(local_owner.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(local, false),
+        ],
+        &[&local_owner],
+    );
+    assert!(ok.is_ok(), "same-market ConvertReleasedPnl succeeds: {ok:?}");
+    let local_after = env.portfolio_state(local);
+    assert_eq!(
+        local_after.capital, RELEASED,
+        "same-market conversion moves released PnL into local senior capital"
+    );
+    assert_eq!(local_after.pnl, 0, "released PnL is consumed");
+    let (_, market_b_after) =
+        state::read_market(&env.svm.get_account(&market_b).unwrap().data).unwrap();
+    assert_eq!(
+        market_b_after.c_tot, RELEASED,
+        "market B senior capital increased only for its local portfolio"
+    );
+    assert_eq!(
+        market_b_after.source_backing_buckets[1].consumed_liened_backing_num,
+        RELEASED * BOUND_SCALE,
+        "market B conversion consumes exactly its own source backing"
+    );
+    assert_eq!(
+        market_b_after.vault as u64,
+        env.token_amount(vault_b),
+        "market B accounting still matches SPL custody"
     );
 }
 
