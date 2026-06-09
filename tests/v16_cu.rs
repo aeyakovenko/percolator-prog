@@ -34748,6 +34748,117 @@ fn v16_attack_chainlink_oracle_key_owner_binding_enforced() {
 }
 
 #[test]
+fn v16_attack_chainlink_oracle_malformed_fields_reject_without_mutation() {
+    const CL_OFF_VERSION: usize = 8;
+    const CL_OFF_DECIMALS: usize = 138;
+    const CL_OFF_LATEST_ROUND_ID: usize = 143;
+    const CL_OFF_LIVE_LENGTH: usize = 148;
+    const CL_OFF_TRANSMISSION: usize = 8 + 192;
+    const CL_TRANS_OFF_SLOT: usize = 0;
+    const CL_TRANS_OFF_TIMESTAMP: usize = 8;
+    const CL_TRANS_OFF_ANSWER: usize = 16;
+
+    let configure = |data: Vec<u8>| -> (bool, Option<String>, bool, u64) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let feed = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                feed,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let before = env.svm.get_account(&env.market).unwrap().data;
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed.to_bytes(), [0u8; 32], [0u8; 32]],
+            &[feed],
+            1,
+            100,
+            0,
+            0,
+            100,
+            0,
+        );
+        let ok = r.is_ok();
+        let price = if ok {
+            env.market_state().1.assets[0].raw_oracle_target_price
+        } else {
+            0
+        };
+        let after = env.svm.get_account(&env.market).unwrap().data;
+        (ok, r.err(), before == after, price)
+    };
+
+    let (ok, _, _, price) = configure(make_chainlink_data(20_000_000, 8, 100));
+    assert!(ok, "control: a well-formed Chainlink feed configures");
+    assert_eq!(price, 200_000, "control: Chainlink scaling reaches e6");
+
+    let mut cases: Vec<(&str, Vec<u8>)> = Vec::new();
+    let mut bad_disc = make_chainlink_data(20_000_000, 8, 100);
+    bad_disc[0] ^= 0xff;
+    cases.push(("bad discriminator", bad_disc));
+
+    let mut version_zero = make_chainlink_data(20_000_000, 8, 100);
+    version_zero[CL_OFF_VERSION] = 0;
+    cases.push(("zero version", version_zero));
+
+    let mut round_zero = make_chainlink_data(20_000_000, 8, 100);
+    round_zero[CL_OFF_LATEST_ROUND_ID..CL_OFF_LATEST_ROUND_ID + 4]
+        .copy_from_slice(&0u32.to_le_bytes());
+    cases.push(("zero latest round", round_zero));
+
+    let mut live_length_two = make_chainlink_data(20_000_000, 8, 100);
+    live_length_two[CL_OFF_LIVE_LENGTH..CL_OFF_LIVE_LENGTH + 4]
+        .copy_from_slice(&2u32.to_le_bytes());
+    cases.push(("bad live length", live_length_two));
+
+    let mut slot_zero = make_chainlink_data(20_000_000, 8, 100);
+    slot_zero[CL_OFF_TRANSMISSION + CL_TRANS_OFF_SLOT
+        ..CL_OFF_TRANSMISSION + CL_TRANS_OFF_SLOT + 8]
+        .copy_from_slice(&0u64.to_le_bytes());
+    cases.push(("zero result slot", slot_zero));
+
+    let mut timestamp_zero = make_chainlink_data(20_000_000, 8, 100);
+    timestamp_zero[CL_OFF_TRANSMISSION + CL_TRANS_OFF_TIMESTAMP
+        ..CL_OFF_TRANSMISSION + CL_TRANS_OFF_TIMESTAMP + 4]
+        .copy_from_slice(&0u32.to_le_bytes());
+    cases.push(("zero publish time", timestamp_zero));
+
+    let mut decimals_too_large = make_chainlink_data(20_000_000, 8, 100);
+    decimals_too_large[CL_OFF_DECIMALS] = 19;
+    cases.push(("decimals above bound", decimals_too_large));
+
+    let mut negative_answer = make_chainlink_data(20_000_000, 8, 100);
+    negative_answer[CL_OFF_TRANSMISSION + CL_TRANS_OFF_ANSWER
+        ..CL_OFF_TRANSMISSION + CL_TRANS_OFF_ANSWER + 16]
+        .copy_from_slice(&(-20_000_000i128).to_le_bytes());
+    cases.push(("negative answer", negative_answer));
+
+    for (label, data) in cases {
+        let (ok, err, unchanged, _) = configure(data);
+        assert!(!ok, "{label}: malformed Chainlink feed must reject");
+        let err = err.unwrap();
+        assert!(
+            err.contains("Custom(26)"),
+            "{label}: malformed Chainlink feed should reject as OracleInvalid (Custom 26), got {err}"
+        );
+        assert!(
+            unchanged,
+            "{label}: rejected Chainlink feed must leave market bytes unchanged"
+        );
+    }
+}
+
+#[test]
 fn v16_attack_non_pyth_oracle_freshness_and_confidence_enforced() {
     type OracleAttempt = (bool, Option<String>, bool, u64);
 
