@@ -33632,6 +33632,117 @@ fn v16_attack_deposit_wrong_mint_source_rejects() {
     );
 }
 
+// security.md sweep — deposit rejects a vault with a delegate (#44 defense-in-depth): inbound custody
+// must use the same hardened vault checks as withdraw. Otherwise a user deposit could be credited into a
+// canonical vault token account that a delegate can drain out-of-band. The rejected deposit must not pull
+// source tokens or credit portfolio capital; a clean vault control then succeeds.
+#[test]
+fn v16_attack_deposit_vault_with_delegate_rejected() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let source = env.token_account_for_mint(env.mint, owner.pubkey(), 1_000);
+    let (_, group_before) = env.market_state();
+    let cap_before = env.portfolio_state(portfolio).capital;
+
+    let attacker = Pubkey::new_unique();
+    let mut delegated = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: env.mint,
+            owner: env.vault_authority,
+            amount: env.token_amount(env.vault),
+            delegate: COption::Some(attacker),
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 1_000,
+            close_authority: COption::None,
+        },
+        &mut delegated,
+    )
+    .unwrap();
+    let mut tainted_vault = env.svm.get_account(&env.vault).unwrap();
+    tainted_vault.data = delegated;
+    env.svm.set_account(env.vault, tainted_vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::Deposit { amount: 500 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "deposit through a delegated vault must reject before crediting capital"
+    );
+    assert_eq!(
+        env.token_amount(source),
+        1_000,
+        "rejected delegated-vault deposit does not pull source tokens"
+    );
+    assert_eq!(
+        env.portfolio_state(portfolio).capital,
+        cap_before,
+        "rejected delegated-vault deposit does not credit capital"
+    );
+    let (_, group_after_reject) = env.market_state();
+    assert_eq!(
+        group_after_reject.vault, group_before.vault,
+        "rejected delegated-vault deposit leaves accounting vault unchanged"
+    );
+    assert_eq!(
+        group_after_reject.c_tot, group_before.c_tot,
+        "rejected delegated-vault deposit leaves c_tot unchanged"
+    );
+
+    let mut clean = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: env.mint,
+            owner: env.vault_authority,
+            amount: env.token_amount(env.vault),
+            delegate: COption::None,
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 0,
+            close_authority: COption::None,
+        },
+        &mut clean,
+    )
+    .unwrap();
+    let mut clean_vault = env.svm.get_account(&env.vault).unwrap();
+    clean_vault.data = clean;
+    env.svm.set_account(env.vault, clean_vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::Deposit { amount: 500 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(ok.is_ok(), "deposit through a clean vault works: {ok:?}");
+    assert_eq!(env.token_amount(source), 500);
+    assert_eq!(
+        env.portfolio_state(portfolio).capital,
+        cap_before + 500,
+        "clean vault deposit credits capital"
+    );
+}
+
 // security.md sweep — withdraw rejects a vault with a delegate/close_authority (#44 defense-in-depth):
 // verify_withdrawable_token_accounts rejects the vault if it has a delegate or close_authority set
 // (such a vault could be drained/closed out-of-band by that authority). Attacker goal: route withdrawals
