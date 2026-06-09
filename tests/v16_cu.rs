@@ -29789,6 +29789,137 @@ fn v16_attack_swap_secondary_unauthorized_and_bounded() {
     );
 }
 
+// security.md sweep - SwapSecondaryForPrimary account aliasing (#26/#35/#44): the primary source must
+// be an authority-owned token account and the secondary destination must be authority-owned. Otherwise
+// the authority could pass the primary vault as both source and destination for a no-op primary transfer
+// that drains secondary, or burn primary into the vault while receiving no secondary.
+#[test]
+fn v16_attack_swap_secondary_rejects_vault_source_or_dest_aliases() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+
+    let depositor = Keypair::new();
+    let portfolio = env.create_portfolio(&depositor);
+    env.deposit(&depositor, portfolio, 1_000);
+
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let admin_secondary = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let admin_secondary_before = env.svm.get_account(&admin_secondary).unwrap();
+    env.svm.expire_blockhash();
+    let vault_source = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(admin_secondary, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        vault_source.is_err(),
+        "SwapSecondaryForPrimary must reject the primary vault as the source"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "primary vault not used as a no-op source"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "secondary reserve not drained by vault-source alias"
+    );
+    assert_eq!(
+        env.svm.get_account(&admin_secondary).unwrap(),
+        admin_secondary_before,
+        "attacker receives no secondary on rejected vault-source alias"
+    );
+
+    let admin_primary = env.token_account_for_mint(env.mint, admin.pubkey(), 10);
+    let admin_primary_before = env.svm.get_account(&admin_primary).unwrap();
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    env.svm.expire_blockhash();
+    let vault_dest = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(admin_primary, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        vault_dest.is_err(),
+        "SwapSecondaryForPrimary must reject the secondary vault as the user destination"
+    );
+    assert_eq!(env.svm.get_account(&admin_primary).unwrap(), admin_primary_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), primary_vault_before);
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "secondary vault not self-paid by bad-destination alias"
+    );
+
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(admin_primary, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(admin_secondary, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(ok.is_ok(), "same accounts without aliasing swap cleanly: {ok:?}");
+    assert_eq!(env.token_amount(admin_primary), 0);
+    assert_eq!(env.token_amount(admin_secondary), 10);
+    assert_eq!(env.token_amount(secondary_vault), 40);
+}
+
 // full-interface sweep (cron30): SwapSecondaryForPrimary must pin the secondary reserve to the
 // current market's vault PDA. A valid secondary-mint token account owned by another market's vault PDA
 // must not be usable as the reserve, or one market's base-unit authority could drain another market's
