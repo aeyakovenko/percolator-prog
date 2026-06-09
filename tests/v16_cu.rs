@@ -38583,6 +38583,71 @@ fn v16_attack_init_portfolio_cannot_reinit_funded_victim() {
     assert_eq!(env.portfolio_state(vp).capital, v_cap, "capital not reset");
 }
 
+// SOL-010 / DoS: an initialized-but-empty portfolio still increments materialized_portfolio_count.
+// Reinitializing it must not register the same account twice, or one legitimate ClosePortfolio would
+// leave a phantom count behind and permanently block CloseSlab on an otherwise empty market.
+#[test]
+fn v16_attack_empty_portfolio_reinit_cannot_inflate_materialized_count() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    assert_eq!(env.portfolio_state(portfolio).capital, 0);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "one empty initialized portfolio is materialized"
+    );
+
+    let attacker = Keypair::new();
+    env.ensure_signer_account(attacker.pubkey());
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    env.svm.expire_blockhash();
+    let reinit = env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&attacker],
+    );
+    assert!(
+        reinit.is_err(),
+        "empty initialized portfolio reinit must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected empty reinit must not increment the materialized count"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected empty reinit must not reassign or rewrite the portfolio"
+    );
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    )
+    .expect("owner closes the one real empty portfolio");
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "one close clears the one real materialized account"
+    );
+
+    env.resolve();
+    env.close_slab_with_cu();
+}
+
 // LOF (fund-stranding): ClosePortfolio zeroes the account and reclaims its rent. If it allowed closing
 // a portfolio with non-zero capital, those vaulted tokens would be orphaned -- and this would NOT trip
 // conservation (vault still >= c_tot + insurance; the tokens just become unwithdrawable). The closable
