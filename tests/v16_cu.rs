@@ -21639,6 +21639,113 @@ fn v16_attack_live_asset_insurance_withdraw_uses_operator_not_authority() {
     );
 }
 
+// full-interface sweep: live asset-0 insurance withdrawal must follow the current hot
+// insurance_operator, not stale marketauth/asset-admin privilege. This is value-moving: after the
+// operator is rekeyed, the old market authority must not drain the funded asset-0 insurance domain.
+#[test]
+fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let new_operator = Keypair::new();
+
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&new_operator),
+        0,
+        processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        new_operator.pubkey().to_bytes(),
+    )
+    .expect("asset-0 admin rotates the live insurance operator");
+    env.top_up_insurance_domain_with_authority(&admin, 0, 500);
+
+    let (_, group_before) = env.market_state();
+    assert_eq!(
+        group_before.insurance_domain_budget[0], 500,
+        "funded asset-0 insurance domain makes the stale-operator attempt non-vacuous"
+    );
+    let stale_dest = env.token_account(admin.pubkey(), 0);
+    let stale_dest_before = env.svm.get_account(&stale_dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let stale_admin = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale_admin.is_err(),
+        "stale marketauth/asset-admin must not retain live asset-0 insurance-operator power"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_dest).unwrap(),
+        stale_dest_before,
+        "stale operator attempt pays no tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "stale operator attempt does not debit the vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale operator attempt leaves market state unchanged"
+    );
+
+    let operator_dest = env.token_account(new_operator.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let operator_withdraw = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(new_operator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(operator_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&new_operator],
+    );
+    assert!(
+        operator_withdraw.is_ok(),
+        "current asset-0 insurance_operator can withdraw live insurance: {operator_withdraw:?}"
+    );
+    assert_eq!(
+        env.token_amount(operator_dest),
+        100,
+        "current operator receives the withdrawal"
+    );
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.insurance_domain_budget[0], 400);
+    assert_eq!(group_after.insurance, group_before.insurance - 100);
+    assert_eq!(
+        env.token_amount(env.vault),
+        group_after.vault as u64,
+        "engine vault accounting matches SPL vault after rekeyed-operator withdrawal"
+    );
+}
+
 // security.md sweep — RebalanceReduce owner gating (#6/#46): RebalanceReduce is OWNER-gated
 // self-service risk reduction (with_one_portfolio_view enforces owner signs + matches the portfolio).
 // A non-owner must NOT be able to force-reduce a victim's position (griefing); the owner may reduce
