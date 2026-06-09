@@ -16923,6 +16923,45 @@ fn v16_attack_tradecpi_self_trade_rejected() {
     assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged");
 }
 
+// LoF sweep — a cure deposit is not stranded in escrow; it is fully recoverable. CureAndCancelClose
+// escrows the optional_deposit into `cancel_deposit_escrow`, then on completion folds the escrow into
+// `capital` and zeroes the escrow (cure_and_cancel_close_with_cert_not_atomic). If that release were
+// dropped, the cure deposit would sit in escrow forever — withdraw only pays out `capital`, so the user's
+// cure funds would be permanently locked (LoF). This drives the full round-trip: cure WITH a nonzero
+// deposit, then withdraw the ENTIRE cured capital (original + cure deposit) back out. cure_deposit_exact_
+// and_atomic only asserts the capital credit (never withdraws it); the audit withdraw-after-cure test
+// cures with a ZERO deposit (no escrow to release). This proves the escrowed deposit round-trips out.
+#[test]
+fn v16_attack_cure_deposit_is_recoverable_not_stranded_in_escrow() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 100);
+    env.seed_cancellable_close_progress(p);
+
+    // Cure WITH a 50 deposit: the escrow is folded into capital (100 + 50 = 150) and zeroed.
+    let src = env.token_account_for_mint(env.mint, owner.pubkey(), 50);
+    env.cure_and_cancel_close_with_cu(&owner, p, src, 50);
+    assert_eq!(
+        env.portfolio_state(p).capital,
+        150,
+        "cure deposit folded into capital (escrow released, not stranded)"
+    );
+
+    // Recover EVERYTHING — including the escrowed cure deposit — via a normal withdraw.
+    let (dest, _) = env.withdraw_with_cu(&owner, p, 150);
+    assert_eq!(
+        env.token_amount(dest),
+        150,
+        "the full cured capital (original 100 + cure deposit 50) is withdrawable"
+    );
+    assert_eq!(
+        env.portfolio_state(p).capital,
+        0,
+        "no residue stranded in capital/escrow after recovering the cure deposit"
+    );
+}
+
 // security.md sweep — CureAndCancelClose deposit accounting (#35/#48): the cure's optional_deposit
 // must credit capital EXACTLY once matching the token transfer (no free-mint), and reject atomically
 // if the source is underfunded. Finding E covered withdraw-after-cure; this covers the deposit leg.
