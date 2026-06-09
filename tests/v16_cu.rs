@@ -15307,6 +15307,336 @@ fn v16_attack_resolved_payout_topup_secondary_rail_exhausts_shared_receipt() {
     );
 }
 
+// security.md sweep - terminal secondary reserve canonical binding (#44/#48): CloseResolved and
+// ClaimResolvedPayoutTopup both mutate terminal receipt/accounting before validating the vault and
+// transferring tokens. A non-canonical secondary token account owned by the vault PDA must reject
+// atomically, or a helper could burn a user's receipt while failing (or misrouting) the payout.
+#[test]
+fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
+    let mut env = V16CuEnv::new();
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, env.vault_authority, 1_100_000),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let fake_secondary_vault = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            fake_secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, env.vault_authority, 1_100_000),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    assert_ne!(
+        fake_secondary_vault, secondary_vault,
+        "fake reserve is not the canonical secondary vault"
+    );
+
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new();
+    let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new();
+    let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &lo_owner,
+        lo,
+        &sh_owner,
+        sh,
+        (10_000 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, 110);
+    for slot in [10u64, 11] {
+        env.svm.warp_to_slot(slot);
+        for p in [sh, lo] {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    action: 0,
+                    asset_index: 0,
+                    now_slot: slot,
+                    funding_rate_e9: 0,
+                    close_q: 0,
+                    fee_bps: 0,
+                    recovery_reason: 0,
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(p, false),
+                ],
+                &[],
+            );
+        }
+    }
+    env.resolve();
+
+    let _ = env.close_resolved(&sh_owner, sh);
+    let (_, after_loser) = env.market_state();
+    assert_eq!(
+        after_loser.vault, 1_100_000,
+        "winner's terminal claim is real before the non-canonical attempt"
+    );
+
+    let secondary_dest = env.token_account_for_mint(secondary, lo_owner.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let winner_before = env.svm.get_account(&lo).unwrap();
+    let canonical_before = env.svm.get_account(&secondary_vault).unwrap();
+    let fake_before = env.svm.get_account(&fake_secondary_vault).unwrap();
+    let dest_before = env.svm.get_account(&secondary_dest).unwrap();
+    env.svm.expire_blockhash();
+    let rejected_close = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(lo_owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(lo, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(fake_secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected_close.is_err(),
+        "CloseResolved must reject a non-canonical secondary reserve"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected close leaves terminal market accounting byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&lo).unwrap(),
+        winner_before,
+        "rejected close does not burn the winner receipt"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        canonical_before,
+        "canonical secondary vault remains untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&fake_secondary_vault).unwrap(),
+        fake_before,
+        "fake secondary reserve remains untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        dest_before,
+        "owner receives no payout from rejected non-canonical close"
+    );
+
+    env.svm.expire_blockhash();
+    let accepted_close = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(lo_owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(lo, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        accepted_close.is_ok(),
+        "canonical secondary CloseResolved still pays: {accepted_close:?}"
+    );
+    assert_eq!(env.token_amount(secondary_dest), 1_100_000);
+    assert_eq!(env.token_amount(secondary_vault), 0);
+    assert_eq!(env.market_state().1.vault, 0);
+
+    let mut topup_env = V16CuEnv::new();
+    let secondary = topup_env.create_mint();
+    topup_env.update_base_unit_mints_with_cu(topup_env.mint, secondary);
+    let secondary_vault = canonical_vault_ata(topup_env.vault_authority, secondary);
+    topup_env
+        .svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, topup_env.vault_authority, 60),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let fake_secondary_vault = Pubkey::new_unique();
+    topup_env
+        .svm
+        .set_account(
+            fake_secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, topup_env.vault_authority, 60),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    topup_env.set_token_account_amount(
+        topup_env.vault,
+        topup_env.mint,
+        topup_env.vault_authority,
+        60,
+    );
+
+    let topup_owner = Keypair::new();
+    let topup_portfolio = topup_env.create_portfolio(&topup_owner);
+    {
+        let mut market_account = topup_env
+            .svm
+            .get_account(&topup_env.market)
+            .expect("market account");
+        let mut portfolio_account = topup_env
+            .svm
+            .get_account(&topup_portfolio)
+            .expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 100 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 100,
+            paid_effective: 40,
+            finalized: false,
+        };
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        topup_env
+            .svm
+            .set_account(topup_env.market, market_account)
+            .unwrap();
+        topup_env
+            .svm
+            .set_account(topup_portfolio, portfolio_account)
+            .unwrap();
+    }
+
+    let topup_dest = topup_env.token_account_for_mint(secondary, topup_owner.pubkey(), 0);
+    let market_before = topup_env.svm.get_account(&topup_env.market).unwrap();
+    let receipt_before = topup_env.svm.get_account(&topup_portfolio).unwrap();
+    let canonical_before = topup_env.svm.get_account(&secondary_vault).unwrap();
+    let fake_before = topup_env.svm.get_account(&fake_secondary_vault).unwrap();
+    let dest_before = topup_env.svm.get_account(&topup_dest).unwrap();
+    topup_env.svm.expire_blockhash();
+    let rejected_topup = topup_env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(topup_owner.pubkey(), false),
+            AccountMeta::new(topup_env.market, false),
+            AccountMeta::new(topup_portfolio, false),
+            AccountMeta::new(topup_dest, false),
+            AccountMeta::new(fake_secondary_vault, false),
+            AccountMeta::new_readonly(topup_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected_topup.is_err(),
+        "ClaimResolvedPayoutTopup must reject a non-canonical secondary reserve"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_env.market).unwrap(),
+        market_before,
+        "rejected top-up leaves market accounting byte-identical"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_portfolio).unwrap(),
+        receipt_before,
+        "rejected top-up does not burn the pending receipt"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&secondary_vault).unwrap(),
+        canonical_before,
+        "canonical top-up reserve remains untouched"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&fake_secondary_vault).unwrap(),
+        fake_before,
+        "fake top-up reserve remains untouched"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_dest).unwrap(),
+        dest_before,
+        "owner receives no payout from rejected non-canonical top-up"
+    );
+
+    topup_env.svm.expire_blockhash();
+    let accepted_topup = topup_env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(topup_owner.pubkey(), false),
+            AccountMeta::new(topup_env.market, false),
+            AccountMeta::new(topup_portfolio, false),
+            AccountMeta::new(topup_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(topup_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        accepted_topup.is_ok(),
+        "canonical secondary top-up still pays: {accepted_topup:?}"
+    );
+    assert_eq!(topup_env.token_amount(topup_dest), 60);
+    assert_eq!(topup_env.token_amount(secondary_vault), 0);
+    let receipt = topup_env.portfolio_state(topup_portfolio);
+    assert_eq!(receipt.resolved_payout_receipt.paid_effective, 100);
+    assert!(receipt.resolved_payout_receipt.finalized);
+    assert_eq!(topup_env.market_state().1.vault, 0);
+}
+
 // security.md sweep — oracle/mark bounds (#37/#39): the auth-mark push feeds settlement. An extreme
 // mark (0 or u64::MAX) must be rejected/clamped, never corrupt pnl or panic the program.
 #[test]
