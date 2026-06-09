@@ -12833,6 +12833,127 @@ fn v16_attack_crank_caller_funding_rate_injection_rejected() {
     assert_eq!(g.c_tot, 2_000_000, "no capital injected via funding");
 }
 
+// security.md sweep - public B-settlement crank (#30/#33/#44): PermissionlessCrank action 2 is an
+// unsigned progress tool for stale social-loss B indices. A hostile cranker must be able to make
+// bounded progress, but must not force more than public_b_chunk_atoms through in one transaction.
+#[test]
+fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        public_b_chunk_atoms: 1,
+        ..V16CuMarketParams::default()
+    });
+    let long_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short_owner = Keypair::new();
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    let before_account = env.portfolio_state(long);
+    let before_leg = active_leg_for_asset(&before_account, 0);
+    assert_eq!(before_leg.side, SideV16::Long);
+    assert_eq!(before_leg.b_snap, 0, "fresh leg starts at B snap 0");
+    assert!(before_leg.loss_weight > 0, "leg participates in social-loss B settlement");
+    let (_, before_group) = env.market_state();
+    let vault_before = before_group.vault;
+    let c_tot_before = before_group.c_tot;
+    let insurance_before = before_group.insurance;
+
+    env.mutate_market(|_, group| {
+        group.assets[0].b_long_num = 3;
+    });
+    assert_eq!(
+        env.market_state().1.assets[0].b_long_num,
+        3,
+        "test setup created a non-vacuous pending B gap"
+    );
+
+    let cranker = Keypair::new();
+    env.ensure_signer_account(cranker.pubkey());
+    let settle_b_once = |env: &mut V16CuEnv| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                action: 2,
+                asset_index: 0,
+                now_slot: 1,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(cranker.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        )
+    };
+
+    env.svm.warp_to_slot(1);
+    let first_cu = settle_b_once(&mut env).expect("first permissionless SettleB chunk");
+    assert_cu_within("PermissionlessCrank SettleB", first_cu, CRANK_CU_LIMIT);
+    let after_first = env.portfolio_state(long);
+    let after_first_leg = active_leg_for_asset(&after_first, 0);
+    assert_eq!(
+        after_first_leg.b_snap, 1,
+        "one public SettleB call advances only one configured chunk"
+    );
+    assert!(
+        after_first_leg.b_stale && after_first.b_stale_state,
+        "remaining B gap stays explicitly marked stale"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].b_long_num,
+        3,
+        "SettleB advances the account snapshot, not the market loss index"
+    );
+    let (_, g_after_first) = env.market_state();
+    assert_eq!(g_after_first.vault, vault_before, "SettleB moves no custody");
+    assert_eq!(g_after_first.c_tot, c_tot_before, "SettleB does not mint capital");
+    assert_eq!(
+        g_after_first.insurance, insurance_before,
+        "SettleB does not debit insurance"
+    );
+
+    settle_b_once(&mut env).expect("second permissionless SettleB chunk");
+    let after_second = env.portfolio_state(long);
+    assert_eq!(
+        active_leg_for_asset(&after_second, 0).b_snap,
+        2,
+        "second SettleB call advances exactly one more chunk"
+    );
+    assert!(after_second.b_stale_state, "one chunk remains after second call");
+
+    settle_b_once(&mut env).expect("final permissionless SettleB chunk");
+    let after_final = env.portfolio_state(long);
+    let final_leg = active_leg_for_asset(&after_final, 0);
+    assert_eq!(final_leg.b_snap, 3, "all B debt settled after three chunks");
+    assert!(
+        !final_leg.b_stale && !after_final.b_stale_state,
+        "final chunk clears B-stale state"
+    );
+    let (_, g_end) = env.market_state();
+    assert_eq!(g_end.vault, vault_before, "no custody change after all chunks");
+    assert_eq!(g_end.c_tot, c_tot_before, "capital invariant preserved");
+    assert_eq!(g_end.insurance, insurance_before, "insurance invariant preserved");
+    assert!(
+        g_end.vault >= g_end.c_tot + g_end.insurance,
+        "senior conservation after permissionless B settlement"
+    );
+}
+
 // security.md sweep — cross-margin (#22/#32): one portfolio holds positions on TWO assets.
 // Probe aggregate conservation and per-asset OI balance under shared-capital cross-margin.
 #[test]
