@@ -28926,6 +28926,133 @@ fn v16_attack_close_slab_requires_secondary_vault_recovery() {
     );
 }
 
+// full-interface sweep (cron38): the optional secondary reserve is validated before CloseSlab sweeps
+// primary dust. A canonical secondary vault with close_authority set must reject atomically; otherwise
+// terminal cleanup could partially reclaim the primary vault while leaving unsafe secondary custody.
+#[test]
+fn v16_attack_close_slab_rejects_closable_secondary_vault_before_reclaim() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    let mut closable_secondary = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: secondary_mint,
+            owner: env.vault_authority,
+            amount: 50,
+            delegate: COption::None,
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 0,
+            close_authority: COption::Some(Pubkey::new_unique()),
+        },
+        &mut closable_secondary,
+    )
+    .unwrap();
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: closable_secondary,
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.resolve();
+
+    let primary_dest = env.token_account(admin.pubkey(), 0);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let primary_dest_before = env.svm.get_account(&primary_dest).unwrap();
+    let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new(secondary_dest, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "CloseSlab must reject a secondary vault with close_authority set"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected closable-secondary CloseSlab must not zero the market"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "primary dust must not be swept before secondary vault validation"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "closable secondary reserve remains untouched and recoverable"
+    );
+    assert_eq!(env.svm.get_account(&primary_dest).unwrap(), primary_dest_before);
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        secondary_dest_before
+    );
+
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new(secondary_dest, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "same secondary reserve closes once close_authority is removed: {ok:?}"
+    );
+    assert_eq!(env.token_amount(primary_dest), 7);
+    assert_eq!(env.token_amount(secondary_dest), 50);
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(closed_market.lamports, 0);
+    assert!(closed_market.data.iter().all(|b| *b == 0));
+}
+
 // full-interface sweep (cron32): CloseSlab's optional secondary vault must be bound to the current
 // market's vault PDA, not merely be a valid token account for the configured secondary mint. A foreign
 // market's canonical secondary reserve must reject before primary dust is swept or either vault/market
