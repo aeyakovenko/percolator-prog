@@ -41336,6 +41336,85 @@ fn v16_attack_permissionless_asset_activation_rejects_when_resolve_matured() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// security.md sweep - stale-resolve fee drift (#30/#33/#48): SyncMaintenanceFee is public and can
+// debit user capital while crediting market insurance. Once the market is resolve-matured, fee sync
+// must freeze so a cranker cannot alter the terminal insurance/capital split before resolution.
+#[test]
+fn v16_attack_sync_maintenance_rejects_when_resolve_matured() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 100_000);
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+
+    // Non-vacuous control: while fresh, maintenance fee sync charges the account.
+    env.svm.warp_to_slot(4);
+    env.sync_maintenance_fee_with_cu(portfolio, None, 4);
+    assert_eq!(
+        env.portfolio_state(portfolio).last_fee_slot,
+        4,
+        "fresh maintenance sync advanced the fee slot"
+    );
+    let fresh_capital = env.portfolio_state(portfolio).capital;
+    assert!(
+        fresh_capital < 100_000,
+        "fresh maintenance sync charged capital"
+    );
+
+    env.svm.warp_to_slot(40);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::SyncMaintenanceFee { now_slot: 0 },
+        vec![
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "SyncMaintenanceFee must reject once the market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale maintenance sync leaves market insurance unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected stale maintenance sync does not debit user capital"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale maintenance sync moves no custody"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve still succeeds after rejected stale maintenance sync: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // Per-asset oracle-authority isolation: PushAuthMark validates the signer against THE TARGET ASSET's
 // oracle_authority (handle_push_auth_mark reads asset_index's profile -> domain_authorities_from_profile ->
 // expect_live_authority, v16_program ~10188). A key that is a *valid* oracle_authority for asset 1 must NOT be
