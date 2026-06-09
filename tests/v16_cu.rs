@@ -12306,6 +12306,158 @@ fn v16_attack_resolved_payout_topup_bad_dest_does_not_burn_receipt() {
     assert_eq!(env.market_state().1.vault, 0);
 }
 
+// security.md sweep - resolved top-up vault custody (#33/#44/#48): ClaimResolvedPayoutTopup is
+// unsigned and updates the pending receipt before validating the vault token account. A delegated
+// canonical vault must reject atomically, without burning the remaining receipt or moving custody.
+#[test]
+fn v16_attack_claim_resolved_topup_rejects_delegated_vault_without_burning_receipt() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    {
+        let mut market_account = env.svm.get_account(&env.market).expect("market account");
+        let mut portfolio_account = env.svm.get_account(&portfolio).expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 100 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 100,
+            paid_effective: 40,
+            finalized: false,
+        };
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        env.svm.set_account(env.market, market_account).unwrap();
+        env.svm.set_account(portfolio, portfolio_account).unwrap();
+    }
+
+    let mut delegated_vault = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: env.mint,
+            owner: env.vault_authority,
+            amount: 60,
+            delegate: COption::Some(Pubkey::new_unique()),
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 60,
+            close_authority: COption::None,
+        },
+        &mut delegated_vault,
+    )
+    .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: delegated_vault,
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "ClaimResolvedPayoutTopup must reject a delegated canonical vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected delegated-vault top-up must not mutate market payout accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected delegated-vault top-up must not burn the pending receipt"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "delegated vault remains untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "destination receives nothing on rejected delegated-vault top-up"
+    );
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 40);
+    assert!(
+        !account.resolved_payout_receipt.finalized,
+        "receipt remains claimable after delegated-vault rejection"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 60),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let cu = env.claim_resolved_payout_topup_with_cu(owner.pubkey(), portfolio, dest);
+    assert_cu_within(
+        "ClaimResolvedPayoutTopup delegated-vault rollback",
+        cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(dest),
+        60,
+        "same top-up succeeds after the vault is restored clean"
+    );
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
+    assert!(account.resolved_payout_receipt.finalized);
+    assert_eq!(env.market_state().1.vault, 0);
+}
+
 // regression (security.md sweep): MTM settlement under a price move (§6.1 loss->capital,
 // §6.2 profit->pnl warmup). After full winner->loser->winner cranking, total equity is
 // conserved, the winner's +PnL is backed by the loser's realized-loss residual, and senior
