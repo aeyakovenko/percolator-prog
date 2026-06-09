@@ -38934,3 +38934,142 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         "control push moved the EWMA mark"
     );
 }
+
+// Per-asset oracle-authority isolation for oracle reconfiguration entrypoints. A valid asset-1
+// oracle_authority must not be able to reset asset 0's oracle mode/anchor, which would let it steer
+// asset-0 marks before liquidations or settlement.
+#[test]
+fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_oracle() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100); // asset 0 oracle_authority = admin
+
+    let a1 = Keypair::new();
+    env.ensure_signer_account(a1.pubkey());
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        a1.pubkey(),
+        a1.pubkey(),
+        a1.pubkey(),
+        a1.pubkey(),
+    );
+
+    // Non-vacuous control: a1 really is accepted for asset 1 oracle reconfiguration.
+    env.svm.expire_blockhash();
+    let own_asset = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: 1,
+            now_slot: 1,
+            initial_mark_e6: 125,
+        },
+        vec![
+            AccountMeta::new(a1.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&a1],
+    );
+    assert!(
+        own_asset.is_ok(),
+        "asset-1's own oracle_authority configures asset-1 auth mark: {own_asset:?}"
+    );
+
+    let (cfg_before, group_before) = env.market_state();
+    assert_eq!(
+        cfg_before.oracle_mode,
+        percolator_prog::constants::ORACLE_MODE_AUTH_MARK,
+        "asset-0 starts on auth-mark mode"
+    );
+    assert_eq!(cfg_before.oracle_target_price_e6, 100);
+
+    // ATTACK 1: the valid asset-1 oracle_authority tries to re-anchor asset 0 as EWMA.
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    let ewma_attack = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureEwmaMark {
+            asset_index: 0,
+            now_slot: 2,
+            initial_mark_e6: 9_000,
+            mark_ewma_halflife_slots: 10,
+            mark_min_fee: 0,
+        },
+        vec![
+            AccountMeta::new(a1.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&a1],
+    );
+    assert!(
+        ewma_attack.is_err(),
+        "asset-1 oracle_authority must not configure asset-0 EWMA"
+    );
+    assert_eq!(
+        env.market_state().0.oracle_mode,
+        cfg_before.oracle_mode,
+        "failed EWMA reconfiguration leaves asset-0 mode unchanged"
+    );
+    assert_eq!(
+        env.market_state().0.oracle_target_price_e6,
+        cfg_before.oracle_target_price_e6,
+        "failed EWMA reconfiguration leaves asset-0 target unchanged"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        group_before.assets[0].effective_price,
+        "failed EWMA reconfiguration leaves asset-0 engine mark unchanged"
+    );
+
+    // ATTACK 2: the same cross-asset authority tries the auth-mark reconfiguration path too.
+    env.svm.expire_blockhash();
+    let auth_attack = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: 0,
+            now_slot: 2,
+            initial_mark_e6: 8_000,
+        },
+        vec![
+            AccountMeta::new(a1.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&a1],
+    );
+    assert!(
+        auth_attack.is_err(),
+        "asset-1 oracle_authority must not configure asset-0 auth mark"
+    );
+    assert_eq!(
+        env.market_state().0.oracle_target_price_e6,
+        cfg_before.oracle_target_price_e6,
+        "failed auth reconfiguration leaves asset-0 target unchanged"
+    );
+
+    // CONTROL: asset 0's own authority can still reconfigure asset 0.
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: 0,
+            now_slot: 2,
+            initial_mark_e6: 150,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(ok.is_ok(), "asset-0 authority reconfigures asset-0: {ok:?}");
+    assert_eq!(env.market_state().0.oracle_target_price_e6, 150);
+}
