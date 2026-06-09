@@ -41235,6 +41235,107 @@ fn v16_attack_init_portfolio_rejects_when_resolve_matured() {
     env.close_slab_with_cu();
 }
 
+// security.md sweep - stale-resolve lifecycle drift (#30/#35/#48): permissionless asset activation
+// reallocs the market, installs new domain authorities, credits the market-init fee, and transfers
+// SPL collateral. Once the base market is stale enough for ResolveStalePermissionless, that live
+// lifecycle/value-in path must freeze just like Deposit/InitPortfolio/top-ups.
+#[test]
+fn v16_attack_permissionless_asset_activation_rejects_when_resolve_matured() {
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(10);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+
+    // Non-vacuous control: while fresh, a permissionless creator can append an empty asset.
+    let fresh_creator = Keypair::new();
+    env.svm.warp_to_slot(4);
+    env.activate_permissionless_asset_with_fee(
+        &fresh_creator,
+        1,
+        4,
+        100,
+        fresh_creator.pubkey(),
+        fresh_creator.pubkey(),
+        fresh_creator.pubkey(),
+        fresh_creator.pubkey(),
+        10,
+    );
+    assert_eq!(
+        env.market_state().1.config.max_market_slots,
+        2,
+        "fresh permissionless activation appended asset 1"
+    );
+
+    env.svm.warp_to_slot(40);
+    let stale_creator = Keypair::new();
+    env.ensure_signer_account(stale_creator.pubkey());
+    let stale_fee_source = env.token_account(stale_creator.pubkey(), 10);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let source_before = env.svm.get_account(&stale_fee_source).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 2,
+            now_slot: 0,
+            initial_price: 100,
+            insurance_authority: stale_creator.pubkey().to_bytes(),
+            insurance_operator: stale_creator.pubkey().to_bytes(),
+            backing_bucket_authority: stale_creator.pubkey().to_bytes(),
+            oracle_authority: stale_creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(stale_creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_fee_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&stale_creator],
+    );
+    assert!(
+        rejected.is_err(),
+        "permissionless asset activation must reject once the market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale activation leaves market capacity and authorities unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale activation moves no vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_fee_source).unwrap(),
+        source_before,
+        "rejected stale activation does not collect the permissionless init fee"
+    );
+    assert_eq!(
+        env.market_state().1.config.max_market_slots,
+        2,
+        "stale activation cannot append a new market slot"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve still succeeds after rejected stale activation: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // Per-asset oracle-authority isolation: PushAuthMark validates the signer against THE TARGET ASSET's
 // oracle_authority (handle_push_auth_mark reads asset_index's profile -> domain_authorities_from_profile ->
 // expect_live_authority, v16_program ~10188). A key that is a *valid* oracle_authority for asset 1 must NOT be

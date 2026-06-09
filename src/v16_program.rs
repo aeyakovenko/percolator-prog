@@ -9105,6 +9105,9 @@ pub mod processor {
             && (asset_index == configured_slots_pre || permissionless_reuse_target)
         {
             let authenticated_slot = authenticated_slot_or_fallback(now_slot);
+            if oracle_v16::permissionless_stale_matured(&cfg_pre, authenticated_slot) {
+                return Err(PercolatorError::OracleStale.into());
+            }
             let append_activation = asset_index == configured_slots_pre;
             if append_activation && cfg_pre.free_market_slot_count != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
