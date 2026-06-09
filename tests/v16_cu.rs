@@ -22293,6 +22293,83 @@ fn v16_attack_refine_resolved_bound_admin_and_mode_gated() {
     );
 }
 
+// security.md sweep - terminal payout bound refinement (#14/#21): even an authorized market admin
+// must not be able to over-decrease the unreceipted claim bound. A bad refine would either underflow
+// terminal accounting or lower the payout denominator incorrectly, locking or haircutting users.
+#[test]
+fn v16_attack_refine_resolved_bound_over_decrease_is_atomic() {
+    let mut env = V16CuEnv::new();
+    let owner_a = Keypair::new();
+    let portfolio_a = env.create_portfolio(&owner_a);
+    let owner_b = Keypair::new();
+    let portfolio_b = env.create_portfolio(&owner_b);
+    env.deposit(&owner_a, portfolio_a, 1_000_000);
+    env.deposit(&owner_b, portfolio_b, 1_000_000);
+    env.top_up_backing_bucket(1, 500_000, 10);
+    env.add_source_positive_pnl(portfolio_a, 1, 250_000);
+    env.add_source_positive_pnl(portfolio_b, 1, 250_000);
+    env.resolve();
+
+    let dest_a = env.close_resolved(&owner_a, portfolio_a);
+    assert_eq!(
+        env.token_amount(dest_a),
+        1_250_000,
+        "first winner creates a resolved receipt and receives its backed claim"
+    );
+
+    let (_, group_before) = env.market_state();
+    let bound = group_before
+        .resolved_payout_ledger
+        .terminal_claim_bound_unreceipted_num;
+    assert!(bound > 0, "resolved user claim contributes to the unreceipted bound");
+    assert!(
+        group_before.resolved_payout_ledger.terminal_claim_exact_receipts_num > 0,
+        "first close converted one winner into an exact receipt"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio_b).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::RefineResolvedUnreceiptedBound {
+            decrease_num: bound + 1,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "authorized over-decrease of resolved payout bound must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected over-refine leaves resolved market accounting byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio_b).unwrap(),
+        portfolio_before,
+        "rejected over-refine leaves user payout state byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected over-refine moves no custody"
+    );
+
+    let dest = env.close_resolved(&owner_b, portfolio_b);
+    assert_eq!(
+        env.token_amount(dest),
+        1_250_000,
+        "remaining user still recovers the full terminal payout after rejected over-refine"
+    );
+}
+
 // security.md sweep — TopUpInsuranceDomain authorization (#6): a per-domain insurance top-up is gated
 // to the domain's insurance_authority (v16_program.rs:6577 expect_live_authority). A non-authority
 // must reject — no manipulating a domain's insurance/budget accounting by an unauthorized caller.
