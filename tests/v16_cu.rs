@@ -44013,6 +44013,88 @@ fn v16_attack_switchboard_wide_std_dev_rejected_without_mutation() {
     );
 }
 
+// Switchboard sample quorum gate: a PullFeed update with too few samples is a manipulable oracle input.
+// The public configure path must reject low-quorum feeds atomically, while accepting the same value once
+// the sample count satisfies the feed's declared minimum.
+#[test]
+fn v16_attack_switchboard_low_sample_quorum_rejected_without_mutation() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 10, 1_000);
+    let value: i128 = 100 * 1_000_000_000_000;
+    let install = |env: &mut V16CuEnv, num_samples: u8, min_sample_size: u8| -> Pubkey {
+        let key = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_switchboard_data(
+                        &[0xABu8; 32],
+                        value,
+                        1,
+                        1_000,
+                        num_samples,
+                        min_sample_size,
+                        1,
+                    ),
+                    owner: oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        key
+    };
+    let configure = |env: &mut V16CuEnv, feed: Pubkey| {
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed.to_bytes(), [0u8; 32], [0u8; 32]],
+            &[feed],
+            10,
+            1_000,
+            0,
+            0,
+            3,
+            100,
+        )
+    };
+    let before = env.svm.get_account(&env.market).unwrap().data;
+
+    for (label, num_samples, min_sample_size) in [
+        ("zero minimum", 3, 0),
+        ("below minimum", 1, 2),
+    ] {
+        let bad = install(&mut env, num_samples, min_sample_size);
+        env.svm.expire_blockhash();
+        let rejected = configure(&mut env, bad);
+        assert!(
+            rejected.is_err(),
+            "Switchboard {label} sample quorum must reject"
+        );
+        let err = rejected.unwrap_err();
+        assert!(
+            err.contains("Custom(26)"),
+            "Switchboard {label} sample quorum must reject as OracleInvalid (Custom 26), got: {err}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap().data,
+            before,
+            "rejected Switchboard {label} sample quorum must not mutate the market"
+        );
+    }
+
+    let valid = install(&mut env, 2, 2);
+    env.svm.expire_blockhash();
+    configure(&mut env, valid).expect("Switchboard sample quorum should configure once satisfied");
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        100,
+        "accepted Switchboard quorum value/1e12 seeds the expected mark"
+    );
+}
+
 // Fee-RATE evasion: execute_trade floors the caller-supplied fee_bps to the config base
 // (hybrid_trade_fee_bps_view: base = max(caller_fee_bps, cfg.trade_fee_base_bps), src/v16_program.rs).
 // A trader passing fee_bps=0 must still pay the config trade_fee_base_bps -- complements the exec_price
