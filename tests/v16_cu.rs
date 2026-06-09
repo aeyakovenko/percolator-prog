@@ -43952,6 +43952,67 @@ fn v16_attack_switchboard_stale_feed_rejected() {
     );
 }
 
+// Switchboard confidence gate: std_dev is parsed from a different vendor layout than Pyth `conf`.
+// A wide-variance feed must not install an uncertain mark, and the rejection must roll back the market.
+#[test]
+fn v16_attack_switchboard_wide_std_dev_rejected_without_mutation() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 10, 1_000);
+    let value: i128 = 100 * 1_000_000_000_000;
+    let wide_std_dev: i128 = 2 * 1_000_000_000_000; // 2% of value, over the 1% filter below.
+    let sb = env.set_switchboard_price(value, wide_std_dev, 1_000);
+    let before = env.svm.get_account(&env.market).unwrap().data;
+
+    let rejected = env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [sb.to_bytes(), [0u8; 32], [0u8; 32]],
+        &[sb],
+        10,
+        1_000,
+        0,
+        0,
+        3,
+        100,
+    );
+    assert!(
+        rejected.is_err(),
+        "a Switchboard feed over the configured std_dev confidence bound must reject"
+    );
+    let err = rejected.unwrap_err();
+    assert!(
+        err.contains("Custom(28)"),
+        "wide Switchboard std_dev must reject as OracleConfTooWide (Custom 28), got: {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before,
+        "rejected wide-std-dev Switchboard config must not mutate the market"
+    );
+
+    let tight = env.set_switchboard_price(value, 1, 1_000);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [tight.to_bytes(), [0u8; 32], [0u8; 32]],
+        &[tight],
+        10,
+        1_000,
+        0,
+        0,
+        3,
+        100,
+    )
+    .expect("tight Switchboard std_dev should configure under the same confidence filter");
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        100,
+        "accepted Switchboard value/1e12 seeds the expected mark"
+    );
+}
+
 // Fee-RATE evasion: execute_trade floors the caller-supplied fee_bps to the config base
 // (hybrid_trade_fee_bps_view: base = max(caller_fee_bps, cfg.trade_fee_base_bps), src/v16_program.rs).
 // A trader passing fee_bps=0 must still pay the config trade_fee_base_bps -- complements the exec_price
