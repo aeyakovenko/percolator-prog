@@ -41511,6 +41511,106 @@ fn v16_attack_rebalance_reduce_rejects_when_resolve_matured() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// security.md sweep - stale-resolve close-progress drift (#30/#35/#48): CureAndCancelClose
+// is owner-gated but can cancel forced-close progress and optionally transfer fresh collateral.
+// Once the market is resolve-matured, that live cure path must freeze atomically.
+#[test]
+fn v16_attack_cure_and_cancel_close_rejects_when_resolve_matured() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+
+    // Non-vacuous control: while fresh, a real cure cancels close progress and credits the deposit.
+    let fresh_owner = Keypair::new();
+    let fresh = env.create_portfolio(&fresh_owner);
+    env.deposit(&fresh_owner, fresh, 100);
+    env.seed_cancellable_close_progress(fresh);
+    let fresh_source = env.token_account_for_mint(env.mint, fresh_owner.pubkey(), 20);
+    env.svm.warp_to_slot(4);
+    env.cure_and_cancel_close_with_cu(&fresh_owner, fresh, fresh_source, 20);
+    let fresh_after = env.portfolio_state(fresh);
+    assert!(
+        fresh_after.close_progress.canceled,
+        "fresh CureAndCancelClose canceled close progress"
+    );
+    assert_eq!(
+        fresh_after.capital, 120,
+        "fresh CureAndCancelClose credited the optional deposit"
+    );
+    assert_eq!(
+        env.token_amount(fresh_source),
+        0,
+        "fresh CureAndCancelClose pulled exactly the optional deposit"
+    );
+
+    let stale_owner = Keypair::new();
+    let stale = env.create_portfolio(&stale_owner);
+    env.deposit(&stale_owner, stale, 100);
+    env.seed_cancellable_close_progress(stale);
+    let stale_source = env.token_account_for_mint(env.mint, stale_owner.pubkey(), 20);
+
+    env.svm.warp_to_slot(40);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&stale).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let source_before = env.svm.get_account(&stale_source).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CureAndCancelClose {
+            optional_deposit: 20,
+        },
+        vec![
+            AccountMeta::new(stale_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale, false),
+            AccountMeta::new(stale_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&stale_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "CureAndCancelClose must reject once the market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale cure leaves market close-progress accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale).unwrap(),
+        portfolio_before,
+        "rejected stale cure leaves close progress active"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale cure moves no vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_source).unwrap(),
+        source_before,
+        "rejected stale cure pulls no source tokens"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve still succeeds after rejected stale cure: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // Per-asset oracle-authority isolation: PushAuthMark validates the signer against THE TARGET ASSET's
 // oracle_authority (handle_push_auth_mark reads asset_index's profile -> domain_authorities_from_profile ->
 // expect_live_authority, v16_program ~10188). A key that is a *valid* oracle_authority for asset 1 must NOT be
