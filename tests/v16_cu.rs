@@ -34563,6 +34563,61 @@ fn v16_attack_oracle_negative_or_zero_price_rejected() {
     );
 }
 
+#[test]
+fn v16_attack_oracle_pyth_exponent_bounds_enforced() {
+    let configure = |price: i64, expo: i32| -> (bool, Option<String>, bool, u64) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let feed = [0x55u8; 32];
+        let acct = env.set_pyth_price_with_conf(&feed, price, expo, 0, 100);
+        let before = env.svm.get_account(&env.market).unwrap().data;
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0u8; 32], [0u8; 32]],
+            &[acct],
+            1,
+            100,
+            0,
+            0,
+            100,
+            0,
+        );
+        let ok = r.is_ok();
+        let price_after = if ok {
+            env.market_state().1.assets[0].raw_oracle_target_price
+        } else {
+            0
+        };
+        let after = env.svm.get_account(&env.market).unwrap().data;
+        (ok, r.err(), before == after, price_after)
+    };
+
+    let (ok, _, _, price_after) = configure(200_000, -6);
+    assert!(ok, "control: a normal Pyth exponent configures");
+    assert_eq!(price_after, 200_000, "control: expo -6 scales to e6");
+
+    for (label, price, expo) in [
+        ("positive exponent above bound", 200_000, 19),
+        ("negative exponent below bound", 200_000, -19),
+        ("max exponent overshoots price bound", 1_000_000, 18),
+        ("min exponent floors to zero", 200_000, -18),
+    ] {
+        let (ok, err, unchanged, _) = configure(price, expo);
+        assert!(!ok, "{label}: Pyth exponent edge must reject");
+        let err = err.unwrap();
+        assert!(
+            err.contains("Custom(26)"),
+            "{label}: exponent edge should reject as OracleInvalid (Custom 26), got {err}"
+        );
+        assert!(
+            unchanged,
+            "{label}: rejected exponent edge must leave market bytes unchanged"
+        );
+    }
+}
+
 // security.md sweep — oracle feed account owner validation (#37/#44): a Pyth feed account must be owned
 // by the Pyth receiver program. Attacker goal: substitute a self-owned account holding crafted "Pyth"
 // data to inject an arbitrary oracle price (full oracle spoof). Protection: the wrapper rejects a feed
