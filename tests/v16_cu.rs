@@ -28097,6 +28097,56 @@ fn v16_attack_undersized_portfolio_account_realloced_safely() {
         "accounting vault == real vault"
     );
 }
+
+// security.md sweep - legacy portfolio storage growth (#44/#48): after the matcher-config tail was
+// added, an already-initialized portfolio with only the engine body must not become stuck. Deposit must
+// grow the account through ensure_portfolio_storage_for_market_slots, preserve accounting, and leave the
+// user able to withdraw.
+#[test]
+fn v16_attack_legacy_portfolio_storage_reallocs_on_deposit_without_corruption() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let mut legacy = env.svm.get_account(&portfolio).unwrap();
+    legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(portfolio, legacy).unwrap();
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup simulates an initialized legacy portfolio without the matcher tail"
+    );
+
+    env.deposit(&owner, portfolio, 1_000);
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap().data.len(),
+        env.portfolio_account_len,
+        "Deposit must grow legacy portfolio storage before mutating it"
+    );
+    assert_eq!(
+        env.portfolio_state(portfolio).capital,
+        1_000,
+        "deposit credits exactly after legacy storage growth"
+    );
+    let (_, group_after_deposit) = env.market_state();
+    assert_eq!(group_after_deposit.c_tot, 1_000);
+    assert_eq!(group_after_deposit.vault as u64, env.token_amount(env.vault));
+
+    let dest = env.withdraw(&owner, portfolio, 1_000);
+    assert_eq!(
+        env.token_amount(dest),
+        1_000,
+        "withdraw recovers the full deposit after legacy storage growth"
+    );
+    assert_eq!(env.portfolio_state(portfolio).capital, 0);
+    let (_, group_after_withdraw) = env.market_state();
+    assert_eq!(group_after_withdraw.c_tot, 0);
+    assert_eq!(
+        group_after_withdraw.vault as u64,
+        env.token_amount(env.vault),
+        "accounting vault == real vault after withdraw"
+    );
+}
+
 // security.md sweep — max-leg multi-asset conservation (#32/#22): one portfolio holding positions on
 // ALL asset slots must keep every invariant (c_tot==Σcapitals, accounting==real vault, per-asset OI
 // balanced). Probes breadth across the full leg array.
