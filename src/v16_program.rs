@@ -4761,6 +4761,17 @@ pub mod processor {
         Ok(())
     }
 
+    fn reject_non_base_oracle_update_after_global_resolve_matured(
+        cfg: &WrapperConfigV16,
+        asset_index: usize,
+        authenticated_slot: u64,
+    ) -> ProgramResult {
+        if asset_index != 0 && oracle_v16::permissionless_stale_matured(cfg, authenticated_slot) {
+            return Err(PercolatorError::OracleStale.into());
+        }
+        Ok(())
+    }
+
     fn shutdown_asset_matured_at_slot_view(
         cfg: &WrapperConfigV16,
         group: &state::MarketViewMutV16<'_>,
@@ -9845,6 +9856,11 @@ pub mod processor {
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
+            reject_non_base_oracle_update_after_global_resolve_matured(
+                &cfg,
+                asset_index_usize,
+                authenticated_slot,
+            )?;
             require_asset_active_for_oracle_reconfiguration_view(&group, asset_index_usize)?;
             let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
             // Asset 0 has a real stored profile; gate oracle reconfiguration on its
@@ -9904,10 +9920,10 @@ pub mod processor {
                     authenticated_slot,
                 )
                 .map_err(map_v16_error)?;
-            cfg.last_good_oracle_slot =
-                core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
+                cfg.last_good_oracle_slot =
+                    core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
                 cfg.oracle_mode = profile.oracle_mode;
                 cfg.oracle_leg_count = profile.oracle_leg_count;
                 cfg.oracle_leg_flags = profile.oracle_leg_flags;
@@ -9967,6 +9983,11 @@ pub mod processor {
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
+            reject_non_base_oracle_update_after_global_resolve_matured(
+                &cfg,
+                asset_index_usize,
+                authenticated_slot,
+            )?;
             require_asset_active_for_oracle_reconfiguration_view(&group, asset_index_usize)?;
             let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
             // Asset 0 has a real stored profile; gate oracle reconfiguration on its
@@ -10013,10 +10034,10 @@ pub mod processor {
                     authenticated_slot,
                 )
                 .map_err(map_v16_error)?;
-            cfg.last_good_oracle_slot =
-                core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
+                cfg.last_good_oracle_slot =
+                    core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
                 cfg.oracle_mode = profile.oracle_mode;
                 cfg.oracle_leg_count = 0;
                 cfg.oracle_leg_flags = 0;
@@ -10071,6 +10092,11 @@ pub mod processor {
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
+            reject_non_base_oracle_update_after_global_resolve_matured(
+                &cfg,
+                asset_index_usize,
+                authenticated_slot,
+            )?;
             require_asset_active_for_oracle_reconfiguration_view(&group, asset_index_usize)?;
             let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
             // Asset 0 has a real stored profile; gate oracle reconfiguration on its
@@ -10117,12 +10143,12 @@ pub mod processor {
                     authenticated_slot,
                 )
                 .map_err(map_v16_error)?;
-            cfg.last_good_oracle_slot =
-                core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
             // Asset 0 now carries a real stored profile: persist it like 1..N, and ALSO mirror the
             // oracle/mark fields into the market-wide config (other code paths still read cfg for asset 0).
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
+                cfg.last_good_oracle_slot =
+                    core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
                 cfg.oracle_mode = profile.oracle_mode;
                 cfg.oracle_leg_count = 0;
                 cfg.oracle_leg_flags = 0;
@@ -10175,6 +10201,11 @@ pub mod processor {
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
+            reject_non_base_oracle_update_after_global_resolve_matured(
+                &cfg,
+                asset_index_usize,
+                authenticated_slot,
+            )?;
             require_asset_mark_pushable_view(&group, asset_index_usize)?;
             if !oracle_v16::profile_is_ewma_mark(&profile) {
                 return Err(PercolatorError::Unauthorized.into());
@@ -10208,10 +10239,10 @@ pub mod processor {
             profile.oracle_target_price_e6 = next_mark;
             profile.oracle_target_publish_time = 0;
             profile.last_good_oracle_slot = authenticated_slot;
-            cfg.last_good_oracle_slot =
-                core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
+                cfg.last_good_oracle_slot =
+                    core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
                 cfg.mark_ewma_e6 = profile.mark_ewma_e6;
                 cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
                 cfg.oracle_target_price_e6 = profile.oracle_target_price_e6;
@@ -10251,6 +10282,11 @@ pub mod processor {
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
+            reject_non_base_oracle_update_after_global_resolve_matured(
+                &cfg,
+                asset_index_usize,
+                authenticated_slot,
+            )?;
             require_asset_mark_pushable_view(&group, asset_index_usize)?;
             if !oracle_v16::profile_is_auth_mark(&profile) {
                 return Err(PercolatorError::Unauthorized.into());
@@ -10267,10 +10303,10 @@ pub mod processor {
             profile.oracle_target_price_e6 = mark_e6;
             profile.oracle_target_publish_time = 0;
             profile.last_good_oracle_slot = authenticated_slot;
-            cfg.last_good_oracle_slot =
-                core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
+                cfg.last_good_oracle_slot =
+                    core::cmp::max(cfg.last_good_oracle_slot, authenticated_slot);
                 cfg.mark_ewma_e6 = profile.mark_ewma_e6;
                 cfg.mark_ewma_last_slot = profile.mark_ewma_last_slot;
                 cfg.mark_ewma_halflife_slots = 0;
@@ -10509,6 +10545,11 @@ pub mod processor {
                     }
                 }
             }
+            reject_non_base_oracle_update_after_global_resolve_matured(
+                &cfg,
+                asset_index_usize,
+                authenticated_now_slot,
+            )?;
             reject_permissionless_resolve_matured_live_for_profile_view(
                 &cfg,
                 &oracle_profile,
@@ -10535,10 +10576,12 @@ pub mod processor {
                     oracle_profile.oracle_target_price_e6,
                 )
                 .map_err(map_v16_error)?;
-            cfg.last_good_oracle_slot = core::cmp::max(
-                cfg.last_good_oracle_slot,
-                oracle_profile.last_good_oracle_slot,
-            );
+            if asset_index_usize == 0 {
+                cfg.last_good_oracle_slot = core::cmp::max(
+                    cfg.last_good_oracle_slot,
+                    oracle_profile.last_good_oracle_slot,
+                );
+            }
             write_oracle_profile_to_view(&mut group, asset_index_usize, &oracle_profile)?;
             if asset_index_usize == 0 && oracle_v16::profile_is_price_managed(&oracle_profile) {
                 cfg.oracle_mode = oracle_profile.oracle_mode;

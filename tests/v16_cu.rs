@@ -21711,6 +21711,95 @@ fn v16_attack_stale_permissionless_asset_cannot_global_resolve_market() {
     assert!(group_after_trade.assets[1].oi_eff_long_q > 0);
 }
 
+// security.md sweep - permissionless asset oracle liveness DoS (#2/#30/#37): the reverse
+// isolation must also hold. A fresh permissionless asset oracle must not be able to bump the
+// market-wide stale clock and block ResolveStalePermissionless after the base market oracle is stale.
+#[test]
+fn v16_attack_permissionless_asset_oracle_cannot_block_base_resolve_matured() {
+    let setup = || {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+        let creator = Keypair::new();
+        let creator_key = creator.pubkey();
+        env.update_market_init_fee_policy_with_cu(1);
+        env.configure_permissionless_resolve_with_cu(5, 5);
+        env.configure_auth_mark_with_cu(0, 100);
+
+        env.svm.warp_to_slot(1);
+        env.activate_permissionless_asset_with_fee(
+            &creator,
+            1,
+            1,
+            100,
+            creator_key,
+            creator_key,
+            creator_key,
+            creator_key,
+            1,
+        );
+        env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+
+        // Non-vacuous control: before the base stale boundary, the permissionless asset oracle
+        // can push its own mark.
+        env.svm.warp_to_slot(2);
+        env.push_auth_mark_for_asset_with_authority(1, &creator, 2, 101);
+        env.svm.warp_to_slot(3);
+        env.push_auth_mark_with_cu(3, 100);
+        (env, creator)
+    };
+
+    // Control: with no permissionless-asset interference, the base stale market is resolvable.
+    let (mut control_env, _) = setup();
+    control_env.svm.warp_to_slot(40);
+    control_env.svm.expire_blockhash();
+    let control_resolve = control_env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(control_env.market, false)],
+        &[],
+    );
+    assert!(
+        control_resolve.is_ok(),
+        "base market is resolve-matured without a permissionless asset oracle bump: {control_resolve:?}"
+    );
+
+    let (mut env, creator) = setup();
+    env.svm.warp_to_slot(40);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let stale_asset_push = env.send(
+        ProgInstruction::PushAuthMark {
+            asset_index: 1,
+            now_slot: 40,
+            mark_e6: 102,
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        stale_asset_push.is_err(),
+        "permissionless asset oracle must not refresh global liveness after base resolve maturity"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale permissionless mark push leaves global liveness unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "base resolve must remain available after rejected permissionless mark push: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // security.md sweep — CloseSlab wind-down finality (#30/#48): a market may only be closed when fully
 // wound down (mode==Resolved AND vault==0 && insurance==0 && c_tot==0 && no materialized portfolios).
 // Closing while value/positions remain would strand funds — must reject.
