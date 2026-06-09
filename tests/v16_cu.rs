@@ -38793,6 +38793,95 @@ fn v16_attack_deposit_primary_only_withdraw_either() {
     );
 }
 
+#[test]
+fn v16_attack_dual_mint_shared_credit_no_double_withdraw() {
+    let mut env = V16CuEnv::new();
+    let market = env.market;
+    let primary = env.mint;
+    let vault_authority = env.vault_authority;
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(primary, secondary);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+
+    let secondary_vault = canonical_vault_ata(vault_authority, secondary);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, vault_authority, 1_000),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let (primary_dest, _) = env.withdraw_with_cu(&owner, portfolio, 1_000);
+    assert_eq!(
+        env.token_amount(primary_dest),
+        1_000,
+        "primary withdrawal consumed the whole shared credit"
+    );
+    assert_eq!(
+        env.portfolio_state(portfolio).capital,
+        0,
+        "primary withdrawal exhausted the portfolio capital"
+    );
+
+    let market_before = env.svm.get_account(&market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+
+    let secondary_dest = env.token_account_for_mint(secondary, owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let double_withdraw = env.send(
+        ProgInstruction::Withdraw { amount: 1_000 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        double_withdraw.is_err(),
+        "exhausted shared credit must not withdraw again through the secondary mint"
+    );
+    assert_eq!(
+        env.svm.get_account(&market).unwrap(),
+        market_before,
+        "rejected cross-mint double-withdraw leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected cross-mint double-withdraw leaves portfolio bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "rejected cross-mint double-withdraw leaves secondary reserve unchanged"
+    );
+    assert_eq!(
+        env.token_amount(secondary_dest),
+        0,
+        "rejected secondary withdraw delivered nothing"
+    );
+    assert_eq!(
+        env.token_amount(primary_dest) + env.token_amount(secondary_dest),
+        1_000,
+        "one primary deposit paid out once across both collateral mints"
+    );
+}
+
 // full-interface sweep: base-unit mints are treated as the same unit at 1:1 atom parity across
 // deposits, withdrawals, and SwapSecondaryForPrimary. A mismatched-decimals secondary mint would make
 // that 1:1 accounting value-asymmetric, so even marketauth must not be able to install it.
