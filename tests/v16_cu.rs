@@ -24675,6 +24675,117 @@ fn v16_attack_topup_backing_bucket_authority_gated() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
 
+// full-interface sweep: WithdrawBackingBucket has a two-stage authority check where marketauth passes
+// preflight, but live withdrawal must still require the current backing_bucket_authority unless the
+// domain is in shutdown-drain. After asset-0 backing authority is rekeyed, stale marketauth must not
+// drain live provider backing.
+#[test]
+fn v16_attack_asset0_backing_rotation_rekeys_live_bucket_withdraw() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let new_backing = Keypair::new();
+
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&new_backing),
+        0,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        new_backing.pubkey().to_bytes(),
+    )
+    .expect("asset-0 admin rotates the backing-bucket authority");
+    env.top_up_backing_bucket_with_authority(&new_backing, 0, 500, 100_000);
+
+    let (_, group_before) = env.market_state();
+    assert_eq!(
+        group_before.source_backing_buckets[0].fresh_unliened_backing_num,
+        500 * BOUND_SCALE,
+        "funded asset-0 backing bucket makes the stale-authority attempt non-vacuous"
+    );
+    let stale_dest = env.token_account(admin.pubkey(), 0);
+    let stale_dest_before = env.svm.get_account(&stale_dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let stale_admin = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale_admin.is_err(),
+        "stale marketauth must not drain live backing after asset-0 backing authority rotates"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_dest).unwrap(),
+        stale_dest_before,
+        "stale backing-withdraw attempt pays no tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "stale backing-withdraw attempt does not debit the vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale backing-withdraw attempt leaves market state unchanged"
+    );
+
+    let backing_dest = env.token_account(new_backing.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let backing_withdraw = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(new_backing.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&new_backing],
+    );
+    assert!(
+        backing_withdraw.is_ok(),
+        "current asset-0 backing authority can withdraw live backing: {backing_withdraw:?}"
+    );
+    assert_eq!(
+        env.token_amount(backing_dest),
+        100,
+        "current backing authority receives the withdrawal"
+    );
+    let (_, group_after) = env.market_state();
+    assert_eq!(
+        group_after.source_backing_buckets[0].fresh_unliened_backing_num,
+        400 * BOUND_SCALE
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        group_after.vault as u64,
+        "engine vault accounting matches SPL vault after rekeyed backing withdrawal"
+    );
+}
+
 // security.md sweep — F-VAULT-FRAG fix on a WITHDRAW path: WithdrawBackingBucket transfers FROM the
 // vault; the canonical-ATA pin must apply here too. A withdrawal routed to a non-canonical
 // vault-authority-owned account must reject (no draining a fragment / fabricating an outbound path).
