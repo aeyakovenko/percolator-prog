@@ -34617,6 +34617,154 @@ fn v16_attack_chainlink_oracle_key_owner_binding_enforced() {
 }
 
 #[test]
+fn v16_attack_non_pyth_oracle_freshness_and_confidence_enforced() {
+    type OracleAttempt = (bool, Option<String>, bool, u64);
+
+    let configure_switchboard =
+        |publish_time: i64, std_dev_e6: u64, conf_filter_bps: u16| -> OracleAttempt {
+            let mut env = V16CuEnv::new();
+            set_test_clock(&mut env, 1, 1000);
+            let feed = Pubkey::new_unique();
+            env.svm
+                .set_account(
+                    feed,
+                    Account {
+                        lamports: 1_000_000_000,
+                        data: make_switchboard_data(200_000, std_dev_e6, publish_time),
+                        owner: oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+                        executable: false,
+                        rent_epoch: 0,
+                    },
+                )
+                .unwrap();
+            let before = env.svm.get_account(&env.market).unwrap().data;
+            let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+                0,
+                1,
+                0,
+                [feed.to_bytes(), [0u8; 32], [0u8; 32]],
+                &[feed],
+                1,
+                1000,
+                0,
+                0,
+                100,
+                conf_filter_bps,
+            );
+            let ok = r.is_ok();
+            let price = if ok {
+                env.market_state().1.assets[0].raw_oracle_target_price
+            } else {
+                0
+            };
+            let after = env.svm.get_account(&env.market).unwrap().data;
+            (ok, r.err(), before == after, price)
+        };
+
+    let (fresh_ok, _, _, fresh_price) = configure_switchboard(940, 1_000, 200);
+    assert!(
+        fresh_ok,
+        "a fresh Switchboard feed with tight std-dev configures"
+    );
+    assert_eq!(
+        fresh_price, 200_000,
+        "fresh Switchboard feed configures the expected e6 mark"
+    );
+
+    let (stale_ok, stale_err, stale_unchanged, _) = configure_switchboard(939, 0, 200);
+    assert!(
+        !stale_ok,
+        "a Switchboard feed one second past max staleness must reject"
+    );
+    let err = stale_err.unwrap();
+    assert!(
+        err.contains("Custom(27)"),
+        "stale Switchboard feed should reject as OracleStale (Custom 27), got: {err}"
+    );
+    assert!(
+        stale_unchanged,
+        "rejected stale Switchboard feed must not mutate the market"
+    );
+
+    let (wide_ok, wide_err, wide_unchanged, _) = configure_switchboard(940, 100_000, 200);
+    assert!(
+        !wide_ok,
+        "a Switchboard feed with std-dev wider than the configured confidence filter must reject"
+    );
+    let err = wide_err.unwrap();
+    assert!(
+        err.contains("Custom(28)"),
+        "wide-confidence Switchboard feed should reject as OracleConfTooWide (Custom 28), got: {err}"
+    );
+    assert!(
+        wide_unchanged,
+        "rejected wide-confidence Switchboard feed must not mutate the market"
+    );
+
+    let configure_chainlink = |publish_time: u32| -> OracleAttempt {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 1000);
+        let feed = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                feed,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_chainlink_data(20_000_000, 8, publish_time),
+                    owner: oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let before = env.svm.get_account(&env.market).unwrap().data;
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed.to_bytes(), [0u8; 32], [0u8; 32]],
+            &[feed],
+            1,
+            1000,
+            0,
+            0,
+            100,
+            200,
+        );
+        let ok = r.is_ok();
+        let price = if ok {
+            env.market_state().1.assets[0].raw_oracle_target_price
+        } else {
+            0
+        };
+        let after = env.svm.get_account(&env.market).unwrap().data;
+        (ok, r.err(), before == after, price)
+    };
+
+    let (fresh_ok, _, _, fresh_price) = configure_chainlink(940);
+    assert!(fresh_ok, "a fresh Chainlink feed configures");
+    assert_eq!(
+        fresh_price, 200_000,
+        "fresh Chainlink feed configures the expected e6 mark"
+    );
+
+    let (stale_ok, stale_err, stale_unchanged, _) = configure_chainlink(939);
+    assert!(
+        !stale_ok,
+        "a Chainlink feed one second past max staleness must reject"
+    );
+    let err = stale_err.unwrap();
+    assert!(
+        err.contains("Custom(27)"),
+        "stale Chainlink feed should reject as OracleStale (Custom 27), got: {err}"
+    );
+    assert!(
+        stale_unchanged,
+        "rejected stale Chainlink feed must not mutate the market"
+    );
+}
+
+#[test]
 fn v16_attack_crank_oracle_feed_id_mismatch_rejects_without_mutation() {
     let mut env = V16CuEnv::new();
     set_test_clock(&mut env, 1, 100);
