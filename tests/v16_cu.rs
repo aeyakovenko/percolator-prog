@@ -22241,6 +22241,158 @@ fn v16_attack_rebalance_reduce_owner_gated() {
         "OI still balanced"
     );
 }
+
+// security.md sweep - RebalanceReduce market isolation (#2/#44): the owner signature is not enough.
+// A portfolio initialized under market A must not be reducible through market B's slab, or a user could
+// corrupt market B's OI/accounting while preserving the correct portfolio owner signer.
+#[test]
+fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    let foreign_owner = Keypair::new();
+    let foreign = env.create_portfolio(&foreign_owner);
+    let foreign_short_owner = Keypair::new();
+    let foreign_short = env.create_portfolio(&foreign_short_owner);
+    env.deposit(&foreign_owner, foreign, 1_000_000);
+    env.deposit(&foreign_short_owner, foreign_short, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &foreign_owner,
+        foreign,
+        &foreign_short_owner,
+        foreign_short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    assert_eq!(
+        env.portfolio_state(foreign)
+            .provenance_header
+            .market_group_id,
+        env.market.to_bytes(),
+        "foreign reduce target is genuinely bound to market A"
+    );
+
+    let params = V16CuMarketParams::default();
+    let (market_b, _vault_authority_b, vault_b) =
+        init_independent_market_same_mint(&mut env, params);
+    let local_owner = Keypair::new();
+    let local = init_portfolio_on_market(
+        &mut env,
+        market_b,
+        &local_owner,
+        params.max_portfolio_assets as usize,
+    );
+    let local_short_owner = Keypair::new();
+    let local_short = init_portfolio_on_market(
+        &mut env,
+        market_b,
+        &local_short_owner,
+        params.max_portfolio_assets as usize,
+    );
+    deposit_to_market(&mut env, market_b, vault_b, &local_owner, local, 1_000_000);
+    deposit_to_market(
+        &mut env,
+        market_b,
+        vault_b,
+        &local_short_owner,
+        local_short,
+        1_000_000,
+    );
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        vec![
+            AccountMeta::new(local_owner.pubkey(), true),
+            AccountMeta::new(local_short_owner.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(local, false),
+            AccountMeta::new(local_short, false),
+        ],
+        &[&local_owner, &local_short_owner],
+    )
+    .expect("open same-market B position");
+
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let foreign_before = env.svm.get_account(&foreign).unwrap();
+    let local_before = env.svm.get_account(&local).unwrap();
+    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+    let reduce_q = POS_SCALE / 2;
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::RebalanceReduce {
+            asset_index: 0,
+            reduce_q,
+        },
+        vec![
+            AccountMeta::new(foreign_owner.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(foreign, false),
+        ],
+        &[&foreign_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "RebalanceReduce must reject a market-A portfolio under market B"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_before);
+    assert_eq!(
+        env.svm.get_account(&foreign).unwrap(),
+        foreign_before,
+        "foreign portfolio is not reduced or re-certified"
+    );
+    assert_eq!(
+        env.svm.get_account(&local).unwrap(),
+        local_before,
+        "local market-B account is not touched by the rejected substitution"
+    );
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::RebalanceReduce {
+            asset_index: 0,
+            reduce_q,
+        },
+        vec![
+            AccountMeta::new(local_owner.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(local, false),
+        ],
+        &[&local_owner],
+    );
+    assert!(ok.is_ok(), "same-market RebalanceReduce succeeds: {ok:?}");
+    let local_after = state::read_portfolio(&env.svm.get_account(&local).unwrap().data)
+        .expect("market-B local portfolio");
+    assert!(
+        active_leg_for_asset(&local_after, 0).basis_pos_q.unsigned_abs() < POS_SCALE,
+        "same-market reduce advanced the local position"
+    );
+    let (_, market_b_after) =
+        state::read_market(&env.svm.get_account(&market_b).unwrap().data).unwrap();
+    assert_eq!(
+        market_b_after.vault as u64,
+        env.token_amount(vault_b),
+        "market B accounting still matches SPL custody"
+    );
+    assert!(market_b_after.vault >= market_b_after.c_tot + market_b_after.insurance);
+}
+
 // security.md sweep — RefineResolvedUnreceiptedBound gating (#6/#30): this wind-down tool (decreases
 // the unreceipted resolved claim bound) is admin-only and resolved-mode-only. A non-admin must
 // reject, and it must reject in Live mode — no tampering with the resolved payout accounting.
