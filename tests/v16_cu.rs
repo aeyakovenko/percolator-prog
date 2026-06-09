@@ -28318,6 +28318,51 @@ fn v16_attack_swap_secondary_conserves_and_mints_nothing() {
     );
 }
 
+// LoF/safety sweep — SwapSecondaryForPrimary rejects on a single-mint market (no secondary configured).
+// The swap reads `secondary_collateral_mint(&cfg)?`, which returns InvalidMint when
+// cfg.secondary_collateral_mint == [0;32] (the default until UpdateBaseUnitMints installs a pair). This
+// rejection happens BEFORE any token account is validated or moved, so a market that never configured a
+// secondary collateral cannot be tricked into a swap (which would otherwise need to interpret a zero/
+// absent mint). Every existing swap test installs a secondary first; the single-mint reject is uncovered.
+#[test]
+fn v16_attack_swap_on_single_mint_market_rejects_no_secondary() {
+    let mut env = V16CuEnv::new(); // single-mint market: no UpdateBaseUnitMints, secondary stays [0;32]
+    let admin = env.admin.insecure_clone();
+
+    // Real, existing accounts for the 4 token slots (content is irrelevant: the cfg check rejects first).
+    let a = env.token_account(admin.pubkey(), 100);
+    let b = env.token_account(admin.pubkey(), 0);
+    let src_before = env.token_amount(a);
+    let vault_before = env.token_amount(env.vault);
+
+    env.svm.expire_blockhash();
+    let r = env.send(
+        ProgInstruction::SwapSecondaryForPrimary { amount: 100 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(a, false),         // primary_source
+            AccountMeta::new(env.vault, false), // primary_vault
+            AccountMeta::new(b, false),         // secondary_dest (placeholder)
+            AccountMeta::new(a, false),         // secondary_vault (placeholder)
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        r.is_err(),
+        "SwapSecondaryForPrimary on a market with no configured secondary mint must reject"
+    );
+    assert!(
+        r.unwrap_err().contains("Custom(10)"),
+        "no-secondary swap must reject as InvalidMint (Custom 10)"
+    );
+    // Nothing moved: the rejection is before any transfer.
+    assert_eq!(env.token_amount(a), src_before, "no primary pulled by the rejected swap");
+    assert_eq!(env.token_amount(env.vault), vault_before, "primary vault unchanged");
+}
+
 // security.md sweep — SwapSecondaryForPrimary authority + balance bounds (#6/#33/#44): the 1:1 par
 // collateral swap is base_unit_authority-gated and bounded by the secondary vault's balance. Attacker
 // goals: (a) a non-authority drains the secondary reserve, (b) the authority over-swaps beyond the
