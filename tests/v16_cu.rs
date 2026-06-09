@@ -21107,6 +21107,149 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
     assert_eq!(ledger_b_state.last_observed_insurance_atoms, 60);
 }
 
+// security.md sweep — terminal optional-ledger account-kind confusion (#35/#44): terminal
+// WithdrawInsurance is separate from live domain withdrawals and may rewrite an optional ledger before
+// paying SPL tokens. A funded portfolio from another market must not be accepted as that ledger, or a
+// wind-down helper could corrupt a user portfolio while draining terminal insurance.
+#[test]
+fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+
+    let victim = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim);
+    env.deposit(&victim, victim_portfolio, 1_000);
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let victim_portfolio_before = env.svm.get_account(&victim_portfolio).unwrap();
+    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
+
+    let (market_b, vault_authority_b, vault_b) =
+        init_independent_market_same_mint(&mut env, V16CuMarketParams::default());
+    let source_b = env.token_account(admin.pubkey(), 100);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsurance { amount: 100 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(source_b, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("fund market B terminal insurance");
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ResolveMarket,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+        ],
+        &[&admin],
+    )
+    .expect("resolve market B");
+    let (_, group_b) = state::read_market(&env.svm.get_account(&market_b).unwrap().data).unwrap();
+    assert_eq!(group_b.mode, percolator::MarketModeV16::Resolved);
+    assert_eq!(group_b.insurance, 100);
+    assert_eq!(group_b.vault, 100);
+
+    let dest = env.token_account(admin.pubkey(), 0);
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(vault_authority_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(victim_portfolio, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "terminal WithdrawInsurance must reject a portfolio account as the optional ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_a_before,
+        "rejected terminal withdraw must not mutate the portfolio's source market"
+    );
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_portfolio_before,
+        "rejected terminal withdraw must not rewrite the funded portfolio bytes or lamports"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_a_before,
+        "rejected terminal withdraw must not touch market A custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&market_b).unwrap(),
+        market_b_before,
+        "rejected terminal withdraw must not debit market B"
+    );
+    assert_eq!(
+        env.svm.get_account(&vault_b).unwrap(),
+        vault_b_before,
+        "rejected terminal withdraw must not move market B custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "rejected terminal withdraw must not pay the destination"
+    );
+
+    let ledger_b = env.insurance_ledger_account();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(vault_authority_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger_b, false),
+        ],
+        &[&admin],
+    )
+    .expect("same terminal withdraw with a real ledger succeeds");
+    assert_eq!(env.token_amount(dest), 40);
+    assert_eq!(env.token_amount(vault_b), 60);
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_portfolio_before,
+        "valid terminal withdraw on market B still leaves the unrelated portfolio untouched"
+    );
+    let ledger_b_state =
+        state::read_insurance_ledger(&env.svm.get_account(&ledger_b).unwrap().data).unwrap();
+    assert_eq!(ledger_b_state.market_group, market_b.to_bytes());
+    assert_eq!(ledger_b_state.authority, admin.pubkey().to_bytes());
+    assert_eq!(ledger_b_state.total_withdrawn_atoms, 40);
+    assert_eq!(ledger_b_state.last_observed_insurance_atoms, 60);
+}
+
 // security.md sweep — ledger account-kind confusion (#44/#35): SyncBackingDomainLedger and
 // SyncInsuranceLedger accept an arbitrary program-owned writable ledger account. Passing a real
 // portfolio account must reject on the persisted account kind before any write; otherwise an
