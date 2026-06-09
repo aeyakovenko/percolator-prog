@@ -42516,6 +42516,93 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
     );
 }
 
+#[test]
+fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+
+    let feed = [0x55u8; 32];
+    let acct = env.set_pyth_price_with_conf(&feed, 200_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[acct],
+        1,
+        100,
+        0,
+        0,
+        100,
+        0,
+    )
+    .expect("hybrid external-oracle configuration succeeds");
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let mark_before = env.market_state().1.assets[0].effective_price;
+    assert!(mark_before > 0, "external oracle seeded a real mark");
+
+    let admin = env.admin.insecure_clone();
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    let auth_push = env.send(
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 9_999_999,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        auth_push.is_err(),
+        "correct authority must not PushAuthMark over a hybrid oracle asset"
+    );
+    assert!(
+        auth_push.unwrap_err().contains("Custom(8)"),
+        "wrong-mode PushAuthMark should reject as Unauthorized"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected PushAuthMark leaves hybrid market bytes unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    let ewma_push = env.send(
+        ProgInstruction::PushEwmaMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 9_999_999,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ewma_push.is_err(),
+        "correct authority must not PushEwmaMark over a hybrid oracle asset"
+    );
+    assert!(
+        ewma_push.unwrap_err().contains("Custom(8)"),
+        "wrong-mode PushEwmaMark should reject as Unauthorized"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected PushEwmaMark leaves hybrid market bytes unchanged"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        mark_before,
+        "external-oracle mark was not overridden by rejected manual pushes"
+    );
+}
+
 // Per-asset oracle-authority isolation for oracle reconfiguration entrypoints. A valid asset-1
 // oracle_authority must not be able to reset asset 0's oracle mode/anchor, which would let it steer
 // asset-0 marks before liquidations or settlement.
