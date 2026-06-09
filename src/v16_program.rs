@@ -6610,6 +6610,7 @@ pub mod processor {
         {
             return Err(PercolatorError::EngineLockActive.into());
         }
+        reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
         let asset = group.markets[asset_index_usize].engine.asset;
         if asset.lifecycle != ASSET_LIFECYCLE_RECOVERY {
             return Err(PercolatorError::EngineLockActive.into());

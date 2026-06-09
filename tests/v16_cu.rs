@@ -32794,6 +32794,159 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
     assert!(market_b_after.vault >= market_b_after.c_tot + market_b_after.insurance);
 }
 
+// security.md sweep - stale-resolve abandoned-asset drift (#30/#35/#48): ForceCloseAbandonedAsset
+// is intentionally unsigned after a shutdown timeout, but it still mutates live exposure and both
+// portfolios. Once the base market is resolve-matured, an abandoned-asset force-close must freeze
+// before the terminal snapshot can be influenced.
+#[test]
+fn v16_attack_force_close_abandoned_asset_rejects_when_resolve_matured() {
+    const STALE_SLOTS: u64 = 20;
+    const DELAY: u64 = 5;
+    const SHUTDOWN_SLOT: u64 = 10;
+    const FRESH_FORCE_SLOT: u64 = SHUTDOWN_SLOT + DELAY + 1;
+    const STALE_FORCE_SLOT: u64 = 40;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_permissionless_resolve_with_cu(STALE_SLOTS, DELAY);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+
+    let fresh_long_owner = Keypair::new();
+    let fresh_short_owner = Keypair::new();
+    let stale_long_owner = Keypair::new();
+    let stale_short_owner = Keypair::new();
+    let fresh_long = env.create_portfolio(&fresh_long_owner);
+    let fresh_short = env.create_portfolio(&fresh_short_owner);
+    let stale_long = env.create_portfolio(&stale_long_owner);
+    let stale_short = env.create_portfolio(&stale_short_owner);
+    for (owner, portfolio) in [
+        (&fresh_long_owner, fresh_long),
+        (&fresh_short_owner, fresh_short),
+        (&stale_long_owner, stale_long),
+        (&stale_short_owner, stale_short),
+    ] {
+        env.deposit(owner, portfolio, 1_000_000);
+    }
+    env.trade_asset_with_cu(
+        1,
+        &fresh_long_owner,
+        fresh_long,
+        &fresh_short_owner,
+        fresh_short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &stale_long_owner,
+        stale_long,
+        &stale_short_owner,
+        stale_short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(SHUTDOWN_SLOT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        SHUTDOWN_SLOT,
+        0,
+    );
+    let recovery_group = env.market_state().1;
+    assert_eq!(recovery_group.mode, MarketModeV16::Live);
+    assert_eq!(recovery_group.assets[1].lifecycle, AssetLifecycleV16::Recovery);
+
+    env.svm.warp_to_slot(FRESH_FORCE_SLOT);
+    let (fresh_cfg, fresh_group) = env.market_state();
+    assert_eq!(fresh_group.mode, MarketModeV16::Live);
+    assert!(
+        !oracle_v16::permissionless_stale_matured(&fresh_cfg, FRESH_FORCE_SLOT),
+        "fresh control must be before the base permissionless-resolve boundary"
+    );
+    let cranker = Keypair::new();
+    let fresh_cu = env.force_close_abandoned_asset_with_cu(
+        &cranker,
+        fresh_long,
+        fresh_short,
+        1,
+        FRESH_FORCE_SLOT,
+        POS_SCALE,
+    );
+    assert_cu_within(
+        "fresh ForceCloseAbandonedAsset before resolve maturity",
+        fresh_cu,
+        TRADE_CU_LIMIT,
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(fresh_long), 1),
+        "fresh abandoned-asset force-close proves the public path is reachable"
+    );
+    assert!(
+        has_active_leg_for_asset(&env.portfolio_state(stale_long), 1),
+        "stale-path target must still have a leg to force-close"
+    );
+
+    env.svm.warp_to_slot(STALE_FORCE_SLOT);
+    let (stale_cfg, stale_group) = env.market_state();
+    assert_eq!(stale_group.mode, MarketModeV16::Live);
+    assert!(
+        oracle_v16::permissionless_stale_matured(&stale_cfg, STALE_FORCE_SLOT),
+        "test setup must be beyond the base permissionless-resolve boundary"
+    );
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let stale_long_before = env.svm.get_account(&stale_long).unwrap();
+    let stale_short_before = env.svm.get_account(&stale_short).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    let rejected = env.try_force_close_abandoned_asset_with_cu(
+        &cranker,
+        stale_long,
+        stale_short,
+        1,
+        STALE_FORCE_SLOT,
+        POS_SCALE,
+    );
+    assert!(
+        rejected.is_err(),
+        "ForceCloseAbandonedAsset must reject once the base market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale ForceClose leaves market exposure unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_long).unwrap(),
+        stale_long_before,
+        "rejected stale ForceClose leaves the long portfolio unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_short).unwrap(),
+        stale_short_before,
+        "rejected stale ForceClose leaves the short portfolio unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale ForceClose moves no custody"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve still succeeds after rejected stale ForceClose: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // security.md sweep — off-market exec_price wash trade (#9/#22/#33): exec_price is validated only as
 // 0 < exec_price <= MAX_ORACLE_PRICE (NOT clamped to the oracle), so two colluding accounts can open a
 // position at a price far from the mark, handing one side an instant profit. Attacker goal: print
