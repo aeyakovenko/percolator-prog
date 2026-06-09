@@ -12618,6 +12618,77 @@ fn v16_regression_profit_withdraw_no_value_printed() {
     );
 }
 
+// security.md sweep — privilege/injection (#19/#39): the permissionless crank's LIQUIDATION fee is
+// config-pinned, not caller-injectable. For action=1 (Liquidate) the wrapper builds the engine request
+// with `fee_bps: config.liquidation_fee_bps` (ignoring the caller's fee_bps) AND requires the caller's
+// fee_bps == 0 (`action == 1 && fee_bps != 0 -> InvalidInstruction`). Without that gate a liquidator could
+// pass an inflated fee_bps to over-extract from the liquidated account (or 0 it out). The funding-rate
+// injection test covers funding_rate_e9 / recovery_reason (via action=0), but never the action=1 fee_bps
+// gate. This proves a Liquidate crank with a nonzero caller fee_bps rejects at the top of the handler
+// (InvalidInstruction, Custom 9), while the same crank with fee_bps==0 passes the gate (failing later for
+// an unrelated reason on a healthy account — NOT Custom 9).
+#[test]
+fn v16_attack_crank_liquidation_fee_bps_not_caller_injectable() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000); // a flat, healthy (non-liquidatable) account
+
+    // ATTACK: a Liquidate crank (action=1) supplying a nonzero fee_bps must reject on the parameter gate.
+    env.svm.expire_blockhash();
+    let r_fee = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 1,
+            fee_bps: 5_000, // caller-injected liquidation fee — must be rejected
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+        ],
+        &[],
+    );
+    assert!(r_fee.is_err(), "Liquidate crank with a caller-supplied fee_bps must reject");
+    assert!(
+        r_fee.unwrap_err().contains("Custom(9)"),
+        "caller fee_bps injection must reject as InvalidInstruction (Custom 9), the parameter gate"
+    );
+
+    // CONTROL: the SAME crank with fee_bps == 0 passes the parameter gate and reaches the engine, which
+    // rejects for an unrelated reason (the account is healthy / not liquidatable) — crucially NOT Custom 9.
+    env.svm.expire_blockhash();
+    let r_zero = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 1,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+        ],
+        &[],
+    );
+    assert!(
+        r_zero.is_err(),
+        "liquidating a healthy account still fails (nothing to liquidate)"
+    );
+    assert!(
+        !r_zero.unwrap_err().contains("Custom(9)"),
+        "fee_bps==0 must PASS the parameter gate and fail downstream (not the Custom 9 gate)"
+    );
+}
+
 // security.md sweep — privilege/injection (#19/#39): the permissionless crank's funding_rate_e9
 // and recovery_reason are CALLER-supplied. Attacker tries to inject arbitrary funding to drain the
 // counterparty. Gate (v16_program.rs:10092) must reject any nonzero caller value; the real rate is
