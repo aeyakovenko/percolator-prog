@@ -47381,8 +47381,8 @@ fn v16_attack_cure_and_cancel_close_rejects_when_resolve_matured() {
 
 // security.md sweep - stale-resolve value-out drift (#30/#35/#48): live domain
 // withdrawals move SPL custody out of the market's insurance/backing layers. Once
-// the market is resolve-matured, insurance and backing withdrawals must freeze
-// before terminal resolution captures the final support envelope.
+// the market is resolve-matured, insurance, backing principal, and backing-provider
+// earnings withdrawals must freeze before terminal resolution captures the final support envelope.
 #[test]
 fn v16_attack_live_domain_withdrawals_reject_when_resolve_matured() {
     let mut env = V16CuEnv::new();
@@ -47391,11 +47391,22 @@ fn v16_attack_live_domain_withdrawals_reject_when_resolve_matured() {
     env.configure_auth_mark_with_cu(0, 100);
     env.top_up_insurance_domain_with_authority(&admin, 0, 100);
     env.top_up_backing_bucket_with_authority(&admin, 1, 100, 100);
+    let earnings_ledger = env.backing_domain_ledger_account();
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].utilization_fee_earnings = 30;
+        group.vault += 30;
+    });
+    env.set_token_account_amount(
+        env.vault,
+        env.mint,
+        env.vault_authority,
+        env.market_state().1.vault as u64,
+    );
 
     env.svm.warp_to_slot(3);
     env.push_auth_mark_with_cu(3, 100);
 
-    // Non-vacuous controls: while fresh, both live value-out paths can withdraw.
+    // Non-vacuous controls: while fresh, all live value-out paths can withdraw.
     env.svm.warp_to_slot(4);
     let (fresh_insurance_dest, _) = env
         .try_withdraw_insurance_asset_with_authority(&admin, 0, 10)
@@ -47412,14 +47423,34 @@ fn v16_attack_live_domain_withdrawals_reject_when_resolve_matured() {
         10,
         "fresh backing withdrawal moved custody"
     );
+    let fresh_earnings_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    env.withdraw_backing_bucket_earnings_to_admin_token_with_cu(
+        earnings_ledger,
+        fresh_earnings_dest,
+        1,
+        5,
+    );
+    assert_eq!(
+        env.token_amount(fresh_earnings_dest),
+        5,
+        "fresh backing-provider earnings withdrawal moved custody"
+    );
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[1].utilization_fee_earnings,
+        25,
+        "stale-path setup leaves provider earnings to attack"
+    );
 
     env.svm.warp_to_slot(40);
     let stale_insurance_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
     let stale_backing_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    let stale_earnings_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
     let market_before = env.svm.get_account(&env.market).unwrap();
+    let earnings_ledger_before = env.svm.get_account(&earnings_ledger).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let insurance_dest_before = env.svm.get_account(&stale_insurance_dest).unwrap();
     let backing_dest_before = env.svm.get_account(&stale_backing_dest).unwrap();
+    let earnings_dest_before = env.svm.get_account(&stale_earnings_dest).unwrap();
 
     env.svm.expire_blockhash();
     let stale_insurance = env.send(
@@ -47463,10 +47494,37 @@ fn v16_attack_live_domain_withdrawals_reject_when_resolve_matured() {
         "WithdrawBackingBucket must reject once the market is resolve-matured"
     );
 
+    env.svm.expire_blockhash();
+    let stale_earnings = env.send(
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(earnings_ledger, false),
+            AccountMeta::new(stale_earnings_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale_earnings.is_err(),
+        "WithdrawBackingBucketEarnings must reject once the market is resolve-matured"
+    );
+
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),
         market_before,
         "rejected stale domain withdrawals leave market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&earnings_ledger).unwrap(),
+        earnings_ledger_before,
+        "rejected stale earnings withdrawal leaves the provider ledger unchanged"
     );
     assert_eq!(
         env.svm.get_account(&env.vault).unwrap(),
@@ -47482,6 +47540,11 @@ fn v16_attack_live_domain_withdrawals_reject_when_resolve_matured() {
         env.svm.get_account(&stale_backing_dest).unwrap(),
         backing_dest_before,
         "rejected stale backing withdrawal pays no tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_earnings_dest).unwrap(),
+        earnings_dest_before,
+        "rejected stale earnings withdrawal pays no tokens"
     );
 
     env.svm.expire_blockhash();
