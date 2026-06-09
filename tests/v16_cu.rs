@@ -340,6 +340,25 @@ fn make_pyth_data(
     data
 }
 
+// Craft a Chainlink OCR2 Transmissions (store) account (mirrors read_chainlink_price_e6 / CL_* offsets
+// in src/v16_program.rs). Layout: 8-byte anchor discriminator + 192-byte header + transmission record.
+// The wrapper binds the feed by ACCOUNT KEY (not a data field), so the account must be created AT the
+// configured feed pubkey.
+fn make_chainlink_data(decimals: u8, answer: i128, publish_time: i64) -> Vec<u8> {
+    // CHAINLINK_FEED_MIN_LEN = 8 + 192 + 48
+    let mut data = vec![0u8; 8 + 192 + 48];
+    data[0..8].copy_from_slice(&[96, 179, 69, 66, 128, 129, 73, 117]); // discriminator
+    data[8] = 1; // CL_OFF_VERSION (must be != 0)
+    data[138] = decimals; // CL_OFF_DECIMALS
+    data[143..147].copy_from_slice(&1u32.to_le_bytes()); // CL_OFF_LATEST_ROUND_ID (!= 0)
+    data[148..152].copy_from_slice(&1u32.to_le_bytes()); // CL_OFF_LIVE_LENGTH (must == 1)
+    let tx = 8 + 192; // CL_OFF_TRANSMISSION
+    data[tx..tx + 8].copy_from_slice(&1u64.to_le_bytes()); // CL_TRANS_OFF_SLOT (!= 0)
+    data[tx + 8..tx + 12].copy_from_slice(&(publish_time as u32).to_le_bytes()); // CL_TRANS_OFF_TIMESTAMP
+    data[tx + 16..tx + 32].copy_from_slice(&answer.to_le_bytes()); // CL_TRANS_OFF_ANSWER (i128)
+    data
+}
+
 fn cu_ix() -> Instruction {
     ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)
 }
@@ -32219,6 +32238,88 @@ fn v16_attack_oracle_negative_or_zero_price_rejected() {
     assert!(
         zero_err.unwrap().contains("Custom(26)"),
         "zero price must be OracleInvalid (Custom 26)"
+    );
+}
+
+// LoF/DoS sweep — Chainlink oracle source end-to-end (SOL-014/SOL-024, previously ZERO coverage). The
+// `CHAINLINK_STORE_PROGRAM_ID` owner branch of `read_oracle_price_e6` -> `read_chainlink_price_e6` is a
+// full production oracle path that nothing exercised: discriminator/version/round/live-length gates,
+// freshness, feed-by-account-key binding, and the `scale_decimal_to_e6(answer, decimals)` scaling. The
+// `decimals` byte is read straight from feed data; `scale_decimal_to_e6` rejects `decimals > MAX_EXPO_ABS
+// (18)` BEFORE `10u128.pow()` runs, so a feed reporting a huge `decimals` cannot overflow the pow into a
+// panic (crank/refresh DoS) or scale the mark to a wrong value (LoF). This proves the happy path reads a
+// crafted Chainlink feed AND that the boundary rejects gracefully. No existing test touches Chainlink.
+#[test]
+fn v16_attack_chainlink_oracle_read_and_bounds_enforced() {
+    // feed binds by account KEY (read_chainlink_price_e6: price_ai.key == expected_feed_key), so create
+    // the feed account AT the configured feed pubkey.
+    let feed = [0x44u8; 32];
+    let feed_key = Pubkey::new_from_array(feed);
+    let configure = |answer: i128, decimals: u8, corrupt_disc: bool| -> (bool, Option<String>) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let mut data = make_chainlink_data(decimals, answer, 100);
+        if corrupt_disc {
+            data[0] ^= 0xff; // break the anchor discriminator
+        }
+        env.svm
+            .set_account(
+                feed_key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0u8; 32], [0u8; 32]],
+            &[feed_key],
+            1,
+            100,
+            0,
+            0,
+            100,
+            0,
+        );
+        (r.is_ok(), r.err())
+    };
+
+    // Happy path: a well-formed Chainlink feed (8 decimals, sane answer) reads and configures. This is
+    // the FIRST end-to-end exercise of the Chainlink parse path (discriminator, version, round id,
+    // live_length, freshness, key binding, decimal scaling all on the success route).
+    let (ok, ok_err) = configure(2_000_000_00, 8, false); // 2.0e8 raw / 10^(8-6) = 2_000_000 e6
+    assert!(ok, "a well-formed Chainlink feed must configure: {ok_err:?}");
+
+    // decimals > MAX_EXPO_ABS(18): scale_decimal_to_e6 rejects before any pow(), so the overflow panic
+    // is unreachable. Graceful OracleInvalid, never a DoS panic / mispriced mark.
+    let (over_ok, over_err) = configure(2_000_000, 19, false);
+    assert!(!over_ok, "decimals=19 (> MAX_EXPO_ABS) must reject, never overflow");
+    assert!(
+        over_err.unwrap().contains("Custom(26)"),
+        "out-of-range decimals must be OracleInvalid (Custom 26), a graceful error not a panic"
+    );
+
+    // Negative answer -> OracleInvalid (no sign-flipped / underflowed mark).
+    let (neg_ok, neg_err) = configure(-2_000_000, 8, false);
+    assert!(!neg_ok, "a negative Chainlink answer must reject");
+    assert!(
+        neg_err.unwrap().contains("Custom(26)"),
+        "negative answer must be OracleInvalid (Custom 26)"
+    );
+
+    // Wrong discriminator -> rejected before any field is trusted (anti-spoof: a Chainlink-owned account
+    // that is not actually a Transmissions store cannot inject a price).
+    let (disc_ok, disc_err) = configure(2_000_000, 8, true);
+    assert!(!disc_ok, "a bad Chainlink discriminator must reject");
+    assert!(
+        disc_err.unwrap().contains("Custom(26)"),
+        "bad discriminator must be OracleInvalid (Custom 26)"
     );
 }
 
