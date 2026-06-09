@@ -18390,6 +18390,96 @@ fn v16_attack_cure_deposit_exact_and_atomic() {
     let _ = g_mid;
 }
 
+// security.md sweep - CureAndCancelClose vault pinning (#35/#44/#48): the optional-deposit rail
+// credits portfolio capital and market vault accounting while canceling close-progress. It must only
+// fund the canonical vault, not an arbitrary vault-authority-owned fragment.
+#[test]
+fn v16_attack_cure_deposit_rejects_noncanonical_vault() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 100);
+    env.seed_cancellable_close_progress(portfolio);
+
+    let source = env.token_account_for_mint(env.mint, owner.pubkey(), 50);
+    let fake_vault = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            fake_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let canonical_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let fake_vault_before = env.svm.get_account(&fake_vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CureAndCancelClose {
+            optional_deposit: 50,
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(fake_vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "CureAndCancelClose must reject a non-canonical vault fragment"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected cure fragment leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected cure fragment leaves close-progress and capital unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&source).unwrap(),
+        source_before,
+        "rejected cure fragment pulls no optional-deposit tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        canonical_vault_before,
+        "rejected cure fragment leaves canonical vault untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&fake_vault).unwrap(),
+        fake_vault_before,
+        "rejected cure fragment leaves the fake vault untouched"
+    );
+    assert!(
+        !env.portfolio_state(portfolio).close_progress.canceled,
+        "close-progress remains active after rejected fragment cure"
+    );
+
+    env.cure_and_cancel_close_with_cu(&owner, portfolio, source, 50);
+    let cured = env.portfolio_state(portfolio);
+    assert!(cured.close_progress.canceled);
+    assert_eq!(cured.capital, 150);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(fake_vault), 0);
+    assert_eq!(env.market_state().1.vault as u64, env.token_amount(env.vault));
+}
+
 // security.md sweep - CureAndCancelClose owner gating (#6/#48): canceling a close-progress ledger is
 // liveness-sensitive. A non-owner must not be able to cancel a victim's forced-close recovery state or
 // move optional-deposit tokens; the real owner must still be able to cure afterward.
