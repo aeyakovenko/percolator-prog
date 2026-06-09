@@ -32453,6 +32453,133 @@ fn v16_attack_liquidation_cranker_reward_requires_reward_owner_signature() {
     );
 }
 
+// full-interface sweep: a liquidation crank can carry both a hybrid-oracle tail and an optional
+// program-owned cranker reward tail. A malformed reward tail must not let the valid oracle update
+// partially persist before the later reward-account validation fails.
+#[test]
+fn v16_attack_hybrid_liquidation_bad_reward_tail_rolls_back_oracle_update() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0xa9u8; 32];
+    let initial_oracle = env.set_pyth_price_with_conf(&feed, 1_000_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial_oracle],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure hybrid oracle");
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        1_000_000,
+        0,
+    );
+
+    set_test_clock(&mut env, 2, 101);
+    let fresh_oracle = env.set_pyth_price_with_conf(&feed, 2_000_000, -6, 0, 101);
+    let malformed_reward = env.program_account(env.portfolio_account_len);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let short_before = env.svm.get_account(&short).unwrap();
+    let malformed_before = env.svm.get_account(&malformed_reward).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new_readonly(fresh_oracle, false),
+            AccountMeta::new(malformed_reward, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "malformed program-owned reward tail must reject even with a valid hybrid oracle tail"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected mixed-tail crank must not persist the fresh oracle target or liquidation state"
+    );
+    assert_eq!(
+        env.svm.get_account(&short).unwrap(),
+        short_before,
+        "rejected mixed-tail crank must not mutate the liquidated portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&malformed_reward).unwrap(),
+        malformed_before,
+        "rejected mixed-tail crank must not mutate the malformed reward account"
+    );
+
+    let payer_owner = env.payer.insecure_clone();
+    let valid_reward = env.create_portfolio(&payer_owner);
+    let reward_cap_before = env.portfolio_state(valid_reward).capital;
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(payer_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new_readonly(fresh_oracle, false),
+            AccountMeta::new(valid_reward, false),
+        ],
+        &[&payer_owner],
+    );
+    assert!(
+        accepted.is_ok(),
+        "same hybrid liquidation succeeds with a valid reward portfolio: {accepted:?}"
+    );
+    assert!(
+        env.portfolio_state(valid_reward).capital > reward_cap_before,
+        "valid reward portfolio receives the cranker reward"
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(
+        cfg.last_good_oracle_slot, 2,
+        "valid control persists the fresh hybrid oracle update"
+    );
+    assert_eq!(group.assets[0].raw_oracle_target_price, 2_000_000);
+}
+
 // security.md sweep — liquidation cranker reward market binding (#3/#44): when cranker rewards are
 // enabled, the reward portfolio must belong to the same market as the liquidated account. A foreign
 // market portfolio can otherwise try to receive value from this market's insurance while validating under
