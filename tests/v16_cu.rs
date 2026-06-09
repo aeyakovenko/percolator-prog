@@ -23490,6 +23490,120 @@ fn v16_attack_withdraw_insurance_asset_operator_gated() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
 
+// security.md sweep - live insurance withdrawal vault pinning (#33/#44/#48): WithdrawInsuranceAsset
+// debits live insurance budgets and may rewrite an optional ledger before paying tokens. It must only
+// withdraw from the canonical vault, not any vault-authority-owned token fragment.
+#[test]
+fn v16_attack_withdraw_insurance_asset_rejects_noncanonical_vault() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority(&admin, 0, 100);
+
+    let fake_vault = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            fake_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 100),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    let ledger = env.insurance_ledger_account();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let canonical_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let fake_vault_before = env.svm.get_account(&fake_vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(fake_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "WithdrawInsuranceAsset must reject a non-canonical vault fragment"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected insurance fragment withdrawal leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        canonical_vault_before,
+        "rejected insurance fragment withdrawal leaves canonical vault untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&fake_vault).unwrap(),
+        fake_vault_before,
+        "rejected insurance fragment withdrawal leaves fake vault untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "rejected insurance fragment withdrawal pays no tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "rejected insurance fragment withdrawal rewrites no ledger state"
+    );
+
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    )
+    .expect("canonical live insurance withdrawal succeeds");
+    assert_eq!(env.token_amount(dest), 40);
+    assert_eq!(env.token_amount(fake_vault), 100);
+    let ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 60);
+    assert_eq!(group.insurance_domain_budget[0], 60);
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+}
+
 // security.md sweep — live asset insurance has a two-key split. The insurance_authority can fund
 // the domain and recover terminal insurance after resolution; live asset withdrawals are gated to the
 // insurance_operator. This keeps the key split explicit instead of accidentally letting the funding
