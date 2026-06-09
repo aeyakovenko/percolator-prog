@@ -36815,6 +36815,94 @@ fn v16_attack_crank_oracle_feed_id_mismatch_rejects_without_mutation() {
     assert_eq!(group.assets[0].raw_oracle_target_price, 210_000);
 }
 
+#[test]
+fn v16_attack_crank_oracle_same_publish_time_price_change_rejects() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0x79u8; 32];
+    let initial = env.set_pyth_price_with_conf(&feed, 200_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure matching one-leg hybrid oracle");
+
+    let cranker_owner = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    set_test_clock(&mut env, 2, 100);
+    let changed_same_publish = env.set_pyth_price_with_conf(&feed, 300_000, -6, 0, 100);
+    let market_before = env.svm.get_account(&env.market).unwrap().data;
+    let portfolio_before = env.svm.get_account(&cranker_portfolio).unwrap().data;
+
+    env.svm.expire_blockhash();
+    let replay = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(cranker_portfolio, false),
+            AccountMeta::new_readonly(changed_same_publish, false),
+        ],
+        &[],
+    );
+    assert!(
+        replay.is_err(),
+        "a different oracle price at the same publish_time must reject"
+    );
+    let err = replay.unwrap_err();
+    assert!(
+        err.contains("Custom(26)"),
+        "same-publish-time price change must reject as OracleInvalid (Custom 26), got: {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_before,
+        "rejected same-publish replay must not mutate market state"
+    );
+    assert_eq!(
+        env.svm.get_account(&cranker_portfolio).unwrap().data,
+        portfolio_before,
+        "rejected same-publish replay must not mutate the cranker portfolio"
+    );
+
+    set_test_clock(&mut env, 3, 101);
+    let fresh = env.set_pyth_price_with_conf(&feed, 210_000, -6, 0, 101);
+    env.svm.expire_blockhash();
+    env.crank_with_oracle_tail(
+        cranker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 3,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &[fresh],
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.last_good_oracle_slot, 3);
+    assert_eq!(group.assets[0].raw_oracle_target_price, 210_000);
+}
+
 // security.md sweep — malformed oracle config rejects cleanly (#37/#44 robustness): a hybrid oracle
 // declaring N legs but supplied with fewer oracle accounts must reject WITHOUT partially configuring or
 // corrupting the market (no out-of-bounds read, no half-written oracle profile). Protection: the runtime
