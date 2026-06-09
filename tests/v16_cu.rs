@@ -32222,6 +32222,80 @@ fn v16_attack_oracle_negative_or_zero_price_rejected() {
     );
 }
 
+// LoF/DoS sweep — Pyth exponent bound + extreme-scale arithmetic (SOL-001/SOL-014). The wrapper scales a
+// Pyth price by `10^(exponent+6)`: `read_pyth_price_e6` does `price_u.checked_mul(10u128.pow(scale))` when
+// scale>=0 and `price_u / 10u128.pow(-scale)` when scale<0. Without the `|exponent| <= MAX_EXPO_ABS(18)`
+// guard, a feed reporting an extreme exponent drives `10u128.pow(huge)` past u128 -> overflow PANIC (a
+// crank/refresh that touches the feed aborts every time = liveness DoS), or scales the mark to a wildly
+// wrong value (mispriced positions = LoF). This drives the boundary directly: an out-of-bounds exponent
+// MUST reject gracefully (OracleInvalid, never panic), and an in-bounds-but-extreme exponent must be
+// handled by the post-scale bounds check (over-MAX or floor-to-0 -> OracleInvalid) without overflow.
+// Complements `oracle_negative_or_zero_price_rejected` (varies price at a FIXED expo=-6, never the
+// exponent) and `oracle_composite_over_max_price_rejects` (the multi-leg compose path, not single-leg
+// Pyth exponent scaling).
+#[test]
+fn v16_attack_oracle_pyth_exponent_bounds_enforced() {
+    let configure = |price: i64, expo: i32| -> (bool, Option<String>) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let feed = [0x55u8; 32];
+        let acct = env.set_pyth_price_with_conf(&feed, price, expo, 0, 100);
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0u8; 32], [0u8; 32]],
+            &[acct],
+            1,
+            100,
+            0,
+            0,
+            100,
+            0,
+        );
+        (r.is_ok(), r.err())
+    };
+
+    // Sanity: a normal in-bounds exponent (-6) with a sane price configures.
+    let (ok, _) = configure(200_000, -6);
+    assert!(ok, "a normal expo=-6 Pyth price configures");
+
+    // MAX_EXPO_ABS == 18. The exponent bound (read_pyth_price_e6, v16_program.rs L4091) rejects
+    // |exponent| > 18 BEFORE any pow() is evaluated, so the overflow can never be reached.
+    let (over_ok, over_err) = configure(200_000, 19);
+    assert!(!over_ok, "exponent 19 (> MAX_EXPO_ABS) must reject, never overflow");
+    assert!(
+        over_err.unwrap().contains("Custom(26)"),
+        "out-of-bounds positive exponent must be OracleInvalid (Custom 26), a graceful error not a panic"
+    );
+    let (under_ok, under_err) = configure(200_000, -19);
+    assert!(!under_ok, "exponent -19 (< -MAX_EXPO_ABS) must reject, never overflow");
+    assert!(
+        under_err.unwrap().contains("Custom(26)"),
+        "out-of-bounds negative exponent must be OracleInvalid (Custom 26)"
+    );
+
+    // In-bounds extreme +18 -> scale = 24 -> 10^24 (fits u128, ~1e24 << 3.4e38). With a large mantissa
+    // the scaled price blows past MAX_ORACLE_PRICE; checked_mul succeeds and the post-scale bounds check
+    // rejects it cleanly. The point: no overflow panic on the largest legal exponent.
+    let (max_ok, max_err) = configure(1_000_000, 18);
+    assert!(!max_ok, "expo=+18 with a large mantissa overshoots MAX_ORACLE_PRICE and must reject");
+    assert!(
+        max_err.unwrap().contains("Custom(26)"),
+        "in-bounds max exponent that overshoots must be OracleInvalid, handled without panic"
+    );
+
+    // In-bounds extreme -18 -> scale = -12 -> price / 10^12. A small mantissa floors to 0 and is rejected
+    // by the `out == 0` guard. The point: the divide path also handles the largest legal magnitude
+    // without panic and never yields a zero mark.
+    let (min_ok, min_err) = configure(200_000, -18);
+    assert!(!min_ok, "expo=-18 with a small mantissa floors to 0 and must reject");
+    assert!(
+        min_err.unwrap().contains("Custom(26)"),
+        "in-bounds min exponent that floors to 0 must be OracleInvalid (no zero mark)"
+    );
+}
+
 // security.md sweep — oracle feed account owner validation (#37/#44): a Pyth feed account must be owned
 // by the Pyth receiver program. Attacker goal: substitute a self-owned account holding crafted "Pyth"
 // data to inject an arbitrary oracle price (full oracle spoof). Protection: the wrapper rejects a feed
