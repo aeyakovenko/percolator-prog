@@ -19881,6 +19881,176 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
 
+// full-interface sweep: the value top-up handlers validate the canonical vault before they mutate
+// market accounting. A delegated canonical vault is unsafe custody even at the right address: donor
+// tokens could be pulled and then drained out-of-band. All top-up variants must reject atomically.
+#[test]
+fn v16_attack_value_topups_reject_delegated_canonical_vault() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+
+    let mut delegated_vault = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: env.mint,
+            owner: env.vault_authority,
+            amount: 0,
+            delegate: COption::Some(Pubkey::new_unique()),
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 1_000,
+            close_authority: COption::None,
+        },
+        &mut delegated_vault,
+    )
+    .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: delegated_vault,
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let assert_core_unchanged = |env: &V16CuEnv, label: &str| {
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label}: market accounting unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "{label}: delegated canonical vault unchanged"
+        );
+    };
+
+    let insurance_source = env.token_account_for_mint(env.mint, admin.pubkey(), 11);
+    let insurance_source_before = env.svm.get_account(&insurance_source).unwrap();
+    env.svm.expire_blockhash();
+    let insurance_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsurance { amount: 11 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        insurance_reject.is_err(),
+        "TopUpInsurance must reject a delegated canonical vault"
+    );
+    assert_core_unchanged(&env, "TopUpInsurance");
+    assert_eq!(
+        env.svm.get_account(&insurance_source).unwrap(),
+        insurance_source_before,
+        "rejected insurance top-up must not pull donor tokens"
+    );
+
+    let domain_source = env.token_account_for_mint(env.mint, admin.pubkey(), 12);
+    let domain_source_before = env.svm.get_account(&domain_source).unwrap();
+    env.svm.expire_blockhash();
+    let domain_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 12,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(domain_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        domain_reject.is_err(),
+        "TopUpInsuranceDomain must reject a delegated canonical vault"
+    );
+    assert_core_unchanged(&env, "TopUpInsuranceDomain");
+    assert_eq!(
+        env.svm.get_account(&domain_source).unwrap(),
+        domain_source_before,
+        "rejected domain insurance top-up must not pull donor tokens"
+    );
+
+    let backing_source = env.token_account_for_mint(env.mint, admin.pubkey(), 13);
+    let backing_source_before = env.svm.get_account(&backing_source).unwrap();
+    env.svm.expire_blockhash();
+    let backing_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 13,
+            expiry_slot: 10_000,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        backing_reject.is_err(),
+        "TopUpBackingBucket must reject a delegated canonical vault"
+    );
+    assert_core_unchanged(&env, "TopUpBackingBucket");
+    assert_eq!(
+        env.svm.get_account(&backing_source).unwrap(),
+        backing_source_before,
+        "rejected backing top-up must not pull donor tokens"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let (_insurance_ok_source, _) = env.top_up_insurance_with_cu(11);
+    let (_domain_ok_source, _) = env.top_up_insurance_domain_with_authority_and_cu(&admin, 0, 12);
+    let (_backing_ok_source, _) = env.top_up_backing_bucket_with_cu(1, 13, 10_000);
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.insurance, 23);
+    assert_eq!(
+        group_after.source_backing_buckets[1].fresh_unliened_backing_num,
+        13 * BOUND_SCALE
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        group_after.vault as u64,
+        "clean-vault controls leave accounting matched to custody"
+    );
+}
+
 // security.md sweep — domain-indexed public calls must reject domains outside the configured market
 // slots before touching accounting, ledgers, or SPL custody. On a one-asset market, domains 0/1 are
 // valid and domain 2 is out of range; a real market authority with valid token accounts still cannot
