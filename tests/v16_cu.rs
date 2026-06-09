@@ -41336,6 +41336,95 @@ fn v16_attack_permissionless_asset_activation_rejects_when_resolve_matured() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// security.md sweep - stale-resolve oracle restart drift (#30/#37/#48): a permissionless
+// asset admin can restart its own Recovery asset and install a fresh per-asset oracle profile.
+// Once the base market is resolve-matured, that lifecycle/oracle restart must freeze; otherwise a
+// non-marketauth asset admin can mutate live market state before the terminal resolve snapshot.
+#[test]
+fn v16_attack_restart_asset_oracle_rejects_when_resolve_matured() {
+    let mut env = V16CuEnv::new();
+    let creator = Keypair::new();
+    let creator_key = creator.pubkey();
+    env.update_market_init_fee_policy_with_cu(10);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        200,
+        creator_key,
+        creator_key,
+        creator_key,
+        creator_key,
+        10,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&creator, 1, 2)
+        .expect("permissionless asset admin can shut down own asset while fresh");
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+
+    // Non-vacuous control: while the base oracle is fresh, the same asset admin can restart.
+    env.svm.expire_blockhash();
+    env.try_restart_asset_oracle_with_authority(&creator, 1, 3, 210)
+        .expect("fresh permissionless asset restart succeeds");
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Active
+    );
+
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&creator, 1, 4)
+        .expect("prepare the asset for the stale restart attempt");
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+
+    env.svm.warp_to_slot(40);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.try_restart_asset_oracle_with_authority(&creator, 1, 40, 250);
+    assert!(
+        rejected.is_err(),
+        "RestartAssetOracle must reject once the base market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale restart leaves lifecycle and oracle profile unchanged"
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery,
+        "stale restart cannot reactivate the permissionless asset"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve still succeeds after rejected stale restart: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // security.md sweep - stale-resolve fee drift (#30/#33/#48): SyncMaintenanceFee is public and can
 // debit user capital while crediting market insurance. Once the market is resolve-matured, fee sync
 // must freeze so a cranker cannot alter the terminal insurance/capital split before resolution.

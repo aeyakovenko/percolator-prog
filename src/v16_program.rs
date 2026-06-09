@@ -9033,6 +9033,9 @@ pub mod processor {
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
+            if oracle_v16::permissionless_stale_matured(&cfg, authenticated_slot) {
+                return Err(PercolatorError::OracleStale.into());
+            }
             let asset_index = asset_index as usize;
             let configured_slots = group.header.config.max_market_slots.get() as usize;
             if asset_index >= configured_slots || asset_index >= group.markets.len() {
