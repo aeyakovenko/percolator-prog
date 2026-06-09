@@ -36186,6 +36186,98 @@ fn v16_attack_deposit_primary_only_withdraw_either() {
     );
 }
 
+// security.md sweep — dual-mint shared credit (#33/#44): primary and secondary withdrawals spend the
+// same portfolio capital. A user must not withdraw a primary deposit once from the primary vault and
+// then again from a funded secondary reserve.
+#[test]
+fn v16_attack_dual_mint_shared_credit_no_double_withdraw() {
+    let mut env = V16CuEnv::new();
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary);
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+
+    let (primary_dest, _) = env.withdraw_with_cu(&owner, portfolio, 1_000);
+    assert_eq!(env.token_amount(primary_dest), 1_000);
+    assert_eq!(
+        env.portfolio_state(portfolio).capital,
+        0,
+        "primary withdrawal exhausted the shared credit"
+    );
+
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, env.vault_authority, 1_000),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let secondary_dest = env.token_account_for_mint(secondary, owner.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let double_withdraw = env.send(
+        ProgInstruction::Withdraw { amount: 1 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        double_withdraw.is_err(),
+        "secondary reserve must not pay a second withdrawal after primary credit is exhausted"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "rejected double-withdraw leaves secondary reserve untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        secondary_dest_before,
+        "rejected double-withdraw pays no secondary tokens"
+    );
+
+    env.deposit(&owner, portfolio, 1);
+    env.svm.expire_blockhash();
+    let legitimate_secondary = env.send(
+        ProgInstruction::Withdraw { amount: 1 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        legitimate_secondary.is_ok(),
+        "fresh shared credit can still withdraw through the secondary reserve: {legitimate_secondary:?}"
+    );
+    assert_eq!(env.token_amount(secondary_dest), 1);
+}
+
 // security.md sweep — base-unit mints changeable only when empty (#5 / README L127): the base-unit
 // authority may (re)set the primary/secondary mints ONLY while the market holds no value; once funded,
 // the change is rejected so live collateral can never be re-denominated out from under holders.
