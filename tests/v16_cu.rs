@@ -20516,6 +20516,78 @@ fn v16_attack_deposit_from_vault_as_source_rejected() {
     );
 }
 
+// security.md sweep - inbound top-up source confusion (#26/#35/#44): TopUpInsurance,
+// TopUpInsuranceDomain, and TopUpBackingBucket all credit market accounting before the SPL transfer
+// commits. Passing the canonical vault as both source and destination would make the token transfer a
+// no-op; if source ownership were not enforced, an authorized caller could mint insurance/backing credit
+// out of existing custody.
+#[test]
+fn v16_attack_topups_cannot_use_vault_as_source() {
+    let mut env = V16CuEnv::new();
+    let user = Keypair::new();
+    let portfolio = env.create_portfolio(&user);
+    env.deposit(&user, portfolio, 1_000_000);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let admin = env.admin.insecure_clone();
+
+    let reject_alias = |env: &mut V16CuEnv, ix: ProgInstruction, label: &str| {
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ix,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            rejected.is_err(),
+            "{label} must reject the vault-as-source alias"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label} must not credit market accounting"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "{label} must not move or rewrite vault custody"
+        );
+    };
+
+    reject_alias(
+        &mut env,
+        ProgInstruction::TopUpInsurance { amount: 500 },
+        "TopUpInsurance",
+    );
+    reject_alias(
+        &mut env,
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 500,
+        },
+        "TopUpInsuranceDomain",
+    );
+    let expiry_slot = env.svm.get_sysvar::<Clock>().slot + 10_000;
+    reject_alias(
+        &mut env,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 500,
+            expiry_slot,
+        },
+        "TopUpBackingBucket",
+    );
+}
+
 // security.md sweep — pnl_pos_tot aggregate integrity (#33, Bug-#10 neighborhood): pnl_pos_tot is the
 // sum of positive account PnLs (the haircut denominator). It must stay EXACTLY equal to Σ max(0, pnl)
 // as positions move through profit -> loss -> profit. A desync would mis-price the haircut.
