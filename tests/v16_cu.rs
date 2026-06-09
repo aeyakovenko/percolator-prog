@@ -27534,6 +27534,48 @@ fn v16_attack_no_fee_liquidation_cranker_gets_nothing() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
 
+#[test]
+fn v16_attack_asset_append_cannot_freeze_flat_withdrawal() {
+    let mut env = V16CuEnv::new();
+
+    let victim = Keypair::new();
+    let portfolio = env.create_portfolio(&victim);
+    env.deposit(&victim, portfolio, 1_000);
+    let epoch_before = env.market_state().1.asset_set_epoch;
+
+    env.update_market_init_fee_policy_with_cu(10);
+    let attacker = Keypair::new();
+    let attacker_key = attacker.pubkey();
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        1,
+        1,
+        100,
+        attacker_key,
+        attacker_key,
+        attacker_key,
+        attacker_key,
+        10,
+    );
+    let epoch_after = env.market_state().1.asset_set_epoch;
+    assert!(
+        epoch_after > epoch_before,
+        "permissionless asset append must advance the market asset epoch"
+    );
+
+    let (dest, _) = env.withdraw_with_cu(&victim, portfolio, 1_000);
+    assert_eq!(
+        env.token_amount(dest),
+        1_000,
+        "flat withdrawal must survive a third party asset epoch bump"
+    );
+    assert_eq!(
+        env.portfolio_state(portfolio).capital,
+        0,
+        "flat victim capital fully exits after the epoch bump"
+    );
+}
+
 // security.md sweep — withdraw requires flat account (#19/#46): withdraw_not_atomic requires the
 // account to be FLAT (active_bitmap empty) — ANY open position blocks withdrawal, regardless of how
 // small the position or how large the capital. After closing, the full capital is recoverable (no
