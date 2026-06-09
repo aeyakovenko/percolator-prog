@@ -9784,6 +9784,77 @@ fn v16_bpf_failed_backing_withdraw_transfer_rolls_back_bucket_and_ledger() {
 }
 
 #[test]
+fn v16_bpf_failed_backing_earnings_withdraw_rolls_back_bucket_and_ledger() {
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10);
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].utilization_fee_earnings = 30;
+        group.vault += 30;
+    });
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 130);
+    env.sync_backing_domain_ledger_with_cu(ledger, 1);
+
+    let dest = env.token_account(env.admin.pubkey(), 0);
+    let mut corrupted_vault = env.svm.get_account(&env.vault).unwrap();
+    corrupted_vault.owner = Pubkey::new_unique();
+    env.svm.set_account(env.vault, corrupted_vault).unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let result = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&env.admin],
+    );
+
+    assert!(
+        result.is_err(),
+        "backing earnings withdraw must fail when the transfer CPI cannot debit the vault"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ledger).unwrap(), ledger_before);
+    assert_eq!(env.svm.get_account(&dest).unwrap(), dest_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault, 130, "vault accounting rolled back");
+    assert_eq!(
+        group.source_backing_buckets[1].utilization_fee_earnings,
+        30,
+        "earnings counter rolled back"
+    );
+    let ledger_state =
+        state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(
+        ledger_state.last_observed_bucket_earnings_atoms,
+        30,
+        "ledger observed earnings rolled back"
+    );
+    assert_eq!(
+        ledger_state.total_earnings_withdrawn_atoms, 0,
+        "ledger withdraw total rolled back"
+    );
+    assert_eq!(env.token_amount(dest), 0);
+}
+
+#[test]
 fn v16_bpf_close_resolved_pays_positive_pnl_through_engine_ledger() {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
