@@ -38812,3 +38812,125 @@ fn v16_attack_push_ewma_mark_same_slot_does_not_compound() {
         "advancing a slot resumes EWMA movement: {m3} vs {m2}"
     );
 }
+
+// Per-asset oracle-authority isolation for the separate EWMA push handler. PushAuthMark has the same
+// boundary covered elsewhere, but PushEwmaMark is its own public entrypoint: a real oracle_authority for
+// asset 1 must not be able to steer asset 0's EWMA mark and cause cross-asset liquidations/LoF.
+#[test]
+fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
+    let mut env = V16CuEnv::new();
+    env.configure_ewma_mark_with_cu(0, 100, 10, 0); // asset 0 EWMA, oracle_authority = admin
+
+    // Activate asset 1 with a distinct real oracle_authority.
+    let a1 = Keypair::new();
+    env.ensure_signer_account(a1.pubkey());
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        a1.pubkey(),
+        a1.pubkey(),
+        a1.pubkey(),
+        a1.pubkey(),
+    );
+
+    // Non-vacuous control: a1 is accepted as the real oracle_authority for asset 1.
+    env.svm.expire_blockhash();
+    let own_asset_config = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureEwmaMark {
+            asset_index: 1,
+            now_slot: 1,
+            initial_mark_e6: 100,
+            mark_ewma_halflife_slots: 10,
+            mark_min_fee: 0,
+        },
+        vec![
+            AccountMeta::new(a1.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&a1],
+    );
+    assert!(
+        own_asset_config.is_ok(),
+        "asset-1's own oracle_authority configures asset-1 EWMA: {own_asset_config:?}"
+    );
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    let own_asset_push = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PushEwmaMark {
+            asset_index: 1,
+            now_slot: 2,
+            mark_e6: 150,
+        },
+        vec![
+            AccountMeta::new(a1.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&a1],
+    );
+    assert!(
+        own_asset_push.is_ok(),
+        "asset-1's own oracle_authority pushes asset-1 EWMA: {own_asset_push:?}"
+    );
+
+    // ATTACK: the same valid asset-1 oracle_authority pushes asset 0's EWMA mark -> reject.
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    let r = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PushEwmaMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 9_999_999,
+        },
+        vec![
+            AccountMeta::new(a1.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&a1],
+    );
+    assert!(
+        r.is_err(),
+        "asset-1's oracle_authority must not push asset-0's EWMA mark"
+    );
+    assert_eq!(
+        env.market_state().0.mark_ewma_e6,
+        100,
+        "asset-0 EWMA mark unchanged by cross-asset push"
+    );
+
+    // CONTROL: asset 0's own authority can push asset 0.
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PushEwmaMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 150,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "asset-0's own authority pushes asset-0 EWMA mark: {ok:?}"
+    );
+    assert!(
+        env.market_state().0.mark_ewma_e6 > 100,
+        "control push moved the EWMA mark"
+    );
+}
