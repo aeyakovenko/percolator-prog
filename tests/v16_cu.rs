@@ -33431,6 +33431,93 @@ fn v16_attack_marketauth_renounce_rejected_even_with_fallback() {
     );
 }
 
+// LoF sweep — pushed marks cannot override an EXTERNAL-oracle asset (oracle bypass / price manipulation).
+// PushAuthMark/PushEwmaMark are the manual-mark paths for AuthMark/EwmaMark-mode assets. An asset priced
+// by a real external oracle (Pyth/Switchboard/Chainlink, i.e. hybrid mode) must NOT accept a pushed mark,
+// or the asset's own oracle authority could bypass the external feed and set ANY settlement price —
+// inducing liquidations / printing PnL against traders (LoF). The handlers gate on the asset's mode
+// (profile_is_auth_mark / profile_is_ewma_mark) and reject a mismatch with Unauthorized, BEFORE the
+// authority or slot checks. This drives the bypass with the GENUINE oracle authority (admin) on a
+// hybrid-configured asset and asserts both pushes reject and the externally-seeded mark is unchanged.
+// The existing push-mark tests cover the authority gate / clamp / freshness, never the MODE gate.
+#[test]
+fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+
+    // Configure asset 0 to be priced by a real EXTERNAL Pyth oracle (hybrid mode). admin is the
+    // oracle authority (ConfigureHybridOracle requires + binds it).
+    let feed = [0x55u8; 32];
+    let acct = env.set_pyth_price_with_conf(&feed, 200_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[acct],
+        1,
+        100,
+        0,
+        0,
+        100,
+        0,
+    )
+    .expect("hybrid (external-oracle) configuration of asset 0");
+    let mark_before = env.market_state().1.assets[0].effective_price;
+    assert!(mark_before > 0, "asset 0 seeded from the external oracle");
+
+    let admin = env.admin.insecure_clone();
+    env.svm.warp_to_slot(2);
+
+    // ATTACK 1: the genuine oracle authority pushes an arbitrary AuthMark to OVERRIDE the external feed.
+    // Mode gate (profile_is_auth_mark) rejects it as Unauthorized -- a hybrid asset is not mark-pushable.
+    env.svm.expire_blockhash();
+    let r_auth = env.send(
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 9_999_999,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(r_auth.is_err(), "PushAuthMark on an external-oracle asset must reject");
+    assert!(
+        r_auth.unwrap_err().contains("Custom(8)"),
+        "wrong-mode push must be Unauthorized (Custom 8), not silently applied"
+    );
+
+    // ATTACK 2: same via PushEwmaMark (profile_is_ewma_mark gate) -> also Unauthorized.
+    env.svm.expire_blockhash();
+    let r_ewma = env.send(
+        ProgInstruction::PushEwmaMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 9_999_999,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(r_ewma.is_err(), "PushEwmaMark on an external-oracle asset must reject");
+    assert!(
+        r_ewma.unwrap_err().contains("Custom(8)"),
+        "wrong-mode push must be Unauthorized (Custom 8)"
+    );
+
+    // The externally-priced mark was never overridden by either rejected push.
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        mark_before,
+        "external-oracle mark unchanged by the rejected manual pushes"
+    );
+}
+
 // security.md sweep — auth-mark push is authority-gated (#6/#37): pushing the settlement mark requires
 // the signer to be the asset's oracle/mark authority (expect_live_authority(authorities.oracle_authority,
 // signer), src/v16_program.rs:9868). Attacker goal: a non-authority pushes an extreme mark to manipulate
