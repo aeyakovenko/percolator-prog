@@ -40926,6 +40926,231 @@ fn v16_attack_withdraw_rejected_when_resolve_matured() {
     assert!(r.is_err(), "withdraw must reject once the market is resolve-matured (#66 solvency gate)");
 }
 
+// security.md sweep - stale-resolve freeze (#30/#35/#48): once the authenticated clock has passed
+// permissionless_resolve_stale_slots, the market is still mode=Live until ResolveStalePermissionless
+// runs, but live value paths must already be frozen. Otherwise an attacker can alter capital, domain
+// support, positions, or settlement state in the stale window before the terminal snapshot is captured.
+#[test]
+fn v16_attack_live_value_paths_reject_when_resolve_matured() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let taker = Keypair::new();
+    let maker = Keypair::new();
+    let taker_portfolio = env.create_portfolio(&taker);
+    let maker_portfolio = env.create_portfolio(&maker);
+    env.deposit(&taker, taker_portfolio, 1_000_000);
+    env.deposit(&maker, maker_portfolio, 1_000_000);
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+
+    // Non-vacuous controls: while the oracle is fresh, the same classes of operations work.
+    env.svm.warp_to_slot(4);
+    let fresh_deposit_source = env.token_account_for_mint(env.mint, taker.pubkey(), 50_000);
+    env.svm.expire_blockhash();
+    let fresh_deposit = env.send(
+        ProgInstruction::Deposit { amount: 50_000 },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_portfolio, false),
+            AccountMeta::new(fresh_deposit_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&taker],
+    );
+    assert!(
+        fresh_deposit.is_ok(),
+        "fresh-oracle Deposit should still work: {fresh_deposit:?}"
+    );
+    env.top_up_insurance_domain_with_authority(&admin, 0, 10);
+    env.top_up_backing_bucket_with_authority(&admin, 1, 10, 100);
+    env.trade_asset_with_cu(
+        0,
+        &taker,
+        taker_portfolio,
+        &maker,
+        maker_portfolio,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(40);
+    let stale_deposit_source = env.token_account_for_mint(env.mint, taker.pubkey(), 75_000);
+    let stale_insurance_source = env.token_account_for_mint(env.mint, admin.pubkey(), 25);
+    let stale_backing_source = env.token_account_for_mint(env.mint, admin.pubkey(), 30);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_portfolio).unwrap();
+    let maker_before = env.svm.get_account(&maker_portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let deposit_source_before = env.svm.get_account(&stale_deposit_source).unwrap();
+    let insurance_source_before = env.svm.get_account(&stale_insurance_source).unwrap();
+    let backing_source_before = env.svm.get_account(&stale_backing_source).unwrap();
+
+    env.svm.expire_blockhash();
+    let stale_deposit = env.send(
+        ProgInstruction::Deposit { amount: 75_000 },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_portfolio, false),
+            AccountMeta::new(stale_deposit_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&taker],
+    );
+    assert!(
+        stale_deposit.is_err(),
+        "Deposit must reject once the market is resolve-matured"
+    );
+
+    env.svm.expire_blockhash();
+    let stale_trade = env.send(
+        ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(maker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_portfolio, false),
+            AccountMeta::new(maker_portfolio, false),
+        ],
+        &[&taker, &maker],
+    );
+    assert!(
+        stale_trade.is_err(),
+        "TradeNoCpi must reject once the market is resolve-matured"
+    );
+
+    env.svm.expire_blockhash();
+    let stale_insurance = env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 25,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale_insurance.is_err(),
+        "TopUpInsuranceDomain must reject once the market is resolve-matured"
+    );
+
+    env.svm.expire_blockhash();
+    let stale_backing = env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 30,
+            expiry_slot: 100,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale_backing.is_err(),
+        "TopUpBackingBucket must reject once the market is resolve-matured"
+    );
+
+    env.svm.expire_blockhash();
+    let stale_crank = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 0,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_portfolio, false),
+        ],
+        &[],
+    );
+    assert!(
+        stale_crank.is_err(),
+        "PermissionlessCrank refresh must reject once the market is resolve-matured"
+    );
+
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale-window live ops leave market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_portfolio).unwrap(),
+        taker_before,
+        "stale-window live ops leave taker portfolio unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&maker_portfolio).unwrap(),
+        maker_before,
+        "stale-window live ops leave maker portfolio unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "stale-window live ops move no vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_deposit_source).unwrap(),
+        deposit_source_before,
+        "rejected stale Deposit pulls no source tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_insurance_source).unwrap(),
+        insurance_source_before,
+        "rejected stale insurance top-up pulls no source tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_backing_source).unwrap(),
+        backing_source_before,
+        "rejected stale backing top-up pulls no source tokens"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "the stale boundary should still be resolvable permissionlessly: {resolve:?}"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.mode, MarketModeV16::Resolved);
+    assert_eq!(
+        group.resolved_slot, 40,
+        "resolved_slot uses the authenticated clock slot"
+    );
+}
+
 // Per-asset oracle-authority isolation: PushAuthMark validates the signer against THE TARGET ASSET's
 // oracle_authority (handle_push_auth_mark reads asset_index's profile -> domain_authorities_from_profile ->
 // expect_live_authority, v16_program ~10188). A key that is a *valid* oracle_authority for asset 1 must NOT be
