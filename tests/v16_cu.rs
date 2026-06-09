@@ -36499,6 +36499,165 @@ fn v16_attack_base_unit_mints_changeable_only_when_empty() {
     );
 }
 
+// security.md sweep — base-unit reserve liveness (#44/#48): accounting-empty is not enough to
+// change away from an already configured secondary mint. The old canonical PDA reserve may still
+// hold secondary tokens, and CloseSlab can only recover the currently configured secondary reserve.
+#[test]
+fn v16_attack_base_unit_mint_reset_requires_old_secondary_reserve_empty() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let first_secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, first_secondary);
+
+    let first_secondary_vault = canonical_vault_ata(env.vault_authority, first_secondary);
+    env.svm
+        .set_account(
+            first_secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(first_secondary, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        env.market_state().1.vault, 0,
+        "market accounting is empty despite raw secondary reserve custody"
+    );
+
+    let replacement_secondary = env.create_mint();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let old_vault_before = env.svm.get_account(&first_secondary_vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: replacement_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(replacement_secondary, false),
+            AccountMeta::new_readonly(first_secondary_vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "must not reset secondary mint while the old canonical reserve still holds tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected reset leaves configured mints unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&first_secondary_vault).unwrap(),
+        old_vault_before,
+        "rejected reset leaves the old secondary reserve recoverable"
+    );
+
+    env.set_token_account_amount(first_secondary_vault, first_secondary, env.vault_authority, 0);
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: replacement_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(replacement_secondary, false),
+            AccountMeta::new_readonly(first_secondary_vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "empty old secondary reserve can be rotated away: {ok:?}"
+    );
+    assert_eq!(
+        env.market_state().0.secondary_collateral_mint,
+        replacement_secondary.to_bytes(),
+        "replacement secondary mint stored once old reserve is empty"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 7),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let replacement_primary = env.create_mint();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let old_primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected_primary = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: replacement_primary.to_bytes(),
+            secondary_mint: replacement_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(replacement_primary, false),
+            AccountMeta::new_readonly(replacement_secondary, false),
+            AccountMeta::new_readonly(env.vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_primary.is_err(),
+        "must not reset primary mint while the old canonical primary vault still holds dust"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected primary reset leaves configured mints unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        old_primary_vault_before,
+        "rejected primary reset leaves old primary dust recoverable"
+    );
+
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 0);
+    env.svm.expire_blockhash();
+    let ok_primary = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: replacement_primary.to_bytes(),
+            secondary_mint: replacement_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(replacement_primary, false),
+            AccountMeta::new_readonly(replacement_secondary, false),
+            AccountMeta::new_readonly(env.vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok_primary.is_ok(),
+        "empty old primary vault can be rotated away: {ok_primary:?}"
+    );
+    assert_eq!(
+        env.market_state().0.collateral_mint,
+        replacement_primary.to_bytes(),
+        "replacement primary mint stored once old primary vault is empty"
+    );
+}
+
 // security.md sweep — base-unit mint scale isolation (#44/#48): the primary/secondary base-unit mints
 // are swapped and withdrawn 1:1. If their SPL decimals differ, the wrapper would silently re-denominate
 // collateral. UpdateBaseUnitMints must reject mismatched decimals before storing the pair.

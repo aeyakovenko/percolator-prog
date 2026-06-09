@@ -8864,6 +8864,33 @@ pub mod processor {
             }
             cfg
         };
+        let previous_primary_mint = primary_collateral_mint(&cfg);
+        let previous_secondary_mint = if cfg.secondary_collateral_mint == [0u8; 32] {
+            None
+        } else {
+            Some(Pubkey::new_from_array(cfg.secondary_collateral_mint))
+        };
+        let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
+        let mut old_vault_account_index = 4usize;
+        if previous_primary_mint != primary_key {
+            let old_primary_vault = account(accounts, old_vault_account_index)?;
+            old_vault_account_index += 1;
+            require_empty_vault_token_account(
+                old_primary_vault,
+                &vault_authority,
+                &previous_primary_mint,
+            )?;
+        }
+        if let Some(previous_secondary_mint) = previous_secondary_mint {
+            if previous_secondary_mint != secondary_key {
+                let old_secondary_vault = account(accounts, old_vault_account_index)?;
+                require_empty_vault_token_account(
+                    old_secondary_vault,
+                    &vault_authority,
+                    &previous_secondary_mint,
+                )?;
+            }
+        }
         cfg.collateral_mint = primary_mint;
         cfg.secondary_collateral_mint = secondary_mint;
         state::write_wrapper_config(&mut data, &cfg)
@@ -11651,6 +11678,19 @@ pub mod processor {
             || *token_ai.key != canonical_vault_address(expected_owner, expected_mint)
         {
             return Err(PercolatorError::InvalidVaultAccount.into());
+        }
+        Ok(())
+    }
+
+    fn require_empty_vault_token_account(
+        token_ai: &AccountInfo,
+        expected_owner: &Pubkey,
+        expected_mint: &Pubkey,
+    ) -> Result<(), ProgramError> {
+        verify_vault_token_account(token_ai, expected_owner, expected_mint)?;
+        let token = unpack_token_account(token_ai)?;
+        if token.amount != 0 {
+            return Err(PercolatorError::EngineLockActive.into());
         }
         Ok(())
     }
