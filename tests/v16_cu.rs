@@ -13812,6 +13812,88 @@ fn v16_attack_account_type_confusion_rejected() {
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
 }
 
+// security.md sweep - PermissionlessCrank pre-parse realloc rollback (#44/#48): the handler grows
+// program-owned portfolio storage before decoding the portfolio header. A raw undersized program-owned
+// account must still reject atomically, with no persistent resize or market mutation.
+#[test]
+fn v16_attack_crank_raw_program_portfolio_realloc_rolls_back() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    let raw = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            raw,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; 8],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let raw_before = env.svm.get_account(&raw).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.warp_to_slot(1);
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(raw, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "raw program-owned account must not become a portfolio through crank pre-realloc"
+    );
+    assert_eq!(
+        env.svm.get_account(&raw).unwrap(),
+        raw_before,
+        "rejected crank rolls back the raw account realloc and zero-fill"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected raw-account crank leaves market bytes unchanged"
+    );
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[],
+    );
+    assert!(
+        ok.is_ok(),
+        "valid portfolio crank remains live after rejected raw-account attempt: {ok:?}"
+    );
+}
+
 // security.md sweep - duplicate writable account aliasing (#26/#44/#48): several public helpers take
 // an arbitrary program-owned writable "portfolio" account. The market slab is also program-owned and
 // large enough to pass shallow storage checks; using it as the portfolio slot must reject atomically.
