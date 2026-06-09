@@ -36278,6 +36278,99 @@ fn v16_attack_dual_mint_shared_credit_no_double_withdraw() {
     assert_eq!(env.token_amount(secondary_dest), 1);
 }
 
+// security.md sweep — dual-mint insurance budget (#33/#44): the domain insurance budget is shared
+// across primary and secondary payout rails. It must not pay once from the primary vault and then again
+// from an independently funded secondary reserve.
+#[test]
+fn v16_attack_dual_mint_domain_insurance_no_double_withdraw() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary);
+    env.top_up_insurance_domain_with_authority(&admin, 0, 100);
+    let (primary_dest, _) = env
+        .try_withdraw_insurance_asset_with_authority(&admin, 0, 100)
+        .expect("primary insurance withdrawal exhausts the budget");
+    assert_eq!(env.token_amount(primary_dest), 100);
+    assert_eq!(
+        env.market_state().1.insurance_domain_budget[0], 0,
+        "first withdrawal exhausted the shared insurance budget"
+    );
+
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, env.vault_authority, 100),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let secondary_dest = env.token_account_for_mint(secondary, admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let double_withdraw = env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 1,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        double_withdraw.is_err(),
+        "secondary reserve must not pay after the insurance budget is exhausted"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "rejected double-withdraw leaves secondary reserve untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        secondary_dest_before,
+        "rejected double-withdraw pays no secondary insurance"
+    );
+
+    env.top_up_insurance_domain_with_authority(&admin, 0, 1);
+    env.svm.expire_blockhash();
+    let legitimate_secondary = env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 1,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        legitimate_secondary.is_ok(),
+        "fresh insurance budget can still pay through the secondary reserve: {legitimate_secondary:?}"
+    );
+    assert_eq!(env.token_amount(secondary_dest), 1);
+}
+
 // security.md sweep — base-unit mints changeable only when empty (#5 / README L127): the base-unit
 // authority may (re)set the primary/secondary mints ONLY while the market holds no value; once funded,
 // the change is rejected so live collateral can never be re-denominated out from under holders.
