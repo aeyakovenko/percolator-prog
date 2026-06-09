@@ -31858,6 +31858,143 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
     );
 }
 
+// security.md sweep - liquidation cranker reward owner isolation (#3/#44): the optional reward
+// portfolio is a public tail account. A caller must not be able to mutate another same-market
+// portfolio by naming it as the cranker reward target without that portfolio owner's signature.
+// Rejection must roll back the liquidated account, reward portfolio, and market; the rightful
+// reward owner remains the positive control.
+#[test]
+fn v16_attack_liquidation_cranker_reward_requires_reward_owner_signature() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let lo = Keypair::new();
+    let l = env.create_portfolio(&lo);
+    let so = Keypair::new();
+    let s = env.create_portfolio(&so);
+    let co = Keypair::new();
+    let c = env.create_portfolio(&co);
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+    env.deposit(&lo, l, 100_000_000);
+    env.deposit(&so, s, 100_000);
+    env.deposit(&co, c, 1_000);
+    env.trade_asset_with_cu(0, &lo, l, &so, s, POS_SCALE as i128, 1_000_000, 0);
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: slot,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(s, false),
+            ],
+            &[],
+        );
+    }
+    assert!(
+        env.portfolio_state(s).health_cert.certified_liq_deficit != 0,
+        "short is liquidatable before the unauthorized reward-owner attempt"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let short_before = env.svm.get_account(&s).unwrap();
+    let cranker_before = env.svm.get_account(&c).unwrap();
+    let cranker_cap_before = env.portfolio_state(c).capital;
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 30,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(mallory.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(s, false),
+            AccountMeta::new(c, false),
+        ],
+        &[&mallory],
+    );
+    assert!(
+        rejected.is_err(),
+        "cranker reward portfolio must require its own owner signer"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-owner reward rejection leaves market byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&s).unwrap(),
+        short_before,
+        "wrong-owner reward rejection leaves liquidated account byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&c).unwrap(),
+        cranker_before,
+        "wrong-owner reward rejection leaves reward portfolio byte-identical"
+    );
+    assert_eq!(
+        env.portfolio_state(c).capital,
+        cranker_cap_before,
+        "no unsolicited reward credit lands in another user's portfolio"
+    );
+
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 30,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(co.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(s, false),
+            AccountMeta::new(c, false),
+        ],
+        &[&co],
+    );
+    assert!(
+        accepted.is_ok(),
+        "reward-owner-signed liquidation succeeds: {:?}",
+        accepted
+    );
+    assert!(
+        env.portfolio_state(c).capital > cranker_cap_before,
+        "positive control: rightful reward owner receives a real cranker reward"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.vault as u64,
+        env.token_amount(env.vault),
+        "accounting == real vault"
+    );
+    assert!(
+        group.vault >= group.c_tot + group.insurance,
+        "senior conservation"
+    );
+}
+
 // security.md sweep — liquidation cranker reward market binding (#3/#44): when cranker rewards are
 // enabled, the reward portfolio must belong to the same market as the liquidated account. A foreign
 // market portfolio can otherwise try to receive value from this market's insurance while validating under
