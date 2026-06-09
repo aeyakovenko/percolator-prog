@@ -43540,6 +43540,125 @@ fn v16_attack_batch_tradecpi_zero_fill_rejects_atomically() {
     );
 }
 
+// security.md sweep - stale-resolve BatchTradeCpi rollback (#30/#35/#48): the batch CPI path invokes
+// the matcher before it reaches the shared batch engine pre-pass that freezes stale-matured markets.
+// Once the oracle is past permissionless_resolve_stale_slots, a batched matcher fill must reject and
+// roll back every protocol account plus matcher-context writes; the same path remains live while fresh.
+#[test]
+fn v16_attack_batch_tradecpi_rejects_stale_resolve_matured_atomically() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_portfolio = env.create_portfolio(&taker);
+    let lp_portfolio = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_portfolio, 1_000_000);
+    env.deposit(&lp, lp_portfolio, 1_000_000);
+    let (ctx, delegate, _) =
+        env.init_matcher_context_authorized(matcher_program, &lp, lp_portfolio);
+    let sz = (2 * POS_SCALE) as i128;
+    let legs = vec![
+        BatchTradeCpiLeg {
+            asset_index: 0,
+            size_q: sz,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+        BatchTradeCpiLeg {
+            asset_index: 1,
+            size_q: -sz,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+    ];
+    let accounts = |env: &V16CuEnv| {
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_portfolio, false),
+            AccountMeta::new(lp_portfolio, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    let fresh = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: legs.clone(),
+        },
+        accounts(&env),
+        &[&taker],
+    );
+    assert!(
+        fresh.is_ok(),
+        "fresh-oracle BatchTradeCpi should still fill before stale maturity: {fresh:?}"
+    );
+    let fresh_taker = env.portfolio_state(taker_portfolio);
+    assert!(
+        has_active_leg_for_asset(&fresh_taker, 0) && has_active_leg_for_asset(&fresh_taker, 1),
+        "fresh control fills both batch legs"
+    );
+
+    env.svm.warp_to_slot(40);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_portfolio).unwrap();
+    let lp_before = env.svm.get_account(&lp_portfolio).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::BatchTradeCpi { legs },
+        accounts(&env),
+        &[&taker],
+    );
+    assert!(
+        rejected.is_err(),
+        "BatchTradeCpi must reject once the market is stale-resolve matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale BatchTradeCpi leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_portfolio).unwrap(),
+        taker_before,
+        "stale BatchTradeCpi leaves taker portfolio unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_portfolio).unwrap(),
+        lp_before,
+        "stale BatchTradeCpi leaves LP portfolio unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "stale BatchTradeCpi rolls back matcher context writes"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve still succeeds after the rejected stale batch: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // Anti-spoof core: validate_matcher_return is the per-leg gate that bounds a (possibly hostile)
 // matcher's reply. Every CPI integration test feeds it HONEST returns; this exercises the REJECTION
 // branches directly with crafted hostile replies (over-fill, reversed sign, forged echo, bad flags,
