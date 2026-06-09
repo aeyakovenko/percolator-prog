@@ -8544,7 +8544,10 @@ pub mod processor {
         if reduce_q == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        with_one_portfolio_view(program_id, accounts, true, |group, portfolio, _cfg| {
+        with_one_portfolio_view(program_id, accounts, true, |group, portfolio, cfg| {
+            if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
+                return Err(V16Error::LockActive);
+            }
             group
                 .rebalance_reduce_position_not_atomic(
                     portfolio,

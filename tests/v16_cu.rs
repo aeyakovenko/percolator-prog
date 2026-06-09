@@ -41415,6 +41415,102 @@ fn v16_attack_sync_maintenance_rejects_when_resolve_matured() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// security.md sweep - stale-resolve exposure drift (#30/#35/#48): RebalanceReduce is an
+// owner-gated public instruction, but it still mutates live exposure. Once the market is
+// resolve-matured, an owner must not be able to reduce their position against stale marks
+// before the terminal snapshot.
+#[test]
+fn v16_attack_rebalance_reduce_rejects_when_resolve_matured() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+
+    // Non-vacuous control: while fresh, the same owner can reduce part of their position.
+    env.svm.warp_to_slot(4);
+    env.rebalance_reduce_with_cu(&long_owner, long, 0, POS_SCALE / 4);
+    let remaining = env.portfolio_state(long).legs[0].basis_pos_q.unsigned_abs();
+    assert!(
+        remaining > 0 && remaining < POS_SCALE,
+        "fresh RebalanceReduce partially reduced the position"
+    );
+
+    env.svm.warp_to_slot(40);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let long_before = env.svm.get_account(&long).unwrap();
+    let short_before = env.svm.get_account(&short).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::RebalanceReduce {
+            asset_index: 0,
+            reduce_q: remaining,
+        },
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+        ],
+        &[&long_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "RebalanceReduce must reject once the market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale RebalanceReduce leaves market exposure unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&long).unwrap(),
+        long_before,
+        "rejected stale RebalanceReduce leaves the owner portfolio unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&short).unwrap(),
+        short_before,
+        "rejected stale RebalanceReduce leaves the counterparty unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale RebalanceReduce moves no custody"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve still succeeds after rejected stale RebalanceReduce: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // Per-asset oracle-authority isolation: PushAuthMark validates the signer against THE TARGET ASSET's
 // oracle_authority (handle_push_auth_mark reads asset_index's profile -> domain_authorities_from_profile ->
 // expect_live_authority, v16_program ~10188). A key that is a *valid* oracle_authority for asset 1 must NOT be
