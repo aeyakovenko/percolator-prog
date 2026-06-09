@@ -467,6 +467,33 @@ impl Default for V16CuMarketParams {
     }
 }
 
+fn init_market_instruction(params: &V16CuMarketParams) -> ProgInstruction {
+    ProgInstruction::InitMarket {
+        max_portfolio_assets: params.max_portfolio_assets,
+        h_min: params.h_min,
+        h_max: params.h_max,
+        initial_price: params.initial_price,
+        min_nonzero_mm_req: params.min_nonzero_mm_req,
+        min_nonzero_im_req: params.min_nonzero_im_req,
+        maintenance_margin_bps: params.maintenance_margin_bps,
+        initial_margin_bps: params.initial_margin_bps,
+        max_trading_fee_bps: params.max_trading_fee_bps,
+        trade_fee_base_bps: params.trade_fee_base_bps,
+        liquidation_fee_bps: params.liquidation_fee_bps,
+        liquidation_fee_cap: params.liquidation_fee_cap,
+        min_liquidation_abs: params.min_liquidation_abs,
+        max_price_move_bps_per_slot: params.max_price_move_bps_per_slot,
+        max_accrual_dt_slots: params.max_accrual_dt_slots,
+        max_abs_funding_e9_per_slot: params.max_abs_funding_e9_per_slot,
+        min_funding_lifetime_slots: params.min_funding_lifetime_slots,
+        max_account_b_settlement_chunks: params.max_account_b_settlement_chunks,
+        max_bankrupt_close_chunks: params.max_bankrupt_close_chunks,
+        max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots,
+        public_b_chunk_atoms: params.public_b_chunk_atoms,
+        maintenance_fee_per_slot: params.maintenance_fee_per_slot,
+    }
+}
+
 impl V16CuEnv {
     fn new() -> Self {
         Self::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000)
@@ -40543,6 +40570,141 @@ fn v16_attack_maintenance_fee_spam_cannot_overdrain() {
         env.portfolio_state(p).capital < cap1,
         "advancing real time accrues additional fee"
     );
+}
+
+// Fresh InitMarket is a public bootstrap boundary: an attacker or misconfigured launcher should not be
+// able to burn a newly allocated market account into a half-written, unusable slab with grief params.
+#[test]
+fn v16_attack_init_market_rejects_grief_config_without_burning_market_account() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let valid = V16CuMarketParams::default();
+    let market_len = state::market_account_len_for_capacity(valid.max_portfolio_assets as usize)
+        .expect("market len");
+    let portfolio_len =
+        state::portfolio_account_len_for_market_slots(valid.max_portfolio_assets as usize)
+            .expect("portfolio len");
+
+    let mut zero_portfolios = V16CuMarketParams::default();
+    zero_portfolios.max_portfolio_assets = 0;
+    let mut over_portfolio_cap = V16CuMarketParams::default();
+    over_portfolio_cap.max_portfolio_assets =
+        percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS + 1;
+    let mut impossible_bound = V16CuMarketParams::default();
+    impossible_bound.h_max = (BOUND_SCALE + 1) as u64;
+    let mut zero_oracle = V16CuMarketParams::default();
+    zero_oracle.initial_price = 0;
+    let mut over_oracle = V16CuMarketParams::default();
+    over_oracle.initial_price = percolator::MAX_ORACLE_PRICE + 1;
+    let mut fee_floor_dos = V16CuMarketParams::default();
+    fee_floor_dos.max_trading_fee_bps = 99;
+    fee_floor_dos.trade_fee_base_bps = 100;
+    let mut maintenance_drain = V16CuMarketParams::default();
+    maintenance_drain.maintenance_fee_per_slot = percolator::MAX_PROTOCOL_FEE_ABS + 1;
+
+    for (label, params) in [
+        ("zero portfolio cap", zero_portfolios),
+        ("portfolio cap above wrapper limit", over_portfolio_cap),
+        ("h_max above bound scale", impossible_bound),
+        ("zero initial oracle price", zero_oracle),
+        ("initial oracle price above max", over_oracle),
+        ("trade fee floor above max fee", fee_floor_dos),
+        ("maintenance fee above protocol cap", maintenance_drain),
+    ] {
+        let market = Keypair::new();
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            &market,
+            market_len,
+            env.program_id,
+        );
+        let market_before = env.svm.get_account(&market.pubkey()).expect("market account");
+
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            init_market_instruction(&params),
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(market.pubkey(), false),
+                AccountMeta::new_readonly(env.mint, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            rejected.is_err(),
+            "{label}: hostile InitMarket config must reject"
+        );
+        assert_eq!(
+            env.svm.get_account(&market.pubkey()).expect("market account"),
+            market_before,
+            "{label}: rejected InitMarket must not dirty the freshly allocated market account"
+        );
+
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            init_market_instruction(&valid),
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(market.pubkey(), false),
+                AccountMeta::new_readonly(env.mint, false),
+            ],
+            &[&admin],
+        )
+        .expect("valid InitMarket after rejected grief config");
+        let market_after_valid = env.svm.get_account(&market.pubkey()).expect("market account");
+        let (cfg, group) = state::read_market(&market_after_valid.data).expect("valid market");
+        assert_eq!(
+            cfg.marketauth,
+            admin.pubkey().to_bytes(),
+            "{label}: valid retry keeps the real initializer as market authority"
+        );
+        assert_eq!(
+            cfg.collateral_mint,
+            env.mint.to_bytes(),
+            "{label}: valid retry pins the intended collateral mint"
+        );
+        assert_eq!(
+            group.assets[0].effective_price, valid.initial_price,
+            "{label}: valid retry initializes a sane base oracle"
+        );
+
+        let owner = Keypair::new();
+        env.ensure_signer_account(owner.pubkey());
+        let portfolio = Keypair::new();
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            &portfolio,
+            portfolio_len,
+            env.program_id,
+        );
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(market.pubkey(), false),
+                AccountMeta::new(portfolio.pubkey(), false),
+            ],
+            &[&owner],
+        )
+        .expect("portfolio init after valid market retry");
+        let portfolio_account = env
+            .svm
+            .get_account(&portfolio.pubkey())
+            .expect("portfolio account");
+        state::read_portfolio(&portfolio_account.data).expect("valid portfolio after retry");
+    }
 }
 
 // SOL-010 (reinitialization): InitMarket targets the shared market account. Reinitializing a funded
