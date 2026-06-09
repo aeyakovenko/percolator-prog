@@ -33222,6 +33222,68 @@ fn v16_attack_chainlink_oracle_read_and_bounds_enforced() {
     );
 }
 
+// LoF sweep — Chainlink oracle freshness (SOL-024). read_chainlink_price_e6 computes
+// age = now_unix_ts - publish_time and rejects (OracleStale) if `age < 0 || age > max_staleness_secs`.
+// A stale price (too old) consumed as the mark would let positions settle/liquidate against an outdated
+// price (LoF); a FUTURE-dated price (age < 0) is equally invalid and must not be trusted. The earlier
+// Chainlink test only used a fresh (publish_time == now) feed, so the freshness gate was never exercised;
+// Switchboard freshness is tested but Chainlink's is not. Configure uses now_unix_ts=100, max_staleness=60.
+#[test]
+fn v16_attack_chainlink_oracle_freshness_enforced() {
+    let feed = [0x46u8; 32];
+    let feed_key = Pubkey::new_from_array(feed);
+    let configure = |publish_time: i64| -> (bool, Option<String>) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100); // now_unix_ts = 100
+        env.svm
+            .set_account(
+                feed_key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_chainlink_data(8, 2_000_000_00, publish_time),
+                    owner: oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0u8; 32], [0u8; 32]],
+            &[feed_key],
+            1,
+            100,
+            0,
+            0,
+            100,
+            0,
+        );
+        (r.is_ok(), r.err())
+    };
+
+    // Fresh (publish_time == now) configures — the freshness gate passes.
+    let (fresh_ok, fresh_err) = configure(100);
+    assert!(fresh_ok, "a fresh Chainlink feed (age 0) configures: {fresh_err:?}");
+
+    // Stale: publish_time=1, now=100, max_staleness=60 -> age 99 > 60 -> OracleStale (Custom 27).
+    let (stale_ok, stale_err) = configure(1);
+    assert!(!stale_ok, "a stale Chainlink feed (age 99 > 60) must reject");
+    assert!(
+        stale_err.unwrap().contains("Custom(27)"),
+        "an over-stale Chainlink price must be OracleStale (Custom 27)"
+    );
+
+    // Future-dated: publish_time=200 > now=100 -> age = -100 < 0 -> OracleStale (no trusting future prices).
+    let (future_ok, future_err) = configure(200);
+    assert!(!future_ok, "a future-dated Chainlink feed (age < 0) must reject");
+    assert!(
+        future_err.unwrap().contains("Custom(27)"),
+        "a future-dated Chainlink price must be OracleStale (Custom 27)"
+    );
+}
+
 // security.md sweep — oracle feed account owner validation (#37/#44): a Pyth feed account must be owned
 // by the Pyth receiver program. Attacker goal: substitute a self-owned account holding crafted "Pyth"
 // data to inject an arbitrary oracle price (full oracle spoof). Protection: the wrapper rejects a feed
