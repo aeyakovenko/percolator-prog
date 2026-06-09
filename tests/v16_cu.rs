@@ -39015,6 +39015,57 @@ fn v16_attack_init_portfolio_cannot_use_market_as_portfolio_account() {
     assert_eq!(initialized.capital, 0);
 }
 
+// DoS sweep — re-init cannot inflate materialized_portfolio_count (SOL-010 / SOL-022 counter inflation).
+// InitPortfolio registers the new (empty) portfolio: materialized_portfolio_count += 1. CloseSlab requires
+// that count == 0 (full wind-down). If an already-initialized EMPTY portfolio could be re-initialized, it
+// would register a SECOND time, leaving a phantom count that never decrements -> the market can NEVER be
+// closed/wound down (a permanent, cheap-to-trigger slab-close DoS). The is_initialized guard rejects the
+// re-init BEFORE the register, so the count cannot be inflated. This is distinct from the funded-reinit
+// test (which protects victim capital/ownership) and from the close-side counter test (rejected close
+// doesn't decrement): this guards the INIT-side counter integrity that keeps slab close reachable.
+#[test]
+fn v16_attack_empty_portfolio_reinit_cannot_inflate_materialized_count() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner); // InitPortfolio: count -> 1 (empty, never deposited)
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "one init registers exactly one materialized portfolio"
+    );
+
+    // ATTACK: re-init the SAME already-initialized empty portfolio to register it a second time.
+    env.svm.expire_blockhash();
+    let r = env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+        ],
+        &[&owner],
+    );
+    assert!(r.is_err(), "re-init of an initialized portfolio must reject");
+    assert!(
+        r.unwrap_err().contains("Custom(2)"),
+        "re-init must be AlreadyInitialized (Custom 2)"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "rejected re-init must NOT inflate materialized_portfolio_count (no phantom count)"
+    );
+
+    // The count is accurate: closing the single real portfolio drives it to 0, so the market remains
+    // wind-down-able (the rejected re-init left no phantom blocking slab close).
+    env.close_portfolio_with_cu(&owner, p);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "count reaches 0 after the one real portfolio closes -> slab close stays reachable"
+    );
+}
+
 // SOL-010 (reinitialization): InitPortfolio targets a program-owned account and SETS its owner. An
 // attacker could try to re-init a VICTIM's already-funded portfolio -- which would reset its capital
 // and reassign ownership, a severe LOF (victim's vaulted tokens orphaned). The is_initialized guard
