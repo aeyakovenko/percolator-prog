@@ -8,6 +8,7 @@ use percolator_prog::{
     constants::{
         ASSET_ORACLE_WRAPPER_LEN, MARKET_GROUP_OFF, MATCHER_ABI_VERSION,
         ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
     },
     ix::{BatchTradeCpiLeg, BatchTradeLeg, Instruction as ProgInstruction},
     oracle_v16, processor, state,
@@ -18469,6 +18470,76 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
     assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
     assert_eq!(auth_state.matcher_context, ctx.to_bytes());
     assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
+}
+
+#[test]
+fn v16_attack_set_matcher_config_reallocs_legacy_lp_portfolio_safely() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+
+    let mut legacy_lp = env.svm.get_account(&lp).unwrap();
+    legacy_lp.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(lp, legacy_lp).unwrap();
+    assert_eq!(
+        env.svm.get_account(&lp).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup simulates a legacy LP portfolio with no matcher-config tail"
+    );
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp,
+        &lp_owner.pubkey(),
+        &matcher_program,
+        &ctx,
+    );
+    env.try_init_auth_matcher_context_with_delegate(matcher_program, &lp_owner, lp, ctx, delegate)
+        .expect("init auth matcher context for legacy LP");
+
+    env.set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 1);
+    let lp_after_config = env.svm.get_account(&lp).unwrap();
+    assert_eq!(
+        lp_after_config.data.len(),
+        env.portfolio_account_len,
+        "SetMatcherConfig must realloc legacy LP storage before writing the matcher tail"
+    );
+    let auth_state = env.portfolio_matcher_config(lp);
+    assert_eq!(auth_state.enabled, 1);
+    assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
+    assert_eq!(auth_state.matcher_context, ctx.to_bytes());
+    assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
+
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    env.svm.expire_blockhash();
+    let fill = env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        ctx,
+        delegate,
+        0,
+        (5 * POS_SCALE) as i128,
+        100,
+    );
+    assert!(
+        fill.is_ok(),
+        "matcher config written after realloc must authorize the LP CPI fill: {fill:?}"
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(taker), 0).basis_pos_q,
+        (5 * POS_SCALE) as i128
+    );
 }
 
 #[test]
