@@ -23928,6 +23928,123 @@ fn v16_attack_close_slab_bad_primary_dest_is_atomic() {
     );
 }
 
+// security.md sweep - CloseSlab vault delegate/close-authority guard (#44/#48):
+// CloseSlab is the terminal path that transfers any raw vault dust, closes the SPL vault account, and
+// zeroes the market slab. Even with the canonical vault address, a delegated or separately closable
+// vault must reject before the signed transfer/close instructions or slab reclaim can run.
+#[test]
+fn v16_attack_close_slab_rejects_delegated_or_closable_primary_vault() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.resolve();
+    let dest = env.token_account(admin.pubkey(), 0);
+
+    let set_primary_vault =
+        |env: &mut V16CuEnv, delegate: COption<Pubkey>, close_authority: COption<Pubkey>| {
+            let mut data = vec![0u8; TokenAccount::LEN];
+            TokenAccount::pack(
+                TokenAccount {
+                    mint: env.mint,
+                    owner: env.vault_authority,
+                    amount: 7,
+                    delegate,
+                    state: AccountState::Initialized,
+                    is_native: COption::None,
+                    delegated_amount: 7,
+                    close_authority,
+                },
+                &mut data,
+            )
+            .unwrap();
+            env.svm
+                .set_account(
+                    env.vault,
+                    Account {
+                        lamports: 1_000_000_000,
+                        data,
+                        owner: spl_token::ID,
+                        executable: false,
+                        rent_epoch: 0,
+                    },
+                )
+                .unwrap();
+        };
+
+    for (label, delegate, close_authority) in [
+        (
+            "delegated",
+            COption::Some(Pubkey::new_unique()),
+            COption::None,
+        ),
+        (
+            "close-authority",
+            COption::None,
+            COption::Some(Pubkey::new_unique()),
+        ),
+    ] {
+        set_primary_vault(&mut env, delegate, close_authority);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let dest_before = env.svm.get_account(&dest).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            rejected.is_err(),
+            "CloseSlab must reject a {label} canonical primary vault"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "rejected {label} vault must not reclaim the market slab"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "rejected {label} vault must not transfer or close the SPL vault"
+        );
+        assert_eq!(
+            env.svm.get_account(&dest).unwrap(),
+            dest_before,
+            "rejected {label} vault must not pay the admin destination"
+        );
+    }
+
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "clean canonical primary vault still closes after rejected guarded vaults: {ok:?}"
+    );
+    assert_eq!(env.token_amount(dest), 7);
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(closed_market.lamports, 0);
+    assert!(closed_market.data.iter().all(|b| *b == 0));
+}
+
 // full-interface sweep (cron31): CloseSlab must pin the primary vault to the current market's vault
 // PDA before transferring dust, closing token accounts, or zeroing the slab. A canonical vault for a
 // different market must reject atomically; otherwise a final cleanup could close or drain foreign
