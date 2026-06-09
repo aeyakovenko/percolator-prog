@@ -35721,6 +35721,94 @@ fn v16_attack_deposit_primary_only_withdraw_either() {
     );
 }
 
+// LoF sweep — dual-mint shared credit (SOL-002 state asymmetry): a deposit credits ONE mint-agnostic
+// engine capital field (`PortfolioV16::header.capital`). The wrapper lets a holder withdraw EITHER the
+// primary or secondary collateral mint 1:1, so the danger is that a single N deposit funds TWO N
+// withdrawals — one per mint — printing collateral out of thin air. This drives that exact double-spend:
+// deposit N primary, fully withdraw N in primary (capital -> 0), then ATTEMPT to withdraw N again in the
+// secondary mint against a fully-funded secondary reserve. The engine MUST reject the second withdraw
+// (capital is exhausted, not per-mint), the secondary reserve must be untouched, and the holder must net
+// exactly N tokens out of an N deposit — never 2N. Complements `deposit_primary_only_withdraw_either`,
+// which only proves each mint is individually withdrawable while credit still remains; it never drives the
+// cross-mint exhaustion boundary where the double-withdraw would actually mint value.
+#[test]
+fn v16_attack_dual_mint_shared_credit_no_double_withdraw() {
+    let mut env = V16CuEnv::new();
+    let market = env.market;
+    let primary = env.mint;
+    let vault_authority = env.vault_authority;
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(primary, secondary);
+
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000); // single PRIMARY deposit -> engine capital == 1_000.
+
+    // Seed the secondary reserve so the ONLY thing standing between the attacker and a 2x drain is the
+    // shared engine credit (not a thin token balance). 1_000 secondary is sitting in the canonical vault.
+    let sec_vault = canonical_vault_ata(vault_authority, secondary);
+    env.svm
+        .set_account(
+            sec_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, vault_authority, 1_000),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    // First withdraw drains the FULL deposit in the primary mint: engine capital 1_000 -> 0.
+    let (primary_dest, _) = env.withdraw_with_cu(&owner, p, 1_000);
+    assert_eq!(
+        env.token_amount(primary_dest),
+        1_000,
+        "full primary withdrawal delivered the entire deposit"
+    );
+
+    // Second withdraw asks for the SAME 1_000 again, now in the secondary mint. If the engine tracked
+    // credit per-mint (or skipped the debit on secondary), this would mint a free 1_000 from the seeded
+    // reserve. It must be rejected: capital is shared and already zero.
+    let sec_dest = env.token_account_for_mint(secondary, owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let r_double = env.send(
+        ProgInstruction::Withdraw { amount: 1_000 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(sec_dest, false),
+            AccountMeta::new(sec_vault, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        r_double.is_err(),
+        "second cross-mint withdraw of an already-exhausted credit MUST reject (no free mint)"
+    );
+    assert_eq!(
+        env.token_amount(sec_dest),
+        0,
+        "rejected secondary withdraw delivered nothing"
+    );
+    assert_eq!(
+        env.token_amount(sec_vault),
+        1_000,
+        "secondary reserve is byte-identical after the rejected double-withdraw"
+    );
+
+    // Net conservation: one N deposit yielded exactly N tokens out across BOTH mints, never 2N.
+    assert_eq!(
+        env.token_amount(primary_dest) + env.token_amount(sec_dest),
+        1_000,
+        "holder netted exactly the deposit, not double"
+    );
+}
+
 // security.md sweep — base-unit mints changeable only when empty (#5 / README L127): the base-unit
 // authority may (re)set the primary/secondary mints ONLY while the market holds no value; once funded,
 // the change is rejected so live collateral can never be re-denominated out from under holders.
