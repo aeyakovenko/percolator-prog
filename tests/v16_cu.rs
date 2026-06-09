@@ -43659,6 +43659,126 @@ fn v16_attack_batch_tradecpi_rejects_stale_resolve_matured_atomically() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// security.md sweep - stale BatchTradeNoCpi legacy realloc rollback (#30/#44/#48): the no-CPI batch
+// path grows legacy portfolios before the shared stale-market freeze check. A stale-matured batch must
+// reject without leaving an attacker-triggered realloc/zero-fill DoS behind; while fresh, the same
+// legacy portfolios must still grow and trade normally.
+#[test]
+fn v16_attack_batch_nocpi_stale_reject_rolls_back_legacy_realloc() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_portfolio = env.create_portfolio(&taker);
+    let lp_portfolio = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_portfolio, 1_000_000);
+    env.deposit(&lp, lp_portfolio, 1_000_000);
+
+    let truncate_to_legacy = |env: &mut V16CuEnv, portfolio: Pubkey| {
+        let mut account = env.svm.get_account(&portfolio).unwrap();
+        account.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+        env.svm.set_account(portfolio, account).unwrap();
+    };
+    truncate_to_legacy(&mut env, taker_portfolio);
+    truncate_to_legacy(&mut env, lp_portfolio);
+    assert_eq!(
+        env.svm.get_account(&taker_portfolio).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup starts with a legacy taker portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_portfolio).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup starts with a legacy LP portfolio"
+    );
+
+    let batch = |env: &mut V16CuEnv, size_q: i128| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q,
+                    exec_price: 100,
+                    fee_bps: 100,
+                }],
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_portfolio, false),
+                AccountMeta::new(lp_portfolio, false),
+            ],
+            &[&taker, &lp],
+        )
+    };
+
+    env.svm.warp_to_slot(4);
+    let fresh = batch(&mut env, POS_SCALE as i128);
+    assert!(
+        fresh.is_ok(),
+        "fresh-oracle BatchTradeNoCpi must grow legacy portfolios and trade: {fresh:?}"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_portfolio).unwrap().data.len(),
+        env.portfolio_account_len,
+        "fresh batch grows the legacy taker storage"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_portfolio).unwrap().data.len(),
+        env.portfolio_account_len,
+        "fresh batch grows the legacy LP storage"
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(taker_portfolio), 0).basis_pos_q,
+        POS_SCALE as i128,
+        "fresh control opened the taker leg"
+    );
+
+    truncate_to_legacy(&mut env, taker_portfolio);
+    truncate_to_legacy(&mut env, lp_portfolio);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_portfolio).unwrap();
+    let lp_before = env.svm.get_account(&lp_portfolio).unwrap();
+
+    env.svm.warp_to_slot(40);
+    let rejected = batch(&mut env, POS_SCALE as i128);
+    assert!(
+        rejected.is_err(),
+        "stale-resolve-matured BatchTradeNoCpi must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale legacy batch leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_portfolio).unwrap(),
+        taker_before,
+        "stale legacy batch rolls back taker realloc and zero-fill"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_portfolio).unwrap(),
+        lp_before,
+        "stale legacy batch rolls back LP realloc and zero-fill"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve remains live after the rejected stale legacy batch: {resolve:?}"
+    );
+}
+
 // Anti-spoof core: validate_matcher_return is the per-leg gate that bounds a (possibly hostile)
 // matcher's reply. Every CPI integration test feeds it HONEST returns; this exercises the REJECTION
 // branches directly with crafted hostile replies (over-fill, reversed sign, forged echo, bad flags,
