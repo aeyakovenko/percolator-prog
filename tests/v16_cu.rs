@@ -41151,6 +41151,90 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     );
 }
 
+// security.md sweep - stale-resolve materialization DoS (#30/#48): InitPortfolio is public and
+// increments materialized_portfolio_count. Once the authenticated clock reaches the permissionless
+// resolve threshold, a new empty portfolio must not be materializable in the stale window, or an
+// attacker could block final CloseSlab liveness with a fresh account created after trading stopped.
+#[test]
+fn v16_attack_init_portfolio_rejects_when_resolve_matured() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+
+    // Non-vacuous control: while fresh, InitPortfolio works and ClosePortfolio clears the count.
+    env.svm.warp_to_slot(4);
+    let fresh_owner = Keypair::new();
+    let fresh_portfolio = env.create_portfolio(&fresh_owner);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "fresh InitPortfolio materializes a portfolio"
+    );
+    env.close_portfolio_with_cu(&fresh_owner, fresh_portfolio);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "fresh ClosePortfolio clears the control portfolio"
+    );
+
+    env.svm.warp_to_slot(40);
+    let attacker = Keypair::new();
+    env.ensure_signer_account(attacker.pubkey());
+    let stale_portfolio = env.program_account(env.portfolio_account_len);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let stale_portfolio_before = env.svm.get_account(&stale_portfolio).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_portfolio, false),
+        ],
+        &[&attacker],
+    );
+    assert!(
+        rejected.is_err(),
+        "InitPortfolio must reject once the market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale InitPortfolio leaves materialized count unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_portfolio).unwrap(),
+        stale_portfolio_before,
+        "rejected stale InitPortfolio leaves the target account uninitialized"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "no stale-window portfolio can block terminal slab reclaim"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve still succeeds after rejected stale InitPortfolio: {resolve:?}"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "resolved market has no attacker-created materialized account"
+    );
+    env.close_slab_with_cu();
+}
+
 // Per-asset oracle-authority isolation: PushAuthMark validates the signer against THE TARGET ASSET's
 // oracle_authority (handle_push_auth_mark reads asset_index's profile -> domain_authorities_from_profile ->
 // expect_live_authority, v16_program ~10188). A key that is a *valid* oracle_authority for asset 1 must NOT be
