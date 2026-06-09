@@ -26198,6 +26198,51 @@ fn v16_attack_no_fee_liquidation_cranker_gets_nothing() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
 
+// DoS sweep — epoch-grief isolation: a third party cannot trap a flat depositor's funds (SOL-021).
+// Appending a permissionless asset advances the market-wide `asset_set_epoch`, which invalidates the
+// health certificate of EVERY portfolio in the market (a cert binds cert_asset_set_epoch == current).
+// If withdrawal were gated on a fresh certificate, an attacker could append assets every slot to keep
+// all victims' certs perpetually stale and freeze their withdrawals (a cheap-to-trigger, market-wide
+// fund-trap). withdraw_not_atomic gates only on flatness (active_bitmap empty), NOT on cert freshness,
+// so a flat holder is immune. This drives the attack: a flat victim, then an unrelated attacker appends
+// an asset (epoch bumps, victim's would-be cert is stale), and the victim still withdraws in full. Guards
+// against a regression that adds a cert-freshness check to the flat-withdraw path and reopens the DoS.
+#[test]
+fn v16_attack_third_party_asset_append_cannot_freeze_flat_withdrawal() {
+    let mut env = V16CuEnv::new();
+
+    // Victim deposits and stays FLAT (no positions).
+    let victim = Keypair::new();
+    let vp = env.create_portfolio(&victim);
+    env.deposit(&victim, vp, 1_000);
+    let epoch_before = env.market_state().1.asset_set_epoch;
+
+    // Unrelated attacker permissionlessly appends a new asset — advancing the market-wide
+    // asset_set_epoch and thereby staling every portfolio's health certificate.
+    env.update_market_init_fee_policy_with_cu(10);
+    let attacker = Keypair::new();
+    let ak = attacker.pubkey();
+    env.activate_permissionless_asset_with_fee(&attacker, 1, 1, 100, ak, ak, ak, ak, 10);
+    let epoch_after = env.market_state().1.asset_set_epoch;
+    assert!(
+        epoch_after > epoch_before,
+        "sanity: permissionless append must advance asset_set_epoch (the grief lever)"
+    );
+
+    // The flat victim must still withdraw their full capital — the epoch bump cannot trap their funds.
+    let (dest, _) = env.withdraw_with_cu(&victim, vp, 1_000);
+    assert_eq!(
+        env.token_amount(dest),
+        1_000,
+        "flat withdrawal must survive a third party's asset_set_epoch bump (no fund-trap DoS)"
+    );
+    assert_eq!(
+        env.portfolio_state(vp).capital,
+        0,
+        "victim's capital fully withdrawn despite the staled certificate"
+    );
+}
+
 // security.md sweep — withdraw requires flat account (#19/#46): withdraw_not_atomic requires the
 // account to be FLAT (active_bitmap empty) — ANY open position blocks withdrawal, regardless of how
 // small the position or how large the capital. After closing, the full capital is recoverable (no
