@@ -20487,6 +20487,139 @@ fn v16_attack_update_authority_handoff_revokes_old_marketauth_admin_paths() {
     );
 }
 
+// full-interface sweep: the market-wide handoff also owns base-unit reserve swaps. A stale former
+// marketauth must not keep a value-moving `SwapSecondaryForPrimary` path after rotation, or it could
+// drain the secondary reserve by providing primary collateral under its own control.
+#[test]
+fn v16_attack_update_authority_handoff_rekeys_secondary_swap_authority() {
+    let mut env = V16CuEnv::new();
+    let old_marketauth = env.admin.insecure_clone();
+    let new_marketauth = Keypair::new();
+    env.ensure_signer_account(new_marketauth.pubkey());
+
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 40),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let stale_primary_source =
+        env.token_account_for_mint(env.mint, old_marketauth.pubkey(), 20);
+    let stale_secondary_dest =
+        env.token_account_for_mint(secondary_mint, old_marketauth.pubkey(), 0);
+    let fresh_primary_source =
+        env.token_account_for_mint(env.mint, new_marketauth.pubkey(), 20);
+    let fresh_secondary_dest =
+        env.token_account_for_mint(secondary_mint, new_marketauth.pubkey(), 0);
+
+    env.update_asset_authority_with_cu(&new_marketauth);
+    assert_eq!(
+        env.market_state().0.marketauth,
+        new_marketauth.pubkey().to_bytes(),
+        "market authority rotated to the new signer"
+    );
+
+    let market_before_stale = env.svm.get_account(&env.market).unwrap().data;
+    let primary_vault_before = env.token_amount(env.vault);
+    let secondary_vault_before = env.token_amount(secondary_vault);
+    env.svm.expire_blockhash();
+    let stale_swap = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SwapSecondaryForPrimary { amount: 20 },
+        vec![
+            AccountMeta::new(old_marketauth.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(stale_primary_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(stale_secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&old_marketauth],
+    );
+    assert!(
+        stale_swap.is_err(),
+        "stale marketauth must not retain the value-moving secondary-swap path"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_before_stale,
+        "rejected stale swap does not rewrite market config"
+    );
+    assert_eq!(
+        env.token_amount(stale_primary_source),
+        20,
+        "stale signer primary source is not debited"
+    );
+    assert_eq!(
+        env.token_amount(stale_secondary_dest),
+        0,
+        "stale signer receives no secondary collateral"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        primary_vault_before,
+        "primary vault unchanged after stale swap"
+    );
+    assert_eq!(
+        env.token_amount(secondary_vault),
+        secondary_vault_before,
+        "secondary reserve unchanged after stale swap"
+    );
+
+    env.svm.expire_blockhash();
+    let fresh_swap = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SwapSecondaryForPrimary { amount: 20 },
+        vec![
+            AccountMeta::new(new_marketauth.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(fresh_primary_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(fresh_secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&new_marketauth],
+    );
+    assert!(
+        fresh_swap.is_ok(),
+        "new marketauth can execute the value-moving secondary swap after handoff: {fresh_swap:?}"
+    );
+    assert_eq!(env.token_amount(fresh_primary_source), 0);
+    assert_eq!(
+        env.token_amount(env.vault),
+        primary_vault_before + 20,
+        "new authority's primary collateral lands in the primary vault"
+    );
+    assert_eq!(
+        env.token_amount(fresh_secondary_dest),
+        20,
+        "new authority receives secondary collateral"
+    );
+    assert_eq!(
+        env.token_amount(secondary_vault),
+        secondary_vault_before - 20,
+        "secondary reserve debited exactly once"
+    );
+}
+
 // regression (security.md sweep): round-trip recovery under the junior-pnl model. A price round-trip
 // (100->110->100) leaves the drawdown-first trader's recovery as JUNIOR pnl (realized losses are
 // senior/immediate, recoveries park as junior pnl that is not liquid in Live mode). Value is fully
