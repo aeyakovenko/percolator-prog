@@ -25127,6 +25127,72 @@ fn v16_attack_finalize_reset_side_requires_empty_side_counts() {
     );
 }
 
+// security.md sweep - unsigned reset finalizer must not unlock drain-only sides (#30/#48):
+// FinalizeResetSide is intentionally permissionless, and Normal is an idempotent no-op, but DrainOnly
+// is a distinct risk throttle. A public caller must not be able to treat DrainOnly like ResetPending
+// and reopen risk by finalizing it.
+#[test]
+fn v16_attack_finalize_reset_side_cannot_unlock_drain_only_modes() {
+    let mut env = V16CuEnv::new();
+    env.mutate_market(|_, group| {
+        group.assets[0].mode_long = SideModeV16::DrainOnly;
+        group.assets[0].mode_short = SideModeV16::DrainOnly;
+    });
+    let before = env.svm.get_account(&env.market).unwrap();
+
+    for (side, label) in [(0u8, "long"), (1u8, "short")] {
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::FinalizeResetSide {
+                asset_index: 0,
+                side,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        );
+        assert!(
+            rejected.is_err(),
+            "permissionless finalizer must reject {label} DrainOnly mode"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before,
+            "rejected {label} DrainOnly finalization must leave the market unchanged"
+        );
+    }
+
+    let (_, group) = env.market_state();
+    assert_eq!(group.assets[0].mode_long, SideModeV16::DrainOnly);
+    assert_eq!(group.assets[0].mode_short, SideModeV16::DrainOnly);
+
+    // Control: the short-side ResetPending path still finalizes when the side is genuinely empty.
+    let mut control = V16CuEnv::new();
+    control.mutate_market(|_, group| {
+        group.assets[0].mode_short = SideModeV16::ResetPending;
+    });
+    let risk_epoch_before = control.market_state().1.risk_epoch;
+    control.svm.expire_blockhash();
+    let accepted = control.send(
+        ProgInstruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 1,
+        },
+        vec![AccountMeta::new(control.market, false)],
+        &[],
+    );
+    assert!(
+        accepted.is_ok(),
+        "empty short ResetPending side remains permissionlessly finalizable: {accepted:?}"
+    );
+    let (_, control_group) = control.market_state();
+    assert_eq!(control_group.assets[0].mode_short, SideModeV16::Normal);
+    assert_eq!(
+        control_group.risk_epoch,
+        risk_epoch_before + 1,
+        "real reset finalization bumps the risk epoch exactly once"
+    );
+}
+
 // security.md sweep — operation-sequence conservation (#32/#33 fuzz-lite): a long varied sequence of
 // deposits/trades/flips/price-moves/cranks/withdrawals must never drift the core invariants. Checks
 // real-vault==accounting, c_tot==Σcapitals, senior conservation, OI balance at every checkpoint.
