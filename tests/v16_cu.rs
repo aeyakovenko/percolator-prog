@@ -26864,6 +26864,160 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_bucket()
     assert_eq!(after.vault as u64, env.token_amount(env.vault));
 }
 
+// security.md sweep - cross-asset backing earnings isolation (#6/#33/#48): provider-fee earnings use
+// a separate public withdrawal rail from principal backing buckets, with a mandatory domain ledger.
+// An asset-1 backing authority must not be able to spend asset-0 earnings or rewrite asset-0 ledger
+// counters, even when the target ledger is otherwise valid for asset 0.
+#[test]
+fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings() {
+    let mut env = V16CuEnv::new();
+    let asset1_backing = Keypair::new();
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        env.admin.pubkey(),
+        env.admin.pubkey(),
+        asset1_backing.pubkey(),
+        env.admin.pubkey(),
+    );
+    env.ensure_signer_account(asset1_backing.pubkey());
+
+    let ledger0 = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger0, 0, 500, 10_000);
+
+    let ledger2 = env.backing_domain_ledger_account();
+    let source2 = env.token_account(asset1_backing.pubkey(), 300);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 2,
+            amount: 300,
+            expiry_slot: 10_000,
+        },
+        vec![
+            AccountMeta::new(asset1_backing.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source2, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger2, false),
+        ],
+        &[&asset1_backing],
+    )
+    .expect("asset-1 backing authority tops up its own domain with ledger");
+
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[0].utilization_fee_earnings = 40;
+        group.source_backing_buckets[2].utilization_fee_earnings = 25;
+        group.vault += 65;
+    });
+    let (_, funded) = env.market_state();
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, funded.vault as u64);
+    assert_eq!(funded.source_backing_buckets[0].utilization_fee_earnings, 40);
+    assert_eq!(funded.source_backing_buckets[2].utilization_fee_earnings, 25);
+
+    let dest = env.token_account_for_mint(env.mint, asset1_backing.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let ledger0_before = env.svm.get_account(&ledger0).unwrap();
+    let ledger2_before = env.svm.get_account(&ledger2).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 0,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(asset1_backing.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger0, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&asset1_backing],
+    );
+    assert!(
+        rejected.is_err(),
+        "asset-1 backing authority must not withdraw asset-0 backing earnings"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected cross-asset earnings withdrawal leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected cross-asset earnings withdrawal leaves the canonical vault untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "rejected cross-asset earnings withdrawal pays no tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger0).unwrap(),
+        ledger0_before,
+        "rejected cross-asset earnings withdrawal rewrites no target-domain ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger2).unwrap(),
+        ledger2_before,
+        "rejected cross-asset earnings withdrawal rewrites no attacker-domain ledger"
+    );
+
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 2,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(asset1_backing.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger2, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&asset1_backing],
+    )
+    .expect("asset-1 backing authority withdraws its own earnings");
+    assert_eq!(env.token_amount(dest), 10);
+    let (_, after) = env.market_state();
+    assert_eq!(
+        after.source_backing_buckets[0].utilization_fee_earnings,
+        40,
+        "asset-0 earnings remain fully withdrawable"
+    );
+    assert_eq!(
+        after.source_backing_buckets[2].utilization_fee_earnings,
+        15,
+        "asset-1 own-domain earnings were debited"
+    );
+    assert_eq!(after.vault as u64, env.token_amount(env.vault));
+    let ledger2_after =
+        state::read_backing_domain_ledger(&env.svm.get_account(&ledger2).unwrap().data).unwrap();
+    assert_eq!(ledger2_after.total_earnings_atoms, 25);
+    assert_eq!(ledger2_after.total_earnings_withdrawn_atoms, 10);
+    assert_eq!(ledger2_after.last_observed_bucket_earnings_atoms, 15);
+}
+
 // security.md sweep — F-VAULT-FRAG fix on a WITHDRAW path: WithdrawBackingBucket transfers FROM the
 // vault; the canonical-ATA pin must apply here too. A withdrawal routed to a non-canonical
 // vault-authority-owned account must reject (no draining a fragment / fabricating an outbound path).
