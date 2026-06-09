@@ -9389,6 +9389,112 @@ fn v16_bpf_failed_close_resolved_transfer_rolls_back_payout_state() {
 }
 
 #[test]
+fn v16_bpf_failed_claim_resolved_topup_rolls_back_receipt_and_ledger() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    {
+        let mut market_account = env.svm.get_account(&env.market).expect("market account");
+        let mut portfolio_account = env.svm.get_account(&portfolio).expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 100 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 100,
+            paid_effective: 40,
+            finalized: false,
+        };
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        env.svm.set_account(env.market, market_account).unwrap();
+        env.svm.set_account(portfolio, portfolio_account).unwrap();
+    }
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 60);
+    let clean_vault = env.svm.get_account(&env.vault).unwrap();
+
+    let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+    let mut corrupted_vault = clean_vault.clone();
+    corrupted_vault.owner = Pubkey::new_unique();
+    env.svm.set_account(env.vault, corrupted_vault).unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let result = env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+
+    assert!(
+        result.is_err(),
+        "resolved payout top-up must fail when post-mutation vault validation fails"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+    assert_eq!(env.svm.get_account(&dest).unwrap(), dest_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(group.vault, 60);
+    assert_eq!(group.resolved_payout_ledger.snapshot_residual, 100);
+    assert_eq!(
+        group
+            .resolved_payout_ledger
+            .terminal_claim_exact_receipts_num,
+        100 * BOUND_SCALE
+    );
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 40);
+    assert!(
+        !account.resolved_payout_receipt.finalized,
+        "failed top-up must leave the pending receipt claimable"
+    );
+    assert_eq!(env.token_amount(dest), 0);
+
+    env.svm.set_account(env.vault, clean_vault).unwrap();
+    env.svm.expire_blockhash();
+    let cu = env.claim_resolved_payout_topup_with_cu(owner.pubkey(), portfolio, dest);
+    assert_cu_within(
+        "ClaimResolvedPayoutTopup rollback retry",
+        cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), 60);
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(group.vault, 0);
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
+    assert!(account.resolved_payout_receipt.finalized);
+}
+
+#[test]
 fn v16_attack_close_resolved_requires_owner_signature_during_exit_window() {
     let mut env = V16CuEnv::new();
     env.configure_permissionless_resolve_with_cu(100, 5);
