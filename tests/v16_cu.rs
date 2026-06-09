@@ -27241,6 +27241,188 @@ fn v16_attack_cumulative_tvl_cap_enforced() {
     );
 }
 
+// security.md sweep — cumulative TVL cap across top-up interfaces (#37/#44): deposit coverage alone
+// does not prove the privileged top-up paths honor the same total-vault cap after their internal
+// insurance/backing accounting mutations. Each over-cap attempt below uses a real token source and
+// optional ledger account, rejects atomically, then a one-atom top-up succeeds exactly at the cap.
+#[test]
+fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
+    fn fill_to_one_below_cap(env: &mut V16CuEnv) {
+        let depositor = Keypair::new();
+        let portfolio = env.create_portfolio(&depositor);
+        env.deposit(&depositor, portfolio, percolator::MAX_VAULT_TVL - 1);
+        assert_eq!(
+            env.market_state().1.vault,
+            percolator::MAX_VAULT_TVL - 1,
+            "setup fills the vault to one atom below MAX_VAULT_TVL"
+        );
+        assert_eq!(
+            env.token_amount(env.vault) as u128,
+            percolator::MAX_VAULT_TVL - 1,
+            "setup token vault matches accounting"
+        );
+    }
+
+    {
+        let mut env = V16CuEnv::new();
+        fill_to_one_below_cap(&mut env);
+        let admin = env.admin.insecure_clone();
+        let source = env.token_account(admin.pubkey(), 2);
+        let ledger = env.insurance_ledger_account();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let ledger_before = env.svm.get_account(&ledger).unwrap();
+        let source_before = env.svm.get_account(&source).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+        env.svm.expire_blockhash();
+        let result = env.send(
+            ProgInstruction::TopUpInsurance { amount: 2 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            result.is_err(),
+            "market insurance top-up pushing total vault over MAX_VAULT_TVL must reject"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&ledger).unwrap(), ledger_before);
+        assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+        let ok_source = env.token_account(env.admin.pubkey(), 1);
+        env.svm.expire_blockhash();
+        env.top_up_insurance_from_admin_token_with_cu(ok_source, 1);
+        let (_, group) = env.market_state();
+        assert_eq!(group.vault, percolator::MAX_VAULT_TVL);
+        assert_eq!(group.insurance, 1);
+        assert_eq!(env.token_amount(ok_source), 0);
+        assert_eq!(env.token_amount(env.vault) as u128, percolator::MAX_VAULT_TVL);
+    }
+
+    {
+        let mut env = V16CuEnv::new();
+        fill_to_one_below_cap(&mut env);
+        let admin = env.admin.insecure_clone();
+        let source = env.token_account(admin.pubkey(), 2);
+        let ledger = env.insurance_ledger_account();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let ledger_before = env.svm.get_account(&ledger).unwrap();
+        let source_before = env.svm.get_account(&source).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+        env.svm.expire_blockhash();
+        let result = env.send(
+            ProgInstruction::TopUpInsuranceDomain {
+                domain: 0,
+                amount: 2,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            result.is_err(),
+            "domain insurance top-up pushing total vault over MAX_VAULT_TVL must reject"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&ledger).unwrap(), ledger_before);
+        assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+        let ok_source = env.token_account(admin.pubkey(), 1);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::TopUpInsuranceDomain {
+                domain: 0,
+                amount: 1,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ok_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("one-atom domain insurance top-up reaches the exact cap");
+        let (_, group) = env.market_state();
+        assert_eq!(group.vault, percolator::MAX_VAULT_TVL);
+        assert_eq!(group.insurance, 1);
+        assert_eq!(group.insurance_domain_budget[0], 1);
+        assert_eq!(group.insurance_domain_budget_remaining_total, 1);
+        assert_eq!(env.token_amount(ok_source), 0);
+        assert_eq!(env.token_amount(env.vault) as u128, percolator::MAX_VAULT_TVL);
+    }
+
+    {
+        let mut env = V16CuEnv::new();
+        fill_to_one_below_cap(&mut env);
+        let admin = env.admin.insecure_clone();
+        let source = env.token_account(admin.pubkey(), 2);
+        let ledger = env.backing_domain_ledger_account();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let ledger_before = env.svm.get_account(&ledger).unwrap();
+        let source_before = env.svm.get_account(&source).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+        env.svm.expire_blockhash();
+        let result = env.send(
+            ProgInstruction::TopUpBackingBucket {
+                domain: 1,
+                amount: 2,
+                expiry_slot: 10_000,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            result.is_err(),
+            "backing bucket top-up pushing total vault over MAX_VAULT_TVL must reject"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&ledger).unwrap(), ledger_before);
+        assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+        let ok_source = env.token_account(env.admin.pubkey(), 1);
+        env.svm.expire_blockhash();
+        env.top_up_backing_bucket_from_admin_token_with_cu(ok_source, 1, 1, 10_000);
+        let (_, group) = env.market_state();
+        assert_eq!(group.vault, percolator::MAX_VAULT_TVL);
+        assert_eq!(
+            group.source_backing_buckets[1].fresh_unliened_backing_num,
+            BOUND_SCALE
+        );
+        assert_eq!(
+            group.source_credit[1].fresh_reserved_backing_num,
+            BOUND_SCALE
+        );
+        assert_eq!(env.token_amount(ok_source), 0);
+        assert_eq!(env.token_amount(env.vault) as u128, percolator::MAX_VAULT_TVL);
+    }
+}
+
 // security.md sweep — portfolio-as-market confusion (#44/#45): passing a portfolio account where the
 // market is expected must reject (the market view decode fails on portfolio-shaped data). No cross-
 // type confusion drains funds.
