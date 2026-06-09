@@ -27608,6 +27608,86 @@ fn v16_attack_unexposed_target_move_cannot_grief_live_insurance_withdrawals() {
     );
 }
 
+// LoF sweep — SwapSecondaryForPrimary mints nothing / is accounting-neutral (SOL-002). A SUCCESSFUL swap
+// is a pure 1:1 token exchange between the authority and the vault (primary in, secondary out); it makes
+// NO engine call, so it must not change the engine's collateral accounting (vault / c_tot / insurance) —
+// only the vault's physical mint composition rebalances. If a swap leaked into engine accounting it would
+// mint or destroy protocol collateral (a solvency break). The sibling test
+// swap_secondary_unauthorized_and_bounded only drives REJECTION paths; nothing exercises a successful
+// swap's conservation. Drives a live deposit (nonzero engine vault/c_tot), then a real swap, asserting:
+// engine counters are byte-identical, the two physical vaults move +N/-N, and total tokens are conserved.
+#[test]
+fn v16_attack_swap_secondary_conserves_and_mints_nothing() {
+    let mut env = V16CuEnv::new();
+    let primary = env.mint;
+    let vault_authority = env.vault_authority;
+    let secondary = env.create_mint(); // 0-decimals, matches primary (post equal-decimals guard)
+    env.update_base_unit_mints_with_cu(primary, secondary);
+
+    // A user deposits 1_000 primary so the engine carries real collateral (vault == c_tot == 1_000).
+    let user = Keypair::new();
+    let p = env.create_portfolio(&user);
+    env.deposit(&user, p, 1_000);
+
+    // Seed the secondary reserve with 400 (a donation: mints no engine collateral).
+    let secondary_vault = canonical_vault_ata(vault_authority, secondary);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, vault_authority, 400),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let admin = env.admin.insecure_clone();
+    let admin_primary = env.token_account_for_mint(primary, admin.pubkey(), 300); // authority pays in primary
+    let admin_secondary = env.token_account_for_mint(secondary, admin.pubkey(), 0); // receives secondary
+
+    // Snapshot engine accounting + physical balances BEFORE the swap.
+    let g_before = env.market_state().1;
+    let primary_vault_before = env.token_amount(env.vault);
+    let sec_vault_before = env.token_amount(secondary_vault);
+    let admin_primary_before = env.token_amount(admin_primary);
+    let total_vault_tokens_before = primary_vault_before + sec_vault_before;
+
+    // Authority swaps 250: pays 250 primary into the vault, receives 250 secondary out.
+    env.swap_secondary_for_primary_with_cu(admin_primary, env.vault, admin_secondary, secondary_vault, 250);
+
+    let g_after = env.market_state().1;
+    // (1) Engine collateral accounting is byte-identical — the swap minted/destroyed NO protocol value.
+    assert_eq!(g_after.vault, g_before.vault, "engine vault counter unchanged by swap");
+    assert_eq!(g_after.c_tot, g_before.c_tot, "engine c_tot unchanged by swap");
+    assert_eq!(g_after.insurance, g_before.insurance, "engine insurance unchanged by swap");
+    assert_eq!(g_before.vault, 1_000, "sanity: engine vault reflects the live deposit only");
+
+    // (2) Physical mint composition rebalanced exactly +250 primary / -250 secondary.
+    assert_eq!(
+        env.token_amount(env.vault),
+        primary_vault_before + 250,
+        "primary vault received the swapped-in 250"
+    );
+    assert_eq!(
+        env.token_amount(secondary_vault),
+        sec_vault_before - 250,
+        "secondary vault released exactly 250"
+    );
+    assert_eq!(env.token_amount(admin_primary), admin_primary_before - 250, "authority paid 250 primary");
+    assert_eq!(env.token_amount(admin_secondary), 250, "authority received 250 secondary");
+
+    // (3) Total custodied tokens across BOTH vaults are conserved (1:1 par, equal decimals): the swap
+    // moved value between mints, never created or destroyed it.
+    assert_eq!(
+        env.token_amount(env.vault) + env.token_amount(secondary_vault),
+        total_vault_tokens_before,
+        "total vault tokens conserved across the swap"
+    );
+}
+
 // security.md sweep — SwapSecondaryForPrimary authority + balance bounds (#6/#33/#44): the 1:1 par
 // collateral swap is base_unit_authority-gated and bounded by the secondary vault's balance. Attacker
 // goals: (a) a non-authority drains the secondary reserve, (b) the authority over-swaps beyond the
