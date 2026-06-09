@@ -42176,3 +42176,237 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         "control push moved the EWMA mark"
     );
 }
+
+// Per-asset oracle-authority isolation for reconfiguration, not just mark pushes. A key that is a
+// valid oracle_authority for asset 1 must not be accepted when the target asset_index is 0; otherwise
+// a wrong-profile authority lookup could let a permissionless asset steer the base market's oracle
+// mode before exposure arrives. Each rejected attack snapshots the market account, and the same key
+// then configures asset 1 through the identical public handler to prove the signer is non-vacuously
+// valid for its own asset.
+#[test]
+fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes() {
+    let setup = || {
+        let mut env = V16CuEnv::new();
+        env.configure_auth_mark_with_cu(0, 100);
+        let a1 = Keypair::new();
+        env.ensure_signer_account(a1.pubkey());
+        env.activate_asset_with_authorities(
+            1,
+            1,
+            100,
+            a1.pubkey(),
+            a1.pubkey(),
+            a1.pubkey(),
+            a1.pubkey(),
+        );
+        (env, a1)
+    };
+
+    {
+        let (mut env, a1) = setup();
+        let before = env.svm.get_account(&env.market).unwrap();
+        env.svm.expire_blockhash();
+        let attack = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ConfigureAuthMark {
+                asset_index: 0,
+                now_slot: 1,
+                initial_mark_e6: 250,
+            },
+            vec![
+                AccountMeta::new(a1.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&a1],
+        );
+        assert!(
+            attack.is_err(),
+            "asset-1 oracle_authority must not configure asset-0 AuthMark"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before,
+            "rejected cross-asset AuthMark reconfiguration is atomic"
+        );
+
+        env.svm.expire_blockhash();
+        let own_asset = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ConfigureAuthMark {
+                asset_index: 1,
+                now_slot: 1,
+                initial_mark_e6: 250,
+            },
+            vec![
+                AccountMeta::new(a1.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&a1],
+        );
+        assert!(
+            own_asset.is_ok(),
+            "the same key configures its own asset's AuthMark: {own_asset:?}"
+        );
+        let profile =
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+                .unwrap();
+        assert_eq!(
+            profile.oracle_mode,
+            percolator_prog::constants::ORACLE_MODE_AUTH_MARK
+        );
+        assert_eq!(profile.oracle_target_price_e6, 250);
+    }
+
+    {
+        let (mut env, a1) = setup();
+        let before = env.svm.get_account(&env.market).unwrap();
+        env.svm.expire_blockhash();
+        let attack = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ConfigureEwmaMark {
+                asset_index: 0,
+                now_slot: 1,
+                initial_mark_e6: 250,
+                mark_ewma_halflife_slots: 10,
+                mark_min_fee: 0,
+            },
+            vec![
+                AccountMeta::new(a1.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&a1],
+        );
+        assert!(
+            attack.is_err(),
+            "asset-1 oracle_authority must not configure asset-0 EWMA"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before,
+            "rejected cross-asset EWMA reconfiguration is atomic"
+        );
+
+        env.svm.expire_blockhash();
+        let own_asset = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ConfigureEwmaMark {
+                asset_index: 1,
+                now_slot: 1,
+                initial_mark_e6: 250,
+                mark_ewma_halflife_slots: 10,
+                mark_min_fee: 0,
+            },
+            vec![
+                AccountMeta::new(a1.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&a1],
+        );
+        assert!(
+            own_asset.is_ok(),
+            "the same key configures its own asset's EWMA: {own_asset:?}"
+        );
+        let profile =
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+                .unwrap();
+        assert_eq!(
+            profile.oracle_mode,
+            percolator_prog::constants::ORACLE_MODE_EWMA_MARK
+        );
+        assert_eq!(profile.mark_ewma_e6, 250);
+    }
+
+    {
+        let (mut env, a1) = setup();
+        set_test_clock(&mut env, 1, 1);
+        let feed = [91u8; 32];
+        let pyth = env.set_pyth_price(&feed, 200_000, -6, 1);
+        let mut feeds = [[0u8; 32]; percolator_prog::constants::ORACLE_LEG_CAP];
+        feeds[0] = feed;
+        let before = env.svm.get_account(&env.market).unwrap();
+        env.svm.expire_blockhash();
+        let attack = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ConfigureHybridOracle {
+                asset_index: 0,
+                now_slot: 1,
+                now_unix_ts: 1,
+                oracle_leg_count: 1,
+                oracle_leg_flags: 0,
+                max_staleness_secs: 60,
+                hybrid_soft_stale_slots: 3,
+                mark_ewma_halflife_slots: 10,
+                mark_min_fee: 0,
+                invert: 0,
+                unit_scale: 0,
+                conf_filter_bps: 500,
+                oracle_leg_feeds: feeds,
+            },
+            vec![
+                AccountMeta::new(a1.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new_readonly(pyth, false),
+            ],
+            &[&a1],
+        );
+        assert!(
+            attack.is_err(),
+            "asset-1 oracle_authority must not configure asset-0 Hybrid"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before,
+            "rejected cross-asset Hybrid reconfiguration is atomic"
+        );
+
+        env.svm.expire_blockhash();
+        let own_asset = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ConfigureHybridOracle {
+                asset_index: 1,
+                now_slot: 1,
+                now_unix_ts: 1,
+                oracle_leg_count: 1,
+                oracle_leg_flags: 0,
+                max_staleness_secs: 60,
+                hybrid_soft_stale_slots: 3,
+                mark_ewma_halflife_slots: 10,
+                mark_min_fee: 0,
+                invert: 0,
+                unit_scale: 0,
+                conf_filter_bps: 500,
+                oracle_leg_feeds: feeds,
+            },
+            vec![
+                AccountMeta::new(a1.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new_readonly(pyth, false),
+            ],
+            &[&a1],
+        );
+        assert!(
+            own_asset.is_ok(),
+            "the same key configures its own asset's Hybrid oracle: {own_asset:?}"
+        );
+        let profile =
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+                .unwrap();
+        assert_eq!(
+            profile.oracle_mode,
+            percolator_prog::constants::ORACLE_MODE_HYBRID_AFTER_HOURS
+        );
+        assert_eq!(profile.oracle_target_price_e6, 200_000);
+    }
+}
