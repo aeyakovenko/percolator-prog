@@ -43324,6 +43324,121 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
     );
 }
 
+// security.md sweep - BatchTradeCpi zero-fill atomicity (#22/#39): batch strategies require every
+// leg to fill. A zero-capacity matcher returning exec_size=0 must reject the whole batch, not create
+// phantom no-op success or partially advance matcher/protocol state.
+#[test]
+fn v16_attack_batch_tradecpi_zero_fill_rejects_atomically() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_portfolio = env.create_portfolio(&taker);
+    let lp_portfolio = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_portfolio, 1_000_000);
+    env.deposit(&lp, lp_portfolio, 1_000_000);
+
+    let (ctx, delegate, _) = env.init_matcher_context_with_data_authorized(
+        matcher_program,
+        &lp,
+        lp_portfolio,
+        encode_matcher_init_passive(0),
+    );
+    let sz = (5 * POS_SCALE) as i128;
+    let legs = vec![
+        BatchTradeCpiLeg {
+            asset_index: 0,
+            size_q: sz,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+        BatchTradeCpiLeg {
+            asset_index: 1,
+            size_q: sz,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+    ];
+    let accounts = |env: &V16CuEnv, ctx: Pubkey, delegate: Pubkey| {
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_portfolio, false),
+            AccountMeta::new(lp_portfolio, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_portfolio).unwrap();
+    let lp_before = env.svm.get_account(&lp_portfolio).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+        accounts(&env, ctx, delegate),
+        &[&taker],
+    );
+    assert!(
+        rejected.is_err(),
+        "BatchTradeCpi must reject when the matcher returns exec_size=0 for a leg"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "zero-fill batch rejection leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_portfolio).unwrap(),
+        taker_before,
+        "zero-fill batch rejection leaves taker portfolio unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_portfolio).unwrap(),
+        lp_before,
+        "zero-fill batch rejection leaves LP portfolio unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "zero-fill batch rejection rolls back matcher context writes"
+    );
+    let group_after_reject = env.market_state().1;
+    assert_eq!(group_after_reject.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group_after_reject.assets[1].oi_eff_long_q, 0);
+    assert_eq!(group_after_reject.insurance, 0, "no fee credited on zero-fill batch");
+
+    let (ok_ctx, ok_delegate, _) = env.init_matcher_context_authorized(
+        matcher_program,
+        &lp,
+        lp_portfolio,
+    );
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::BatchTradeCpi { legs },
+        accounts(&env, ok_ctx, ok_delegate),
+        &[&taker],
+    );
+    assert!(
+        ok.is_ok(),
+        "same BatchTradeCpi fills once the matcher can fully satisfy every leg: {ok:?}"
+    );
+    let taker_after = env.portfolio_state(taker_portfolio);
+    assert!(
+        has_active_leg_for_asset(&taker_after, 0)
+            && has_active_leg_for_asset(&taker_after, 1),
+        "successful control fills both batch legs"
+    );
+}
+
 // Anti-spoof core: validate_matcher_return is the per-leg gate that bounds a (possibly hostile)
 // matcher's reply. Every CPI integration test feeds it HONEST returns; this exercises the REJECTION
 // branches directly with crafted hostile replies (over-fill, reversed sign, forged echo, bad flags,
