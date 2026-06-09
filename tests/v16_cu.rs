@@ -38378,6 +38378,82 @@ fn v16_attack_init_market_cannot_reinitialize_funded_market() {
     );
 }
 
+// SOL-010 (reinitialization): even before user funds arrive, a hostile signer must not be able to
+// re-run InitMarket on the already initialized slab and seize marketauth or swap the collateral mint.
+#[test]
+fn v16_attack_init_market_cannot_reinitialize_empty_market_or_seize_authority() {
+    let mut env = V16CuEnv::new();
+    let attacker = Keypair::new();
+    env.ensure_signer_account(attacker.pubkey());
+    let attacker_mint = env.create_mint();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let params = V16CuMarketParams {
+        initial_price: 777,
+        ..V16CuMarketParams::default()
+    };
+
+    env.svm.expire_blockhash();
+    let reinit = env.send(
+        ProgInstruction::InitMarket {
+            max_portfolio_assets: params.max_portfolio_assets,
+            h_min: params.h_min,
+            h_max: params.h_max,
+            initial_price: params.initial_price,
+            min_nonzero_mm_req: params.min_nonzero_mm_req,
+            min_nonzero_im_req: params.min_nonzero_im_req,
+            maintenance_margin_bps: params.maintenance_margin_bps,
+            initial_margin_bps: params.initial_margin_bps,
+            max_trading_fee_bps: params.max_trading_fee_bps,
+            trade_fee_base_bps: params.trade_fee_base_bps,
+            liquidation_fee_bps: params.liquidation_fee_bps,
+            liquidation_fee_cap: params.liquidation_fee_cap,
+            min_liquidation_abs: params.min_liquidation_abs,
+            max_price_move_bps_per_slot: params.max_price_move_bps_per_slot,
+            max_accrual_dt_slots: params.max_accrual_dt_slots,
+            max_abs_funding_e9_per_slot: params.max_abs_funding_e9_per_slot,
+            min_funding_lifetime_slots: params.min_funding_lifetime_slots,
+            max_account_b_settlement_chunks: params.max_account_b_settlement_chunks,
+            max_bankrupt_close_chunks: params.max_bankrupt_close_chunks,
+            max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots,
+            public_b_chunk_atoms: params.public_b_chunk_atoms,
+            maintenance_fee_per_slot: params.maintenance_fee_per_slot,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(attacker_mint, false),
+        ],
+        &[&attacker],
+    );
+    assert!(
+        reinit.is_err(),
+        "non-authority InitMarket reinit must not seize an empty initialized market"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected empty-market reinit leaves the initialized slab byte-for-byte unchanged"
+    );
+    let cfg = env.market_state().0;
+    assert_eq!(
+        cfg.marketauth,
+        env.admin.pubkey().to_bytes(),
+        "market authority stayed with the original initializer"
+    );
+    assert_eq!(
+        cfg.collateral_mint,
+        env.mint.to_bytes(),
+        "attacker could not swap the market collateral mint"
+    );
+
+    env.update_fee_redirect_policy_with_cu(1_234);
+    assert_eq!(
+        env.market_state().0.fee_redirect_to_market_0_bps,
+        1_234,
+        "market remains usable by the real authority after rejected reinit"
+    );
+}
+
 // SOL-010 / account-kind confusion: InitPortfolio is permissionless and targets a program-owned
 // writable account. Passing the market slab itself as the portfolio target must reject atomically;
 // otherwise a user could rewrite the market into a portfolio and strand every account/vault.
