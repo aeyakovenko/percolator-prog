@@ -34845,6 +34845,83 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
     );
 }
 
+// LoF sweep — oracle-authority rotation actually transfers control (revokes old, grants new). Rotating an
+// asset's oracle authority via UpdateAssetAuthority must REVOKE the previous holder's mark-push power and
+// GRANT it to the new key. If rotation only updated state cosmetically (old key still able to push), a
+// rotated-out / compromised key could keep injecting marks to manipulate settlement (LoF); if the new key
+// could not push, the asset's oracle would be bricked (DoS). Drives the functional transfer end-to-end:
+// admin (the bootstrapped oracle authority) pushes once, the asset_admin rotates the oracle authority to a
+// fresh key, then the OLD key's push rejects (Unauthorized) while the NEW key's push succeeds. The
+// existing rotation test checks state-level isolation/burnability, not the functional push transfer.
+#[test]
+fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100); // admin bootstraps as asset 0's oracle authority; mark = 100
+    let admin = env.admin.insecure_clone();
+
+    // Baseline: the current oracle authority (admin) can push a mark.
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    let r0 = env.send(
+        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 2, mark_e6: 110 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(r0.is_ok(), "admin (oracle authority) can push before rotation: {r0:?}");
+
+    // Rotate the ORACLE authority admin -> newauth. admin signs as asset_admin; newauth co-signs (proves
+    // control of the incoming key).
+    let newauth = Keypair::new();
+    env.ensure_signer_account(newauth.pubkey());
+    env.svm.expire_blockhash();
+    let rot = env.send(
+        ProgInstruction::UpdateAssetAuthority {
+            asset_index: 0,
+            kind: percolator_prog::processor::ASSET_AUTH_ORACLE,
+            new_pubkey: newauth.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(newauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin, &newauth],
+    );
+    assert!(rot.is_ok(), "asset_admin rotates the oracle authority: {rot:?}");
+
+    env.svm.warp_to_slot(3);
+    // OLD authority (admin) is now REVOKED: its push must reject as Unauthorized.
+    env.svm.expire_blockhash();
+    let r_old = env.send(
+        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 3, mark_e6: 120 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(r_old.is_err(), "the OLD oracle authority must be revoked after rotation");
+    assert!(
+        r_old.unwrap_err().contains("Custom(8)"),
+        "revoked old authority push must be Unauthorized (Custom 8)"
+    );
+
+    // NEW authority can push: rotation GRANTED control.
+    env.svm.expire_blockhash();
+    let r_new = env.send(
+        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 3, mark_e6: 120 },
+        vec![
+            AccountMeta::new(newauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&newauth],
+    );
+    assert!(r_new.is_ok(), "the NEW oracle authority can push after rotation: {r_new:?}");
+}
+
 // security.md sweep - oracle reconfiguration authority (#6/#37): changing oracle MODE/anchor is as
 // sensitive as pushing a mark. A non-oracle-authority must not switch an empty market between EWMA,
 // AUTH_MARK, or HYBRID modes and thereby seize future price control before users arrive.
