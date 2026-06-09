@@ -7522,6 +7522,55 @@ fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
     assert_domain_budget_remaining_total_consistent(&group, "maintenance fee with cranker share");
 }
 
+// LoF/conservation sweep — maintenance cranker share at the 100% boundary (cranker_share_bps == 10_000).
+// The policy validation rejects > 10_000 but ALLOWS exactly 10_000, so a market can route the ENTIRE
+// maintenance fee to the cranker. The fee passes THROUGH insurance: sync credits the full charged fee to
+// insurance, then `reward = charged * share / 10_000` is moved out to the cranker, with `retained =
+// charged - reward` staying. At 100% share reward == charged, so the cranker takes the whole fee and
+// insurance nets ZERO — the extreme where a regression could underflow insurance (reward > available) or
+// lose/double the fee. Proves conservation holds at the boundary: payer pays exactly the fee, the cranker
+// receives all of it, insurance is unchanged, and the domain-budget total stays consistent. The existing
+// `_is_bounded` test only exercises a 40% share, never the 100% edge.
+#[test]
+fn v16_attack_sync_maintenance_full_cranker_share_conserves_no_insurance_underflow() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    let payer_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.deposit(&payer_owner, payer_portfolio, 100_000_000);
+    env.update_maintenance_fee_policy_with_cu(10_000); // 100% cranker share — the boundary
+
+    let insurance_before = env.market_state().1.insurance;
+
+    env.svm.warp_to_slot(10);
+    env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
+
+    let (_, group) = env.market_state();
+    let payer = env.portfolio_state(payer_portfolio);
+    let cranker = env.portfolio_state(cranker_portfolio);
+
+    // Same fee as the 40%-share test (the fee does not depend on the share): 580.
+    let fee = 100_000_000 - payer.capital;
+    assert_eq!(fee, 580, "maintenance fee charged is the same regardless of share");
+    // 100% share -> the cranker receives the ENTIRE fee...
+    assert_eq!(cranker.capital, 580, "cranker receives the full fee at 100% share");
+    // ...and NOTHING is retained to insurance (and no underflow: insurance is unchanged, not negative).
+    assert_eq!(
+        group.insurance, insurance_before,
+        "at 100% share nothing is retained to insurance (no underflow, no double-credit)"
+    );
+    // Conservation: the payer's debit equals exactly what the cranker received (insurance net zero).
+    assert_eq!(
+        cranker.capital + (group.insurance - insurance_before),
+        fee,
+        "fee fully conserved: cranker reward + retained insurance == charged"
+    );
+    assert_domain_budget_remaining_total_consistent(&group, "100% maintenance cranker share");
+}
+
 #[test]
 fn v16_attack_sync_maintenance_bad_cranker_rolls_back_fee() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
