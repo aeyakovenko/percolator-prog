@@ -25606,6 +25606,59 @@ fn v16_attack_self_crank_maintenance_fee_conserves() {
     );
 }
 
+// DoS/safety sweep — permissionless SettleB (PermissionlessCrank action=2) cannot corrupt or drain a
+// healthy account. SettleB is the bankrupt-account chunk-settlement crank; it is PERMISSIONLESS (anyone
+// may target any portfolio) and, unlike Liquidate (action=1), pays NO cranker reward. The existing crank
+// tests only exercise action=0 (Refresh) and action=1 (Liquidate) — the action=2 dispatch is otherwise
+// untested end-to-end. A SettleB on a flat, solvent account has nothing to settle, so it MUST be a safe
+// no-op for value: the account's capital and the market's vault/c_tot are conserved, no reward is minted,
+// and the owner can still withdraw in full afterward (no fund-trap). Guards the untested permissionless
+// dispatch against being abused to corrupt, drain, or freeze an unrelated healthy account.
+#[test]
+fn v16_attack_permissionless_settle_b_on_healthy_account_is_safe_noop() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000); // flat, solvent — nothing to settle
+
+    let (_, g0) = env.market_state();
+    let cap0 = env.portfolio_state(p).capital;
+    assert_eq!(cap0, 1_000, "account funded and flat");
+
+    // A third party permissionlessly cranks SettleB (action=2) against the healthy account.
+    env.svm.warp_to_slot(5);
+    env.svm.expire_blockhash();
+    let _ = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 2,
+            asset_index: 0,
+            now_slot: 5,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true), // arbitrary cranker
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+        ],
+        &[],
+    );
+    // Whether the engine treats "nothing to settle" as a no-op (Ok) or NonProgress (Err), the invariant is
+    // the same: NO value moved and NO state corruption.
+    let (_, g1) = env.market_state();
+    assert_eq!(env.portfolio_state(p).capital, cap0, "SettleB must not touch a healthy account's capital");
+    assert_eq!(g1.vault, g0.vault, "SettleB must not move the market vault");
+    assert_eq!(g1.c_tot, g0.c_tot, "SettleB must not move c_tot");
+    assert_eq!(g1.insurance, g0.insurance, "SettleB must not mint/burn insurance (no cranker reward)");
+
+    // Liveness: the owner can still withdraw their full capital — the permissionless SettleB did not
+    // freeze or trap the account.
+    let (dest, _) = env.withdraw_with_cu(&owner, p, 1_000);
+    assert_eq!(env.token_amount(dest), 1_000, "account fully withdrawable after a permissionless SettleB");
+}
+
 // security.md sweep — per-asset crank isolation (#32/#22): cranking one asset must not alter another
 // asset's state. A crank+price-move on asset 0 must leave asset 1's effective_price and OI unchanged
 // (no cross-asset corruption).
