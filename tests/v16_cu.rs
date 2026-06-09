@@ -26641,6 +26641,107 @@ fn v16_attack_topup_backing_bucket_authority_gated() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
 
+// security.md sweep - cross-asset backing withdrawal isolation (#6/#33/#48): a backing authority for
+// asset 1 is a real privileged key, but it must only control asset 1's domains. A wrong target-domain
+// authority lookup would let it drain asset 0's funded backing bucket.
+#[test]
+fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_bucket() {
+    let mut env = V16CuEnv::new();
+    let asset1_backing = Keypair::new();
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        env.admin.pubkey(),
+        env.admin.pubkey(),
+        asset1_backing.pubkey(),
+        env.admin.pubkey(),
+    );
+    env.top_up_backing_bucket(0, 500, 10_000);
+    env.top_up_backing_bucket_with_authority(&asset1_backing, 2, 300, 10_000);
+    let (_, funded) = env.market_state();
+    assert_eq!(funded.source_backing_buckets[0].fresh_unliened_backing_num, 500 * BOUND_SCALE);
+    assert_eq!(funded.source_backing_buckets[2].fresh_unliened_backing_num, 300 * BOUND_SCALE);
+
+    let dest = env.token_account_for_mint(env.mint, asset1_backing.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(asset1_backing.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&asset1_backing],
+    );
+    assert!(
+        rejected.is_err(),
+        "asset-1 backing authority must not withdraw asset-0 backing"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected cross-asset backing withdrawal leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected cross-asset backing withdrawal leaves the canonical vault untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "rejected cross-asset backing withdrawal pays no tokens"
+    );
+
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(asset1_backing.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&asset1_backing],
+    )
+    .expect("asset-1 backing authority withdraws its own domain");
+    assert_eq!(env.token_amount(dest), 100);
+    let (_, after) = env.market_state();
+    assert_eq!(
+        after.source_backing_buckets[0].fresh_unliened_backing_num,
+        500 * BOUND_SCALE,
+        "asset-0 backing remains fully funded"
+    );
+    assert_eq!(
+        after.source_backing_buckets[2].fresh_unliened_backing_num,
+        200 * BOUND_SCALE,
+        "asset-1 own-domain backing was debited"
+    );
+    assert_eq!(after.vault as u64, env.token_amount(env.vault));
+}
+
 // security.md sweep — F-VAULT-FRAG fix on a WITHDRAW path: WithdrawBackingBucket transfers FROM the
 // vault; the canonical-ATA pin must apply here too. A withdrawal routed to a non-canonical
 // vault-authority-owned account must reject (no draining a fragment / fabricating an outbound path).
