@@ -15637,6 +15637,128 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
     assert_eq!(topup_env.market_state().1.vault, 0);
 }
 
+// security.md sweep - terminal insurance secondary reserve binding (#44/#48): WithdrawInsurance is a
+// separate resolved-mode payout rail. If it accepted any vault-PDA-owned secondary token account, an
+// authority could debit terminal insurance accounting while paying from or fragmenting a non-canonical
+// reserve. Rejection must roll back both market and optional ledger state.
+#[test]
+fn v16_attack_terminal_insurance_rejects_noncanonical_secondary_vault() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary);
+    env.top_up_insurance(100);
+    env.resolve();
+
+    let canonical_secondary_vault = canonical_vault_ata(env.vault_authority, secondary);
+    env.svm
+        .set_account(
+            canonical_secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, env.vault_authority, 100),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let fake_secondary_vault = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            fake_secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, env.vault_authority, 100),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let dest = env.token_account_for_mint(secondary, admin.pubkey(), 0);
+    let ledger = env.insurance_ledger_account();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let canonical_before = env.svm.get_account(&canonical_secondary_vault).unwrap();
+    let fake_before = env.svm.get_account(&fake_secondary_vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(fake_secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "terminal WithdrawInsurance must reject a non-canonical secondary reserve"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), primary_vault_before);
+    assert_eq!(
+        env.svm.get_account(&canonical_secondary_vault).unwrap(),
+        canonical_before,
+        "canonical secondary reserve remains untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&fake_secondary_vault).unwrap(),
+        fake_before,
+        "fake secondary reserve remains untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "rejected terminal insurance withdrawal pays no secondary tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "rejected terminal insurance withdrawal rewrites no ledger state"
+    );
+
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(canonical_secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    )
+    .expect("terminal WithdrawInsurance through canonical secondary reserve");
+    assert_eq!(env.token_amount(dest), 40);
+    assert_eq!(env.token_amount(canonical_secondary_vault), 60);
+    let ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 60);
+    assert_eq!(group.vault, 60);
+}
+
 // security.md sweep — oracle/mark bounds (#37/#39): the auth-mark push feeds settlement. An extreme
 // mark (0 or u64::MAX) must be rejected/clamped, never corrupt pnl or panic the program.
 #[test]
