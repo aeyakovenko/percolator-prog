@@ -38376,6 +38376,228 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
     );
 }
 
+// security.md sweep - mark input bounds (#37/#39): the mark authority controls settlement input, but
+// invalid marks or an EWMA halflife of zero must not even transiently rewrite the oracle profile. Existing
+// conservation tests cover "no panic"; this asserts exact market rollback for every public mark entrypoint.
+#[test]
+fn v16_attack_mark_input_bounds_reject_atomically() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let over_max = percolator::MAX_ORACLE_PRICE + 1;
+    env.svm.warp_to_slot(1);
+
+    let reject_unchanged = |env: &mut V16CuEnv, ix: ProgInstruction, label: &str| {
+        let before = env.svm.get_account(&env.market).unwrap();
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ix,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        );
+        assert!(rejected.is_err(), "{label} must reject");
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before,
+            "{label} must leave the market byte-identical"
+        );
+    };
+
+    reject_unchanged(
+        &mut env,
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: 0,
+        },
+        "ConfigureAuthMark zero initial mark",
+    );
+    reject_unchanged(
+        &mut env,
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: over_max,
+        },
+        "ConfigureAuthMark over-max initial mark",
+    );
+    reject_unchanged(
+        &mut env,
+        ProgInstruction::ConfigureEwmaMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: 0,
+            mark_ewma_halflife_slots: 4,
+            mark_min_fee: 0,
+        },
+        "ConfigureEwmaMark zero initial mark",
+    );
+    reject_unchanged(
+        &mut env,
+        ProgInstruction::ConfigureEwmaMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: over_max,
+            mark_ewma_halflife_slots: 4,
+            mark_min_fee: 0,
+        },
+        "ConfigureEwmaMark over-max initial mark",
+    );
+    reject_unchanged(
+        &mut env,
+        ProgInstruction::ConfigureEwmaMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: 100,
+            mark_ewma_halflife_slots: 0,
+            mark_min_fee: 0,
+        },
+        "ConfigureEwmaMark zero halflife",
+    );
+
+    env.svm.expire_blockhash();
+    let ewma = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureEwmaMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: 100,
+            mark_ewma_halflife_slots: 4,
+            mark_min_fee: 0,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(ewma.is_ok(), "valid EWMA configuration should succeed: {ewma:?}");
+    let (cfg_ewma, _) = env.market_state();
+    assert_eq!(
+        cfg_ewma.oracle_mode,
+        percolator_prog::constants::ORACLE_MODE_EWMA_MARK
+    );
+    assert_eq!(cfg_ewma.mark_ewma_e6, 100);
+    assert_eq!(cfg_ewma.mark_ewma_halflife_slots, 4);
+
+    env.svm.warp_to_slot(2);
+    reject_unchanged(
+        &mut env,
+        ProgInstruction::PushEwmaMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 0,
+        },
+        "PushEwmaMark zero mark",
+    );
+    reject_unchanged(
+        &mut env,
+        ProgInstruction::PushEwmaMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: over_max,
+        },
+        "PushEwmaMark over-max mark",
+    );
+
+    env.svm.expire_blockhash();
+    let valid_ewma_push = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PushEwmaMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 120,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        valid_ewma_push.is_ok(),
+        "valid EWMA push remains live after rejected bounds probes: {valid_ewma_push:?}"
+    );
+    assert_eq!(env.market_state().0.mark_ewma_last_slot, 2);
+
+    env.svm.warp_to_slot(3);
+    env.svm.expire_blockhash();
+    let auth = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: 0,
+            now_slot: 3,
+            initial_mark_e6: 200,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(auth.is_ok(), "valid AuthMark configuration should succeed: {auth:?}");
+
+    env.svm.warp_to_slot(4);
+    reject_unchanged(
+        &mut env,
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 4,
+            mark_e6: 0,
+        },
+        "PushAuthMark zero mark",
+    );
+    reject_unchanged(
+        &mut env,
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 4,
+            mark_e6: over_max,
+        },
+        "PushAuthMark over-max mark",
+    );
+
+    env.svm.expire_blockhash();
+    let valid_auth_push = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 4,
+            mark_e6: 220,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        valid_auth_push.is_ok(),
+        "valid AuthMark push remains live after rejected bounds probes: {valid_auth_push:?}"
+    );
+    let (cfg_auth, _) = env.market_state();
+    assert_eq!(
+        cfg_auth.oracle_mode,
+        percolator_prog::constants::ORACLE_MODE_AUTH_MARK
+    );
+    assert_eq!(cfg_auth.mark_ewma_e6, 220);
+    assert_eq!(cfg_auth.oracle_target_price_e6, 220);
+    assert_eq!(cfg_auth.mark_ewma_last_slot, 4);
+}
+
 // hostile public-interface sweep: even the legitimate oracle authority must not be able to
 // reconfigure an oracle anchor/mode after traders have live exposure. Otherwise a compromised or
 // adversarial authority could reset the official price basis under open positions and cause LoF/DoS.
