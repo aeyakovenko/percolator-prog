@@ -36090,6 +36090,69 @@ fn v16_attack_permissionless_create_fee_funds_asset0_insurance() {
     assert_domain_budget_remaining_total_consistent(&after, "permissionless create fee");
 }
 
+// security.md sweep — permissionless append liveness (#44/#48): a stranger may legitimately grow
+// the asset set, but that must not strand a flat user who deposited before the epoch change. The
+// user has no asset-1 exposure, so a post-append full withdrawal must remain live and exact.
+#[test]
+fn v16_attack_permissionless_append_cannot_freeze_flat_withdrawal() {
+    const FEE: u128 = 40;
+    const DEPOSIT: u128 = 1_000;
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(FEE);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, DEPOSIT);
+    let (_, before) = env.market_state();
+    assert_eq!(
+        before.config.max_market_slots, 1,
+        "starts as a one-asset market"
+    );
+    assert_eq!(env.portfolio_state(portfolio).capital, DEPOSIT);
+
+    let creator = Keypair::new();
+    let cp = creator.pubkey();
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(&creator, 1, 1, 100, cp, cp, cp, cp, FEE);
+    let (_, appended) = env.market_state();
+    assert_eq!(
+        appended.config.max_market_slots, 2,
+        "permissionless append grew exactly one unrelated asset slot"
+    );
+    assert_eq!(appended.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert!(
+        appended.asset_set_epoch > before.asset_set_epoch,
+        "asset-set epoch advanced across the append"
+    );
+
+    let (dest, _cu) = env.withdraw_with_cu(&owner, portfolio, DEPOSIT);
+    let account = env.portfolio_state(portfolio);
+    let (_, after_withdraw) = env.market_state();
+    assert_eq!(
+        env.token_amount(dest),
+        DEPOSIT as u64,
+        "full pre-append capital withdraws after the unrelated append"
+    );
+    assert_eq!(account.capital, 0, "portfolio capital fully debited");
+    assert!(
+        percolator::active_bitmap_is_empty(account.active_bitmap),
+        "flat account remains exposure-free"
+    );
+    assert_eq!(
+        after_withdraw.c_tot, 0,
+        "only the user's collateral left c_tot"
+    );
+    assert_eq!(
+        after_withdraw.vault, appended.vault - DEPOSIT,
+        "accounting vault debited exactly the withdrawal"
+    );
+    assert_eq!(
+        after_withdraw.insurance, appended.insurance,
+        "permissionless create fee insurance remains untouched"
+    );
+    assert_domain_budget_remaining_total_consistent(&after_withdraw, "post-append flat withdraw");
+}
+
 // security.md sweep — base-unit deposit/withdraw mint routing (#5 / README L122): deposits accept ONLY
 // the primary base-unit mint, but a holder may withdraw in EITHER the primary or the secondary mint.
 #[test]
