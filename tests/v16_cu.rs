@@ -21866,6 +21866,62 @@ fn v16_attack_rebalance_reduce_owner_gated() {
         "OI still balanced"
     );
 }
+
+// LoF/safety sweep — RebalanceReduce is reduce-ONLY: an over-sized reduce_q cannot flip a position into
+// opposite-side risk. The engine clamps `reduce_q = reduce_q.min(leg.basis_pos_q.unsigned_abs())`, so a
+// reduce can at most take the position to FLAT, never past zero into the other side. Without that clamp,
+// the "reduce" tool would be a backdoor to OPEN fresh opposite-side exposure (a long of N reduced by 2N
+// would become a short of N) — risk creation disguised as risk reduction, bypassing the initial-margin
+// gate that real opens must pass. The existing owner-gated test reduces by EXACTLY the position size
+// (flat either way, so the clamp is never exercised); this drives reduce_q far beyond the position and
+// asserts the result is exactly flat with the sign never inverted, and OI/senior conservation intact.
+#[test]
+fn v16_attack_rebalance_reduce_overshoot_clamps_to_flat_no_flip() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    let la = Keypair::new();
+    let pa = env.create_portfolio(&la);
+    let lb = Keypair::new();
+    let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    // la opens a LONG of POS_SCALE vs lb's short.
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q;
+    assert!(basis0 > 0, "la opened a long position of POS_SCALE");
+
+    // The owner force-reduces with reduce_q FAR larger than the position (3x). The clamp must cap the
+    // reduction at the position size, landing exactly flat — never flipping the long into a short.
+    env.svm.expire_blockhash();
+    let r = env.send(
+        ProgInstruction::RebalanceReduce {
+            asset_index: 0,
+            reduce_q: 3 * POS_SCALE,
+        },
+        vec![
+            AccountMeta::new(la.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(pa, false),
+        ],
+        &[&la],
+    );
+    assert!(r.is_ok(), "over-sized owner reduce should succeed (clamped): {r:?}");
+
+    let after = env.portfolio_state(pa).legs[0].basis_pos_q;
+    assert_eq!(
+        after, 0,
+        "over-reduce clamps to FLAT (0), never flips the long into a short"
+    );
+    // Defense-in-depth: the sign was never inverted (no opposite-side risk opened).
+    assert!(after >= 0, "position must not become negative (no backdoor short open)");
+
+    let (_, g1) = env.market_state();
+    assert_eq!(
+        g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q,
+        "OI still balanced after the clamped reduce"
+    );
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation holds");
+}
+
 // security.md sweep — RefineResolvedUnreceiptedBound gating (#6/#30): this wind-down tool (decreases
 // the unreceipted resolved claim bound) is admin-only and resolved-mode-only. A non-admin must
 // reject, and it must reject in Live mode — no tampering with the resolved payout accounting.
