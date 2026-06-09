@@ -340,6 +340,34 @@ fn make_pyth_data(
     data
 }
 
+fn make_switchboard_data(price_e6: u64, std_dev_e6: u64, publish_time: i64) -> Vec<u8> {
+    let mut data = vec![0u8; 3_208];
+    data[0..8].copy_from_slice(&[196, 27, 108, 196, 10, 215, 219, 40]);
+    data[2_120..2_152].copy_from_slice(&[0x5a; 32]);
+    data[2_215] = 1;
+    data[2_216..2_224].copy_from_slice(&publish_time.to_le_bytes());
+    let value = (price_e6 as i128) * 1_000_000_000_000i128;
+    data[2_264..2_280].copy_from_slice(&value.to_le_bytes());
+    let std_dev = (std_dev_e6 as i128) * 1_000_000_000_000i128;
+    data[2_280..2_296].copy_from_slice(&std_dev.to_le_bytes());
+    data[2_360] = 1;
+    data[2_368..2_376].copy_from_slice(&1u64.to_le_bytes());
+    data
+}
+
+fn make_chainlink_data(price: i128, decimals: u8, publish_time: u32) -> Vec<u8> {
+    let mut data = vec![0u8; 248];
+    data[0..8].copy_from_slice(&[96, 179, 69, 66, 128, 129, 73, 117]);
+    data[8] = 1;
+    data[138] = decimals;
+    data[143..147].copy_from_slice(&1u32.to_le_bytes());
+    data[148..152].copy_from_slice(&1u32.to_le_bytes());
+    data[200..208].copy_from_slice(&1u64.to_le_bytes());
+    data[208..212].copy_from_slice(&publish_time.to_le_bytes());
+    data[216..232].copy_from_slice(&price.to_le_bytes());
+    data
+}
+
 fn cu_ix() -> Instruction {
     ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)
 }
@@ -34295,6 +34323,296 @@ fn v16_attack_oracle_feed_id_mismatch_rejected() {
         ok.is_ok(),
         "the matching configured feed id configures: {:?}",
         ok
+    );
+}
+
+#[test]
+fn v16_attack_switchboard_oracle_key_owner_binding_enforced() {
+    let valid_feed = Pubkey::new_unique();
+    let mut valid_env = V16CuEnv::new();
+    set_test_clock(&mut valid_env, 1, 100);
+    valid_env
+        .svm
+        .set_account(
+            valid_feed,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_switchboard_data(200_000, 0, 100),
+                owner: oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let ok = valid_env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [valid_feed.to_bytes(), [0u8; 32], [0u8; 32]],
+        &[valid_feed],
+        1,
+        100,
+        0,
+        0,
+        100,
+        0,
+    );
+    assert!(ok.is_ok(), "a valid Switchboard feed configures: {ok:?}");
+    assert_eq!(
+        valid_env.market_state().1.assets[0].raw_oracle_target_price,
+        200_000,
+        "valid Switchboard parse should set the expected e6 mark"
+    );
+
+    let expected_feed = Pubkey::new_unique();
+    let wrong_feed = Pubkey::new_unique();
+    let mut wrong_key_env = V16CuEnv::new();
+    set_test_clock(&mut wrong_key_env, 1, 100);
+    wrong_key_env
+        .svm
+        .set_account(
+            wrong_feed,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_switchboard_data(500_000, 0, 100),
+                owner: oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let before = wrong_key_env
+        .svm
+        .get_account(&wrong_key_env.market)
+        .unwrap()
+        .data;
+    let bad = wrong_key_env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [expected_feed.to_bytes(), [0u8; 32], [0u8; 32]],
+        &[wrong_feed],
+        1,
+        100,
+        0,
+        0,
+        100,
+        0,
+    );
+    assert!(
+        bad.is_err(),
+        "a Switchboard account at the wrong key must reject"
+    );
+    let err = bad.err().unwrap();
+    assert!(
+        err.contains("Custom(29)"),
+        "wrong Switchboard feed key should reject as InvalidOracleKey (Custom 29), got: {err}"
+    );
+    assert_eq!(
+        wrong_key_env
+            .svm
+            .get_account(&wrong_key_env.market)
+            .unwrap()
+            .data,
+        before,
+        "rejected Switchboard key spoof must not mutate the market"
+    );
+
+    let mut wrong_owner_env = V16CuEnv::new();
+    set_test_clock(&mut wrong_owner_env, 1, 100);
+    wrong_owner_env
+        .svm
+        .set_account(
+            expected_feed,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_switchboard_data(500_000, 0, 100),
+                owner: Pubkey::new_unique(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let before = wrong_owner_env
+        .svm
+        .get_account(&wrong_owner_env.market)
+        .unwrap()
+        .data;
+    let bad = wrong_owner_env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [expected_feed.to_bytes(), [0u8; 32], [0u8; 32]],
+        &[expected_feed],
+        1,
+        100,
+        0,
+        0,
+        100,
+        0,
+    );
+    assert!(
+        bad.is_err(),
+        "a Switchboard-shaped account under a non-Switchboard owner must reject"
+    );
+    let err = bad.err().unwrap();
+    assert!(
+        err.contains("IllegalOwner"),
+        "wrong Switchboard owner should reject as IllegalOwner, got: {err}"
+    );
+    assert_eq!(
+        wrong_owner_env
+            .svm
+            .get_account(&wrong_owner_env.market)
+            .unwrap()
+            .data,
+        before,
+        "rejected Switchboard owner spoof must not mutate the market"
+    );
+}
+
+#[test]
+fn v16_attack_chainlink_oracle_key_owner_binding_enforced() {
+    let valid_feed = Pubkey::new_unique();
+    let mut valid_env = V16CuEnv::new();
+    set_test_clock(&mut valid_env, 1, 100);
+    valid_env
+        .svm
+        .set_account(
+            valid_feed,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_chainlink_data(20_000_000, 8, 100),
+                owner: oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let ok = valid_env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [valid_feed.to_bytes(), [0u8; 32], [0u8; 32]],
+        &[valid_feed],
+        1,
+        100,
+        0,
+        0,
+        100,
+        0,
+    );
+    assert!(ok.is_ok(), "a valid Chainlink feed configures: {ok:?}");
+    assert_eq!(
+        valid_env.market_state().1.assets[0].raw_oracle_target_price,
+        200_000,
+        "valid Chainlink parse should set the expected e6 mark"
+    );
+
+    let expected_feed = Pubkey::new_unique();
+    let wrong_feed = Pubkey::new_unique();
+    let mut wrong_key_env = V16CuEnv::new();
+    set_test_clock(&mut wrong_key_env, 1, 100);
+    wrong_key_env
+        .svm
+        .set_account(
+            wrong_feed,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_chainlink_data(50_000_000, 8, 100),
+                owner: oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let before = wrong_key_env
+        .svm
+        .get_account(&wrong_key_env.market)
+        .unwrap()
+        .data;
+    let bad = wrong_key_env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [expected_feed.to_bytes(), [0u8; 32], [0u8; 32]],
+        &[wrong_feed],
+        1,
+        100,
+        0,
+        0,
+        100,
+        0,
+    );
+    assert!(
+        bad.is_err(),
+        "a Chainlink account at the wrong key must reject"
+    );
+    let err = bad.err().unwrap();
+    assert!(
+        err.contains("Custom(29)"),
+        "wrong Chainlink feed key should reject as InvalidOracleKey (Custom 29), got: {err}"
+    );
+    assert_eq!(
+        wrong_key_env
+            .svm
+            .get_account(&wrong_key_env.market)
+            .unwrap()
+            .data,
+        before,
+        "rejected Chainlink key spoof must not mutate the market"
+    );
+
+    let mut wrong_owner_env = V16CuEnv::new();
+    set_test_clock(&mut wrong_owner_env, 1, 100);
+    wrong_owner_env
+        .svm
+        .set_account(
+            expected_feed,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_chainlink_data(50_000_000, 8, 100),
+                owner: Pubkey::new_unique(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let before = wrong_owner_env
+        .svm
+        .get_account(&wrong_owner_env.market)
+        .unwrap()
+        .data;
+    let bad = wrong_owner_env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [expected_feed.to_bytes(), [0u8; 32], [0u8; 32]],
+        &[expected_feed],
+        1,
+        100,
+        0,
+        0,
+        100,
+        0,
+    );
+    assert!(
+        bad.is_err(),
+        "a Chainlink-shaped account under a non-Chainlink owner must reject"
+    );
+    let err = bad.err().unwrap();
+    assert!(
+        err.contains("IllegalOwner"),
+        "wrong Chainlink owner should reject as IllegalOwner, got: {err}"
+    );
+    assert_eq!(
+        wrong_owner_env
+            .svm
+            .get_account(&wrong_owner_env.market)
+            .unwrap()
+            .data,
+        before,
+        "rejected Chainlink owner spoof must not mutate the market"
     );
 }
 
