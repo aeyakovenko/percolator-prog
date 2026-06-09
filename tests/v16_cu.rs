@@ -21216,6 +21216,48 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
         "rejected terminal withdraw must not pay the destination"
     );
 
+    env.svm.expire_blockhash();
+    let market_alias = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(vault_authority_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(market_b, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        market_alias.is_err(),
+        "terminal WithdrawInsurance must reject the market account as the optional ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&market_b).unwrap(),
+        market_b_before,
+        "terminal market-as-ledger rejection must not rewrite or debit market B"
+    );
+    assert_eq!(
+        env.svm.get_account(&vault_b).unwrap(),
+        vault_b_before,
+        "terminal market-as-ledger rejection must not move market B custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "terminal market-as-ledger rejection must not pay the destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_portfolio_before,
+        "terminal market-as-ledger rejection still leaves unrelated portfolios untouched"
+    );
+
     let ledger_b = env.insurance_ledger_account();
     env.svm.expire_blockhash();
     send_tx(
