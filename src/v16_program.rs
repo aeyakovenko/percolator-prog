@@ -8848,6 +8848,23 @@ pub mod processor {
         expect_key(secondary_mint_ai, &secondary_key)?;
         verify_mint(primary_mint_ai)?;
         verify_mint(secondary_mint_ai)?;
+        // Both collateral mints denominate the SAME base unit 1:1: deposits are primary-only,
+        // withdrawals pay EITHER mint, and SwapSecondaryForPrimary moves atoms 1:1 — none of these
+        // paths rescale by decimals. If the two mints had different decimals, one atom of each would
+        // carry different value, so a holder could deposit the higher-value mint and withdraw the same
+        // atom count in the lower-value mint (LoF), or drain the vault via the favorable direction.
+        // Pin the pair to equal decimals so even marketauth cannot install a value-asymmetric pair
+        // (bounded-admin: the admin must not be able to reach a user's collateral).
+        let primary_decimals = spl_token::state::Mint::unpack(&primary_mint_ai.try_borrow_data()?)
+            .map_err(|_| PercolatorError::InvalidMint)?
+            .decimals;
+        let secondary_decimals =
+            spl_token::state::Mint::unpack(&secondary_mint_ai.try_borrow_data()?)
+                .map_err(|_| PercolatorError::InvalidMint)?
+                .decimals;
+        if primary_decimals != secondary_decimals {
+            return Err(PercolatorError::InvalidMint.into());
+        }
 
         let mut data = market_ai.try_borrow_mut_data()?;
         let mut cfg = {
