@@ -21861,6 +21861,153 @@ fn v16_attack_permissionless_resolve_rejects_fresh_market() {
     );
 }
 
+// security.md sweep - stale-matured live entrypoint freeze (#30/#33/#48): once the market is
+// permissionless-resolve matured, ordinary live value-moving entrypoints must reject atomically until the
+// market is resolved. Otherwise users could race stale resolution by withdrawing/trading/topping up against
+// stale accounting. The same clock state must still allow ResolveStalePermissionless as the positive path.
+#[test]
+fn v16_attack_stale_matured_live_value_paths_reject_before_resolution() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+
+    let owner_a = Keypair::new();
+    let account_a = env.create_portfolio(&owner_a);
+    let owner_b = Keypair::new();
+    let account_b = env.create_portfolio(&owner_b);
+    env.deposit(&owner_a, account_a, 1_000_000);
+    env.deposit(&owner_b, account_b, 1_000_000);
+    let admin = env.admin.insecure_clone();
+    let withdraw_dest = env.token_account_for_mint(env.mint, owner_a.pubkey(), 0);
+    let deposit_source = env.token_account_for_mint(env.mint, owner_a.pubkey(), 50_000);
+    let topup_source = env.token_account_for_mint(env.mint, admin.pubkey(), 25_000);
+
+    env.svm.warp_to_slot(5);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let account_a_before = env.svm.get_account(&account_a).unwrap();
+    let account_b_before = env.svm.get_account(&account_b).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let withdraw_dest_before = env.svm.get_account(&withdraw_dest).unwrap();
+    let deposit_source_before = env.svm.get_account(&deposit_source).unwrap();
+    let topup_source_before = env.svm.get_account(&topup_source).unwrap();
+
+    env.svm.expire_blockhash();
+    let withdraw = env.send(
+        ProgInstruction::Withdraw { amount: 100_000 },
+        vec![
+            AccountMeta::new(owner_a.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+            AccountMeta::new(withdraw_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner_a],
+    );
+    assert!(
+        withdraw.is_err(),
+        "Withdraw must reject once stale resolution is matured"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&account_a).unwrap(), account_a_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(
+        env.svm.get_account(&withdraw_dest).unwrap(),
+        withdraw_dest_before,
+        "stale-matured withdraw pays no tokens"
+    );
+
+    env.svm.expire_blockhash();
+    let deposit = env.send(
+        ProgInstruction::Deposit { amount: 50_000 },
+        vec![
+            AccountMeta::new(owner_a.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+            AccountMeta::new(deposit_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner_a],
+    );
+    assert!(
+        deposit.is_err(),
+        "Deposit must reject once stale resolution is matured"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&account_a).unwrap(), account_a_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(
+        env.svm.get_account(&deposit_source).unwrap(),
+        deposit_source_before,
+        "stale-matured deposit pulls no source tokens"
+    );
+
+    env.svm.expire_blockhash();
+    let topup = env.send(
+        ProgInstruction::TopUpInsurance { amount: 25_000 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(topup_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        topup.is_err(),
+        "TopUpInsurance must reject once stale resolution is matured"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(
+        env.svm.get_account(&topup_source).unwrap(),
+        topup_source_before,
+        "stale-matured top-up pulls no source tokens"
+    );
+
+    env.svm.expire_blockhash();
+    let trade = env.send(
+        ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        vec![
+            AccountMeta::new(owner_a.pubkey(), true),
+            AccountMeta::new(owner_b.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+            AccountMeta::new(account_b, false),
+        ],
+        &[&owner_a, &owner_b],
+    );
+    assert!(
+        trade.is_err(),
+        "TradeNoCpi must reject once stale resolution is matured"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&account_a).unwrap(), account_a_before);
+    assert_eq!(env.svm.get_account(&account_b).unwrap(), account_b_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 5 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "the same stale-matured clock state must still allow permissionless resolve: {resolve:?}"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.mode, percolator::MarketModeV16::Resolved);
+    assert_eq!(group.resolved_slot, 5);
+}
+
 // security.md sweep -- permissionless resolve slot spoof (#30 DoS): ResolveStalePermissionless is
 // public. A cranker must not be able to pass a far-future caller now_slot and resolve a still-fresh
 // market. The handler must authenticate against Clock; once the real Clock reaches the stale window,
