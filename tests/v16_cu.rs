@@ -39205,3 +39205,168 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_oracle
     assert!(ok.is_ok(), "asset-0 authority reconfigures asset-0: {ok:?}");
     assert_eq!(env.market_state().0.oracle_target_price_e6, 150);
 }
+
+// Per-asset oracle-authority isolation for the external-feed ConfigureHybridOracle path. The no-feed
+// EWMA/Auth reconfiguration handlers are covered above; Hybrid has its own oracle-account tail and feed
+// validation, so a valid asset-1 oracle_authority must not be able to use a real feed account to reset
+// asset 0's oracle mode/anchor.
+#[test]
+fn v16_attack_cross_asset_oracle_authority_cannot_configure_other_asset_hybrid() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100); // asset 0 oracle_authority = admin
+
+    let a1 = Keypair::new();
+    env.ensure_signer_account(a1.pubkey());
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        a1.pubkey(),
+        a1.pubkey(),
+        a1.pubkey(),
+        a1.pubkey(),
+    );
+
+    set_test_clock(&mut env, 2, 100);
+    let own_feed = [0x31u8; 32];
+    let own_pyth = env.set_pyth_price_with_conf(&own_feed, 175, -6, 0, 100);
+    let mut own_feeds = [[0u8; 32]; percolator_prog::constants::ORACLE_LEG_CAP];
+    own_feeds[0] = own_feed;
+    env.svm.expire_blockhash();
+    let own_asset_hybrid = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureHybridOracle {
+            asset_index: 1,
+            now_slot: 2,
+            now_unix_ts: 100,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 3,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: own_feeds,
+        },
+        vec![
+            AccountMeta::new(a1.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(own_pyth, false),
+        ],
+        &[&a1],
+    );
+    assert!(
+        own_asset_hybrid.is_ok(),
+        "asset-1's own oracle_authority configures asset-1 Hybrid mode: {own_asset_hybrid:?}"
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].effective_price,
+        175,
+        "control hybrid configuration moved asset 1 to the Pyth feed price"
+    );
+
+    let market_before_attack = env.svm.get_account(&env.market).unwrap();
+    let (cfg_before_attack, group_before_attack) = env.market_state();
+    assert_eq!(
+        cfg_before_attack.oracle_mode,
+        percolator_prog::constants::ORACLE_MODE_AUTH_MARK,
+        "asset 0 remains on auth-mark before the cross-asset hybrid attempt"
+    );
+    assert_eq!(cfg_before_attack.oracle_target_price_e6, 100);
+
+    set_test_clock(&mut env, 3, 101);
+    let attack_feed = [0x32u8; 32];
+    let attack_pyth = env.set_pyth_price_with_conf(&attack_feed, 9_000, -6, 0, 101);
+    let mut attack_feeds = [[0u8; 32]; percolator_prog::constants::ORACLE_LEG_CAP];
+    attack_feeds[0] = attack_feed;
+    env.svm.expire_blockhash();
+    let hybrid_attack = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureHybridOracle {
+            asset_index: 0,
+            now_slot: 3,
+            now_unix_ts: 101,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 3,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: attack_feeds,
+        },
+        vec![
+            AccountMeta::new(a1.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(attack_pyth, false),
+        ],
+        &[&a1],
+    );
+    assert!(
+        hybrid_attack.is_err(),
+        "asset-1 oracle_authority must not configure asset-0 Hybrid mode"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_attack,
+        "failed cross-asset Hybrid configuration leaves the whole market account unchanged"
+    );
+    assert_eq!(
+        env.market_state().0.oracle_target_price_e6,
+        cfg_before_attack.oracle_target_price_e6,
+        "failed cross-asset Hybrid configuration leaves asset-0 target unchanged"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        group_before_attack.assets[0].effective_price,
+        "failed cross-asset Hybrid configuration leaves asset-0 engine mark unchanged"
+    );
+
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    let own_asset0_hybrid = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureHybridOracle {
+            asset_index: 0,
+            now_slot: 3,
+            now_unix_ts: 101,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 3,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: attack_feeds,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(attack_pyth, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        own_asset0_hybrid.is_ok(),
+        "asset-0's own oracle_authority can configure asset-0 Hybrid mode: {own_asset0_hybrid:?}"
+    );
+    let (cfg_after, group_after) = env.market_state();
+    assert_eq!(
+        cfg_after.oracle_mode,
+        percolator_prog::constants::ORACLE_MODE_HYBRID_AFTER_HOURS
+    );
+    assert_eq!(cfg_after.oracle_target_price_e6, 9_000);
+    assert_eq!(group_after.assets[0].effective_price, 9_000);
+}
