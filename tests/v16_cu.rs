@@ -33205,6 +33205,72 @@ fn v16_attack_pyth_partial_verification_rejected() {
     );
 }
 
+// LoF sweep — Pyth account header validation: discriminator + minimum length (SOL-019 type confusion).
+// read_pyth_price_e6 rejects an account whose first 8 bytes are not the PriceUpdateV2 anchor discriminator
+// (OracleInvalid) and one shorter than PRICE_UPDATE_V2_MIN_LEN (InvalidAccountData), BEFORE deserializing
+// the price. Combined with the owner check, this stops a Pyth-RECEIVER-owned account that is NOT a
+// PriceUpdateV2 (a different Pyth account type, or a crafted blob) from being parsed as a price feed --
+// type confusion that could inject an arbitrary mark (LoF). No existing test corrupts the Pyth
+// discriminator or truncates the account (make_pyth_data always writes the correct 134-byte header).
+#[test]
+fn v16_attack_pyth_bad_discriminator_or_short_account_rejected() {
+    let feed = [0x55u8; 32];
+    let configure = |mutate: &dyn Fn(&mut Vec<u8>)| -> (bool, Option<String>) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let mut data = make_pyth_data(&feed, 200_000, -6, 0, 100);
+        mutate(&mut data);
+        let acct = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                acct,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0u8; 32], [0u8; 32]],
+            &[acct],
+            1,
+            100,
+            0,
+            0,
+            100,
+            0,
+        );
+        (r.is_ok(), r.err())
+    };
+
+    // Control: an untouched (valid header) Pyth account configures.
+    let (ok, ok_err) = configure(&|_d| {});
+    assert!(ok, "a well-formed Pyth account configures: {ok_err:?}");
+
+    // Corrupted anchor discriminator -> rejected before the price is parsed (type confusion blocked).
+    let (disc_ok, disc_err) = configure(&|d| d[0] ^= 0xff);
+    assert!(!disc_ok, "a Pyth account with a wrong discriminator must reject");
+    assert!(
+        disc_err.unwrap().contains("Custom(26)"),
+        "bad Pyth discriminator must be OracleInvalid (Custom 26)"
+    );
+
+    // Truncated account (below PRICE_UPDATE_V2_MIN_LEN) -> rejected on the length gate, no out-of-bounds.
+    let (short_ok, short_err) = configure(&|d| d.truncate(100));
+    assert!(!short_ok, "a too-short Pyth account must reject");
+    let short_msg = short_err.unwrap_or_default();
+    assert!(
+        short_msg.contains("InvalidAccountData") || short_msg.contains("Custom"),
+        "a too-short Pyth account must reject cleanly (no panic / OOB read): {short_msg}"
+    );
+}
+
 // LoF/DoS sweep — Chainlink oracle source end-to-end (SOL-014/SOL-024, previously ZERO coverage). The
 // `CHAINLINK_STORE_PROGRAM_ID` owner branch of `read_oracle_price_e6` -> `read_chainlink_price_e6` is a
 // full production oracle path that nothing exercised: discriminator/version/round/live-length gates,
