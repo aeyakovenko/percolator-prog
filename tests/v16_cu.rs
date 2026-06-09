@@ -26670,6 +26670,138 @@ fn v16_attack_backing_fee_policy_authority_gated() {
     );
 }
 
+// full-interface sweep: fee-policy authority must follow the current asset-0 insurance authority,
+// not stale marketauth or asset-admin privilege. This is a real role-boundary test: the old
+// marketauth remains live for market-wide admin policy, but cannot mutate the insurance-authority-
+// gated backing/trade fee policies after asset-0 insurance is rotated.
+#[test]
+fn v16_attack_asset0_insurance_rotation_rekeys_fee_policy_authority() {
+    let mut env = V16CuEnv::new();
+    let old_marketauth = env.admin.insecure_clone();
+    let new_insurance = Keypair::new();
+
+    env.try_update_per_asset_authority_with_cu(
+        &old_marketauth,
+        Some(&new_insurance),
+        0,
+        processor::ASSET_AUTH_INSURANCE,
+        new_insurance.pubkey().to_bytes(),
+    )
+    .expect("asset-0 admin rotates asset-0 insurance authority");
+
+    let cfg_before = env.market_state().0;
+    let profile0 =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(
+        profile0.insurance_authority,
+        new_insurance.pubkey().to_bytes(),
+        "test precondition: asset-0 insurance authority is rotated away from marketauth"
+    );
+
+    env.svm.expire_blockhash();
+    let market_admin_still_live = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps: 123 },
+        vec![
+            AccountMeta::new(old_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&old_marketauth],
+    );
+    assert!(
+        market_admin_still_live.is_ok(),
+        "old marketauth remains a valid market-admin role after asset-0 insurance rotation"
+    );
+
+    let stale_backing = env.send(
+        ProgInstruction::UpdateBackingFeePolicy {
+            domain: 0,
+            fee_bps: 77,
+            insurance_share_bps: 5_000,
+        },
+        vec![
+            AccountMeta::new(old_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&old_marketauth],
+    );
+    assert!(
+        stale_backing.is_err(),
+        "stale marketauth must not retain asset-0 backing-fee authority"
+    );
+    let stale_trade = env.send(
+        ProgInstruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 88,
+        },
+        vec![
+            AccountMeta::new(old_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&old_marketauth],
+    );
+    assert!(
+        stale_trade.is_err(),
+        "stale marketauth must not retain asset-0 trade-fee authority"
+    );
+
+    let cfg_after_rejects = env.market_state().0;
+    assert_eq!(
+        cfg_after_rejects.backing_trade_fee_bps_long,
+        cfg_before.backing_trade_fee_bps_long,
+        "rejected stale backing-fee update leaves the fee unchanged"
+    );
+    assert_eq!(
+        cfg_after_rejects.trade_fee_base_bps,
+        cfg_before.trade_fee_base_bps,
+        "rejected stale trade-fee update leaves the fee unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    let backing_ok = env.send(
+        ProgInstruction::UpdateBackingFeePolicy {
+            domain: 0,
+            fee_bps: 77,
+            insurance_share_bps: 5_000,
+        },
+        vec![
+            AccountMeta::new(new_insurance.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&new_insurance],
+    );
+    assert!(
+        backing_ok.is_ok(),
+        "current asset-0 insurance authority can update backing-fee policy: {backing_ok:?}"
+    );
+    env.svm.expire_blockhash();
+    let trade_ok = env.send(
+        ProgInstruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 88,
+        },
+        vec![
+            AccountMeta::new(new_insurance.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&new_insurance],
+    );
+    assert!(
+        trade_ok.is_ok(),
+        "current asset-0 insurance authority can update trade-fee policy: {trade_ok:?}"
+    );
+
+    let cfg_after = env.market_state().0;
+    assert_eq!(cfg_after.backing_trade_fee_bps_long, 77);
+    assert_eq!(cfg_after.backing_trade_fee_insurance_share_bps_long, 5_000);
+    assert_eq!(cfg_after.trade_fee_base_bps, 88);
+    assert_eq!(
+        cfg_after.fee_redirect_to_market_0_bps, 123,
+        "market-admin policy update and insurance-authority fee updates affect distinct fields"
+    );
+}
+
 // security.md sweep - permissionless asset authority isolation (#6/#33): the creator of asset N owns
 // that asset's local domain authorities, but must not be able to mutate market-wide knobs or market 0
 // policies. Discriminating control: the same creator CAN update asset N's own backing-fee domain.
