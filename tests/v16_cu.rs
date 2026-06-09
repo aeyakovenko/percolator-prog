@@ -37693,6 +37693,118 @@ fn v16_bpf_batch_trade_14_legs_under_tx_limit() {
     assert_eq!(percolator::active_bitmap_count_ones(t.active_bitmap), 14);
 }
 
+// SOL-011 / DoS boundary: BatchTradeNoCpi is a public variable-length instruction. It must not
+// accept a distinct-asset batch that exceeds the configured per-portfolio active-leg cap, even when
+// the market has more configured assets than one portfolio may hold.
+#[test]
+fn v16_attack_batch_nocpi_over_portfolio_leg_cap_rejects_atomically() {
+    const ASSETS: usize = 15;
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: 14,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            ..V16CuMarketParams::default()
+        },
+        ASSETS,
+    );
+    env.activate_asset(14, 15, 100);
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(ASSETS).unwrap();
+    env.svm.warp_to_slot(20);
+    for a in 0..ASSETS as u16 {
+        env.configure_auth_mark_for_asset_as_admin(a, 20, 100);
+    }
+    let (_, configured) = env.market_state();
+    assert_eq!(configured.config.max_market_slots as usize, ASSETS);
+    assert_eq!(configured.config.max_portfolio_assets, 14);
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 5_000_000);
+    env.deposit(&lp, la, 5_000_000);
+
+    let over_cap_legs: Vec<BatchTradeLeg> = (0..ASSETS as u16)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        })
+        .collect();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+
+    env.svm.expire_blockhash();
+    let over_cap = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: over_cap_legs,
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(
+        over_cap.is_err(),
+        "15-leg BatchTradeNoCpi must reject against a 14-leg portfolio cap"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected over-cap batch must not mutate market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&ta).unwrap(),
+        taker_before,
+        "rejected over-cap batch must not partially open taker legs"
+    );
+    assert_eq!(
+        env.svm.get_account(&la).unwrap(),
+        lp_before,
+        "rejected over-cap batch must not partially open LP legs"
+    );
+
+    let cap_legs: Vec<BatchTradeLeg> = (0..14u16)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        })
+        .collect();
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::BatchTradeNoCpi { legs: cap_legs },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+        ],
+        &[&taker, &lp],
+    )
+    .expect("14-leg control batch still executes on the same 15-asset market");
+    let taker_after = env.portfolio_state(ta);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(taker_after.active_bitmap),
+        14,
+        "control opens exactly the configured active-leg cap"
+    );
+    assert!(
+        !has_active_leg_for_asset(&taker_after, 14),
+        "the rejected 15th leg never leaked into the taker portfolio"
+    );
+}
+
 // BatchTradeCpi: a single batched matcher CPI fills a MIXED-direction spread (taker long asset 0,
 // short asset 1) against one LP, then both fills apply with one end-state margin check.
 #[test]
