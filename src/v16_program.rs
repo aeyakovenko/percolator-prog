@@ -9296,6 +9296,9 @@ pub mod processor {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
             let authenticated_slot = authenticated_slot_or_fallback(now_slot);
+            if oracle_v16::permissionless_stale_matured(&cfg_pre, authenticated_slot) {
+                return Err(PercolatorError::OracleStale.into());
+            }
             let cfg_after = {
                 let mut data = market_ai.try_borrow_mut_data()?;
                 let (mut cfg, mut group) = state::market_view_mut(&mut data)?;

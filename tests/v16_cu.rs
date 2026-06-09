@@ -46879,6 +46879,106 @@ fn v16_attack_permissionless_asset_activation_rejects_when_resolve_matured() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// security.md sweep - stale-resolve asset shutdown drift (#30/#35/#48): a permissionless
+// asset admin can shut down its own live asset and freeze its oracle/profile state. Once the
+// base market is resolve-matured, that lifecycle mutation must freeze before terminal resolution.
+#[test]
+fn v16_attack_permissionless_asset_shutdown_rejects_when_resolve_matured() {
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(10);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let fresh_creator = Keypair::new();
+    let stale_creator = Keypair::new();
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &fresh_creator,
+        1,
+        1,
+        100,
+        fresh_creator.pubkey(),
+        fresh_creator.pubkey(),
+        fresh_creator.pubkey(),
+        fresh_creator.pubkey(),
+        10,
+    );
+    env.svm.warp_to_slot(2);
+    env.activate_permissionless_asset_with_fee(
+        &stale_creator,
+        2,
+        2,
+        100,
+        stale_creator.pubkey(),
+        stale_creator.pubkey(),
+        stale_creator.pubkey(),
+        stale_creator.pubkey(),
+        10,
+    );
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+    let (_, active_group) = env.market_state();
+    assert_eq!(active_group.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(active_group.assets[2].lifecycle, AssetLifecycleV16::Active);
+
+    env.svm.warp_to_slot(4);
+    let fresh_shutdown = env.try_shutdown_asset_with_authority(&fresh_creator, 1, 4);
+    assert!(
+        fresh_shutdown.is_ok(),
+        "fresh permissionless asset shutdown succeeds: {fresh_shutdown:?}"
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery,
+        "fresh shutdown proves the per-asset admin path is reachable"
+    );
+
+    env.svm.warp_to_slot(40);
+    let (stale_cfg, stale_group) = env.market_state();
+    assert_eq!(stale_group.mode, MarketModeV16::Live);
+    assert!(
+        oracle_v16::permissionless_stale_matured(&stale_cfg, 40),
+        "test setup must be beyond the permissionless resolve stale boundary"
+    );
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.try_shutdown_asset_with_authority(&stale_creator, 2, 40);
+    assert!(
+        rejected.is_err(),
+        "permissionless asset shutdown must reject once the base market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale shutdown leaves lifecycle/profile state unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale shutdown moves no custody"
+    );
+    assert_eq!(
+        env.market_state().1.assets[2].lifecycle,
+        AssetLifecycleV16::Active,
+        "stale shutdown cannot move the asset into Recovery"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve still succeeds after rejected stale shutdown: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // security.md sweep - stale-resolve oracle restart drift (#30/#37/#48): a permissionless
 // asset admin can restart its own Recovery asset and install a fresh per-asset oracle profile.
 // Once the base market is resolve-matured, that lifecycle/oracle restart must freeze; otherwise a
