@@ -36487,6 +36487,99 @@ fn v16_attack_chainlink_stale_feed_rejected_without_mutation() {
     );
 }
 
+// Hybrid oracle leg-shape gate: duplicate feed identities, stray feeds, and impossible divide flags
+// must reject before installing an oracle profile. Otherwise a config could double-count one feed or
+// advertise a divide leg that has no corresponding account.
+#[test]
+fn v16_attack_hybrid_oracle_rejects_duplicate_or_malformed_leg_config() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+    let feed0 = [0xa0u8; 32];
+    let feed1 = [0xa1u8; 32];
+    let feed2 = [0xa2u8; 32];
+    let oracle0 = env.set_pyth_price_with_conf(&feed0, 200_000, -6, 0, 100);
+    let oracle1 = env.set_pyth_price_with_conf(&feed1, 300_000, -6, 0, 100);
+    let oracle2 = env.set_pyth_price_with_conf(&feed2, 400_000, -6, 0, 100);
+    let configure = |env: &mut V16CuEnv,
+                     count: u8,
+                     flags: u8,
+                     feeds: [[u8; 32]; 3],
+                     accounts: &[Pubkey]| {
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            count,
+            flags,
+            feeds,
+            accounts,
+            1,
+            100,
+            0,
+            0,
+            100,
+            0,
+        )
+    };
+    let before = env.svm.get_account(&env.market).unwrap().data;
+
+    for (label, count, flags, feeds, accounts) in [
+        (
+            "count-1 stray second feed",
+            1,
+            0,
+            [feed0, feed1, [0u8; 32]],
+            vec![oracle0],
+        ),
+        (
+            "count-2 duplicate first feed",
+            2,
+            0,
+            [feed0, feed0, [0u8; 32]],
+            vec![oracle0, oracle1],
+        ),
+        (
+            "count-2 divide third flag",
+            2,
+            ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            [feed0, feed1, [0u8; 32]],
+            vec![oracle0, oracle1],
+        ),
+        (
+            "count-3 duplicate third feed",
+            3,
+            0,
+            [feed0, feed1, feed1],
+            vec![oracle0, oracle1, oracle2],
+        ),
+    ] {
+        env.svm.expire_blockhash();
+        let rejected = configure(&mut env, count, flags, feeds, &accounts);
+        assert!(
+            rejected.is_err(),
+            "hybrid oracle {label} must reject"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap().data,
+            before,
+            "rejected hybrid oracle {label} must not mutate the market"
+        );
+    }
+
+    env.svm.expire_blockhash();
+    configure(
+        &mut env,
+        1,
+        0,
+        [feed0, [0u8; 32], [0u8; 32]],
+        &[oracle0],
+    )
+    .expect("well-formed one-leg hybrid oracle should configure");
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        200_000,
+        "valid one-leg control seeds the expected mark"
+    );
+}
+
 // security.md sweep — Pyth exponent bounds (#37/#39): exponent scaling is part of the trusted mark.
 // Out-of-range exponents, over-max scaled prices, and floor-to-zero scaled prices must reject through
 // ConfigureHybridOracle without installing a malformed oracle profile.
