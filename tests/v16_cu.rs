@@ -33140,6 +33140,71 @@ fn v16_attack_oracle_pyth_exponent_bounds_enforced() {
     );
 }
 
+// LoF sweep — Pyth price updates must be FULLY verified (SOL-024 oracle integrity). read_pyth_price_e6
+// rejects unless data[OFF_VERIFICATION_LEVEL] == PYTH_VERIFICATION_FULL_TAG (1). The Pyth Solana Receiver
+// can write a PriceUpdateV2 at a PARTIAL verification level (fewer guardian signatures verified); trusting
+// such a partially-verified price as the settlement mark would accept oracle data the receiver itself did
+// not fully validate — a manipulation/mispricing vector (LoF). Drives the gate: a FULL price configures,
+// while partial (0) and any other non-FULL level reject as OracleInvalid. No existing test varies the
+// Pyth verification level (make_pyth_data hardcodes FULL).
+#[test]
+fn v16_attack_pyth_partial_verification_rejected() {
+    let feed = [0x55u8; 32];
+    let configure = |verification_level: u8| -> (bool, Option<String>) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let mut data = make_pyth_data(&feed, 200_000, -6, 0, 100); // well-formed, fresh, in-bounds price
+        data[40] = verification_level; // OFF_VERIFICATION_LEVEL
+        let acct = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                acct,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0u8; 32], [0u8; 32]],
+            &[acct],
+            1,
+            100,
+            0,
+            0,
+            100,
+            0,
+        );
+        (r.is_ok(), r.err())
+    };
+
+    // FULL verification (1) -> configures (proves the price is otherwise valid, isolating the gate).
+    let (full_ok, full_err) = configure(1);
+    assert!(full_ok, "a FULLY-verified Pyth price configures: {full_err:?}");
+
+    // PARTIAL verification (0) -> reject: the price was not fully verified by the Pyth receiver.
+    let (partial_ok, partial_err) = configure(0);
+    assert!(!partial_ok, "a partially-verified Pyth price must reject");
+    assert!(
+        partial_err.unwrap().contains("Custom(26)"),
+        "partial-verification Pyth price must be OracleInvalid (Custom 26)"
+    );
+
+    // Any other non-FULL tag (2) -> also reject (only the exact FULL tag is accepted).
+    let (other_ok, other_err) = configure(2);
+    assert!(!other_ok, "a non-FULL verification tag must reject");
+    assert!(
+        other_err.unwrap().contains("Custom(26)"),
+        "non-FULL verification tag must be OracleInvalid (Custom 26)"
+    );
+}
+
 // LoF/DoS sweep — Chainlink oracle source end-to-end (SOL-014/SOL-024, previously ZERO coverage). The
 // `CHAINLINK_STORE_PROGRAM_ID` owner branch of `read_oracle_price_e6` -> `read_chainlink_price_e6` is a
 // full production oracle path that nothing exercised: discriminator/version/round/live-length gates,
