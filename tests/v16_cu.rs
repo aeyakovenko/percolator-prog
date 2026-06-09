@@ -36420,6 +36420,73 @@ fn v16_attack_chainlink_owner_and_key_binding_reject_spoofed_feed() {
     );
 }
 
+// Chainlink staleness gate: a well-formed transmissions account with an old timestamp must not seed
+// an outdated mark. This covers the Chainlink-specific timestamp offset and OracleStale branch.
+#[test]
+fn v16_attack_chainlink_stale_feed_rejected_without_mutation() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 10, 1_000);
+    let install = |env: &mut V16CuEnv, publish_time: u32| -> Pubkey {
+        let key = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_chainlink_data(1, 8, 1, 1, 1, publish_time, 10_000),
+                    owner: oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        key
+    };
+    let configure = |env: &mut V16CuEnv, feed: Pubkey| {
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed.to_bytes(), [0u8; 32], [0u8; 32]],
+            &[feed],
+            10,
+            1_000,
+            0,
+            0,
+            100,
+            0,
+        )
+    };
+    let stale = install(&mut env, 1);
+    let before = env.svm.get_account(&env.market).unwrap().data;
+
+    env.svm.expire_blockhash();
+    let rejected = configure(&mut env, stale);
+    assert!(
+        rejected.is_err(),
+        "a stale Chainlink feed must reject instead of seeding the oracle"
+    );
+    let err = rejected.unwrap_err();
+    assert!(
+        err.contains("Custom(27)"),
+        "stale Chainlink feed must reject as OracleStale (Custom 27), got: {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before,
+        "rejected stale Chainlink config must not mutate the market"
+    );
+
+    let fresh = install(&mut env, 1_000);
+    env.svm.expire_blockhash();
+    configure(&mut env, fresh).expect("fresh Chainlink feed should configure");
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        100,
+        "fresh Chainlink answer/decimals seeds the expected mark"
+    );
+}
+
 // security.md sweep — Pyth exponent bounds (#37/#39): exponent scaling is part of the trusted mark.
 // Out-of-range exponents, over-max scaled prices, and floor-to-zero scaled prices must reject through
 // ConfigureHybridOracle without installing a malformed oracle profile.
