@@ -32652,6 +32652,55 @@ fn v16_attack_chainlink_oracle_malformed_fields_reject_without_mutation() {
     );
 }
 
+// security.md sweep — Pyth exponent bounds (#37/#39): exponent scaling is part of the trusted mark.
+// Out-of-range exponents, over-max scaled prices, and floor-to-zero scaled prices must reject through
+// ConfigureHybridOracle without installing a malformed oracle profile.
+#[test]
+fn v16_attack_oracle_pyth_exponent_bounds_enforced() {
+    let configure = |price: i64, expo: i32| -> (bool, bool) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let feed = [0xa5u8; 32];
+        let acct = env.set_pyth_price_with_conf(&feed, price, expo, 0, 100);
+        let before = env.svm.get_account(&env.market).unwrap().data;
+        let result = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0u8; 32], [0u8; 32]],
+            &[acct],
+            1,
+            100,
+            0,
+            0,
+            100,
+            0,
+        );
+        let after = env.svm.get_account(&env.market).unwrap().data;
+        (result.is_ok(), before == after)
+    };
+
+    let (ok, _) = configure(200_000, -6);
+    assert!(ok, "normal Pyth exponent configures");
+
+    for (label, price, expo) in [
+        ("positive exponent over bound", 1, 19),
+        ("negative exponent over bound", 1_000_000_000, -19),
+        ("positive exponent scales over max", 1, 18),
+        ("negative exponent floors to zero", 1, -18),
+    ] {
+        let (configured, unchanged) = configure(price, expo);
+        assert!(
+            !configured,
+            "Pyth {label} must reject instead of installing a malformed mark"
+        );
+        assert!(
+            unchanged,
+            "Pyth {label} rejection must leave market state unchanged"
+        );
+    }
+}
+
 #[test]
 fn v16_attack_crank_oracle_feed_id_mismatch_rejects_without_mutation() {
     let mut env = V16CuEnv::new();
