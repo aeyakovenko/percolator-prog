@@ -33415,6 +33415,74 @@ fn v16_attack_chainlink_oracle_freshness_enforced() {
     );
 }
 
+// LoF sweep — Chainlink round-header field validation (SOL-019/SOL-024). read_chainlink_price_e6 rejects
+// (OracleInvalid) when version == 0, latest_round_id == 0, live_length != 1, result_slot == 0, or
+// publish_time <= 0. Notably live_length != 1: the reader reads the transmission at a FIXED offset, so a
+// multi-round feed (live_length > 1, where the latest round lives elsewhere in the ring buffer) MUST be
+// rejected rather than misread off the stale first slot -- otherwise positions would settle against an
+// outdated round (LoF). The earlier Chainlink tests only used a well-formed single-round header; none of
+// these individual field gates is exercised.
+#[test]
+fn v16_attack_chainlink_round_header_fields_validated() {
+    let feed = [0x47u8; 32];
+    let feed_key = Pubkey::new_from_array(feed);
+    let configure = |mutate: &dyn Fn(&mut Vec<u8>)| -> (bool, Option<String>) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let mut data = make_chainlink_data(8, 2_000_000_00, 100); // valid single-round header
+        mutate(&mut data);
+        env.svm
+            .set_account(
+                feed_key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0u8; 32], [0u8; 32]],
+            &[feed_key],
+            1,
+            100,
+            0,
+            0,
+            100,
+            0,
+        );
+        (r.is_ok(), r.err())
+    };
+
+    // Control: the untouched single-round header configures.
+    let (ok, ok_err) = configure(&|_d| {});
+    assert!(ok, "a well-formed single-round Chainlink feed configures: {ok_err:?}");
+
+    // Each field gate, individually, must reject as OracleInvalid (Custom 26).
+    let cases: [(&str, &dyn Fn(&mut Vec<u8>)); 5] = [
+        ("version == 0", &|d: &mut Vec<u8>| d[8] = 0),
+        ("latest_round_id == 0", &|d: &mut Vec<u8>| d[143..147].copy_from_slice(&0u32.to_le_bytes())),
+        ("live_length != 1 (multi-round)", &|d: &mut Vec<u8>| {
+            d[148..152].copy_from_slice(&2u32.to_le_bytes())
+        }),
+        ("result_slot == 0", &|d: &mut Vec<u8>| d[200..208].copy_from_slice(&0u64.to_le_bytes())),
+        ("publish_time <= 0", &|d: &mut Vec<u8>| d[208..212].copy_from_slice(&0u32.to_le_bytes())),
+    ];
+    for (label, mutate) in cases {
+        let (cfg_ok, cfg_err) = configure(mutate);
+        assert!(!cfg_ok, "Chainlink feed with {label} must reject");
+        assert!(
+            cfg_err.unwrap().contains("Custom(26)"),
+            "Chainlink {label} must be OracleInvalid (Custom 26)"
+        );
+    }
+}
+
 // security.md sweep — oracle feed account owner validation (#37/#44): a Pyth feed account must be owned
 // by the Pyth receiver program. Attacker goal: substitute a self-owned account holding crafted "Pyth"
 // data to inject an arbitrary oracle price (full oracle spoof). Protection: the wrapper rejects a feed
