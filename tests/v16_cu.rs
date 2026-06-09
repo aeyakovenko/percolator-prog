@@ -20359,6 +20359,134 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
     );
 }
 
+// full-interface sweep: UpdateAuthority is a market-wide handoff, not just a config write. Once the
+// marketauth rotates, the old key must lose downstream admin power everywhere, especially policy
+// mutation and ResolveMarket. A stale resolve is a real DoS/LoF vector because it can freeze a live,
+// funded market while users still hold withdrawable capital.
+#[test]
+fn v16_attack_update_authority_handoff_revokes_old_marketauth_admin_paths() {
+    let mut env = V16CuEnv::new();
+    let old_marketauth = env.admin.insecure_clone();
+    let new_marketauth = Keypair::new();
+    env.ensure_signer_account(new_marketauth.pubkey());
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000_000);
+    assert_eq!(
+        env.market_state().1.mode,
+        percolator::MarketModeV16::Live,
+        "precondition: funded market is live"
+    );
+
+    env.update_asset_authority_with_cu(&new_marketauth);
+    assert_eq!(
+        env.market_state().0.marketauth,
+        new_marketauth.pubkey().to_bytes(),
+        "market authority rotated to the new signer"
+    );
+
+    let market_before_stale = env.svm.get_account(&env.market).unwrap().data;
+    let vault_before_stale = env.svm.get_account(&env.vault).unwrap().data;
+
+    env.svm.expire_blockhash();
+    let stale_policy = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps: 777 },
+        vec![
+            AccountMeta::new(old_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&old_marketauth],
+    );
+    assert!(
+        stale_policy.is_err(),
+        "old marketauth must not retain fee-policy mutation power after handoff"
+    );
+
+    env.svm.expire_blockhash();
+    let stale_resolve = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ResolveMarket,
+        vec![
+            AccountMeta::new(old_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&old_marketauth],
+    );
+    assert!(
+        stale_resolve.is_err(),
+        "old marketauth must not retain ResolveMarket DoS power after handoff"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_before_stale,
+        "stale admin attempts leave market state byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap().data,
+        vault_before_stale,
+        "stale admin attempts do not touch real custody"
+    );
+
+    // Non-vacuous liveness check: the stale key did not resolve/freeze the market; the owner can
+    // still withdraw capital before the new marketauth intentionally exercises the admin path.
+    let (owner_dest, _) = env.withdraw_with_cu(&owner, portfolio, 250_000);
+    assert_eq!(
+        env.token_amount(owner_dest),
+        250_000,
+        "funded market remains live and withdrawable after stale-admin attempts"
+    );
+
+    env.svm.expire_blockhash();
+    let new_policy = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps: 777 },
+        vec![
+            AccountMeta::new(new_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&new_marketauth],
+    );
+    assert!(
+        new_policy.is_ok(),
+        "new marketauth can mutate market-wide policy after handoff: {new_policy:?}"
+    );
+    assert_eq!(
+        env.market_state().0.fee_redirect_to_market_0_bps,
+        777,
+        "new authority owns the market-wide policy path"
+    );
+
+    env.svm.expire_blockhash();
+    let new_resolve = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ResolveMarket,
+        vec![
+            AccountMeta::new(new_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&new_marketauth],
+    );
+    assert!(
+        new_resolve.is_ok(),
+        "new marketauth can intentionally resolve the market after handoff: {new_resolve:?}"
+    );
+    assert_eq!(
+        env.market_state().1.mode,
+        percolator::MarketModeV16::Resolved,
+        "resolve authority moved to the new signer"
+    );
+}
+
 // regression (security.md sweep): round-trip recovery under the junior-pnl model. A price round-trip
 // (100->110->100) leaves the drawdown-first trader's recovery as JUNIOR pnl (realized losses are
 // senior/immediate, recoveries park as junior pnl that is not liquid in Live mode). Value is fully
