@@ -17103,6 +17103,107 @@ fn v16_attack_backing_earnings_no_over_or_double_withdraw() {
     );
 }
 
+// security.md sweep - backing earnings vault pinning (#33/#44/#48): provider-fee earnings use a
+// distinct vault-out instruction and mandatory ledger from principal backing withdrawals. It must not
+// debit earnings/accounting while paying from a non-canonical vault-authority-owned fragment.
+#[test]
+fn v16_attack_backing_earnings_reject_noncanonical_vault() {
+    const EARNINGS: u128 = 30;
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10);
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].utilization_fee_earnings = EARNINGS;
+        group.vault += EARNINGS;
+    });
+    let funded_vault = env.market_state().1.vault as u64;
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, funded_vault);
+
+    let fake_vault = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            fake_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, funded_vault),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let dest = env.token_account_for_mint(env.mint, env.admin.pubkey(), 0);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let canonical_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let fake_vault_before = env.svm.get_account(&fake_vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(fake_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&env.admin.insecure_clone()],
+    );
+    assert!(
+        rejected.is_err(),
+        "WithdrawBackingBucketEarnings must reject a non-canonical vault fragment"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected earnings fragment withdrawal leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "rejected earnings fragment withdrawal rewrites no ledger state"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        canonical_vault_before,
+        "rejected earnings fragment withdrawal leaves canonical vault untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&fake_vault).unwrap(),
+        fake_vault_before,
+        "rejected earnings fragment withdrawal leaves fake vault untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "rejected earnings fragment withdrawal pays no tokens"
+    );
+
+    env.svm.expire_blockhash();
+    env.withdraw_backing_bucket_earnings_to_admin_token_with_cu(ledger, dest, 1, 10);
+    assert_eq!(env.token_amount(dest), 10);
+    assert_eq!(env.token_amount(fake_vault), funded_vault);
+    let (_, group) = env.market_state();
+    assert_eq!(group.source_backing_buckets[1].utilization_fee_earnings, 20);
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+    let ledger_state =
+        state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_state.total_earnings_atoms, EARNINGS);
+    assert_eq!(ledger_state.total_earnings_withdrawn_atoms, 10);
+    assert_eq!(ledger_state.last_observed_bucket_earnings_atoms, 20);
+}
+
 // security.md sweep — withdraw mint confusion (#44): withdrawing to a dest token account of a
 // DIFFERENT mint than the vault must reject (SPL transfer enforces matching mints). Capital must not
 // be debited if the transfer can't land, and no tokens leak.
