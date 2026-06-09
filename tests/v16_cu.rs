@@ -28548,6 +28548,129 @@ fn v16_attack_swap_secondary_rejects_foreign_market_vault() {
     assert_eq!(env.token_amount(secondary_vault_b), 70);
 }
 
+// full-interface sweep (cron35): the secondary collateral reserve is a real value-bearing vault, so it
+// must inherit the same delegate/close-authority hardening as the primary vault. A canonical secondary
+// vault with a delegate could be drained out-of-band; SwapSecondaryForPrimary must reject it before
+// pulling primary collateral or paying secondary collateral.
+#[test]
+fn v16_attack_swap_secondary_rejects_delegated_secondary_vault() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    let mut delegated_reserve = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: secondary_mint,
+            owner: env.vault_authority,
+            amount: 50,
+            delegate: COption::Some(Pubkey::new_unique()),
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 50,
+            close_authority: COption::None,
+        },
+        &mut delegated_reserve,
+    )
+    .unwrap();
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: delegated_reserve,
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 10);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let source_before = env.svm.get_account(&primary_source).unwrap();
+    let dest_before = env.svm.get_account(&secondary_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(primary_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "SwapSecondaryForPrimary must reject a delegated secondary reserve"
+    );
+    assert_eq!(
+        env.svm.get_account(&primary_source).unwrap(),
+        source_before,
+        "rejected delegated-reserve swap must not pull primary collateral"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        dest_before,
+        "rejected delegated-reserve swap must not pay secondary collateral"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "rejected delegated-reserve swap must not credit the primary vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "delegated secondary reserve remains untouched and recoverable"
+    );
+
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(primary_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "same canonical secondary reserve works once delegate is removed: {ok:?}"
+    );
+    assert_eq!(env.token_amount(primary_source), 0);
+    assert_eq!(env.token_amount(secondary_dest), 10);
+    assert_eq!(env.token_amount(secondary_vault), 40);
+}
+
 // security.md sweep — CloseSlab with secondary collateral (#44/#48): if a secondary collateral mint is
 // configured, closing the slab must not zero the market after closing only the primary vault. Any
 // secondary reserve must be recovered atomically in the same close, or the PDA-held reserve is stranded.
