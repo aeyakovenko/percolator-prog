@@ -8538,7 +8538,10 @@ pub mod processor {
         if b_delta_budget == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        with_one_portfolio_view(program_id, accounts, true, |group, portfolio, _cfg| {
+        with_one_portfolio_view(program_id, accounts, true, |group, portfolio, cfg| {
+            if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
+                return Err(V16Error::LockActive);
+            }
             group
                 .forfeit_recovery_leg_not_atomic(portfolio, asset_index as usize, b_delta_budget)
                 .map(|_| ())

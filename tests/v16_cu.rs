@@ -46894,6 +46894,142 @@ fn v16_attack_sync_maintenance_rejects_when_resolve_matured() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// security.md sweep - stale-resolve recovery-leg drift (#30/#35/#48): ForfeitRecoveryLeg
+// is owner-gated, but it can still clear an asset-recovery leg while the overall market
+// remains Live. Once the base oracle is resolve-matured, that live recovery-tool path must
+// freeze before the terminal snapshot.
+#[test]
+fn v16_attack_forfeit_recovery_leg_rejects_when_resolve_matured() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let fresh_long_owner = Keypair::new();
+    let fresh_short_owner = Keypair::new();
+    let stale_long_owner = Keypair::new();
+    let stale_short_owner = Keypair::new();
+    let fresh_long = env.create_portfolio(&fresh_long_owner);
+    let fresh_short = env.create_portfolio(&fresh_short_owner);
+    let stale_long = env.create_portfolio(&stale_long_owner);
+    let stale_short = env.create_portfolio(&stale_short_owner);
+    for (owner, portfolio) in [
+        (&fresh_long_owner, fresh_long),
+        (&fresh_short_owner, fresh_short),
+        (&stale_long_owner, stale_long),
+        (&stale_short_owner, stale_short),
+    ] {
+        env.deposit(owner, portfolio, 1_000_000);
+    }
+    env.trade_asset_with_cu(
+        0,
+        &fresh_long_owner,
+        fresh_long,
+        &fresh_short_owner,
+        fresh_short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &stale_long_owner,
+        stale_long,
+        &stale_short_owner,
+        stale_short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+    env.mutate_market(|_, group| {
+        assert_eq!(group.mode, MarketModeV16::Live);
+        group.assets[0].lifecycle = AssetLifecycleV16::Recovery;
+    });
+    let (_, recovery_group) = env.market_state();
+    assert_eq!(recovery_group.mode, MarketModeV16::Live);
+    assert_eq!(recovery_group.assets[0].lifecycle, AssetLifecycleV16::Recovery);
+
+    env.svm.warp_to_slot(4);
+    let fresh_cu = env.forfeit_recovery_leg_with_cu(&fresh_long_owner, fresh_long, 0, 1);
+    assert_cu_within(
+        "fresh ForfeitRecoveryLeg before resolve maturity",
+        fresh_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(fresh_long), 0),
+        "fresh asset-recovery forfeit proves the live path is reachable before stale maturity"
+    );
+    assert!(
+        has_active_leg_for_asset(&env.portfolio_state(stale_long), 0),
+        "stale-path target must still have a leg to forfeit"
+    );
+
+    env.svm.warp_to_slot(40);
+    let (stale_cfg, stale_group) = env.market_state();
+    assert_eq!(stale_group.mode, MarketModeV16::Live);
+    assert!(
+        oracle_v16::permissionless_stale_matured(&stale_cfg, 40),
+        "test setup must be beyond the permissionless resolve stale boundary"
+    );
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let stale_long_before = env.svm.get_account(&stale_long).unwrap();
+    let stale_short_before = env.svm.get_account(&stale_short).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ForfeitRecoveryLeg {
+            asset_index: 0,
+            b_delta_budget: 1,
+        },
+        vec![
+            AccountMeta::new(stale_long_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_long, false),
+        ],
+        &[&stale_long_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "ForfeitRecoveryLeg must reject once the market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale ForfeitRecoveryLeg leaves market exposure unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_long).unwrap(),
+        stale_long_before,
+        "rejected stale ForfeitRecoveryLeg leaves the owner portfolio unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_short).unwrap(),
+        stale_short_before,
+        "rejected stale ForfeitRecoveryLeg leaves the counterparty unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale ForfeitRecoveryLeg moves no custody"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve still succeeds after rejected stale ForfeitRecoveryLeg: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // security.md sweep - stale-resolve exposure drift (#30/#35/#48): RebalanceReduce is an
 // owner-gated public instruction, but it still mutates live exposure. Once the market is
 // resolve-matured, an owner must not be able to reduce their position against stale marks
