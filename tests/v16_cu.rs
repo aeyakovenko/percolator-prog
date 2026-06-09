@@ -41243,6 +41243,111 @@ fn v16_attack_asset_activation_cooldown_enforced() {
     );
 }
 
+// security.md sweep - stale-resolve junior/senior drift (#30/#33/#35/#48):
+// ConvertReleasedPnl is owner-gated, but it still moves source-backed junior PnL into senior
+// withdrawable capital. Once the market is resolve-matured, that conversion must freeze before the
+// terminal payout snapshot can be influenced.
+#[test]
+fn v16_attack_convert_released_pnl_rejects_when_resolve_matured() {
+    const RELEASED: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.top_up_backing_bucket(1, RELEASED * 2, 10_000);
+
+    let fresh_owner = Keypair::new();
+    let fresh = env.create_portfolio(&fresh_owner);
+    let stale_owner = Keypair::new();
+    let stale = env.create_portfolio(&stale_owner);
+    env.add_source_positive_pnl(fresh, 1, RELEASED);
+    env.add_source_positive_pnl(stale, 1, RELEASED);
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+    for portfolio in [fresh, stale] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: 3,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+        );
+    }
+    assert!(
+        env.portfolio_state(stale).pnl > 0,
+        "stale-path setup must have real released PnL to convert"
+    );
+
+    env.svm.warp_to_slot(4);
+    let fresh_cu = env.convert_released_pnl_with_cu(&fresh_owner, fresh, RELEASED);
+    assert_cu_within(
+        "fresh ConvertReleasedPnl before resolve maturity",
+        fresh_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.portfolio_state(fresh).capital,
+        RELEASED,
+        "fresh conversion proves the staged PnL is actually convertible"
+    );
+
+    env.svm.warp_to_slot(40);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let stale_before = env.svm.get_account(&stale).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let stale_state_before = env.portfolio_state(stale);
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ConvertReleasedPnl { amount: RELEASED },
+        vec![
+            AccountMeta::new(stale_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale, false),
+        ],
+        &[&stale_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "ConvertReleasedPnl must reject once the market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale ConvertReleasedPnl leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale).unwrap(),
+        stale_before,
+        "rejected stale ConvertReleasedPnl leaves the owner portfolio unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale ConvertReleasedPnl moves no custody"
+    );
+    let stale_state_after = env.portfolio_state(stale);
+    assert_eq!(stale_state_after.capital, stale_state_before.capital);
+    assert_eq!(stale_state_after.pnl, stale_state_before.pnl);
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve still succeeds after rejected stale ConvertReleasedPnl: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // #66 guard: WithdrawCollateral must be blocked once the market is resolve-matured (oracle stale past the
 // permissionless-resolve threshold) -- reject_permissionless_resolve_matured_live_view (v16_program 4738, the
 // #66 fix) is applied to withdraw (5972) + 7 other value-out ops, but its rejection on a value-out op was never
