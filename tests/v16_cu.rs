@@ -12748,6 +12748,175 @@ fn v16_attack_retire_rejects_funded_backing_bucket() {
     );
 }
 
+// security.md sweep - last-principal backing withdrawal must not strand provider earnings (#22/#48):
+// utilization-fee earnings are owed to the backing authority but stored beside the principal bucket.
+// A provider who withdraws principal before earnings must not turn the bucket into an invalid empty
+// shell with trapped earnings; the rejected attempt must roll back market, ledger, vault, and dest.
+#[test]
+fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
+    const PRINCIPAL: u128 = 100;
+    const EARNINGS: u128 = 42;
+    let mut env = V16CuEnv::new();
+    env.activate_asset(1, 1, 100);
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 2, PRINCIPAL, 10_000);
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[2].utilization_fee_earnings = EARNINGS;
+        group.vault += EARNINGS;
+    });
+    let funded_vault = env.market_state().1.vault as u64;
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, funded_vault);
+    let (_, funded_group) = env.market_state();
+    assert_eq!(
+        funded_group.source_backing_buckets[2].fresh_unliened_backing_num,
+        PRINCIPAL * BOUND_SCALE,
+        "asset-1 backing principal is present (non-vacuous)"
+    );
+    assert_eq!(
+        funded_group.source_backing_buckets[2].utilization_fee_earnings,
+        EARNINGS,
+        "asset-1 backing provider earnings are owed (non-vacuous)"
+    );
+
+    let admin = env.admin.insecure_clone();
+    let dest = env.token_account(admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    env.svm.expire_blockhash();
+    let premature_principal = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: PRINCIPAL,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        premature_principal.is_err(),
+        "last-principal withdrawal must reject while provider earnings remain unpaid"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected principal withdrawal leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "rejected principal withdrawal leaves the provider ledger unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected principal withdrawal leaves the canonical vault untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "rejected principal withdrawal pays no destination tokens"
+    );
+    let (_, still_funded_group) = env.market_state();
+    assert_eq!(
+        still_funded_group.source_backing_buckets[2].fresh_unliened_backing_num,
+        PRINCIPAL * BOUND_SCALE,
+        "principal remains recoverable after rejected premature withdrawal"
+    );
+    assert_eq!(
+        still_funded_group.source_backing_buckets[2].utilization_fee_earnings,
+        EARNINGS,
+        "earnings remain recoverable after rejected premature withdrawal"
+    );
+
+    env.withdraw_backing_bucket_earnings_to_admin_token_with_cu(ledger, dest, 2, EARNINGS);
+    assert_eq!(
+        env.token_amount(dest),
+        EARNINGS as u64,
+        "backing provider recovers the accrued earnings first"
+    );
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[2].utilization_fee_earnings,
+        0,
+        "earnings blocker is fully drained"
+    );
+
+    env.svm.expire_blockhash();
+    let principal_after_earnings = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: PRINCIPAL,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        principal_after_earnings.is_ok(),
+        "principal withdrawal succeeds after earnings are paid: {principal_after_earnings:?}"
+    );
+    assert_eq!(
+        env.token_amount(dest),
+        (PRINCIPAL + EARNINGS) as u64,
+        "provider recovers both earnings and principal exactly once"
+    );
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[2].fresh_unliened_backing_num,
+        0,
+        "principal blocker is fully drained after the safe order"
+    );
+
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_RETIRE,
+            asset_index: 1,
+            now_slot: 4,
+            initial_price: 0,
+            insurance_authority: admin.pubkey().to_bytes(),
+            insurance_operator: admin.pubkey().to_bytes(),
+            backing_bucket_authority: admin.pubkey().to_bytes(),
+            oracle_authority: admin.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        accepted.is_ok(),
+        "RETIRE succeeds once provider earnings and principal are paid: {accepted:?}"
+    );
+    let (_, retired_group) = env.market_state();
+    assert_eq!(
+        retired_group.assets[1].lifecycle,
+        AssetLifecycleV16::Retired,
+        "asset-1 retired after backing-provider funds are paid"
+    );
+    assert_eq!(
+        retired_group.source_backing_buckets[2].utilization_fee_earnings,
+        0,
+        "retired slot carries no stale provider earnings"
+    );
+}
+
 // Coverage probe (audit, Finding G): close_resolved_account_not_atomic charges an
 // accrued maintenance fee into group.insurance (handle_close_resolved passes
 // cfg.maintenance_fee_per_slot) but the wrapper does NOT credit any per-domain
