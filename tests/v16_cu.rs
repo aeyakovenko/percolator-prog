@@ -41852,6 +41852,56 @@ fn v16_attack_init_portfolio_cannot_use_market_as_portfolio_account() {
     assert_eq!(initialized.capital, 0);
 }
 
+#[test]
+fn v16_attack_empty_portfolio_reinit_cannot_inflate_materialized_count() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "initial empty portfolio increments the materialized count once"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    env.svm.expire_blockhash();
+    let reinit = env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        reinit.is_err(),
+        "re-init of an already initialized empty portfolio must reject"
+    );
+    assert!(
+        reinit.unwrap_err().contains("Custom(2)"),
+        "empty portfolio re-init should reject as AlreadyInitialized"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected empty re-init must not inflate market counters"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected empty re-init must not rewrite the portfolio"
+    );
+
+    env.close_portfolio_with_cu(&owner, portfolio);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "one real empty portfolio closes back to zero materialized count"
+    );
+}
+
 // SOL-010 (reinitialization): InitPortfolio targets a program-owned account and SETS its owner. An
 // attacker could try to re-init a VICTIM's already-funded portfolio -- which would reset its capital
 // and reassign ownership, a severe LOF (victim's vaulted tokens orphaned). The is_initialized guard
