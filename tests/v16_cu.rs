@@ -14444,6 +14444,190 @@ fn v16_attack_resolved_payout_replay_extracts_nothing() {
     );
 }
 
+// security.md sweep - resolved payout dual-mint rail isolation (#33/#44/#48): a resolved winner can
+// be paid through the secondary base-unit reserve, but that receipt must then exhaust the shared
+// terminal claim. Independently funded primary reserve liquidity must not permit a second payout.
+#[test]
+fn v16_attack_resolved_payout_dual_mint_replay_extracts_nothing() {
+    let mut env = V16CuEnv::new();
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, env.vault_authority, 1_100_000),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new();
+    let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new();
+    let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &lo_owner,
+        lo,
+        &sh_owner,
+        sh,
+        (10_000 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, 110);
+    for slot in [10u64, 11] {
+        env.svm.warp_to_slot(slot);
+        for p in [sh, lo] {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    action: 0,
+                    asset_index: 0,
+                    now_slot: slot,
+                    funding_rate_e9: 0,
+                    close_q: 0,
+                    fee_bps: 0,
+                    recovery_reason: 0,
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(p, false),
+                ],
+                &[],
+            );
+        }
+    }
+    env.resolve();
+
+    let _ = env.close_resolved(&sh_owner, sh);
+    let (_, after_loser) = env.market_state();
+    assert_eq!(
+        after_loser.vault, 1_100_000,
+        "winner's terminal claim remains after loser closes"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        1_100_000,
+        "primary raw reserve still has enough liquidity for a replay attempt"
+    );
+
+    let secondary_dest = env.token_account_for_mint(secondary, lo_owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let secondary_close_cu = env
+        .send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(lo_owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(lo, false),
+                AccountMeta::new(secondary_dest, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("close resolved through secondary reserve");
+    assert_cu_within(
+        "CloseResolved secondary payout",
+        secondary_close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(secondary_dest),
+        1_100_000,
+        "winner is fully paid through the secondary rail"
+    );
+    assert_eq!(
+        env.token_amount(secondary_vault),
+        0,
+        "secondary reserve was spent by the terminal payout"
+    );
+    let winner = env.portfolio_state(lo);
+    assert!(
+        winner.resolved_payout_receipt.finalized || !winner.resolved_payout_receipt.present,
+        "secondary payout finalized the shared receipt"
+    );
+    let (_, after_secondary_payout) = env.market_state();
+    assert_eq!(
+        after_secondary_payout.vault, 0,
+        "shared accounting vault exhausted after secondary payout"
+    );
+
+    let replay_close_dest = env.token_account_for_mint(env.mint, lo_owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let _ = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(lo_owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(lo, false),
+            AccountMeta::new(replay_close_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert_eq!(
+        env.token_amount(replay_close_dest),
+        0,
+        "primary CloseResolved replay extracts nothing after secondary payout"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        1_100_000,
+        "primary reserve remains untouched by CloseResolved replay"
+    );
+
+    let replay_topup_dest = env.token_account_for_mint(env.mint, lo_owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let _ = env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(lo_owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(lo, false),
+            AccountMeta::new(replay_topup_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert_eq!(
+        env.token_amount(replay_topup_dest),
+        0,
+        "primary top-up replay extracts nothing after secondary payout"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        1_100_000,
+        "primary reserve remains untouched by top-up replay"
+    );
+    let (_, g_end) = env.market_state();
+    assert_eq!(g_end.vault, 0, "accounting vault remains exhausted");
+    assert!(
+        g_end.vault >= g_end.c_tot + g_end.insurance,
+        "senior conservation preserved after cross-rail replays"
+    );
+}
+
 // security.md sweep — oracle/mark bounds (#37/#39): the auth-mark push feeds settlement. An extreme
 // mark (0 or u64::MAX) must be rejected/clamped, never corrupt pnl or panic the program.
 #[test]
