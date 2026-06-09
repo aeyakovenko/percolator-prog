@@ -21800,6 +21800,111 @@ fn v16_attack_permissionless_asset_oracle_cannot_block_base_resolve_matured() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// security.md sweep - permissionless asset crank liveness DoS (#2/#30/#37): even if a
+// permissionless asset was refreshed just before the base stale threshold, its public crank must not
+// continue mutating market state after the base market becomes permissionlessly resolvable.
+#[test]
+fn v16_attack_permissionless_asset_crank_rejects_after_base_resolve_matured() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    let creator = Keypair::new();
+    let creator_key = creator.pubkey();
+    env.update_market_init_fee_policy_with_cu(1);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        creator_key,
+        creator_key,
+        creator_key,
+        creator_key,
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+    let cranked = env.create_portfolio(&Keypair::new());
+
+    // Non-vacuous control: one slot before base resolve maturity, asset-1 can refresh itself.
+    env.svm.warp_to_slot(7);
+    env.push_auth_mark_for_asset_with_authority(1, &creator, 7, 101);
+    env.svm.expire_blockhash();
+    let fresh_crank = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: 7,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(cranked, false),
+        ],
+        &[],
+    );
+    assert!(
+        fresh_crank.is_ok(),
+        "permissionless asset crank works before base resolve maturity: {fresh_crank:?}"
+    );
+
+    env.svm.warp_to_slot(8);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&cranked).unwrap();
+    env.svm.expire_blockhash();
+    let stale_crank = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: 8,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(cranked, false),
+        ],
+        &[],
+    );
+    assert!(
+        stale_crank.is_err(),
+        "permissionless asset crank must reject once the base market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale permissionless asset crank leaves market state unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&cranked).unwrap(),
+        portfolio_before,
+        "rejected stale permissionless asset crank leaves the target portfolio unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "base resolve remains available after rejected permissionless asset crank: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // security.md sweep — CloseSlab wind-down finality (#30/#48): a market may only be closed when fully
 // wound down (mode==Resolved AND vault==0 && insurance==0 && c_tot==0 && no materialized portfolios).
 // Closing while value/positions remain would strand funds — must reject.
