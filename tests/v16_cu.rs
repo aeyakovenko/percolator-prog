@@ -36334,6 +36334,92 @@ fn v16_attack_chainlink_oracle_malformed_fields_reject_without_mutation() {
     );
 }
 
+// Chainlink spoofing gate: Chainlink feeds are account-key-bound like Switchboard. A valid-looking
+// transmissions account under the wrong key, or under an attacker owner, must reject atomically.
+#[test]
+fn v16_attack_chainlink_owner_and_key_binding_reject_spoofed_feed() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+    let install = |env: &mut V16CuEnv, owner: Pubkey| -> Pubkey {
+        let key = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_chainlink_data(1, 8, 1, 1, 1, 100, 10_000),
+                    owner,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        key
+    };
+    let configure = |env: &mut V16CuEnv, expected_feed: Pubkey, account: Pubkey| {
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [expected_feed.to_bytes(), [0u8; 32], [0u8; 32]],
+            &[account],
+            1,
+            100,
+            0,
+            0,
+            100,
+            0,
+        )
+    };
+    let before = env.svm.get_account(&env.market).unwrap().data;
+
+    let wrong_key = install(&mut env, oracle_v16::CHAINLINK_STORE_PROGRAM_ID);
+    let expected_key = Pubkey::new_unique();
+    env.svm.expire_blockhash();
+    let key_spoof = configure(&mut env, expected_key, wrong_key);
+    assert!(
+        key_spoof.is_err(),
+        "a Chainlink transmissions account must match the configured account key"
+    );
+    let key_err = key_spoof.unwrap_err();
+    assert!(
+        key_err.contains("Custom(29)"),
+        "wrong Chainlink account key must reject as InvalidOracleKey (Custom 29), got: {key_err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before,
+        "wrong-key Chainlink spoof must not mutate the market"
+    );
+
+    let fake_owner = install(&mut env, Pubkey::new_unique());
+    env.svm.expire_blockhash();
+    let owner_spoof = configure(&mut env, fake_owner, fake_owner);
+    assert!(
+        owner_spoof.is_err(),
+        "attacker-owned Chainlink-shaped data must reject before parsing the price"
+    );
+    let owner_err = owner_spoof.unwrap_err();
+    assert!(
+        owner_err.contains("IllegalOwner"),
+        "attacker-owned Chainlink feed must reject as IllegalOwner, got: {owner_err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before,
+        "attacker-owned Chainlink spoof must not mutate the market"
+    );
+
+    let valid = install(&mut env, oracle_v16::CHAINLINK_STORE_PROGRAM_ID);
+    env.svm.expire_blockhash();
+    configure(&mut env, valid, valid).expect("real Chainlink owner/key pair should configure");
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        100,
+        "valid Chainlink owner/key pair seeds the expected mark"
+    );
+}
+
 // security.md sweep — Pyth exponent bounds (#37/#39): exponent scaling is part of the trusted mark.
 // Out-of-range exponents, over-max scaled prices, and floor-to-zero scaled prices must reject through
 // ConfigureHybridOracle without installing a malformed oracle profile.
