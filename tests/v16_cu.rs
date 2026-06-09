@@ -41820,6 +41820,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
             AccountMeta::new(market, false),
         ]
     };
+    let market_before_rejects = env.svm.get_account(&env.market).unwrap();
 
     // ATTACK: a non-admin sets the resolve timer -> reject (marketauth-gated).
     let mallory = Keypair::new();
@@ -41837,8 +41838,13 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
         r_grief.is_err(),
         "non-admin ConfigurePermissionlessResolve must reject (could force premature resolution)"
     );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_rejects,
+        "non-admin ConfigurePermissionlessResolve must leave the market byte-identical"
+    );
 
-    // INPUT BOUNDS (admin): stale_slots == 0 and > MAX rejected.
+    // INPUT BOUNDS (admin): stale_slots == 0 / > MAX and force_close_delay_slots == 0 / > MAX rejected.
     env.svm.expire_blockhash();
     let r_zero = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
@@ -41849,10 +41855,15 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
         &[&admin],
     );
     assert!(r_zero.is_err(), "stale_slots == 0 must reject");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_rejects,
+        "stale_slots == 0 must not change resolve policy"
+    );
     env.svm.expire_blockhash();
     let r_huge = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
-            stale_slots: 6_480_001,
+            stale_slots: percolator_prog::constants::MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS + 1,
             force_close_delay_slots: 1_000,
         },
         metas(admin.pubkey()),
@@ -41861,6 +41872,47 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     assert!(
         r_huge.is_err(),
         "stale_slots > MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_rejects,
+        "oversized stale_slots must not change resolve policy"
+    );
+    env.svm.expire_blockhash();
+    let r_force_zero = env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 1_000,
+            force_close_delay_slots: 0,
+        },
+        metas(admin.pubkey()),
+        &[&admin],
+    );
+    assert!(
+        r_force_zero.is_err(),
+        "force_close_delay_slots == 0 must reject; otherwise shutdown/force-close can be disabled"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_rejects,
+        "zero force_close_delay_slots must not change resolve policy"
+    );
+    env.svm.expire_blockhash();
+    let r_force_huge = env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 1_000,
+            force_close_delay_slots: percolator_prog::constants::MAX_FORCE_CLOSE_DELAY_SLOTS + 1,
+        },
+        metas(admin.pubkey()),
+        &[&admin],
+    );
+    assert!(
+        r_force_huge.is_err(),
+        "force_close_delay_slots > MAX_FORCE_CLOSE_DELAY_SLOTS must reject; otherwise force-close liveness can be stuck"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_rejects,
+        "oversized force_close_delay_slots must not change resolve policy"
     );
 
     // LEGITIMATE: admin sets a valid timer -> ok, and it sticks.
@@ -41874,10 +41926,15 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
         &[&admin],
     );
     assert!(r_ok.is_ok(), "admin valid ConfigurePermissionlessResolve should succeed: {r_ok:?}");
+    let cfg = env.market_state().0;
     assert_eq!(
-        env.market_state().0.permissionless_resolve_stale_slots,
+        cfg.permissionless_resolve_stale_slots,
         1_000,
         "valid timer must be stored"
+    );
+    assert_eq!(
+        cfg.force_close_delay_slots, 1_000,
+        "valid force-close exit window must be stored"
     );
 }
 
