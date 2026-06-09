@@ -41232,6 +41232,7 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
         fresh_deposit.is_ok(),
         "fresh-oracle Deposit should still work: {fresh_deposit:?}"
     );
+    env.top_up_insurance(10);
     env.top_up_insurance_domain_with_authority(&admin, 0, 10);
     env.top_up_backing_bucket_with_authority(&admin, 1, 10, 100);
     env.trade_asset_with_cu(
@@ -41247,6 +41248,7 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
 
     env.svm.warp_to_slot(40);
     let stale_deposit_source = env.token_account_for_mint(env.mint, taker.pubkey(), 75_000);
+    let stale_global_insurance_source = env.token_account_for_mint(env.mint, admin.pubkey(), 20);
     let stale_insurance_source = env.token_account_for_mint(env.mint, admin.pubkey(), 25);
     let stale_backing_source = env.token_account_for_mint(env.mint, admin.pubkey(), 30);
 
@@ -41255,6 +41257,8 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     let maker_before = env.svm.get_account(&maker_portfolio).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let deposit_source_before = env.svm.get_account(&stale_deposit_source).unwrap();
+    let global_insurance_source_before =
+        env.svm.get_account(&stale_global_insurance_source).unwrap();
     let insurance_source_before = env.svm.get_account(&stale_insurance_source).unwrap();
     let backing_source_before = env.svm.get_account(&stale_backing_source).unwrap();
 
@@ -41296,6 +41300,23 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     assert!(
         stale_trade.is_err(),
         "TradeNoCpi must reject once the market is resolve-matured"
+    );
+
+    env.svm.expire_blockhash();
+    let stale_global_insurance = env.send(
+        ProgInstruction::TopUpInsurance { amount: 20 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_global_insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale_global_insurance.is_err(),
+        "TopUpInsurance must reject once the market is resolve-matured"
     );
 
     env.svm.expire_blockhash();
@@ -41386,6 +41407,11 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
         env.svm.get_account(&stale_deposit_source).unwrap(),
         deposit_source_before,
         "rejected stale Deposit pulls no source tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_global_insurance_source).unwrap(),
+        global_insurance_source_before,
+        "rejected stale global insurance top-up pulls no source tokens"
     );
     assert_eq!(
         env.svm.get_account(&stale_insurance_source).unwrap(),
