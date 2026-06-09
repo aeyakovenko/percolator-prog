@@ -365,6 +365,29 @@ fn make_switchboard_data(
     data
 }
 
+fn make_chainlink_data(
+    version: u8,
+    decimals: u8,
+    latest_round_id: u32,
+    live_length: u32,
+    result_slot: u64,
+    publish_time: u32,
+    answer: i128,
+) -> Vec<u8> {
+    const CL_LEN: usize = 8 + 192 + 48;
+    const DISC: [u8; 8] = [96, 179, 69, 66, 128, 129, 73, 117];
+    let mut data = vec![0u8; CL_LEN];
+    data[0..8].copy_from_slice(&DISC);
+    data[8] = version;
+    data[138] = decimals;
+    data[143..147].copy_from_slice(&latest_round_id.to_le_bytes());
+    data[148..152].copy_from_slice(&live_length.to_le_bytes());
+    data[200..208].copy_from_slice(&result_slot.to_le_bytes());
+    data[208..212].copy_from_slice(&publish_time.to_le_bytes());
+    data[216..232].copy_from_slice(&answer.to_le_bytes());
+    data
+}
+
 fn cu_ix() -> Instruction {
     ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)
 }
@@ -32526,6 +32549,106 @@ fn v16_attack_oracle_feed_id_mismatch_rejected() {
         ok.is_ok(),
         "the matching configured feed id configures: {:?}",
         ok
+    );
+}
+
+// security.md sweep — Chainlink oracle parser hardening (#37/#44): a Chainlink-owned transmissions
+// account is accepted as a hybrid oracle leg, so malformed header/transmission fields must reject
+// through the public ConfigureHybridOracle path without partially installing a bad oracle profile.
+#[test]
+fn v16_attack_chainlink_oracle_malformed_fields_reject_without_mutation() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+    let valid = || make_chainlink_data(1, 8, 1, 1, 1, 100, 10_000);
+    let install = |env: &mut V16CuEnv, data: Vec<u8>| -> Pubkey {
+        let key = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        key
+    };
+
+    let before = env.svm.get_account(&env.market).unwrap().data;
+    let mut cases: Vec<(&str, Vec<u8>)> = Vec::new();
+    let mut bad_disc = valid();
+    bad_disc[0] ^= 0xff;
+    cases.push(("bad discriminator", bad_disc));
+    cases.push(("zero version", make_chainlink_data(0, 8, 1, 1, 1, 100, 10_000)));
+    cases.push((
+        "zero latest round",
+        make_chainlink_data(1, 8, 0, 1, 1, 100, 10_000),
+    ));
+    cases.push((
+        "non-single live length",
+        make_chainlink_data(1, 8, 1, 2, 1, 100, 10_000),
+    ));
+    cases.push(("zero slot", make_chainlink_data(1, 8, 1, 1, 0, 100, 10_000)));
+    cases.push(("zero publish time", make_chainlink_data(1, 8, 1, 1, 1, 0, 10_000)));
+    cases.push((
+        "decimals over bound",
+        make_chainlink_data(1, 19, 1, 1, 1, 100, 10_000),
+    ));
+    cases.push((
+        "negative answer",
+        make_chainlink_data(1, 8, 1, 1, 1, 100, -10_000),
+    ));
+
+    for (label, data) in cases {
+        let acct = install(&mut env, data);
+        env.svm.expire_blockhash();
+        let rejected = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [acct.to_bytes(), [0u8; 32], [0u8; 32]],
+            &[acct],
+            1,
+            100,
+            0,
+            0,
+            100,
+            0,
+        );
+        assert!(
+            rejected.is_err(),
+            "malformed Chainlink {label} must reject"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap().data,
+            before,
+            "malformed Chainlink {label} must not mutate market state"
+        );
+    }
+
+    let ok_acct = install(&mut env, valid());
+    env.svm.expire_blockhash();
+    let ok = env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [ok_acct.to_bytes(), [0u8; 32], [0u8; 32]],
+        &[ok_acct],
+        1,
+        100,
+        0,
+        0,
+        100,
+        0,
+    );
+    assert!(ok.is_ok(), "valid Chainlink leg configures: {ok:?}");
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        100,
+        "valid Chainlink answer/decimals seeds the expected mark"
     );
 }
 
