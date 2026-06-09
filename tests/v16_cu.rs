@@ -33037,6 +33037,110 @@ fn v16_attack_crank_oracle_feed_id_mismatch_rejects_without_mutation() {
     assert_eq!(group.assets[0].raw_oracle_target_price, 210_000);
 }
 
+// security.md sweep — oracle same-publish-time replay guard (#37/#44): after a hybrid feed update is
+// accepted, a later oracle account with the SAME publish_time but a DIFFERENT price must reject. Without
+// this monotonicity check, a mutable feed account could rewrite price at a fixed timestamp and drive the
+// mark without a fresh oracle update. A later publish_time with the same feed id still cranks normally.
+#[test]
+fn v16_attack_crank_oracle_same_publish_time_price_rewrite_rejected() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0x79u8; 32];
+    let initial = env.set_pyth_price_with_conf(&feed, 200_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure matching one-leg hybrid oracle");
+
+    let keeper_owner = Keypair::new();
+    let keeper_portfolio = env.create_portfolio(&keeper_owner);
+    set_test_clock(&mut env, 2, 101);
+    let rewritten_same_time = env.set_pyth_price_with_conf(&feed, 500_000, -6, 0, 100);
+    let market_before = env.svm.get_account(&env.market).unwrap().data;
+    let portfolio_before = env.svm.get_account(&keeper_portfolio).unwrap().data;
+
+    env.svm.expire_blockhash();
+    let bad = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper_portfolio, false),
+            AccountMeta::new_readonly(rewritten_same_time, false),
+        ],
+        &[],
+    );
+    assert!(
+        bad.is_err(),
+        "same-publish-time feed with a changed price must reject"
+    );
+    let err = bad.err().unwrap();
+    assert!(
+        err.contains("Custom(26)"),
+        "same-time price rewrite should reject as OracleInvalid (Custom 26), got: {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_before,
+        "rejected same-time price rewrite must not update oracle profile or market state"
+    );
+    assert_eq!(
+        env.svm.get_account(&keeper_portfolio).unwrap().data,
+        portfolio_before,
+        "rejected same-time price rewrite must not mutate the cranked portfolio"
+    );
+
+    let (cfg_after_bad, group_after_bad) = env.market_state();
+    assert_eq!(cfg_after_bad.oracle_leg_prices_e6[0], 200_000);
+    assert_eq!(cfg_after_bad.oracle_leg_publish_times[0], 100);
+    assert_eq!(
+        group_after_bad.assets[0].raw_oracle_target_price, 200_000,
+        "stale rewrite did not move the target mark"
+    );
+
+    let later = env.set_pyth_price_with_conf(&feed, 210_000, -6, 0, 101);
+    env.svm.expire_blockhash();
+    env.crank_with_oracle_tail(
+        keeper_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &[later],
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.oracle_leg_prices_e6[0], 210_000);
+    assert_eq!(cfg.oracle_leg_publish_times[0], 101);
+    assert_eq!(cfg.last_good_oracle_slot, 2);
+    assert_eq!(
+        group.assets[0].raw_oracle_target_price, 210_000,
+        "later publish_time with the same feed id cranks normally"
+    );
+}
+
 // security.md sweep — malformed oracle config rejects cleanly (#37/#44 robustness): a hybrid oracle
 // declaring N legs but supplied with fewer oracle accounts must reject WITHOUT partially configuring or
 // corrupting the market (no out-of-bounds read, no half-written oracle profile). Protection: the runtime
