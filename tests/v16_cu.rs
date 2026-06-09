@@ -270,12 +270,16 @@ fn encode_matcher_init_passive_with_spread(
 }
 
 fn make_mint_data() -> Vec<u8> {
+    make_mint_data_with_decimals(0)
+}
+
+fn make_mint_data_with_decimals(decimals: u8) -> Vec<u8> {
     let mut data = vec![0u8; Mint::LEN];
     Mint::pack(
         Mint {
             mint_authority: COption::None,
             supply: 0,
-            decimals: 0,
+            decimals,
             is_initialized: true,
             freeze_authority: COption::None,
         },
@@ -38633,6 +38637,79 @@ fn v16_attack_deposit_primary_only_withdraw_either() {
         env.token_amount(sec_dest),
         300,
         "secondary withdrawal delivered 1:1"
+    );
+}
+
+// full-interface sweep: base-unit mints are treated as the same unit at 1:1 atom parity across
+// deposits, withdrawals, and SwapSecondaryForPrimary. A mismatched-decimals secondary mint would make
+// that 1:1 accounting value-asymmetric, so even marketauth must not be able to install it.
+#[test]
+fn v16_attack_base_unit_mints_reject_mismatched_decimals() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let primary = env.mint;
+
+    let matched_secondary = env.create_mint();
+    env.svm.expire_blockhash();
+    let matched = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: primary.to_bytes(),
+            secondary_mint: matched_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(primary, false),
+            AccountMeta::new_readonly(matched_secondary, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        matched.is_ok(),
+        "equal-decimals primary/secondary mints must still configure: {matched:?}"
+    );
+
+    let mismatched_secondary = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            mismatched_secondary,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_mint_data_with_decimals(6),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: primary.to_bytes(),
+            secondary_mint: mismatched_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(primary, false),
+            AccountMeta::new_readonly(mismatched_secondary, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "mismatched-decimals base-unit pair must reject"
+    );
+    assert!(
+        rejected.unwrap_err().contains("Custom(10)"),
+        "mismatched decimals must fail as InvalidMint"
+    );
+    let (cfg, _) = env.market_state();
+    assert_eq!(
+        cfg.secondary_collateral_mint,
+        matched_secondary.to_bytes(),
+        "rejected mismatched-decimals update must not overwrite the existing secondary mint"
     );
 }
 

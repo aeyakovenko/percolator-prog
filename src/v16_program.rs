@@ -8848,6 +8848,16 @@ pub mod processor {
         expect_key(secondary_mint_ai, &secondary_key)?;
         verify_mint(primary_mint_ai)?;
         verify_mint(secondary_mint_ai)?;
+        let primary_decimals = spl_token::state::Mint::unpack(&primary_mint_ai.try_borrow_data()?)
+            .map_err(|_| PercolatorError::InvalidMint)?
+            .decimals;
+        let secondary_decimals =
+            spl_token::state::Mint::unpack(&secondary_mint_ai.try_borrow_data()?)
+                .map_err(|_| PercolatorError::InvalidMint)?
+                .decimals;
+        if primary_decimals != secondary_decimals {
+            return Err(PercolatorError::InvalidMint.into());
+        }
 
         let mut data = market_ai.try_borrow_mut_data()?;
         let mut cfg = {
