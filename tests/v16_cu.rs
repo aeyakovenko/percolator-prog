@@ -16938,6 +16938,59 @@ fn v16_attack_cure_and_cancel_close_owner_gated() {
     );
 }
 
+// LoF/idempotency sweep — CureAndCancelClose cannot be replayed against an already-cured close ledger.
+// A cure leaves the close ledger in the `canceled` (inert) state and escrows the deposit; the preflight
+// rejects any ledger that is not `active` (`!active || canceled || finalized || has_irreversible_progress
+// -> LockActive`). Without that, a second cure could re-run the cancel/escrow path on a stale ledger,
+// double-processing a deposit or resurrecting a settled close. This drives the replay: seed a cancellable
+// close, cure it once (success -> canceled), then attempt a SECOND cure with a funded deposit — which must
+// reject (EngineLockActive) WITHOUT pulling the second deposit. Existing cure tests cover gating, exact
+// deposit, and cross-market rejection, but never the double-cure / canceled-ledger replay.
+#[test]
+fn v16_attack_cure_cannot_be_replayed_on_canceled_close_ledger() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 100);
+    env.seed_cancellable_close_progress(p);
+
+    // First cure (flat account, no extra deposit needed) succeeds and leaves the ledger `canceled`.
+    let src0 = env.token_account(owner.pubkey(), 0);
+    env.cure_and_cancel_close_with_cu(&owner, p, src0, 0);
+
+    // ATTACK: replay the cure with a FUNDED deposit against the now-canceled ledger. Must reject
+    // (EngineLockActive, Custom 21) and must NOT pull the second deposit (no double-escrow).
+    let src1 = env.token_account(owner.pubkey(), 50);
+    env.svm.expire_blockhash();
+    let r_replay = env.send(
+        ProgInstruction::CureAndCancelClose {
+            optional_deposit: 50,
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(src1, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        r_replay.is_err(),
+        "a second cure of an already-canceled close ledger must reject (no replay)"
+    );
+    assert!(
+        r_replay.unwrap_err().contains("Custom(21)"),
+        "double-cure must reject as EngineLockActive (Custom 21)"
+    );
+    assert_eq!(
+        env.token_amount(src1),
+        50,
+        "rejected replay must not pull the second deposit (no double-escrow)"
+    );
+}
+
 // full-interface sweep (cron29): CureAndCancelClose validates token accounts before the engine cure
 // and transfers after the engine mutation. A market-A portfolio must not be curable through market B
 // with a valid market-B vault, or the source transfer could fund one market while canceling and
