@@ -29355,6 +29355,95 @@ fn v16_attack_swap_secondary_unauthorized_and_bounded() {
     );
 }
 
+#[test]
+fn v16_attack_swap_secondary_conserves_and_mints_nothing() {
+    let mut env = V16CuEnv::new();
+    let primary = env.mint;
+    let vault_authority = env.vault_authority;
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(primary, secondary);
+
+    let user = Keypair::new();
+    let portfolio = env.create_portfolio(&user);
+    env.deposit(&user, portfolio, 1_000);
+
+    let secondary_vault = canonical_vault_ata(vault_authority, secondary);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, vault_authority, 400),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let admin = env.admin.insecure_clone();
+    let admin_primary = env.token_account_for_mint(primary, admin.pubkey(), 300);
+    let admin_secondary = env.token_account_for_mint(secondary, admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let group_before = env.market_state().1;
+    let primary_vault_before = env.token_amount(env.vault);
+    let secondary_vault_before = env.token_amount(secondary_vault);
+    let admin_primary_before = env.token_amount(admin_primary);
+    let total_vault_tokens_before = primary_vault_before + secondary_vault_before;
+
+    env.swap_secondary_for_primary_with_cu(
+        admin_primary,
+        env.vault,
+        admin_secondary,
+        secondary_vault,
+        250,
+    );
+
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "successful secondary swap must not mutate engine market state"
+    );
+    let group_after = env.market_state().1;
+    assert_eq!(
+        group_after.vault, group_before.vault,
+        "engine vault accounting unchanged by physical mint rebalance"
+    );
+    assert_eq!(
+        group_after.c_tot, group_before.c_tot,
+        "engine c_tot unchanged by physical mint rebalance"
+    );
+    assert_eq!(
+        group_after.insurance, group_before.insurance,
+        "engine insurance unchanged by physical mint rebalance"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        primary_vault_before + 250,
+        "primary vault received the swapped-in primary collateral"
+    );
+    assert_eq!(
+        env.token_amount(secondary_vault),
+        secondary_vault_before - 250,
+        "secondary reserve released the same atom count"
+    );
+    assert_eq!(
+        env.token_amount(admin_primary),
+        admin_primary_before - 250,
+        "base-unit authority paid primary collateral"
+    );
+    assert_eq!(
+        env.token_amount(admin_secondary),
+        250,
+        "base-unit authority received secondary collateral"
+    );
+    assert_eq!(
+        env.token_amount(env.vault) + env.token_amount(secondary_vault),
+        total_vault_tokens_before,
+        "total custodied base-unit atoms conserved across the swap"
+    );
+}
+
 // full-interface sweep (cron30): SwapSecondaryForPrimary must pin the secondary reserve to the
 // current market's vault PDA. A valid secondary-mint token account owned by another market's vault PDA
 // must not be usable as the reserve, or one market's base-unit authority could drain another market's
