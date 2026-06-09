@@ -36534,6 +36534,153 @@ fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit(
     assert_domain_budget_remaining_total_consistent(&funded_group, "funded permissionless create");
 }
 
+// full-interface sweep (cron39): permissionless reuse of a retired slot is a separate
+// UpdateAssetLifecycle branch from append. An underfunded creator must not consume
+// free_market_slot_count, install fresh authorities into the retired slot, or credit asset-0
+// insurance before the fee transfer can really happen.
+#[test]
+fn v16_attack_permissionless_reuse_underfunded_fee_does_not_consume_slot() {
+    const FEE: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(FEE);
+
+    env.svm.warp_to_slot(1);
+    env.activate_asset(1, 1, 100);
+    env.svm.warp_to_slot(2);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        2,
+        0,
+    );
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let (cfg_before, group_before) = env.market_state();
+    assert_eq!(
+        cfg_before.free_market_slot_count, 1,
+        "setup leaves exactly one retired reusable slot"
+    );
+    assert_eq!(
+        group_before.assets[1].lifecycle,
+        AssetLifecycleV16::Retired
+    );
+
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    let underfunded_source = env.token_account(creator.pubkey(), FEE as u64 - 1);
+    let source_before = env.svm.get_account(&underfunded_source).unwrap();
+
+    env.svm.warp_to_slot(3);
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 3,
+            initial_price: 250,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(underfunded_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        rejected.is_err(),
+        "underfunded permissionless slot reuse must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected reuse did not consume the retired slot or install new authorities"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected reuse did not move vault tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&underfunded_source).unwrap(),
+        source_before,
+        "rejected reuse did not debit the creator"
+    );
+    let (cfg_after_reject, group_after_reject) = env.market_state();
+    assert_eq!(
+        cfg_after_reject.free_market_slot_count, 1,
+        "retired slot remains reusable after rejected underfunded reuse"
+    );
+    assert_eq!(
+        group_after_reject.assets[1].lifecycle,
+        AssetLifecycleV16::Retired,
+        "asset remains retired after rejected underfunded reuse"
+    );
+    assert_eq!(group_after_reject.insurance, group_before.insurance);
+    assert_eq!(group_after_reject.vault, group_before.vault);
+    assert_eq!(
+        group_after_reject.insurance_domain_budget,
+        group_before.insurance_domain_budget
+    );
+
+    let funded_source = env.token_account(creator.pubkey(), FEE as u64);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 3,
+            initial_price: 250,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(funded_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    )
+    .expect("funded permissionless slot reuse succeeds after rejected underfunded attempt");
+    let (cfg_after_funded, group_after_funded) = env.market_state();
+    assert_eq!(
+        cfg_after_funded.free_market_slot_count, 0,
+        "funded reuse consumes the retired slot"
+    );
+    assert_eq!(
+        group_after_funded.assets[1].lifecycle,
+        AssetLifecycleV16::Active
+    );
+    assert_eq!(
+        env.token_amount(funded_source),
+        0,
+        "funded reuse pulls the fee"
+    );
+    assert_eq!(
+        group_after_funded.vault - group_before.vault,
+        FEE,
+        "funded reuse credits the accounting vault exactly once"
+    );
+    assert_eq!(
+        group_after_funded.insurance - group_before.insurance,
+        FEE,
+        "funded reuse credits asset-0 insurance exactly once"
+    );
+    assert_domain_budget_remaining_total_consistent(
+        &group_after_funded,
+        "permissionless reuse funded after underfunded reject",
+    );
+}
+
 // security.md sweep - sparse append DoS: permissionless activation may append exactly the next
 // configured slot, or reuse a retired slot, but it must not accept sparse jumps. Otherwise a stranger
 // could force large market-account growth or create holes in the asset table.
