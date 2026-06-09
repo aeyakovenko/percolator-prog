@@ -27924,6 +27924,116 @@ fn v16_attack_backing_fee_policy_authority_gated() {
     );
 }
 
+// security.md sweep — global policy bounds (#3/#6/#37): marketauth controls cranker reward and
+// fee policies, but even the authorized key must not be able to install over-100% reward shares,
+// over-max trade fees, oversized permissionless-init fees, or a nonzero insurance split on a zero
+// backing fee. These bad knobs can turn later public reward/top-up paths into DoS or over-credit
+// surfaces. Rejected writes must leave the whole market byte-identical, and the prior bounded
+// maintenance reward policy must remain live.
+#[test]
+fn v16_attack_global_policy_bounds_reject_grief_values() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    env.update_maintenance_fee_policy_with_cu(4_000);
+    env.update_trade_fee_policy_with_cu(88);
+    env.update_market_init_fee_policy_with_cu(40);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let reject_unchanged = |env: &mut V16CuEnv, ix: ProgInstruction, label: &str| {
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ix,
+            vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&env.admin],
+        );
+        assert!(rejected.is_err(), "{label} must reject");
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label} must leave the market byte-identical"
+        );
+    };
+
+    reject_unchanged(
+        &mut env,
+        ProgInstruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: 10_001,
+        },
+        "liquidation cranker share above 100%",
+    );
+    reject_unchanged(
+        &mut env,
+        ProgInstruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 10_001,
+        },
+        "maintenance cranker share above 100%",
+    );
+    reject_unchanged(
+        &mut env,
+        ProgInstruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 10_001,
+        },
+        "trade fee above the market maximum",
+    );
+    reject_unchanged(
+        &mut env,
+        ProgInstruction::UpdateMarketInitFeePolicy {
+            min_init_fee: u128::from(u64::MAX) + 1,
+        },
+        "permissionless init fee that cannot fit a token transfer",
+    );
+    reject_unchanged(
+        &mut env,
+        ProgInstruction::UpdateBackingFeePolicy {
+            domain: 0,
+            fee_bps: 0,
+            insurance_share_bps: 1,
+        },
+        "nonzero backing insurance split on a zero backing fee",
+    );
+
+    let (cfg, _) = env.market_state();
+    assert_eq!(cfg.liquidation_cranker_fee_share_bps, 5_000);
+    assert_eq!(cfg.maintenance_cranker_fee_share_bps, 4_000);
+    assert_eq!(cfg.trade_fee_base_bps, 88);
+    assert_eq!(cfg.permissionless_market_init_fee, 40);
+    assert_eq!(cfg.backing_trade_fee_policy_count, 0);
+
+    let payer_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.deposit(&payer_owner, payer_portfolio, 100_000_000);
+    env.svm.warp_to_slot(10);
+    env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
+
+    let payer = env.portfolio_state(payer_portfolio);
+    let cranker = env.portfolio_state(cranker_portfolio);
+    let (_, group) = env.market_state();
+    assert_eq!(
+        payer.capital,
+        100_000_000 - 580,
+        "bounded policy charges exactly the elapsed maintenance fee"
+    );
+    assert_eq!(
+        cranker.capital, 232,
+        "preserved 40% maintenance cranker share still pays a real bounded reward"
+    );
+    assert_eq!(
+        group.insurance, 348,
+        "remaining maintenance fee stays in insurance"
+    );
+    assert_domain_budget_remaining_total_consistent(&group, "bounded global policy reward");
+}
+
 // security.md sweep - permissionless asset authority isolation (#6/#33): the creator of asset N owns
 // that asset's local domain authorities, but must not be able to mutate market-wide knobs or market 0
 // policies. Discriminating control: the same creator CAN update asset N's own backing-fee domain.
