@@ -44216,6 +44216,99 @@ fn v16_attack_switchboard_low_sample_quorum_rejected_without_mutation() {
     );
 }
 
+// Switchboard spoofing gate: unlike Pyth, the configured feed is the PullFeed account key. A valid-
+// looking account under the wrong key, or under an attacker owner, must not seed the oracle profile.
+#[test]
+fn v16_attack_switchboard_owner_and_key_binding_reject_spoofed_feed() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 10, 1_000);
+    let value: i128 = 100 * 1_000_000_000_000;
+    let install = |env: &mut V16CuEnv, owner: Pubkey| -> Pubkey {
+        let key = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_switchboard_data(&[0xABu8; 32], value, 1, 1_000, 3, 1, 1),
+                    owner,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        key
+    };
+    let configure = |env: &mut V16CuEnv, expected_feed: Pubkey, account: Pubkey| {
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [expected_feed.to_bytes(), [0u8; 32], [0u8; 32]],
+            &[account],
+            10,
+            1_000,
+            0,
+            0,
+            3,
+            100,
+        )
+    };
+    let before = env.svm.get_account(&env.market).unwrap().data;
+
+    let wrong_key = install(
+        &mut env,
+        oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+    );
+    let expected_key = Pubkey::new_unique();
+    env.svm.expire_blockhash();
+    let key_spoof = configure(&mut env, expected_key, wrong_key);
+    assert!(
+        key_spoof.is_err(),
+        "a Switchboard PullFeed account must match the configured account key"
+    );
+    let key_err = key_spoof.unwrap_err();
+    assert!(
+        key_err.contains("Custom(29)"),
+        "wrong Switchboard account key must reject as InvalidOracleKey (Custom 29), got: {key_err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before,
+        "wrong-key Switchboard spoof must not mutate the market"
+    );
+
+    let fake_owner = install(&mut env, Pubkey::new_unique());
+    env.svm.expire_blockhash();
+    let owner_spoof = configure(&mut env, fake_owner, fake_owner);
+    assert!(
+        owner_spoof.is_err(),
+        "attacker-owned Switchboard-shaped data must reject before parsing the price"
+    );
+    let owner_err = owner_spoof.unwrap_err();
+    assert!(
+        owner_err.contains("IllegalOwner"),
+        "attacker-owned Switchboard feed must reject as IllegalOwner, got: {owner_err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before,
+        "attacker-owned Switchboard spoof must not mutate the market"
+    );
+
+    let valid = install(
+        &mut env,
+        oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+    );
+    env.svm.expire_blockhash();
+    configure(&mut env, valid, valid).expect("real Switchboard owner/key pair should configure");
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        100,
+        "valid Switchboard owner/key pair seeds the expected mark"
+    );
+}
+
 // Fee-RATE evasion: execute_trade floors the caller-supplied fee_bps to the config base
 // (hybrid_trade_fee_bps_view: base = max(caller_fee_bps, cfg.trade_fee_base_bps), src/v16_program.rs).
 // A trader passing fee_bps=0 must still pay the config trade_fee_base_bps -- complements the exec_price
