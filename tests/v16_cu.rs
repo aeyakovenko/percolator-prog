@@ -269,13 +269,13 @@ fn encode_matcher_init_passive_with_spread(
     data
 }
 
-fn make_mint_data() -> Vec<u8> {
+fn make_mint_data_with_decimals(decimals: u8) -> Vec<u8> {
     let mut data = vec![0u8; Mint::LEN];
     Mint::pack(
         Mint {
             mint_authority: COption::None,
             supply: 0,
-            decimals: 0,
+            decimals,
             is_initialized: true,
             freeze_authority: COption::None,
         },
@@ -283,6 +283,10 @@ fn make_mint_data() -> Vec<u8> {
     )
     .unwrap();
     data
+}
+
+fn make_mint_data() -> Vec<u8> {
+    make_mint_data_with_decimals(0)
 }
 
 /// The canonical vault address the wrapper now pins to (F-VAULT-FRAG fix): the Associated Token
@@ -36244,6 +36248,66 @@ fn v16_attack_base_unit_mints_changeable_only_when_empty() {
         env.market_state().0.secondary_collateral_mint,
         new_secondary.to_bytes(),
         "secondary mint unchanged while funded"
+    );
+}
+
+// security.md sweep — base-unit mint scale isolation (#44/#48): the primary/secondary base-unit mints
+// are swapped and withdrawn 1:1. If their SPL decimals differ, the wrapper would silently re-denominate
+// collateral. UpdateBaseUnitMints must reject mismatched decimals before storing the pair.
+#[test]
+fn v16_attack_base_unit_mints_reject_mismatched_decimals() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let mismatched_secondary = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            mismatched_secondary,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_mint_data_with_decimals(6),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: mismatched_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(mismatched_secondary, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "base-unit mints with different decimals must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected decimal mismatch must not partially update base-unit mints"
+    );
+    assert_eq!(
+        env.market_state().0.secondary_collateral_mint,
+        [0u8; 32],
+        "no secondary mint stored after rejected mismatch"
+    );
+
+    let matching_secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, matching_secondary);
+    assert_eq!(
+        env.market_state().0.secondary_collateral_mint,
+        matching_secondary.to_bytes(),
+        "matching-decimal base-unit pair still configures"
     );
 }
 
