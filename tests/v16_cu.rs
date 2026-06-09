@@ -5991,6 +5991,66 @@ fn v16_bpf_restart_asset_oracle_is_uniform_for_local_asset_admins() {
     );
 }
 
+// security.md sweep - RestartAssetOracle cross-asset admin isolation (#6/#37/#48): restart rewrites an
+// empty RECOVERY asset back to ACTIVE with a fresh market id and price. A key that is a valid admin for
+// asset 1 must not be able to restart asset 0 at an attacker-selected price.
+#[test]
+fn v16_attack_cross_asset_admin_cannot_restart_other_asset_oracle() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let asset1_admin = Keypair::new();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.activate_asset(1, 2, 100);
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&asset1_admin),
+        1,
+        processor::ASSET_AUTH_ADMIN,
+        asset1_admin.pubkey().to_bytes(),
+    )
+    .expect("rotate asset-1 admin to a distinct key");
+
+    env.svm.warp_to_slot(3);
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 0, 3, 0);
+    env.svm.warp_to_slot(4);
+    env.try_shutdown_asset_with_authority(&asset1_admin, 1, 4)
+        .expect("asset-1 admin shuts down its own asset");
+    let (_, recovery_group) = env.market_state();
+    assert_eq!(recovery_group.assets[0].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(recovery_group.assets[1].lifecycle, AssetLifecycleV16::Recovery);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.warp_to_slot(5);
+    env.svm.expire_blockhash();
+    let rejected = env.try_restart_asset_oracle_with_authority(&asset1_admin, 0, 5, 777);
+    assert!(
+        rejected.is_err(),
+        "asset-1 admin must not restart asset-0's recovery oracle"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected cross-asset restart leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery,
+        "asset-0 remains in recovery after rejected cross-asset restart"
+    );
+
+    env.svm.expire_blockhash();
+    env.try_restart_asset_oracle_with_authority(&asset1_admin, 1, 5, 250)
+        .expect("asset-1 admin restarts its own recovery asset");
+    let data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, after) = state::read_market(&data).unwrap();
+    let asset1_profile = state::read_asset_oracle_profile(&data, 1).unwrap();
+    assert_eq!(after.assets[0].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(after.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(after.assets[1].effective_price, 250);
+    assert_eq!(asset1_profile.asset_admin, asset1_admin.pubkey().to_bytes());
+}
+
 #[test]
 fn v16_attack_restart_asset_oracle_rejects_backing_state_without_mutation() {
     let mut env = V16CuEnv::new();
