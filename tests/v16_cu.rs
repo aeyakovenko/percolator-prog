@@ -45337,6 +45337,123 @@ fn v16_attack_asset_activation_cooldown_enforced() {
     );
 }
 
+// security.md sweep - retired-slot reuse must respect the same activation cooldown as append
+// (#30/#48). Otherwise an attacker could churn a single reusable slot through market ids/epochs in a
+// tight loop. Rejected permissionless reuse must also leave the creator's init-fee source untouched.
+#[test]
+fn v16_attack_permissionless_reuse_respects_activation_cooldown_and_fee_atomicity() {
+    const FEE: u128 = 40;
+    let mut env = V16CuEnv::new();
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    env.update_market_init_fee_policy_with_cu(FEE);
+
+    env.svm.warp_to_slot(5);
+    env.activate_asset(1, 5, 100);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        5,
+        0,
+    );
+    let (cfg_retired, retired_group) = env.market_state();
+    assert_eq!(
+        retired_group.assets[1].lifecycle,
+        AssetLifecycleV16::Retired,
+        "slot is reusable after same-slot retire"
+    );
+    assert_eq!(cfg_retired.free_market_slot_count, 1);
+
+    let source = env.token_account(creator.pubkey(), FEE as u64);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+
+    env.svm.expire_blockhash();
+    let same_slot_reuse = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 5,
+            initial_price: 250,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        same_slot_reuse.is_err(),
+        "permissionless retired-slot reuse in the activation cooldown window must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected cooldown reuse must not reactivate the retired slot"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected cooldown reuse must not credit the vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&source).unwrap(),
+        source_before,
+        "rejected cooldown reuse must not pull the creator's fee"
+    );
+
+    env.svm.warp_to_slot(6);
+    let ok_source = env.token_account(creator.pubkey(), FEE as u64);
+    env.svm.expire_blockhash();
+    let reuse_after_cooldown = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 6,
+            initial_price: 250,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ok_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        reuse_after_cooldown.is_ok(),
+        "permissionless reuse should succeed once the cooldown elapses: {reuse_after_cooldown:?}"
+    );
+    let (cfg_after, group_after) = env.market_state();
+    assert_eq!(cfg_after.free_market_slot_count, 0);
+    assert_eq!(group_after.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(group_after.assets[1].effective_price, 250);
+    assert_eq!(env.token_amount(ok_source), 0);
+    assert_eq!(env.token_amount(env.vault), FEE as u64);
+    assert_eq!(group_after.vault, FEE);
+    assert_eq!(group_after.insurance, FEE);
+    assert_eq!(
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap()
+            .asset_admin,
+        creator.pubkey().to_bytes(),
+        "successful reuse installs fresh creator-scoped authorities"
+    );
+}
+
 // security.md sweep - stale-resolve junior/senior drift (#30/#33/#35/#48):
 // ConvertReleasedPnl is owner-gated, but it still moves source-backed junior PnL into senior
 // withdrawable capital. Once the market is resolve-matured, that conversion must freeze before the
