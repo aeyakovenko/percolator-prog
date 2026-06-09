@@ -28925,6 +28925,86 @@ fn v16_attack_backing_fee_policy_authority_gated() {
     );
 }
 
+// security.md sweep - cross-asset fee-policy isolation (#6/#104): UpdateBackingFeePolicy is a
+// shared config write guarded by the target domain's insurance_authority. An authority for asset 1
+// must not be able to mutate asset 0's backing fee policy or the global nonzero-policy counter.
+#[test]
+fn v16_attack_cross_asset_insurance_authority_cannot_update_other_backing_fee_policy() {
+    let mut env = V16CuEnv::new();
+    let asset1_insurance = Keypair::new();
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        asset1_insurance.pubkey(),
+        env.admin.pubkey(),
+        env.admin.pubkey(),
+        env.admin.pubkey(),
+    );
+    env.ensure_signer_account(asset1_insurance.pubkey());
+
+    let market_before = env.svm.get_account(&env.market).unwrap().data;
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateBackingFeePolicy {
+            domain: 0,
+            fee_bps: 91,
+            insurance_share_bps: 5_000,
+        },
+        vec![
+            AccountMeta::new(asset1_insurance.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&asset1_insurance],
+    );
+    assert!(
+        rejected.is_err(),
+        "asset-1 insurance authority must not update asset-0 backing fee policy"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_before,
+        "cross-asset policy rejection must not mutate shared config/profile bytes"
+    );
+
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateBackingFeePolicy {
+            domain: 2,
+            fee_bps: 91,
+            insurance_share_bps: 5_000,
+        },
+        vec![
+            AccountMeta::new(asset1_insurance.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&asset1_insurance],
+    )
+    .expect("asset-1 insurance authority updates its own backing fee policy");
+
+    let market_after = env.svm.get_account(&env.market).unwrap();
+    let (cfg_after, _) = env.market_state();
+    let profile0 = state::read_asset_oracle_profile(&market_after.data, 0).unwrap();
+    let profile1 = state::read_asset_oracle_profile(&market_after.data, 1).unwrap();
+    assert_eq!(cfg_after.backing_trade_fee_policy_count, 1);
+    assert_eq!(
+        cfg_after.backing_trade_fee_bps_long, 0,
+        "asset-0 backing fee policy remains unset"
+    );
+    assert_eq!(
+        profile0.backing_trade_fee_bps_long, 0,
+        "asset-0 profile remains untouched"
+    );
+    assert_eq!(profile1.backing_trade_fee_bps_long, 91);
+    assert_eq!(profile1.backing_trade_fee_insurance_share_bps_long, 5_000);
+}
+
 // security.md sweep — global policy bounds (#3/#6/#37): marketauth controls cranker reward and
 // fee policies, but even the authorized key must not be able to install over-100% reward shares,
 // over-max trade fees, oversized permissionless-init fees, or a nonzero insurance split on a zero
