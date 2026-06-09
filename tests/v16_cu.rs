@@ -14926,6 +14926,137 @@ fn v16_attack_resolved_payout_dual_mint_replay_extracts_nothing() {
     );
 }
 
+// security.md sweep - resolved top-up dual-mint rail isolation (#33/#44/#48):
+// ClaimResolvedPayoutTopup is a separate unsigned terminal path from CloseResolved. A pending top-up
+// may be paid through the secondary reserve, but that must finalize the shared receipt so raw primary
+// reserve liquidity cannot be replay-drained afterward.
+#[test]
+fn v16_attack_resolved_payout_topup_secondary_rail_exhausts_shared_receipt() {
+    let mut env = V16CuEnv::new();
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, env.vault_authority, 60),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 60);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    {
+        let mut market_account = env.svm.get_account(&env.market).expect("market account");
+        let mut portfolio_account = env.svm.get_account(&portfolio).expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 100 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 100,
+            paid_effective: 40,
+            finalized: false,
+        };
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        env.svm.set_account(env.market, market_account).unwrap();
+        env.svm.set_account(portfolio, portfolio_account).unwrap();
+    }
+
+    let secondary_dest = env.token_account_for_mint(secondary, owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let secondary_claim = env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        secondary_claim.is_ok(),
+        "pending resolved payout top-up should be payable through the secondary rail: {secondary_claim:?}"
+    );
+    assert_eq!(
+        env.token_amount(secondary_dest),
+        60,
+        "secondary rail paid exactly the pending top-up"
+    );
+    assert_eq!(
+        env.token_amount(secondary_vault),
+        0,
+        "secondary reserve was spent by the top-up"
+    );
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
+    assert!(account.resolved_payout_receipt.finalized);
+    assert_eq!(
+        env.market_state().1.vault,
+        0,
+        "shared accounting vault exhausted after secondary top-up"
+    );
+
+    let primary_replay_dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let primary_replay = env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(primary_replay_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        primary_replay.is_ok(),
+        "finalized top-up replay should be a no-op, not a second payout: {primary_replay:?}"
+    );
+    assert_eq!(
+        env.token_amount(primary_replay_dest),
+        0,
+        "primary replay extracts nothing from the finalized receipt"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "independently funded primary reserve remains untouched by top-up replay"
+    );
+}
+
 // security.md sweep — oracle/mark bounds (#37/#39): the auth-mark push feeds settlement. An extreme
 // mark (0 or u64::MAX) must be rejected/clamped, never corrupt pnl or panic the program.
 #[test]
