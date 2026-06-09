@@ -31017,6 +31017,95 @@ fn v16_attack_liquidation_cranker_reward_bounded_by_fee() {
     );
 }
 
+// LoF/conservation sweep — liquidation cranker share at the 100% boundary (liquidation_cranker_fee_share_
+// bps == 10_000). Unlike the maintenance-fee share (routed through insurance), the liquidation fee is
+// charged to the LIQUIDATED account's collateral and split between the cranker and insurance. At 100%
+// share the cranker takes the ENTIRE fee and insurance gets ZERO — the extreme where a regression could
+// over-pay the cranker beyond the fee (mint) or leak to insurance. Proves: cranker_reward == total_fee,
+// insurance delta == 0, the reward never exceeds the fee, and the fee mints no vault tokens (internal
+// transfer only). The existing bounded test only exercises a 50% share (exact cranker/insurance split).
+#[test]
+fn v16_attack_liquidation_full_cranker_share_takes_whole_fee_no_mint() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(10_000); // 100% cranker share — the boundary
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let lo = Keypair::new();
+    let l = env.create_portfolio(&lo);
+    let so = Keypair::new();
+    let s = env.create_portfolio(&so);
+    let co = Keypair::new();
+    let c = env.create_portfolio(&co); // cranker
+    env.deposit(&lo, l, 100_000_000);
+    env.deposit(&so, s, 100_000); // thin short -> insolvent on a price doubling
+    env.deposit(&co, c, 1_000);
+    env.trade_asset_with_cu(0, &lo, l, &so, s, POS_SCALE as i128, 1_000_000, 0);
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: slot,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(s, false),
+            ],
+            &[],
+        );
+    }
+    let c0 = env.portfolio_state(c).capital;
+    let (_, g0) = env.market_state();
+
+    // Liquidate the insolvent short, crediting the cranker portfolio.
+    env.svm.expire_blockhash();
+    let r = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 30,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(co.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(s, false),
+            AccountMeta::new(c, false),
+        ],
+        &[&co],
+    );
+    assert!(r.is_ok(), "liquidation with a fee should proceed: {r:?}");
+
+    let (_, g1) = env.market_state();
+    let cranker_reward = env.portfolio_state(c).capital as i128 - c0 as i128;
+    let ins_delta = g1.insurance as i128 - g0.insurance as i128;
+    let total_fee = cranker_reward + ins_delta;
+
+    assert!(cranker_reward > 0, "cranker received a real reward (non-vacuous): {cranker_reward}");
+    assert!(total_fee > 0, "a liquidation fee was charged");
+    // 100% share: the cranker takes the ENTIRE fee; insurance gets nothing.
+    assert_eq!(ins_delta, 0, "100%% share: no liquidation fee retained to insurance");
+    assert_eq!(cranker_reward, total_fee, "100%% share: cranker reward == the whole fee");
+    // The reward never exceeds the fee (no profit/mint beyond what was charged).
+    assert!(cranker_reward <= total_fee, "cranker reward bounded by the fee");
+    // The fee is internal (liquidated account -> cranker), minting no vault tokens.
+    assert_eq!(g1.vault, g0.vault, "liquidation fee mints no vault tokens");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation through 100%-share liquidation");
+}
+
 // security.md sweep — liquidation cranker reward account aliasing (#3/#44): when cranker rewards are
 // enabled, the optional reward portfolio must be distinct from the portfolio being liquidated. Otherwise
 // a liquidated account could receive part of its own liquidation fee back in the same crank.
