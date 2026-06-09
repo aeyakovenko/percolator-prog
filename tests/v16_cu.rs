@@ -19386,6 +19386,82 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     assert_eq!(env.token_amount(earnings_dest), 0);
 }
 
+// LoF sweep — deposit must pin the vault to the canonical ATA (F-VAULT-FRAG, SOL-007). Deposit credits
+// engine collateral and moves tokens into `vault_token`, while withdrawals pull from the CANONICAL vault
+// (the ATA of vault_authority+mint). If deposit accepted ANY vault_authority-owned token account, a
+// deposit could be routed into a NON-canonical account: the engine credits capital, but the tokens land
+// in a vault the protocol never reads for withdrawals -> the canonical vault is undercollateralized and
+// the depositor's tokens are stranded (liquidity fragmentation). verify_vault_token_account pins the key
+// to canonical_vault_address, so a fragmented deposit must reject. The F-VAULT-FRAG pinning is tested for
+// withdraw / backing / insurance / domain-topups, but NOT for the deposit path.
+#[test]
+fn v16_attack_deposit_to_noncanonical_vault_rejected() {
+    let mut env = V16CuEnv::new();
+    let primary = env.mint;
+    let vault_authority = env.vault_authority;
+
+    let user = Keypair::new();
+    let p = env.create_portfolio(&user);
+
+    // A legit user-owned source funded with 1_000 primary.
+    let source = env.token_account_for_mint(primary, user.pubkey(), 1_000);
+
+    // A FRAGMENTED vault: a valid token account OWNED BY vault_authority for the right mint, but NOT the
+    // canonical ATA (random address). Same owner + mint as the real vault — only the address differs.
+    let fragmented_vault = Pubkey::new_unique();
+    assert_ne!(
+        fragmented_vault,
+        canonical_vault_ata(vault_authority, primary),
+        "fragmented vault is deliberately not the canonical ATA"
+    );
+    env.svm
+        .set_account(
+            fragmented_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(primary, vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    // ATTACK: deposit routed into the fragmented vault. Must reject (InvalidVaultAccount, Custom 12) —
+    // the engine must NOT credit capital against a vault withdrawals will never read.
+    env.svm.expire_blockhash();
+    let r = env.send(
+        ProgInstruction::Deposit { amount: 1_000 },
+        vec![
+            AccountMeta::new(user.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(fragmented_vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&user],
+    );
+    assert!(r.is_err(), "deposit into a non-canonical vault must reject");
+    assert!(
+        r.unwrap_err().contains("Custom(12)"),
+        "fragmented vault must be InvalidVaultAccount (Custom 12)"
+    );
+    // Atomic: nothing pulled, nothing credited.
+    assert_eq!(env.token_amount(source), 1_000, "rejected deposit pulled no tokens");
+    assert_eq!(env.token_amount(fragmented_vault), 0, "fragmented vault received nothing");
+    assert_eq!(env.portfolio_state(p).capital, 0, "no engine capital credited to a fragmented deposit");
+
+    // CONTROL: the SAME deposit into the CANONICAL vault succeeds and credits capital — proving the
+    // rejection above was the canonical-vault pin, not an unrelated failure.
+    env.deposit(&user, p, 1_000);
+    assert_eq!(
+        env.portfolio_state(p).capital,
+        1_000,
+        "deposit into the canonical vault credits capital normally"
+    );
+}
+
 // security.md sweep — deposit source confusion (#35/#44): the deposit source must be a token account
 // owned by the depositor. Passing the VAULT (or any non-owned account) as the source must reject —
 // otherwise a vault->vault no-op transfer could credit capital for free (mint capital from nothing).
