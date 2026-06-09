@@ -39004,6 +39004,175 @@ fn v16_bpf_batch_trade_14_legs_under_tx_limit() {
     assert_eq!(percolator::active_bitmap_count_ones(t.active_bitmap), 14);
 }
 
+// security.md sweep — batch active-leg cap atomicity (#22/#30/#35): the matcher ABI can return up to
+// 16 legs, while the wrapper caps a portfolio at 14 active legs. A 15-distinct-asset batch must reject
+// without partially opening the first 14 legs or leaving matcher-side state behind; the exact 14-leg
+// boundary still succeeds.
+#[test]
+fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
+    const CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const OVER: u16 = CAP + 1;
+
+    fn setup_env() -> (V16CuEnv, Keypair, Pubkey, Keypair, Pubkey) {
+        let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+            V16CuMarketParams {
+                max_portfolio_assets: CAP,
+                maintenance_margin_bps: 10_000,
+                initial_margin_bps: 10_000,
+                max_price_move_bps_per_slot: 10_000,
+                ..V16CuMarketParams::default()
+            },
+            70,
+        );
+        assert_eq!(env.market_state().1.config.max_market_slots, CAP as u32);
+        env.activate_asset(CAP, 20, 100);
+        let (_, group) = env.market_state();
+        assert_eq!(group.config.max_market_slots, OVER as u32);
+        assert_eq!(group.config.max_portfolio_assets, CAP);
+
+        let taker = Keypair::new();
+        let lp = Keypair::new();
+        let taker_account = env.create_portfolio(&taker);
+        let lp_account = env.create_portfolio(&lp);
+        env.deposit(&taker, taker_account, 100_000_000);
+        env.deposit(&lp, lp_account, 100_000_000);
+        (env, taker, taker_account, lp, lp_account)
+    }
+
+    let nocpi_legs = |count: u16| -> Vec<BatchTradeLeg> {
+        (0..count)
+            .map(|asset_index| BatchTradeLeg {
+                asset_index,
+                size_q: POS_SCALE as i128,
+                exec_price: 100,
+                fee_bps: 0,
+            })
+            .collect()
+    };
+    let cpi_legs = |count: u16| -> Vec<BatchTradeCpiLeg> {
+        (0..count)
+            .map(|asset_index| BatchTradeCpiLeg {
+                asset_index,
+                size_q: POS_SCALE as i128,
+                fee_bps: 0,
+                limit_price: 0,
+            })
+            .collect()
+    };
+
+    {
+        let (mut env, taker, taker_account, lp, lp_account) = setup_env();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_before = env.svm.get_account(&taker_account).unwrap();
+        let lp_before = env.svm.get_account(&lp_account).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: nocpi_legs(OVER),
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+                AccountMeta::new(lp_account, false),
+            ],
+            &[&taker, &lp],
+        );
+        assert!(
+            rejected.is_err(),
+            "15-distinct-leg BatchTradeNoCpi must reject at the portfolio active-leg cap"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+        assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+
+        env.svm.expire_blockhash();
+        let ok = env.send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: nocpi_legs(CAP),
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+                AccountMeta::new(lp_account, false),
+            ],
+            &[&taker, &lp],
+        );
+        assert!(ok.is_ok(), "exact-cap BatchTradeNoCpi must still execute: {ok:?}");
+        let taker_after = env.portfolio_state(taker_account);
+        assert_eq!(
+            percolator::active_bitmap_count_ones(taker_after.active_bitmap),
+            CAP as u32,
+            "exact-cap no-CPI batch opened exactly 14 legs"
+        );
+    }
+
+    {
+        let (mut env, taker, taker_account, lp, lp_account) = setup_env();
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, lp_account);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_before = env.svm.get_account(&taker_account).unwrap();
+        let lp_before = env.svm.get_account(&lp_account).unwrap();
+        let ctx_before = env.svm.get_account(&ctx).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::BatchTradeCpi {
+                legs: cpi_legs(OVER),
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+                AccountMeta::new(lp_account, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker],
+        );
+        assert!(
+            rejected.is_err(),
+            "15-distinct-leg BatchTradeCpi must reject after matcher return validation"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+        assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+        assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+
+        env.svm.expire_blockhash();
+        let ok = env.send(
+            ProgInstruction::BatchTradeCpi {
+                legs: cpi_legs(CAP),
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+                AccountMeta::new(lp_account, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker],
+        );
+        assert!(ok.is_ok(), "exact-cap BatchTradeCpi must still execute: {ok:?}");
+        let taker_after = env.portfolio_state(taker_account);
+        assert_eq!(
+            percolator::active_bitmap_count_ones(taker_after.active_bitmap),
+            CAP as u32,
+            "exact-cap CPI batch opened exactly 14 legs"
+        );
+    }
+}
+
 // BatchTradeCpi: a single batched matcher CPI fills a MIXED-direction spread (taker long asset 0,
 // short asset 1) against one LP, then both fills apply with one end-state margin check.
 #[test]
