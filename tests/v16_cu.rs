@@ -36763,6 +36763,107 @@ fn v16_attack_hybrid_oracle_rejects_duplicate_or_malformed_leg_config() {
     );
 }
 
+// security.md sweep - Hybrid oracle scalar bounds (#37/#39/#44): feed-shape tests cover duplicate
+// and missing legs; this covers the scalar knobs that can otherwise install a malformed after-hours
+// fallback profile. Rejected scalar configs must leave the market byte-identical.
+#[test]
+fn v16_attack_hybrid_oracle_scalar_bounds_reject_atomically() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+    let admin = env.admin.insecure_clone();
+    let feed = [0xba; 32];
+    let oracle = env.set_pyth_price_with_conf(&feed, 200_000, -6, 0, 100);
+    let feeds = [feed, [0u8; 32], [0u8; 32]];
+    let accounts = vec![
+        AccountMeta::new(admin.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new_readonly(oracle, false),
+    ];
+
+    let reject_unchanged = |env: &mut V16CuEnv,
+                            oracle_leg_count: u8,
+                            max_staleness_secs: u64,
+                            hybrid_soft_stale_slots: u64,
+                            mark_ewma_halflife_slots: u64,
+                            invert: u8,
+                            conf_filter_bps: u16,
+                            label: &str| {
+        let before = env.svm.get_account(&env.market).unwrap();
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ConfigureHybridOracle {
+                asset_index: 0,
+                now_slot: 1,
+                now_unix_ts: 100,
+                oracle_leg_count,
+                oracle_leg_flags: 0,
+                max_staleness_secs,
+                hybrid_soft_stale_slots,
+                mark_ewma_halflife_slots,
+                mark_min_fee: 0,
+                invert,
+                unit_scale: 0,
+                conf_filter_bps,
+                oracle_leg_feeds: feeds,
+            },
+            accounts.clone(),
+            &[&admin],
+        );
+        assert!(rejected.is_err(), "{label} must reject");
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before,
+            "{label} must leave the market byte-identical"
+        );
+    };
+
+    reject_unchanged(&mut env, 0, 60, 3, 10, 0, 500, "zero leg count");
+    reject_unchanged(&mut env, 4, 60, 3, 10, 0, 500, "leg count over cap");
+    reject_unchanged(&mut env, 1, 0, 3, 10, 0, 500, "zero max staleness");
+    reject_unchanged(&mut env, 1, 60, 0, 10, 0, 500, "zero soft-stale slots");
+    reject_unchanged(&mut env, 1, 60, 3, 0, 0, 500, "zero fallback EWMA halflife");
+    reject_unchanged(&mut env, 1, 60, 3, 10, 2, 500, "bad invert flag");
+    reject_unchanged(&mut env, 1, 60, 3, 10, 0, 10_001, "confidence filter over 100%");
+
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureHybridOracle {
+            asset_index: 0,
+            now_slot: 1,
+            now_unix_ts: 100,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 3,
+            mark_ewma_halflife_slots: 10,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: feeds,
+        },
+        accounts,
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "valid Hybrid oracle config remains live after scalar-bound probes: {ok:?}"
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(
+        cfg.oracle_mode,
+        percolator_prog::constants::ORACLE_MODE_HYBRID_AFTER_HOURS
+    );
+    assert_eq!(cfg.mark_ewma_halflife_slots, 10);
+    assert_eq!(group.assets[0].effective_price, 200_000);
+}
+
 // security.md sweep — Pyth exponent bounds (#37/#39): exponent scaling is part of the trusted mark.
 // Out-of-range exponents, over-max scaled prices, and floor-to-zero scaled prices must reject through
 // ConfigureHybridOracle without installing a malformed oracle profile.
