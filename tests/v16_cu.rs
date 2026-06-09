@@ -32701,6 +32701,104 @@ fn v16_attack_oracle_pyth_exponent_bounds_enforced() {
     }
 }
 
+// security.md sweep — oracle mode isolation (#6/#37): once an asset is configured as a Hybrid/external
+// oracle, even the correct oracle_authority must not bypass the external feed by calling pushed-mark
+// entrypoints. The legitimate update path remains PermissionlessCrank with the oracle tail.
+#[test]
+fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0xb6u8; 32];
+    let initial = env.set_pyth_price_with_conf(&feed, 100, 0, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial],
+        1,
+        100,
+        0,
+        0,
+        100,
+        0,
+    )
+    .expect("configure a one-leg external oracle");
+    assert_eq!(env.market_state().1.assets[0].effective_price, 100_000_000);
+
+    let admin = env.admin.insecure_clone();
+    let hybrid_before = env.svm.get_account(&env.market).unwrap();
+    set_test_clock(&mut env, 2, 101);
+    env.svm.expire_blockhash();
+    let auth_push = env.send(
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 9_999_999,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        auth_push.is_err(),
+        "PushAuthMark must not override a Hybrid/external oracle asset"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        hybrid_before,
+        "rejected PushAuthMark leaves the Hybrid oracle profile unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    let ewma_push = env.send(
+        ProgInstruction::PushEwmaMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 9_999_999,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ewma_push.is_err(),
+        "PushEwmaMark must not override a Hybrid/external oracle asset"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        hybrid_before,
+        "rejected PushEwmaMark leaves the Hybrid oracle profile unchanged"
+    );
+
+    let cranker = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker);
+    let updated = env.set_pyth_price_with_conf(&feed, 110, 0, 0, 101);
+    env.svm.expire_blockhash();
+    env.crank_with_oracle_tail(
+        cranker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &[updated],
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].raw_oracle_target_price,
+        110_000_000,
+        "external oracle tail remains the valid update path"
+    );
+}
+
 #[test]
 fn v16_attack_crank_oracle_feed_id_mismatch_rejects_without_mutation() {
     let mut env = V16CuEnv::new();
