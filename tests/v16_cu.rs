@@ -12652,6 +12652,102 @@ fn v16_attack_retire_rejects_funded_insurance_domain_budget() {
     );
 }
 
+// security.md sweep - RETIRE must also reject funded backing buckets (#22/#48): retiring an asset
+// canonicalizes its slot for reuse. If fresh backing principal survived retirement, the provider's
+// funds would become unreachable once the inactive slot can no longer be withdrawn from, and reuse
+// could inherit stale backing bytes. This is distinct from the funded insurance-budget guard above.
+#[test]
+fn v16_attack_retire_rejects_funded_backing_bucket() {
+    let mut env = V16CuEnv::new();
+    env.activate_asset(1, 1, 100);
+    env.top_up_backing_bucket(2, 700, 10_000);
+    let (_, funded_group) = env.market_state();
+    assert_eq!(
+        funded_group.source_backing_buckets[2].fresh_unliened_backing_num,
+        700 * BOUND_SCALE,
+        "asset-1 backing bucket funded (non-vacuous)"
+    );
+
+    let admin = env.admin.insecure_clone();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.warp_to_slot(3);
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_RETIRE,
+            asset_index: 1,
+            now_slot: 3,
+            initial_price: 0,
+            insurance_authority: admin.pubkey().to_bytes(),
+            insurance_operator: admin.pubkey().to_bytes(),
+            backing_bucket_authority: admin.pubkey().to_bytes(),
+            oracle_authority: admin.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "RETIRE must reject while the asset's backing bucket holds principal"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected backing-funded RETIRE must not mutate the market"
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Active,
+        "asset-1 stays Active after the rejected RETIRE"
+    );
+
+    let backing_dest = env.token_account(admin.pubkey(), 0);
+    env.withdraw_backing_bucket_to_admin_token_with_cu(backing_dest, 2, 700);
+    assert_eq!(
+        env.token_amount(backing_dest),
+        700,
+        "backing provider can recover the funded bucket"
+    );
+
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_RETIRE,
+            asset_index: 1,
+            now_slot: 4,
+            initial_price: 0,
+            insurance_authority: admin.pubkey().to_bytes(),
+            insurance_operator: admin.pubkey().to_bytes(),
+            backing_bucket_authority: admin.pubkey().to_bytes(),
+            oracle_authority: admin.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        accepted.is_ok(),
+        "RETIRE succeeds once the backing bucket is drained: {accepted:?}"
+    );
+    let (_, retired_group) = env.market_state();
+    assert_eq!(
+        retired_group.assets[1].lifecycle,
+        AssetLifecycleV16::Retired,
+        "asset-1 retired after backing principal is drained"
+    );
+    assert_eq!(
+        retired_group.source_backing_buckets[2].fresh_unliened_backing_num,
+        0,
+        "retired slot carries no stale backing principal"
+    );
+}
+
 // Coverage probe (audit, Finding G): close_resolved_account_not_atomic charges an
 // accrued maintenance fee into group.insurance (handle_close_resolved passes
 // cfg.maintenance_fee_per_slot) but the wrapper does NOT credit any per-domain
