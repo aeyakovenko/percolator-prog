@@ -27174,6 +27174,103 @@ fn v16_attack_withdraw_insurance_domain_budget_cannot_be_overdrawn() {
     conserve(&env);
 }
 
+// LoF sweep — dual-mint domain-insurance shared budget (SOL-002 state asymmetry, protocol funds).
+// `TopUpInsuranceDomain` is funded PRIMARY-only, but `WithdrawInsuranceAsset` (via
+// verify_domain_withdrawal_preflight -> verify_withdrawable_token_accounts) pays out in EITHER the
+// primary or the secondary collateral mint. The danger: a single domain insurance budget of N funds TWO
+// N withdrawals — one per mint — draining the protocol insurance backstop at 2x. This drives that exact
+// double-spend on PROTOCOL funds: top a domain budget to N, withdraw the full N in primary (budget -> 0),
+// then attempt a second N in the secondary mint against a fully-seeded secondary reserve. The engine MUST
+// reject (the domain budget is one mint-agnostic counter, already 0), the reserve must be untouched, and
+// no more than N may ever leave. This is the insurance-path analogue of the user-capital double-withdraw:
+// a DIFFERENT handler (handle_withdraw_insurance_asset), a DIFFERENT counter (insurance_domain_budget),
+// and higher severity (the insurance pool backstops every trader's bad debt). No existing insurance or
+// backing test exercises the dual-mint payout path at all.
+#[test]
+fn v16_attack_dual_mint_domain_insurance_no_double_withdraw() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let primary = env.mint;
+    let vault_authority = env.vault_authority;
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(primary, secondary);
+
+    // Fund asset-0's long-side domain (domain 0) insurance budget = 300, in PRIMARY.
+    env.top_up_insurance_domain_with_authority(&admin, 0, 300);
+    assert_eq!(
+        env.market_state().1.insurance_domain_budget[0], 300,
+        "domain-0 budget funded"
+    );
+
+    // Seed the SECONDARY reserve generously so the ONLY barrier to a second payout is the shared
+    // mint-agnostic budget, never a thin token balance (a donation mints no insurance).
+    let sec_vault = canonical_vault_ata(vault_authority, secondary);
+    env.svm
+        .set_account(
+            sec_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, vault_authority, 1_000),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    // First payout: drain the FULL asset-0 budget in the PRIMARY mint. budget -> 0.
+    let (primary_dest, _) = env
+        .try_withdraw_insurance_asset_with_authority(&admin, 0, 300)
+        .expect("asset-0 operator withdraws its domain insurance in primary");
+    assert_eq!(env.token_amount(primary_dest), 300, "primary payout delivered the full budget");
+    assert_eq!(
+        env.market_state().1.insurance_domain_budget[0], 0,
+        "domain-0 budget fully drained by the primary payout"
+    );
+
+    // Second payout: ask for the SAME 300 again, now in the SECONDARY mint. If the budget were tracked
+    // per-mint (or the debit skipped on the secondary route), this would mint a free 300 of protocol
+    // insurance from the seeded reserve. It must reject: the budget is shared and already zero.
+    let sec_dest = env.token_account_for_mint(secondary, admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let r_double = env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 300,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(sec_dest, false),
+            AccountMeta::new(sec_vault, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        r_double.is_err(),
+        "second cross-mint insurance payout of an exhausted budget MUST reject (no free protocol mint)"
+    );
+    assert_eq!(env.token_amount(sec_dest), 0, "rejected secondary payout delivered nothing");
+    assert_eq!(
+        env.token_amount(sec_vault),
+        1_000,
+        "secondary insurance reserve is byte-identical after the rejected double-withdraw"
+    );
+    assert_eq!(
+        env.market_state().1.insurance_domain_budget[0], 0,
+        "budget stays zero; the rejected attempt did not resurrect or double it"
+    );
+
+    // Net conservation: one N budget paid out exactly N across BOTH mints, never 2N.
+    assert_eq!(
+        env.token_amount(primary_dest) + env.token_amount(sec_dest),
+        300,
+        "protocol insurance paid exactly the funded budget, not double"
+    );
+}
+
 // security.md sweep — uniform live insurance API (#6/#23/#57): asset 0 and permissionless assets 1..N
 // both withdraw through the same asset-indexed tag. The signer must be that asset's insurance_operator,
 // and the withdrawal is bounded to that asset's own long+short insurance budget.
