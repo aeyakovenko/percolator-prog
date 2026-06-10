@@ -8325,6 +8325,78 @@ fn v16_attack_non_owner_cannot_close_flat_portfolio() {
     );
 }
 
+// security.md sweep - ClosePortfolio legacy realloc rollback (#6/#44/#48):
+// ClosePortfolio grows legacy portfolio accounts before checking whether the
+// signer owns the portfolio. A hostile signer must not be able to leave a
+// victim's legacy account expanded/zero-filled, move rent, or decrement the
+// materialized portfolio count before the owner check rejects.
+#[test]
+fn v16_attack_non_owner_close_rolls_back_legacy_realloc() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let mut legacy = env.svm.get_account(&portfolio).unwrap();
+    legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(portfolio, legacy).unwrap();
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup simulates a legacy initialized portfolio without the matcher tail"
+    );
+
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "legacy victim portfolio is materialized before the close attempt"
+    );
+
+    env.svm.expire_blockhash();
+    let bad_close = env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(mallory.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&mallory],
+    );
+    assert!(
+        bad_close.is_err(),
+        "non-owner close of a legacy victim portfolio must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected legacy close must not move rent or decrement materialized count"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected legacy close rolls back the pre-auth realloc and zero-fill"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed close does not leave a public legacy realloc behind"
+    );
+
+    let close_cu = env.close_portfolio_with_cu(&owner, portfolio);
+    assert_cu_within(
+        "ClosePortfolio legacy owner retry",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "the real owner can still close after the rejected legacy realloc attempt"
+    );
+}
+
 #[test]
 fn v16_attack_close_portfolio_rejects_occupied_source_domain_without_claim_bound() {
     let mut env = V16CuEnv::new();
