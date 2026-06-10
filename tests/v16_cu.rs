@@ -31094,6 +31094,105 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
     assert_domain_budget_remaining_total_consistent(&group, "bounded global policy reward");
 }
 
+// security.md sweep - trade-fee authority isolation (#6/#33): UpdateTradeFeePolicy is a
+// market-wide economic knob, but the code intentionally gates it to asset-0's insurance authority.
+// After asset-0 insurance is rotated away from marketauth, stale marketauth must not be able to raise
+// the fee floor and grief trading; the new asset-0 insurance key can set it, and the fee is charged.
+#[test]
+fn v16_attack_trade_fee_policy_follows_asset0_insurance_authority() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let new_insurance = Keypair::new();
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&new_insurance),
+        0,
+        processor::ASSET_AUTH_INSURANCE,
+        new_insurance.pubkey().to_bytes(),
+    )
+    .expect("rotate asset-0 insurance authority away from marketauth");
+    assert_eq!(
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap()
+            .insurance_authority,
+        new_insurance.pubkey().to_bytes()
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let stale_marketauth = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 500,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale_marketauth.is_err(),
+        "old marketauth must not control the trade fee floor after asset-0 insurance rotates"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale marketauth fee update leaves market bytes unchanged"
+    );
+    assert_eq!(env.market_state().0.trade_fee_base_bps, 0);
+
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 500,
+        },
+        vec![
+            AccountMeta::new(new_insurance.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&new_insurance],
+    )
+    .expect("current asset-0 insurance authority updates the trade fee floor");
+    assert_eq!(env.market_state().0.trade_fee_base_bps, 500);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    let insurance_before = env.market_state().1.insurance;
+
+    env.svm.expire_blockhash();
+    env.try_trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    )
+    .expect("trade succeeds with caller fee_bps=0 after the insurance authority sets the floor");
+    let (_, group) = env.market_state();
+    assert!(
+        group.insurance > insurance_before,
+        "trade paid the asset-0-insurance-authorized fee floor"
+    );
+    assert_eq!(
+        group.vault,
+        group.c_tot + group.insurance,
+        "fee-floor trade remains exactly conserved"
+    );
+}
+
 // security.md sweep - permissionless asset authority isolation (#6/#33): the creator of asset N owns
 // that asset's local domain authorities, but must not be able to mutate market-wide knobs or market 0
 // policies. Discriminating control: the same creator CAN update asset N's own backing-fee domain.
