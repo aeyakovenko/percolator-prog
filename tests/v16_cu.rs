@@ -18472,6 +18472,169 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
     assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
 }
 
+// security.md sweep - matcher self-CPI / protocol-context isolation (#22/#26/#44): the matcher CPI
+// boundary must be an external program/context. An LP must not be able to authorize the Percolator
+// program itself with the market slab as matcher_ctx; if a stale/corrupt config already contains that
+// tuple, TradeCpi and BatchTradeCpi must still reject before invoking or mutating protocol state.
+#[test]
+fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
+    let mut env = V16CuEnv::new();
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+
+    let self_delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp,
+        &lp_owner.pubkey(),
+        &env.program_id,
+        &env.market,
+    );
+    env.svm
+        .set_account(
+            self_delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market_before_config = env.svm.get_account(&env.market).unwrap();
+    let lp_before_config = env.svm.get_account(&lp).unwrap();
+    env.svm.expire_blockhash();
+    let self_config = env.send(
+        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        vec![
+            AccountMeta::new(lp_owner.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(env.program_id, false),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new_readonly(self_delegate, false),
+        ],
+        &[&lp_owner],
+    );
+    assert!(
+        self_config.is_err(),
+        "SetMatcherConfig must reject Percolator itself as matcher_program/context"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_config,
+        "rejected self-matcher config leaves the market slab unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp).unwrap(),
+        lp_before_config,
+        "rejected self-matcher config does not arm the LP account"
+    );
+
+    let mut corrupt_lp = env.svm.get_account(&lp).unwrap();
+    state::write_portfolio_matcher_config(
+        &mut corrupt_lp.data,
+        &state::PortfolioMatcherConfigV16 {
+            matcher_program: env.program_id.to_bytes(),
+            matcher_context: env.market.to_bytes(),
+            matcher_delegate: self_delegate.to_bytes(),
+            enabled: 1,
+        },
+    )
+    .expect("inject stale self-matcher config for fill-time guard");
+    env.svm.set_account(lp, corrupt_lp).unwrap();
+
+    let market_before_fill = env.svm.get_account(&env.market).unwrap();
+    let taker_before_fill = env.svm.get_account(&taker).unwrap();
+    let lp_before_fill = env.svm.get_account(&lp).unwrap();
+    let send_self_single = |env: &mut V16CuEnv| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q: (5 * POS_SCALE) as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            vec![
+                AccountMeta::new(taker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker, false),
+                AccountMeta::new(lp, false),
+                AccountMeta::new_readonly(env.program_id, false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new_readonly(self_delegate, false),
+            ],
+            &[&taker_owner],
+        )
+    };
+    let self_single = send_self_single(&mut env);
+    assert!(
+        self_single.is_err(),
+        "TradeCpi must reject a self-program matcher tuple before CPI"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_fill);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before_fill);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before_fill);
+
+    env.svm.expire_blockhash();
+    let self_batch = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: (5 * POS_SCALE) as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(env.program_id, false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(self_delegate, false),
+        ],
+        &[&taker_owner],
+    );
+    assert!(
+        self_batch.is_err(),
+        "BatchTradeCpi must reject a self-program matcher tuple before CPI"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_fill);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before_fill);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before_fill);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+    env.svm.expire_blockhash();
+    let ok = env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        ctx,
+        delegate,
+        0,
+        (5 * POS_SCALE) as i128,
+        100,
+    );
+    assert!(
+        ok.is_ok(),
+        "external matcher tuple still fills after self-program attempts: {ok:?}"
+    );
+}
+
 #[test]
 fn v16_attack_set_matcher_config_reallocs_legacy_lp_portfolio_safely() {
     let mut env = V16CuEnv::new();
