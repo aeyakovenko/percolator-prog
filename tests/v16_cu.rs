@@ -42280,6 +42280,117 @@ fn v16_attack_permissionless_append_zero_authority_rolls_back_realloc_and_fee() 
     assert_eq!(valid_group.assets[1].lifecycle, AssetLifecycleV16::Active);
 }
 
+// security.md sweep - permissionless append invalid oracle price rollback (#5/#24/#44/#48):
+// asset activation accepts a caller-supplied initial oracle price and reaches the dynamic append
+// path after validating the fee accounts. A zero or over-MAX price must not install an unusable
+// asset, grow the market, or pull the permissionless init fee.
+#[test]
+fn v16_attack_permissionless_append_invalid_price_rolls_back_realloc_and_fee() {
+    const FEE: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(FEE);
+    env.svm.warp_to_slot(1);
+
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let (_, group_before) = env.market_state();
+
+    for (label, bad_price) in [
+        ("zero initial price", 0),
+        (
+            "initial price above MAX_ORACLE_PRICE",
+            percolator::MAX_ORACLE_PRICE + 1,
+        ),
+    ] {
+        let source = env.token_account(creator.pubkey(), FEE as u64);
+        let source_before = env.svm.get_account(&source).unwrap();
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+                asset_index: 1,
+                now_slot: 1,
+                initial_price: bad_price,
+                insurance_authority: creator.pubkey().to_bytes(),
+                insurance_operator: creator.pubkey().to_bytes(),
+                backing_bucket_authority: creator.pubkey().to_bytes(),
+                oracle_authority: creator.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&creator],
+        );
+        assert!(rejected.is_err(), "{label} must reject");
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label} must roll back the dynamic-append market realloc"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "{label} must not move canonical vault custody"
+        );
+        assert_eq!(
+            env.svm.get_account(&source).unwrap(),
+            source_before,
+            "{label} must not pull the creator's init fee"
+        );
+        let (_, rejected_group) = env.market_state();
+        assert_eq!(
+            rejected_group.config.max_market_slots,
+            group_before.config.max_market_slots,
+            "{label} must not append a market slot"
+        );
+        assert_eq!(
+            rejected_group.insurance, group_before.insurance,
+            "{label} must not credit market insurance"
+        );
+        assert_eq!(
+            rejected_group.vault, group_before.vault,
+            "{label} must not credit accounting vault"
+        );
+    }
+
+    let valid_source = env.token_account(creator.pubkey(), FEE as u64);
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(valid_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        accepted.is_ok(),
+        "valid permissionless append still succeeds after rejected bad prices: {accepted:?}"
+    );
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(group_after.assets[1].effective_price, 100);
+    assert_eq!(env.token_amount(valid_source), 0);
+}
+
 // security.md sweep — permissionless create fee funds asset-0 insurance (#5 / README L59): the fee a
 // stranger pays to permissionlessly create asset N flows entirely into asset-0's insurance (the market
 // insurance pool + asset-0's per-domain budgets), conserving every atom.
