@@ -23622,6 +23622,134 @@ fn v16_attack_resolved_payout_paths_cannot_use_market_as_portfolio_alias() {
     );
 }
 
+// security.md sweep - unsigned top-up legacy realloc rollback (#5/#33/#44/#48):
+// ClaimResolvedPayoutTopup is intentionally permissionless and grows legacy
+// portfolio storage before validating the destination token account. A cranker
+// with a bad destination must not be able to leave the victim's legacy account
+// expanded/zero-filled, burn the pending receipt, or move vault custody.
+#[test]
+fn v16_attack_claim_resolved_topup_bad_dest_rolls_back_legacy_realloc() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    {
+        let mut market_account = env.svm.get_account(&env.market).expect("market account");
+        let mut portfolio_account = env.svm.get_account(&portfolio).expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 100 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 100,
+            paid_effective: 40,
+            finalized: false,
+        };
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        env.svm.set_account(env.market, market_account).unwrap();
+        env.svm.set_account(portfolio, portfolio_account).unwrap();
+    }
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 60);
+
+    let mut legacy = env.svm.get_account(&portfolio).unwrap();
+    legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(portfolio, legacy).unwrap();
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup simulates a legacy portfolio with a pending top-up receipt"
+    );
+
+    let attacker = Keypair::new();
+    let bad_dest = env.token_account_for_mint(env.mint, attacker.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let bad_dest_before = env.svm.get_account(&bad_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(bad_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "unsigned top-up must reject a destination not owned by the portfolio owner"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected bad-dest top-up leaves terminal payout accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected bad-dest top-up rolls back the legacy realloc and receipt mutation"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected bad-dest top-up moves no vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&bad_dest).unwrap(),
+        bad_dest_before,
+        "bad destination receives no tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed unsigned top-up does not leave a public realloc behind"
+    );
+
+    let good_dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+    let topup_cu = env.claim_resolved_payout_topup_with_cu(owner.pubkey(), portfolio, good_dest);
+    assert_cu_within(
+        "ClaimResolvedPayoutTopup legacy retry",
+        topup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap().data.len(),
+        env.portfolio_account_len,
+        "valid top-up grows legacy storage exactly once"
+    );
+    assert_eq!(
+        env.token_amount(good_dest),
+        60,
+        "same legacy receipt remains claimable after the rejected bad-dest attempt"
+    );
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
+    assert!(account.resolved_payout_receipt.finalized);
+}
+
 // security.md sweep — liquidation of a healthy account (#2): an account above maintenance margin must
 // NOT be liquidatable. A permissionless action:1 crank against a healthy account must be a no-op — no
 // force-close, no fee extraction, position intact.
