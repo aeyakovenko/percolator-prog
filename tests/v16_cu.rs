@@ -50948,3 +50948,2162 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
         assert_eq!(profile.oracle_target_price_e6, 200_000);
     }
 }
+
+
+// ===== Integrated novel coverage distilled from PR #125 and PR #114 (deduped vs the 485 existing tests) =====
+// [from pr125]
+// LoF sweep — deposit/withdraw amount > u64::MAX must reject, never truncate (SOL-014). The instruction
+// `amount` is u128 but SPL token balances are u64: the wrapper credits the ENGINE `amount` (u128) while
+// transferring `amount_to_u64(amount)` tokens. `amount_to_u64` is `u64::try_from`, so amounts above
+// u64::MAX reject. If it instead used `amount as u64`, a deposit of `u64::MAX + 1` would credit the engine
+// ~1.8e19 base units while transferring `(u64::MAX+1) as u64 == 0` tokens — minting collateral from
+// nothing (drain). This drives the boundary: deposit and withdraw with amount == u64::MAX + 1 both reject
+// (InvalidInstruction) with the engine vault/c_tot and the user balances untouched. The existing
+// `large_amount_deposit_withdraw_exact` only exercises the TVL cap (~1e16, far below u64::MAX).
+#[test]
+fn v16_attack_deposit_withdraw_amount_over_u64_max_rejects_no_truncation() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000); // a normal funded position to withdraw against
+
+    let over: u128 = u64::MAX as u128 + 1; // (over as u64) == 0 — the truncation trap
+    let (_, g0) = env.market_state();
+    let cap0 = env.portfolio_state(p).capital;
+
+    // DEPOSIT over u64::MAX: must reject before any engine credit / token pull.
+    let src = env.token_account(owner.pubkey(), 1_000);
+    env.svm.expire_blockhash();
+    let r_dep = env.send(
+        ProgInstruction::Deposit { amount: over },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(src, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(r_dep.is_err(), "deposit of amount > u64::MAX must reject (no truncation credit)");
+    assert!(
+        r_dep.unwrap_err().contains("Custom(9)"),
+        "over-u64 deposit must be InvalidInstruction (Custom 9)"
+    );
+    assert_eq!(env.token_amount(src), 1_000, "rejected over-u64 deposit pulled no tokens");
+    assert_eq!(env.portfolio_state(p).capital, cap0, "no engine credit minted by truncation");
+    assert_eq!(env.market_state().1.c_tot, g0.c_tot, "c_tot unchanged");
+
+    // WITHDRAW over u64::MAX: must also reject before any engine debit / token transfer.
+    let dest = env.token_account(owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let r_wd = env.send(
+        ProgInstruction::Withdraw { amount: over },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(r_wd.is_err(), "withdraw of amount > u64::MAX must reject (no truncation debit)");
+    assert!(
+        r_wd.unwrap_err().contains("Custom(9)"),
+        "over-u64 withdraw must be InvalidInstruction (Custom 9)"
+    );
+    assert_eq!(env.token_amount(dest), 0, "rejected over-u64 withdraw delivered nothing");
+    assert_eq!(env.portfolio_state(p).capital, cap0, "capital unchanged by rejected over-u64 withdraw");
+}
+
+// [from pr125]
+// security.md sweep — privilege/injection (#19/#39): the permissionless crank's LIQUIDATION fee is
+// config-pinned, not caller-injectable. For action=1 (Liquidate) the wrapper builds the engine request
+// with `fee_bps: config.liquidation_fee_bps` (ignoring the caller's fee_bps) AND requires the caller's
+// fee_bps == 0 (`action == 1 && fee_bps != 0 -> InvalidInstruction`). Without that gate a liquidator could
+// pass an inflated fee_bps to over-extract from the liquidated account (or 0 it out). The funding-rate
+// injection test covers funding_rate_e9 / recovery_reason (via action=0), but never the action=1 fee_bps
+// gate. This proves a Liquidate crank with a nonzero caller fee_bps rejects at the top of the handler
+// (InvalidInstruction, Custom 9), while the same crank with fee_bps==0 passes the gate (failing later for
+// an unrelated reason on a healthy account — NOT Custom 9).
+#[test]
+fn v16_attack_crank_liquidation_fee_bps_not_caller_injectable() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000); // a flat, healthy (non-liquidatable) account
+
+    // ATTACK: a Liquidate crank (action=1) supplying a nonzero fee_bps must reject on the parameter gate.
+    env.svm.expire_blockhash();
+    let r_fee = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 1,
+            fee_bps: 5_000, // caller-injected liquidation fee — must be rejected
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+        ],
+        &[],
+    );
+    assert!(r_fee.is_err(), "Liquidate crank with a caller-supplied fee_bps must reject");
+    assert!(
+        r_fee.unwrap_err().contains("Custom(9)"),
+        "caller fee_bps injection must reject as InvalidInstruction (Custom 9), the parameter gate"
+    );
+
+    // CONTROL: the SAME crank with fee_bps == 0 passes the parameter gate and reaches the engine, which
+    // rejects for an unrelated reason (the account is healthy / not liquidatable) — crucially NOT Custom 9.
+    env.svm.expire_blockhash();
+    let r_zero = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 1,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+        ],
+        &[],
+    );
+    assert!(
+        r_zero.is_err(),
+        "liquidating a healthy account still fails (nothing to liquidate)"
+    );
+    assert!(
+        !r_zero.unwrap_err().contains("Custom(9)"),
+        "fee_bps==0 must PASS the parameter gate and fail downstream (not the Custom 9 gate)"
+    );
+}
+
+// [from pr125]
+// LoF/safety sweep — SwapSecondaryForPrimary rejects on a single-mint market (no secondary configured).
+// The swap reads `secondary_collateral_mint(&cfg)?`, which returns InvalidMint when
+// cfg.secondary_collateral_mint == [0;32] (the default until UpdateBaseUnitMints installs a pair). This
+// rejection happens BEFORE any token account is validated or moved, so a market that never configured a
+// secondary collateral cannot be tricked into a swap (which would otherwise need to interpret a zero/
+// absent mint). Every existing swap test installs a secondary first; the single-mint reject is uncovered.
+#[test]
+fn v16_attack_swap_on_single_mint_market_rejects_no_secondary() {
+    let mut env = V16CuEnv::new(); // single-mint market: no UpdateBaseUnitMints, secondary stays [0;32]
+    let admin = env.admin.insecure_clone();
+
+    // Real, existing accounts for the 4 token slots (content is irrelevant: the cfg check rejects first).
+    let a = env.token_account(admin.pubkey(), 100);
+    let b = env.token_account(admin.pubkey(), 0);
+    let src_before = env.token_amount(a);
+    let vault_before = env.token_amount(env.vault);
+
+    env.svm.expire_blockhash();
+    let r = env.send(
+        ProgInstruction::SwapSecondaryForPrimary { amount: 100 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(a, false),         // primary_source
+            AccountMeta::new(env.vault, false), // primary_vault
+            AccountMeta::new(b, false),         // secondary_dest (placeholder)
+            AccountMeta::new(a, false),         // secondary_vault (placeholder)
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        r.is_err(),
+        "SwapSecondaryForPrimary on a market with no configured secondary mint must reject"
+    );
+    assert!(
+        r.unwrap_err().contains("Custom(10)"),
+        "no-secondary swap must reject as InvalidMint (Custom 10)"
+    );
+    // Nothing moved: the rejection is before any transfer.
+    assert_eq!(env.token_amount(a), src_before, "no primary pulled by the rejected swap");
+    assert_eq!(env.token_amount(env.vault), vault_before, "primary vault unchanged");
+}
+
+// [from pr125]
+// LoF sweep — Pyth price updates must be FULLY verified (SOL-024 oracle integrity). read_pyth_price_e6
+// rejects unless data[OFF_VERIFICATION_LEVEL] == PYTH_VERIFICATION_FULL_TAG (1). The Pyth Solana Receiver
+// can write a PriceUpdateV2 at a PARTIAL verification level (fewer guardian signatures verified); trusting
+// such a partially-verified price as the settlement mark would accept oracle data the receiver itself did
+// not fully validate — a manipulation/mispricing vector (LoF). Drives the gate: a FULL price configures,
+// while partial (0) and any other non-FULL level reject as OracleInvalid. No existing test varies the
+// Pyth verification level (make_pyth_data hardcodes FULL).
+#[test]
+fn v16_attack_pyth_partial_verification_rejected() {
+    let feed = [0x55u8; 32];
+    let configure = |verification_level: u8| -> (bool, Option<String>) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let mut data = make_pyth_data(&feed, 200_000, -6, 0, 100); // well-formed, fresh, in-bounds price
+        data[40] = verification_level; // OFF_VERIFICATION_LEVEL
+        let acct = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                acct,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0u8; 32], [0u8; 32]],
+            &[acct],
+            1,
+            100,
+            0,
+            0,
+            100,
+            0,
+        );
+        (r.is_ok(), r.err())
+    };
+
+    // FULL verification (1) -> configures (proves the price is otherwise valid, isolating the gate).
+    let (full_ok, full_err) = configure(1);
+    assert!(full_ok, "a FULLY-verified Pyth price configures: {full_err:?}");
+
+    // PARTIAL verification (0) -> reject: the price was not fully verified by the Pyth receiver.
+    let (partial_ok, partial_err) = configure(0);
+    assert!(!partial_ok, "a partially-verified Pyth price must reject");
+    assert!(
+        partial_err.unwrap().contains("Custom(26)"),
+        "partial-verification Pyth price must be OracleInvalid (Custom 26)"
+    );
+
+    // Any other non-FULL tag (2) -> also reject (only the exact FULL tag is accepted).
+    let (other_ok, other_err) = configure(2);
+    assert!(!other_ok, "a non-FULL verification tag must reject");
+    assert!(
+        other_err.unwrap().contains("Custom(26)"),
+        "non-FULL verification tag must be OracleInvalid (Custom 26)"
+    );
+}
+
+// [from pr125]
+// LoF sweep — Pyth account header validation: discriminator + minimum length (SOL-019 type confusion).
+// read_pyth_price_e6 rejects an account whose first 8 bytes are not the PriceUpdateV2 anchor discriminator
+// (OracleInvalid) and one shorter than PRICE_UPDATE_V2_MIN_LEN (InvalidAccountData), BEFORE deserializing
+// the price. Combined with the owner check, this stops a Pyth-RECEIVER-owned account that is NOT a
+// PriceUpdateV2 (a different Pyth account type, or a crafted blob) from being parsed as a price feed --
+// type confusion that could inject an arbitrary mark (LoF). No existing test corrupts the Pyth
+// discriminator or truncates the account (make_pyth_data always writes the correct 134-byte header).
+#[test]
+fn v16_attack_pyth_bad_discriminator_or_short_account_rejected() {
+    let feed = [0x55u8; 32];
+    let configure = |mutate: &dyn Fn(&mut Vec<u8>)| -> (bool, Option<String>) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let mut data = make_pyth_data(&feed, 200_000, -6, 0, 100);
+        mutate(&mut data);
+        let acct = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                acct,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let r = env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0u8; 32], [0u8; 32]],
+            &[acct],
+            1,
+            100,
+            0,
+            0,
+            100,
+            0,
+        );
+        (r.is_ok(), r.err())
+    };
+
+    // Control: an untouched (valid header) Pyth account configures.
+    let (ok, ok_err) = configure(&|_d| {});
+    assert!(ok, "a well-formed Pyth account configures: {ok_err:?}");
+
+    // Corrupted anchor discriminator -> rejected before the price is parsed (type confusion blocked).
+    let (disc_ok, disc_err) = configure(&|d| d[0] ^= 0xff);
+    assert!(!disc_ok, "a Pyth account with a wrong discriminator must reject");
+    assert!(
+        disc_err.unwrap().contains("Custom(26)"),
+        "bad Pyth discriminator must be OracleInvalid (Custom 26)"
+    );
+
+    // Truncated account (below PRICE_UPDATE_V2_MIN_LEN) -> rejected on the length gate, no out-of-bounds.
+    let (short_ok, short_err) = configure(&|d| d.truncate(100));
+    assert!(!short_ok, "a too-short Pyth account must reject");
+    let short_msg = short_err.unwrap_or_default();
+    assert!(
+        short_msg.contains("InvalidAccountData") || short_msg.contains("Custom"),
+        "a too-short Pyth account must reject cleanly (no panic / OOB read): {short_msg}"
+    );
+}
+
+// [from pr125]
+// LoF/conservation sweep — liquidation cranker share at the 100% boundary (liquidation_cranker_fee_share_
+// bps == 10_000). Unlike the maintenance-fee share (routed through insurance), the liquidation fee is
+// charged to the LIQUIDATED account's collateral and split between the cranker and insurance. At 100%
+// share the cranker takes the ENTIRE fee and insurance gets ZERO — the extreme where a regression could
+// over-pay the cranker beyond the fee (mint) or leak to insurance. Proves: cranker_reward == total_fee,
+// insurance delta == 0, the reward never exceeds the fee, and the fee mints no vault tokens (internal
+// transfer only). The existing bounded test only exercises a 50% share (exact cranker/insurance split).
+#[test]
+fn v16_attack_liquidation_full_cranker_share_takes_whole_fee_no_mint() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(10_000); // 100% cranker share — the boundary
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let lo = Keypair::new();
+    let l = env.create_portfolio(&lo);
+    let so = Keypair::new();
+    let s = env.create_portfolio(&so);
+    let co = Keypair::new();
+    let c = env.create_portfolio(&co); // cranker
+    env.deposit(&lo, l, 100_000_000);
+    env.deposit(&so, s, 100_000); // thin short -> insolvent on a price doubling
+    env.deposit(&co, c, 1_000);
+    env.trade_asset_with_cu(0, &lo, l, &so, s, POS_SCALE as i128, 1_000_000, 0);
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: slot,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(s, false),
+            ],
+            &[],
+        );
+    }
+    let c0 = env.portfolio_state(c).capital;
+    let (_, g0) = env.market_state();
+
+    // Liquidate the insolvent short, crediting the cranker portfolio.
+    env.svm.expire_blockhash();
+    let r = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 30,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(co.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(s, false),
+            AccountMeta::new(c, false),
+        ],
+        &[&co],
+    );
+    assert!(r.is_ok(), "liquidation with a fee should proceed: {r:?}");
+
+    let (_, g1) = env.market_state();
+    let cranker_reward = env.portfolio_state(c).capital as i128 - c0 as i128;
+    let ins_delta = g1.insurance as i128 - g0.insurance as i128;
+    let total_fee = cranker_reward + ins_delta;
+
+    assert!(cranker_reward > 0, "cranker received a real reward (non-vacuous): {cranker_reward}");
+    assert!(total_fee > 0, "a liquidation fee was charged");
+    // 100% share: the cranker takes the ENTIRE fee; insurance gets nothing.
+    assert_eq!(ins_delta, 0, "100%% share: no liquidation fee retained to insurance");
+    assert_eq!(cranker_reward, total_fee, "100%% share: cranker reward == the whole fee");
+    // The reward never exceeds the fee (no profit/mint beyond what was charged).
+    assert!(cranker_reward <= total_fee, "cranker reward bounded by the fee");
+    // The fee is internal (liquidated account -> cranker), minting no vault tokens.
+    assert_eq!(g1.vault, g0.vault, "liquidation fee mints no vault tokens");
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation through 100%-share liquidation");
+}
+
+// [from pr125]
+// LoF/conservation sweep — maintenance cranker share at the 100% boundary (cranker_share_bps == 10_000).
+// The policy validation rejects > 10_000 but ALLOWS exactly 10_000, so a market can route the ENTIRE
+// maintenance fee to the cranker. The fee passes THROUGH insurance: sync credits the full charged fee to
+// insurance, then `reward = charged * share / 10_000` is moved out to the cranker, with `retained =
+// charged - reward` staying. At 100% share reward == charged, so the cranker takes the whole fee and
+// insurance nets ZERO — the extreme where a regression could underflow insurance (reward > available) or
+// lose/double the fee. Proves conservation holds at the boundary: payer pays exactly the fee, the cranker
+// receives all of it, insurance is unchanged, and the domain-budget total stays consistent. The existing
+// `_is_bounded` test only exercises a 40% share, never the 100% edge.
+#[test]
+fn v16_attack_sync_maintenance_full_cranker_share_conserves_no_insurance_underflow() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    let payer_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.deposit(&payer_owner, payer_portfolio, 100_000_000);
+    env.update_maintenance_fee_policy_with_cu(10_000); // 100% cranker share — the boundary
+
+    let insurance_before = env.market_state().1.insurance;
+
+    env.svm.warp_to_slot(10);
+    env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
+
+    let (_, group) = env.market_state();
+    let payer = env.portfolio_state(payer_portfolio);
+    let cranker = env.portfolio_state(cranker_portfolio);
+
+    // Same fee as the 40%-share test (the fee does not depend on the share): 580.
+    let fee = 100_000_000 - payer.capital;
+    assert_eq!(fee, 580, "maintenance fee charged is the same regardless of share");
+    // 100% share -> the cranker receives the ENTIRE fee...
+    assert_eq!(cranker.capital, 580, "cranker receives the full fee at 100% share");
+    // ...and NOTHING is retained to insurance (and no underflow: insurance is unchanged, not negative).
+    assert_eq!(
+        group.insurance, insurance_before,
+        "at 100% share nothing is retained to insurance (no underflow, no double-credit)"
+    );
+    // Conservation: the payer's debit equals exactly what the cranker received (insurance net zero).
+    assert_eq!(
+        cranker.capital + (group.insurance - insurance_before),
+        fee,
+        "fee fully conserved: cranker reward + retained insurance == charged"
+    );
+    assert_domain_budget_remaining_total_consistent(&group, "100% maintenance cranker share");
+}
+
+// [from pr125]
+// LoF/safety sweep — RebalanceReduce is reduce-ONLY: an over-sized reduce_q cannot flip a position into
+// opposite-side risk. The engine clamps `reduce_q = reduce_q.min(leg.basis_pos_q.unsigned_abs())`, so a
+// reduce can at most take the position to FLAT, never past zero into the other side. Without that clamp,
+// the "reduce" tool would be a backdoor to OPEN fresh opposite-side exposure (a long of N reduced by 2N
+// would become a short of N) — risk creation disguised as risk reduction, bypassing the initial-margin
+// gate that real opens must pass. The existing owner-gated test reduces by EXACTLY the position size
+// (flat either way, so the clamp is never exercised); this drives reduce_q far beyond the position and
+// asserts the result is exactly flat with the sign never inverted, and OI/senior conservation intact.
+#[test]
+fn v16_attack_rebalance_reduce_overshoot_clamps_to_flat_no_flip() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    let la = Keypair::new();
+    let pa = env.create_portfolio(&la);
+    let lb = Keypair::new();
+    let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    // la opens a LONG of POS_SCALE vs lb's short.
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q;
+    assert!(basis0 > 0, "la opened a long position of POS_SCALE");
+
+    // The owner force-reduces with reduce_q FAR larger than the position (3x). The clamp must cap the
+    // reduction at the position size, landing exactly flat — never flipping the long into a short.
+    env.svm.expire_blockhash();
+    let r = env.send(
+        ProgInstruction::RebalanceReduce {
+            asset_index: 0,
+            reduce_q: 3 * POS_SCALE,
+        },
+        vec![
+            AccountMeta::new(la.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(pa, false),
+        ],
+        &[&la],
+    );
+    assert!(r.is_ok(), "over-sized owner reduce should succeed (clamped): {r:?}");
+
+    let after = env.portfolio_state(pa).legs[0].basis_pos_q;
+    assert_eq!(
+        after, 0,
+        "over-reduce clamps to FLAT (0), never flips the long into a short"
+    );
+    // Defense-in-depth: the sign was never inverted (no opposite-side risk opened).
+    assert!(after >= 0, "position must not become negative (no backdoor short open)");
+
+    let (_, g1) = env.market_state();
+    assert_eq!(
+        g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q,
+        "OI still balanced after the clamped reduce"
+    );
+    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation holds");
+}
+
+// [from pr125]
+// DoS/safety sweep — permissionless SettleB (PermissionlessCrank action=2) cannot corrupt or drain a
+// healthy account. SettleB is the bankrupt-account chunk-settlement crank; it is PERMISSIONLESS (anyone
+// may target any portfolio) and, unlike Liquidate (action=1), pays NO cranker reward. The existing crank
+// tests only exercise action=0 (Refresh) and action=1 (Liquidate) — the action=2 dispatch is otherwise
+// untested end-to-end. A SettleB on a flat, solvent account has nothing to settle, so it MUST be a safe
+// no-op for value: the account's capital and the market's vault/c_tot are conserved, no reward is minted,
+// and the owner can still withdraw in full afterward (no fund-trap). Guards the untested permissionless
+// dispatch against being abused to corrupt, drain, or freeze an unrelated healthy account.
+#[test]
+fn v16_attack_permissionless_settle_b_on_healthy_account_is_safe_noop() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000); // flat, solvent — nothing to settle
+
+    let (_, g0) = env.market_state();
+    let cap0 = env.portfolio_state(p).capital;
+    assert_eq!(cap0, 1_000, "account funded and flat");
+
+    // A third party permissionlessly cranks SettleB (action=2) against the healthy account.
+    env.svm.warp_to_slot(5);
+    env.svm.expire_blockhash();
+    let _ = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 2,
+            asset_index: 0,
+            now_slot: 5,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true), // arbitrary cranker
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+        ],
+        &[],
+    );
+    // Whether the engine treats "nothing to settle" as a no-op (Ok) or NonProgress (Err), the invariant is
+    // the same: NO value moved and NO state corruption.
+    let (_, g1) = env.market_state();
+    assert_eq!(env.portfolio_state(p).capital, cap0, "SettleB must not touch a healthy account's capital");
+    assert_eq!(g1.vault, g0.vault, "SettleB must not move the market vault");
+    assert_eq!(g1.c_tot, g0.c_tot, "SettleB must not move c_tot");
+    assert_eq!(g1.insurance, g0.insurance, "SettleB must not mint/burn insurance (no cranker reward)");
+
+    // Liveness: the owner can still withdraw their full capital — the permissionless SettleB did not
+    // freeze or trap the account.
+    let (dest, _) = env.withdraw_with_cu(&owner, p, 1_000);
+    assert_eq!(env.token_amount(dest), 1_000, "account fully withdrawable after a permissionless SettleB");
+}
+
+// [from pr125]
+// LoF/idempotency sweep — CureAndCancelClose cannot be replayed against an already-cured close ledger.
+// A cure leaves the close ledger in the `canceled` (inert) state and escrows the deposit; the preflight
+// rejects any ledger that is not `active` (`!active || canceled || finalized || has_irreversible_progress
+// -> LockActive`). Without that, a second cure could re-run the cancel/escrow path on a stale ledger,
+// double-processing a deposit or resurrecting a settled close. This drives the replay: seed a cancellable
+// close, cure it once (success -> canceled), then attempt a SECOND cure with a funded deposit — which must
+// reject (EngineLockActive) WITHOUT pulling the second deposit. Existing cure tests cover gating, exact
+// deposit, and cross-market rejection, but never the double-cure / canceled-ledger replay.
+#[test]
+fn v16_attack_cure_cannot_be_replayed_on_canceled_close_ledger() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 100);
+    env.seed_cancellable_close_progress(p);
+
+    // First cure (flat account, no extra deposit needed) succeeds and leaves the ledger `canceled`.
+    let src0 = env.token_account(owner.pubkey(), 0);
+    env.cure_and_cancel_close_with_cu(&owner, p, src0, 0);
+
+    // ATTACK: replay the cure with a FUNDED deposit against the now-canceled ledger. Must reject
+    // (EngineLockActive, Custom 21) and must NOT pull the second deposit (no double-escrow).
+    let src1 = env.token_account(owner.pubkey(), 50);
+    env.svm.expire_blockhash();
+    let r_replay = env.send(
+        ProgInstruction::CureAndCancelClose {
+            optional_deposit: 50,
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(src1, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        r_replay.is_err(),
+        "a second cure of an already-canceled close ledger must reject (no replay)"
+    );
+    assert!(
+        r_replay.unwrap_err().contains("Custom(21)"),
+        "double-cure must reject as EngineLockActive (Custom 21)"
+    );
+    assert_eq!(
+        env.token_amount(src1),
+        50,
+        "rejected replay must not pull the second deposit (no double-escrow)"
+    );
+}
+
+// [from pr125]
+// LoF sweep — oracle-authority rotation actually transfers control (revokes old, grants new). Rotating an
+// asset's oracle authority via UpdateAssetAuthority must REVOKE the previous holder's mark-push power and
+// GRANT it to the new key. If rotation only updated state cosmetically (old key still able to push), a
+// rotated-out / compromised key could keep injecting marks to manipulate settlement (LoF); if the new key
+// could not push, the asset's oracle would be bricked (DoS). Drives the functional transfer end-to-end:
+// admin (the bootstrapped oracle authority) pushes once, the asset_admin rotates the oracle authority to a
+// fresh key, then the OLD key's push rejects (Unauthorized) while the NEW key's push succeeds. The
+// existing rotation test checks state-level isolation/burnability, not the functional push transfer.
+#[test]
+fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100); // admin bootstraps as asset 0's oracle authority; mark = 100
+    let admin = env.admin.insecure_clone();
+
+    // Baseline: the current oracle authority (admin) can push a mark.
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    let r0 = env.send(
+        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 2, mark_e6: 110 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(r0.is_ok(), "admin (oracle authority) can push before rotation: {r0:?}");
+
+    // Rotate the ORACLE authority admin -> newauth. admin signs as asset_admin; newauth co-signs (proves
+    // control of the incoming key).
+    let newauth = Keypair::new();
+    env.ensure_signer_account(newauth.pubkey());
+    env.svm.expire_blockhash();
+    let rot = env.send(
+        ProgInstruction::UpdateAssetAuthority {
+            asset_index: 0,
+            kind: percolator_prog::processor::ASSET_AUTH_ORACLE,
+            new_pubkey: newauth.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(newauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin, &newauth],
+    );
+    assert!(rot.is_ok(), "asset_admin rotates the oracle authority: {rot:?}");
+
+    env.svm.warp_to_slot(3);
+    // OLD authority (admin) is now REVOKED: its push must reject as Unauthorized.
+    env.svm.expire_blockhash();
+    let r_old = env.send(
+        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 3, mark_e6: 120 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(r_old.is_err(), "the OLD oracle authority must be revoked after rotation");
+    assert!(
+        r_old.unwrap_err().contains("Custom(8)"),
+        "revoked old authority push must be Unauthorized (Custom 8)"
+    );
+
+    // NEW authority can push: rotation GRANTED control.
+    env.svm.expire_blockhash();
+    let r_new = env.send(
+        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 3, mark_e6: 120 },
+        vec![
+            AccountMeta::new(newauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&newauth],
+    );
+    assert!(r_new.is_ok(), "the NEW oracle authority can push after rotation: {r_new:?}");
+}
+
+// [from pr114]
+// full-interface sweep: the value top-up handlers validate the canonical vault before they mutate
+// market accounting. A delegated canonical vault is unsafe custody even at the right address: donor
+// tokens could be pulled and then drained out-of-band. All top-up variants must reject atomically.
+#[test]
+fn v16_attack_value_topups_reject_delegated_canonical_vault() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+
+    let mut delegated_vault = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: env.mint,
+            owner: env.vault_authority,
+            amount: 0,
+            delegate: COption::Some(Pubkey::new_unique()),
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 1_000,
+            close_authority: COption::None,
+        },
+        &mut delegated_vault,
+    )
+    .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: delegated_vault,
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let assert_core_unchanged = |env: &V16CuEnv, label: &str| {
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label}: market accounting unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "{label}: delegated canonical vault unchanged"
+        );
+    };
+
+    let insurance_source = env.token_account_for_mint(env.mint, admin.pubkey(), 11);
+    let insurance_source_before = env.svm.get_account(&insurance_source).unwrap();
+    env.svm.expire_blockhash();
+    let insurance_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsurance { amount: 11 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        insurance_reject.is_err(),
+        "TopUpInsurance must reject a delegated canonical vault"
+    );
+    assert_core_unchanged(&env, "TopUpInsurance");
+    assert_eq!(
+        env.svm.get_account(&insurance_source).unwrap(),
+        insurance_source_before,
+        "rejected insurance top-up must not pull donor tokens"
+    );
+
+    let domain_source = env.token_account_for_mint(env.mint, admin.pubkey(), 12);
+    let domain_source_before = env.svm.get_account(&domain_source).unwrap();
+    env.svm.expire_blockhash();
+    let domain_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 12,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(domain_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        domain_reject.is_err(),
+        "TopUpInsuranceDomain must reject a delegated canonical vault"
+    );
+    assert_core_unchanged(&env, "TopUpInsuranceDomain");
+    assert_eq!(
+        env.svm.get_account(&domain_source).unwrap(),
+        domain_source_before,
+        "rejected domain insurance top-up must not pull donor tokens"
+    );
+
+    let backing_source = env.token_account_for_mint(env.mint, admin.pubkey(), 13);
+    let backing_source_before = env.svm.get_account(&backing_source).unwrap();
+    env.svm.expire_blockhash();
+    let backing_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 13,
+            expiry_slot: 10_000,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        backing_reject.is_err(),
+        "TopUpBackingBucket must reject a delegated canonical vault"
+    );
+    assert_core_unchanged(&env, "TopUpBackingBucket");
+    assert_eq!(
+        env.svm.get_account(&backing_source).unwrap(),
+        backing_source_before,
+        "rejected backing top-up must not pull donor tokens"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let (_insurance_ok_source, _) = env.top_up_insurance_with_cu(11);
+    let (_domain_ok_source, _) = env.top_up_insurance_domain_with_authority_and_cu(&admin, 0, 12);
+    let (_backing_ok_source, _) = env.top_up_backing_bucket_with_cu(1, 13, 10_000);
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.insurance, 23);
+    assert_eq!(
+        group_after.source_backing_buckets[1].fresh_unliened_backing_num,
+        13 * BOUND_SCALE
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        group_after.vault as u64,
+        "clean-vault controls leave accounting matched to custody"
+    );
+}
+
+// [from pr114]
+// full-interface sweep (cron40): CloseResolved computes and records the resolved payout before
+// validating the supplied vault account. A delegated canonical vault must reject atomically, without
+// finalizing/burning the user's payout state or moving custody.
+#[test]
+fn v16_attack_close_resolved_rejects_delegated_vault_without_burning_payout() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000_000);
+    env.resolve();
+
+    let mut delegated_vault = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: env.mint,
+            owner: env.vault_authority,
+            amount: 1_000_000,
+            delegate: COption::Some(Pubkey::new_unique()),
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 1_000_000,
+            close_authority: COption::None,
+        },
+        &mut delegated_vault,
+    )
+    .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: delegated_vault,
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&p).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "CloseResolved must reject a delegated canonical payout vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected delegated-vault CloseResolved must not mutate market payout accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&p).unwrap(),
+        portfolio_before,
+        "rejected delegated-vault CloseResolved must not finalize or burn the payout"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "delegated vault remains untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "destination receives nothing on rejected delegated-vault payout"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 1_000_000),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        ok.is_ok(),
+        "same resolved payout succeeds after the vault is restored clean: {ok:?}"
+    );
+    assert_eq!(env.token_amount(dest), 1_000_000);
+    assert_eq!(
+        env.market_state().1.vault,
+        0,
+        "resolved payout fully drains accounted vault value"
+    );
+}
+
+// [from pr114]
+// security.md sweep - resolved top-up vault custody (#33/#44/#48): ClaimResolvedPayoutTopup is
+// unsigned and updates the pending receipt before validating the vault token account. A delegated
+// canonical vault must reject atomically, without burning the remaining receipt or moving custody.
+#[test]
+fn v16_attack_claim_resolved_topup_rejects_delegated_vault_without_burning_receipt() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    {
+        let mut market_account = env.svm.get_account(&env.market).expect("market account");
+        let mut portfolio_account = env.svm.get_account(&portfolio).expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 100 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 100,
+            paid_effective: 40,
+            finalized: false,
+        };
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        env.svm.set_account(env.market, market_account).unwrap();
+        env.svm.set_account(portfolio, portfolio_account).unwrap();
+    }
+
+    let mut delegated_vault = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: env.mint,
+            owner: env.vault_authority,
+            amount: 60,
+            delegate: COption::Some(Pubkey::new_unique()),
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 60,
+            close_authority: COption::None,
+        },
+        &mut delegated_vault,
+    )
+    .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: delegated_vault,
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "ClaimResolvedPayoutTopup must reject a delegated canonical vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected delegated-vault top-up must not mutate market payout accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected delegated-vault top-up must not burn the pending receipt"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "delegated vault remains untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "destination receives nothing on rejected delegated-vault top-up"
+    );
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 40);
+    assert!(
+        !account.resolved_payout_receipt.finalized,
+        "receipt remains claimable after delegated-vault rejection"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 60),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let cu = env.claim_resolved_payout_topup_with_cu(owner.pubkey(), portfolio, dest);
+    assert_cu_within(
+        "ClaimResolvedPayoutTopup delegated-vault rollback",
+        cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(dest),
+        60,
+        "same top-up succeeds after the vault is restored clean"
+    );
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
+    assert!(account.resolved_payout_receipt.finalized);
+    assert_eq!(env.market_state().1.vault, 0);
+}
+
+// [from pr114]
+// security.md sweep - terminal insurance vault custody (#33/#44/#48): terminal WithdrawInsurance
+// debits resolved insurance and the optional ledger before validating token custody. A canonical vault
+// that carries a delegate is still unsafe; rejection must roll back market and ledger accounting.
+#[test]
+fn v16_attack_terminal_insurance_withdraw_rejects_delegated_vault_without_debiting_budget() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(100);
+    env.resolve();
+    let ledger = env.insurance_ledger_account();
+    let dest = env.token_account(env.admin.pubkey(), 0);
+
+    let mut delegated_vault = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: env.mint,
+            owner: env.vault_authority,
+            amount: 100,
+            delegate: COption::Some(Pubkey::new_unique()),
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 100,
+            close_authority: COption::None,
+        },
+        &mut delegated_vault,
+    )
+    .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: delegated_vault,
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&env.admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "terminal WithdrawInsurance must reject a delegated canonical vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "delegated-vault terminal insurance withdraw must not debit market budgets"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "delegated-vault terminal insurance withdraw must not rewrite the ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "destination receives nothing through the delegated vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "delegated vault remains byte-identical"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 100);
+    assert_eq!(group.vault, 100);
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 100),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&env.admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "terminal WithdrawInsurance succeeds once the vault is restored clean: {ok:?}"
+    );
+    assert_eq!(env.token_amount(dest), 40);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 60);
+    assert_eq!(group.vault, 60);
+    let ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+}
+
+// [from pr114]
+// full-interface sweep: SwapSecondaryForPrimary validates two distinct vault legs before either SPL
+// transfer. The secondary reserve is covered above; the primary vault must also reject if it carries a
+// delegate, otherwise the market authority could receive secondary collateral while depositing primary
+// into custody that can be drained out-of-band.
+#[test]
+fn v16_attack_swap_secondary_rejects_delegated_primary_vault() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let mut delegated_primary_vault = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: env.mint,
+            owner: env.vault_authority,
+            amount: 0,
+            delegate: COption::Some(Pubkey::new_unique()),
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 10,
+            close_authority: COption::None,
+        },
+        &mut delegated_primary_vault,
+    )
+    .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: delegated_primary_vault,
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 10);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let source_before = env.svm.get_account(&primary_source).unwrap();
+    let dest_before = env.svm.get_account(&secondary_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(primary_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "SwapSecondaryForPrimary must reject a delegated primary vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&primary_source).unwrap(),
+        source_before,
+        "rejected delegated-primary swap must not pull primary collateral"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "rejected delegated-primary swap must not credit unsafe primary custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        dest_before,
+        "rejected delegated-primary swap must not pay secondary collateral"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "rejected delegated-primary swap must not debit the secondary reserve"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(primary_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "same primary vault works once delegate is removed: {ok:?}"
+    );
+    assert_eq!(env.token_amount(primary_source), 0);
+    assert_eq!(env.token_amount(env.vault), 10);
+    assert_eq!(env.token_amount(secondary_dest), 10);
+    assert_eq!(env.token_amount(secondary_vault), 40);
+}
+
+// [from pr114]
+// full-interface sweep (cron35): the secondary collateral reserve is a real value-bearing vault, so it
+// must inherit the same delegate/close-authority hardening as the primary vault. A canonical secondary
+// vault with a delegate could be drained out-of-band; SwapSecondaryForPrimary must reject it before
+// pulling primary collateral or paying secondary collateral.
+#[test]
+fn v16_attack_swap_secondary_rejects_delegated_secondary_vault() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    let mut delegated_reserve = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: secondary_mint,
+            owner: env.vault_authority,
+            amount: 50,
+            delegate: COption::Some(Pubkey::new_unique()),
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 50,
+            close_authority: COption::None,
+        },
+        &mut delegated_reserve,
+    )
+    .unwrap();
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: delegated_reserve,
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 10);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let source_before = env.svm.get_account(&primary_source).unwrap();
+    let dest_before = env.svm.get_account(&secondary_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(primary_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "SwapSecondaryForPrimary must reject a delegated secondary reserve"
+    );
+    assert_eq!(
+        env.svm.get_account(&primary_source).unwrap(),
+        source_before,
+        "rejected delegated-reserve swap must not pull primary collateral"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        dest_before,
+        "rejected delegated-reserve swap must not pay secondary collateral"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "rejected delegated-reserve swap must not credit the primary vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "delegated secondary reserve remains untouched and recoverable"
+    );
+
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(primary_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "same canonical secondary reserve works once delegate is removed: {ok:?}"
+    );
+    assert_eq!(env.token_amount(primary_source), 0);
+    assert_eq!(env.token_amount(secondary_dest), 10);
+    assert_eq!(env.token_amount(secondary_vault), 40);
+}
+
+// [from pr114]
+// full-interface sweep (cron38): the optional secondary reserve is validated before CloseSlab sweeps
+// primary dust. A canonical secondary vault with close_authority set must reject atomically; otherwise
+// terminal cleanup could partially reclaim the primary vault while leaving unsafe secondary custody.
+#[test]
+fn v16_attack_close_slab_rejects_closable_secondary_vault_before_reclaim() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    let mut closable_secondary = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: secondary_mint,
+            owner: env.vault_authority,
+            amount: 50,
+            delegate: COption::None,
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 0,
+            close_authority: COption::Some(Pubkey::new_unique()),
+        },
+        &mut closable_secondary,
+    )
+    .unwrap();
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: closable_secondary,
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.resolve();
+
+    let primary_dest = env.token_account(admin.pubkey(), 0);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let primary_dest_before = env.svm.get_account(&primary_dest).unwrap();
+    let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new(secondary_dest, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "CloseSlab must reject a secondary vault with close_authority set"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected closable-secondary CloseSlab must not zero the market"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "primary dust must not be swept before secondary vault validation"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "closable secondary reserve remains untouched and recoverable"
+    );
+    assert_eq!(env.svm.get_account(&primary_dest).unwrap(), primary_dest_before);
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        secondary_dest_before
+    );
+
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new(secondary_dest, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "same secondary reserve closes once close_authority is removed: {ok:?}"
+    );
+    assert_eq!(env.token_amount(primary_dest), 7);
+    assert_eq!(env.token_amount(secondary_dest), 50);
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(closed_market.lamports, 0);
+    assert!(closed_market.data.iter().all(|b| *b == 0));
+}
+
+// [from pr114]
+// full-interface sweep: a liquidation crank can carry both a hybrid-oracle tail and an optional
+// program-owned cranker reward tail. A malformed reward tail must not let the valid oracle update
+// partially persist before the later reward-account validation fails.
+#[test]
+fn v16_attack_hybrid_liquidation_bad_reward_tail_rolls_back_oracle_update() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0xa9u8; 32];
+    let initial_oracle = env.set_pyth_price_with_conf(&feed, 1_000_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial_oracle],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure hybrid oracle");
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        1_000_000,
+        0,
+    );
+
+    set_test_clock(&mut env, 2, 101);
+    let fresh_oracle = env.set_pyth_price_with_conf(&feed, 2_000_000, -6, 0, 101);
+    let malformed_reward = env.program_account(env.portfolio_account_len);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let short_before = env.svm.get_account(&short).unwrap();
+    let malformed_before = env.svm.get_account(&malformed_reward).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new_readonly(fresh_oracle, false),
+            AccountMeta::new(malformed_reward, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "malformed program-owned reward tail must reject even with a valid hybrid oracle tail"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected mixed-tail crank must not persist the fresh oracle target or liquidation state"
+    );
+    assert_eq!(
+        env.svm.get_account(&short).unwrap(),
+        short_before,
+        "rejected mixed-tail crank must not mutate the liquidated portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&malformed_reward).unwrap(),
+        malformed_before,
+        "rejected mixed-tail crank must not mutate the malformed reward account"
+    );
+
+    let payer_owner = env.payer.insecure_clone();
+    let valid_reward = env.create_portfolio(&payer_owner);
+    let reward_cap_before = env.portfolio_state(valid_reward).capital;
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(payer_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new_readonly(fresh_oracle, false),
+            AccountMeta::new(valid_reward, false),
+        ],
+        &[&payer_owner],
+    );
+    assert!(
+        accepted.is_ok(),
+        "same hybrid liquidation succeeds with a valid reward portfolio: {accepted:?}"
+    );
+    assert!(
+        env.portfolio_state(valid_reward).capital > reward_cap_before,
+        "valid reward portfolio receives the cranker reward"
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(
+        cfg.last_good_oracle_slot, 2,
+        "valid control persists the fresh hybrid oracle update"
+    );
+    assert_eq!(group.assets[0].raw_oracle_target_price, 2_000_000);
+}
+
+// [from pr114]
+// full-interface sweep: live asset-0 insurance withdrawal must follow the current hot
+// insurance_operator, not stale marketauth/asset-admin privilege. This is value-moving: after the
+// operator is rekeyed, the old market authority must not drain the funded asset-0 insurance domain.
+#[test]
+fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let new_operator = Keypair::new();
+
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&new_operator),
+        0,
+        processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        new_operator.pubkey().to_bytes(),
+    )
+    .expect("asset-0 admin rotates the live insurance operator");
+    env.top_up_insurance_domain_with_authority(&admin, 0, 500);
+
+    let (_, group_before) = env.market_state();
+    assert_eq!(
+        group_before.insurance_domain_budget[0], 500,
+        "funded asset-0 insurance domain makes the stale-operator attempt non-vacuous"
+    );
+    let stale_dest = env.token_account(admin.pubkey(), 0);
+    let stale_dest_before = env.svm.get_account(&stale_dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let stale_admin = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale_admin.is_err(),
+        "stale marketauth/asset-admin must not retain live asset-0 insurance-operator power"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_dest).unwrap(),
+        stale_dest_before,
+        "stale operator attempt pays no tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "stale operator attempt does not debit the vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale operator attempt leaves market state unchanged"
+    );
+
+    let operator_dest = env.token_account(new_operator.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let operator_withdraw = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(new_operator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(operator_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&new_operator],
+    );
+    assert!(
+        operator_withdraw.is_ok(),
+        "current asset-0 insurance_operator can withdraw live insurance: {operator_withdraw:?}"
+    );
+    assert_eq!(
+        env.token_amount(operator_dest),
+        100,
+        "current operator receives the withdrawal"
+    );
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.insurance_domain_budget[0], 400);
+    assert_eq!(group_after.insurance, group_before.insurance - 100);
+    assert_eq!(
+        env.token_amount(env.vault),
+        group_after.vault as u64,
+        "engine vault accounting matches SPL vault after rekeyed-operator withdrawal"
+    );
+}
+
+// [from pr114]
+// full-interface sweep: WithdrawBackingBucket has a two-stage authority check where marketauth passes
+// preflight, but live withdrawal must still require the current backing_bucket_authority unless the
+// domain is in shutdown-drain. After asset-0 backing authority is rekeyed, stale marketauth must not
+// drain live provider backing.
+#[test]
+fn v16_attack_asset0_backing_rotation_rekeys_live_bucket_withdraw() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let new_backing = Keypair::new();
+
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&new_backing),
+        0,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        new_backing.pubkey().to_bytes(),
+    )
+    .expect("asset-0 admin rotates the backing-bucket authority");
+    env.top_up_backing_bucket_with_authority(&new_backing, 0, 500, 100_000);
+
+    let (_, group_before) = env.market_state();
+    assert_eq!(
+        group_before.source_backing_buckets[0].fresh_unliened_backing_num,
+        500 * BOUND_SCALE,
+        "funded asset-0 backing bucket makes the stale-authority attempt non-vacuous"
+    );
+    let stale_dest = env.token_account(admin.pubkey(), 0);
+    let stale_dest_before = env.svm.get_account(&stale_dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let stale_admin = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale_admin.is_err(),
+        "stale marketauth must not drain live backing after asset-0 backing authority rotates"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_dest).unwrap(),
+        stale_dest_before,
+        "stale backing-withdraw attempt pays no tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "stale backing-withdraw attempt does not debit the vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale backing-withdraw attempt leaves market state unchanged"
+    );
+
+    let backing_dest = env.token_account(new_backing.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let backing_withdraw = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(new_backing.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&new_backing],
+    );
+    assert!(
+        backing_withdraw.is_ok(),
+        "current asset-0 backing authority can withdraw live backing: {backing_withdraw:?}"
+    );
+    assert_eq!(
+        env.token_amount(backing_dest),
+        100,
+        "current backing authority receives the withdrawal"
+    );
+    let (_, group_after) = env.market_state();
+    assert_eq!(
+        group_after.source_backing_buckets[0].fresh_unliened_backing_num,
+        400 * BOUND_SCALE
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        group_after.vault as u64,
+        "engine vault accounting matches SPL vault after rekeyed backing withdrawal"
+    );
+}
+
+// [from pr114]
+// full-interface sweep: the market-wide handoff also owns base-unit reserve swaps. A stale former
+// marketauth must not keep a value-moving `SwapSecondaryForPrimary` path after rotation, or it could
+// drain the secondary reserve by providing primary collateral under its own control.
+#[test]
+fn v16_attack_update_authority_handoff_rekeys_secondary_swap_authority() {
+    let mut env = V16CuEnv::new();
+    let old_marketauth = env.admin.insecure_clone();
+    let new_marketauth = Keypair::new();
+    env.ensure_signer_account(new_marketauth.pubkey());
+
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 40),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let stale_primary_source =
+        env.token_account_for_mint(env.mint, old_marketauth.pubkey(), 20);
+    let stale_secondary_dest =
+        env.token_account_for_mint(secondary_mint, old_marketauth.pubkey(), 0);
+    let fresh_primary_source =
+        env.token_account_for_mint(env.mint, new_marketauth.pubkey(), 20);
+    let fresh_secondary_dest =
+        env.token_account_for_mint(secondary_mint, new_marketauth.pubkey(), 0);
+
+    env.update_asset_authority_with_cu(&new_marketauth);
+    assert_eq!(
+        env.market_state().0.marketauth,
+        new_marketauth.pubkey().to_bytes(),
+        "market authority rotated to the new signer"
+    );
+
+    let market_before_stale = env.svm.get_account(&env.market).unwrap().data;
+    let primary_vault_before = env.token_amount(env.vault);
+    let secondary_vault_before = env.token_amount(secondary_vault);
+    env.svm.expire_blockhash();
+    let stale_swap = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SwapSecondaryForPrimary { amount: 20 },
+        vec![
+            AccountMeta::new(old_marketauth.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(stale_primary_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(stale_secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&old_marketauth],
+    );
+    assert!(
+        stale_swap.is_err(),
+        "stale marketauth must not retain the value-moving secondary-swap path"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_before_stale,
+        "rejected stale swap does not rewrite market config"
+    );
+    assert_eq!(
+        env.token_amount(stale_primary_source),
+        20,
+        "stale signer primary source is not debited"
+    );
+    assert_eq!(
+        env.token_amount(stale_secondary_dest),
+        0,
+        "stale signer receives no secondary collateral"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        primary_vault_before,
+        "primary vault unchanged after stale swap"
+    );
+    assert_eq!(
+        env.token_amount(secondary_vault),
+        secondary_vault_before,
+        "secondary reserve unchanged after stale swap"
+    );
+
+    env.svm.expire_blockhash();
+    let fresh_swap = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SwapSecondaryForPrimary { amount: 20 },
+        vec![
+            AccountMeta::new(new_marketauth.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(fresh_primary_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(fresh_secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&new_marketauth],
+    );
+    assert!(
+        fresh_swap.is_ok(),
+        "new marketauth can execute the value-moving secondary swap after handoff: {fresh_swap:?}"
+    );
+    assert_eq!(env.token_amount(fresh_primary_source), 0);
+    assert_eq!(
+        env.token_amount(env.vault),
+        primary_vault_before + 20,
+        "new authority's primary collateral lands in the primary vault"
+    );
+    assert_eq!(
+        env.token_amount(fresh_secondary_dest),
+        20,
+        "new authority receives secondary collateral"
+    );
+    assert_eq!(
+        env.token_amount(secondary_vault),
+        secondary_vault_before - 20,
+        "secondary reserve debited exactly once"
+    );
+}
