@@ -7,7 +7,7 @@ use percolator::{
 use percolator_prog::{
     constants::{
         ASSET_ORACLE_WRAPPER_LEN, MARKET_GROUP_OFF, MATCHER_ABI_VERSION,
-        ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        MATCHER_CONTEXT_MIN_LEN, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
         PORTFOLIO_ENGINE_ACCOUNT_LEN,
     },
     ix::{BatchTradeCpiLeg, BatchTradeLeg, Instruction as ProgInstruction},
@@ -19324,6 +19324,118 @@ fn v16_attack_set_matcher_config_reallocs_legacy_lp_portfolio_safely() {
         active_leg_for_asset(&env.portfolio_state(taker), 0).basis_pos_q,
         (5 * POS_SCALE) as i128
     );
+}
+
+#[test]
+fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let lp_owner = Keypair::new();
+    let lp = env.create_portfolio(&lp_owner);
+
+    let mut legacy_lp = env.svm.get_account(&lp).unwrap();
+    legacy_lp.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(lp, legacy_lp).unwrap();
+    assert_eq!(
+        env.svm.get_account(&lp).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup simulates a legacy LP portfolio with no matcher-config tail"
+    );
+
+    let bad_ctx = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            bad_ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; MATCHER_CONTEXT_MIN_LEN - 1],
+                owner: matcher_program,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let bad_delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp,
+        &lp_owner.pubkey(),
+        &matcher_program,
+        &bad_ctx,
+    );
+    env.svm
+        .set_account(
+            bad_delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let lp_before = env.svm.get_account(&lp).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        vec![
+            AccountMeta::new(lp_owner.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new_readonly(bad_ctx, false),
+            AccountMeta::new_readonly(bad_delegate, false),
+        ],
+        &[&lp_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "SetMatcherConfig must reject an undersized matcher context after legacy realloc"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected bad-context matcher config leaves market slab unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp).unwrap(),
+        lp_before,
+        "rejected bad-context matcher config rolls back legacy LP realloc"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed SetMatcherConfig must not leave a matcher-tail-sized legacy account"
+    );
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp,
+        &lp_owner.pubkey(),
+        &matcher_program,
+        &ctx,
+    );
+    env.try_init_auth_matcher_context_with_delegate(matcher_program, &lp_owner, lp, ctx, delegate)
+        .expect("init auth matcher context after rejected legacy realloc");
+    env.set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 1);
+    let lp_after_config = env.svm.get_account(&lp).unwrap();
+    assert_eq!(
+        lp_after_config.data.len(),
+        env.portfolio_account_len,
+        "valid SetMatcherConfig still grows the legacy LP storage"
+    );
+    let auth_state = env.portfolio_matcher_config(lp);
+    assert_eq!(auth_state.enabled, 1);
+    assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
+    assert_eq!(auth_state.matcher_context, ctx.to_bytes());
+    assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
 }
 
 #[test]
