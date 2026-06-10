@@ -9908,6 +9908,114 @@ fn v16_attack_close_resolved_after_exit_window_is_permissionless_but_not_stealab
     assert_eq!(account.capital, 0);
 }
 
+// security.md sweep - permissionless CloseResolved legacy rollback (#5/#26/#44/#48):
+// After the owner exit window, CloseResolved is intentionally permissionless
+// when the caller names the portfolio owner, but it mutates payout state before
+// validating the destination token account. A bad destination must roll back
+// both the legacy realloc and the post-engine payout mutation.
+#[test]
+fn v16_attack_permissionless_close_resolved_bad_dest_rolls_back_legacy_realloc() {
+    let mut env = V16CuEnv::new();
+    const EXIT_DELAY: u64 = 5;
+    env.configure_permissionless_resolve_with_cu(100, EXIT_DELAY);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.resolve();
+    env.svm.warp_to_slot(EXIT_DELAY + 1);
+
+    let mut legacy = env.svm.get_account(&portfolio).unwrap();
+    legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(portfolio, legacy).unwrap();
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup simulates a resolved legacy portfolio"
+    );
+
+    let attacker = Keypair::new();
+    let attacker_dest = env.token_account(attacker.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let attacker_dest_before = env.svm.get_account(&attacker_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(attacker_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "permissionless CloseResolved must reject an attacker-owned destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected legacy CloseResolved leaves resolved market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected legacy CloseResolved rolls back realloc and payout-state mutation"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed CloseResolved does not leave a public legacy realloc behind"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected legacy CloseResolved moves no vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&attacker_dest).unwrap(),
+        attacker_dest_before,
+        "attacker destination receives no payout"
+    );
+
+    let owner_dest = env.token_account(owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let accepted = env
+        .send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(owner_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("permissionless CloseResolved still works for the owner destination");
+    assert_cu_within(
+        "permissionless legacy CloseResolved retry",
+        accepted,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(owner_dest), 1_000);
+    assert_eq!(env.market_state().1.vault, 0);
+    assert_eq!(env.portfolio_state(portfolio).capital, 0);
+}
+
 // security.md sweep — CloseResolved caller-supplied fee_rate_per_slot must be IGNORED (Copenhagen
 // SOL-001-class spoofed-param / SOL-023 fee-rounding-away-from-user): CloseResolved is permissionless
 // after the exit window (force_close_delay_slots==0 -> always permissionless), and it carries a
