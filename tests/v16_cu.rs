@@ -39371,6 +39371,15 @@ fn v16_attack_convert_released_pnl_owner_gated() {
     let cap0 = env.portfolio_state(p).capital;
     let pnl0 = env.portfolio_state(p).pnl;
     assert!(pnl0 > 0, "victim has backed junior pnl");
+    let mut legacy = env.svm.get_account(&p).unwrap();
+    legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(p, legacy).unwrap();
+    let legacy_before = env.svm.get_account(&p).unwrap();
+    assert_eq!(
+        legacy_before.data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup uses a legacy owner-gated portfolio"
+    );
 
     // ATTACK 1: a NON-OWNER (mallory) signs a convert on the victim's portfolio -> reject (owner mismatch).
     let mallory = Keypair::new();
@@ -39388,6 +39397,11 @@ fn v16_attack_convert_released_pnl_owner_gated() {
         &[&mallory],
     );
     assert!(r1.is_err(), "non-owner convert must reject");
+    assert_eq!(
+        env.svm.get_account(&p).unwrap(),
+        legacy_before,
+        "non-owner convert rolls back the helper's pre-owner-check legacy realloc"
+    );
 
     // ATTACK 2: the owner's pubkey is passed but NOT as a signer -> reject (expect_signer).
     env.svm.expire_blockhash();
@@ -39405,6 +39419,11 @@ fn v16_attack_convert_released_pnl_owner_gated() {
     assert!(
         r2.is_err(),
         "convert with the owner as a non-signer must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&p).unwrap(),
+        legacy_before,
+        "non-signer convert leaves the legacy portfolio untouched"
     );
 
     // neither attempt converted anything.
@@ -39433,6 +39452,11 @@ fn v16_attack_convert_released_pnl_owner_gated() {
         &[&owner],
     );
     assert!(ok.is_ok(), "owner-signed convert works: {:?}", ok);
+    assert_eq!(
+        env.svm.get_account(&p).unwrap().data.len(),
+        env.portfolio_account_len,
+        "owner-signed convert grows the legacy portfolio before converting"
+    );
     assert_eq!(
         env.portfolio_state(p).capital,
         cap0 + 40,
