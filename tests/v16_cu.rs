@@ -10177,6 +10177,96 @@ fn v16_bpf_failed_terminal_insurance_withdraw_rolls_back_market_and_ledger() {
 }
 
 #[test]
+fn v16_attack_terminal_insurance_short_canonical_vault_rolls_back_budget_and_ledger() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance(100);
+    env.resolve();
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 39);
+
+    let ledger = env.insurance_ledger_account();
+    let dest = env.token_account(admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "terminal WithdrawInsurance must reject when canonical vault liquidity is short"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "short canonical vault rejection rolls back terminal insurance budgets"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "short canonical vault rejection rolls back optional ledger writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "short canonical vault rejection pays no tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "short canonical vault rejection leaves the vault token account unchanged"
+    );
+    let (_, rejected_group) = env.market_state();
+    assert_eq!(rejected_group.insurance, 100);
+    assert_eq!(rejected_group.vault, 100);
+
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 100);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    )
+    .expect("terminal WithdrawInsurance succeeds once canonical vault liquidity matches accounting");
+    assert_eq!(env.token_amount(dest), 40);
+    assert_eq!(env.token_amount(env.vault), 60);
+    let ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 60);
+    assert_eq!(group.vault, 60);
+}
+
+#[test]
 fn v16_bpf_failed_backing_withdraw_transfer_rolls_back_bucket_and_ledger() {
     let mut env = V16CuEnv::new();
     let ledger = env.backing_domain_ledger_account();
