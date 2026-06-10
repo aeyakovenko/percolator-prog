@@ -47819,6 +47819,81 @@ fn v16_attack_init_portfolio_rejects_when_resolve_matured() {
     env.close_slab_with_cu();
 }
 
+// security.md sweep - stale InitPortfolio undersized realloc rollback (#5/#44/#48):
+// InitPortfolio is public and safely grows undersized program-owned accounts
+// before it initializes them. Once the stale-resolve window is reached, that
+// pre-init realloc must also roll back; otherwise a cranker could leave junk
+// accounts expanded/zero-filled while the market is supposed to be frozen.
+#[test]
+fn v16_attack_stale_init_portfolio_rolls_back_undersized_realloc() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+    env.svm.warp_to_slot(40);
+
+    let attacker = Keypair::new();
+    env.ensure_signer_account(attacker.pubkey());
+    let small_len = env.portfolio_account_len / 2;
+    let stale_portfolio = env.program_account(small_len);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let stale_portfolio_before = env.svm.get_account(&stale_portfolio).unwrap();
+    assert_eq!(
+        stale_portfolio_before.data.len(),
+        small_len,
+        "test setup supplies an undersized uninitialized program-owned account"
+    );
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_portfolio, false),
+        ],
+        &[&attacker],
+    );
+    assert!(
+        rejected.is_err(),
+        "stale InitPortfolio on an undersized account must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected undersized stale init leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_portfolio).unwrap(),
+        stale_portfolio_before,
+        "rejected undersized stale init rolls back the pre-stale realloc"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_portfolio).unwrap().data.len(),
+        small_len,
+        "failed stale init does not leave a public account expansion behind"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "no undersized stale account can materialize and block slab reclaim"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve remains live after rejected undersized init: {resolve:?}"
+    );
+    env.close_slab_with_cu();
+}
+
 // security.md sweep - stale-resolve lifecycle drift (#30/#35/#48): permissionless asset activation
 // reallocs the market, installs new domain authorities, credits the market-init fee, and transfers
 // SPL collateral. Once the base market is stale enough for ResolveStalePermissionless, that live
