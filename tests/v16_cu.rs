@@ -19815,6 +19815,15 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
     env.deposit(&la, pa, 1_000_000);
     env.deposit(&lb, pb, 1_000_000);
     let (_, g0) = env.market_state();
+    let mut legacy_pa = env.svm.get_account(&pa).unwrap();
+    legacy_pa.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(pa, legacy_pa).unwrap();
+    let pa_legacy_before = env.svm.get_account(&pa).unwrap();
+    assert_eq!(
+        pa_legacy_before.data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup uses a legacy victim portfolio"
+    );
 
     // Mallory tries to withdraw from pa (owned by la).
     env.svm.expire_blockhash();
@@ -19845,6 +19854,11 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
         &[&mallory],
     );
     assert!(r_wd.is_err(), "non-owner withdraw must reject");
+    assert_eq!(
+        env.svm.get_account(&pa).unwrap(),
+        pa_legacy_before,
+        "non-owner withdraw rolls back the pre-owner-check legacy realloc"
+    );
     assert_eq!(env.token_amount(dest), 0, "no funds stolen by non-owner");
     assert_eq!(
         env.portfolio_state(pa).capital,
@@ -19853,6 +19867,8 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
     );
 
     // Mallory tries to trade pa against pb (signing as the account_a owner).
+    let pa_before_trade = env.svm.get_account(&pa).unwrap();
+    let pb_before_trade = env.svm.get_account(&pb).unwrap();
     env.svm.expire_blockhash();
     let r_tr = env.send(
         ProgInstruction::TradeNoCpi {
@@ -19871,6 +19887,16 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
         &[&mallory, &lb],
     );
     assert!(r_tr.is_err(), "non-owner trade of pa must reject");
+    assert_eq!(
+        env.svm.get_account(&pa).unwrap(),
+        pa_before_trade,
+        "non-owner trade rolls back the victim account realloc"
+    );
+    assert_eq!(
+        env.svm.get_account(&pb).unwrap(),
+        pb_before_trade,
+        "non-owner trade leaves the honest counterparty untouched"
+    );
     assert_eq!(
         env.portfolio_state(pa).legs[0].basis_pos_q,
         0,
