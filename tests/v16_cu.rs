@@ -1120,15 +1120,23 @@ impl V16CuEnv {
     }
 
     fn add_source_positive_pnl(&mut self, portfolio: Pubkey, domain: usize, amount: u128) {
+        // Use the engine's canonical, Live-gated, shape-validated grant API (over the same account
+        // bytes) rather than a host-side re-implementation, so setups match how the engine actually
+        // creates source-backed claims.
         let mut market_account = self.svm.get_account(&self.market).expect("market account");
         let mut portfolio_account = self.svm.get_account(&portfolio).expect("portfolio account");
-        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
-        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
-        group
-            .add_account_source_positive_pnl_not_atomic(&mut account, domain, amount)
-            .unwrap();
-        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
-        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        let max_slots = state::read_market_config_mode_and_capacity(&market_account.data)
+            .unwrap()
+            .2;
+        {
+            let (_cfg, mut group) = state::market_view_mut(&mut market_account.data).unwrap();
+            let mut account =
+                state::portfolio_view_mut_for_market_slots(&mut portfolio_account.data, max_slots)
+                    .unwrap();
+            group
+                .add_account_source_positive_pnl_not_atomic(&mut account, domain, amount)
+                .unwrap();
+        }
         self.svm.set_account(self.market, market_account).unwrap();
         self.svm.set_account(portfolio, portfolio_account).unwrap();
     }
@@ -3956,13 +3964,18 @@ fn add_source_positive_pnl_to_market(
 ) {
     let mut market_account = env.svm.get_account(&market).expect("market account");
     let mut portfolio_account = env.svm.get_account(&portfolio).expect("portfolio account");
-    let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
-    let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
-    group
-        .add_account_source_positive_pnl_not_atomic(&mut account, domain, amount)
-        .unwrap();
-    state::write_market(&mut market_account.data, &cfg, &group).unwrap();
-    state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+    let max_slots = state::read_market_config_mode_and_capacity(&market_account.data)
+        .unwrap()
+        .2;
+    {
+        let (_cfg, mut group) = state::market_view_mut(&mut market_account.data).unwrap();
+        let mut account =
+            state::portfolio_view_mut_for_market_slots(&mut portfolio_account.data, max_slots)
+                .unwrap();
+        group
+            .add_account_source_positive_pnl_not_atomic(&mut account, domain, amount)
+            .unwrap();
+    }
     env.svm.set_account(market, market_account).unwrap();
     env.svm.set_account(portfolio, portfolio_account).unwrap();
 }
@@ -53105,5 +53118,52 @@ fn v16_attack_update_authority_handoff_rekeys_secondary_swap_authority() {
         env.token_amount(secondary_vault),
         secondary_vault_before - 20,
         "secondary reserve debited exactly once"
+    );
+}
+
+// security.md sweep — backing-bucket creation must reject an already-lapsed expiry. TopUpBackingBucket
+// forwards expiry_slot to the engine's deposit_fresh, which requires a FUTURE expiry
+// (expiry_slot > current_slot). A topup at expiry_slot 0 would mint immediately-lapsed backing
+// principal (poisoning the live source-domain ledger) — it must reject, pulling no tokens; a future
+// expiry is the accepted control.
+#[test]
+fn v16_attack_backing_topup_rejects_lapsed_expiry() {
+    let mut env = V16CuEnv::new();
+    let vault0 = env.token_amount(env.vault);
+    let admin = env.admin.insecure_clone();
+    let source = env.token_account(admin.pubkey(), 50);
+    let topup = |env: &mut V16CuEnv, expiry: u64| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::TopUpBackingBucket {
+                domain: 1,
+                amount: 50,
+                expiry_slot: expiry,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+    };
+    let r = topup(&mut env, 0);
+    assert!(r.is_err(), "topup with lapsed expiry_slot=0 must reject: {r:?}");
+    assert_eq!(
+        env.token_amount(env.vault),
+        vault0,
+        "rejected lapsed-expiry topup pulled no tokens into the vault"
+    );
+    assert_eq!(env.token_amount(source), 50, "source balance intact after reject");
+    // control: a future expiry is accepted and credits exactly the backing.
+    let r_ok = topup(&mut env, 10_000);
+    assert!(r_ok.is_ok(), "future-expiry backing topup must succeed: {r_ok:?}");
+    assert_eq!(
+        env.token_amount(env.vault),
+        vault0 + 50,
+        "valid topup credits exactly the backing"
     );
 }
