@@ -47484,6 +47484,121 @@ fn v16_attack_withdraw_rejected_when_resolve_matured() {
     assert!(r.is_err(), "withdraw must reject once the market is resolve-matured (#66 solvency gate)");
 }
 
+// security.md sweep - stale Withdraw legacy realloc rollback (#5/#30/#44/#48):
+// Withdraw grows legacy portfolio storage before the stale-market freeze check
+// and then performs a signed vault transfer after the engine debit. A stale
+// legacy withdrawal must roll back the realloc/debit path and move no tokens.
+#[test]
+fn v16_attack_stale_withdraw_rolls_back_legacy_realloc_and_signed_transfer() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+
+    // Non-vacuous control: a funded legacy portfolio can still withdraw while fresh.
+    env.svm.warp_to_slot(4);
+    let fresh_owner = Keypair::new();
+    let fresh = env.create_portfolio(&fresh_owner);
+    env.deposit(&fresh_owner, fresh, 200_000);
+    let mut fresh_legacy = env.svm.get_account(&fresh).unwrap();
+    fresh_legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(fresh, fresh_legacy).unwrap();
+    let (fresh_dest, fresh_cu) = env.withdraw_with_cu(&fresh_owner, fresh, 50_000);
+    assert_cu_within("fresh legacy Withdraw", fresh_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        env.token_amount(fresh_dest),
+        50_000,
+        "fresh legacy withdraw pays the owner"
+    );
+    assert_eq!(
+        env.svm.get_account(&fresh).unwrap().data.len(),
+        env.portfolio_account_len,
+        "fresh withdraw grows legacy portfolio storage before debiting"
+    );
+    assert_eq!(
+        env.portfolio_state(fresh).capital,
+        150_000,
+        "fresh legacy withdraw debits exactly once"
+    );
+
+    let stale_owner = Keypair::new();
+    let stale = env.create_portfolio(&stale_owner);
+    env.deposit(&stale_owner, stale, 200_000);
+    let mut stale_legacy = env.svm.get_account(&stale).unwrap();
+    stale_legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(stale, stale_legacy).unwrap();
+    assert_eq!(
+        env.svm.get_account(&stale).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup simulates a funded legacy portfolio before stale withdraw"
+    );
+
+    env.svm.warp_to_slot(40);
+    let dest = env.token_account_for_mint(env.mint, stale_owner.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&stale).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::Withdraw { amount: 50_000 },
+        vec![
+            AccountMeta::new(stale_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&stale_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "legacy withdraw must reject once the market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale legacy withdraw leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale).unwrap(),
+        portfolio_before,
+        "rejected stale legacy withdraw rolls back the pre-stale realloc and debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed stale withdraw does not leave a public legacy realloc behind"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale legacy withdraw does not transfer out of the vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "rejected stale legacy withdraw pays nothing to the destination"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve remains live after rejected stale legacy withdraw: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // security.md sweep - stale-resolve freeze (#30/#35/#48): once the authenticated clock has passed
 // permissionless_resolve_stale_slots, the market is still mode=Live until ResolveStalePermissionless
 // runs, but live value paths must already be frozen. Otherwise an attacker can alter capital, domain
