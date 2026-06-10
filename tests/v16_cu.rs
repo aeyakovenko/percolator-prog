@@ -35735,6 +35735,145 @@ fn v16_attack_liquidation_cranker_reward_rejects_wrong_owner() {
     );
 }
 
+// security.md sweep - liquidation reward legacy realloc rollback (#5/#6/#35/#44):
+// the reward tail is detected before the crank path refreshes oracle/profile state, and a legacy-sized
+// reward portfolio is grown before the later owner/provenance validation. A wrong signer must roll back
+// that pre-validation realloc as well as the oracle write, liquidation mutation, and reward credit.
+#[test]
+fn v16_attack_liquidation_wrong_owner_rolls_back_legacy_reward_realloc() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let lo = Keypair::new();
+    let l = env.create_portfolio(&lo);
+    let so = Keypair::new();
+    let s = env.create_portfolio(&so);
+    let co = Keypair::new();
+    let c = env.create_portfolio(&co);
+    env.deposit(&lo, l, 100_000_000);
+    env.deposit(&so, s, 100_000);
+    env.trade_asset_with_cu(0, &lo, l, &so, s, POS_SCALE as i128, 1_000_000, 0);
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: slot,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(s, false),
+            ],
+            &[],
+        );
+    }
+    assert!(
+        env.portfolio_state(s).health_cert.certified_liq_deficit != 0,
+        "short is liquidatable before probing the legacy reward rollback"
+    );
+
+    let cranker_cap_before = env.portfolio_state(c).capital;
+    let mut legacy_cranker = env.svm.get_account(&c).unwrap();
+    legacy_cranker.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(c, legacy_cranker).unwrap();
+    let cranker_before = env.svm.get_account(&c).unwrap();
+    assert_eq!(
+        cranker_before.data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup uses a legacy reward portfolio"
+    );
+
+    let wrong_owner = Keypair::new();
+    env.ensure_signer_account(wrong_owner.pubkey());
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let short_before = env.svm.get_account(&s).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 30,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(wrong_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(s, false),
+            AccountMeta::new(c, false),
+        ],
+        &[&wrong_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "wrong signer must not grow or credit another user's legacy reward portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-owner legacy reward rejection rolls back the pre-validation oracle/profile write"
+    );
+    assert_eq!(
+        env.svm.get_account(&s).unwrap(),
+        short_before,
+        "wrong-owner legacy reward rejection leaves the liquidated portfolio byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&c).unwrap(),
+        cranker_before,
+        "wrong-owner legacy reward rejection rolls back reward-account realloc and bytes"
+    );
+    assert_eq!(
+        env.svm.get_account(&c).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed liquidation leaves the reward account legacy-sized"
+    );
+
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: 0,
+            now_slot: 30,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(co.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(s, false),
+            AccountMeta::new(c, false),
+        ],
+        &[&co],
+    );
+    assert!(
+        accepted.is_ok(),
+        "authorized owner can still grow the legacy reward account and claim the liquidation reward: {accepted:?}"
+    );
+    assert_eq!(
+        env.svm.get_account(&c).unwrap().data.len(),
+        env.portfolio_account_len,
+        "successful retry grows the legacy reward portfolio"
+    );
+    assert!(
+        env.portfolio_state(c).capital > cranker_cap_before,
+        "authorized retry credits a real cranker reward"
+    );
+}
+
 // security.md sweep — liquidation cranker reward market binding (#3/#44): when cranker rewards are
 // enabled, the reward portfolio must belong to the same market as the liquidated account. A foreign
 // market portfolio can otherwise try to receive value from this market's insurance while validating under
