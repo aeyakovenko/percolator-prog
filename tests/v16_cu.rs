@@ -33808,10 +33808,25 @@ fn v16_attack_force_close_abandoned_asset_rejects_when_resolve_matured() {
         oracle_v16::permissionless_stale_matured(&stale_cfg, STALE_FORCE_SLOT),
         "test setup must be beyond the base permissionless-resolve boundary"
     );
+    for portfolio in [stale_long, stale_short] {
+        let mut legacy = env.svm.get_account(&portfolio).unwrap();
+        legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+        env.svm.set_account(portfolio, legacy).unwrap();
+    }
     let market_before = env.svm.get_account(&env.market).unwrap();
     let stale_long_before = env.svm.get_account(&stale_long).unwrap();
     let stale_short_before = env.svm.get_account(&stale_short).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
+    assert_eq!(
+        stale_long_before.data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "stale long setup uses a legacy portfolio"
+    );
+    assert_eq!(
+        stale_short_before.data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "stale short setup uses a legacy portfolio"
+    );
 
     let rejected = env.try_force_close_abandoned_asset_with_cu(
         &cranker,
@@ -33839,6 +33854,16 @@ fn v16_attack_force_close_abandoned_asset_rejects_when_resolve_matured() {
         env.svm.get_account(&stale_short).unwrap(),
         stale_short_before,
         "rejected stale ForceClose leaves the short portfolio unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_long).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "rejected stale ForceClose rolls back long-account realloc"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_short).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "rejected stale ForceClose rolls back short-account realloc"
     );
     assert_eq!(
         env.svm.get_account(&env.vault).unwrap(),
