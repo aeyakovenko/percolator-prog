@@ -40887,6 +40887,117 @@ fn v16_attack_permissionless_create_rejects_noncanonical_fee_vault() {
     assert_eq!(group.insurance, FEE);
 }
 
+// security.md sweep - permissionless init-fee source/vault alias (#26/#44/#48): the creator's fee
+// source must be a creator-owned token account, not the already-funded canonical vault. Otherwise a
+// duplicate source==destination transfer could no-op while the program credits market insurance.
+#[test]
+fn v16_attack_permissionless_create_rejects_vault_as_fee_source() {
+    const FEE: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(FEE);
+
+    let honest_owner = Keypair::new();
+    let honest_portfolio = env.create_portfolio(&honest_owner);
+    env.deposit(&honest_owner, honest_portfolio, FEE * 10);
+    assert!(
+        env.token_amount(env.vault) >= FEE as u64,
+        "canonical vault is funded enough that this is not an underfunded-source reject"
+    );
+
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    env.svm.warp_to_slot(1);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let portfolio_before = env.svm.get_account(&honest_portfolio).unwrap();
+    let (_, group_before) = env.market_state();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        rejected.is_err(),
+        "permissionless create must reject the canonical vault as the fee source"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected vault-source activation must not realloc or install the new asset"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "source==vault attempt must not move or self-transfer vault tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&honest_portfolio).unwrap(),
+        portfolio_before,
+        "honest depositor state is untouched by the rejected vault-source attempt"
+    );
+    let (_, rejected_group) = env.market_state();
+    assert_eq!(
+        rejected_group.config.max_market_slots,
+        group_before.config.max_market_slots
+    );
+    assert_eq!(
+        rejected_group.insurance, group_before.insurance,
+        "rejected vault-source attempt does not credit insurance"
+    );
+    assert_eq!(
+        rejected_group.vault, group_before.vault,
+        "rejected vault-source attempt does not credit accounting vault"
+    );
+
+    let valid_source = env.token_account(creator.pubkey(), FEE as u64);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(valid_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    )
+    .expect("canonical vault with a creator-owned fee source still activates");
+    let (_, group) = env.market_state();
+    assert_eq!(group.config.max_market_slots, 2);
+    assert_eq!(group.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(env.token_amount(valid_source), 0);
+    assert_eq!(env.token_amount(env.vault), (FEE * 11) as u64);
+    assert_eq!(group.vault, FEE * 11);
+    assert_eq!(group.insurance, FEE);
+}
+
 // security.md sweep - sparse append DoS: permissionless activation may append exactly the next
 // configured slot, or reuse a retired slot, but it must not accept sparse jumps. Otherwise a stranger
 // could force large market-account growth or create holes in the asset table.
