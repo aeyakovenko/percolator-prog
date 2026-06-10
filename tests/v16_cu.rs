@@ -23091,6 +23091,163 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
     );
 }
 
+// security.md sweep - stale marketauth policy replay (#6/#33): after marketauth is handed off, the
+// previous key must lose operational policy power, not just rotation power. Otherwise a stale admin
+// could later grief reward shares, fee redirects, permissionless-create cost, or stale-resolve timing.
+#[test]
+fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    let old_admin = env.admin.insecure_clone();
+    let new_admin = Keypair::new();
+    env.update_asset_authority_with_cu(&new_admin);
+    assert_eq!(
+        env.market_state().0.marketauth,
+        new_admin.pubkey().to_bytes(),
+        "test setup rotates marketauth away from the old key"
+    );
+    let cfg_after_rotation = env.market_state().0;
+
+    let mut old_attempt = |ix: ProgInstruction, label: &str| {
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ix,
+            vec![
+                AccountMeta::new(old_admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&old_admin],
+        );
+        assert!(rejected.is_err(), "{label} must reject for stale marketauth");
+        let cfg = env.market_state().0;
+        assert_eq!(cfg.marketauth, cfg_after_rotation.marketauth);
+        assert_eq!(
+            cfg.liquidation_cranker_fee_share_bps,
+            cfg_after_rotation.liquidation_cranker_fee_share_bps
+        );
+        assert_eq!(
+            cfg.maintenance_cranker_fee_share_bps,
+            cfg_after_rotation.maintenance_cranker_fee_share_bps
+        );
+        assert_eq!(
+            cfg.fee_redirect_to_market_0_bps,
+            cfg_after_rotation.fee_redirect_to_market_0_bps
+        );
+        assert_eq!(
+            cfg.permissionless_market_init_fee,
+            cfg_after_rotation.permissionless_market_init_fee
+        );
+        assert_eq!(
+            cfg.permissionless_resolve_stale_slots,
+            cfg_after_rotation.permissionless_resolve_stale_slots
+        );
+        assert_eq!(
+            cfg.force_close_delay_slots,
+            cfg_after_rotation.force_close_delay_slots
+        );
+    };
+
+    old_attempt(
+        ProgInstruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: 5_000,
+        },
+        "liquidation policy replay",
+    );
+    old_attempt(
+        ProgInstruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 4_000,
+        },
+        "maintenance policy replay",
+    );
+    old_attempt(
+        ProgInstruction::UpdateFeeRedirectPolicy {
+            redirect_bps: 2_000,
+        },
+        "fee redirect replay",
+    );
+    old_attempt(
+        ProgInstruction::UpdateMarketInitFeePolicy { min_init_fee: 40 },
+        "permissionless init-fee replay",
+    );
+    old_attempt(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 100,
+            force_close_delay_slots: 5,
+        },
+        "permissionless resolve policy replay",
+    );
+
+    let mut new_update = |ix: ProgInstruction, label: &str| {
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ix,
+            vec![
+                AccountMeta::new(new_admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&new_admin],
+        )
+        .unwrap_or_else(|err| panic!("{label} by new marketauth must succeed: {err}"));
+    };
+
+    new_update(
+        ProgInstruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: 5_000,
+        },
+        "liquidation policy update",
+    );
+    new_update(
+        ProgInstruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 4_000,
+        },
+        "maintenance policy update",
+    );
+    new_update(
+        ProgInstruction::UpdateFeeRedirectPolicy {
+            redirect_bps: 2_000,
+        },
+        "fee redirect update",
+    );
+    new_update(
+        ProgInstruction::UpdateMarketInitFeePolicy { min_init_fee: 40 },
+        "permissionless init-fee update",
+    );
+    new_update(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 100,
+            force_close_delay_slots: 5,
+        },
+        "permissionless resolve policy update",
+    );
+    let cfg = env.market_state().0;
+    assert_eq!(cfg.liquidation_cranker_fee_share_bps, 5_000);
+    assert_eq!(cfg.maintenance_cranker_fee_share_bps, 4_000);
+    assert_eq!(cfg.fee_redirect_to_market_0_bps, 2_000);
+    assert_eq!(cfg.permissionless_market_init_fee, 40);
+    assert_eq!(cfg.permissionless_resolve_stale_slots, 100);
+    assert_eq!(cfg.force_close_delay_slots, 5);
+
+    let payer_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.deposit(&payer_owner, payer_portfolio, 100_000_000);
+    env.svm.warp_to_slot(10);
+    env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
+    let cranker = env.portfolio_state(cranker_portfolio);
+    assert_eq!(
+        cranker.capital, 232,
+        "new marketauth's maintenance share pays the public cranker path"
+    );
+}
+
 // regression (security.md sweep): round-trip recovery under the junior-pnl model. A price round-trip
 // (100->110->100) leaves the drawdown-first trader's recovery as JUNIOR pnl (realized losses are
 // senior/immediate, recoveries park as junior pnl that is not liquid in Live mode). Value is fully
