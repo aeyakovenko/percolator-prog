@@ -48378,6 +48378,129 @@ fn v16_attack_sync_maintenance_rejects_when_resolve_matured() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// security.md sweep - stale SyncMaintenanceFee legacy cranker rollback (#5/#30/#44/#48):
+// SyncMaintenanceFee is permissionless and grows both the charged portfolio and
+// optional cranker reward portfolio before the stale-market freeze check. Once
+// resolve-matured, a cranker must not leave either legacy account expanded,
+// debit capital, credit insurance, or collect a reward.
+#[test]
+fn v16_attack_stale_maintenance_rolls_back_legacy_cranker_reallocs() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.update_maintenance_fee_policy_with_cu(4_000);
+
+    let fresh_owner = Keypair::new();
+    let fresh_cranker_owner = Keypair::new();
+    let fresh_payer = env.create_portfolio(&fresh_owner);
+    let fresh_cranker = env.create_portfolio(&fresh_cranker_owner);
+    env.deposit(&fresh_owner, fresh_payer, 100_000_000);
+
+    let stale_owner = Keypair::new();
+    let stale_cranker_owner = Keypair::new();
+    let stale_payer = env.create_portfolio(&stale_owner);
+    let stale_cranker = env.create_portfolio(&stale_cranker_owner);
+    env.deposit(&stale_owner, stale_payer, 100_000_000);
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+
+    // Non-vacuous control: while fresh, legacy payer+cranker accounts grow and the cranker earns.
+    env.svm.warp_to_slot(4);
+    for portfolio in [fresh_payer, fresh_cranker] {
+        let mut legacy = env.svm.get_account(&portfolio).unwrap();
+        legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+        env.svm.set_account(portfolio, legacy).unwrap();
+    }
+    let fresh_cu = env.sync_maintenance_fee_with_cu(fresh_payer, Some(fresh_cranker), 4);
+    assert_cu_within("fresh legacy SyncMaintenanceFee", fresh_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        env.svm.get_account(&fresh_payer).unwrap().data.len(),
+        env.portfolio_account_len,
+        "fresh maintenance sync grows the legacy charged portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&fresh_cranker).unwrap().data.len(),
+        env.portfolio_account_len,
+        "fresh maintenance sync grows the legacy cranker portfolio"
+    );
+    assert_eq!(env.portfolio_state(fresh_payer).last_fee_slot, 4);
+    assert!(
+        env.portfolio_state(fresh_cranker).capital > 0,
+        "fresh maintenance sync credits the cranker reward"
+    );
+
+    for portfolio in [stale_payer, stale_cranker] {
+        let mut legacy = env.svm.get_account(&portfolio).unwrap();
+        legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+        env.svm.set_account(portfolio, legacy).unwrap();
+    }
+    env.svm.warp_to_slot(40);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let payer_before = env.svm.get_account(&stale_payer).unwrap();
+    let cranker_before = env.svm.get_account(&stale_cranker).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::SyncMaintenanceFee { now_slot: 0 },
+        vec![
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_payer, false),
+            AccountMeta::new(stale_cranker, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "legacy cranker maintenance sync must reject once the market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale maintenance sync leaves insurance and budgets unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_payer).unwrap(),
+        payer_before,
+        "rejected stale maintenance sync rolls back charged-account realloc/debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_cranker).unwrap(),
+        cranker_before,
+        "rejected stale maintenance sync rolls back cranker realloc/reward"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_payer).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed stale maintenance sync leaves charged account legacy-sized"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_cranker).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed stale maintenance sync leaves cranker account legacy-sized"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale maintenance sync moves no custody"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve remains live after rejected stale legacy maintenance sync: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // security.md sweep - stale-resolve recovery-leg drift (#30/#35/#48): ForfeitRecoveryLeg
 // is owner-gated, but it can still clear an asset-recovery leg while the overall market
 // remains Live. Once the base oracle is resolve-matured, that live recovery-tool path must
