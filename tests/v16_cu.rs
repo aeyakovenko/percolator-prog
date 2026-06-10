@@ -34292,6 +34292,87 @@ fn v16_attack_force_close_requires_opposite_sides() {
     );
 }
 
+// security.md sweep - ForceCloseAbandonedAsset oversized close_q (#14/#33/#48): the cranker controls
+// a u128 close_q, but the handler must clamp it to the opposing abandoned positions before casting to
+// the signed trade request. A huge close_q must not wrap negative, over-close, or corrupt OI.
+#[test]
+fn v16_attack_force_close_oversized_close_q_clamps_before_i128_cast() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    const DELAY: u64 = 5;
+    const SHUT: u64 = 10;
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    let before = env.market_state().1;
+    assert_eq!(before.assets[1].oi_eff_long_q, POS_SCALE);
+    assert_eq!(before.assets[1].oi_eff_short_q, POS_SCALE);
+
+    env.svm.warp_to_slot(SHUT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        SHUT,
+        0,
+    );
+    env.svm.warp_to_slot(SHUT + DELAY + 1);
+
+    let cranker = Keypair::new();
+    let close = env.try_force_close_abandoned_asset_with_cu(
+        &cranker,
+        long,
+        short,
+        1,
+        SHUT + DELAY + 1,
+        u128::MAX,
+    );
+    assert!(
+        close.is_ok(),
+        "oversized force-close close_q must clamp before i128 cast: {close:?}"
+    );
+    let after = env.market_state().1;
+    assert_eq!(
+        after.assets[1].oi_eff_long_q, 0,
+        "oversized close_q closed exactly the real long OI"
+    );
+    assert_eq!(
+        after.assets[1].oi_eff_short_q, 0,
+        "oversized close_q closed exactly the real short OI"
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(long), 1),
+        "long abandoned leg fully closed"
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(short), 1),
+        "short abandoned leg fully closed"
+    );
+    assert_eq!(
+        after.vault as u64,
+        env.token_amount(env.vault),
+        "force-close with huge close_q keeps accounting tied to custody"
+    );
+    assert!(
+        after.vault >= after.c_tot + after.insurance,
+        "senior conservation after oversized force-close"
+    );
+}
+
 // security.md sweep — ForceCloseAbandonedAsset has no portfolio-owner signatures by design after a
 // shutdown timeout, so it must prove portfolio provenance itself. A cranker must not be able to pair a
 // market-A portfolio with a market-B abandoned asset and mutate either market/account. Same-market
