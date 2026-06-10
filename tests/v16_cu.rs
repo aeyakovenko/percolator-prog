@@ -48595,6 +48595,98 @@ fn v16_attack_cure_and_cancel_close_rejects_when_resolve_matured() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// security.md sweep - stale CureAndCancelClose legacy realloc rollback (#5/#30/#44/#48):
+// CureAndCancelClose grows legacy portfolio storage before the stale-market
+// freeze check, then would cancel close-progress and optionally pull collateral.
+// Once resolve-matured, the rejected cure must not leave the legacy account
+// expanded, cancel the close ledger, credit capital, or move SPL tokens.
+#[test]
+fn v16_attack_stale_cure_rolls_back_legacy_realloc_and_transfer() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 100);
+    env.seed_cancellable_close_progress(portfolio);
+    let source = env.token_account_for_mint(env.mint, owner.pubkey(), 20);
+
+    let mut legacy = env.svm.get_account(&portfolio).unwrap();
+    legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(portfolio, legacy).unwrap();
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup simulates a legacy portfolio with active close-progress"
+    );
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+    env.svm.warp_to_slot(40);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CureAndCancelClose {
+            optional_deposit: 20,
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "legacy CureAndCancelClose must reject once the market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale legacy cure leaves close-progress accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected stale legacy cure rolls back the pre-stale realloc and close ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed stale cure does not leave a public legacy realloc behind"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale legacy cure moves no vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&source).unwrap(),
+        source_before,
+        "rejected stale legacy cure pulls no optional-deposit tokens"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve remains live after rejected stale legacy cure: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // security.md sweep - stale-resolve value-out drift (#30/#35/#48): live domain
 // withdrawals move SPL custody out of the market's insurance/backing layers. Once
 // the market is resolve-matured, insurance, backing principal, and backing-provider
