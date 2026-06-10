@@ -25442,6 +25442,117 @@ fn v16_attack_close_slab_bad_primary_dest_is_atomic() {
     );
 }
 
+// security.md sweep - stale marketauth final reclaim (#6/#48): CloseSlab is the terminal authority
+// path that moves raw vault dust, closes the SPL vault, and reclaims the market slab. A rotated-out
+// market authority must not be able to replay this final close after handoff.
+#[test]
+fn v16_attack_close_slab_rejects_stale_marketauth_after_rotation() {
+    let mut env = V16CuEnv::new();
+    let old_admin = env.admin.insecure_clone();
+    let new_admin = Keypair::new();
+    env.update_asset_authority_with_cu(&new_admin);
+    assert_eq!(
+        env.market_state().0.marketauth,
+        new_admin.pubkey().to_bytes(),
+        "test setup rotates marketauth away from the old key"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ResolveMarket,
+        vec![
+            AccountMeta::new(new_admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&new_admin],
+    );
+    assert!(
+        resolve.is_ok(),
+        "the rotated-in market authority can resolve before final close: {resolve:?}"
+    );
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+
+    let stale_dest = env.token_account(old_admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let stale_dest_before = env.svm.get_account(&stale_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let stale_close = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(old_admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(stale_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&old_admin],
+    );
+    assert!(
+        stale_close.is_err(),
+        "rotated-out marketauth must not reclaim the final slab"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale CloseSlab must not zero or reclaim the market slab"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "stale CloseSlab must not transfer or close the primary vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_dest).unwrap(),
+        stale_dest_before,
+        "stale CloseSlab must not send dust to the old authority"
+    );
+
+    let new_dest = env.token_account(new_admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let good_close = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(new_admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(new_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&new_admin],
+    );
+    assert!(
+        good_close.is_ok(),
+        "rotated-in marketauth can still reclaim the final slab: {good_close:?}"
+    );
+    assert_eq!(
+        env.token_amount(new_dest),
+        7,
+        "final vault dust recovered by the current market authority"
+    );
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(
+        closed_market.lamports, 0,
+        "market lamports reclaimed after current-authority CloseSlab"
+    );
+    assert!(
+        closed_market.data.iter().all(|b| *b == 0),
+        "market data zeroed only after current-authority CloseSlab"
+    );
+}
+
 // security.md sweep - CloseSlab vault delegate/close-authority guard (#44/#48):
 // CloseSlab is the terminal path that transfers any raw vault dust, closes the SPL vault account, and
 // zeroes the market slab. Even with the canonical vault address, a delegated or separately closable
