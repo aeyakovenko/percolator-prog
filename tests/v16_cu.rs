@@ -4921,6 +4921,128 @@ fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
 }
 
 #[test]
+fn v16_attack_privileged_reactivate_invalid_price_keeps_retired_slot_reusable() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let old_creator = Keypair::new();
+    let new_insurance = Keypair::new();
+    let new_operator = Keypair::new();
+    let new_backing = Keypair::new();
+    let new_oracle = Keypair::new();
+    env.update_market_init_fee_policy_with_cu(1);
+
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &old_creator,
+        1,
+        1,
+        100,
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        old_creator.pubkey(),
+        1,
+    );
+    env.svm.warp_to_slot(3);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        3,
+        0,
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let profile_before = state::read_asset_oracle_profile(&market_before.data, 1).unwrap();
+    let (cfg_before, group_before) = state::read_market(&market_before.data).unwrap();
+    assert_eq!(cfg_before.free_market_slot_count, 1);
+    assert_eq!(group_before.assets[1].lifecycle, AssetLifecycleV16::Retired);
+
+    for (label, bad_price) in [
+        ("zero privileged reactivation price", 0),
+        (
+            "privileged reactivation price above MAX_ORACLE_PRICE",
+            percolator::MAX_ORACLE_PRICE + 1,
+        ),
+    ] {
+        env.svm.warp_to_slot(4);
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+                asset_index: 1,
+                now_slot: 4,
+                initial_price: bad_price,
+                insurance_authority: new_insurance.pubkey().to_bytes(),
+                insurance_operator: new_operator.pubkey().to_bytes(),
+                backing_bucket_authority: new_backing.pubkey().to_bytes(),
+                oracle_authority: new_oracle.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        );
+        assert!(rejected.is_err(), "{label} must reject");
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label} must not consume the retired slot or overwrite authorities"
+        );
+        let market_after = env.svm.get_account(&env.market).unwrap();
+        let profile_after = state::read_asset_oracle_profile(&market_after.data, 1).unwrap();
+        let (cfg_after, group_after) = state::read_market(&market_after.data).unwrap();
+        assert_eq!(profile_after, profile_before);
+        assert_eq!(cfg_after.free_market_slot_count, 1);
+        assert_eq!(group_after.assets[1].lifecycle, AssetLifecycleV16::Retired);
+        assert_eq!(
+            group_after.assets[1].market_id,
+            group_before.assets[1].market_id
+        );
+    }
+
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 4,
+            initial_price: 250,
+            insurance_authority: new_insurance.pubkey().to_bytes(),
+            insurance_operator: new_operator.pubkey().to_bytes(),
+            backing_bucket_authority: new_backing.pubkey().to_bytes(),
+            oracle_authority: new_oracle.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    )
+    .expect("valid privileged reactivation still succeeds after rejected bad prices");
+
+    let market_after = env.svm.get_account(&env.market).unwrap();
+    let profile_after = state::read_asset_oracle_profile(&market_after.data, 1).unwrap();
+    let (cfg_after, group_after) = state::read_market(&market_after.data).unwrap();
+    assert_eq!(cfg_after.free_market_slot_count, 0);
+    assert_eq!(group_after.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(group_after.assets[1].effective_price, 250);
+    assert_eq!(
+        profile_after.asset_admin,
+        admin.pubkey().to_bytes(),
+        "valid privileged reactivation must install admin ownership only after valid pricing"
+    );
+    assert_eq!(profile_after.insurance_authority, new_insurance.pubkey().to_bytes());
+    assert_eq!(profile_after.insurance_operator, new_operator.pubkey().to_bytes());
+    assert_eq!(
+        profile_after.backing_bucket_authority,
+        new_backing.pubkey().to_bytes()
+    );
+    assert_eq!(profile_after.oracle_authority, new_oracle.pubkey().to_bytes());
+}
+
+#[test]
 fn v16_bpf_permissionless_oracle_liquidation_uses_only_its_own_domain_insurance() {
     let mut env = V16CuEnv::new();
     let victim_insurance = Keypair::new();
