@@ -10765,8 +10765,11 @@ fn v16_bpf_close_resolved_pays_positive_pnl_through_engine_ledger() {
     assert_eq!(group.c_tot, 0);
     assert_eq!(account.capital, 0);
     assert_eq!(account.pnl, 0);
-    assert!(account.resolved_payout_receipt.present);
-    assert!(account.resolved_payout_receipt.finalized);
+    // Source-backed positive pnl is REALIZED into capital at resolved close (the
+    // realize_source_backed_claims step) and paid out as capital — not parked as a junior payout
+    // receipt against the backing it is underwritten by. The winner is fully paid (1_250 above)
+    // and winds down with NO resolved receipt outstanding.
+    assert!(!account.resolved_payout_receipt.present);
 }
 
 #[test]
@@ -15838,11 +15841,14 @@ fn v16_regression_resolved_open_positions_recover_fairly_order_robust() {
     let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
     assert_eq!(a.capital, 0, "long fully wound down");
     assert_eq!(b.capital, 0, "short fully wound down");
-    // the winner (positive claim) has a finalized payout receipt.
+    // The winner's positive pnl is source-backed (the directional trade created source credit),
+    // so at resolved close it is REALIZED into capital and paid as capital — no junior payout
+    // receipt is parked. The account winds down completely (pnl 0, capital 0, no receipt).
     assert!(
-        a.resolved_payout_receipt.finalized,
-        "winner payout receipt finalized"
+        !a.resolved_payout_receipt.present,
+        "winner fully paid via capital realization, no dangling receipt"
     );
+    assert_eq!(a.pnl, 0, "winner pnl fully realized");
     let (_, g) = env.market_state();
     assert_eq!(g.vault, 0, "vault fully drained, no funds stranded");
 }
@@ -15913,6 +15919,95 @@ fn v16_regression_resolved_multiwinner_haircut_no_overpay_no_strand() {
         total_out >= 3_000,
         "all senior capital recovered (no LoF on capital)"
     );
+}
+
+// engine backing_double_claim_fuzz port (LoF) — Fresh-bucket counterparty backing principal is
+// provider-recoverable: WithdrawBackingBucket has NO resolved-payout-snapshot gate. residual()
+// (the junior payout pool feeding the resolved snapshot) must therefore EXCLUDE that principal.
+// The currently-pinned engine counts it, so a resolved junior winner with ZERO honest residual is
+// still paid out of the provider's backing — the same vault atoms the provider can still withdraw.
+// Whoever closes second is robbed (loss of funds). This drives the bug end-to-end through the
+// public CloseResolved + WithdrawBackingBucket handlers; the winner closing first captures the
+// payout snapshot via the buggy residual(). FAILS against the pinned (pre-fix) engine, PASSES once
+// residual() excludes recoverable counterparty backing principal.
+#[test]
+fn v16_attack_resolved_junior_winner_double_claims_provider_backing() {
+    const CAPITAL: u128 = 1_000;
+    const BACKING: u128 = 1_000; // provider principal (B >= F)
+    const FACE: u128 = 500; // winner junior positive pnl
+    let domain: u16 = 1;
+    let mut env = V16CuEnv::new();
+
+    // Provider deposits recoverable Fresh-bucket backing principal (Live mode).
+    env.top_up_backing_bucket(domain, BACKING, 10_000);
+
+    // A winner deposits capital, then (synthetically) holds plain JUNIOR positive pnl with NO
+    // source claim of its own, and we resolve with ZERO honest junior residual: vault =
+    // CAPITAL + BACKING and c_tot = CAPITAL, so the only vault atoms above capital ARE the
+    // provider's recoverable backing.
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, CAPITAL);
+    {
+        let mut market_account = env.svm.get_account(&env.market).unwrap();
+        let mut portfolio_account = env.svm.get_account(&portfolio).unwrap();
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.pnl_pos_tot = FACE;
+        group.pnl_matured_pos_tot = FACE;
+        group.pnl_pos_bound_tot = FACE;
+        group.pnl_pos_bound_tot_num = FACE * BOUND_SCALE;
+        account.pnl = FACE as i128;
+        account.last_fee_slot = 1;
+        // payout_snapshot_captured left false: the first CloseResolved captures it via residual().
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        env.svm.set_account(env.market, market_account).unwrap();
+        env.svm.set_account(portfolio, portfolio_account).unwrap();
+    }
+
+    // Honest junior residual (vault - capital - backing) is ZERO, so the winner is NOT entitled to
+    // any pnl payout: it must recover EXACTLY its capital. A larger payout is financed by the
+    // provider's recoverable backing — the double-claim.
+    let dest = env.close_resolved(&owner, portfolio);
+    let _ = env.close_resolved(&owner, portfolio); // finalize receipt
+    let winner_payout = env.token_amount(dest) as u128;
+    assert_eq!(
+        winner_payout, CAPITAL,
+        "winner must recover ONLY capital (honest junior residual is zero); a larger payout \
+         ({winner_payout}) was financed out of the provider's recoverable backing (double-claim)"
+    );
+
+    // Wind the winner down so the provider can reclaim (resolved-mode withdraw requires
+    // materialized_portfolio_count == 0 && c_tot == 0).
+    env.close_portfolio_with_cu(&owner, portfolio);
+    let (_, g) = env.market_state();
+    assert_eq!(g.c_tot, 0, "winner capital fully wound down");
+    assert_eq!(g.materialized_portfolio_count, 0, "winner dematerialized");
+
+    // The provider must recover its FULL principal — recoverable, no snapshot gate. (On the
+    // pinned engine the run already failed the winner_payout assertion above, before reaching
+    // here; on the fixed engine the backing is intact and this withdrawal succeeds.)
+    let admin_pubkey = env.admin.pubkey();
+    let provider_dest = env.token_account(admin_pubkey, 0);
+    env.withdraw_backing_bucket_to_admin_token_with_cu(provider_dest, domain, BACKING);
+    let provider_got = env.token_amount(provider_dest) as u128;
+    assert_eq!(
+        provider_got, BACKING,
+        "provider recovers exactly its principal"
+    );
+
+    // Global conservation: nothing minted, nothing stranded.
+    assert_eq!(
+        winner_payout + provider_got,
+        CAPITAL + BACKING,
+        "value conserved end to end (no mint, no strand)"
+    );
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault, 0, "vault fully drained, no funds stranded");
 }
 // security.md sweep — slot spoofing / over-accrual DoS (#30/#19): the permissionless crank's
 // now_slot is CALLER-supplied. A cranker passes a far-future now_slot to over-accrue funding/fees
@@ -18211,8 +18306,11 @@ fn v16_attack_backing_earnings_no_over_or_double_withdraw() {
     let ledger = env.backing_domain_ledger_account();
     env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10);
     // inject accrued utilization-fee earnings for domain 1's bucket, then sync the ledger.
+    // Earnings are vault-backed senior value, so fund them in the vault too (the senior-stack
+    // invariant c_tot + insurance + earnings + backing <= vault must hold).
     env.mutate_market(|_, group| {
         group.source_backing_buckets[1].utilization_fee_earnings = EARNINGS;
+        group.vault += EARNINGS;
     });
     env.sync_backing_domain_ledger_with_cu(ledger, 1);
     let dest = env.token_account_for_mint(env.mint, env.admin.pubkey(), 0);
@@ -26533,27 +26631,71 @@ fn v16_attack_refine_resolved_bound_over_decrease_is_atomic() {
     let portfolio_a = env.create_portfolio(&owner_a);
     let owner_b = Keypair::new();
     let portfolio_b = env.create_portfolio(&owner_b);
+    let owner_c = Keypair::new();
+    let portfolio_c = env.create_portfolio(&owner_c);
     env.deposit(&owner_a, portfolio_a, 1_000_000);
     env.deposit(&owner_b, portfolio_b, 1_000_000);
-    env.top_up_backing_bucket(1, 500_000, 10);
-    env.add_source_positive_pnl(portfolio_a, 1, 250_000);
-    env.add_source_positive_pnl(portfolio_b, 1, 250_000);
-    env.resolve();
+    env.deposit(&owner_c, portfolio_c, 500_000);
+    // Two PLAIN-JUNIOR positive-pnl winners (no source backing -> they flow through the junior
+    // receipt pool / unreceipted bound, which is what the refine targets), funded by a third
+    // account that donated its 500k capital into the junior residual. (Source-backed claims now
+    // realize straight to capital and never populate the unreceipted bound.) Conservation holds:
+    // vault 2.5M >= c_tot 2.0M + net positive pnl 0.5M.
+    {
+        let mut m = env.svm.get_account(&env.market).unwrap();
+        let mut pa = env.svm.get_account(&portfolio_a).unwrap();
+        let mut pb = env.svm.get_account(&portfolio_b).unwrap();
+        let mut pc = env.svm.get_account(&portfolio_c).unwrap();
+        let (cfg, mut g) = state::read_market(&m.data).unwrap();
+        let mut a = state::read_portfolio(&pa.data).unwrap();
+        let mut b = state::read_portfolio(&pb.data).unwrap();
+        let mut c = state::read_portfolio(&pc.data).unwrap();
+        // C donates its capital to the junior residual.
+        g.c_tot -= 500_000;
+        c.capital = 0;
+        c.last_fee_slot = 1;
+        // A and B hold matured junior positive pnl.
+        a.pnl = 250_000;
+        a.last_fee_slot = 1;
+        b.pnl = 250_000;
+        b.last_fee_slot = 1;
+        g.pnl_pos_tot = 500_000;
+        g.pnl_matured_pos_tot = 500_000;
+        g.pnl_pos_bound_tot = 500_000;
+        g.pnl_pos_bound_tot_num = 500_000 * BOUND_SCALE;
+        g.mode = MarketModeV16::Resolved;
+        g.resolved_slot = 1;
+        g.current_slot = 1;
+        state::write_market(&mut m.data, &cfg, &g).unwrap();
+        state::write_portfolio(&mut pa.data, &a).unwrap();
+        state::write_portfolio(&mut pb.data, &b).unwrap();
+        state::write_portfolio(&mut pc.data, &c).unwrap();
+        env.svm.set_account(env.market, m).unwrap();
+        env.svm.set_account(portfolio_a, pa).unwrap();
+        env.svm.set_account(portfolio_b, pb).unwrap();
+        env.svm.set_account(portfolio_c, pc).unwrap();
+    }
 
     let dest_a = env.close_resolved(&owner_a, portfolio_a);
     assert_eq!(
         env.token_amount(dest_a),
         1_250_000,
-        "first winner creates a resolved receipt and receives its backed claim"
+        "first winner receives capital + full junior claim and becomes an exact receipt"
     );
 
     let (_, group_before) = env.market_state();
     let bound = group_before
         .resolved_payout_ledger
         .terminal_claim_bound_unreceipted_num;
-    assert!(bound > 0, "resolved user claim contributes to the unreceipted bound");
     assert!(
-        group_before.resolved_payout_ledger.terminal_claim_exact_receipts_num > 0,
+        bound > 0,
+        "remaining junior user claim contributes to the unreceipted bound"
+    );
+    assert!(
+        group_before
+            .resolved_payout_ledger
+            .terminal_claim_exact_receipts_num
+            > 0,
         "first close converted one winner into an exact receipt"
     );
 
@@ -30858,6 +31000,8 @@ fn v16_attack_close_portfolio_with_pnl_rejected() {
 // security.md sweep — backing-bucket expiry (#33): a winner's positive pnl backed by a backing bucket
 // with an expiry. After the expiry passes, the payout must still be CONSERVING — the winner is paid at
 // most the (still-available) backing, never more, and the system never over-pays expired backing.
+// (Engine e833b7f / commit 6433346 "Expire lapsed backing at resolved close" makes the realize step
+// expire past-expiry backing instead of stranding the winner with Stale — see the prior finding.)
 #[test]
 fn v16_attack_backing_expiry_no_overpay() {
     let mut env = V16CuEnv::new();
