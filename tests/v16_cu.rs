@@ -103,6 +103,12 @@ fn market_engine_slot_bytes(data: &[u8], asset_index: usize) -> &[u8] {
     &data[slot_start..slot_end]
 }
 
+fn market_group_header_bytes(data: &[u8]) -> &percolator::MarketGroupV16HeaderAccount {
+    let start = MARKET_GROUP_OFF;
+    let end = start + core::mem::size_of::<percolator::MarketGroupV16HeaderAccount>();
+    bytemuck::from_bytes(&data[start..end])
+}
+
 fn changed_byte_offsets(before: &[u8], after: &[u8]) -> Vec<usize> {
     assert_eq!(before.len(), after.len());
     before
@@ -466,6 +472,56 @@ impl Default for V16CuMarketParams {
             maintenance_fee_per_slot: 0,
         }
     }
+}
+
+fn init_host_market_data_for_serializer_probe() -> Vec<u8> {
+    let params = V16CuMarketParams::default();
+    let mut engine_config = percolator::V16Config::public_user_fund(
+        params.max_portfolio_assets,
+        params.h_min,
+        params.h_max,
+    );
+    engine_config.min_nonzero_mm_req = params.min_nonzero_mm_req;
+    engine_config.min_nonzero_im_req = params.min_nonzero_im_req;
+    engine_config.maintenance_margin_bps = params.maintenance_margin_bps;
+    engine_config.initial_margin_bps = params.initial_margin_bps;
+    engine_config.max_trading_fee_bps = params.max_trading_fee_bps;
+    engine_config.liquidation_fee_bps = params.liquidation_fee_bps;
+    engine_config.liquidation_fee_cap = params.liquidation_fee_cap;
+    engine_config.min_liquidation_abs = params.min_liquidation_abs;
+    engine_config.max_price_move_bps_per_slot = params.max_price_move_bps_per_slot;
+    engine_config.max_accrual_dt_slots = params.max_accrual_dt_slots;
+    engine_config.max_abs_funding_e9_per_slot = params.max_abs_funding_e9_per_slot;
+    engine_config.min_funding_lifetime_slots = params.min_funding_lifetime_slots;
+    engine_config.max_account_b_settlement_chunks = params.max_account_b_settlement_chunks;
+    engine_config.max_bankrupt_close_chunks = params.max_bankrupt_close_chunks;
+    engine_config.max_bankrupt_close_lifetime_slots = params.max_bankrupt_close_lifetime_slots;
+    engine_config.public_b_chunk_atoms = params.public_b_chunk_atoms;
+
+    let mut wrapper = state::WrapperConfigV16::default();
+    wrapper.marketauth = [1u8; 32];
+    wrapper.collateral_mint = [2u8; 32];
+    wrapper.oracle_mode = percolator_prog::constants::ORACLE_MODE_MANUAL;
+    wrapper.mark_ewma_e6 = params.initial_price;
+    wrapper.oracle_target_price_e6 = params.initial_price;
+    wrapper.mark_ewma_halflife_slots =
+        percolator_prog::constants::DEFAULT_MARK_EWMA_HALFLIFE_SLOTS;
+
+    let mut data = vec![
+        0u8;
+        state::market_account_len_for_capacity(params.max_portfolio_assets as usize)
+            .unwrap()
+    ];
+    state::init_market_account_zero_copy(
+        &mut data,
+        &wrapper,
+        engine_config,
+        [9u8; 32],
+        params.initial_price,
+        0,
+    )
+    .unwrap();
+    data
 }
 
 fn init_market_instruction(params: &V16CuMarketParams) -> ProgInstruction {
@@ -3978,6 +4034,35 @@ fn add_source_positive_pnl_to_market(
     }
     env.svm.set_account(market, market_account).unwrap();
     env.svm.set_account(portfolio, portfolio_account).unwrap();
+}
+
+#[test]
+fn v16_host_write_market_round_trips_source_fresh_backing_total() {
+    let mut data = init_host_market_data_for_serializer_probe();
+    let (cfg, mut group) = state::read_market(&data).unwrap();
+    let amount = 37u128
+        .checked_mul(BOUND_SCALE)
+        .expect("probe amount within bound scale");
+    let domain = 1usize;
+
+    group.vault = group.vault.checked_add(37).unwrap();
+    group.source_backing_buckets[domain] = percolator::BackingBucketV16 {
+        market_id: group.assets[0].market_id,
+        fresh_unliened_backing_num: amount,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..percolator::BackingBucketV16::EMPTY
+    };
+    group.source_credit[domain].fresh_reserved_backing_num = amount;
+
+    state::write_market(&mut data, &cfg, &group).unwrap();
+    assert_eq!(
+        market_group_header_bytes(&data)
+            .source_fresh_backing_total_num
+            .get(),
+        amount,
+        "host write_market must serialize the fresh backing aggregate used by engine residual math"
+    );
 }
 
 fn crank_portfolio_on_market(

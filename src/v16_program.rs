@@ -2046,8 +2046,10 @@ pub mod state {
             }
             let mut claim_bound = 0u128;
             let mut ins_reserved = 0u128;
+            let mut fresh_backing = 0u128;
             for s in &group.source_credit {
                 claim_bound = claim_bound.saturating_add(s.positive_claim_bound_num);
+                fresh_backing = fresh_backing.saturating_add(s.fresh_reserved_backing_num);
                 let num = s.insurance_credit_reserved_num;
                 let whole = num / percolator::BOUND_SCALE;
                 let atoms = if num % percolator::BOUND_SCALE == 0 {
@@ -2064,6 +2066,7 @@ pub mod state {
             }
             header.backing_provider_earnings_total = percolator::V16PodU128::new(earnings);
             header.source_claim_bound_total_num = percolator::V16PodU128::new(claim_bound);
+            header.source_fresh_backing_total_num = percolator::V16PodU128::new(fresh_backing);
             header.source_insurance_credit_reserved_total_atoms =
                 percolator::V16PodU128::new(ins_reserved);
             header.insurance_domain_budget_remaining_total =
