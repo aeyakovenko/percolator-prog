@@ -5146,36 +5146,81 @@ pub mod processor {
         Ok(capacity.min(global_available).min(group.header.vault.get()))
     }
 
-    fn terminal_insurance_withdraw_capacity_for_authority_view(
-        group: &state::MarketViewMutV16<'_>,
-        cfg: &WrapperConfigV16,
-        authority: &Pubkey,
-    ) -> Result<u128, ProgramError> {
-        let authority_bytes = authority.to_bytes();
-        if authority_bytes == [0u8; 32] {
-            return Err(PercolatorError::Unauthorized.into());
+    fn debit_terminal_insurance_domain_for_authority_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        domain: usize,
+        amount: &mut u128,
+        observed_total: &mut u128,
+    ) -> ProgramResult {
+        let remaining = domain_withdraw_capacity_view(group, domain)?;
+        if remaining == 0 {
+            return Ok(());
         }
-        let domain_count = (group.header.config.max_market_slots.get() as usize)
+        *observed_total = observed_total
+            .checked_add(remaining)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let debit = remaining.min(*amount);
+        if debit != 0 {
+            group
+                .withdraw_domain_insurance_not_atomic(domain, debit)
+                .map_err(map_v16_error)?;
+            *amount = amount
+                .checked_sub(debit)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?;
+        }
+        Ok(())
+    }
+
+    fn debit_terminal_insurance_asset_for_authority_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        cfg: &WrapperConfigV16,
+        authority_bytes: [u8; 32],
+        asset_index: usize,
+        amount: &mut u128,
+        observed_total: &mut u128,
+        observe_all_matching_domains: bool,
+    ) -> ProgramResult {
+        let long_domain = asset_index
             .checked_mul(2)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        let mut total = 0u128;
-        let mut domain = 0usize;
-        while domain < domain_count {
-            let authorities = domain_authorities_from_view(group, cfg, domain)?;
-            if authorities.insurance_authority == authority_bytes {
-                total = total
-                    .checked_add(domain_withdraw_capacity_view(group, domain)?)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-            }
-            domain += 1;
+        let short_domain = long_domain
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let slot = &group.markets[asset_index].engine;
+        let long_budget_remaining = slot
+            .insurance_domain_budget_long
+            .get()
+            .checked_sub(slot.insurance_domain_spent_long.get())
+            .ok_or(PercolatorError::EngineCounterUnderflow)?;
+        let short_budget_remaining = slot
+            .insurance_domain_budget_short
+            .get()
+            .checked_sub(slot.insurance_domain_spent_short.get())
+            .ok_or(PercolatorError::EngineCounterUnderflow)?;
+        if long_budget_remaining == 0 && short_budget_remaining == 0 {
+            return Ok(());
         }
-        let global_available = group.header.insurance.get().saturating_sub(
-            group
-                .header
-                .source_insurance_credit_reserved_total_atoms
-                .get(),
-        );
-        Ok(total.min(global_available).min(group.header.vault.get()))
+        let authorities = domain_authorities_from_view(group, cfg, long_domain)?;
+        if authorities.insurance_authority != authority_bytes {
+            return Ok(());
+        }
+        if long_budget_remaining != 0 && (*amount != 0 || observe_all_matching_domains) {
+            debit_terminal_insurance_domain_for_authority_view(
+                group,
+                long_domain,
+                amount,
+                observed_total,
+            )?;
+        }
+        if short_budget_remaining != 0 && (*amount != 0 || observe_all_matching_domains) {
+            debit_terminal_insurance_domain_for_authority_view(
+                group,
+                short_domain,
+                amount,
+                observed_total,
+            )?;
+        }
+        Ok(())
     }
 
     fn debit_terminal_insurance_budgets_for_authority_view(
@@ -5183,39 +5228,64 @@ pub mod processor {
         cfg: &WrapperConfigV16,
         authority: &Pubkey,
         mut amount: u128,
-    ) -> ProgramResult {
+        observe_all_matching_domains: bool,
+    ) -> Result<u128, ProgramError> {
         if amount == 0 {
-            return Ok(());
+            return Ok(0);
         }
         let authority_bytes = authority.to_bytes();
         if authority_bytes == [0u8; 32] {
             return Err(PercolatorError::Unauthorized.into());
         }
-        let domain_count = (group.header.config.max_market_slots.get() as usize)
-            .checked_mul(2)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        let mut domain = 0usize;
-        while domain < domain_count && amount != 0 {
-            let authorities = domain_authorities_from_view(group, cfg, domain)?;
-            if authorities.insurance_authority == authority_bytes {
-                let remaining = domain_withdraw_capacity_view(group, domain)?;
-                let debit = remaining.min(amount);
-                if debit != 0 {
-                    // Atomic insurance/vault/budget withdraw per domain (maintains the budget total).
-                    group
-                        .withdraw_domain_insurance_not_atomic(domain, debit)
-                        .map_err(map_v16_error)?;
-                    amount = amount
-                        .checked_sub(debit)
-                        .ok_or(PercolatorError::EngineCounterUnderflow)?;
-                }
+        let global_available_before = group.header.insurance.get().saturating_sub(
+            group
+                .header
+                .source_insurance_credit_reserved_total_atoms
+                .get(),
+        );
+        let vault_before = group.header.vault.get();
+        let asset_count = group.header.config.max_market_slots.get() as usize;
+        if asset_count > group.markets.len() {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let mut observed_total = 0u128;
+        let mut front = 0usize;
+        let mut back = asset_count;
+        // Sweep from both ends so sparse terminal budgets at either edge cannot force a full
+        // near-10 MiB account walk before making progress.
+        while front < back && (amount != 0 || observe_all_matching_domains) {
+            debit_terminal_insurance_asset_for_authority_view(
+                group,
+                cfg,
+                authority_bytes,
+                front,
+                &mut amount,
+                &mut observed_total,
+                observe_all_matching_domains,
+            )?;
+            if amount == 0 && !observe_all_matching_domains {
+                break;
             }
-            domain += 1;
+            back -= 1;
+            if back != front {
+                debit_terminal_insurance_asset_for_authority_view(
+                    group,
+                    cfg,
+                    authority_bytes,
+                    back,
+                    &mut amount,
+                    &mut observed_total,
+                    observe_all_matching_domains,
+                )?;
+            }
+            front += 1;
         }
         if amount != 0 {
             return Err(PercolatorError::EngineCounterUnderflow.into());
         }
-        Ok(())
+        Ok(observed_total
+            .min(global_available_before)
+            .min(vault_before))
     }
 
     fn debit_market_insurance_budget_view(
@@ -8096,15 +8166,10 @@ pub mod processor {
         let cfg_pre = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
-            let available_insurance = terminal_insurance_withdraw_capacity_for_authority_view(
-                &group,
-                &cfg,
-                authority.key,
-            )?;
             if group.header.mode != 1
                 || group.header.materialized_portfolio_count.get() != 0
                 || group.header.c_tot.get() != 0
-                || amount > available_insurance
+                || amount > group.header.insurance.get()
                 || amount > group.header.vault.get()
             {
                 return Err(PercolatorError::EngineLockActive.into());
@@ -8114,26 +8179,27 @@ pub mod processor {
             } else {
                 None
             };
+            // insurance + vault + per-domain budget all decremented atomically inside the engine
+            // withdraw (called per domain by the helper); no separate header decrement here.
+            let observed_insurance = debit_terminal_insurance_budgets_for_authority_view(
+                &mut group,
+                &cfg,
+                authority.key,
+                amount,
+                ledger_data.is_some(),
+            )?;
             let mut ledger_state = if let Some(data) = ledger_data.as_deref() {
                 let (mut ledger, initialized) = read_or_new_insurance_ledger(
                     data,
                     market_ai.key.to_bytes(),
                     authority.key.to_bytes(),
-                    available_insurance,
+                    observed_insurance,
                 )?;
-                sync_insurance_ledger(&mut ledger, available_insurance)?;
+                sync_insurance_ledger(&mut ledger, observed_insurance)?;
                 Some((ledger, initialized))
             } else {
                 None
             };
-            // insurance + vault + per-domain budget all decremented atomically inside the engine
-            // withdraw (called per domain by the helper); no separate header decrement here.
-            debit_terminal_insurance_budgets_for_authority_view(
-                &mut group,
-                &cfg,
-                authority.key,
-                amount,
-            )?;
             if let Some((ledger, _)) = ledger_state.as_mut() {
                 ledger.total_withdrawn_atoms = ledger
                     .total_withdrawn_atoms

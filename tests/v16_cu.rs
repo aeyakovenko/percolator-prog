@@ -44615,6 +44615,124 @@ fn v16_bpf_10m_market_over_5000_assets_trades_with_bounded_cu() {
     );
 }
 
+// DoS regression — terminal insurance withdrawal used to compute authority capacity with one
+// full-domain scan and then debit with another. A sparse near-10 MiB market with only the LAST
+// domain funded exhausted the 1.4M tx cap before the authority could recover funds, stranding
+// terminal insurance and blocking CloseSlab. Keep this path real-BPF and non-vacuous: fund the
+// last domain, resolve with no portfolios, withdraw through the global terminal interface, and
+// then close the slab.
+#[test]
+fn v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market() {
+    const N: usize = 5_834;
+    const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const FUNDED: u128 = 123;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(1, PRICE);
+    let (_, g0) = env.market_state();
+    let template = g0.assets[0];
+
+    let new_len = state::market_account_len_for_capacity(N).unwrap();
+    let next_len = state::market_account_len_for_capacity(N + 1).unwrap();
+    assert!(
+        N > 5_000 && new_len <= SOLANA_MAX_ACCOUNT_DATA_LEN && next_len > SOLANA_MAX_ACCOUNT_DATA_LEN,
+        "test should exercise the maximal near-10 MiB market capacity"
+    );
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        acct.data.resize(new_len, 0u8);
+        acct.lamports = acct.lamports.max(new_len as u64 * 10);
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    let high_market_id = (HIGH_ASSET as u64) + 1;
+    env.mutate_market(|_cfg, group| {
+        assert_eq!(group.assets.len(), N, "grown read yields N asset slots");
+        assert_eq!(group.insurance_domain_budget.len(), 2 * N);
+        group.config.max_market_slots = N as u32;
+        group.next_market_id = (N as u64) + 1;
+
+        let mut high = template;
+        high.market_id = high_market_id;
+        group.assets[HIGH_ASSET] = high;
+
+        let (long_domain, short_domain) = (2 * HIGH_ASSET, 2 * HIGH_ASSET + 1);
+        group.source_backing_buckets[long_domain] =
+            percolator::BackingBucketV16::empty_for_market(high_market_id);
+        group.source_backing_buckets[short_domain] =
+            percolator::BackingBucketV16::empty_for_market(high_market_id);
+    });
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        let profile0 = state::read_asset_oracle_profile(&acct.data, 0).unwrap();
+        state::write_asset_oracle_profile(&mut acct.data, HIGH_ASSET, &profile0).unwrap();
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    let last_domain = (2 * HIGH_ASSET + 1) as u16;
+    let admin = env.admin.insecure_clone();
+    let topup_cu = env.top_up_insurance_domain_with_authority_and_cu(&admin, last_domain, FUNDED).1;
+    assert_cu_within(
+        "10MiB terminal last-domain insurance top-up",
+        topup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let before_resolve = env.market_state().1;
+    assert_eq!(
+        before_resolve.insurance_domain_budget[last_domain as usize],
+        FUNDED,
+        "only the last domain is funded"
+    );
+    assert_eq!(before_resolve.insurance, FUNDED);
+    assert_eq!(before_resolve.c_tot, 0, "no open capital before resolve");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data.len(),
+        new_len,
+        "market account remains the near-10 MiB buffer"
+    );
+
+    env.resolve();
+    let (dest, withdraw_cu) = env.withdraw_terminal_insurance_with_authority(&admin, FUNDED);
+    println!(
+        "v16 10MiB terminal WithdrawInsurance: domains={}, funded_domain={}, CU={withdraw_cu}",
+        2 * N,
+        last_domain
+    );
+    assert_cu_within(
+        "10MiB terminal last-domain WithdrawInsurance",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), FUNDED as u64);
+
+    let after_withdraw = env.market_state().1;
+    assert_eq!(after_withdraw.insurance, 0, "terminal insurance drained");
+    assert_eq!(
+        after_withdraw.insurance_domain_budget_remaining_total, 0,
+        "all per-domain insurance is consumed"
+    );
+    assert_eq!(
+        after_withdraw.insurance_domain_budget[last_domain as usize],
+        0,
+        "last-domain budget principal is consumed"
+    );
+    assert_eq!(
+        after_withdraw.insurance_domain_spent[last_domain as usize],
+        0,
+        "terminal withdrawal reduces budget rather than recording spent"
+    );
+
+    let close_cu = env.close_slab_with_cu();
+    assert_cu_within(
+        "10MiB terminal last-domain CloseSlab",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 // LIVENESS: no trader can block marketauth's asset cleanup. After force_close_delay_slots, the
 // permissionless force-close winds down a retired asset by netting a long against a short at the
 // frozen mark. A griefer who sits on a maximally-complex (14-leg) STALE portfolio cannot stall this:
