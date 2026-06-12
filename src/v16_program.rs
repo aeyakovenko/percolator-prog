@@ -2660,7 +2660,30 @@ pub mod state {
             .try_to_runtime()
             .map_err(map_account_wire_error)?;
         let mut prices = alloc::vec::Vec::with_capacity(asset_indices.len());
+        let mut seen_low_assets = 0u128;
+        let mut seen_high_assets = [0u16; 16];
+        let mut seen_high_len = 0usize;
         for &asset_index in asset_indices {
+            if asset_index < 128 {
+                let bit = 1u128 << u32::from(asset_index);
+                if seen_low_assets & bit != 0 {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                seen_low_assets |= bit;
+            } else {
+                if seen_high_len >= seen_high_assets.len() {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                let mut i = 0usize;
+                while i < seen_high_len {
+                    if seen_high_assets[i] == asset_index {
+                        return Err(PercolatorError::InvalidInstruction.into());
+                    }
+                    i += 1;
+                }
+                seen_high_assets[seen_high_len] = asset_index;
+                seen_high_len += 1;
+            }
             if asset_index as usize >= engine_config.max_market_slots as usize {
                 return Err(PercolatorError::InvalidInstruction.into());
             }

@@ -45137,6 +45137,154 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
     );
 }
 
+// CU/DoS hardening: duplicate-asset BatchTradeCpi is structurally invalid and must reject before
+// matcher CPI. The existing duplicate test proves rollback; this hostile sentinel proves the wrapper
+// does not call the matcher first.
+#[test]
+fn v16_attack_batch_tradecpi_duplicate_assets_reject_before_hostile_matcher_cpi() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &la,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; MATCHER_CONTEXT_LEN],
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
+
+    let send = |env: &mut V16CuEnv, legs: Vec<BatchTradeCpiLeg>| {
+        let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
+        data[0] = 0; // hostile over-fill mode: if CPI occurs, validation fails InvalidAccountData.
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::BatchTradeCpi { legs },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker],
+        )
+    };
+    let sz = (5 * POS_SCALE) as i128;
+
+    let distinct_err = send(
+        &mut env,
+        vec![
+            BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: sz,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            BatchTradeCpiLeg {
+                asset_index: 1,
+                size_q: -sz,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+        ],
+    )
+    .expect_err("distinct hostile batch should reach matcher-return validation");
+    assert!(
+        distinct_err.contains("InvalidAccountData"),
+        "distinct hostile control should fail from matcher-return validation, got {distinct_err}"
+    );
+    assert!(
+        !distinct_err.contains("Custom(9)"),
+        "distinct hostile control must not trip the duplicate gate: {distinct_err}"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+    let duplicate_err = send(
+        &mut env,
+        vec![
+            BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: sz,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: -sz,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+        ],
+    )
+    .expect_err("duplicate-asset BatchTradeCpi must reject before matcher CPI");
+    assert!(
+        duplicate_err.contains("Custom(9)"),
+        "duplicate-asset BatchTradeCpi must fail as InvalidInstruction before hostile matcher validation, got {duplicate_err}"
+    );
+    assert!(
+        !duplicate_err.contains("InvalidAccountData"),
+        "duplicate-asset BatchTradeCpi must not reach hostile matcher validation: {duplicate_err}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ta).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&la).unwrap(), lp_before);
+}
+
 // BatchTradeNoCpi end-state margin: a leg that is individually margin-INFEASIBLE (it would leave the
 // taker holding two full positions at once) is rejected as a standalone trade, but the SAME leg in a
 // batch that also closes the offsetting position SUCCEEDS, because the batch checks initial margin
