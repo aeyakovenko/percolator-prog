@@ -7152,7 +7152,14 @@ pub mod processor {
         }
         // One header/config parse for mode + slot + every leg's oracle price (avoids O(N^2)
         // re-parsing the market once per leg).
-        let (mode_pre, current_slot_pre, oracle_prices, stale_matured, fee_bounds_ok) = {
+        let (
+            mode_pre,
+            current_slot_pre,
+            oracle_prices,
+            stale_matured,
+            backing_fee_policy_active,
+            fee_bounds_ok,
+        ) = {
             let market_data = market_ai.try_borrow_data()?;
             let (cfg_pre, mode_pre, current_slot_pre, max_trading_fee_bps, oracle_prices) =
                 state::read_asset_effective_prices(&market_data, &asset_indices)?;
@@ -7182,6 +7189,7 @@ pub mod processor {
                 current_slot_pre,
                 oracle_prices,
                 stale_matured,
+                cfg_pre.backing_trade_fee_policy_count != 0,
                 fee_bounds_ok,
             )
         };
@@ -7190,6 +7198,9 @@ pub mod processor {
         }
         if stale_matured {
             return Err(PercolatorError::OracleStale.into());
+        }
+        if backing_fee_policy_active {
+            return Err(PercolatorError::InvalidInstruction.into());
         }
         if !fee_bounds_ok {
             return Err(PercolatorError::InvalidInstruction.into());
