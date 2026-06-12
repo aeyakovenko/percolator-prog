@@ -2639,7 +2639,16 @@ pub mod state {
     pub fn read_asset_effective_prices(
         data: &[u8],
         asset_indices: &[u16],
-    ) -> Result<(WrapperConfigV16, MarketModeV16, u64, alloc::vec::Vec<u64>), ProgramError> {
+    ) -> Result<
+        (
+            WrapperConfigV16,
+            MarketModeV16,
+            u64,
+            u64,
+            alloc::vec::Vec<u64>,
+        ),
+        ProgramError,
+    > {
         if data.len() < MIN_MARKET_ACCOUNT_LEN {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
@@ -2662,6 +2671,7 @@ pub mod state {
             config,
             decode_market_mode(wire.mode)?,
             wire.current_slot.get(),
+            engine_config.max_trading_fee_bps,
             prices,
         ))
     }
@@ -7142,9 +7152,9 @@ pub mod processor {
         }
         // One header/config parse for mode + slot + every leg's oracle price (avoids O(N^2)
         // re-parsing the market once per leg).
-        let (mode_pre, current_slot_pre, oracle_prices, stale_matured) = {
+        let (mode_pre, current_slot_pre, oracle_prices, stale_matured, fee_bounds_ok) = {
             let market_data = market_ai.try_borrow_data()?;
-            let (cfg_pre, mode_pre, current_slot_pre, oracle_prices) =
+            let (cfg_pre, mode_pre, current_slot_pre, max_trading_fee_bps, oracle_prices) =
                 state::read_asset_effective_prices(&market_data, &asset_indices)?;
             let authenticated_slot = authenticated_slot_or_fallback(current_slot_pre);
             let mut stale_matured = false;
@@ -7164,13 +7174,25 @@ pub mod processor {
                     break;
                 }
             }
-            (mode_pre, current_slot_pre, oracle_prices, stale_matured)
+            let fee_bounds_ok = legs.iter().all(|leg| {
+                core::cmp::max(leg.fee_bps, cfg_pre.trade_fee_base_bps) <= max_trading_fee_bps
+            });
+            (
+                mode_pre,
+                current_slot_pre,
+                oracle_prices,
+                stale_matured,
+                fee_bounds_ok,
+            )
         };
         if mode_pre != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
         if stale_matured {
             return Err(PercolatorError::OracleStale.into());
+        }
+        if !fee_bounds_ok {
+            return Err(PercolatorError::InvalidInstruction.into());
         }
         let (account_a_header, account_a_owner) =
             state::read_portfolio_owner_preflight(&account_a_ai.try_borrow_data()?)?;

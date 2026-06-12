@@ -46749,6 +46749,141 @@ fn v16_attack_batch_tradecpi_stale_rejects_before_hostile_matcher_cpi() {
     );
 }
 
+// CU/DoS hardening: BatchTradeCpi must reject impossible caller fee_bps before invoking a matcher.
+// The single-fill CPI path checks max(caller_fee_bps, trade_fee_base_bps) before CPI; batch CPI must
+// do the same. The hostile over-fill matcher is the sentinel: a valid-fee call reaches matcher-return
+// validation and fails InvalidAccountData, while an over-fee call must fail InvalidInstruction first.
+#[test]
+fn v16_attack_batch_tradecpi_fee_bps_rejects_before_hostile_matcher_cpi() {
+    let mut env = V16CuEnv::new();
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &la,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; MATCHER_CONTEXT_LEN],
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
+
+    let send_fee = |env: &mut V16CuEnv, fee_bps: u64| {
+        let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
+        data[0] = 0; // hostile over-fill mode: if CPI occurs, validation fails InvalidAccountData.
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: (5 * POS_SCALE) as i128,
+                    fee_bps,
+                    limit_price: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker],
+        )
+    };
+
+    let valid_fee_err = send_fee(&mut env, 100)
+        .expect_err("valid-fee hostile batch should reach matcher-return validation");
+    assert!(
+        valid_fee_err.contains("InvalidAccountData"),
+        "valid-fee hostile sentinel must fail from matcher-return validation, got {valid_fee_err}"
+    );
+    assert!(
+        !valid_fee_err.contains("Custom(9)"),
+        "valid-fee sentinel must not trip the fee preflight: {valid_fee_err}"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+    for bad_fee in [10_001u64, u64::MAX] {
+        let rejected = send_fee(&mut env, bad_fee)
+            .expect_err("over-fee BatchTradeCpi must reject before matcher CPI");
+        assert!(
+            rejected.contains("Custom(9)"),
+            "over-fee BatchTradeCpi must fail as InvalidInstruction before hostile matcher validation, got {rejected}"
+        );
+        assert!(
+            !rejected.contains("InvalidAccountData"),
+            "over-fee BatchTradeCpi must not reach hostile matcher validation: {rejected}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "over-fee preflight leaves market bytes unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&ta).unwrap(),
+            taker_before,
+            "over-fee preflight leaves taker bytes unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&la).unwrap(),
+            lp_before,
+            "over-fee preflight leaves LP bytes unchanged"
+        );
+    }
+}
+
 // security.md sweep - stale BatchTradeNoCpi legacy realloc rollback (#30/#44/#48): the no-CPI batch
 // path grows legacy portfolios before the shared stale-market freeze check. A stale-matured batch must
 // reject without leaving an attacker-triggered realloc/zero-fill DoS behind; while fresh, the same
