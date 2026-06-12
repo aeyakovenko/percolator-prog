@@ -45495,8 +45495,7 @@ fn v16_bpf_batch_trade_14_legs_under_tx_limit() {
 
 // security.md sweep — batch active-leg cap atomicity (#22/#30/#35): the matcher ABI can return up to
 // 16 legs, while the wrapper caps a portfolio at 14 active legs. A 15-distinct-asset batch must reject
-// without partially opening the first 14 legs or leaving matcher-side state behind; the exact 14-leg
-// boundary still succeeds.
+// without partially opening the first 14 legs; the exact 14-leg boundary still succeeds.
 #[test]
 fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
     const CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
@@ -45629,7 +45628,7 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
         );
         assert!(
             rejected.is_err(),
-            "15-distinct-leg BatchTradeCpi must reject after matcher return validation"
+            "15-distinct-leg BatchTradeCpi must reject at the configured portfolio active-leg cap"
         );
         assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
         assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
@@ -45660,6 +45659,164 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
             "exact-cap CPI batch opened exactly 14 legs"
         );
     }
+}
+
+// CU/DoS hardening: BatchTradeCpi must enforce the configured portfolio active-leg cap before
+// invoking an external matcher. This uses a low-cap market so the attack is below the 16-leg matcher
+// ABI cap: an exact-cap hostile request reaches matcher-return validation, while cap+1 fails at the
+// wrapper preflight and never gives the matcher a writable context.
+#[test]
+fn v16_attack_batch_tradecpi_configured_leg_cap_rejects_before_hostile_matcher_cpi() {
+    const CAP: u16 = 2;
+    const OVER: u16 = CAP + 1;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: CAP,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        70,
+    );
+    assert_eq!(env.market_state().1.config.max_market_slots, CAP as u32);
+    env.activate_asset(CAP, 20, 100);
+    let (_, group) = env.market_state();
+    assert_eq!(group.config.max_market_slots, OVER as u32);
+    assert_eq!(group.config.max_portfolio_assets, CAP);
+
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_account,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; MATCHER_CONTEXT_LEN],
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+
+    let send = |env: &mut V16CuEnv, count: u16| {
+        let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
+        data[0] = 0; // hostile over-fill mode: if CPI occurs, validation fails InvalidAccountData.
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let legs: Vec<BatchTradeCpiLeg> = (0..count)
+            .map(|asset_index| BatchTradeCpiLeg {
+                asset_index,
+                size_q: POS_SCALE as i128,
+                fee_bps: 0,
+                limit_price: 0,
+            })
+            .collect();
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::BatchTradeCpi { legs },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+                AccountMeta::new(lp_account, false),
+                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker],
+        )
+    };
+
+    let exact_cap_err = send(&mut env, CAP)
+        .expect_err("exact-cap hostile batch should reach matcher-return validation");
+    assert!(
+        exact_cap_err.contains("InvalidAccountData"),
+        "exact-cap hostile control should fail from matcher-return validation, got {exact_cap_err}"
+    );
+    assert!(
+        !exact_cap_err.contains("Custom(9)"),
+        "exact-cap hostile control must not trip the configured active-leg cap: {exact_cap_err}"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_account).unwrap();
+    let lp_before = env.svm.get_account(&lp_account).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    let over_cap_err = send(&mut env, OVER)
+        .expect_err("over-cap BatchTradeCpi must reject before matcher CPI");
+    assert!(
+        over_cap_err.contains("Custom(9)"),
+        "over-cap BatchTradeCpi must fail as InvalidInstruction before hostile matcher validation, got {over_cap_err}"
+    );
+    assert!(
+        !over_cap_err.contains("InvalidAccountData"),
+        "over-cap BatchTradeCpi must not reach hostile matcher validation: {over_cap_err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "over-cap preflight leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_account).unwrap(),
+        taker_before,
+        "over-cap preflight leaves taker bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_account).unwrap(),
+        lp_before,
+        "over-cap preflight leaves LP bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "over-cap preflight never gives the hostile matcher a writable context"
+    );
 }
 
 // DoS sweep: batch instruction decoding used to allocate the caller-declared leg vector before any

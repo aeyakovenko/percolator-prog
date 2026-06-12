@@ -2659,6 +2659,11 @@ pub mod state {
             .config
             .try_to_runtime()
             .map_err(map_account_wire_error)?;
+        if asset_indices.is_empty()
+            || asset_indices.len() > engine_config.max_portfolio_assets as usize
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
         let mut prices = alloc::vec::Vec::with_capacity(asset_indices.len());
         let mut seen_low_assets = 0u128;
         let mut seen_high_assets = [0u16; 16];
