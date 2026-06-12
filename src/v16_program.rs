@@ -10707,6 +10707,16 @@ pub mod processor {
                         if last.key == portfolio_ai.key {
                             return Err(PercolatorError::InvalidInstruction.into());
                         }
+                        let (reward_header, reward_owner) =
+                            state::read_portfolio_owner_preflight(&last.try_borrow_data()?)?;
+                        if reward_header.market_group_id != market_ai.key.to_bytes()
+                            || reward_header.portfolio_account_id != last.key.to_bytes()
+                        {
+                            return Err(PercolatorError::EngineProvenanceMismatch.into());
+                        }
+                        if reward_owner != owner.key.to_bytes() {
+                            return Err(PercolatorError::Unauthorized.into());
+                        }
                         ensure_portfolio_storage_for_market_slots(last, max_market_slots)?;
                         cranker_portfolio_ai = Some(last);
                         oracle_tail = rest;

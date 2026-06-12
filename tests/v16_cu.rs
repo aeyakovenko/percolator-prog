@@ -36895,6 +36895,96 @@ fn v16_attack_liquidation_cranker_reward_rejects_wrong_owner() {
     );
 }
 
+// CU/DoS hardening: when liquidation rewards are enabled, a wrong-owner reward tail must reject
+// before the crank parses a supplied external oracle tail. The authorized control below reaches the
+// bogus oracle and fails there; the wrong-owner attempt must fail as Unauthorized first.
+#[test]
+fn v16_attack_liquidation_reward_wrong_owner_rejects_before_oracle_tail_parse() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0xb1u8; 32];
+    let initial_oracle = env.set_pyth_price_with_conf(&feed, 1_000_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial_oracle],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure hybrid oracle");
+
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let reward_owner = Keypair::new();
+    let reward = env.create_portfolio(&reward_owner);
+    let wrong_owner = Keypair::new();
+    env.ensure_signer_account(wrong_owner.pubkey());
+    let bogus_oracle = env.program_account(8);
+
+    set_test_clock(&mut env, 2, 101);
+    let send = |env: &mut V16CuEnv, signer: &Keypair| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                action: 1,
+                asset_index: 0,
+                now_slot: 2,
+                funding_rate_e9: 0,
+                close_q: POS_SCALE,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(signer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+                AccountMeta::new_readonly(bogus_oracle, false),
+                AccountMeta::new(reward, false),
+            ],
+            &[signer],
+        )
+    };
+
+    let authorized_oracle_err = send(&mut env, &reward_owner)
+        .expect_err("authorized reward owner should reach bogus oracle parsing");
+    assert!(
+        !authorized_oracle_err.contains("Custom(8)"),
+        "authorized reward owner must not trip the reward-owner gate: {authorized_oracle_err}"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim).unwrap();
+    let reward_before = env.svm.get_account(&reward).unwrap();
+    let wrong_owner_err = send(&mut env, &wrong_owner)
+        .expect_err("wrong reward owner must reject before oracle parsing");
+    assert!(
+        wrong_owner_err.contains("Custom(8)"),
+        "wrong reward owner must fail as Unauthorized before bogus oracle parsing, got {wrong_owner_err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-owner preflight leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&victim).unwrap(),
+        victim_before,
+        "wrong-owner preflight leaves victim bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&reward).unwrap(),
+        reward_before,
+        "wrong-owner preflight leaves reward bytes unchanged"
+    );
+}
+
 // security.md sweep - liquidation reward legacy realloc rollback (#5/#6/#35/#44):
 // the reward tail is detected before the crank path refreshes oracle/profile state, and a legacy-sized
 // reward portfolio is grown before the later owner/provenance validation. A wrong signer must roll back
