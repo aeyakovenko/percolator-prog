@@ -35466,6 +35466,7 @@ fn assert_no_cpi_tiny_exit_accepts_extreme_reported_price(
     let long_before = opened_group.assets[0].oi_eff_long_q;
     let short_before = opened_group.assets[0].oi_eff_short_q;
     let insurance_before_exit = opened_group.insurance;
+    let mark_before_exit = env.market_state().0.mark_ewma_e6;
     assert_eq!(long_before, OPEN_Q.unsigned_abs());
     assert_eq!(short_before, OPEN_Q.unsigned_abs());
 
@@ -35485,7 +35486,7 @@ fn assert_no_cpi_tiny_exit_accepts_extreme_reported_price(
         exit.is_ok(),
         "{path:?}: risk-reducing exit must not be DoSed by valid reported_price={reported_price}: {exit:?}"
     );
-    let (_, closed_group) = env.market_state();
+    let (closed_cfg, closed_group) = env.market_state();
     assert_eq!(
         closed_group.assets[0].oi_eff_long_q,
         long_before - POS_SCALE,
@@ -35499,6 +35500,20 @@ fn assert_no_cpi_tiny_exit_accepts_extreme_reported_price(
     assert!(
         closed_group.insurance > insurance_before_exit,
         "{path:?}: extreme reported_price={reported_price} close charged a bounded higher fee"
+    );
+    let close_fee_paid = closed_group.insurance - insurance_before_exit;
+    let externality_notional = 2u128
+        .checked_mul(long_before)
+        .and_then(|v| v.checked_mul(MARK as u128))
+        .and_then(|v| v.checked_div(POS_SCALE))
+        .expect("externality notional");
+    let paid_move_bps = close_fee_paid * 10_000 / externality_notional;
+    let mark_move_bps =
+        percolator_prog::policy_v16::price_move_bps_ceil(mark_before_exit, closed_cfg.mark_ewma_e6)
+            .expect("mark move bps");
+    assert!(
+        mark_move_bps <= paid_move_bps as u64,
+        "{path:?}: EWMA close move ({mark_move_bps} bps) must be covered by paid fee ({paid_move_bps} bps)"
     );
 }
 
@@ -35542,6 +35557,7 @@ fn assert_no_cpi_tiny_open_accepts_extreme_reported_price(
     let long_before = opened_group.assets[0].oi_eff_long_q;
     let short_before = opened_group.assets[0].oi_eff_short_q;
     let insurance_before_tiny = opened_group.insurance;
+    let mark_before_tiny = env.market_state().0.mark_ewma_e6;
 
     let (owner_c, account_c, owner_d, account_d) =
         funded_no_cpi_reported_price_pair(&mut env, 10_000_000_000_000);
@@ -35561,7 +35577,7 @@ fn assert_no_cpi_tiny_open_accepts_extreme_reported_price(
         tiny_open.is_ok(),
         "{path:?}: tiny open must not be DoSed by valid reported_price={reported_price}: {tiny_open:?}"
     );
-    let (_, final_group) = env.market_state();
+    let (final_cfg, final_group) = env.market_state();
     assert_eq!(
         final_group.assets[0].oi_eff_long_q,
         long_before + POS_SCALE,
@@ -35575,6 +35591,20 @@ fn assert_no_cpi_tiny_open_accepts_extreme_reported_price(
     assert!(
         final_group.insurance > insurance_before_tiny,
         "{path:?}: extreme reported_price={reported_price} open charged a bounded higher fee"
+    );
+    let tiny_fee_paid = final_group.insurance - insurance_before_tiny;
+    let externality_notional = 2u128
+        .checked_mul(long_before)
+        .and_then(|v| v.checked_mul(MARK as u128))
+        .and_then(|v| v.checked_div(POS_SCALE))
+        .expect("externality notional");
+    let paid_move_bps = tiny_fee_paid * 10_000 / externality_notional;
+    let mark_move_bps =
+        percolator_prog::policy_v16::price_move_bps_ceil(mark_before_tiny, final_cfg.mark_ewma_e6)
+            .expect("mark move bps");
+    assert!(
+        mark_move_bps <= paid_move_bps as u64,
+        "{path:?}: EWMA open move ({mark_move_bps} bps) must be covered by paid fee ({paid_move_bps} bps)"
     );
 }
 
