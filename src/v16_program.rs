@@ -11556,13 +11556,13 @@ pub mod processor {
             mark_externality_notional,
             profile.mark_min_fee,
             min_externality_bps,
-        )
-        .ok_or(PercolatorError::EngineInvalidConfig)?;
+        );
+        // The dynamic fee model prices mark-discovery externality; it must not be an availability
+        // gate. If a valid reported print would require more fee than the market cap permits,
+        // charge the cap and rely on the already dt-clamped accepted price to bound mark movement.
+        let required = required.unwrap_or(max_trading_fee_bps);
         let fee = core::cmp::max(base, required);
-        if fee > max_trading_fee_bps {
-            return Err(PercolatorError::EngineInvalidConfig.into());
-        }
-        Ok(fee)
+        Ok(core::cmp::min(fee, max_trading_fee_bps))
     }
 
     fn hybrid_effective_price_for_crank_view(

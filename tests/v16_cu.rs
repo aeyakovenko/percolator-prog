@@ -35426,6 +35426,174 @@ fn v16_attack_nocpi_epsilon_reported_price_uses_dt_clamped_fee_and_ewma_price() 
     }
 }
 
+fn assert_no_cpi_tiny_exit_accepts_extreme_reported_price(
+    path: NoCpiReportedPricePath,
+    reported_price: u64,
+) {
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const OPEN_Q: i128 = (1000u128 * POS_SCALE) as i128;
+    const CLOSE_Q: i128 = -(POS_SCALE as i128);
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        h_max: 20,
+        max_price_move_bps_per_slot: CAP_BPS,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_ewma_mark_with_cu(1, MARK, 1, 0);
+    env.svm.warp_to_slot(5);
+    let (owner_a, account_a, owner_b, account_b) =
+        funded_no_cpi_reported_price_pair(&mut env, 10_000_000_000_000);
+
+    env.svm.expire_blockhash();
+    try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        OPEN_Q,
+        MARK,
+        0,
+    )
+    .unwrap_or_else(|err| panic!("{path:?}: setup open at mark failed: {err}"));
+    let (_, opened_group) = env.market_state();
+    let long_before = opened_group.assets[0].oi_eff_long_q;
+    let short_before = opened_group.assets[0].oi_eff_short_q;
+    let insurance_before_exit = opened_group.insurance;
+    assert_eq!(long_before, OPEN_Q.unsigned_abs());
+    assert_eq!(short_before, OPEN_Q.unsigned_abs());
+
+    env.svm.expire_blockhash();
+    let exit = try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        CLOSE_Q,
+        reported_price,
+        0,
+    );
+    assert!(
+        exit.is_ok(),
+        "{path:?}: risk-reducing exit must not be DoSed by valid reported_price={reported_price}: {exit:?}"
+    );
+    let (_, closed_group) = env.market_state();
+    assert_eq!(
+        closed_group.assets[0].oi_eff_long_q,
+        long_before - POS_SCALE,
+        "{path:?}: long OI reduced by the close"
+    );
+    assert_eq!(
+        closed_group.assets[0].oi_eff_short_q,
+        short_before - POS_SCALE,
+        "{path:?}: short OI reduced by the close"
+    );
+    assert!(
+        closed_group.insurance > insurance_before_exit,
+        "{path:?}: extreme reported_price={reported_price} close charged a bounded higher fee"
+    );
+}
+
+fn assert_no_cpi_tiny_open_accepts_extreme_reported_price(
+    path: NoCpiReportedPricePath,
+    reported_price: u64,
+) {
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const OPEN_Q: i128 = (1000u128 * POS_SCALE) as i128;
+    const TINY_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        h_max: 20,
+        max_price_move_bps_per_slot: CAP_BPS,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_ewma_mark_with_cu(1, MARK, 1, 0);
+    env.svm.warp_to_slot(5);
+    let (owner_a, account_a, owner_b, account_b) =
+        funded_no_cpi_reported_price_pair(&mut env, 10_000_000_000_000);
+
+    env.svm.expire_blockhash();
+    try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        OPEN_Q,
+        MARK,
+        0,
+    )
+    .unwrap_or_else(|err| panic!("{path:?}: setup open at mark failed: {err}"));
+    let (_, opened_group) = env.market_state();
+    let long_before = opened_group.assets[0].oi_eff_long_q;
+    let short_before = opened_group.assets[0].oi_eff_short_q;
+    let insurance_before_tiny = opened_group.insurance;
+
+    let (owner_c, account_c, owner_d, account_d) =
+        funded_no_cpi_reported_price_pair(&mut env, 10_000_000_000_000);
+    env.svm.expire_blockhash();
+    let tiny_open = try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &owner_c,
+        account_c,
+        &owner_d,
+        account_d,
+        TINY_Q,
+        reported_price,
+        0,
+    );
+    assert!(
+        tiny_open.is_ok(),
+        "{path:?}: tiny open must not be DoSed by valid reported_price={reported_price}: {tiny_open:?}"
+    );
+    let (_, final_group) = env.market_state();
+    assert_eq!(
+        final_group.assets[0].oi_eff_long_q,
+        long_before + POS_SCALE,
+        "{path:?}: long OI increased by the tiny open"
+    );
+    assert_eq!(
+        final_group.assets[0].oi_eff_short_q,
+        short_before + POS_SCALE,
+        "{path:?}: short OI increased by the tiny open"
+    );
+    assert!(
+        final_group.insurance > insurance_before_tiny,
+        "{path:?}: extreme reported_price={reported_price} open charged a bounded higher fee"
+    );
+}
+
+// Trade liveness: reported no-CPI prices are adversarial mark-discovery inputs, not a reason to
+// reject valid trades. Extreme valid reports may be clamped and charged higher fees, but tiny trades
+// against large existing OI must still execute instead of failing the fee model.
+#[test]
+fn v16_attack_nocpi_trade_not_dosed_by_extreme_reported_price() {
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        for reported_price in [1, percolator::MAX_ORACLE_PRICE] {
+            assert_no_cpi_tiny_exit_accepts_extreme_reported_price(path, reported_price);
+            assert_no_cpi_tiny_open_accepts_extreme_reported_price(path, reported_price);
+        }
+    }
+}
+
 // security.md sweep — phantom collateral via un-backed positive PnL (#9/#22/#33): an account whose
 // counterparty went insolvent carries a large positive PnL figure that is NOT backed (residual is
 // pinned at the counterparty's recovered capital). Attacker goal: have that face-value paper profit
