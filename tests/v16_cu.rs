@@ -36161,6 +36161,181 @@ fn v16_attack_auth_mark_prices_do_not_drive_mark_or_fee_across_trade_routes() {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum MixedModeBatchPath {
+    NoCpi,
+    Cpi,
+}
+
+fn mixed_mode_batch_env() -> V16CuEnv {
+    const MARK: u64 = 1_000_000;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        initial_price: MARK,
+        h_max: 20,
+        max_trading_fee_bps: 37,
+        max_price_move_bps_per_slot: 50,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_ewma_mark_for_asset_as_admin(0, 1, MARK, 1, 0);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, MARK);
+    env.svm.warp_to_slot(5);
+    env
+}
+
+fn send_mixed_mode_batch_trade(
+    env: &mut V16CuEnv,
+    path: MixedModeBatchPath,
+    taker: &Keypair,
+    taker_account: Pubkey,
+    lp: &Keypair,
+    lp_account: Pubkey,
+) -> Result<u64, String> {
+    const MARK: u64 = 1_000_000;
+    const SIZE_Q: i128 = (1000u128 * POS_SCALE) as i128;
+    const SPREAD_BPS: u32 = 9_000;
+    let high_print = MARK * (10_000 + SPREAD_BPS as u64) / 10_000;
+    env.svm.expire_blockhash();
+    match path {
+        MixedModeBatchPath::NoCpi => env.send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![
+                    BatchTradeLeg {
+                        asset_index: 0,
+                        size_q: SIZE_Q,
+                        exec_price: high_print,
+                        fee_bps: 0,
+                    },
+                    BatchTradeLeg {
+                        asset_index: 1,
+                        size_q: SIZE_Q,
+                        exec_price: high_print,
+                        fee_bps: 0,
+                    },
+                ],
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+                AccountMeta::new(lp_account, false),
+            ],
+            &[taker, lp],
+        ),
+        MixedModeBatchPath::Cpi => {
+            let matcher_program = Pubkey::new_unique();
+            let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+            env.svm.add_program(matcher_program, &matcher_bytes);
+            let (ctx, delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+                matcher_program,
+                lp,
+                lp_account,
+                SPREAD_BPS,
+                SPREAD_BPS,
+            );
+            env.svm.expire_blockhash();
+            env.send(
+                ProgInstruction::BatchTradeCpi {
+                    legs: vec![
+                        BatchTradeCpiLeg {
+                            asset_index: 0,
+                            size_q: SIZE_Q,
+                            fee_bps: 0,
+                            limit_price: 0,
+                        },
+                        BatchTradeCpiLeg {
+                            asset_index: 1,
+                            size_q: SIZE_Q,
+                            fee_bps: 0,
+                            limit_price: 0,
+                        },
+                    ],
+                },
+                vec![
+                    AccountMeta::new(taker.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker_account, false),
+                    AccountMeta::new(lp_account, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new(ctx, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ],
+                &[taker],
+            )
+        }
+    }
+}
+
+fn assert_mixed_mode_batch_updates_only_trade_driven_leg(path: MixedModeBatchPath) {
+    const MARK: u64 = 1_000_000;
+    const SIZE_Q: u128 = 1000u128 * POS_SCALE;
+    const MAX_FEE_BPS: u64 = 37;
+    let high_print = MARK * 19 / 10;
+    let accepted_price = oracle_v16::clamp_toward_engine_dt(MARK, high_print, 50, 4);
+
+    let mut env = mixed_mode_batch_env();
+    let taker = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp = Keypair::new();
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 6_000_000_000);
+    env.deposit(&lp, lp_account, 6_000_000_000);
+    let insurance_before = env.market_state().1.insurance;
+
+    let batch = send_mixed_mode_batch_trade(&mut env, path, &taker, taker_account, &lp, lp_account);
+    assert!(
+        batch.is_ok(),
+        "{path:?}: mixed EWMA/AUTH_MARK batch should stay live under off-oracle prints: {batch:?}"
+    );
+
+    let cfg = env.market_state().0;
+    let group = env.market_state().1;
+    let ewma_profile = trade_driven_mark_profile(&env, 0);
+    let auth_profile = trade_driven_mark_profile(&env, 1);
+    let mark_move_bps =
+        percolator_prog::policy_v16::price_move_bps_ceil(MARK, ewma_profile.mark_ewma_e6)
+            .expect("ewma mark move");
+    assert_eq!(
+        mark_move_bps, MAX_FEE_BPS,
+        "{path:?}: EWMA leg in mixed batch should bind at the fee cap"
+    );
+    assert_eq!(
+        cfg.mark_ewma_e6, ewma_profile.mark_ewma_e6,
+        "{path:?}: asset-0 wrapper mirror should track the EWMA profile"
+    );
+    assert_eq!(
+        auth_profile.mark_ewma_e6, MARK,
+        "{path:?}: AUTH_MARK leg in same batch must not be trade-driven"
+    );
+    assert_eq!(group.assets[0].oi_eff_long_q, SIZE_Q);
+    assert_eq!(group.assets[0].oi_eff_short_q, SIZE_Q);
+    assert_eq!(group.assets[1].oi_eff_long_q, SIZE_Q);
+    assert_eq!(group.assets[1].oi_eff_short_q, SIZE_Q);
+
+    let fee_paid = group.insurance - insurance_before;
+    assert!(fee_paid > 0, "{path:?}: EWMA batch leg must pay a fee");
+    let ewma_trade_notional = SIZE_Q * accepted_price as u128 / POS_SCALE;
+    let paid_move_bps = fee_paid * 10_000 / (ewma_trade_notional * 2);
+    assert!(
+        mark_move_bps <= paid_move_bps as u64,
+        "{path:?}: mixed-batch EWMA move ({mark_move_bps} bps) must be covered by fees ({paid_move_bps} bps)"
+    );
+}
+
+// Multi-leg batch parity: when one atomic batch mixes a trade-driven EWMA leg with an AUTH_MARK leg,
+// only the EWMA leg may consume the off-oracle print for capped mark discovery. The AUTH_MARK leg
+// remains fixed even though it shares the same batch, counterparties, and matcher spread.
+#[test]
+fn v16_attack_mixed_mode_batches_update_only_trade_driven_marks() {
+    for path in [MixedModeBatchPath::NoCpi, MixedModeBatchPath::Cpi] {
+        assert_mixed_mode_batch_updates_only_trade_driven_leg(path);
+    }
+}
+
 // security.md sweep — phantom collateral via un-backed positive PnL (#9/#22/#33): an account whose
 // counterparty went insolvent carries a large positive PnL figure that is NOT backed (residual is
 // pinned at the counterparty's recovered capital). Attacker goal: have that face-value paper profit
