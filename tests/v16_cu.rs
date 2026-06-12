@@ -2409,6 +2409,34 @@ impl V16CuEnv {
         .expect("configure ewma_mark mark")
     }
 
+    fn configure_ewma_mark_for_asset_as_admin(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+        initial_mark_e6: u64,
+        halflife_slots: u64,
+        mark_min_fee: u64,
+    ) -> u64 {
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::ConfigureEwmaMark {
+                asset_index,
+                now_slot,
+                initial_mark_e6,
+                mark_ewma_halflife_slots: halflife_slots,
+                mark_min_fee,
+            },
+            vec![
+                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[&self.admin],
+        )
+        .expect("configure ewma_mark for asset as admin")
+    }
+
     fn push_ewma_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
         send_tx(
             &mut self.svm,
@@ -35171,14 +35199,39 @@ fn try_no_cpi_reported_price_trade_with_cu(
     exec_price: u64,
     fee_bps: u64,
 ) -> Result<u64, String> {
+    try_no_cpi_reported_price_trade_with_cu_on_asset(
+        env, path, 0, owner_a, account_a, owner_b, account_b, size_q, exec_price, fee_bps,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_no_cpi_reported_price_trade_with_cu_on_asset(
+    env: &mut V16CuEnv,
+    path: NoCpiReportedPricePath,
+    asset_index: u16,
+    owner_a: &Keypair,
+    account_a: Pubkey,
+    owner_b: &Keypair,
+    account_b: Pubkey,
+    size_q: i128,
+    exec_price: u64,
+    fee_bps: u64,
+) -> Result<u64, String> {
     match path {
         NoCpiReportedPricePath::Single => env.try_trade_asset_with_cu(
-            0, owner_a, account_a, owner_b, account_b, size_q, exec_price, fee_bps,
+            asset_index,
+            owner_a,
+            account_a,
+            owner_b,
+            account_b,
+            size_q,
+            exec_price,
+            fee_bps,
         ),
         NoCpiReportedPricePath::Batch => env.send(
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
-                    asset_index: 0,
+                    asset_index,
                     size_q,
                     exec_price,
                     fee_bps,
@@ -35710,6 +35763,401 @@ fn v16_attack_nocpi_extreme_price_caps_ewma_move_without_dos() {
         for reported_price in [1, percolator::MAX_ORACLE_PRICE] {
             assert_no_cpi_extreme_reported_price_caps_paid_ewma_move(path, reported_price);
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CpiReportedPricePath {
+    Single,
+    Batch,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TradeDrivenMarkMode {
+    EwmaMark,
+    HybridAfterHours,
+}
+
+fn trade_driven_mark_profile(env: &V16CuEnv, asset_index: u16) -> state::AssetOracleProfileV16 {
+    state::read_asset_oracle_profile(
+        &env.svm.get_account(&env.market).unwrap().data,
+        asset_index as usize,
+    )
+    .unwrap()
+}
+
+fn trade_driven_mark_cpi_env(mode: TradeDrivenMarkMode, asset_index: u16) -> V16CuEnv {
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        initial_price: MARK,
+        h_max: 20,
+        max_trading_fee_bps: 37,
+        max_price_move_bps_per_slot: CAP_BPS,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    match mode {
+        TradeDrivenMarkMode::EwmaMark => {
+            env.svm.warp_to_slot(1);
+            env.configure_ewma_mark_for_asset_as_admin(asset_index, 1, MARK, 1, 0);
+            env.svm.warp_to_slot(5);
+        }
+        TradeDrivenMarkMode::HybridAfterHours => {
+            set_test_clock(&mut env, 1, 100);
+            let feed = [0xceu8; 32];
+            let pyth = env.set_pyth_price(&feed, MARK as i64, -6, 100);
+            env.try_configure_hybrid_asset_with_conf_filter_cu(
+                asset_index,
+                1,
+                0,
+                [feed, [0u8; 32], [0u8; 32]],
+                &[pyth],
+                1,
+                100,
+                0,
+                0,
+                1,
+                0,
+            )
+            .expect("configure hybrid oracle for CPI mark test");
+            set_test_clock(&mut env, 5, 104);
+        }
+    }
+    let profile = trade_driven_mark_profile(&env, asset_index);
+    assert_eq!(
+        profile.mark_ewma_e6, MARK,
+        "{mode:?}: setup mark should start at MARK"
+    );
+    assert_eq!(
+        env.market_state().1.assets[asset_index as usize].effective_price,
+        MARK,
+        "{mode:?}: setup effective price should start at MARK"
+    );
+    env
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_cpi_spread_trade_with_cu(
+    env: &mut V16CuEnv,
+    path: CpiReportedPricePath,
+    owner_a: &Keypair,
+    account_a: Pubkey,
+    owner_b: &Keypair,
+    account_b: Pubkey,
+    asset_index: u16,
+    size_q: i128,
+    fee_bps: u64,
+    base_spread_bps: u32,
+    max_total_bps: u32,
+) -> Result<u64, String> {
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (ctx, delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+        matcher_program,
+        owner_b,
+        account_b,
+        base_spread_bps,
+        max_total_bps,
+    );
+    env.svm.expire_blockhash();
+    match path {
+        CpiReportedPricePath::Single => env.try_trade_cpi_with_cu_on_asset(
+            owner_a,
+            account_a,
+            owner_b,
+            account_b,
+            matcher_program,
+            ctx,
+            delegate,
+            asset_index,
+            size_q,
+            fee_bps,
+        ),
+        CpiReportedPricePath::Batch => env.send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index,
+                    size_q,
+                    fee_bps,
+                    limit_price: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(owner_a.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account_a, false),
+                AccountMeta::new(account_b, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[owner_a],
+        ),
+    }
+}
+
+fn assert_cpi_spread_price_caps_paid_trade_driven_mark_move(
+    mode: TradeDrivenMarkMode,
+    path: CpiReportedPricePath,
+    size_q: i128,
+) {
+    const ASSET_INDEX: u16 = 1;
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const MAX_FEE_BPS: u64 = 37;
+    const SPREAD_BPS: u32 = 9_000;
+    const TRADE_Q: u128 = 1000u128 * POS_SCALE;
+
+    let matcher_exec_price = if size_q > 0 {
+        MARK * (10_000 + SPREAD_BPS as u64) / 10_000
+    } else {
+        MARK * (10_000 - SPREAD_BPS as u64) / 10_000
+    };
+    let accepted_price = oracle_v16::clamp_toward_engine_dt(MARK, matcher_exec_price, CAP_BPS, 4);
+    let candidate_mark =
+        percolator_prog::policy_v16::ewma_update(MARK, accepted_price, 1, 1, 5, 0, 0);
+    let candidate_move_bps =
+        percolator_prog::policy_v16::price_move_bps_ceil(MARK, candidate_mark)
+            .expect("candidate mark move");
+    assert!(
+        candidate_move_bps > MAX_FEE_BPS,
+        "{mode:?} {path:?}: setup must make the matcher-driven EWMA candidate exceed the fee cap"
+    );
+
+    let mut env = trade_driven_mark_cpi_env(mode, ASSET_INDEX);
+    let taker = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp = Keypair::new();
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 3_000_000_000);
+    env.deposit(&lp, lp_account, 3_000_000_000);
+    let insurance_before = env.market_state().1.insurance;
+
+    let trade = try_cpi_spread_trade_with_cu(
+        &mut env,
+        path,
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        ASSET_INDEX,
+        size_q,
+        0,
+        SPREAD_BPS,
+        SPREAD_BPS,
+    );
+    assert!(
+        trade.is_ok(),
+        "{mode:?} {path:?}: valid off-oracle matcher fill must not DoS the trade: {trade:?}"
+    );
+
+    let profile = trade_driven_mark_profile(&env, ASSET_INDEX);
+    let group = env.market_state().1;
+    let mark_move_bps =
+        percolator_prog::policy_v16::price_move_bps_ceil(MARK, profile.mark_ewma_e6)
+            .expect("actual mark move");
+    assert_eq!(
+        mark_move_bps, MAX_FEE_BPS,
+        "{mode:?} {path:?}: trade-driven mark movement should bind at the fee cap"
+    );
+    if size_q > 0 {
+        assert!(
+            profile.mark_ewma_e6 > MARK,
+            "{mode:?} {path:?}: high matcher print should move the trade-driven mark up"
+        );
+    } else {
+        assert!(
+            profile.mark_ewma_e6 < MARK,
+            "{mode:?} {path:?}: low matcher print should move the trade-driven mark down"
+        );
+    }
+    assert_eq!(
+        group.assets[ASSET_INDEX as usize].oi_eff_long_q,
+        TRADE_Q,
+        "{mode:?} {path:?}: asset-1 long OI should be opened"
+    );
+    assert_eq!(
+        group.assets[ASSET_INDEX as usize].oi_eff_short_q,
+        TRADE_Q,
+        "{mode:?} {path:?}: asset-1 short OI should be opened"
+    );
+    assert_eq!(
+        group.assets[0].oi_eff_long_q, 0,
+        "{mode:?} {path:?}: asset-0 must stay untouched"
+    );
+    let fee_paid = group.insurance - insurance_before;
+    assert!(fee_paid > 0, "{mode:?} {path:?}: trade must pay a fee");
+    let trade_notional = TRADE_Q * accepted_price as u128 / POS_SCALE;
+    let externality_notional = trade_notional * 2;
+    let paid_move_bps = fee_paid * 10_000 / externality_notional;
+    assert!(
+        mark_move_bps <= paid_move_bps as u64,
+        "{mode:?} {path:?}: mark move ({mark_move_bps} bps) must be covered by paid fee ({paid_move_bps} bps)"
+    );
+}
+
+// CPI parity for the EWMA/no-CPI fix: a matcher can return valid off-oracle full fills on both
+// single and batched CPI routes. Those fills must remain live, but EWMA/stale-hybrid movement must
+// use the same dt-clamped accepted price and fee-supported mark cap as the no-CPI paths.
+#[test]
+fn v16_attack_cpi_spread_prices_cap_paid_ewma_and_hybrid_mark_move() {
+    for mode in [
+        TradeDrivenMarkMode::EwmaMark,
+        TradeDrivenMarkMode::HybridAfterHours,
+    ] {
+        for path in [CpiReportedPricePath::Single, CpiReportedPricePath::Batch] {
+            assert_cpi_spread_price_caps_paid_trade_driven_mark_move(
+                mode,
+                path,
+                (1000u128 * POS_SCALE) as i128,
+            );
+            assert_cpi_spread_price_caps_paid_trade_driven_mark_move(
+                mode,
+                path,
+                -((1000u128 * POS_SCALE) as i128),
+            );
+        }
+    }
+}
+
+fn auth_mark_reported_price_env() -> V16CuEnv {
+    const MARK: u64 = 1_000_000;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        initial_price: MARK,
+        h_max: 20,
+        max_trading_fee_bps: 1_000,
+        max_price_move_bps_per_slot: 50,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.update_trade_fee_policy_with_cu(100);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, MARK);
+    env.svm.warp_to_slot(5);
+    env
+}
+
+fn auth_mark_no_cpi_fee_and_mark(
+    path: NoCpiReportedPricePath,
+    size_q: i128,
+    reported_price: u64,
+) -> (u128, u64) {
+    let mut env = auth_mark_reported_price_env();
+    let (owner_a, account_a, owner_b, account_b) =
+        funded_no_cpi_reported_price_pair(&mut env, 3_000_000_000);
+    let insurance_before = env.market_state().1.insurance;
+    env.svm.expire_blockhash();
+    try_no_cpi_reported_price_trade_with_cu_on_asset(
+        &mut env,
+        path,
+        1,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        size_q,
+        reported_price,
+        0,
+    )
+    .unwrap_or_else(|err| {
+        panic!("{path:?}: auth-mark no-CPI trade with reported_price={reported_price} failed: {err}")
+    });
+    let profile = trade_driven_mark_profile(&env, 1);
+    (env.market_state().1.insurance - insurance_before, profile.mark_ewma_e6)
+}
+
+fn auth_mark_cpi_fee_and_mark(
+    path: CpiReportedPricePath,
+    size_q: i128,
+    spread_bps: u32,
+) -> (u128, u64) {
+    let mut env = auth_mark_reported_price_env();
+    let taker = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp = Keypair::new();
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 3_000_000_000);
+    env.deposit(&lp, lp_account, 3_000_000_000);
+    let insurance_before = env.market_state().1.insurance;
+    try_cpi_spread_trade_with_cu(
+        &mut env,
+        path,
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        1,
+        size_q,
+        0,
+        spread_bps,
+        spread_bps,
+    )
+    .unwrap_or_else(|err| {
+        panic!("{path:?}: auth-mark CPI trade with spread_bps={spread_bps} failed: {err}")
+    });
+    let profile = trade_driven_mark_profile(&env, 1);
+    (env.market_state().1.insurance - insurance_before, profile.mark_ewma_e6)
+}
+
+// AUTH_MARK is price-managed but not trade-driven: off-oracle reported/matcher prices must neither
+// move the mark nor resize fees. This closes the mode boundary around the EWMA/hybrid fix.
+#[test]
+fn v16_attack_auth_mark_prices_do_not_drive_mark_or_fee_across_trade_routes() {
+    const MARK: u64 = 1_000_000;
+    const SIZE_Q: i128 = (1000u128 * POS_SCALE) as i128;
+    const SPREAD_BPS: u32 = 9_000;
+
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        let long_at_mark = auth_mark_no_cpi_fee_and_mark(path, SIZE_Q, MARK);
+        let long_high = auth_mark_no_cpi_fee_and_mark(path, SIZE_Q, MARK * 19 / 10);
+        assert!(
+            long_at_mark.0 > 0,
+            "{path:?}: auth-mark no-CPI baseline must charge a nonzero fee"
+        );
+        assert_eq!(
+            long_high, long_at_mark,
+            "{path:?}: high reported no-CPI price must not move auth mark or change fee"
+        );
+
+        let short_at_mark = auth_mark_no_cpi_fee_and_mark(path, -SIZE_Q, MARK);
+        let short_low = auth_mark_no_cpi_fee_and_mark(path, -SIZE_Q, MARK / 10);
+        assert_eq!(
+            short_low, short_at_mark,
+            "{path:?}: low reported no-CPI price must not move auth mark or change fee"
+        );
+        assert_eq!(long_high.1, MARK, "{path:?}: auth mark stays fixed");
+        assert_eq!(short_low.1, MARK, "{path:?}: auth mark stays fixed");
+    }
+
+    for path in [CpiReportedPricePath::Single, CpiReportedPricePath::Batch] {
+        let long_at_mark = auth_mark_cpi_fee_and_mark(path, SIZE_Q, 0);
+        let long_high = auth_mark_cpi_fee_and_mark(path, SIZE_Q, SPREAD_BPS);
+        assert!(
+            long_at_mark.0 > 0,
+            "{path:?}: auth-mark CPI baseline must charge a nonzero fee"
+        );
+        assert_eq!(
+            long_high, long_at_mark,
+            "{path:?}: high matcher CPI price must not move auth mark or change fee"
+        );
+
+        let short_at_mark = auth_mark_cpi_fee_and_mark(path, -SIZE_Q, 0);
+        let short_low = auth_mark_cpi_fee_and_mark(path, -SIZE_Q, SPREAD_BPS);
+        assert_eq!(
+            short_low, short_at_mark,
+            "{path:?}: low matcher CPI price must not move auth mark or change fee"
+        );
+        assert_eq!(long_high.1, MARK, "{path:?}: auth mark stays fixed");
+        assert_eq!(short_low.1, MARK, "{path:?}: auth mark stays fixed");
     }
 }
 
