@@ -35382,8 +35382,8 @@ fn ewma_no_cpi_fee_and_mark_for_reported_price(
 // No-CPI reported-price manipulation follow-up: an epsilon reported price is valid, so rejecting
 // zero is insufficient. The wrapper must first bound the reported print to the same per-asset dt
 // envelope the engine will accept, then use that accepted print consistently for fee notional,
-// dynamic mark-movement fees, and EWMA movement. Otherwise epsilon can either under-pay fees or
-// drive a different mark than the charged price justified.
+// mark-movement fees, and EWMA movement. Otherwise epsilon can either under-pay fees or drive a
+// different mark than the charged price justified.
 #[test]
 fn v16_attack_nocpi_epsilon_reported_price_uses_dt_clamped_fee_and_ewma_price() {
     const MARK: u64 = 1_000_000;
@@ -35415,9 +35415,9 @@ fn v16_attack_nocpi_epsilon_reported_price_uses_dt_clamped_fee_and_ewma_price() 
             epsilon.1, at_mark.1,
             "{path:?}: non-vacuous EWMA assertion; the accepted below-mark print must move the mark"
         );
-        assert!(
-            epsilon.0 < at_mark.0,
-            "{path:?}: lower accepted print should charge lower notional fee than at-mark"
+        assert_eq!(
+            at_mark.1, MARK,
+            "{path:?}: at-mark control should not move EWMA"
         );
         assert!(
             epsilon.1 < at_mark.1,
@@ -35620,6 +35620,95 @@ fn v16_attack_nocpi_trade_not_dosed_by_extreme_reported_price() {
         for reported_price in [1, percolator::MAX_ORACLE_PRICE] {
             assert_no_cpi_tiny_exit_accepts_extreme_reported_price(path, reported_price);
             assert_no_cpi_tiny_open_accepts_extreme_reported_price(path, reported_price);
+        }
+    }
+}
+
+fn assert_no_cpi_extreme_reported_price_caps_paid_ewma_move(
+    path: NoCpiReportedPricePath,
+    reported_price: u64,
+) {
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const MAX_FEE_BPS: u64 = 37;
+    const TRADE_SLOT: u64 = 5;
+    const SIZE_Q: i128 = (1000u128 * POS_SCALE) as i128;
+
+    let accepted_price = oracle_v16::clamp_toward_engine_dt(MARK, reported_price, CAP_BPS, 4);
+    let candidate_mark =
+        percolator_prog::policy_v16::ewma_update(MARK, accepted_price, 1, 1, TRADE_SLOT, 0, 0);
+    let candidate_move_bps =
+        percolator_prog::policy_v16::price_move_bps_ceil(MARK, candidate_mark)
+            .expect("candidate move bps");
+    assert!(
+        candidate_move_bps > MAX_FEE_BPS,
+        "{path:?}: setup must make the unclamped EWMA candidate exceed the market fee cap"
+    );
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        h_max: 20,
+        max_trading_fee_bps: MAX_FEE_BPS,
+        max_price_move_bps_per_slot: CAP_BPS,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_ewma_mark_with_cu(1, MARK, 1, 0);
+    env.svm.warp_to_slot(TRADE_SLOT);
+    let (owner_a, account_a, owner_b, account_b) =
+        funded_no_cpi_reported_price_pair(&mut env, 3_000_000_000);
+    let insurance_before = env.market_state().1.insurance;
+
+    env.svm.expire_blockhash();
+    let trade = try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        SIZE_Q,
+        reported_price,
+        0,
+    );
+    assert!(
+        trade.is_ok(),
+        "{path:?}: capped EWMA movement must not reject valid reported_price={reported_price}: {trade:?}"
+    );
+
+    let (cfg, group) = env.market_state();
+    let mark_move_bps = percolator_prog::policy_v16::price_move_bps_ceil(MARK, cfg.mark_ewma_e6)
+        .expect("actual mark move bps");
+    assert_eq!(
+        mark_move_bps, MAX_FEE_BPS,
+        "{path:?}: EWMA movement should bind at the market fee cap, not at the full candidate move"
+    );
+    assert!(
+        group.insurance > insurance_before,
+        "{path:?}: capped EWMA movement still charges a fee"
+    );
+    let trade_notional = SIZE_Q.unsigned_abs() * accepted_price as u128 / POS_SCALE;
+    let externality_notional = trade_notional * 2;
+    let paid_move_bps = (group.insurance - insurance_before) * 10_000 / externality_notional;
+    assert!(
+        mark_move_bps <= paid_move_bps as u64,
+        "{path:?}: capped EWMA move ({mark_move_bps} bps) must be paid for by fees ({paid_move_bps} bps)"
+    );
+}
+
+// The fee cap is not a liveness gate for no-CPI EWMA discovery. If the full EWMA candidate would
+// require more fee than the market cap allows, the trade still executes and the internal mark move
+// is reduced to what the capped fee actually pays for.
+#[test]
+fn v16_attack_nocpi_extreme_price_caps_ewma_move_without_dos() {
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        for reported_price in [1, percolator::MAX_ORACLE_PRICE] {
+            assert_no_cpi_extreme_reported_price_caps_paid_ewma_move(path, reported_price);
         }
     }
 }
