@@ -35153,6 +35153,185 @@ fn v16_attack_tradenocpi_fee_cannot_be_evaded_via_exec_price() {
     );
 }
 
+#[derive(Clone, Copy, Debug)]
+enum NoCpiReportedPricePath {
+    Single,
+    Batch,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_no_cpi_reported_price_trade_with_cu(
+    env: &mut V16CuEnv,
+    path: NoCpiReportedPricePath,
+    owner_a: &Keypair,
+    account_a: Pubkey,
+    owner_b: &Keypair,
+    account_b: Pubkey,
+    size_q: i128,
+    exec_price: u64,
+    fee_bps: u64,
+) -> Result<u64, String> {
+    match path {
+        NoCpiReportedPricePath::Single => env.try_trade_asset_with_cu(
+            0, owner_a, account_a, owner_b, account_b, size_q, exec_price, fee_bps,
+        ),
+        NoCpiReportedPricePath::Batch => env.send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q,
+                    exec_price,
+                    fee_bps,
+                }],
+            },
+            vec![
+                AccountMeta::new(owner_a.pubkey(), true),
+                AccountMeta::new(owner_b.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account_a, false),
+                AccountMeta::new(account_b, false),
+            ],
+            &[owner_a, owner_b],
+        ),
+    }
+}
+
+fn funded_no_cpi_reported_price_pair(
+    env: &mut V16CuEnv,
+    deposit: u128,
+) -> (Keypair, Pubkey, Keypair, Pubkey) {
+    let owner_a = Keypair::new();
+    let account_a = env.create_portfolio(&owner_a);
+    let owner_b = Keypair::new();
+    let account_b = env.create_portfolio(&owner_b);
+    env.deposit(&owner_a, account_a, deposit);
+    env.deposit(&owner_b, account_b, deposit);
+    (owner_a, account_a, owner_b, account_b)
+}
+
+fn assert_zero_reported_price_rejects_atomically(
+    mut env: V16CuEnv,
+    path: NoCpiReportedPricePath,
+    label: &str,
+) {
+    let (owner_a, account_a, owner_b, account_b) =
+        funded_no_cpi_reported_price_pair(&mut env, 10_000_000_000);
+    let (_, group_before) = env.market_state();
+    let mark = group_before.assets[0].effective_price;
+    assert_eq!(mark, 1_000_000, "{label}: setup must use the intended mark");
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let account_a_before = env.svm.get_account(&account_a).unwrap();
+    let account_b_before = env.svm.get_account(&account_b).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        POS_SCALE as i128,
+        0,
+        0,
+    );
+    assert!(
+        rejected.is_err(),
+        "{label} {path:?}: zero reported exec_price must reject before it can drive the mark"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "{label} {path:?}: rejected zero-price trade must leave market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&account_a).unwrap(),
+        account_a_before,
+        "{label} {path:?}: rejected zero-price trade must leave account_a unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&account_b).unwrap(),
+        account_b_before,
+        "{label} {path:?}: rejected zero-price trade must leave account_b unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    let control = try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        POS_SCALE as i128,
+        mark,
+        0,
+    );
+    assert!(
+        control.is_ok(),
+        "{label} {path:?}: at-mark no-CPI control trade must remain live: {control:?}"
+    );
+}
+
+fn zero_reported_price_ewma_env() -> V16CuEnv {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_price_move_bps_per_slot: 50,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_ewma_mark_with_cu(1, 1_000_000, 1, 0);
+    env.svm.warp_to_slot(2);
+    env
+}
+
+fn zero_reported_price_hybrid_after_hours_env() -> V16CuEnv {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_price_move_bps_per_slot: 50,
+        ..V16CuMarketParams::default()
+    });
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0x4du8; 32];
+    let pyth = env.set_pyth_price(&feed, 1_000_000, -6, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[pyth],
+        1,
+        100,
+        0,
+        0,
+        1,
+        0,
+    )
+    .expect("configure hybrid oracle");
+    set_test_clock(&mut env, 2, 101);
+    env
+}
+
+// No-CPI reported-price manipulation: fees are already pinned to the mark, but the original
+// caller-supplied exec_price still feeds EWMA discovery in EWMA and stale-hybrid modes. A zero
+// reported price used to bypass the per-slot clamp and move the mark toward zero via a wash trade.
+#[test]
+fn v16_attack_nocpi_zero_reported_price_cannot_drive_ewma_or_hybrid_mark() {
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        assert_zero_reported_price_rejects_atomically(
+            zero_reported_price_ewma_env(),
+            path,
+            "EWMA mark",
+        );
+        assert_zero_reported_price_rejects_atomically(
+            zero_reported_price_hybrid_after_hours_env(),
+            path,
+            "Hybrid after-hours mark",
+        );
+    }
+}
+
 // security.md sweep — phantom collateral via un-backed positive PnL (#9/#22/#33): an account whose
 // counterparty went insolvent carries a large positive PnL figure that is NOT backed (residual is
 // pinned at the counterparty's recovered capital). Attacker goal: have that face-value paper profit
