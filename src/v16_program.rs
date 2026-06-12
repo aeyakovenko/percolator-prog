@@ -4724,6 +4724,14 @@ pub mod processor {
     const ASSET_LIFECYCLE_RETIRED: u8 = 4;
     const ASSET_LIFECYCLE_RECOVERY: u8 = 5;
 
+    #[inline]
+    fn ensure_valid_reported_trade_price(exec_price: u64) -> ProgramResult {
+        if exec_price == 0 || exec_price > percolator::MAX_ORACLE_PRICE {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        Ok(())
+    }
+
     fn authenticated_slot_or_fallback(fallback_slot: u64) -> u64 {
         Clock::get().map(|c| c.slot).unwrap_or(fallback_slot)
     }
@@ -6344,6 +6352,9 @@ pub mod processor {
         if account_a_ai.key == account_b_ai.key {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        for leg in legs {
+            ensure_valid_reported_trade_price(leg.exec_price)?;
+        }
         let (_cfg_pre, mode_pre, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         if mode_pre != MarketModeV16::Live {
@@ -6562,6 +6573,7 @@ pub mod processor {
         if account_a_ai.key == account_b_ai.key {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        ensure_valid_reported_trade_price(exec_price)?;
         let (_cfg_pre, mode_pre, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         if mode_pre != MarketModeV16::Live {
