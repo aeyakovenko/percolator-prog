@@ -35332,6 +35332,100 @@ fn v16_attack_nocpi_zero_reported_price_cannot_drive_ewma_or_hybrid_mark() {
     }
 }
 
+fn ewma_no_cpi_fee_and_mark_for_reported_price(
+    path: NoCpiReportedPricePath,
+    reported_price: u64,
+) -> (u128, u64) {
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const TRADE_SLOT: u64 = 5;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        h_max: 20,
+        max_price_move_bps_per_slot: CAP_BPS,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        trade_fee_base_bps: 100,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_ewma_mark_with_cu(1, MARK, 1, 0);
+    let (_, configured_group) = env.market_state();
+    assert_eq!(configured_group.assets[0].effective_price, MARK);
+    assert_eq!(configured_group.assets[0].slot_last, 1);
+
+    env.svm.warp_to_slot(TRADE_SLOT);
+    let (owner_a, account_a, owner_b, account_b) =
+        funded_no_cpi_reported_price_pair(&mut env, 3_000_000_000);
+    let insurance_before = env.market_state().1.insurance;
+    let size_q = (1000u128 * POS_SCALE) as i128;
+    env.svm.expire_blockhash();
+    try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        size_q,
+        reported_price,
+        0,
+    )
+    .unwrap_or_else(|err| {
+        panic!("{path:?}: no-CPI EWMA trade with reported_price={reported_price} failed: {err}")
+    });
+    let (cfg, group) = env.market_state();
+    (group.insurance - insurance_before, cfg.mark_ewma_e6)
+}
+
+// No-CPI reported-price manipulation follow-up: an epsilon reported price is valid, so rejecting
+// zero is insufficient. The wrapper must first bound the reported print to the same per-asset dt
+// envelope the engine will accept, then use that accepted print consistently for fee notional,
+// dynamic mark-movement fees, and EWMA movement. Otherwise epsilon can either under-pay fees or
+// drive a different mark than the charged price justified.
+#[test]
+fn v16_attack_nocpi_epsilon_reported_price_uses_dt_clamped_fee_and_ewma_price() {
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const DT: u64 = 4;
+    let dt_clamped_epsilon = oracle_v16::clamp_toward_engine_dt(MARK, 1, CAP_BPS, DT);
+    assert_eq!(
+        dt_clamped_epsilon, 980_000,
+        "test setup must exercise a multi-slot engine dt clamp"
+    );
+
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        let epsilon = ewma_no_cpi_fee_and_mark_for_reported_price(path, 1);
+        let clamped = ewma_no_cpi_fee_and_mark_for_reported_price(path, dt_clamped_epsilon);
+        let at_mark = ewma_no_cpi_fee_and_mark_for_reported_price(path, MARK);
+
+        assert_eq!(
+            epsilon, clamped,
+            "{path:?}: epsilon report must be normalized to the accepted dt-clamped price for fee and EWMA"
+        );
+        assert_ne!(
+            epsilon.0, at_mark.0,
+            "{path:?}: non-vacuous fee assertion; the accepted below-mark print must not be billed as old mark"
+        );
+        assert_ne!(
+            epsilon.1, at_mark.1,
+            "{path:?}: non-vacuous EWMA assertion; the accepted below-mark print must move the mark"
+        );
+        assert!(
+            epsilon.0 < at_mark.0,
+            "{path:?}: lower accepted print should charge lower notional fee than at-mark"
+        );
+        assert!(
+            epsilon.1 < at_mark.1,
+            "{path:?}: lower accepted print should move EWMA below at-mark control"
+        );
+    }
+}
+
 // security.md sweep — phantom collateral via un-backed positive PnL (#9/#22/#33): an account whose
 // counterparty went insolvent carries a large positive PnL figure that is NOT backed (residual is
 // pinned at the counterparty's recovered capital). Attacker goal: have that face-value paper profit

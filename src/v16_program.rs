@@ -6173,20 +6173,18 @@ pub mod processor {
             } else {
                 size_q.unsigned_abs()
             };
-            // F-TRADENOCPI-FEE: the position enters/settles at the asset mark (effective_price), NOT at
-            // the caller-supplied exec_price. The engine uses request.exec_price ONLY as the fee notional
-            // basis (fee = size_q*exec_price/POS_SCALE * fee_bps), so without pinning it two cooperating
-            // accounts could declare a tiny exec_price to pay an arbitrarily small fee on a full
-            // mark-valued trade. Bill the fee on the mark (the price the trade actually settles at),
-            // mirroring TradeCpi where the matcher's exec_price_e6 must equal the oracle price.
-            // NOTE: the ORIGINAL caller exec_price is still passed to update_hybrid_mark_after_trade_view
-            // below — in hybrid mode that is the reported trade price that drives mark discovery (bounded
-            // by the EWMA/clamp), a distinct role from the fee basis.
-            let fee_basis_price = group.markets[asset_index as usize]
-                .engine
-                .asset
-                .effective_price
-                .get();
+            // F-TRADENOCPI-FEE / F-NOCPI-MARK-FEE: request.exec_price is used by the engine only as
+            // fee notional. In price-managed EWMA/stale-hybrid modes, the caller's reported print is
+            // also the mark-discovery input, so first normalize it to the same per-asset dt price
+            // envelope the engine will accept. Use that accepted print consistently for dynamic fee
+            // sizing, engine fee notional, and the EWMA update. Modes without trade-driven mark
+            // discovery fall back to the current effective mark.
+            let fee_basis_price = accepted_reported_trade_price_view(
+                &oracle_profile,
+                &group,
+                asset_index as usize,
+                exec_price,
+            )?;
             let fee_bps = hybrid_trade_fee_bps_view(
                 &cfg,
                 &oracle_profile,
@@ -6264,7 +6262,7 @@ pub mod processor {
                 &mut oracle_profile,
                 &group,
                 asset_index as usize,
-                exec_price,
+                fee_basis_price,
                 outcome
                     .fee_a
                     .checked_add(outcome.fee_b)
@@ -6408,11 +6406,12 @@ pub mod processor {
             expect_portfolio_view_owner(&account_a, account_a_owner_key)?;
             expect_portfolio_view_owner(&account_b, account_b_owner_key)?;
 
-            // Pre-pass: per leg, read its oracle profile, pin the fee basis to the asset mark, and
-            // build the SIGNED engine request. Reject duplicate assets (one leg per asset per batch).
+            // Pre-pass: per leg, read its oracle profile, normalize the reported print to the
+            // wrapper-accepted fee/mark basis, and build the SIGNED engine request. Reject duplicate
+            // assets (one leg per asset per batch).
             let mut requests: Vec<TradeRequestV16> = Vec::with_capacity(legs.len());
-            // (asset_index, oracle_profile, reported_exec_price, fee_basis_price, fee_bps_eff, abs_size)
-            let mut leg_ctx: Vec<(usize, state::AssetOracleProfileV16, u64, u64, u64, u128)> =
+            // (asset_index, oracle_profile, fee_basis_price, fee_bps_eff, abs_size)
+            let mut leg_ctx: Vec<(usize, state::AssetOracleProfileV16, u64, u64, u128)> =
                 Vec::with_capacity(legs.len());
             for leg in legs {
                 let asset_index = leg.asset_index as usize;
@@ -6429,11 +6428,12 @@ pub mod processor {
                     return Err(PercolatorError::InvalidInstruction.into());
                 }
                 let abs_size = leg.size_q.unsigned_abs();
-                let fee_basis_price = group.markets[asset_index]
-                    .engine
-                    .asset
-                    .effective_price
-                    .get();
+                let fee_basis_price = accepted_reported_trade_price_view(
+                    &oracle_profile,
+                    &group,
+                    asset_index,
+                    leg.exec_price,
+                )?;
                 let fee_bps_eff = hybrid_trade_fee_bps_view(
                     &cfg,
                     &oracle_profile,
@@ -6452,7 +6452,6 @@ pub mod processor {
                 leg_ctx.push((
                     asset_index,
                     oracle_profile,
-                    leg.exec_price,
                     fee_basis_price,
                     fee_bps_eff,
                     abs_size,
@@ -6480,14 +6479,8 @@ pub mod processor {
             // aggregate or we refuse the batch (no silent mis-accounting).
             let mut reconstructed_total: u128 = 0;
             let mut cfg_dirty = false;
-            for (
-                asset_index,
-                oracle_profile,
-                reported_price,
-                fee_basis_price,
-                fee_bps_eff,
-                abs_size,
-            ) in leg_ctx.iter_mut()
+            for (asset_index, oracle_profile, fee_basis_price, fee_bps_eff, abs_size) in
+                leg_ctx.iter_mut()
             {
                 let fee_leg = batch_leg_fee(*abs_size, *fee_basis_price, *fee_bps_eff)?;
                 credit_trade_fees_to_market_budgets_view(
@@ -6507,7 +6500,7 @@ pub mod processor {
                     oracle_profile,
                     &group,
                     *asset_index,
-                    *reported_price,
+                    *fee_basis_price,
                     total_fee_leg,
                 )?;
                 write_oracle_profile_to_view(&mut group, *asset_index, oracle_profile)?;
@@ -11462,13 +11455,52 @@ pub mod processor {
         ))
     }
 
+    fn profile_updates_mark_from_trade_view(
+        profile: &state::AssetOracleProfileV16,
+        now_slot: u64,
+    ) -> bool {
+        oracle_v16::profile_is_ewma_mark(profile)
+            || (oracle_v16::profile_is_hybrid(profile)
+                && oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot))
+    }
+
+    fn accepted_reported_trade_price_view(
+        profile: &state::AssetOracleProfileV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        reported_exec_price: u64,
+    ) -> Result<u64, ProgramError> {
+        ensure_valid_reported_trade_price(reported_exec_price)?;
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let effective_price = group.markets[asset_index]
+            .engine
+            .asset
+            .effective_price
+            .get();
+        let now_slot = authenticated_market_slot_or_fallback_view(group);
+        if !profile_updates_mark_from_trade_view(profile, now_slot) {
+            return Ok(effective_price);
+        }
+        let dt_slots = core::cmp::max(1, asset_segment_dt_view(group, asset_index, now_slot)?);
+        Ok(oracle_v16::clamp_toward_engine_dt(
+            effective_price,
+            reported_exec_price,
+            group.header.config.max_price_move_bps_per_slot.get(),
+            dt_slots,
+        ))
+    }
+
     fn hybrid_trade_fee_bps_view(
         cfg: &WrapperConfigV16,
         profile: &state::AssetOracleProfileV16,
         group: &state::MarketViewMutV16<'_>,
         asset_index: usize,
         size_q_abs: u128,
-        exec_price: u64,
+        accepted_exec_price: u64,
         caller_fee_bps: u64,
     ) -> Result<u64, ProgramError> {
         let base = core::cmp::max(caller_fee_bps, cfg.trade_fee_base_bps);
@@ -11495,13 +11527,7 @@ pub mod processor {
         }
         let asset = group.markets[asset_index].engine.asset;
         let effective_price = asset.effective_price.get();
-        let trade_notional = trade_notional_floor(size_q_abs, exec_price)?;
-        let clamped_exec = oracle_v16::clamp_toward_engine_dt(
-            effective_price,
-            exec_price,
-            group.header.config.max_price_move_bps_per_slot.get(),
-            1,
-        );
+        let trade_notional = trade_notional_floor(size_q_abs, accepted_exec_price)?;
         let max_side_oi_q = core::cmp::max(asset.oi_eff_long_q.get(), asset.oi_eff_short_q.get());
         let max_side_notional = risk_notional_ceil(max_side_oi_q, effective_price)?;
         let mark_externality_notional = core::cmp::max(max_side_notional, trade_notional)
@@ -11522,7 +11548,7 @@ pub mod processor {
         let required = policy_v16::dynamic_fee_bps_with_externality_floor(
             base,
             profile.mark_ewma_e6,
-            clamped_exec,
+            accepted_exec_price,
             profile.mark_ewma_halflife_slots,
             profile.mark_ewma_last_slot,
             now_slot,
@@ -11662,34 +11688,24 @@ pub mod processor {
         profile: &mut state::AssetOracleProfileV16,
         group: &state::MarketViewMutV16<'_>,
         asset_index: usize,
-        exec_price: u64,
+        accepted_exec_price: u64,
         fee_paid: u128,
     ) -> Result<(), ProgramError> {
         let now_slot = authenticated_market_slot_or_fallback_view(group);
-        let ewma_updates_from_trade = oracle_v16::profile_is_ewma_mark(profile)
-            || (oracle_v16::profile_is_hybrid(profile)
-                && oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot));
+        let ewma_updates_from_trade = profile_updates_mark_from_trade_view(profile, now_slot);
         if !ewma_updates_from_trade
             || asset_index >= group.header.config.max_market_slots.get() as usize
         {
             return Ok(());
         }
+        if accepted_exec_price == 0 || accepted_exec_price > percolator::MAX_ORACLE_PRICE {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
         let fee_paid = u64::try_from(fee_paid).unwrap_or(u64::MAX);
-        let effective_price = group.markets[asset_index]
-            .engine
-            .asset
-            .effective_price
-            .get();
-        let clamped_exec = oracle_v16::clamp_toward_engine_dt(
-            effective_price,
-            exec_price,
-            group.header.config.max_price_move_bps_per_slot.get(),
-            1,
-        );
         let old = profile.mark_ewma_e6;
         let new_mark = policy_v16::ewma_update(
             old,
-            clamped_exec,
+            accepted_exec_price,
             profile.mark_ewma_halflife_slots,
             profile.mark_ewma_last_slot,
             now_slot,
