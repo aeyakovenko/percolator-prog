@@ -10670,6 +10670,13 @@ pub mod processor {
         if action > 2 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        let (target_header, _) =
+            state::read_portfolio_owner_preflight(&portfolio_ai.try_borrow_data()?)?;
+        if target_header.market_group_id != market_ai.key.to_bytes()
+            || target_header.portfolio_account_id != portfolio_ai.key.to_bytes()
+        {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
         ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
         let authenticated_now_slot = authenticated_slot_or_fallback(now_slot);
         let asset_index_usize = asset_index as usize;

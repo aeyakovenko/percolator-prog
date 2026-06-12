@@ -36769,6 +36769,112 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
     );
 }
 
+// CU/DoS hardening: PermissionlessCrank must prove the target portfolio belongs to this market before
+// it parses any supplied hybrid-oracle tail. The valid-target control reaches bogus oracle parsing;
+// the foreign-market portfolio must fail as a provenance error first.
+#[test]
+fn v16_attack_crank_target_portfolio_rejects_before_oracle_tail_parse() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0xc7u8; 32];
+    let initial_oracle = env.set_pyth_price_with_conf(&feed, 1_000_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial_oracle],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure hybrid oracle");
+
+    let owner = Keypair::new();
+    let valid_portfolio = env.create_portfolio(&owner);
+    let foreign_owner = Keypair::new();
+    let foreign_portfolio = Pubkey::new_unique();
+    let mut foreign_data = vec![0u8; env.portfolio_account_len];
+    state::init_portfolio_account_zero_copy(
+        &mut foreign_data,
+        Pubkey::new_unique().to_bytes(),
+        foreign_portfolio.to_bytes(),
+        foreign_owner.pubkey().to_bytes(),
+        0,
+        1,
+    )
+    .unwrap();
+    env.svm
+        .set_account(
+            foreign_portfolio,
+            Account {
+                lamports: 1_000_000_000,
+                data: foreign_data,
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let bogus_oracle = env.program_account(8);
+
+    let send = |env: &mut V16CuEnv, portfolio: Pubkey| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: 2,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new_readonly(bogus_oracle, false),
+            ],
+            &[],
+        )
+    };
+
+    set_test_clock(&mut env, 2, 101);
+    let valid_err = send(&mut env, valid_portfolio)
+        .expect_err("valid target portfolio should reach bogus oracle parsing");
+    assert!(
+        !valid_err.contains("Custom(16)"),
+        "valid target must not trip the provenance preflight: {valid_err}"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let foreign_before = env.svm.get_account(&foreign_portfolio).unwrap();
+    let invalid_err = send(&mut env, foreign_portfolio)
+        .expect_err("foreign target portfolio must reject before oracle parsing");
+    assert!(
+        invalid_err.contains("Custom(16)"),
+        "foreign target must fail as EngineProvenanceMismatch before bogus oracle parsing, got {invalid_err}"
+    );
+    assert!(
+        !invalid_err.contains("Custom(29)") && !invalid_err.contains("IllegalOwner"),
+        "foreign target must not reach the bogus oracle parser: {invalid_err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "pre-oracle target rejection leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&foreign_portfolio).unwrap(),
+        foreign_before,
+        "pre-oracle target rejection leaves foreign portfolio bytes unchanged"
+    );
+}
+
 // security.md sweep - liquidation cranker reward owner binding (#6/#35/#44): the optional reward
 // portfolio is validated after the crank path has already refreshed oracle/profile state. A same-market
 // reward portfolio owned by a different user must reject transaction-atomically, or any signer could
