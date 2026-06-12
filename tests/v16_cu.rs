@@ -45424,6 +45424,79 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
     }
 }
 
+// DoS sweep: batch instruction decoding used to allocate the caller-declared leg vector before any
+// cap check. A max u8 length could panic the SBF program with "memory allocation failed" before the
+// handler reached its normal batch bounds. Both batch tags must now reject at decode time cleanly.
+#[test]
+fn v16_attack_batch_decode_oversized_vectors_reject_before_allocation() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let taker = Keypair::new();
+    let maker = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let maker_account = env.create_portfolio(&maker);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_account).unwrap();
+    let maker_before = env.svm.get_account(&maker_account).unwrap();
+
+    let no_cpi_legs: Vec<BatchTradeLeg> = (0..u16::from(u8::MAX))
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        })
+        .collect();
+    env.svm.expire_blockhash();
+    let no_cpi = env.send(
+        ProgInstruction::BatchTradeNoCpi { legs: no_cpi_legs },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(maker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(maker_account, false),
+        ],
+        &[&taker, &maker],
+    );
+    let no_cpi_err = no_cpi.expect_err("oversized BatchTradeNoCpi must reject");
+    assert!(
+        no_cpi_err.contains("InvalidInstructionData"),
+        "oversized BatchTradeNoCpi must reject in decode, got {no_cpi_err}"
+    );
+    assert!(
+        !no_cpi_err.contains("ProgramFailedToComplete")
+            && !no_cpi_err.contains("memory allocation failed"),
+        "oversized BatchTradeNoCpi must not panic the program: {no_cpi_err}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&maker_account).unwrap(), maker_before);
+
+    let cpi_legs: Vec<BatchTradeCpiLeg> = (0..u16::from(u8::MAX))
+        .map(|asset_index| BatchTradeCpiLeg {
+            asset_index,
+            size_q: POS_SCALE as i128,
+            fee_bps: 0,
+            limit_price: 0,
+        })
+        .collect();
+    env.svm.expire_blockhash();
+    let cpi = env.send(ProgInstruction::BatchTradeCpi { legs: cpi_legs }, vec![], &[]);
+    let cpi_err = cpi.expect_err("oversized BatchTradeCpi must reject");
+    assert!(
+        cpi_err.contains("InvalidInstructionData"),
+        "oversized BatchTradeCpi must reject in decode, got {cpi_err}"
+    );
+    assert!(
+        !cpi_err.contains("ProgramFailedToComplete")
+            && !cpi_err.contains("memory allocation failed"),
+        "oversized BatchTradeCpi must not panic the program: {cpi_err}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&maker_account).unwrap(), maker_before);
+}
+
 // BatchTradeCpi: a single batched matcher CPI fills a MIXED-direction spread (taker long asset 0,
 // short asset 1) against one LP, then both fills apply with one end-state margin check.
 #[test]

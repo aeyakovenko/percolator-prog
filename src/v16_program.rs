@@ -2810,6 +2810,8 @@ pub mod ix {
     use alloc::vec::Vec;
     use solana_program::program_error::ProgramError;
 
+    const BATCH_TRADE_DECODE_MAX_LEGS: usize = 16;
+
     /// One leg of an atomic multi-leg batch trade. `size_q` is SIGNED (engine semantics): a
     /// positive size makes the taker (account_a) long that asset, a negative size makes it short,
     /// so a single batch can express a mixed-direction spread (long A / short B) against one LP.
@@ -3127,6 +3129,9 @@ pub mod ix {
                 },
                 66 => {
                     let n = read_u8(&mut rest)? as usize;
+                    if n > BATCH_TRADE_DECODE_MAX_LEGS {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
                     let mut legs = Vec::with_capacity(n);
                     for _ in 0..n {
                         legs.push(BatchTradeLeg {
@@ -3140,6 +3145,9 @@ pub mod ix {
                 }
                 67 => {
                     let n = read_u8(&mut rest)? as usize;
+                    if n > BATCH_TRADE_DECODE_MAX_LEGS {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
                     let mut legs = Vec::with_capacity(n);
                     for _ in 0..n {
                         legs.push(BatchTradeCpiLeg {
