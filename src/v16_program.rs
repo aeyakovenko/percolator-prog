@@ -2639,11 +2639,12 @@ pub mod state {
     pub fn read_asset_effective_prices(
         data: &[u8],
         asset_indices: &[u16],
-    ) -> Result<(MarketModeV16, u64, alloc::vec::Vec<u64>), ProgramError> {
+    ) -> Result<(WrapperConfigV16, MarketModeV16, u64, alloc::vec::Vec<u64>), ProgramError> {
         if data.len() < MIN_MARKET_ACCOUNT_LEN {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         check_header(data, KIND_MARKET)?;
+        let config = read_wrapper_config_from_bytes(data)?;
         let wire = market_header(data)?;
         let engine_config = wire
             .config
@@ -2658,6 +2659,7 @@ pub mod state {
             prices.push(slot.asset.effective_price.get());
         }
         Ok((
+            config,
             decode_market_mode(wire.mode)?,
             wire.current_slot.get(),
             prices,
@@ -7140,12 +7142,35 @@ pub mod processor {
         }
         // One header/config parse for mode + slot + every leg's oracle price (avoids O(N^2)
         // re-parsing the market once per leg).
-        let (mode_pre, current_slot_pre, oracle_prices) = {
+        let (mode_pre, current_slot_pre, oracle_prices, stale_matured) = {
             let market_data = market_ai.try_borrow_data()?;
-            state::read_asset_effective_prices(&market_data, &asset_indices)?
+            let (cfg_pre, mode_pre, current_slot_pre, oracle_prices) =
+                state::read_asset_effective_prices(&market_data, &asset_indices)?;
+            let authenticated_slot = authenticated_slot_or_fallback(current_slot_pre);
+            let mut stale_matured = false;
+            for &asset_index in &asset_indices {
+                let oracle_profile_pre =
+                    read_oracle_profile_for_asset(&market_data, &cfg_pre, asset_index as usize)?;
+                let leg_stale = if oracle_v16::profile_is_price_managed(&oracle_profile_pre) {
+                    cfg_pre.permissionless_resolve_stale_slots != 0
+                        && authenticated_slot
+                            .saturating_sub(oracle_profile_pre.last_good_oracle_slot)
+                            >= cfg_pre.permissionless_resolve_stale_slots
+                } else {
+                    oracle_v16::permissionless_stale_matured(&cfg_pre, authenticated_slot)
+                };
+                if leg_stale {
+                    stale_matured = true;
+                    break;
+                }
+            }
+            (mode_pre, current_slot_pre, oracle_prices, stale_matured)
         };
         if mode_pre != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
+        }
+        if stale_matured {
+            return Err(PercolatorError::OracleStale.into());
         }
         let (account_a_header, account_a_owner) =
             state::read_portfolio_owner_preflight(&account_a_ai.try_borrow_data()?)?;

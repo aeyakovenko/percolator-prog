@@ -46586,6 +46586,169 @@ fn v16_attack_batch_tradecpi_rejects_stale_resolve_matured_atomically() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// CU/DoS hardening: stale-resolve-matured BatchTradeCpi must fail before the external matcher CPI.
+// The older rollback test proves protocol/matcher writes are reverted after a stale rejection. This
+// uses a hostile over-fill matcher as a sentinel: while fresh, that exact route reaches matcher-return
+// validation and fails as InvalidAccountData; once stale, the wrapper must return OracleStale first.
+#[test]
+fn v16_attack_batch_tradecpi_stale_rejects_before_hostile_matcher_cpi() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &la,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; MATCHER_CONTEXT_LEN],
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
+
+    let sz = (5 * POS_SCALE) as i128;
+    let legs = vec![
+        BatchTradeCpiLeg {
+            asset_index: 0,
+            size_q: sz,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+        BatchTradeCpiLeg {
+            asset_index: 1,
+            size_q: sz,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+    ];
+    let accounts = |env: &V16CuEnv| {
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+    let set_hostile_mode = |env: &mut V16CuEnv, mode: u8| {
+        let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
+        data[0] = mode;
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    };
+
+    env.svm.warp_to_slot(4);
+    set_hostile_mode(&mut env, 0);
+    env.svm.expire_blockhash();
+    let fresh_err = env
+        .send(
+            ProgInstruction::BatchTradeCpi {
+                legs: legs.clone(),
+            },
+            accounts(&env),
+            &[&taker],
+        )
+        .expect_err("fresh hostile over-fill must reach matcher-return validation");
+    assert!(
+        fresh_err.contains("InvalidAccountData"),
+        "fresh hostile over-fill should fail from matcher-return validation, got {fresh_err}"
+    );
+    assert!(
+        !fresh_err.contains("Custom(27)") && !fresh_err.contains("0x1b"),
+        "fresh hostile over-fill must not be mistaken for stale gating: {fresh_err}"
+    );
+
+    env.svm.warp_to_slot(40);
+    set_hostile_mode(&mut env, 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let stale_err = env
+        .send(
+            ProgInstruction::BatchTradeCpi { legs },
+            accounts(&env),
+            &[&taker],
+        )
+        .expect_err("stale BatchTradeCpi must reject before matcher CPI");
+    assert!(
+        stale_err.contains("Custom(27)") || stale_err.contains("0x1b"),
+        "stale BatchTradeCpi must fail as OracleStale before hostile matcher validation, got {stale_err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "pre-CPI stale rejection leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ta).unwrap(),
+        taker_before,
+        "pre-CPI stale rejection leaves taker bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&la).unwrap(),
+        lp_before,
+        "pre-CPI stale rejection leaves LP bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "pre-CPI stale rejection never gives the hostile matcher a writable context"
+    );
+}
+
 // security.md sweep - stale BatchTradeNoCpi legacy realloc rollback (#30/#44/#48): the no-CPI batch
 // path grows legacy portfolios before the shared stale-market freeze check. A stale-matured batch must
 // reject without leaving an attacker-triggered realloc/zero-fill DoS behind; while fresh, the same
