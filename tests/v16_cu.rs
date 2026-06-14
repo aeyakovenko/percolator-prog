@@ -23488,6 +23488,128 @@ fn v16_attack_terminal_insurance_withdraw_rekeys_after_authority_rotation() {
     assert_eq!(group_after.insurance_domain_budget[0], 60);
 }
 
+// full-interface sweep (cron135): the terminal full-drain ledger fast path skips the early
+// observation read, so an initialized stale-authority ledger is rejected only after the in-memory
+// domain debit. The whole transaction must still roll back, and a fresh current-authority ledger
+// must remain live.
+#[test]
+fn v16_attack_terminal_insurance_full_drain_stale_ledger_rolls_back_after_rotation() {
+    let mut env = V16CuEnv::new();
+    let stale_authority = env.admin.insecure_clone();
+    let current_authority = Keypair::new();
+    let stale_ledger = env.insurance_ledger_account();
+
+    env.top_up_insurance_domain_with_authority_ledger_and_cu(
+        &stale_authority,
+        stale_ledger,
+        0,
+        100,
+    );
+    let stale_ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&stale_ledger).unwrap().data)
+            .expect("stale authority ledger initialized");
+    assert_eq!(
+        stale_ledger_state.authority,
+        stale_authority.pubkey().to_bytes()
+    );
+    assert_eq!(stale_ledger_state.total_deposited_atoms, 100);
+
+    env.try_update_per_asset_authority_with_cu(
+        &stale_authority,
+        Some(&current_authority),
+        0,
+        processor::ASSET_AUTH_INSURANCE,
+        current_authority.pubkey().to_bytes(),
+    )
+    .expect("rotate asset-0 insurance authority after ledger-backed funding");
+    env.resolve();
+    assert_eq!(env.market_state().1.insurance, 100);
+
+    let current_dest = env.token_account(current_authority.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let stale_ledger_before = env.svm.get_account(&stale_ledger).unwrap();
+    let dest_before = env.svm.get_account(&current_dest).unwrap();
+    env.svm.expire_blockhash();
+    let stale_ledger_full_drain = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 100 },
+        vec![
+            AccountMeta::new(current_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(current_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(stale_ledger, false),
+        ],
+        &[&current_authority],
+    );
+    assert!(
+        stale_ledger_full_drain.is_err(),
+        "full-drain terminal withdrawal must reject a stale initialized ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale full-drain ledger rejection must roll back the terminal domain debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "stale full-drain ledger rejection must not move SPL vault tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_ledger).unwrap(),
+        stale_ledger_before,
+        "stale full-drain ledger rejection must not rewrite the old ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&current_dest).unwrap(),
+        dest_before,
+        "stale full-drain ledger rejection must not pay the current authority"
+    );
+
+    let fresh_ledger = env.insurance_ledger_account();
+    env.svm.expire_blockhash();
+    let fresh_full_drain = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 100 },
+        vec![
+            AccountMeta::new(current_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(current_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(fresh_ledger, false),
+        ],
+        &[&current_authority],
+    );
+    assert!(
+        fresh_full_drain.is_ok(),
+        "fresh ledger full-drain remains available to the current authority: {fresh_full_drain:?}"
+    );
+    assert_eq!(env.token_amount(current_dest), 100);
+    assert_eq!(env.token_amount(env.vault), 0);
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.insurance, 0);
+    assert_eq!(group_after.insurance_domain_budget[0], 0);
+    let fresh_ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&fresh_ledger).unwrap().data)
+            .expect("fresh authority ledger initialized by full drain");
+    assert_eq!(
+        fresh_ledger_state.authority,
+        current_authority.pubkey().to_bytes()
+    );
+    assert_eq!(fresh_ledger_state.total_withdrawn_atoms, 100);
+    assert_eq!(fresh_ledger_state.last_observed_insurance_atoms, 0);
+}
+
 // full-interface sweep (cron135): resolved WithdrawBackingBucket has a preflight that admits
 // marketauth, then a resolved-mode inner check that must require the current backing authority.
 // Backing funded before a handoff must not remain terminal-withdrawable by the stale authority.
