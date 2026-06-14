@@ -8826,7 +8826,7 @@ pub mod processor {
         }
         let authenticated_now_slot = authenticated_slot_or_fallback(now_slot);
 
-        let close_payer_portfolio = {
+        let sync_result = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             if group.header.mode == 0 {
@@ -8931,13 +8931,9 @@ pub mod processor {
                     .map_err(map_v16_error)?;
             }
 
-            let close_payer_portfolio =
-                deregister_materialized_portfolio_if_empty(&mut group, &portfolio)?;
-            close_payer_portfolio
+            Ok::<(), ProgramError>(())
         };
-        if close_payer_portfolio {
-            close_portfolio_account_to_market_slab(portfolio_ai, market_ai)?;
-        }
+        sync_result?;
         Ok(())
     }
 
@@ -11163,17 +11159,6 @@ pub mod processor {
     ) -> ProgramResult {
         ensure_trade_portfolio_current_for_requests_view(group, account_a, requests)?;
         ensure_trade_portfolio_current_for_requests_view(group, account_b, requests)
-    }
-
-    fn deregister_materialized_portfolio_if_empty(
-        group: &mut state::MarketViewMutV16<'_>,
-        portfolio: &percolator::PortfolioV16ViewMut<'_>,
-    ) -> Result<bool, ProgramError> {
-        match group.deregister_empty_materialized_portfolio_not_atomic(&portfolio.as_view()) {
-            Ok(()) => Ok(true),
-            Err(percolator::V16Error::LockActive) => Ok(false),
-            Err(err) => Err(map_v16_error(err)),
-        }
     }
 
     fn close_portfolio_account_to_market_slab(
