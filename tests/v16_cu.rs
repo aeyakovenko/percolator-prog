@@ -24158,6 +24158,13 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         new_asset.pubkey().to_bytes(),
         "market authority updated to the co-signing key"
     );
+    assert_eq!(
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap()
+            .asset_admin,
+        new_asset.pubkey().to_bytes(),
+        "default asset-0 admin follows the co-signed market authority handoff"
+    );
     env.svm.expire_blockhash();
     let stale_old_key = send_tx(
         &mut env.svm,
@@ -24189,7 +24196,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
             .unwrap()
     };
     let ins_before = prof0(&env).insurance_authority;
-    // asset-0 admin (the market admin) tries to set asset-0 insurance to a non-signing key -> reject.
+    // The current asset-0 admin tries to set asset-0 insurance to a non-signing key -> reject.
     env.svm.expire_blockhash();
     let r2 = send_tx(
         &mut env.svm,
@@ -24201,10 +24208,11 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
             new_pubkey: victim.pubkey().to_bytes(),
         },
         vec![
-            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(new_asset.pubkey(), true),
+            AccountMeta::new_readonly(victim.pubkey(), false),
             AccountMeta::new(env.market, false),
         ],
-        &[&env.admin],
+        &[&new_asset],
     );
     assert!(
         r2.is_err(),
@@ -24229,11 +24237,11 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
             new_pubkey: new_ins.pubkey().to_bytes(),
         },
         vec![
-            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(new_asset.pubkey(), true),
             AccountMeta::new(new_ins.pubkey(), true),
             AccountMeta::new(env.market, false),
         ],
-        &[&env.admin, &new_ins],
+        &[&new_asset, &new_ins],
     );
     assert!(
         r2_ok.is_ok(),
@@ -55563,6 +55571,100 @@ fn v16_attack_update_authority_handoff_rekeys_secondary_swap_authority() {
         env.token_amount(secondary_vault),
         secondary_vault_before - 20,
         "secondary reserve debited exactly once"
+    );
+}
+
+// full-interface sweep: UpdateAuthority used to rotate only `cfg.marketauth`; asset 0's default
+// `asset_admin` stayed pinned to the previous key. That stale key could still force-shutdown asset 0
+// after handoff, even though policy/resolve/base-unit powers had moved to the new market authority.
+#[test]
+fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
+    let mut env = V16CuEnv::new();
+    let old_marketauth = env.admin.insecure_clone();
+    let new_marketauth = Keypair::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+
+    env.update_asset_authority_with_cu(&new_marketauth);
+    assert_eq!(
+        env.market_state().0.marketauth,
+        new_marketauth.pubkey().to_bytes(),
+        "market authority rotated to the new signer"
+    );
+    assert_eq!(
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap()
+            .asset_admin,
+        new_marketauth.pubkey().to_bytes(),
+        "default asset-0 admin follows the market authority handoff"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    let stale_shutdown = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+            asset_index: 0,
+            now_slot: 2,
+            initial_price: 0,
+            insurance_authority: old_marketauth.pubkey().to_bytes(),
+            insurance_operator: old_marketauth.pubkey().to_bytes(),
+            backing_bucket_authority: old_marketauth.pubkey().to_bytes(),
+            oracle_authority: old_marketauth.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(old_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&old_marketauth],
+    );
+    assert!(
+        stale_shutdown.is_err(),
+        "stale marketauth must not retain asset-0 lifecycle-admin power after handoff"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale asset-0 shutdown leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::Active,
+        "asset 0 remains active after stale shutdown attempt"
+    );
+
+    env.svm.expire_blockhash();
+    let fresh_shutdown = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+            asset_index: 0,
+            now_slot: 2,
+            initial_price: 0,
+            insurance_authority: new_marketauth.pubkey().to_bytes(),
+            insurance_operator: new_marketauth.pubkey().to_bytes(),
+            backing_bucket_authority: new_marketauth.pubkey().to_bytes(),
+            oracle_authority: new_marketauth.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(new_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&new_marketauth],
+    );
+    assert!(
+        fresh_shutdown.is_ok(),
+        "current marketauth can still shut down asset 0 after handoff: {fresh_shutdown:?}"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery
     );
 }
 
