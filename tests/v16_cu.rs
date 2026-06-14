@@ -17561,6 +17561,284 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
     assert_eq!(topup_env.market_state().1.vault, 0);
 }
 
+// full-interface sweep (cron135): secondary terminal payouts use the same post-engine vault
+// validation as primary payouts. A canonical secondary reserve with a delegate set must reject
+// atomically after the terminal receipt/accounting mutation, and both payout handlers must remain
+// live once the reserve is restored clean.
+#[test]
+fn v16_attack_terminal_secondary_payouts_reject_delegated_canonical_vault() {
+    fn delegated_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
+        let mut data = vec![0u8; TokenAccount::LEN];
+        TokenAccount::pack(
+            TokenAccount {
+                mint,
+                owner,
+                amount,
+                delegate: COption::Some(Pubkey::new_unique()),
+                state: AccountState::Initialized,
+                is_native: COption::None,
+                delegated_amount: amount,
+                close_authority: COption::None,
+            },
+            &mut data,
+        )
+        .unwrap();
+        data
+    }
+
+    let mut env = V16CuEnv::new();
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: delegated_token_data(secondary, env.vault_authority, 60),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 60);
+    env.resolve();
+    assert_eq!(env.market_state().1.vault, 60);
+
+    let secondary_dest = env.token_account_for_mint(secondary, owner.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let dest_before = env.svm.get_account(&secondary_dest).unwrap();
+    env.svm.expire_blockhash();
+    let rejected_close = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected_close.is_err(),
+        "CloseResolved must reject a delegated canonical secondary reserve"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected secondary CloseResolved must roll back market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected secondary CloseResolved must not burn the payout receipt"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "delegated secondary reserve remains untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        dest_before,
+        "rejected secondary CloseResolved pays no tokens"
+    );
+
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, env.vault_authority, 60),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let accepted_close = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        accepted_close.is_ok(),
+        "clean secondary reserve still pays CloseResolved: {accepted_close:?}"
+    );
+    assert_eq!(env.token_amount(secondary_dest), 60);
+    assert_eq!(env.token_amount(secondary_vault), 0);
+    assert_eq!(env.market_state().1.vault, 0);
+
+    let mut topup_env = V16CuEnv::new();
+    let topup_secondary = topup_env.create_mint();
+    topup_env.update_base_unit_mints_with_cu(topup_env.mint, topup_secondary);
+    let topup_secondary_vault = canonical_vault_ata(topup_env.vault_authority, topup_secondary);
+    topup_env
+        .svm
+        .set_account(
+            topup_secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: delegated_token_data(topup_secondary, topup_env.vault_authority, 60),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let topup_owner = Keypair::new();
+    let topup_portfolio = topup_env.create_portfolio(&topup_owner);
+    {
+        let mut market_account = topup_env
+            .svm
+            .get_account(&topup_env.market)
+            .expect("market account");
+        let mut portfolio_account = topup_env
+            .svm
+            .get_account(&topup_portfolio)
+            .expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 100 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 100,
+            paid_effective: 40,
+            finalized: false,
+        };
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        topup_env
+            .svm
+            .set_account(topup_env.market, market_account)
+            .unwrap();
+        topup_env
+            .svm
+            .set_account(topup_portfolio, portfolio_account)
+            .unwrap();
+    }
+
+    let topup_dest = topup_env.token_account_for_mint(topup_secondary, topup_owner.pubkey(), 0);
+    let market_before = topup_env.svm.get_account(&topup_env.market).unwrap();
+    let receipt_before = topup_env.svm.get_account(&topup_portfolio).unwrap();
+    let secondary_vault_before = topup_env.svm.get_account(&topup_secondary_vault).unwrap();
+    let dest_before = topup_env.svm.get_account(&topup_dest).unwrap();
+    topup_env.svm.expire_blockhash();
+    let rejected_topup = topup_env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(topup_owner.pubkey(), false),
+            AccountMeta::new(topup_env.market, false),
+            AccountMeta::new(topup_portfolio, false),
+            AccountMeta::new(topup_dest, false),
+            AccountMeta::new(topup_secondary_vault, false),
+            AccountMeta::new_readonly(topup_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected_topup.is_err(),
+        "ClaimResolvedPayoutTopup must reject a delegated canonical secondary reserve"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_env.market).unwrap(),
+        market_before,
+        "rejected secondary top-up must roll back market accounting"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_portfolio).unwrap(),
+        receipt_before,
+        "rejected secondary top-up must not burn the receipt"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_secondary_vault).unwrap(),
+        secondary_vault_before,
+        "delegated secondary top-up reserve remains untouched"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_dest).unwrap(),
+        dest_before,
+        "rejected secondary top-up pays no tokens"
+    );
+
+    topup_env
+        .svm
+        .set_account(
+            topup_secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(topup_secondary, topup_env.vault_authority, 60),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    topup_env.svm.expire_blockhash();
+    let accepted_topup = topup_env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(topup_owner.pubkey(), false),
+            AccountMeta::new(topup_env.market, false),
+            AccountMeta::new(topup_portfolio, false),
+            AccountMeta::new(topup_dest, false),
+            AccountMeta::new(topup_secondary_vault, false),
+            AccountMeta::new_readonly(topup_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        accepted_topup.is_ok(),
+        "clean secondary reserve still pays ClaimResolvedPayoutTopup: {accepted_topup:?}"
+    );
+    assert_eq!(topup_env.token_amount(topup_dest), 60);
+    assert_eq!(topup_env.token_amount(topup_secondary_vault), 0);
+    let receipt = topup_env.portfolio_state(topup_portfolio);
+    assert_eq!(receipt.resolved_payout_receipt.paid_effective, 100);
+    assert!(receipt.resolved_payout_receipt.finalized);
+    assert_eq!(topup_env.market_state().1.vault, 0);
+}
+
 // security.md sweep - terminal insurance secondary reserve binding (#44/#48): WithdrawInsurance is a
 // separate resolved-mode payout rail. If it accepted any vault-PDA-owned secondary token account, an
 // authority could debit terminal insurance accounting while paying from or fragmenting a non-canonical
