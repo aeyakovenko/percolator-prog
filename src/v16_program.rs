@@ -4782,16 +4782,25 @@ pub mod processor {
         )
     }
 
-    fn permissionless_resolve_matured_for_profile_view(
+    fn permissionless_resolve_matured_for_profile_at_slot(
         cfg: &WrapperConfigV16,
         profile: &state::AssetOracleProfileV16,
-        group: &state::MarketViewMutV16<'_>,
+        now_slot: u64,
     ) -> bool {
         cfg.permissionless_resolve_stale_slots != 0
             && profile.last_good_oracle_slot != 0
-            && authenticated_market_slot_or_fallback_view(group)
-                .saturating_sub(profile.last_good_oracle_slot)
+            && now_slot.saturating_sub(profile.last_good_oracle_slot)
                 >= cfg.permissionless_resolve_stale_slots
+    }
+
+    fn global_or_profile_resolve_matured_at_slot(
+        cfg: &WrapperConfigV16,
+        profile: &state::AssetOracleProfileV16,
+        now_slot: u64,
+    ) -> bool {
+        oracle_v16::permissionless_stale_matured(cfg, now_slot)
+            || (oracle_v16::profile_is_price_managed(profile)
+                && permissionless_resolve_matured_for_profile_at_slot(cfg, profile, now_slot))
     }
 
     fn reject_permissionless_resolve_matured_live_view(
@@ -4809,11 +4818,12 @@ pub mod processor {
         profile: &state::AssetOracleProfileV16,
         group: &state::MarketViewMutV16<'_>,
     ) -> ProgramResult {
-        if !oracle_v16::profile_is_price_managed(profile) {
-            return reject_permissionless_resolve_matured_live_view(cfg, group);
-        }
         if group.header.mode == 0
-            && permissionless_resolve_matured_for_profile_view(cfg, profile, group)
+            && global_or_profile_resolve_matured_at_slot(
+                cfg,
+                profile,
+                authenticated_market_slot_or_fallback_view(group),
+            )
         {
             return Err(PercolatorError::OracleStale.into());
         }
@@ -6939,17 +6949,11 @@ pub mod processor {
             &cfg_pre,
             asset_index as usize,
         )?;
-        let stale_matured = if oracle_v16::profile_is_price_managed(&oracle_profile_pre) {
-            cfg_pre.permissionless_resolve_stale_slots != 0
-                && authenticated_slot_or_fallback(current_slot_pre)
-                    .saturating_sub(oracle_profile_pre.last_good_oracle_slot)
-                    >= cfg_pre.permissionless_resolve_stale_slots
-        } else {
-            oracle_v16::permissionless_stale_matured(
-                &cfg_pre,
-                authenticated_slot_or_fallback(current_slot_pre),
-            )
-        };
+        let stale_matured = global_or_profile_resolve_matured_at_slot(
+            &cfg_pre,
+            &oracle_profile_pre,
+            authenticated_slot_or_fallback(current_slot_pre),
+        );
         if stale_matured {
             return Err(PercolatorError::OracleStale.into());
         }
@@ -7235,14 +7239,11 @@ pub mod processor {
             for &asset_index in &asset_indices {
                 let oracle_profile_pre =
                     read_oracle_profile_for_asset(&market_data, &cfg_pre, asset_index as usize)?;
-                let leg_stale = if oracle_v16::profile_is_price_managed(&oracle_profile_pre) {
-                    cfg_pre.permissionless_resolve_stale_slots != 0
-                        && authenticated_slot
-                            .saturating_sub(oracle_profile_pre.last_good_oracle_slot)
-                            >= cfg_pre.permissionless_resolve_stale_slots
-                } else {
-                    oracle_v16::permissionless_stale_matured(&cfg_pre, authenticated_slot)
-                };
+                let leg_stale = global_or_profile_resolve_matured_at_slot(
+                    &cfg_pre,
+                    &oracle_profile_pre,
+                    authenticated_slot,
+                );
                 if leg_stale {
                     stale_matured = true;
                     break;
