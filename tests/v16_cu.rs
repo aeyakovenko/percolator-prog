@@ -2789,6 +2789,46 @@ impl V16CuEnv {
         (source, cu)
     }
 
+    fn top_up_insurance_domain_with_authority_ledger_and_cu(
+        &mut self,
+        authority: &Keypair,
+        ledger: Pubkey,
+        domain: u16,
+        amount: u128,
+    ) -> (Pubkey, u64) {
+        self.ensure_signer_account(authority.pubkey());
+        let source = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                source,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(self.mint, authority.pubkey(), amount as u64),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let cu = send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::TopUpInsuranceDomain { domain, amount },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[authority],
+        )
+        .expect("top up domain insurance with ledger");
+        (source, cu)
+    }
+
     fn top_up_backing_bucket_with_cu(
         &mut self,
         domain: u16,
@@ -3132,6 +3172,45 @@ impl V16CuEnv {
             &[authority],
         )
         .expect("withdraw terminal insurance");
+        (dest, cu)
+    }
+
+    fn withdraw_terminal_insurance_with_authority_and_ledger(
+        &mut self,
+        authority: &Keypair,
+        ledger: Pubkey,
+        amount: u128,
+    ) -> (Pubkey, u64) {
+        let dest = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                dest,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(self.mint, authority.pubkey(), 0),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let cu = send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::WithdrawInsurance { amount },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[authority],
+        )
+        .expect("withdraw terminal insurance with ledger");
         (dest, cu)
     }
 
@@ -45227,6 +45306,190 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
     );
 }
 
+fn grow_market_to_10m_with_high_active_asset(
+    env: &mut V16CuEnv,
+    n: usize,
+    high_asset: usize,
+    price: u64,
+) -> usize {
+    const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
+
+    env.configure_auth_mark_with_cu(1, price);
+    let (_, g0) = env.market_state();
+    assert_eq!(g0.config.max_market_slots, 1, "starts as a 1-asset market");
+    assert_eq!(
+        g0.assets[0].lifecycle,
+        AssetLifecycleV16::Active,
+        "asset 0 active after ConfigureAuthMark"
+    );
+    let template = g0.assets[0];
+
+    let new_len = state::market_account_len_for_capacity(n).unwrap();
+    let next_len = state::market_account_len_for_capacity(n + 1).unwrap();
+    let small_len = state::market_account_len_for_capacity(1).unwrap();
+    assert!(
+        n > 5_000 && new_len <= SOLANA_MAX_ACCOUNT_DATA_LEN && next_len > SOLANA_MAX_ACCOUNT_DATA_LEN,
+        "10 MiB market capacity should be >5,000 assets and maximal at N={n}: len={new_len}, next={next_len}"
+    );
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        assert_eq!(
+            acct.data.len(),
+            small_len,
+            "market started at the 1-slot length"
+        );
+        acct.data.resize(new_len, 0u8);
+        acct.lamports = acct.lamports.max(new_len as u64 * 10);
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    let high_market_id = (high_asset as u64) + 1;
+    env.mutate_market(|_cfg, group| {
+        assert_eq!(group.assets.len(), n, "grown read yields N asset slots");
+        assert_eq!(
+            group.insurance_domain_budget.len(),
+            2 * n,
+            "per-domain Vecs sized to 2N"
+        );
+        group.config.max_market_slots = n as u32;
+        group.next_market_id = (n as u64) + 1;
+
+        let mut high = template;
+        high.market_id = high_market_id;
+        group.assets[high_asset] = high;
+
+        let (ld, sd) = (2 * high_asset, 2 * high_asset + 1);
+        group.source_backing_buckets[ld] =
+            percolator::BackingBucketV16::empty_for_market(high_market_id);
+        group.source_backing_buckets[sd] =
+            percolator::BackingBucketV16::empty_for_market(high_market_id);
+    });
+
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        let profile0 = state::read_asset_oracle_profile(&acct.data, 0).unwrap();
+        state::write_asset_oracle_profile(&mut acct.data, high_asset, &profile0).unwrap();
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    let (_, g) = env.market_state();
+    assert_eq!(g.config.max_market_slots as usize, n);
+    assert_eq!(g.assets.len(), n);
+    assert_eq!(g.assets[high_asset].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(g.assets[high_asset].effective_price, price);
+    assert_eq!(g.assets[high_asset].market_id, high_market_id);
+    assert_eq!(env.svm.get_account(&env.market).unwrap().data.len(), new_len);
+    new_len
+}
+
+#[test]
+fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const TRADE_SLOT: u64 = 1;
+    const LIQUIDATION_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new();
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    let configure_cu = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureEwmaMark {
+            asset_index: HIGH_ASSET as u16,
+            now_slot: TRADE_SLOT,
+            initial_mark_e6: PRICE,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("configure high-asset ewma mark");
+    println!(
+        "v16 10MiB ConfigureEwmaMark: assets={N}, account_len={account_len}, \
+         asset={HIGH_ASSET}, CU={configure_cu}"
+    );
+    assert_cu_within("10MiB ConfigureEwmaMark", configure_cu, CUSTODY_CU_LIMIT);
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 250);
+    env.svm.warp_to_slot(TRADE_SLOT);
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        HIGH_ASSET as u16,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(LIQUIDATION_SLOT);
+    env.svm.expire_blockhash();
+    let push_cu = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PushEwmaMark {
+            asset_index: HIGH_ASSET as u16,
+            now_slot: LIQUIDATION_SLOT,
+            mark_e6: 300,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("push high-asset ewma mark");
+    println!(
+        "v16 10MiB PushEwmaMark: assets={N}, account_len={account_len}, \
+         asset={HIGH_ASSET}, CU={push_cu}"
+    );
+    assert_cu_within("10MiB PushEwmaMark", push_cu, CUSTODY_CU_LIMIT);
+
+    let liquidation_cu = env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: HIGH_ASSET as u16,
+            now_slot: LIQUIDATION_SLOT,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    println!(
+        "v16 10MiB PermissionlessCrank Liquidate: assets={N}, account_len={account_len}, \
+         asset={HIGH_ASSET}, CU={liquidation_cu}"
+    );
+    assert_cu_within(
+        "10MiB PermissionlessCrank Liquidate",
+        liquidation_cu,
+        CRANK_CU_LIMIT,
+    );
+    let (_, group) = env.market_state();
+    let short_after = env.portfolio_state(short);
+    assert!(
+        group.assets[HIGH_ASSET].effective_price >= 200,
+        "adverse high-asset mark actually moved"
+    );
+    assert!(percolator::active_bitmap_is_empty(short_after.active_bitmap));
+}
+
 // Scale proof — the largest current market that fits Solana's 10 MiB account cap is valid AND a
 // real BPF trade on a HIGH asset index executes with O(1)-in-N compute.
 //
@@ -45572,6 +45835,367 @@ fn v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market()
         close_cu,
         CUSTODY_CU_LIMIT,
     );
+}
+
+// DoS regression — the optional terminal insurance ledger used to force
+// observe-all-authority-domains even when the ledger was fresh and the terminal
+// withdrawal drained the whole insurance balance. On a sparse near-10 MiB market
+// with only the last domain funded, that made the ledger variant spend ~585k CU
+// before any counters existed to reconcile. A fresh full-drain ledger now follows
+// the bounded progress-making withdrawal path while still recording the terminal
+// withdrawal counters.
+#[test]
+fn v16_bpf_terminal_insurance_ledger_last_domain_withdraw_stays_bounded_on_10m_market() {
+    const N: usize = 5_834;
+    const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const FUNDED: u128 = 123;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(1, PRICE);
+    let (_, g0) = env.market_state();
+    let template = g0.assets[0];
+
+    let new_len = state::market_account_len_for_capacity(N).unwrap();
+    let next_len = state::market_account_len_for_capacity(N + 1).unwrap();
+    assert!(
+        N > 5_000 && new_len <= SOLANA_MAX_ACCOUNT_DATA_LEN && next_len > SOLANA_MAX_ACCOUNT_DATA_LEN,
+        "test should exercise the maximal near-10 MiB market capacity"
+    );
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        acct.data.resize(new_len, 0u8);
+        acct.lamports = acct.lamports.max(new_len as u64 * 10);
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    let high_market_id = (HIGH_ASSET as u64) + 1;
+    env.mutate_market(|_cfg, group| {
+        assert_eq!(group.assets.len(), N, "grown read yields N asset slots");
+        assert_eq!(group.insurance_domain_budget.len(), 2 * N);
+        group.config.max_market_slots = N as u32;
+        group.next_market_id = (N as u64) + 1;
+
+        let mut high = template;
+        high.market_id = high_market_id;
+        group.assets[HIGH_ASSET] = high;
+
+        let (long_domain, short_domain) = (2 * HIGH_ASSET, 2 * HIGH_ASSET + 1);
+        group.source_backing_buckets[long_domain] =
+            percolator::BackingBucketV16::empty_for_market(high_market_id);
+        group.source_backing_buckets[short_domain] =
+            percolator::BackingBucketV16::empty_for_market(high_market_id);
+    });
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        let profile0 = state::read_asset_oracle_profile(&acct.data, 0).unwrap();
+        state::write_asset_oracle_profile(&mut acct.data, HIGH_ASSET, &profile0).unwrap();
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    let last_domain = (2 * HIGH_ASSET + 1) as u16;
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority_and_cu(&admin, last_domain, FUNDED);
+    let ledger = env.insurance_ledger_account();
+
+    env.resolve();
+    let (dest, withdraw_cu) =
+        env.withdraw_terminal_insurance_with_authority_and_ledger(&admin, ledger, FUNDED);
+    println!(
+        "v16 10MiB terminal WithdrawInsurance + ledger: domains={}, funded_domain={}, CU={withdraw_cu}",
+        2 * N,
+        last_domain
+    );
+    assert_cu_within(
+        "10MiB terminal last-domain WithdrawInsurance with ledger",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), FUNDED as u64);
+
+    let ledger_data = env.svm.get_account(&ledger).unwrap().data;
+    let ledger_state = state::read_insurance_ledger(&ledger_data).unwrap();
+    assert_eq!(ledger_state.total_withdrawn_atoms, FUNDED);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 0);
+}
+
+// DoS regression — an initialized terminal insurance ledger must not re-enable the
+// observe-all scan for a full-drain withdrawal. The ledger already observed the
+// funded sparse tail domain during top-up; after the terminal withdrawal drains
+// every remaining atom, there is no residual insurance balance to reconcile.
+#[test]
+fn v16_bpf_terminal_insurance_initialized_ledger_full_drain_stays_bounded_on_10m_market() {
+    const N: usize = 5_834;
+    const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const FUNDED: u128 = 123;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(1, PRICE);
+    let (_, g0) = env.market_state();
+    let template = g0.assets[0];
+
+    let new_len = state::market_account_len_for_capacity(N).unwrap();
+    let next_len = state::market_account_len_for_capacity(N + 1).unwrap();
+    assert!(
+        N > 5_000 && new_len <= SOLANA_MAX_ACCOUNT_DATA_LEN && next_len > SOLANA_MAX_ACCOUNT_DATA_LEN,
+        "test should exercise the maximal near-10 MiB market capacity"
+    );
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        acct.data.resize(new_len, 0u8);
+        acct.lamports = acct.lamports.max(new_len as u64 * 10);
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    let high_market_id = (HIGH_ASSET as u64) + 1;
+    env.mutate_market(|_cfg, group| {
+        assert_eq!(group.assets.len(), N, "grown read yields N asset slots");
+        assert_eq!(group.insurance_domain_budget.len(), 2 * N);
+        group.config.max_market_slots = N as u32;
+        group.next_market_id = (N as u64) + 1;
+
+        let mut high = template;
+        high.market_id = high_market_id;
+        group.assets[HIGH_ASSET] = high;
+
+        let (long_domain, short_domain) = (2 * HIGH_ASSET, 2 * HIGH_ASSET + 1);
+        group.source_backing_buckets[long_domain] =
+            percolator::BackingBucketV16::empty_for_market(high_market_id);
+        group.source_backing_buckets[short_domain] =
+            percolator::BackingBucketV16::empty_for_market(high_market_id);
+    });
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        let profile0 = state::read_asset_oracle_profile(&acct.data, 0).unwrap();
+        state::write_asset_oracle_profile(&mut acct.data, HIGH_ASSET, &profile0).unwrap();
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    let last_domain = (2 * HIGH_ASSET + 1) as u16;
+    let admin = env.admin.insecure_clone();
+    let ledger = env.insurance_ledger_account();
+    let (_source, topup_cu) =
+        env.top_up_insurance_domain_with_authority_ledger_and_cu(&admin, ledger, last_domain, FUNDED);
+    assert_cu_within(
+        "10MiB terminal last-domain TopUpInsuranceDomain with ledger",
+        topup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let ledger_data = env.svm.get_account(&ledger).unwrap().data;
+    let ledger_state = state::read_insurance_ledger(&ledger_data).unwrap();
+    assert_eq!(ledger_state.total_deposited_atoms, FUNDED);
+    assert_eq!(ledger_state.total_principal_atoms, FUNDED);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, FUNDED);
+    assert_eq!(ledger_state.total_withdrawn_atoms, 0);
+
+    env.resolve();
+    let (dest, withdraw_cu) =
+        env.withdraw_terminal_insurance_with_authority_and_ledger(&admin, ledger, FUNDED);
+    println!(
+        "v16 10MiB terminal WithdrawInsurance + initialized ledger: domains={}, funded_domain={}, CU={withdraw_cu}",
+        2 * N,
+        last_domain
+    );
+    assert_cu_within(
+        "10MiB terminal last-domain WithdrawInsurance with initialized ledger",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), FUNDED as u64);
+
+    let ledger_data = env.svm.get_account(&ledger).unwrap().data;
+    let ledger_state = state::read_insurance_ledger(&ledger_data).unwrap();
+    assert_eq!(ledger_state.total_deposited_atoms, FUNDED);
+    assert_eq!(ledger_state.total_withdrawn_atoms, FUNDED);
+    assert_eq!(ledger_state.total_principal_atoms, 0);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 0);
+}
+
+// DoS regression guard - partial terminal insurance withdrawals with an optional ledger intentionally
+// observe all matching authority domains so the ledger's profit/loss view stays conservative. That is
+// the expensive branch full-drain tests bypass; keep the worst sparse-tail case bounded so a one-atom
+// withdrawal cannot brick ledger-using insurance operators on a near-10 MiB market.
+#[test]
+fn v16_bpf_terminal_insurance_partial_ledger_withdraw_stays_bounded_on_10m_market() {
+    const N: usize = 5_834;
+    const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const FUNDED: u128 = 123;
+    const PARTIAL: u128 = 1;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(1, PRICE);
+    let (_, g0) = env.market_state();
+    let template = g0.assets[0];
+
+    let new_len = state::market_account_len_for_capacity(N).unwrap();
+    let next_len = state::market_account_len_for_capacity(N + 1).unwrap();
+    assert!(
+        N > 5_000
+            && new_len <= SOLANA_MAX_ACCOUNT_DATA_LEN
+            && next_len > SOLANA_MAX_ACCOUNT_DATA_LEN,
+        "test should exercise the maximal near-10 MiB market capacity"
+    );
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        acct.data.resize(new_len, 0u8);
+        acct.lamports = acct.lamports.max(new_len as u64 * 10);
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    let high_market_id = (HIGH_ASSET as u64) + 1;
+    env.mutate_market(|_cfg, group| {
+        assert_eq!(group.assets.len(), N, "grown read yields N asset slots");
+        assert_eq!(group.insurance_domain_budget.len(), 2 * N);
+        group.config.max_market_slots = N as u32;
+        group.next_market_id = (N as u64) + 1;
+
+        let mut high = template;
+        high.market_id = high_market_id;
+        group.assets[HIGH_ASSET] = high;
+
+        let (long_domain, short_domain) = (2 * HIGH_ASSET, 2 * HIGH_ASSET + 1);
+        group.source_backing_buckets[long_domain] =
+            percolator::BackingBucketV16::empty_for_market(high_market_id);
+        group.source_backing_buckets[short_domain] =
+            percolator::BackingBucketV16::empty_for_market(high_market_id);
+    });
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        let profile0 = state::read_asset_oracle_profile(&acct.data, 0).unwrap();
+        state::write_asset_oracle_profile(&mut acct.data, HIGH_ASSET, &profile0).unwrap();
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    let last_domain = (2 * HIGH_ASSET + 1) as u16;
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority_and_cu(&admin, last_domain, FUNDED);
+    let ledger = env.insurance_ledger_account();
+
+    env.resolve();
+    let (dest, withdraw_cu) =
+        env.withdraw_terminal_insurance_with_authority_and_ledger(&admin, ledger, PARTIAL);
+    println!(
+        "v16 10MiB terminal partial WithdrawInsurance + ledger: domains={}, funded_domain={}, CU={withdraw_cu}",
+        2 * N,
+        last_domain
+    );
+    assert_cu_within(
+        "10MiB terminal partial WithdrawInsurance with ledger",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), PARTIAL as u64);
+
+    let ledger_data = env.svm.get_account(&ledger).unwrap().data;
+    let ledger_state = state::read_insurance_ledger(&ledger_data).unwrap();
+    assert_eq!(ledger_state.total_withdrawn_atoms, PARTIAL);
+    assert_eq!(ledger_state.total_principal_atoms, 0);
+    assert_eq!(
+        ledger_state.last_observed_insurance_atoms,
+        FUNDED - PARTIAL,
+        "partial ledger withdrawal records the remaining observed terminal insurance"
+    );
+
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, FUNDED - PARTIAL);
+    assert_eq!(group.vault, FUNDED - PARTIAL);
+    assert_eq!(
+        group.insurance_domain_budget[last_domain as usize],
+        FUNDED - PARTIAL
+    );
+}
+
+// DoS/ledger-isolation regression guard: terminal partial withdrawals with an optional ledger
+// must not use global insurance as the observation cap when the withdrawing authority owns only
+// a sparse tail domain. Otherwise unrelated authority insurance at the front of a 10MiB market
+// can force a full account walk before the tail authority can recover even one atom.
+#[test]
+fn v16_bpf_terminal_insurance_partial_ledger_ignores_other_authority_budget_on_10m_market() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const OTHER_AUTHORITY_FUNDED: u128 = 77;
+    const TAIL_FUNDED: u128 = 123;
+    const PARTIAL: u128 = 1;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    let admin = env.admin.insecure_clone();
+    let tail_authority = Keypair::new();
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&tail_authority),
+        HIGH_ASSET as u16,
+        processor::ASSET_AUTH_INSURANCE,
+        tail_authority.pubkey().to_bytes(),
+    )
+    .expect("rotate sparse tail insurance authority");
+
+    let front_domain = 0u16;
+    let tail_domain = (2 * HIGH_ASSET + 1) as u16;
+    env.top_up_insurance_domain_with_authority_and_cu(&admin, front_domain, OTHER_AUTHORITY_FUNDED);
+    env.top_up_insurance_domain_with_authority_and_cu(&tail_authority, tail_domain, TAIL_FUNDED);
+
+    let before_resolve = env.market_state().1;
+    assert_eq!(
+        before_resolve.insurance,
+        OTHER_AUTHORITY_FUNDED + TAIL_FUNDED,
+        "setup funds both authorities so the global cap exceeds the tail authority balance"
+    );
+    assert_eq!(
+        before_resolve.insurance_domain_budget[front_domain as usize],
+        OTHER_AUTHORITY_FUNDED
+    );
+    assert_eq!(
+        before_resolve.insurance_domain_budget[tail_domain as usize],
+        TAIL_FUNDED
+    );
+
+    let ledger = env.insurance_ledger_account();
+    env.resolve();
+    let (dest, withdraw_cu) =
+        env.withdraw_terminal_insurance_with_authority_and_ledger(&tail_authority, ledger, PARTIAL);
+    println!(
+        "v16 10MiB terminal mixed-authority partial WithdrawInsurance + ledger: \
+         assets={N}, account_len={account_len}, tail_domain={tail_domain}, CU={withdraw_cu}"
+    );
+    assert_cu_within(
+        "10MiB mixed-authority terminal partial WithdrawInsurance with ledger",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), PARTIAL as u64);
+
+    let ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_state.authority, tail_authority.pubkey().to_bytes());
+    assert_eq!(ledger_state.total_withdrawn_atoms, PARTIAL);
+    assert_eq!(
+        ledger_state.last_observed_insurance_atoms,
+        TAIL_FUNDED - PARTIAL,
+        "tail authority ledger must ignore unrelated front authority insurance"
+    );
+
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.insurance,
+        OTHER_AUTHORITY_FUNDED + TAIL_FUNDED - PARTIAL
+    );
+    assert_eq!(
+        group.insurance_domain_budget[front_domain as usize], OTHER_AUTHORITY_FUNDED,
+        "other authority terminal insurance is not touched"
+    );
+    assert_eq!(
+        group.insurance_domain_budget[tail_domain as usize],
+        TAIL_FUNDED - PARTIAL
+    );
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
 }
 
 // LIVENESS: no trader can block marketauth's asset cleanup. After force_close_delay_slots, the
