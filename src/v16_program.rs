@@ -8987,11 +8987,20 @@ pub mod processor {
             return Err(PercolatorError::Unauthorized.into());
         }
 
-        let (mut cfg, _, _, _) =
-            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        expect_live_authority(&cfg.marketauth, current.key)?;
-        cfg.marketauth = new_pubkey;
-        state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
+        let mut data = market_ai.try_borrow_mut_data()?;
+        let cfg_after = {
+            let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
+            expect_live_authority(&cfg.marketauth, current.key)?;
+            let old_marketauth = cfg.marketauth;
+            let mut profile = read_oracle_profile_from_view(&group, &cfg, 0)?;
+            if profile.asset_admin == old_marketauth {
+                profile.asset_admin = new_pubkey;
+                write_oracle_profile_to_view(&mut group, 0, &profile)?;
+            }
+            cfg.marketauth = new_pubkey;
+            cfg
+        };
+        state::write_wrapper_config(&mut data, &cfg_after)
     }
 
     #[inline(never)]
