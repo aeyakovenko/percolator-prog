@@ -5287,7 +5287,7 @@ pub mod processor {
         cfg: &WrapperConfigV16,
         authority: &Pubkey,
         mut amount: u128,
-        observe_all_matching_domains: bool,
+        observe_matching_until: Option<u128>,
     ) -> Result<u128, ProgramError> {
         if amount == 0 {
             return Ok(0);
@@ -5307,12 +5307,17 @@ pub mod processor {
         if asset_count > group.markets.len() {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        let observed_cap = observe_matching_until
+            .unwrap_or(0)
+            .min(global_available_before)
+            .min(vault_before);
         let mut observed_total = 0u128;
         let mut front = 0usize;
         let mut back = asset_count;
         // Sweep from both ends so sparse terminal budgets at either edge cannot force a full
         // near-10 MiB account walk before making progress.
-        while front < back && (amount != 0 || observe_all_matching_domains) {
+        while front < back && (amount != 0 || observed_total < observed_cap) {
+            let observe_front = observed_total < observed_cap;
             debit_terminal_insurance_asset_for_authority_view(
                 group,
                 cfg,
@@ -5320,13 +5325,14 @@ pub mod processor {
                 front,
                 &mut amount,
                 &mut observed_total,
-                observe_all_matching_domains,
+                observe_front,
             )?;
-            if amount == 0 && !observe_all_matching_domains {
+            if amount == 0 && observed_total >= observed_cap {
                 break;
             }
             back -= 1;
             if back != front {
+                let observe_back = observed_total < observed_cap;
                 debit_terminal_insurance_asset_for_authority_view(
                     group,
                     cfg,
@@ -5334,8 +5340,11 @@ pub mod processor {
                     back,
                     &mut amount,
                     &mut observed_total,
-                    observe_all_matching_domains,
+                    observe_back,
                 )?;
+            }
+            if amount == 0 && observed_total >= observed_cap {
+                break;
             }
             front += 1;
         }
@@ -5480,6 +5489,35 @@ pub mod processor {
         {
             return Err(PercolatorError::EngineLockActive.into());
         }
+        Ok(())
+    }
+
+    fn reset_empty_asset_oracle_anchor_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        authenticated_price: u64,
+        now_slot: u64,
+    ) -> ProgramResult {
+        // Keep oracle reconfiguration target-asset scoped. The engine helper also scans every
+        // configured asset before resetting the anchor, which lets a 10MiB dynamic market exhaust CU.
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+            || group.header.mode != 0
+            || authenticated_price == 0
+            || authenticated_price > percolator::MAX_ORACLE_PRICE
+            || now_slot < group.header.current_slot.get()
+        {
+            return Err(PercolatorError::EngineInvalidConfig.into());
+        }
+        require_asset_active_for_oracle_reconfiguration_view(group, asset_index)?;
+
+        let asset = &mut group.markets[asset_index].engine.asset;
+        asset.raw_oracle_target_price = percolator::V16PodU64::new(authenticated_price);
+        asset.effective_price = percolator::V16PodU64::new(authenticated_price);
+        asset.fund_px_last = percolator::V16PodU64::new(authenticated_price);
+        asset.slot_last = percolator::V16PodU64::new(now_slot);
+        group.header.current_slot = percolator::V16PodU64::new(now_slot);
+        group.header.slot_last = percolator::V16PodU64::new(now_slot);
         Ok(())
     }
 
@@ -8277,6 +8315,27 @@ pub mod processor {
             } else {
                 None
             };
+            let observe_matching_until = if let Some(data) = ledger_data.as_deref() {
+                if amount == group.header.insurance.get() {
+                    None
+                } else if state::is_initialized(data) {
+                    let ledger = state::read_insurance_ledger(data)?;
+                    if ledger.market_group != market_ai.key.to_bytes()
+                        || ledger.authority != authority.key.to_bytes()
+                    {
+                        return Err(PercolatorError::Unauthorized.into());
+                    }
+                    Some(ledger.last_observed_insurance_atoms.max(amount))
+                } else {
+                    Some(amount)
+                }
+            } else {
+                None
+            };
+            // A terminal ledger full-drain has no remaining observation to reconcile; use the
+            // progress-making scan instead of walking every market slot. Partial withdrawals observe
+            // matching authority domains only up to the ledger's own horizon, not global insurance,
+            // so unrelated authorities cannot force a full sparse-market scan.
             // insurance + vault + per-domain budget all decremented atomically inside the engine
             // withdraw (called per domain by the helper); no separate header decrement here.
             let observed_insurance = debit_terminal_insurance_budgets_for_authority_view(
@@ -8284,7 +8343,7 @@ pub mod processor {
                 &cfg,
                 authority.key,
                 amount,
-                ledger_data.is_some(),
+                observe_matching_until,
             )?;
             let mut ledger_state = if let Some(data) = ledger_data.as_deref() {
                 let (mut ledger, initialized) = read_or_new_insurance_ledger(
@@ -10087,13 +10146,12 @@ pub mod processor {
             profile.oracle_target_publish_time = publish_time;
             profile.mark_ewma_e6 = price;
             profile.mark_ewma_last_slot = authenticated_slot;
-            group
-                .reset_empty_asset_oracle_anchor_not_atomic(
-                    asset_index_usize,
-                    price,
-                    authenticated_slot,
-                )
-                .map_err(map_v16_error)?;
+            reset_empty_asset_oracle_anchor_view(
+                &mut group,
+                asset_index_usize,
+                price,
+                authenticated_slot,
+            )?;
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
                 cfg.last_good_oracle_slot =
@@ -10201,13 +10259,12 @@ pub mod processor {
                 oracle_leg_publish_times: [0i64; constants::ORACLE_LEG_CAP],
             };
 
-            group
-                .reset_empty_asset_oracle_anchor_not_atomic(
-                    asset_index_usize,
-                    initial_mark_e6,
-                    authenticated_slot,
-                )
-                .map_err(map_v16_error)?;
+            reset_empty_asset_oracle_anchor_view(
+                &mut group,
+                asset_index_usize,
+                initial_mark_e6,
+                authenticated_slot,
+            )?;
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
                 cfg.last_good_oracle_slot =
@@ -10310,13 +10367,12 @@ pub mod processor {
                 oracle_leg_publish_times: [0i64; constants::ORACLE_LEG_CAP],
             };
 
-            group
-                .reset_empty_asset_oracle_anchor_not_atomic(
-                    asset_index_usize,
-                    initial_mark_e6,
-                    authenticated_slot,
-                )
-                .map_err(map_v16_error)?;
+            reset_empty_asset_oracle_anchor_view(
+                &mut group,
+                asset_index_usize,
+                initial_mark_e6,
+                authenticated_slot,
+            )?;
             // Asset 0 now carries a real stored profile: persist it like 1..N, and ALSO mirror the
             // oracle/mark fields into the market-wide config (other code paths still read cfg for asset 0).
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
@@ -11407,6 +11463,16 @@ pub mod processor {
             || asset.explicit_unallocated_loss_short.get() != 0
             || asset.mode_long != 0
             || asset.mode_short != 0
+            || group.markets[asset_index]
+                .engine
+                .pending_domain_loss_barrier_long
+                .get()
+                != 0
+            || group.markets[asset_index]
+                .engine
+                .pending_domain_loss_barrier_short
+                .get()
+                != 0
     }
 
     fn trade_notional_floor(size_q: u128, price: u64) -> Result<u128, ProgramError> {
