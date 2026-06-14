@@ -23386,6 +23386,108 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
     assert_eq!(ledger_b_state.last_observed_insurance_atoms, 60);
 }
 
+// full-interface sweep (cron135): terminal WithdrawInsurance debits resolved-domain budgets by
+// insurance_authority, not the live insurance_operator. Insurance funded before an authority handoff
+// must not remain withdrawable by the stale key once the market resolves, while the current authority
+// must still be able to recover it.
+#[test]
+fn v16_attack_terminal_insurance_withdraw_rekeys_after_authority_rotation() {
+    let mut env = V16CuEnv::new();
+    let stale_authority = env.admin.insecure_clone();
+    let current_authority = Keypair::new();
+
+    env.top_up_insurance_domain_with_authority(&stale_authority, 0, 100);
+    env.try_update_per_asset_authority_with_cu(
+        &stale_authority,
+        Some(&current_authority),
+        0,
+        processor::ASSET_AUTH_INSURANCE,
+        current_authority.pubkey().to_bytes(),
+    )
+    .expect("rotate asset-0 insurance authority after funding");
+    assert_eq!(
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap()
+            .insurance_authority,
+        current_authority.pubkey().to_bytes()
+    );
+
+    env.resolve();
+    let (_, group_before) = env.market_state();
+    assert_eq!(group_before.mode, percolator::MarketModeV16::Resolved);
+    assert_eq!(group_before.insurance, 100);
+    assert_eq!(group_before.insurance_domain_budget[0], 100);
+    assert_eq!(env.token_amount(env.vault), 100);
+
+    let stale_dest = env.token_account(stale_authority.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let stale_dest_before = env.svm.get_account(&stale_dest).unwrap();
+    env.svm.expire_blockhash();
+    let stale_withdraw = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(stale_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&stale_authority],
+    );
+    assert!(
+        stale_withdraw.is_err(),
+        "stale insurance authority must not retain terminal withdrawal power"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale terminal withdrawal must not debit resolved insurance"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "stale terminal withdrawal must not move SPL vault tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_dest).unwrap(),
+        stale_dest_before,
+        "stale terminal withdrawal must not pay the stale authority"
+    );
+
+    let current_dest = env.token_account(current_authority.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let current_withdraw = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(current_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(current_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&current_authority],
+    );
+    assert!(
+        current_withdraw.is_ok(),
+        "current insurance authority can recover terminal insurance: {current_withdraw:?}"
+    );
+    assert_eq!(env.token_amount(current_dest), 40);
+    assert_eq!(env.token_amount(env.vault), 60);
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.insurance, 60);
+    assert_eq!(group_after.vault, 60);
+    assert_eq!(group_after.insurance_domain_budget[0], 60);
+}
+
 // security.md sweep — terminal optional-ledger account-kind confusion (#35/#44): terminal
 // WithdrawInsurance is separate from live domain withdrawals and may rewrite an optional ledger before
 // paying SPL tokens. A funded portfolio from another market must not be accepted as that ledger, or a
