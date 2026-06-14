@@ -49344,6 +49344,54 @@ fn v16_attack_maintenance_fee_spam_cannot_overdrain() {
     );
 }
 
+// security.md sweep - public maintenance sync must not bypass the live ClosePortfolio owner gate.
+// A flat but initialized portfolio is user-owned state; ClosePortfolio rejects a non-owner in live
+// mode, so the unsigned SyncMaintenanceFee path must not dematerialize it as a side effect.
+#[test]
+fn v16_attack_sync_maintenance_cannot_close_empty_live_victim_portfolio() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "empty initialized portfolio is materialized before the attack"
+    );
+
+    env.svm.expire_blockhash();
+    let sync = env.send(
+        ProgInstruction::SyncMaintenanceFee { now_slot: 0 },
+        vec![
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[],
+    );
+    assert!(
+        sync.is_ok(),
+        "public SyncMaintenanceFee may refresh an empty live portfolio but must not close it: {sync:?}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "empty maintenance sync must not decrement materialized count or absorb rent"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "empty maintenance sync must leave the victim portfolio alive"
+    );
+
+    env.close_portfolio_with_cu(&owner, portfolio);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "owner ClosePortfolio remains the live dematerialization path"
+    );
+}
+
 // Fresh InitMarket is a public bootstrap boundary: an attacker or misconfigured launcher should not be
 // able to burn a newly allocated market account into a half-written, unusable slab with grief params.
 #[test]
