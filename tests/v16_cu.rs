@@ -20595,11 +20595,35 @@ fn v16_attack_tradecpi_limit_price_enforced() {
         )
     };
     let (_, g0) = env.market_state();
+    let market_before_tight = env.svm.get_account(&env.market).unwrap();
+    let taker_before_tight = env.svm.get_account(&taker).unwrap();
+    let maker_before_tight = env.svm.get_account(&maker).unwrap();
+    let ctx_before_tight = env.svm.get_account(&ctx).unwrap();
     // too-tight limit (100 = oracle, but buy ask is 100+spread) must reject.
     let r_tight = do_trade(&mut env, 100);
     assert!(
         r_tight.is_err(),
         "buy with limit at oracle must reject when matcher fills above it (slippage guard)"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_tight,
+        "post-CPI tight-limit rejection rolls back market writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker).unwrap(),
+        taker_before_tight,
+        "post-CPI tight-limit rejection rolls back taker writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&maker).unwrap(),
+        maker_before_tight,
+        "post-CPI tight-limit rejection rolls back maker writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before_tight,
+        "post-CPI tight-limit rejection rolls back matcher context writes"
     );
     assert_eq!(
         env.portfolio_state(taker).legs[0].basis_pos_q,
@@ -52889,6 +52913,10 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
         ]
     };
     // leg 0 generous limit (would fill at 105 <= 1_000_000); leg 1 tight limit (100 < ask 105 -> violate).
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::BatchTradeCpi {
@@ -52913,6 +52941,26 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
     assert!(
         r.is_err(),
         "a per-leg slippage violation must abort the whole batch"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "post-CPI batch slippage rejection rolls back market writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&ta).unwrap(),
+        taker_before,
+        "post-CPI batch slippage rejection rolls back taker writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&la).unwrap(),
+        lp_before,
+        "post-CPI batch slippage rejection rolls back LP writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "post-CPI batch slippage rejection rolls back matcher context writes"
     );
     let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
     assert!(
