@@ -25563,6 +25563,292 @@ fn v16_attack_permissionless_asset_crank_rejects_after_base_resolve_matured() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+#[test]
+fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    let creator = Keypair::new();
+    let creator_key = creator.pubkey();
+    env.update_market_init_fee_policy_with_cu(1);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        creator_key,
+        creator_key,
+        creator_key,
+        creator_key,
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_portfolio = env.create_portfolio(&taker);
+    let lp_portfolio = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_portfolio, 1_000_000);
+    env.deposit(&lp, lp_portfolio, 1_000_000);
+
+    env.svm.warp_to_slot(7);
+    env.push_auth_mark_for_asset_with_authority(1, &creator, 7, 101);
+    let fresh_trade = env.try_trade_asset_with_cu(
+        1,
+        &taker,
+        taker_portfolio,
+        &lp,
+        lp_portfolio,
+        POS_SCALE as i128,
+        101,
+        0,
+    );
+    assert!(
+        fresh_trade.is_ok(),
+        "fresh non-base trade control should execute before base resolve maturity: {fresh_trade:?}"
+    );
+
+    env.svm.warp_to_slot(8);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_portfolio).unwrap();
+    let lp_before = env.svm.get_account(&lp_portfolio).unwrap();
+    env.svm.expire_blockhash();
+    let stale_trade = env.send(
+        ProgInstruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: POS_SCALE as i128,
+            exec_price: 101,
+            fee_bps: 0,
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_portfolio, false),
+            AccountMeta::new(lp_portfolio, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(
+        stale_trade.is_err(),
+        "non-base TradeNoCpi must reject once the base market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale non-base trade leaves market state unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_portfolio).unwrap(),
+        taker_before,
+        "rejected stale non-base trade leaves taker state unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_portfolio).unwrap(),
+        lp_before,
+        "rejected stale non-base trade leaves LP state unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "base resolve remains available after rejected non-base trade: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
+#[test]
+fn v16_attack_non_base_tradecpi_rejects_before_matcher_after_base_resolve_matured() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    let creator = Keypair::new();
+    let creator_key = creator.pubkey();
+    env.update_market_init_fee_policy_with_cu(1);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        creator_key,
+        creator_key,
+        creator_key,
+        creator_key,
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_portfolio = env.create_portfolio(&taker);
+    let lp_portfolio = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_portfolio, 1_000_000);
+    env.deposit(&lp, lp_portfolio, 1_000_000);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_portfolio,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; MATCHER_CONTEXT_LEN],
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, lp_portfolio, ctx, delegate, 1);
+
+    let accounts = |env: &V16CuEnv| {
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_portfolio, false),
+            AccountMeta::new(lp_portfolio, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+    let set_hostile_mode = |env: &mut V16CuEnv, mode: u8| {
+        let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
+        data[0] = mode;
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    };
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+    env.svm.warp_to_slot(7);
+    env.push_auth_mark_for_asset_with_authority(1, &creator, 7, 101);
+    set_hostile_mode(&mut env, 0);
+    env.svm.expire_blockhash();
+    let fresh_err = env
+        .send(
+            ProgInstruction::TradeCpi {
+                asset_index: 1,
+                size_q: POS_SCALE as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            accounts(&env),
+            &[&taker],
+        )
+        .expect_err("fresh hostile non-base TradeCpi must reach matcher-return validation");
+    assert!(
+        fresh_err.contains("InvalidAccountData"),
+        "fresh hostile non-base TradeCpi should fail from matcher validation, got {fresh_err}"
+    );
+    assert!(
+        !fresh_err.contains("Custom(27)") && !fresh_err.contains("0x1b"),
+        "fresh hostile non-base TradeCpi must not be mistaken for stale gating: {fresh_err}"
+    );
+
+    env.svm.warp_to_slot(8);
+    set_hostile_mode(&mut env, 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_portfolio).unwrap();
+    let lp_before = env.svm.get_account(&lp_portfolio).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let stale_err = env
+        .send(
+            ProgInstruction::TradeCpi {
+                asset_index: 1,
+                size_q: POS_SCALE as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            accounts(&env),
+            &[&taker],
+        )
+        .expect_err("base-stale non-base TradeCpi must reject before matcher CPI");
+    assert!(
+        stale_err.contains("Custom(27)") || stale_err.contains("0x1b"),
+        "base-stale non-base TradeCpi must fail as OracleStale before matcher validation, got {stale_err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "pre-CPI stale rejection leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_portfolio).unwrap(),
+        taker_before,
+        "pre-CPI stale rejection leaves taker bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_portfolio).unwrap(),
+        lp_before,
+        "pre-CPI stale rejection leaves LP bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "pre-CPI stale rejection never gives the hostile matcher a writable context"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "base resolve remains available after rejected non-base TradeCpi: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // security.md sweep — CloseSlab wind-down finality (#30/#48): a market may only be closed when fully
 // wound down (mode==Resolved AND vault==0 && insurance==0 && c_tot==0 && no materialized portfolios).
 // Closing while value/positions remain would strand funds — must reject.
