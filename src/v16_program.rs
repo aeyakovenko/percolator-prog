@@ -8995,8 +8995,20 @@ pub mod processor {
             let mut profile = read_oracle_profile_from_view(&group, &cfg, 0)?;
             if profile.asset_admin == old_marketauth {
                 profile.asset_admin = new_pubkey;
-                write_oracle_profile_to_view(&mut group, 0, &profile)?;
             }
+            if profile.insurance_authority == old_marketauth {
+                profile.insurance_authority = new_pubkey;
+            }
+            if profile.insurance_operator == old_marketauth {
+                profile.insurance_operator = new_pubkey;
+            }
+            if profile.backing_bucket_authority == old_marketauth {
+                profile.backing_bucket_authority = new_pubkey;
+            }
+            if profile.oracle_authority == old_marketauth {
+                profile.oracle_authority = new_pubkey;
+            }
+            write_oracle_profile_to_view(&mut group, 0, &profile)?;
             cfg.marketauth = new_pubkey;
             cfg
         };

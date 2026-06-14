@@ -55668,6 +55668,125 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
     );
 }
 
+#[test]
+fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities() {
+    let mut env = V16CuEnv::new();
+    let old_marketauth = env.admin.insecure_clone();
+    let new_marketauth = Keypair::new();
+    env.ensure_signer_account(new_marketauth.pubkey());
+    env.configure_auth_mark_with_cu(0, 100);
+
+    env.update_asset_authority_with_cu(&new_marketauth);
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(
+        profile.insurance_authority,
+        new_marketauth.pubkey().to_bytes(),
+        "default asset-0 insurance authority follows the market authority handoff"
+    );
+    assert_eq!(
+        profile.insurance_operator,
+        new_marketauth.pubkey().to_bytes(),
+        "default asset-0 insurance operator follows the market authority handoff"
+    );
+    assert_eq!(
+        profile.backing_bucket_authority,
+        new_marketauth.pubkey().to_bytes(),
+        "default asset-0 backing authority follows the market authority handoff"
+    );
+    assert_eq!(
+        profile.oracle_authority,
+        new_marketauth.pubkey().to_bytes(),
+        "default asset-0 oracle authority follows the market authority handoff"
+    );
+
+    let market_before_old_fee = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let stale_fee = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 500,
+        },
+        vec![
+            AccountMeta::new(old_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&old_marketauth],
+    );
+    assert!(
+        stale_fee.is_err(),
+        "stale marketauth must not retain asset-0-insurance fee-floor power after handoff"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_old_fee,
+        "rejected stale fee update leaves market bytes unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 500,
+        },
+        vec![
+            AccountMeta::new(new_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&new_marketauth],
+    )
+    .expect("current marketauth inherits asset-0 insurance fee-floor power");
+    assert_eq!(env.market_state().0.trade_fee_base_bps, 500);
+
+    let target_before_old_push = env.market_state().0.oracle_target_price_e6;
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    let stale_push = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 777,
+        },
+        vec![
+            AccountMeta::new(old_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&old_marketauth],
+    );
+    assert!(
+        stale_push.is_err(),
+        "stale marketauth must not retain asset-0 oracle push power after handoff"
+    );
+    assert_eq!(
+        env.market_state().0.oracle_target_price_e6,
+        target_before_old_push,
+        "rejected stale oracle push leaves the asset-0 oracle target unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    env.push_auth_mark_for_asset_with_authority(0, &new_marketauth, 2, 777);
+    assert_eq!(
+        env.market_state().0.oracle_target_price_e6,
+        777,
+        "current marketauth inherits asset-0 oracle target push power"
+    );
+    assert_eq!(
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap()
+            .oracle_target_price_e6,
+        777,
+        "current marketauth updates the stored asset-0 oracle profile"
+    );
+}
+
 // security.md sweep — backing-bucket creation must reject an already-lapsed expiry. TopUpBackingBucket
 // forwards expiry_slot to the engine's deposit_fresh, which requires a FUTURE expiry
 // (expiry_slot > current_slot). A topup at expiry_slot 0 would mint immediately-lapsed backing
