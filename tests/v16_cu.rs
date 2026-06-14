@@ -33287,6 +33287,247 @@ fn v16_attack_backing_withdrawals_reject_delegated_canonical_vault() {
     assert_eq!(ledger_after.last_observed_bucket_earnings_atoms, 20);
 }
 
+// full-interface sweep (cron135): backing principal and provider-fee earnings can be paid from the
+// configured secondary reserve, not only the primary vault. That path must inherit canonical-vault
+// delegate rejection for both backing ledgers, and the provider must still be able to withdraw after
+// the reserve is restored clean.
+#[test]
+fn v16_attack_backing_withdrawals_reject_delegated_secondary_reserve() {
+    const PRINCIPAL: u128 = 100;
+    const EARNINGS: u128 = 30;
+    fn delegated_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
+        let mut data = vec![0u8; TokenAccount::LEN];
+        TokenAccount::pack(
+            TokenAccount {
+                mint,
+                owner,
+                amount,
+                delegate: COption::Some(Pubkey::new_unique()),
+                state: AccountState::Initialized,
+                is_native: COption::None,
+                delegated_amount: amount,
+                close_authority: COption::None,
+            },
+            &mut data,
+        )
+        .unwrap();
+        data
+    }
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary);
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, PRINCIPAL, 10_000);
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].utilization_fee_earnings = EARNINGS;
+        group.vault += EARNINGS;
+    });
+    let funded_vault = env.market_state().1.vault as u64;
+    assert_eq!(funded_vault, (PRINCIPAL + EARNINGS) as u64);
+
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 0);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: delegated_token_data(secondary, env.vault_authority, funded_vault),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let dest = env.token_account_for_mint(secondary, admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected_principal = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_principal.is_err(),
+        "WithdrawBackingBucket must reject a delegated canonical secondary reserve"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "delegated-secondary principal rejection leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "delegated-secondary principal rejection rewrites no backing ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "primary vault remains untouched on secondary-reserve rejection"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "delegated secondary reserve remains byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "delegated-secondary principal rejection pays no tokens"
+    );
+
+    env.svm.expire_blockhash();
+    let rejected_earnings = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_earnings.is_err(),
+        "WithdrawBackingBucketEarnings must reject a delegated canonical secondary reserve"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "delegated-secondary earnings rejection leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "delegated-secondary earnings rejection rewrites no backing ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "delegated secondary reserve remains untouched after earnings rejection"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "delegated-secondary earnings rejection pays no tokens"
+    );
+
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, env.vault_authority, funded_vault),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok_principal = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok_principal.is_ok(),
+        "clean secondary reserve pays backing principal: {ok_principal:?}"
+    );
+    assert_eq!(env.token_amount(dest), 40);
+    assert_eq!(env.token_amount(secondary_vault), funded_vault - 40);
+
+    env.svm.expire_blockhash();
+    let ok_earnings = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok_earnings.is_ok(),
+        "clean secondary reserve pays backing earnings: {ok_earnings:?}"
+    );
+    assert_eq!(env.token_amount(dest), 50);
+    assert_eq!(env.token_amount(secondary_vault), funded_vault - 50);
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.vault, PRINCIPAL + EARNINGS - 50);
+    assert_eq!(
+        group_after.source_backing_buckets[1].fresh_unliened_backing_num,
+        60 * BOUND_SCALE
+    );
+    assert_eq!(
+        group_after.source_backing_buckets[1].utilization_fee_earnings,
+        20
+    );
+    let ledger_after =
+        state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_after.total_principal_atoms, 60);
+    assert_eq!(ledger_after.total_principal_withdrawn_atoms, 40);
+    assert_eq!(ledger_after.total_earnings_atoms, EARNINGS);
+    assert_eq!(ledger_after.total_earnings_withdrawn_atoms, 10);
+    assert_eq!(ledger_after.last_observed_bucket_earnings_atoms, 20);
+}
+
 // security.md sweep — convert bounded by available backing (#33/#35): if a winner's positive pnl
 // exceeds its source backing, ConvertReleasedPnl must release at most the AVAILABLE backing, never the
 // full (partly-unbacked) pnl. Otherwise unbacked pnl would convert into withdrawable capital.
