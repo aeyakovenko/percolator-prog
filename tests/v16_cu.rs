@@ -17964,6 +17964,154 @@ fn v16_attack_terminal_insurance_rejects_noncanonical_secondary_vault() {
     assert_eq!(group.vault, 60);
 }
 
+// full-interface sweep (cron135): terminal insurance through the secondary reserve also reaches
+// token-account delegate validation only after terminal insurance and ledger accounting are staged.
+// A canonical secondary ATA with delegate authority set must reject atomically and remain live after
+// the reserve is restored clean.
+#[test]
+fn v16_attack_terminal_insurance_rejects_delegated_secondary_vault() {
+    fn delegated_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
+        let mut data = vec![0u8; TokenAccount::LEN];
+        TokenAccount::pack(
+            TokenAccount {
+                mint,
+                owner,
+                amount,
+                delegate: COption::Some(Pubkey::new_unique()),
+                state: AccountState::Initialized,
+                is_native: COption::None,
+                delegated_amount: amount,
+                close_authority: COption::None,
+            },
+            &mut data,
+        )
+        .unwrap();
+        data
+    }
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary);
+    env.top_up_insurance(100);
+    env.resolve();
+
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: delegated_token_data(secondary, env.vault_authority, 100),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let dest = env.token_account_for_mint(secondary, admin.pubkey(), 0);
+    let ledger = env.insurance_ledger_account();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "terminal WithdrawInsurance must reject a delegated canonical secondary reserve"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected secondary insurance withdrawal must not debit market budgets"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "primary vault remains untouched on secondary-reserve rejection"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "delegated secondary reserve remains byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "rejected secondary insurance withdrawal pays no tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "rejected secondary insurance withdrawal rewrites no ledger state"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 100);
+    assert_eq!(group.vault, 100);
+
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, env.vault_authority, 100),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "terminal WithdrawInsurance through clean secondary reserve remains live: {ok:?}"
+    );
+    assert_eq!(env.token_amount(dest), 40);
+    assert_eq!(env.token_amount(secondary_vault), 60);
+    let ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 60);
+    assert_eq!(group.vault, 60);
+}
+
 // security.md sweep - terminal insurance primary vault binding (#44/#48): WithdrawInsurance mutates
 // terminal insurance budgets and the optional ledger before SPL vault validation. A fake primary vault
 // owned by the market PDA must reject transaction-atomically, leaving terminal accounting and ledger
