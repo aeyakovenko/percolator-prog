@@ -55580,6 +55580,83 @@ fn v16_attack_init_portfolio_cannot_use_market_as_portfolio_account() {
     assert_eq!(initialized.capital, 0);
 }
 
+// Public-interface DoS sweep: default deploys enter through the Anchor v2/Pinocchio adapter before
+// the legacy processor. That adapter scans the complete instruction account list for duplicate
+// runtime accounts, so ignored trailing accounts on a cheap permissionless route must remain bounded.
+#[test]
+fn v16_attack_init_portfolio_ignored_extra_accounts_are_cu_bounded() {
+    const EXTRA_ACCOUNTS: usize = 56;
+
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    env.ensure_signer_account(owner.pubkey());
+    let mut extras = Vec::with_capacity(EXTRA_ACCOUNTS);
+    for _ in 0..EXTRA_ACCOUNTS {
+        let key = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: Vec::new(),
+                    owner: solana_sdk::system_program::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        extras.push(key);
+    }
+
+    let send_init = |env: &mut V16CuEnv, extra_count: usize| -> u64 {
+        let portfolio = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                portfolio,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: vec![0u8; env.portfolio_account_len],
+                    owner: env.program_id,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let mut accounts = vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ];
+        accounts.extend(
+            extras
+                .iter()
+                .take(extra_count)
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+        env.svm.expire_blockhash();
+        env.send(ProgInstruction::InitPortfolio, accounts, &[&owner])
+            .expect("InitPortfolio with ignored trailing accounts")
+    };
+
+    let baseline_cu = send_init(&mut env, 0);
+    let bloated_cu = send_init(&mut env, EXTRA_ACCOUNTS);
+
+    assert!(
+        bloated_cu > baseline_cu,
+        "ignored extra accounts must reach the deployed adapter path"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 75_000,
+        "ignored extra accounts consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "init_portfolio ignored extra account path",
+        bloated_cu,
+        150_000,
+    );
+}
+
 // SOL-010 (reinitialization): InitPortfolio targets a program-owned account and SETS its owner. An
 // attacker could try to re-init a VICTIM's already-funded portfolio -- which would reset its capital
 // and reassign ownership, a severe LOF (victim's vaulted tokens orphaned). The is_initialized guard
