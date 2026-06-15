@@ -61381,6 +61381,113 @@ fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
     );
 }
 
+// security.md sweep - TradeCpi flagged partial fill (#22/#39): the matcher ABI allows a partial
+// fill only when FLAG_PARTIAL_OK is set and the price equals the oracle echo. Exercise that accepted
+// path end-to-end so it cannot drift into an overfill, zero-fill, or fee-on-request-size bug.
+#[test]
+fn v16_attack_hostile_matcher_single_tradecpi_flagged_partial_fills_exactly() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &la,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 10; // valid flagged partial: exec_size = request / 2, FLAG_PARTIAL_OK set.
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
+
+    let request_q = (10 * POS_SCALE) as i128;
+    let expected_q = request_q / 2;
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q: request_q,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker],
+    );
+    assert!(
+        accepted.is_ok(),
+        "valid flagged partial TradeCpi must execute: {accepted:?}"
+    );
+
+    let taker_after = env.portfolio_state(ta);
+    let lp_after = env.portfolio_state(la);
+    assert_eq!(
+        active_leg_for_asset(&taker_after, 0).basis_pos_q,
+        expected_q,
+        "taker opens exactly the flagged partial amount"
+    );
+    assert_eq!(
+        active_leg_for_asset(&lp_after, 0).basis_pos_q,
+        -expected_q,
+        "LP opens exactly the opposite flagged partial amount"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.assets[0].oi_eff_long_q, expected_q as u128);
+    assert_eq!(group.assets[0].oi_eff_short_q, expected_q as u128);
+    assert!(
+        group.insurance > 0,
+        "fee is charged on the accepted partial fill"
+    );
+    assert_eq!(
+        group.vault,
+        group.c_tot + group.insurance,
+        "partial fill preserves vault conservation"
+    );
+}
+
 // DoS/manipulation rate-limit: PushEwmaMark feeds a SMOOTHED mark (EWMA over dt slots). A mark
 // authority must not defeat the per-slot rate limit by pushing repeatedly within ONE slot (each push
 // compounding toward an extreme value -> instant mark manipulation -> mis-liquidation). The EWMA

@@ -12,6 +12,7 @@ entrypoint!(process);
 
 const ABI: u32 = 3;
 const FLAG_VALID: u32 = 1;
+const FLAG_PARTIAL_OK: u32 = 2;
 
 // Build one crafted 64-byte MatcherReturn; `mode` perturbs exactly one field (default = honest fill).
 fn craft(mode: u8, req_id: u64, lp: u64, asset: u64, oracle: u64, req: i128) -> [u8; 64] {
@@ -31,6 +32,7 @@ fn craft(mode: u8, req_id: u64, lp: u64, asset: u64, oracle: u64, req: i128) -> 
         5 => l = lp.wrapping_add(1),                 // forged lp_account_id
         6 => price = 0,                              // zero exec price
         7 => { flags = FLAG_VALID; size = req / 2 }  // unflagged partial (no PARTIAL_OK)
+        10 => { flags = FLAG_VALID | FLAG_PARTIAL_OK; size = req / 2 } // valid flagged partial
         _ => {}                                      // honest full fill -> wrapper accepts
     }
     let mut b = [0u8; 64];
