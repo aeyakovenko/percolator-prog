@@ -50312,6 +50312,77 @@ fn v16_bpf_10m_market_portfolio_value_rails_stay_bounded() {
     assert_eq!(group.materialized_portfolio_count, 0);
 }
 
+#[test]
+fn v16_bpf_10m_market_preexisting_portfolios_trade_after_growth() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const AMOUNT: u128 = 1_000_000;
+    const TRADE_SLOT: u64 = 10;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    let portfolio_len_before = env.svm.get_account(&long_account).unwrap().data.len();
+    assert_eq!(
+        portfolio_len_before,
+        state::portfolio_account_len_for_market_slots(1).unwrap(),
+        "setup creates portfolios before the market grows"
+    );
+
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    assert_eq!(
+        state::portfolio_account_len_for_market_slots(N).unwrap(),
+        portfolio_len_before,
+        "portfolio storage stays fixed-size as market slot capacity grows"
+    );
+
+    env.deposit(&long_owner, long_account, AMOUNT);
+    env.deposit(&short_owner, short_account, AMOUNT);
+    assert_eq!(
+        env.svm.get_account(&long_account).unwrap().data.len(),
+        portfolio_len_before,
+        "deposit after 10MiB growth does not need a portfolio realloc"
+    );
+
+    env.svm.warp_to_slot(TRADE_SLOT);
+    env.svm.expire_blockhash();
+    let trade_cu = env.trade_asset_with_cu(
+        HIGH_ASSET as u16,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    println!(
+        "v16 10MiB preexisting portfolios high-tail trade: assets={N}, account_len={account_len}, \
+         portfolio_len={portfolio_len_before}, asset={HIGH_ASSET}, CU={trade_cu}"
+    );
+    assert_cu_within(
+        "10MiB preexisting portfolio high-tail trade",
+        trade_cu,
+        TRADE_CU_LIMIT,
+    );
+    assert_eq!(
+        env.svm.get_account(&long_account).unwrap().data.len(),
+        portfolio_len_before,
+        "trade after 10MiB growth leaves the preexisting portfolio size unchanged"
+    );
+    let long_state = env.portfolio_state(long_account);
+    assert!(
+        has_active_leg_for_asset(&long_state, HIGH_ASSET),
+        "preexisting portfolio opens a high-tail position after market growth"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+    assert!(group.vault >= group.c_tot + group.insurance);
+}
+
 // LoF/DoS sweep — a user stuck in the close-progress state must still be able
 // to cancel that recovery ledger on a max-size market. This is a distinct
 // recovery route from the flat Deposit/Withdraw/ClosePortfolio lifecycle.
