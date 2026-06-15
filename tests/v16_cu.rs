@@ -51778,6 +51778,168 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
 }
 
 #[test]
+fn v16_bpf_10m_market_liquidation_reward_high_asset_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 1_000_000;
+    const TRADE_SLOT: u64 = 1;
+    const LIQUIDATION_SLOT: u64 = 30;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000);
+    env.deposit(&cranker_owner, cranker, 1_000);
+    env.svm.warp_to_slot(TRADE_SLOT);
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        HIGH_ASSET as u16,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    let mut max_refresh_cu = 0;
+    for slot in 2..=LIQUIDATION_SLOT {
+        env.svm.warp_to_slot(slot);
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::PushAuthMark {
+                asset_index: HIGH_ASSET as u16,
+                now_slot: slot,
+                mark_e6: PRICE * 2,
+            },
+            vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&env.admin],
+        )
+        .expect("push high-asset auth mark for liquidation");
+        env.svm.expire_blockhash();
+        if let Ok(cu) = env.send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: HIGH_ASSET as u16,
+                now_slot: slot,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        ) {
+            max_refresh_cu = max_refresh_cu.max(cu);
+        }
+    }
+
+    let (_, before_group) = env.market_state();
+    assert!(
+        env.portfolio_state(short).health_cert.certified_liq_deficit != 0,
+        "short is liquidatable before the reward crank"
+    );
+    let cranker_cap_before = env.portfolio_state(cranker).capital;
+    let high_long_domain = 2 * HIGH_ASSET;
+    let high_short_domain = high_long_domain + 1;
+    let high_budget_before = before_group.insurance_domain_budget[high_long_domain]
+        + before_group.insurance_domain_budget[high_short_domain];
+
+    env.svm.expire_blockhash();
+    let liquidation_cu = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PermissionlessCrank {
+            action: 1,
+            asset_index: HIGH_ASSET as u16,
+            now_slot: LIQUIDATION_SLOT,
+            funding_rate_e9: 0,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new(cranker, false),
+        ],
+        &[&cranker_owner],
+    )
+    .expect("liquidate high-asset position with cranker reward");
+    println!(
+        "v16 10MiB PermissionlessCrank LiquidateReward: assets={N}, account_len={account_len}, \
+         asset={HIGH_ASSET}, max_refresh_CU={max_refresh_cu}, CU={liquidation_cu}"
+    );
+    assert_cu_within(
+        "10MiB PermissionlessCrank LiquidateReward",
+        liquidation_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (_, after_group) = env.market_state();
+    let short_after = env.portfolio_state(short);
+    let cranker_reward = env.portfolio_state(cranker).capital - cranker_cap_before;
+    let insurance_delta = after_group.insurance - before_group.insurance;
+    let high_budget_delta = after_group.insurance_domain_budget[high_long_domain]
+        + after_group.insurance_domain_budget[high_short_domain]
+        - high_budget_before;
+    assert!(
+        cranker_reward > 0,
+        "max-size high-tail liquidation must pay a real cranker reward"
+    );
+    assert_eq!(
+        cranker_reward, insurance_delta,
+        "50% cranker share leaves the other half retained by insurance"
+    );
+    assert_eq!(
+        high_budget_delta, insurance_delta,
+        "retained liquidation fee is budgeted to the liquidated high-tail asset domains"
+    );
+    assert!(
+        after_group.assets[HIGH_ASSET].effective_price > PRICE,
+        "liquidation path applies the pending adverse high-tail mark"
+    );
+    assert!(percolator::active_bitmap_is_empty(
+        short_after.active_bitmap
+    ));
+    assert_eq!(
+        after_group.vault, before_group.vault,
+        "liquidation reward is an internal fee split, not a vault mint"
+    );
+    assert_eq!(after_group.vault as u64, env.token_amount(env.vault));
+    assert!(
+        after_group.vault >= after_group.c_tot + after_group.insurance,
+        "senior conservation after high-tail reward liquidation"
+    );
+    assert_domain_budget_remaining_total_consistent(
+        &after_group,
+        "10MiB high-tail liquidation reward",
+    );
+}
+
+#[test]
 fn v16_bpf_10m_market_refresh_high_asset_stays_bounded() {
     const N: usize = 5_834;
     const HIGH_ASSET: usize = N - 1;
