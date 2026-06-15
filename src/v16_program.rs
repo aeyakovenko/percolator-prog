@@ -10860,6 +10860,38 @@ pub mod processor {
         ensure_trade_portfolio_current_for_requests_view(group, account_b, requests)
     }
 
+    fn ensure_cpi_trade_asset_lifecycle_before_matcher(
+        group: &state::MarketViewMutV16<'_>,
+        account_a: &percolator::PortfolioV16ViewMut<'_>,
+        account_b: &percolator::PortfolioV16ViewMut<'_>,
+        asset_indices: &[u16],
+    ) -> ProgramResult {
+        for &asset_index in asset_indices {
+            let asset_index_usize = asset_index as usize;
+            if asset_index_usize >= group.header.config.max_market_slots.get() as usize
+                || asset_index_usize >= group.markets.len()
+            {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            let lifecycle = group.markets[asset_index_usize].engine.asset.lifecycle;
+            if lifecycle == ASSET_LIFECYCLE_ACTIVE {
+                continue;
+            }
+            let account_a_has_asset =
+                portfolio_has_active_asset_view(group, account_a, asset_index_usize)?;
+            let account_b_has_asset =
+                portfolio_has_active_asset_view(group, account_b, asset_index_usize)?;
+            if !account_a_has_asset && !account_b_has_asset {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
+            match lifecycle {
+                ASSET_LIFECYCLE_DRAIN_ONLY | ASSET_LIFECYCLE_RECOVERY => {}
+                _ => return Err(PercolatorError::EngineLockActive.into()),
+            }
+        }
+        Ok(())
+    }
+
     fn ensure_cpi_trade_portfolios_current_before_matcher(
         market_ai: &AccountInfo<'_>,
         account_a_ai: &AccountInfo<'_>,
@@ -10886,6 +10918,12 @@ pub mod processor {
         let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
         let account_b =
             state::portfolio_view_mut_for_market_slots(&mut account_b_data, max_market_slots)?;
+        ensure_cpi_trade_asset_lifecycle_before_matcher(
+            &group,
+            &account_a,
+            &account_b,
+            asset_indices,
+        )?;
         ensure_trade_portfolios_current_for_requests_view(&group, &account_a, &account_b, &requests)
     }
 

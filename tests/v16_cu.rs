@@ -48477,6 +48477,219 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
     );
 }
 
+// CU/DoS hardening: CPI trade routes must reject inactive first-open assets before invoking the
+// LP matcher. Matcher config can outlive lifecycle transitions; without a pre-CPI lifecycle gate,
+// any taker could force an external matcher call that is guaranteed to be discarded later.
+#[test]
+fn v16_attack_inactive_asset_tradecpi_rejects_before_hostile_matcher_cpi() {
+    for lifecycle_case in ["Retired", "DrainOnly", "Recovery"] {
+        let mut env = V16CuEnv::new();
+        let creator = Keypair::new();
+        env.update_market_init_fee_policy_with_cu(1);
+        if lifecycle_case == "Recovery" {
+            env.configure_permissionless_resolve_with_cu(100, 5);
+        }
+        env.svm.warp_to_slot(1);
+        env.activate_permissionless_asset_with_fee(
+            &creator,
+            1,
+            1,
+            100,
+            creator.pubkey(),
+            creator.pubkey(),
+            creator.pubkey(),
+            creator.pubkey(),
+            1,
+        );
+
+        let hostile = Pubkey::new_unique();
+        env.svm.add_program(
+            hostile,
+            &std::fs::read(hostile_matcher_program_path()).unwrap(),
+        );
+        let taker = Keypair::new();
+        let lp = Keypair::new();
+        let taker_account = env.create_portfolio(&taker);
+        let lp_account = env.create_portfolio(&lp);
+        env.deposit(&taker, taker_account, 1_000_000);
+        env.deposit(&lp, lp_account, 1_000_000);
+        let ctx = Pubkey::new_unique();
+        let delegate = matcher_delegate_key(
+            &env.program_id,
+            &env.market,
+            &lp_account,
+            &lp.pubkey(),
+            &hostile,
+            &ctx,
+        );
+        env.svm
+            .set_account(
+                delegate,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: vec![],
+                    owner: Pubkey::default(),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: vec![0u8; MATCHER_CONTEXT_LEN],
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+
+        let set_hostile_mode = |env: &mut V16CuEnv| {
+            let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
+            data[0] = 0; // hostile over-fill mode: if CPI occurs, validation fails.
+            env.svm
+                .set_account(
+                    ctx,
+                    Account {
+                        lamports: 1_000_000_000,
+                        data,
+                        owner: hostile,
+                        executable: false,
+                        rent_epoch: 0,
+                    },
+                )
+                .unwrap();
+        };
+        let accounts = |env: &V16CuEnv| {
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+                AccountMeta::new(lp_account, false),
+                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ]
+        };
+
+        set_hostile_mode(&mut env);
+        env.svm.expire_blockhash();
+        let fresh_err = env
+            .send(
+                ProgInstruction::TradeCpi {
+                    asset_index: 1,
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 0,
+                    limit_price: 0,
+                },
+                accounts(&env),
+                &[&taker],
+            )
+            .expect_err("fresh active TradeCpi sentinel should reach matcher validation");
+        assert!(
+            fresh_err.contains("InvalidAccountData"),
+            "fresh active TradeCpi should fail from hostile matcher validation, got {fresh_err}"
+        );
+
+        match lifecycle_case {
+            "Retired" => {
+                env.svm.warp_to_slot(3);
+                env.update_asset_lifecycle_as_admin_with_cu(
+                    percolator_prog::processor::ASSET_ACTION_RETIRE,
+                    1,
+                    3,
+                    0,
+                );
+                assert_eq!(
+                    env.market_state().1.assets[1].lifecycle,
+                    AssetLifecycleV16::Retired
+                );
+            }
+            "DrainOnly" => {
+                env.update_asset_lifecycle_as_admin_with_cu(
+                    percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+                    1,
+                    0,
+                    0,
+                );
+                assert_eq!(
+                    env.market_state().1.assets[1].lifecycle,
+                    AssetLifecycleV16::DrainOnly
+                );
+            }
+            "Recovery" => {
+                env.svm.warp_to_slot(3);
+                env.update_asset_lifecycle_as_admin_with_cu(
+                    percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+                    1,
+                    3,
+                    0,
+                );
+                assert_eq!(
+                    env.market_state().1.assets[1].lifecycle,
+                    AssetLifecycleV16::Recovery
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        for (route, batch) in [("TradeCpi", false), ("BatchTradeCpi", true)] {
+            set_hostile_mode(&mut env);
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let taker_before = env.svm.get_account(&taker_account).unwrap();
+            let lp_before = env.svm.get_account(&lp_account).unwrap();
+            let ctx_before = env.svm.get_account(&ctx).unwrap();
+            env.svm.expire_blockhash();
+            let rejected = if batch {
+                env.send(
+                    ProgInstruction::BatchTradeCpi {
+                        legs: vec![BatchTradeCpiLeg {
+                            asset_index: 1,
+                            size_q: POS_SCALE as i128,
+                            fee_bps: 0,
+                            limit_price: 0,
+                        }],
+                    },
+                    accounts(&env),
+                    &[&taker],
+                )
+            } else {
+                env.send(
+                    ProgInstruction::TradeCpi {
+                        asset_index: 1,
+                        size_q: POS_SCALE as i128,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    },
+                    accounts(&env),
+                    &[&taker],
+                )
+            }
+            .expect_err("inactive-asset CPI trade must reject before matcher CPI");
+            assert!(
+                rejected.contains("Custom(21)") || rejected.contains("custom program error: 0x15"),
+                "{lifecycle_case} {route} rejection should be EngineLockActive, got {rejected}"
+            );
+            assert!(
+                !rejected.contains("InvalidAccountData"),
+                "{lifecycle_case} {route} rejection must not reach hostile matcher validation: {rejected}"
+            );
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+            assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+            assert_eq!(
+                env.svm.get_account(&ctx).unwrap(),
+                ctx_before,
+                "{lifecycle_case} {route} rejection never gives the hostile matcher a writable context"
+            );
+        }
+    }
+}
+
 // security.md sweep — BatchTradeCpi fee bounds on permissionless LP fills (#37/#49): in CPI mode the
 // taker supplies fee_bps while the LP owner does not sign the fill. An over-max fee must therefore
 // reject the whole batch, or a taker could drain an LP into protocol insurance through a matcher fill.
