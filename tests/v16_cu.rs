@@ -63642,6 +63642,207 @@ fn v16_attack_rebalance_reduce_rejects_when_resolve_matured() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// LoF/DoS sweep: RebalanceReduce and ForfeitRecoveryLeg both run through the common
+// one-portfolio wrapper, which can grow legacy portfolio storage before the stale-resolve freeze check.
+// CureAndCancelClose/SyncMaintenanceFee already pin that rollback shape; keep the sibling recovery
+// tools covered so a failed stale transaction cannot leave a legacy account expanded while resolve
+// remains live.
+#[test]
+fn v16_attack_stale_recovery_tools_roll_back_legacy_reallocs() {
+    {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+        env.configure_permissionless_resolve_with_cu(5, 5);
+        env.configure_auth_mark_with_cu(0, 100);
+
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long, 1_000_000);
+        env.deposit(&short_owner, short, 1_000_000);
+        env.trade_asset_with_cu(
+            0,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            POS_SCALE as i128,
+            100,
+            0,
+        );
+
+        env.svm.warp_to_slot(3);
+        env.push_auth_mark_with_cu(3, 100);
+        let mut legacy = env.svm.get_account(&long).unwrap();
+        legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+        env.svm.set_account(long, legacy).unwrap();
+        assert_eq!(
+            env.svm.get_account(&long).unwrap().data.len(),
+            PORTFOLIO_ENGINE_ACCOUNT_LEN,
+            "test setup simulates a legacy rebalance-reduce target"
+        );
+
+        env.svm.warp_to_slot(40);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let long_before = env.svm.get_account(&long).unwrap();
+        let short_before = env.svm.get_account(&short).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::RebalanceReduce {
+                asset_index: 0,
+                reduce_q: POS_SCALE / 2,
+            },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[&long_owner],
+        );
+        assert!(
+            rejected.is_err(),
+            "legacy RebalanceReduce must reject once the market is resolve-matured"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "rejected stale legacy RebalanceReduce leaves market exposure unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&long).unwrap(),
+            long_before,
+            "rejected stale legacy RebalanceReduce rolls back the pre-stale realloc"
+        );
+        assert_eq!(
+            env.svm.get_account(&short).unwrap(),
+            short_before,
+            "rejected stale legacy RebalanceReduce leaves the counterparty unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&long).unwrap().data.len(),
+            PORTFOLIO_ENGINE_ACCOUNT_LEN,
+            "failed stale RebalanceReduce does not leave a public legacy realloc behind"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "rejected stale legacy RebalanceReduce moves no custody"
+        );
+
+        env.svm.expire_blockhash();
+        let resolve = env.send(
+            ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        );
+        assert!(
+            resolve.is_ok(),
+            "permissionless resolve remains live after rejected stale legacy RebalanceReduce: {resolve:?}"
+        );
+        assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+    }
+
+    {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+        env.configure_permissionless_resolve_with_cu(5, 5);
+        env.configure_auth_mark_with_cu(0, 100);
+
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long, 1_000_000);
+        env.deposit(&short_owner, short, 1_000_000);
+        env.trade_asset_with_cu(
+            0,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            POS_SCALE as i128,
+            100,
+            0,
+        );
+
+        env.svm.warp_to_slot(3);
+        env.push_auth_mark_with_cu(3, 100);
+        env.mutate_market(|_, group| {
+            group.assets[0].lifecycle = AssetLifecycleV16::Recovery;
+        });
+        let mut legacy = env.svm.get_account(&long).unwrap();
+        legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+        env.svm.set_account(long, legacy).unwrap();
+        assert_eq!(
+            env.svm.get_account(&long).unwrap().data.len(),
+            PORTFOLIO_ENGINE_ACCOUNT_LEN,
+            "test setup simulates a legacy recovery-forfeit target"
+        );
+
+        env.svm.warp_to_slot(40);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let long_before = env.svm.get_account(&long).unwrap();
+        let short_before = env.svm.get_account(&short).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::ForfeitRecoveryLeg {
+                asset_index: 0,
+                b_delta_budget: 1,
+            },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[&long_owner],
+        );
+        assert!(
+            rejected.is_err(),
+            "legacy ForfeitRecoveryLeg must reject once the market is resolve-matured"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "rejected stale legacy ForfeitRecoveryLeg leaves recovery exposure unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&long).unwrap(),
+            long_before,
+            "rejected stale legacy ForfeitRecoveryLeg rolls back the pre-stale realloc"
+        );
+        assert_eq!(
+            env.svm.get_account(&short).unwrap(),
+            short_before,
+            "rejected stale legacy ForfeitRecoveryLeg leaves the counterparty unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&long).unwrap().data.len(),
+            PORTFOLIO_ENGINE_ACCOUNT_LEN,
+            "failed stale ForfeitRecoveryLeg does not leave a public legacy realloc behind"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "rejected stale legacy ForfeitRecoveryLeg moves no custody"
+        );
+
+        env.svm.expire_blockhash();
+        let resolve = env.send(
+            ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        );
+        assert!(
+            resolve.is_ok(),
+            "permissionless resolve remains live after rejected stale legacy ForfeitRecoveryLeg: {resolve:?}"
+        );
+        assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+    }
+}
+
 // security.md sweep - stale-resolve close-progress drift (#30/#35/#48): CureAndCancelClose
 // is owner-gated but can cancel forced-close progress and optionally transfer fresh collateral.
 // Once the market is resolve-matured, that live cure path must freeze atomically.
