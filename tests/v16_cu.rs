@@ -39632,6 +39632,110 @@ fn v16_attack_nocpi_extreme_price_caps_ewma_move_without_dos() {
     }
 }
 
+fn assert_no_cpi_same_slot_trade_driven_ewma_does_not_compound(path: NoCpiReportedPricePath) {
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const MAX_FEE_BPS: u64 = 37;
+    const TRADE_SLOT: u64 = 5;
+    const SIZE_Q: i128 = (1000u128 * POS_SCALE) as i128;
+    const HIGH_PRINT: u64 = MARK * 19 / 10;
+
+    let accepted_price = oracle_v16::clamp_toward_engine_dt(MARK, HIGH_PRINT, CAP_BPS, 4);
+    let candidate_mark =
+        percolator_prog::policy_v16::ewma_update(MARK, accepted_price, 1, 1, TRADE_SLOT, 0, 0);
+    let candidate_move_bps = percolator_prog::policy_v16::price_move_bps_ceil(MARK, candidate_mark)
+        .expect("candidate move bps");
+    assert!(
+        candidate_move_bps > MAX_FEE_BPS,
+        "{path:?}: setup must make the first split fill bind at the fee cap"
+    );
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        h_max: 20,
+        max_trading_fee_bps: MAX_FEE_BPS,
+        max_price_move_bps_per_slot: CAP_BPS,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_ewma_mark_with_cu(1, MARK, 1, 0);
+    env.svm.warp_to_slot(TRADE_SLOT);
+    let (owner_a, account_a, owner_b, account_b) =
+        funded_no_cpi_reported_price_pair(&mut env, 4_000_000_000);
+    let (owner_c, account_c, owner_d, account_d) =
+        funded_no_cpi_reported_price_pair(&mut env, 4_000_000_000);
+    let insurance_before_first = env.market_state().1.insurance;
+
+    env.svm.expire_blockhash();
+    try_no_cpi_reported_price_trade_with_cu(
+        &mut env, path, &owner_a, account_a, &owner_b, account_b, SIZE_Q, HIGH_PRINT, 0,
+    )
+    .unwrap_or_else(|err| panic!("{path:?}: first split EWMA trade failed: {err}"));
+    let (after_first_cfg, after_first_group) = env.market_state();
+    let first_mark = after_first_cfg.mark_ewma_e6;
+    assert!(
+        first_mark > MARK,
+        "{path:?}: first split fill must move EWMA upward so the no-compounding check is non-vacuous"
+    );
+    assert_eq!(
+        after_first_cfg.mark_ewma_last_slot, TRADE_SLOT,
+        "{path:?}: first trade-driven EWMA update records the trade slot"
+    );
+    let first_move_bps = percolator_prog::policy_v16::price_move_bps_ceil(MARK, first_mark)
+        .expect("first EWMA move bps");
+    assert_eq!(
+        first_move_bps, MAX_FEE_BPS,
+        "{path:?}: first split fill should bind at the paid fee cap"
+    );
+    assert!(
+        after_first_group.insurance > insurance_before_first,
+        "{path:?}: first split fill pays the EWMA movement fee"
+    );
+
+    env.svm.expire_blockhash();
+    let second = try_no_cpi_reported_price_trade_with_cu(
+        &mut env, path, &owner_c, account_c, &owner_d, account_d, SIZE_Q, HIGH_PRINT, 0,
+    );
+    assert!(
+        second.is_ok(),
+        "{path:?}: same-slot split fill must remain live instead of DoSing valid trades: {second:?}"
+    );
+    let (after_second_cfg, after_second_group) = env.market_state();
+    assert_eq!(
+        after_second_cfg.mark_ewma_e6, first_mark,
+        "{path:?}: same-slot split fill must not compound trade-driven EWMA movement"
+    );
+    assert_eq!(
+        after_second_cfg.mark_ewma_last_slot, TRADE_SLOT,
+        "{path:?}: same-slot split fill must not advance the EWMA timestamp again"
+    );
+    assert_eq!(
+        after_second_group.assets[0].oi_eff_long_q,
+        2 * SIZE_Q.unsigned_abs(),
+        "{path:?}: both same-slot split fills opened long OI"
+    );
+    assert_eq!(
+        after_second_group.assets[0].oi_eff_short_q,
+        2 * SIZE_Q.unsigned_abs(),
+        "{path:?}: both same-slot split fills opened short OI"
+    );
+}
+
+// Split-trade manipulation: same-slot repeats must not compound the trade-driven EWMA update. The
+// first fill can pay for and apply one bounded mark move; the second fill in the same slot remains
+// live but `ewma_update(dt==0)` must keep the mark fixed.
+#[test]
+fn v16_attack_nocpi_same_slot_trade_driven_ewma_does_not_compound() {
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        assert_no_cpi_same_slot_trade_driven_ewma_does_not_compound(path);
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum CpiReportedPricePath {
     Single,
@@ -39863,6 +39967,113 @@ fn assert_cpi_spread_price_caps_paid_trade_driven_mark_move(
     );
 }
 
+fn assert_cpi_same_slot_trade_driven_mark_does_not_compound(
+    mode: TradeDrivenMarkMode,
+    path: CpiReportedPricePath,
+) {
+    const ASSET_INDEX: u16 = 1;
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const MAX_FEE_BPS: u64 = 37;
+    const SPREAD_BPS: u32 = 9_000;
+    const SIZE_Q: i128 = (1000u128 * POS_SCALE) as i128;
+    const SIZE_Q_ABS: u128 = 1000u128 * POS_SCALE;
+
+    let matcher_exec_price = MARK * (10_000 + SPREAD_BPS as u64) / 10_000;
+    let accepted_price = oracle_v16::clamp_toward_engine_dt(MARK, matcher_exec_price, CAP_BPS, 4);
+    let candidate_mark =
+        percolator_prog::policy_v16::ewma_update(MARK, accepted_price, 1, 1, 5, 0, 0);
+    let candidate_move_bps = percolator_prog::policy_v16::price_move_bps_ceil(MARK, candidate_mark)
+        .expect("candidate move bps");
+    assert!(
+        candidate_move_bps > MAX_FEE_BPS,
+        "{mode:?} {path:?}: setup must make the first CPI split fill bind at the fee cap"
+    );
+
+    let mut env = trade_driven_mark_cpi_env(mode, ASSET_INDEX);
+    let taker_a = Keypair::new();
+    let taker_account_a = env.create_portfolio(&taker_a);
+    let lp_a = Keypair::new();
+    let lp_account_a = env.create_portfolio(&lp_a);
+    let taker_b = Keypair::new();
+    let taker_account_b = env.create_portfolio(&taker_b);
+    let lp_b = Keypair::new();
+    let lp_account_b = env.create_portfolio(&lp_b);
+    env.deposit(&taker_a, taker_account_a, 4_000_000_000);
+    env.deposit(&lp_a, lp_account_a, 4_000_000_000);
+    env.deposit(&taker_b, taker_account_b, 4_000_000_000);
+    env.deposit(&lp_b, lp_account_b, 4_000_000_000);
+
+    try_cpi_spread_trade_with_cu(
+        &mut env,
+        path,
+        &taker_a,
+        taker_account_a,
+        &lp_a,
+        lp_account_a,
+        ASSET_INDEX,
+        SIZE_Q,
+        0,
+        SPREAD_BPS,
+        SPREAD_BPS,
+    )
+    .unwrap_or_else(|err| panic!("{mode:?} {path:?}: first CPI split fill failed: {err}"));
+    let first_profile = trade_driven_mark_profile(&env, ASSET_INDEX);
+    let first_mark = first_profile.mark_ewma_e6;
+    assert!(
+        first_mark > MARK,
+        "{mode:?} {path:?}: first CPI split fill must move the mark upward"
+    );
+    assert_eq!(
+        first_profile.mark_ewma_last_slot, 5,
+        "{mode:?} {path:?}: first CPI split fill records the trade slot"
+    );
+    let first_move_bps = percolator_prog::policy_v16::price_move_bps_ceil(MARK, first_mark)
+        .expect("first CPI mark move bps");
+    assert_eq!(
+        first_move_bps, MAX_FEE_BPS,
+        "{mode:?} {path:?}: first CPI split fill should bind at the paid fee cap"
+    );
+
+    let second = try_cpi_spread_trade_with_cu(
+        &mut env,
+        path,
+        &taker_b,
+        taker_account_b,
+        &lp_b,
+        lp_account_b,
+        ASSET_INDEX,
+        SIZE_Q,
+        0,
+        SPREAD_BPS,
+        SPREAD_BPS,
+    );
+    assert!(
+        second.is_ok(),
+        "{mode:?} {path:?}: same-slot CPI split fill must remain live: {second:?}"
+    );
+    let second_profile = trade_driven_mark_profile(&env, ASSET_INDEX);
+    assert_eq!(
+        second_profile.mark_ewma_e6, first_mark,
+        "{mode:?} {path:?}: same-slot CPI split fill must not compound trade-driven mark movement"
+    );
+    assert_eq!(
+        second_profile.mark_ewma_last_slot, 5,
+        "{mode:?} {path:?}: same-slot CPI split fill must not advance the mark timestamp again"
+    );
+    let group = env.market_state().1;
+    assert_eq!(
+        group.assets[ASSET_INDEX as usize].oi_eff_long_q,
+        2 * SIZE_Q_ABS,
+        "{mode:?} {path:?}: both same-slot CPI split fills opened long OI"
+    );
+    assert_eq!(
+        group.assets[ASSET_INDEX as usize].oi_eff_short_q,
+        2 * SIZE_Q_ABS,
+        "{mode:?} {path:?}: both same-slot CPI split fills opened short OI"
+    );
+}
+
 // CPI parity for the EWMA/no-CPI fix: a matcher can return valid off-oracle full fills on both
 // single and batched CPI routes. Those fills must remain live, but EWMA/stale-hybrid movement must
 // use the same dt-clamped accepted price and fee-supported mark cap as the no-CPI paths.
@@ -39883,6 +40094,20 @@ fn v16_attack_cpi_spread_prices_cap_paid_ewma_and_hybrid_mark_move() {
                 path,
                 -((1000u128 * POS_SCALE) as i128),
             );
+        }
+    }
+}
+
+// CPI split-trade parity: matcher-returned off-oracle prices must obey the same same-slot
+// no-compounding rule as no-CPI reported prices in every trade-driven mark mode.
+#[test]
+fn v16_attack_cpi_same_slot_trade_driven_marks_do_not_compound() {
+    for mode in [
+        TradeDrivenMarkMode::EwmaMark,
+        TradeDrivenMarkMode::HybridAfterHours,
+    ] {
+        for path in [CpiReportedPricePath::Single, CpiReportedPricePath::Batch] {
+            assert_cpi_same_slot_trade_driven_mark_does_not_compound(mode, path);
         }
     }
 }
