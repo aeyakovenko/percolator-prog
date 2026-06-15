@@ -52610,6 +52610,97 @@ fn v16_bpf_10m_market_high_domain_backing_fee_policy_stays_bounded() {
 }
 
 #[test]
+fn v16_bpf_10m_market_high_asset_insurance_authority_rotation_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const FUNDED: u128 = 123;
+    const WITHDRAW: u128 = 40;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    let admin = env.admin.insecure_clone();
+    let insurance_authority = Keypair::new();
+    let insurance_operator = Keypair::new();
+    let high_long_domain = (2 * HIGH_ASSET) as u16;
+
+    let rotate_authority_cu = env
+        .try_update_per_asset_authority_with_cu(
+            &admin,
+            Some(&insurance_authority),
+            HIGH_ASSET as u16,
+            processor::ASSET_AUTH_INSURANCE,
+            insurance_authority.pubkey().to_bytes(),
+        )
+        .expect("rotate high-asset insurance authority");
+    let rotate_operator_cu = env
+        .try_update_per_asset_authority_with_cu(
+            &admin,
+            Some(&insurance_operator),
+            HIGH_ASSET as u16,
+            processor::ASSET_AUTH_INSURANCE_OPERATOR,
+            insurance_operator.pubkey().to_bytes(),
+        )
+        .expect("rotate high-asset insurance operator");
+    assert_cu_within(
+        "10MiB high-asset insurance authority rotate",
+        rotate_authority_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_cu_within(
+        "10MiB high-asset insurance operator rotate",
+        rotate_operator_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let (_source, topup_cu) = env.top_up_insurance_domain_with_authority_and_cu(
+        &insurance_authority,
+        high_long_domain,
+        FUNDED,
+    );
+    assert_cu_within(
+        "10MiB rotated high-asset insurance top-up",
+        topup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (dest, withdraw_cu) = env
+        .try_withdraw_insurance_asset_with_authority(
+            &insurance_operator,
+            HIGH_ASSET as u16,
+            WITHDRAW,
+        )
+        .expect("rotated high-asset insurance operator withdraws");
+    println!(
+        "v16 10MiB high-asset insurance authority rotation: assets={N}, \
+         account_len={account_len}, rotate_authority_CU={rotate_authority_cu}, \
+         rotate_operator_CU={rotate_operator_cu}, topup_CU={topup_cu}, withdraw_CU={withdraw_cu}"
+    );
+    assert_cu_within(
+        "10MiB rotated high-asset insurance withdrawal",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), WITHDRAW as u64);
+
+    let data = env.svm.get_account(&env.market).unwrap().data;
+    let profile = state::read_asset_oracle_profile(&data, HIGH_ASSET).unwrap();
+    assert_eq!(
+        profile.insurance_authority,
+        insurance_authority.pubkey().to_bytes()
+    );
+    assert_eq!(
+        profile.insurance_operator,
+        insurance_operator.pubkey().to_bytes()
+    );
+    let (_, group) = state::read_market(&data).unwrap();
+    assert_eq!(
+        group.insurance_domain_budget[high_long_domain as usize],
+        FUNDED - WITHDRAW
+    );
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+}
+
+#[test]
 fn v16_bpf_10m_market_live_insurance_withdraw_high_asset_stays_bounded() {
     const N: usize = 5_834;
     const HIGH_ASSET: usize = N - 1;
