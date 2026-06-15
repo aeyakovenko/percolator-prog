@@ -51458,6 +51458,63 @@ fn v16_bpf_10m_market_terminal_backing_ledger_paths_stay_bounded() {
 }
 
 #[test]
+fn v16_bpf_10m_market_high_domain_backing_fee_policy_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    let high_long_domain = (2 * HIGH_ASSET) as u16;
+    let high_short_domain = high_long_domain + 1;
+
+    let long_cu = env.update_backing_fee_policy_with_cu(high_long_domain, 77, 3_000);
+    let short_cu = env.update_backing_fee_policy_with_cu(high_short_domain, 44, 4_000);
+    let clear_long_cu = env.update_backing_fee_policy_with_cu(high_long_domain, 0, 0);
+    println!(
+        "v16 10MiB UpdateBackingFeePolicy high domains: assets={N}, account_len={account_len}, \
+         long_domain={high_long_domain}, short_domain={high_short_domain}, \
+         long_CU={long_cu}, short_CU={short_cu}, clear_long_CU={clear_long_cu}"
+    );
+    assert_cu_within(
+        "10MiB high-domain UpdateBackingFeePolicy long",
+        long_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_cu_within(
+        "10MiB high-domain UpdateBackingFeePolicy short",
+        short_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_cu_within(
+        "10MiB high-domain UpdateBackingFeePolicy clear",
+        clear_long_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let (cfg, _) = env.market_state();
+    assert_eq!(
+        cfg.backing_trade_fee_policy_count, 1,
+        "clearing one of two high-domain fee policies decrements the global policy count"
+    );
+    assert_eq!(
+        cfg.backing_trade_fee_bps_long, 0,
+        "base-market long fee remains untouched by high-domain writes"
+    );
+    assert_eq!(
+        cfg.backing_trade_fee_bps_short, 0,
+        "base-market short fee remains untouched by high-domain writes"
+    );
+
+    let data = env.svm.get_account(&env.market).unwrap().data;
+    let high_profile = state::read_asset_oracle_profile(&data, HIGH_ASSET).unwrap();
+    assert_eq!(high_profile.backing_trade_fee_bps_long, 0);
+    assert_eq!(high_profile.backing_trade_fee_insurance_share_bps_long, 0);
+    assert_eq!(high_profile.backing_trade_fee_bps_short, 44);
+    assert_eq!(high_profile.backing_trade_fee_insurance_share_bps_short, 4_000);
+}
+
+#[test]
 fn v16_bpf_10m_market_live_insurance_withdraw_high_asset_stays_bounded() {
     const N: usize = 5_834;
     const HIGH_ASSET: usize = N - 1;
