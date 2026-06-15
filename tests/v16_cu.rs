@@ -51217,7 +51217,9 @@ fn v16_bpf_10m_market_close_resolved_max_tail_legs_stays_bounded() {
     {
         let mut acct = env.svm.get_account(&env.market).unwrap();
         acct.data.resize(new_len, 0u8);
-        acct.lamports = acct.lamports.max(new_len as u64 * 10);
+        acct.lamports = acct
+            .lamports
+            .max(solana_sdk::rent::Rent::default().minimum_balance(new_len));
         env.svm.set_account(env.market, acct).unwrap();
     }
     env.mutate_market(|_cfg, group| {
@@ -51305,6 +51307,48 @@ fn v16_bpf_10m_market_close_resolved_max_tail_legs_stays_bounded() {
     );
     assert_eq!(group.vault, 0);
     assert_eq!(env.token_amount(env.vault), 0);
+
+    let taker_portfolio_close_cu = env.close_portfolio_with_cu(&taker, taker_account);
+    let lp_portfolio_close_cu = env.close_portfolio_with_cu(&lp, lp_account);
+    println!(
+        "v16 10MiB resolved max-tail ClosePortfolio: assets={N}, legs={TAIL_LEGS}, \
+         account_len={new_len}, taker_CU={taker_portfolio_close_cu}, \
+         lp_CU={lp_portfolio_close_cu}"
+    );
+    assert_cu_within(
+        "10MiB resolved max-tail taker ClosePortfolio",
+        taker_portfolio_close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_cu_within(
+        "10MiB resolved max-tail LP ClosePortfolio",
+        lp_portfolio_close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (_, dematerialized_group) = env.market_state();
+    assert_eq!(dematerialized_group.materialized_portfolio_count, 0);
+    assert_eq!(dematerialized_group.c_tot, 0);
+    assert_eq!(dematerialized_group.vault, 0);
+
+    let close_slab_cu = env.close_slab_with_cu();
+    println!(
+        "v16 10MiB resolved max-tail final CloseSlab: assets={N}, account_len={new_len}, \
+         CU={close_slab_cu}"
+    );
+    assert_cu_within(
+        "10MiB resolved max-tail final CloseSlab",
+        close_slab_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert!(
+        env.svm
+            .get_account(&env.market)
+            .unwrap()
+            .data
+            .iter()
+            .all(|b| *b == 0),
+        "final CloseSlab reclaims the market after max-tail accounts dematerialize"
+    );
 }
 
 #[test]
