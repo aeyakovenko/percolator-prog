@@ -50268,6 +50268,50 @@ fn grow_market_to_10m_with_high_active_asset(
     new_len
 }
 
+// DoS sweep — a max-size market must not make basic user portfolio lifecycle
+// rails non-live. Trades already cover max-size active positions; this keeps
+// the separate InitPortfolio/Deposit/Withdraw/ClosePortfolio public paths
+// bounded when the market account has the largest capacity that fits on SVM.
+#[test]
+fn v16_bpf_10m_market_portfolio_value_rails_stay_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const AMOUNT: u128 = 1_000;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    {
+        let mut market = env.svm.get_account(&env.market).unwrap();
+        market.lamports = market.lamports.max(100_000_000_000);
+        env.svm.set_account(env.market, market).unwrap();
+    }
+
+    let owner = Keypair::new();
+    let (portfolio, init_cu) = env.create_portfolio_with_cu(&owner);
+    assert_cu_within("10MiB InitPortfolio", init_cu, CUSTODY_CU_LIMIT);
+
+    let (_, deposit_cu) = env.deposit_with_cu(&owner, portfolio, AMOUNT);
+    assert_cu_within("10MiB Deposit", deposit_cu, CUSTODY_CU_LIMIT);
+
+    let (dest, withdraw_cu) = env.withdraw_with_cu(&owner, portfolio, AMOUNT);
+    assert_cu_within("10MiB Withdraw", withdraw_cu, CUSTODY_CU_LIMIT);
+
+    let close_cu = env.close_portfolio_with_cu(&owner, portfolio);
+    assert_cu_within("10MiB ClosePortfolio", close_cu, CUSTODY_CU_LIMIT);
+
+    println!(
+        "v16 10MiB portfolio value rails: assets={N}, account_len={account_len}, \
+         InitPortfolio CU={init_cu}, Deposit CU={deposit_cu}, Withdraw CU={withdraw_cu}, \
+         ClosePortfolio CU={close_cu}"
+    );
+    assert_eq!(env.token_amount(dest), AMOUNT as u64);
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(group.materialized_portfolio_count, 0);
+}
+
 // DoS sweep — public resolution and wind-down entrypoints must not scale with
 // the largest market account that fits Solana's 10 MiB account cap. Existing CU
 // coverage bounded small-market resolve/close and exercised large-market
