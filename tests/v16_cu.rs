@@ -40306,6 +40306,130 @@ fn v16_attack_nocpi_saturated_base_fee_does_not_dos_or_move_ewma_for_free() {
     }
 }
 
+fn assert_no_cpi_asset_profile_caps_paid_trade_driven_mark_move(
+    mode: TradeDrivenMarkMode,
+    path: NoCpiReportedPricePath,
+    size_q: i128,
+) {
+    const ASSET_INDEX: u16 = 1;
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const MAX_FEE_BPS: u64 = 37;
+    const TRADE_Q: u128 = 1000u128 * POS_SCALE;
+
+    let reported_price = if size_q > 0 {
+        MARK * 19 / 10
+    } else {
+        MARK / 10
+    };
+    let accepted_price = oracle_v16::clamp_toward_engine_dt(MARK, reported_price, CAP_BPS, 4);
+    let candidate_mark =
+        percolator_prog::policy_v16::ewma_update(MARK, accepted_price, 1, 1, 5, 0, 0);
+    let candidate_move_bps = percolator_prog::policy_v16::price_move_bps_ceil(MARK, candidate_mark)
+        .expect("candidate mark move");
+    assert!(
+        candidate_move_bps > MAX_FEE_BPS,
+        "{mode:?} {path:?}: setup must make the asset-profile EWMA candidate exceed the fee cap"
+    );
+
+    let mut env = trade_driven_mark_cpi_env(mode, ASSET_INDEX);
+    let (cfg_before, _) = env.market_state();
+    let (owner_a, account_a, owner_b, account_b) =
+        funded_no_cpi_reported_price_pair(&mut env, 3_000_000_000);
+    let insurance_before = env.market_state().1.insurance;
+
+    env.svm.expire_blockhash();
+    let trade = try_no_cpi_reported_price_trade_with_cu_on_asset(
+        &mut env,
+        path,
+        ASSET_INDEX,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        size_q,
+        reported_price,
+        0,
+    );
+    assert!(
+        trade.is_ok(),
+        "{mode:?} {path:?}: valid off-mark no-CPI asset-profile fill must not DoS: {trade:?}"
+    );
+
+    let profile = trade_driven_mark_profile(&env, ASSET_INDEX);
+    let (cfg_after, group) = env.market_state();
+    assert_eq!(
+        cfg_after.mark_ewma_e6, cfg_before.mark_ewma_e6,
+        "{mode:?} {path:?}: asset-1 trade-driven mark must not overwrite asset-0 wrapper mirror"
+    );
+    let mark_move_bps =
+        percolator_prog::policy_v16::price_move_bps_ceil(MARK, profile.mark_ewma_e6)
+            .expect("actual asset-profile mark move");
+    assert_eq!(
+        mark_move_bps, MAX_FEE_BPS,
+        "{mode:?} {path:?}: asset-profile mark movement should bind at the fee cap"
+    );
+    if size_q > 0 {
+        assert!(
+            profile.mark_ewma_e6 > MARK,
+            "{mode:?} {path:?}: high reported print should move asset-1 mark up"
+        );
+    } else {
+        assert!(
+            profile.mark_ewma_e6 < MARK,
+            "{mode:?} {path:?}: low reported print should move asset-1 mark down"
+        );
+    }
+    assert_eq!(
+        group.assets[ASSET_INDEX as usize].oi_eff_long_q, TRADE_Q,
+        "{mode:?} {path:?}: asset-1 long OI should be opened"
+    );
+    assert_eq!(
+        group.assets[ASSET_INDEX as usize].oi_eff_short_q, TRADE_Q,
+        "{mode:?} {path:?}: asset-1 short OI should be opened"
+    );
+    assert_eq!(
+        group.assets[0].oi_eff_long_q, 0,
+        "{mode:?} {path:?}: asset-0 long OI must stay untouched"
+    );
+    let fee_paid = group.insurance - insurance_before;
+    assert!(fee_paid > 0, "{mode:?} {path:?}: trade must pay a fee");
+    let trade_notional = TRADE_Q * accepted_price as u128 / POS_SCALE;
+    let externality_notional = trade_notional * 2;
+    let paid_move_bps = fee_paid * 10_000 / externality_notional;
+    assert!(
+        mark_move_bps <= paid_move_bps as u64,
+        "{mode:?} {path:?}: asset-profile mark move ({mark_move_bps} bps) must be covered by paid fee ({paid_move_bps} bps)"
+    );
+}
+
+// Asset-profile parity for the no-CPI EWMA fix: asset 0 mirrors trade-driven mark updates into the
+// wrapper config, while asset 1 stores them only in its oracle profile. Exercise that separate writeback
+// branch for both single and batch no-CPI routes, and keep asset 0 isolated.
+#[test]
+fn v16_attack_nocpi_asset_profile_trade_driven_marks_are_paid_and_isolated() {
+    for mode in [
+        TradeDrivenMarkMode::EwmaMark,
+        TradeDrivenMarkMode::HybridAfterHours,
+    ] {
+        for path in [
+            NoCpiReportedPricePath::Single,
+            NoCpiReportedPricePath::Batch,
+        ] {
+            assert_no_cpi_asset_profile_caps_paid_trade_driven_mark_move(
+                mode,
+                path,
+                (1000u128 * POS_SCALE) as i128,
+            );
+            assert_no_cpi_asset_profile_caps_paid_trade_driven_mark_move(
+                mode,
+                path,
+                -((1000u128 * POS_SCALE) as i128),
+            );
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum CpiReportedPricePath {
     Single,
