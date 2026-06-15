@@ -50878,6 +50878,165 @@ fn v16_bpf_10m_market_sync_maintenance_fee_stays_bounded() {
     assert_eq!(group.vault as u64, env.token_amount(env.vault));
 }
 
+// DoS/CU sweep - SyncMaintenanceFee gets much larger when both stressors are
+// present: a max-size market account and a payer portfolio already carrying the
+// full active-leg cap on high-tail assets. It must still make bounded fee progress
+// inside one transaction.
+#[test]
+fn v16_bpf_10m_market_sync_maintenance_fee_max_tail_legs_stays_bounded() {
+    const N: usize = 5_834;
+    const TAIL_LEGS: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
+    const FIRST_TAIL_ASSET: usize = N - TAIL_LEGS;
+    const PRICE: u64 = 100;
+    const TRADE_SLOT: u64 = 10;
+    const SYNC_SLOT: u64 = 20;
+    const MAINTENANCE_FEE_PER_SLOT: u128 = 58;
+    const CRANKER_SHARE_BPS: u16 = 4_000;
+
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        TAIL_LEGS as u16,
+        1_000,
+        1_000,
+        500,
+        MAINTENANCE_FEE_PER_SLOT,
+    );
+    for asset_index in 0..TAIL_LEGS as u16 {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 1, PRICE);
+    }
+    let (_, template_group) = env.market_state();
+    let template_asset = template_group.assets[0];
+
+    let new_len = state::market_account_len_for_capacity(N).unwrap();
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        acct.data.resize(new_len, 0u8);
+        acct.lamports = acct.lamports.max(new_len as u64 * 10);
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+    env.mutate_market(|_cfg, group| {
+        group.config.max_market_slots = N as u32;
+        group.next_market_id = (N as u64) + 1;
+        for asset_index in FIRST_TAIL_ASSET..N {
+            let market_id = (asset_index as u64) + 1;
+            let mut asset = template_asset;
+            asset.market_id = market_id;
+            group.assets[asset_index] = asset;
+            group.source_backing_buckets[2 * asset_index] =
+                percolator::BackingBucketV16::empty_for_market(market_id);
+            group.source_backing_buckets[2 * asset_index + 1] =
+                percolator::BackingBucketV16::empty_for_market(market_id);
+        }
+    });
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        let profile0 = state::read_asset_oracle_profile(&acct.data, 0).unwrap();
+        for asset_index in FIRST_TAIL_ASSET..N {
+            state::write_asset_oracle_profile(&mut acct.data, asset_index, &profile0).unwrap();
+        }
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let cranker = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    let cranker_account = env.create_portfolio(&cranker);
+    env.deposit(&taker, taker_account, 100_000_000);
+    env.deposit(&lp, lp_account, 100_000_000);
+
+    let legs: Vec<BatchTradeLeg> = (FIRST_TAIL_ASSET..N)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index: asset_index as u16,
+            size_q: POS_SCALE as i128,
+            exec_price: PRICE,
+            fee_bps: 0,
+        })
+        .collect();
+    env.svm.warp_to_slot(TRADE_SLOT);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::BatchTradeNoCpi { legs },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        &[&taker, &lp],
+    )
+    .expect("open 14 high-tail legs before maintenance sync");
+
+    let mut max_refresh_cu = 0;
+    for asset_index in FIRST_TAIL_ASSET..N {
+        env.svm.expire_blockhash();
+        let refresh_cu = env.crank(
+            taker_account,
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: asset_index as u16,
+                now_slot: SYNC_SLOT,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+        );
+        max_refresh_cu = max_refresh_cu.max(refresh_cu);
+        assert_cu_within(
+            "10MiB max-tail maintenance setup refresh",
+            refresh_cu,
+            CRANK_CU_LIMIT,
+        );
+    }
+
+    env.update_maintenance_fee_policy_with_cu(CRANKER_SHARE_BPS);
+    let before_group = env.market_state().1;
+    let before_taker = env.portfolio_state(taker_account);
+    let before_cranker = env.portfolio_state(cranker_account);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(before_taker.active_bitmap),
+        TAIL_LEGS as u32
+    );
+
+    env.svm.warp_to_slot(SYNC_SLOT);
+    let sync_cu =
+        env.sync_maintenance_fee_with_cu(taker_account, Some(cranker_account), SYNC_SLOT);
+    println!(
+        "v16 10MiB SyncMaintenanceFee max tail legs: assets={N}, legs={TAIL_LEGS}, \
+         account_len={new_len}, max_refresh_CU={max_refresh_cu}, CU={sync_cu}"
+    );
+    assert!(
+        sync_cu < 1_400_000,
+        "10MiB SyncMaintenanceFee max tail legs CU {sync_cu} must fit the tx limit"
+    );
+
+    let after_group = env.market_state().1;
+    let after_taker = env.portfolio_state(taker_account);
+    let after_cranker = env.portfolio_state(cranker_account);
+    let charged = before_taker.capital - after_taker.capital;
+    let reward = after_cranker.capital - before_cranker.capital;
+    assert!(
+        after_taker.last_fee_slot > before_taker.last_fee_slot,
+        "maintenance sync must advance the fee slot rank"
+    );
+    assert!(
+        after_taker.last_fee_slot <= SYNC_SLOT,
+        "bounded accrual must not over-advance past the requested slot"
+    );
+    assert_eq!(reward, charged * CRANKER_SHARE_BPS as u128 / 10_000);
+    assert_eq!(
+        after_group.insurance_domain_budget[0] + after_group.insurance_domain_budget[1],
+        before_group.insurance_domain_budget[0]
+            + before_group.insurance_domain_budget[1]
+            + charged
+            - reward
+    );
+    assert_eq!(after_group.vault as u64, env.token_amount(env.vault));
+}
+
 #[test]
 fn v16_bpf_10m_market_settle_b_high_asset_stays_bounded() {
     const N: usize = 5_834;
