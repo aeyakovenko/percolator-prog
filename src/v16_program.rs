@@ -6996,6 +6996,15 @@ pub mod processor {
         if oracle_price == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        let (_, _, max_market_slots, _) =
+            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        ensure_cpi_trade_portfolios_current_before_matcher(
+            market_ai,
+            account_a_ai,
+            account_b_ai,
+            max_market_slots,
+            &[asset_index],
+        )?;
         let req_id = current_slot_pre.wrapping_add(1);
         let lp_account_id = matcher_lp_account_id(&delegate);
 
@@ -7326,6 +7335,13 @@ pub mod processor {
             }
             matcher_legs.push((leg.asset_index, oracle_prices[i], leg.size_q));
         }
+        ensure_cpi_trade_portfolios_current_before_matcher(
+            market_ai,
+            account_a_ai,
+            account_b_ai,
+            max_market_slots,
+            &asset_indices,
+        )?;
 
         invoke_matcher_batch(
             matcher_prog,
@@ -11222,6 +11238,35 @@ pub mod processor {
     ) -> ProgramResult {
         ensure_trade_portfolio_current_for_requests_view(group, account_a, requests)?;
         ensure_trade_portfolio_current_for_requests_view(group, account_b, requests)
+    }
+
+    fn ensure_cpi_trade_portfolios_current_before_matcher(
+        market_ai: &AccountInfo<'_>,
+        account_a_ai: &AccountInfo<'_>,
+        account_b_ai: &AccountInfo<'_>,
+        max_market_slots: usize,
+        asset_indices: &[u16],
+    ) -> ProgramResult {
+        ensure_portfolio_storage_for_market_slots(account_a_ai, max_market_slots)?;
+        ensure_portfolio_storage_for_market_slots(account_b_ai, max_market_slots)?;
+        let mut requests: Vec<TradeRequestV16> = Vec::with_capacity(asset_indices.len());
+        for &asset_index in asset_indices {
+            requests.push(TradeRequestV16 {
+                asset_index: asset_index as usize,
+                size_q: 1,
+                exec_price: 1,
+                fee_bps: 0,
+            });
+        }
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        let (_, group) = state::market_view_mut(&mut market_data)?;
+        let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
+        let account_a =
+            state::portfolio_view_mut_for_market_slots(&mut account_a_data, max_market_slots)?;
+        let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
+        let account_b =
+            state::portfolio_view_mut_for_market_slots(&mut account_b_data, max_market_slots)?;
+        ensure_trade_portfolios_current_for_requests_view(&group, &account_a, &account_b, &requests)
     }
 
     fn close_portfolio_account_to_market_slab(
