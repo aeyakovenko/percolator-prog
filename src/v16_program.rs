@@ -4788,7 +4788,6 @@ pub mod processor {
         now_slot: u64,
     ) -> bool {
         cfg.permissionless_resolve_stale_slots != 0
-            && profile.last_good_oracle_slot != 0
             && now_slot.saturating_sub(profile.last_good_oracle_slot)
                 >= cfg.permissionless_resolve_stale_slots
     }

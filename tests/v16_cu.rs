@@ -25369,6 +25369,105 @@ fn v16_attack_stale_permissionless_asset_cannot_global_resolve_market() {
     assert!(group_after_trade.assets[1].oi_eff_long_q > 0);
 }
 
+// security.md sweep - slot-zero local stale bypass (#24/#30/#37): a non-base price-managed asset can
+// be configured at the authenticated genesis slot. Its local stale clock must still mature; otherwise
+// stale AuthMark/EWMA assets born at slot 0 can keep trading forever while the base oracle stays fresh.
+#[test]
+fn v16_attack_non_base_slot_zero_profile_stale_rejects_trade() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+
+    env.activate_asset(1, 0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 0, 100);
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(
+        profile.last_good_oracle_slot, 0,
+        "probe setup must create a slot-zero local price-managed profile"
+    );
+
+    // Keep the base market fresh past the asset-1 stale boundary so this is not the global/base gate.
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_portfolio = env.create_portfolio(&taker);
+    let lp_portfolio = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_portfolio, 1_000_000);
+    env.deposit(&lp, lp_portfolio, 1_000_000);
+
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_with_cu(4, 100);
+    let fresh_base_resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        fresh_base_resolve.is_err(),
+        "base market is fresh; this probe must not be exercising global resolve maturity"
+    );
+
+    env.svm.warp_to_slot(6);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_portfolio).unwrap();
+    let lp_before = env.svm.get_account(&lp_portfolio).unwrap();
+    env.svm.expire_blockhash();
+    let stale_trade = env.send(
+        ProgInstruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_portfolio, false),
+            AccountMeta::new(lp_portfolio, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(
+        stale_trade.is_err(),
+        "slot-zero local AuthMark profile must reject trades once its stale window matures"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected slot-zero local stale trade leaves market state unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_portfolio).unwrap(),
+        taker_before,
+        "rejected slot-zero local stale trade leaves taker state unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_portfolio).unwrap(),
+        lp_before,
+        "rejected slot-zero local stale trade leaves LP state unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    let base_trade = env.try_trade_asset_with_cu(
+        0,
+        &taker,
+        taker_portfolio,
+        &lp,
+        lp_portfolio,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    assert!(
+        base_trade.is_ok(),
+        "unrelated base trades remain live while only asset-1's local slot-zero profile is stale: {base_trade:?}"
+    );
+}
+
 // security.md sweep - permissionless asset oracle liveness DoS (#2/#30/#37): the reverse
 // isolation must also hold. A fresh permissionless asset oracle must not be able to bump the
 // market-wide stale clock and block ResolveStalePermissionless after the base market oracle is stale.
