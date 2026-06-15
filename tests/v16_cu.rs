@@ -50685,6 +50685,75 @@ fn v16_bpf_10m_market_permissionless_reuse_high_asset_stays_bounded() {
     assert_eq!(profile.oracle_authority, creator_key.to_bytes());
 }
 
+// LoF/DoS sweep - secondary base-unit swaps are value-moving public custody
+// routes but should remain independent of market account size and should not
+// mutate engine state. Keep that true on the largest market account.
+#[test]
+fn v16_bpf_10m_market_secondary_swap_stays_bounded_and_state_free() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const AMOUNT: u128 = 77;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+
+    let secondary_mint = env.create_mint();
+    let configure_cu = env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    assert_cu_within(
+        "10MiB UpdateBaseUnitMints",
+        configure_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.collateral_mint, env.mint.to_bytes());
+    assert_eq!(cfg.secondary_collateral_mint, secondary_mint.to_bytes());
+    assert_eq!(group.vault, 0);
+
+    let primary_source = env.token_account_for_mint(env.mint, env.admin.pubkey(), AMOUNT as u64);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, env.admin.pubkey(), 0);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, AMOUNT as u64),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let before_market_data = env.svm.get_account(&env.market).unwrap().data;
+    let swap_cu = env.swap_secondary_for_primary_with_cu(
+        primary_source,
+        env.vault,
+        secondary_dest,
+        secondary_vault,
+        AMOUNT,
+    );
+    println!(
+        "v16 10MiB SwapSecondaryForPrimary: assets={N}, account_len={account_len}, \
+         configure_CU={configure_cu}, swap_CU={swap_cu}"
+    );
+    assert_cu_within(
+        "10MiB SwapSecondaryForPrimary",
+        swap_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(primary_source), 0);
+    assert_eq!(env.token_amount(env.vault), AMOUNT as u64);
+    assert_eq!(env.token_amount(secondary_dest), AMOUNT as u64);
+    assert_eq!(env.token_amount(secondary_vault), 0);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before_market_data,
+        "secondary swap must only move SPL custody, not rewrite max-size market state"
+    );
+}
+
 #[test]
 fn v16_bpf_10m_market_recovery_tools_high_asset_stay_bounded() {
     const N: usize = 5_834;
