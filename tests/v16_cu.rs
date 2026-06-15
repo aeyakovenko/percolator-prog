@@ -39736,6 +39736,79 @@ fn v16_attack_nocpi_same_slot_trade_driven_ewma_does_not_compound() {
     }
 }
 
+fn assert_no_cpi_saturated_base_fee_keeps_trade_live_without_free_ewma_move(
+    path: NoCpiReportedPricePath,
+) {
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const MAX_FEE_BPS: u64 = 37;
+    const TRADE_SLOT: u64 = 5;
+    const SIZE_Q: i128 = (1000u128 * POS_SCALE) as i128;
+    const HIGH_PRINT: u64 = MARK * 19 / 10;
+
+    let accepted_price = oracle_v16::clamp_toward_engine_dt(MARK, HIGH_PRINT, CAP_BPS, 4);
+    let candidate_mark =
+        percolator_prog::policy_v16::ewma_update(MARK, accepted_price, 1, 1, TRADE_SLOT, 0, 0);
+    assert!(
+        candidate_mark > MARK,
+        "{path:?}: setup must create an upward EWMA candidate"
+    );
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        h_max: 20,
+        max_trading_fee_bps: MAX_FEE_BPS,
+        trade_fee_base_bps: MAX_FEE_BPS,
+        max_price_move_bps_per_slot: CAP_BPS,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_ewma_mark_with_cu(1, MARK, 1, 0);
+    env.svm.warp_to_slot(TRADE_SLOT);
+    let (owner_a, account_a, owner_b, account_b) =
+        funded_no_cpi_reported_price_pair(&mut env, 4_000_000_000);
+    let insurance_before = env.market_state().1.insurance;
+
+    env.svm.expire_blockhash();
+    let trade = try_no_cpi_reported_price_trade_with_cu(
+        &mut env, path, &owner_a, account_a, &owner_b, account_b, SIZE_Q, HIGH_PRINT, 0,
+    );
+    assert!(
+        trade.is_ok(),
+        "{path:?}: saturated base fee must not DoS a valid off-mark trade: {trade:?}"
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(
+        cfg.mark_ewma_e6, MARK,
+        "{path:?}: with no fee headroom, the trade must not move EWMA for free"
+    );
+    assert_eq!(
+        cfg.mark_ewma_last_slot, 1,
+        "{path:?}: with no EWMA move, the last mark slot stays at the configured anchor"
+    );
+    assert!(
+        group.insurance > insurance_before,
+        "{path:?}: trade still pays the saturated base fee"
+    );
+    assert_eq!(group.assets[0].oi_eff_long_q, SIZE_Q.unsigned_abs());
+    assert_eq!(group.assets[0].oi_eff_short_q, SIZE_Q.unsigned_abs());
+}
+
+// Fee-headroom edge: if the configured base trade fee already consumes the max trading fee cap,
+// off-mark reported prices must still execute but cannot move the trade-driven EWMA without an
+// additional fee budget to pay for that movement.
+#[test]
+fn v16_attack_nocpi_saturated_base_fee_does_not_dos_or_move_ewma_for_free() {
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        assert_no_cpi_saturated_base_fee_keeps_trade_live_without_free_ewma_move(path);
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum CpiReportedPricePath {
     Single,
@@ -39757,13 +39830,23 @@ fn trade_driven_mark_profile(env: &V16CuEnv, asset_index: u16) -> state::AssetOr
 }
 
 fn trade_driven_mark_cpi_env(mode: TradeDrivenMarkMode, asset_index: u16) -> V16CuEnv {
+    trade_driven_mark_cpi_env_with_fees(mode, asset_index, 0, 37)
+}
+
+fn trade_driven_mark_cpi_env_with_fees(
+    mode: TradeDrivenMarkMode,
+    asset_index: u16,
+    trade_fee_base_bps: u64,
+    max_trading_fee_bps: u64,
+) -> V16CuEnv {
     const MARK: u64 = 1_000_000;
     const CAP_BPS: u64 = 50;
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
         max_portfolio_assets: 2,
         initial_price: MARK,
         h_max: 20,
-        max_trading_fee_bps: 37,
+        max_trading_fee_bps,
+        trade_fee_base_bps,
         max_price_move_bps_per_slot: CAP_BPS,
         max_accrual_dt_slots: 20,
         min_funding_lifetime_slots: 20,
@@ -40108,6 +40191,91 @@ fn v16_attack_cpi_same_slot_trade_driven_marks_do_not_compound() {
     ] {
         for path in [CpiReportedPricePath::Single, CpiReportedPricePath::Batch] {
             assert_cpi_same_slot_trade_driven_mark_does_not_compound(mode, path);
+        }
+    }
+}
+
+fn assert_cpi_saturated_base_fee_keeps_trade_live_without_free_mark_move(
+    mode: TradeDrivenMarkMode,
+    path: CpiReportedPricePath,
+) {
+    const ASSET_INDEX: u16 = 1;
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const MAX_FEE_BPS: u64 = 37;
+    const SPREAD_BPS: u32 = 9_000;
+    const SIZE_Q: i128 = (1000u128 * POS_SCALE) as i128;
+
+    let matcher_exec_price = MARK * (10_000 + SPREAD_BPS as u64) / 10_000;
+    let accepted_price = oracle_v16::clamp_toward_engine_dt(MARK, matcher_exec_price, CAP_BPS, 4);
+    let candidate_mark =
+        percolator_prog::policy_v16::ewma_update(MARK, accepted_price, 1, 1, 5, 0, 0);
+    assert!(
+        candidate_mark > MARK,
+        "{mode:?} {path:?}: setup must create an upward matcher-driven mark candidate"
+    );
+
+    let mut env =
+        trade_driven_mark_cpi_env_with_fees(mode, ASSET_INDEX, MAX_FEE_BPS, MAX_FEE_BPS);
+    let taker = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp = Keypair::new();
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 4_000_000_000);
+    env.deposit(&lp, lp_account, 4_000_000_000);
+    let insurance_before = env.market_state().1.insurance;
+
+    let trade = try_cpi_spread_trade_with_cu(
+        &mut env,
+        path,
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        ASSET_INDEX,
+        SIZE_Q,
+        0,
+        SPREAD_BPS,
+        SPREAD_BPS,
+    );
+    assert!(
+        trade.is_ok(),
+        "{mode:?} {path:?}: saturated base fee must not DoS a valid matcher fill: {trade:?}"
+    );
+    let profile = trade_driven_mark_profile(&env, ASSET_INDEX);
+    assert_eq!(
+        profile.mark_ewma_e6, MARK,
+        "{mode:?} {path:?}: with no fee headroom, matcher fill must not move the mark for free"
+    );
+    assert_eq!(
+        profile.mark_ewma_last_slot, 1,
+        "{mode:?} {path:?}: with no mark move, the profile timestamp stays at the configured anchor"
+    );
+    let group = env.market_state().1;
+    assert!(
+        group.insurance > insurance_before,
+        "{mode:?} {path:?}: trade still pays the saturated base fee"
+    );
+    assert_eq!(
+        group.assets[ASSET_INDEX as usize].oi_eff_long_q,
+        SIZE_Q.unsigned_abs()
+    );
+    assert_eq!(
+        group.assets[ASSET_INDEX as usize].oi_eff_short_q,
+        SIZE_Q.unsigned_abs()
+    );
+}
+
+// CPI parity for the zero-headroom fee edge: matcher-returned off-oracle prices stay live, but EWMA
+// and stale-hybrid marks cannot move unless there is fee headroom beyond the configured base fee.
+#[test]
+fn v16_attack_cpi_saturated_base_fee_does_not_dos_or_move_marks_for_free() {
+    for mode in [
+        TradeDrivenMarkMode::EwmaMark,
+        TradeDrivenMarkMode::HybridAfterHours,
+    ] {
+        for path in [CpiReportedPricePath::Single, CpiReportedPricePath::Batch] {
+            assert_cpi_saturated_base_fee_keeps_trade_live_without_free_mark_move(mode, path);
         }
     }
 }
