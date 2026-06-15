@@ -50813,6 +50813,100 @@ fn v16_bpf_10m_market_secondary_swap_stays_bounded_and_state_free() {
     );
 }
 
+// LoF sweep - terminal slab cleanup must recover both configured collateral
+// reserves before zeroing a max-size market account.
+#[test]
+fn v16_bpf_10m_market_close_slab_secondary_reserve_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const PRIMARY_DUST: u64 = 7;
+    const SECONDARY_DUST: u64 = 50;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    let admin = env.admin.insecure_clone();
+
+    let secondary_mint = env.create_mint();
+    let configure_cu = env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    assert_cu_within(
+        "10MiB CloseSlab setup UpdateBaseUnitMints",
+        configure_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, PRIMARY_DUST),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, SECONDARY_DUST),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let resolve_cu = env.resolve();
+    assert_cu_within(
+        "10MiB CloseSlab secondary setup ResolveMarket",
+        resolve_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let primary_dest = env.token_account(admin.pubkey(), 0);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let close_cu = env
+        .send(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(primary_dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new(secondary_dest, false),
+            ],
+            &[&admin],
+        )
+        .expect("10MiB CloseSlab with secondary reserve");
+    println!(
+        "v16 10MiB CloseSlab secondary reserve: assets={N}, account_len={account_len}, \
+         configure_CU={configure_cu}, resolve_CU={resolve_cu}, close_CU={close_cu}"
+    );
+    assert_cu_within(
+        "10MiB CloseSlab secondary reserve",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(primary_dest), PRIMARY_DUST);
+    assert_eq!(env.token_amount(secondary_dest), SECONDARY_DUST);
+    assert!(
+        env.svm
+            .get_account(&env.market)
+            .unwrap()
+            .data
+            .iter()
+            .all(|b| *b == 0),
+        "market slab is zeroed only after both reserves are recovered"
+    );
+}
+
 #[test]
 fn v16_bpf_10m_market_recovery_tools_high_asset_stay_bounded() {
     const N: usize = 5_834;
