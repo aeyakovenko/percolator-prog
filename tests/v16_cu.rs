@@ -50312,6 +50312,47 @@ fn v16_bpf_10m_market_portfolio_value_rails_stay_bounded() {
     assert_eq!(group.materialized_portfolio_count, 0);
 }
 
+// LoF/DoS sweep — a user stuck in the close-progress state must still be able
+// to cancel that recovery ledger on a max-size market. This is a distinct
+// recovery route from the flat Deposit/Withdraw/ClosePortfolio lifecycle.
+#[test]
+fn v16_bpf_10m_market_cure_and_cancel_close_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+
+    let owner = Keypair::new();
+    let (portfolio, init_cu) = env.create_portfolio_with_cu(&owner);
+    assert_cu_within("10MiB Cure setup InitPortfolio", init_cu, CUSTODY_CU_LIMIT);
+    env.seed_cancellable_close_progress(portfolio);
+    assert!(
+        env.portfolio_state(portfolio).close_progress.active,
+        "test setup must put the user into close progress"
+    );
+
+    let source = env.token_account(owner.pubkey(), 0);
+    let cure_cu = env.cure_and_cancel_close_with_cu(&owner, portfolio, source, 0);
+    assert_cu_within(
+        "10MiB CureAndCancelClose",
+        cure_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    println!(
+        "v16 10MiB CureAndCancelClose: assets={N}, account_len={account_len}, CU={cure_cu}"
+    );
+
+    let account = env.portfolio_state(portfolio);
+    assert!(account.close_progress.canceled);
+    assert_eq!(
+        env.market_state().1.pending_domain_loss_barriers[0],
+        0,
+        "canceling close progress releases the pending loss barrier"
+    );
+}
+
 // DoS sweep — public resolution and wind-down entrypoints must not scale with
 // the largest market account that fits Solana's 10 MiB account cap. Existing CU
 // coverage bounded small-market resolve/close and exercised large-market
