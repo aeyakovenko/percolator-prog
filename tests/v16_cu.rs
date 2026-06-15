@@ -57172,6 +57172,155 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
     );
 }
 
+// Lifecycle isolation: a retired slot still has market/account bytes, but direct public trade routes
+// must not reopen OI against it. The failed attempts must also leave the canonical retired slot reusable.
+#[test]
+fn v16_attack_retired_asset_cannot_be_traded_before_reactivation() {
+    let mut env = V16CuEnv::new();
+    let creator = Keypair::new();
+    env.update_market_init_fee_policy_with_cu(1);
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        1,
+    );
+    env.svm.warp_to_slot(3);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        3,
+        0,
+    );
+    let (retired_cfg, retired_group) = env.market_state();
+    assert_eq!(retired_cfg.free_market_slot_count, 1);
+    assert_eq!(retired_group.assets[1].lifecycle, AssetLifecycleV16::Retired);
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+
+    let send_retired_trade = |env: &mut V16CuEnv, batch: bool| {
+        env.svm.expire_blockhash();
+        let accounts = vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+        ];
+        if batch {
+            env.send(
+                ProgInstruction::BatchTradeNoCpi {
+                    legs: vec![BatchTradeLeg {
+                        asset_index: 1,
+                        size_q: POS_SCALE as i128,
+                        exec_price: 100,
+                        fee_bps: 0,
+                    }],
+                },
+                accounts,
+                &[&taker, &lp],
+            )
+        } else {
+            env.send(
+                ProgInstruction::TradeNoCpi {
+                    asset_index: 1,
+                    size_q: POS_SCALE as i128,
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                accounts,
+                &[&taker, &lp],
+            )
+        }
+    };
+
+    for (label, batch) in [("TradeNoCpi", false), ("BatchTradeNoCpi", true)] {
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_before = env.svm.get_account(&taker_account).unwrap();
+        let lp_before = env.svm.get_account(&lp_account).unwrap();
+        let rejected = send_retired_trade(&mut env, batch);
+        assert!(
+            rejected.is_err(),
+            "{label} must reject against a retired asset slot"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label} retired-slot rejection must leave market bytes unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&taker_account).unwrap(),
+            taker_before,
+            "{label} retired-slot rejection must leave taker unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&lp_account).unwrap(),
+            lp_before,
+            "{label} retired-slot rejection must leave LP unchanged"
+        );
+    }
+
+    env.withdraw(&taker, taker_account, 1_000_000);
+    env.withdraw(&lp, lp_account, 1_000_000);
+    env.close_portfolio_with_cu(&taker, taker_account);
+    env.close_portfolio_with_cu(&lp, lp_account);
+
+    env.svm.warp_to_slot(4);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        u64::MAX,
+        125,
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        1,
+    );
+    let (reactivated_cfg, reactivated_group) = env.market_state();
+    assert_eq!(reactivated_cfg.free_market_slot_count, 0);
+    assert_eq!(
+        reactivated_group.assets[1].lifecycle,
+        AssetLifecycleV16::Active
+    );
+
+    let live_taker = Keypair::new();
+    let live_lp = Keypair::new();
+    let live_taker_account = env.create_portfolio(&live_taker);
+    let live_lp_account = env.create_portfolio(&live_lp);
+    env.deposit(&live_taker, live_taker_account, 1_000_000);
+    env.deposit(&live_lp, live_lp_account, 1_000_000);
+    env.svm.expire_blockhash();
+    let accepted = env.try_trade_asset_with_cu(
+        1,
+        &live_taker,
+        live_taker_account,
+        &live_lp,
+        live_lp_account,
+        POS_SCALE as i128,
+        125,
+        0,
+    );
+    assert!(
+        accepted.is_ok(),
+        "reactivated slot must remain trade-live after rejected retired-slot probes: {accepted:?}"
+    );
+    let group = env.market_state().1;
+    assert_eq!(group.assets[1].oi_eff_long_q, POS_SCALE);
+    assert_eq!(group.assets[1].oi_eff_short_q, POS_SCALE);
+}
+
 // security.md sweep - BatchTradeNoCpi fee bounds (#19/#37): the direct batch route uses the shared
 // batch execution/reconstruction path, not the single-trade handler. A hostile caller-supplied fee_bps
 // must be bounded before any leg opens or any fee is credited; the max valid fee remains live.
