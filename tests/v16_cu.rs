@@ -8200,6 +8200,64 @@ fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
     assert_domain_budget_remaining_total_consistent(&group, "maintenance fee with cranker share");
 }
 
+// full-interface sweep (cron135): SyncMaintenanceFee has a same-account branch for
+// `cranker_portfolio == charged_portfolio`. It must not double-borrow, double-credit, or lose funds:
+// the account pays the maintenance fee once, receives only the configured cranker share back, and the
+// retained fee is conserved in market insurance/domain budgets.
+#[test]
+fn v16_attack_sync_maintenance_self_cranker_alias_conserves_fee() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 100_000_000);
+    env.update_maintenance_fee_policy_with_cu(4_000);
+
+    env.svm.warp_to_slot(10);
+    let sync_cu = env.sync_maintenance_fee_with_cu(portfolio, Some(portfolio), 10);
+    assert_cu_within(
+        "SyncMaintenanceFee self-cranker alias",
+        sync_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(portfolio);
+    let charged = 58u128 * 10;
+    let reward = charged * 4_000 / 10_000;
+    let retained = charged - reward;
+    assert_eq!(account.last_fee_slot, 10);
+    assert_eq!(
+        account.capital,
+        100_000_000 - retained,
+        "self-cranker alias nets only the configured reward share back to the charged account"
+    );
+    assert_eq!(
+        group.insurance, retained,
+        "retained maintenance fee is conserved in market insurance"
+    );
+    assert_eq!(
+        group.insurance_domain_budget[0] + group.insurance_domain_budget[1],
+        retained,
+        "retained maintenance fee is credited to the active market budgets once"
+    );
+    assert_eq!(
+        group.vault as u64,
+        env.token_amount(env.vault),
+        "self-cranker alias moves no SPL tokens"
+    );
+    assert_eq!(
+        group.vault,
+        account.capital + group.insurance,
+        "senior conservation holds after self-cranker fee split"
+    );
+    assert_domain_budget_remaining_total_consistent(
+        &group,
+        "maintenance fee self-cranker alias",
+    );
+}
+
 #[test]
 fn v16_attack_sync_maintenance_bad_cranker_rolls_back_fee() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
