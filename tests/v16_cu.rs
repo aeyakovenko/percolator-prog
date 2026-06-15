@@ -66896,6 +66896,228 @@ fn v16_attack_claim_resolved_topup_rejects_delegated_vault_without_burning_recei
     assert_eq!(env.market_state().1.vault, 0);
 }
 
+// full-interface sweep: CloseResolved and ClaimResolvedPayoutTopup both compute their payout-side
+// engine deltas before reaching token-program validation. A loaded but non-SPL token-program
+// account must fail inside the handler and the SVM rollback must leave the payout state claimable.
+#[test]
+fn v16_attack_resolved_payout_wrong_token_program_rolls_back_terminal_state() {
+    fn fake_loaded_token_program(env: &mut V16CuEnv) -> Pubkey {
+        let fake = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                fake,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: Vec::new(),
+                    owner: Pubkey::new_unique(),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        fake
+    }
+
+    let mut close_env = V16CuEnv::new();
+    let close_owner = Keypair::new();
+    let close_portfolio = close_env.create_portfolio(&close_owner);
+    close_env.deposit(&close_owner, close_portfolio, 1_000_000);
+    close_env.resolve();
+
+    let close_dest = close_env.token_account_for_mint(close_env.mint, close_owner.pubkey(), 0);
+    let fake_token_program = fake_loaded_token_program(&mut close_env);
+    let close_market_before = close_env.svm.get_account(&close_env.market).unwrap();
+    let close_portfolio_before = close_env.svm.get_account(&close_portfolio).unwrap();
+    let close_vault_before = close_env.svm.get_account(&close_env.vault).unwrap();
+    let close_dest_before = close_env.svm.get_account(&close_dest).unwrap();
+
+    close_env.svm.expire_blockhash();
+    let rejected_close = close_env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(close_owner.pubkey(), false),
+            AccountMeta::new(close_env.market, false),
+            AccountMeta::new(close_portfolio, false),
+            AccountMeta::new(close_dest, false),
+            AccountMeta::new(close_env.vault, false),
+            AccountMeta::new_readonly(close_env.vault_authority, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected_close.is_err(),
+        "CloseResolved must reject a loaded non-SPL token-program account"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_env.market).unwrap(),
+        close_market_before,
+        "wrong-token-program CloseResolved must not commit payout ledger changes"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_portfolio).unwrap(),
+        close_portfolio_before,
+        "wrong-token-program CloseResolved must not close or zero the portfolio"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_env.vault).unwrap(),
+        close_vault_before,
+        "wrong-token-program CloseResolved must not debit the vault"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_dest).unwrap(),
+        close_dest_before,
+        "wrong-token-program CloseResolved must not pay the destination"
+    );
+
+    close_env.svm.expire_blockhash();
+    let accepted_close = close_env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(close_owner.pubkey(), false),
+            AccountMeta::new(close_env.market, false),
+            AccountMeta::new(close_portfolio, false),
+            AccountMeta::new(close_dest, false),
+            AccountMeta::new(close_env.vault, false),
+            AccountMeta::new_readonly(close_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        accepted_close.is_ok(),
+        "same CloseResolved payout remains claimable with the real token program: {accepted_close:?}"
+    );
+    assert_eq!(close_env.token_amount(close_dest), 1_000_000);
+    assert_eq!(close_env.market_state().1.vault, 0);
+
+    let mut topup_env = V16CuEnv::new();
+    let topup_owner = Keypair::new();
+    let topup_portfolio = topup_env.create_portfolio(&topup_owner);
+    {
+        let mut market_account = topup_env
+            .svm
+            .get_account(&topup_env.market)
+            .expect("market account");
+        let mut portfolio_account = topup_env
+            .svm
+            .get_account(&topup_portfolio)
+            .expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 100 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 100,
+            paid_effective: 40,
+            finalized: false,
+        };
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        topup_env.svm.set_account(topup_env.market, market_account).unwrap();
+        topup_env
+            .svm
+            .set_account(topup_portfolio, portfolio_account)
+            .unwrap();
+    }
+    topup_env.set_token_account_amount(
+        topup_env.vault,
+        topup_env.mint,
+        topup_env.vault_authority,
+        60,
+    );
+
+    let topup_dest = topup_env.token_account_for_mint(topup_env.mint, topup_owner.pubkey(), 0);
+    let fake_token_program = fake_loaded_token_program(&mut topup_env);
+    let topup_market_before = topup_env.svm.get_account(&topup_env.market).unwrap();
+    let topup_portfolio_before = topup_env.svm.get_account(&topup_portfolio).unwrap();
+    let topup_vault_before = topup_env.svm.get_account(&topup_env.vault).unwrap();
+    let topup_dest_before = topup_env.svm.get_account(&topup_dest).unwrap();
+
+    topup_env.svm.expire_blockhash();
+    let rejected_topup = topup_env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(topup_owner.pubkey(), false),
+            AccountMeta::new(topup_env.market, false),
+            AccountMeta::new(topup_portfolio, false),
+            AccountMeta::new(topup_dest, false),
+            AccountMeta::new(topup_env.vault, false),
+            AccountMeta::new_readonly(topup_env.vault_authority, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected_topup.is_err(),
+        "ClaimResolvedPayoutTopup must reject a loaded non-SPL token-program account"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_env.market).unwrap(),
+        topup_market_before,
+        "wrong-token-program top-up must not commit market payout changes"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_portfolio).unwrap(),
+        topup_portfolio_before,
+        "wrong-token-program top-up must not burn the pending receipt"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_env.vault).unwrap(),
+        topup_vault_before,
+        "wrong-token-program top-up must not debit the vault"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_dest).unwrap(),
+        topup_dest_before,
+        "wrong-token-program top-up must not pay the destination"
+    );
+    let account = topup_env.portfolio_state(topup_portfolio);
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 40);
+    assert!(
+        !account.resolved_payout_receipt.finalized,
+        "receipt remains claimable after wrong-token-program rejection"
+    );
+
+    topup_env.svm.expire_blockhash();
+    let cu = topup_env.claim_resolved_payout_topup_with_cu(
+        topup_owner.pubkey(),
+        topup_portfolio,
+        topup_dest,
+    );
+    assert_cu_within(
+        "ClaimResolvedPayoutTopup wrong-token-program rollback",
+        cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(topup_env.token_amount(topup_dest), 60);
+    let account = topup_env.portfolio_state(topup_portfolio);
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
+    assert!(account.resolved_payout_receipt.finalized);
+    assert_eq!(topup_env.market_state().1.vault, 0);
+}
+
 // [from pr114]
 // security.md sweep - terminal insurance vault custody (#33/#44/#48): terminal WithdrawInsurance
 // debits resolved insurance and the optional ledger before validating token custody. A canonical vault
