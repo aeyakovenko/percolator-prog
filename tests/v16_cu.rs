@@ -52449,6 +52449,86 @@ fn v16_bpf_10m_market_configure_hybrid_high_asset_stays_bounded() {
     );
 }
 
+#[test]
+fn v16_bpf_10m_market_three_leg_hybrid_high_asset_crank_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const INITIAL_PRICE: u64 = 100;
+    const CONFIG_SLOT: u64 = 2;
+    const CONFIG_TS: i64 = 200;
+    const CRANK_SLOT: u64 = 3;
+    const CRANK_TS: i64 = 201;
+
+    let mut env = V16CuEnv::new();
+    let account_len =
+        grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, INITIAL_PRICE);
+    let feeds = [[0x61u8; 32], [0x62u8; 32], [0x63u8; 32]];
+    set_test_clock(&mut env, CONFIG_SLOT, CONFIG_TS);
+    let config_leg0 = env.set_pyth_price(&feeds[0], 4_000_000_000, -6, CONFIG_TS);
+    let config_leg1 = env.set_pyth_price(&feeds[1], 150_000_000, -6, CONFIG_TS);
+    let config_leg2 = env.set_pyth_price(&feeds[2], 200_000_000, -6, CONFIG_TS);
+    let configure_cu = env
+        .try_configure_hybrid_asset_with_conf_filter_cu(
+            HIGH_ASSET as u16,
+            3,
+            ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            feeds,
+            &[config_leg0, config_leg1, config_leg2],
+            CONFIG_SLOT,
+            CONFIG_TS,
+            0,
+            0,
+            3,
+            500,
+        )
+        .expect("configure three-leg high-asset hybrid oracle");
+    assert_cu_within(
+        "10MiB ConfigureHybridOracle three-leg high asset",
+        configure_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let keeper = Keypair::new();
+    let keeper_portfolio = env.create_portfolio(&keeper);
+    set_test_clock(&mut env, CRANK_SLOT, CRANK_TS);
+    let crank_leg0 = env.set_pyth_price(&feeds[0], 4_200_000_000, -6, CRANK_TS);
+    let crank_leg1 = env.set_pyth_price(&feeds[1], 150_000_000, -6, CRANK_TS);
+    let crank_leg2 = env.set_pyth_price(&feeds[2], 200_000_000, -6, CRANK_TS);
+    let crank_cu = env.crank_with_oracle_tail(
+        keeper_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: HIGH_ASSET as u16,
+            now_slot: CRANK_SLOT,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &[crank_leg0, crank_leg1, crank_leg2],
+    );
+    println!(
+        "v16 10MiB three-leg Hybrid crank: assets={N}, account_len={account_len}, \
+         asset={HIGH_ASSET}, configure_CU={configure_cu}, crank_CU={crank_cu}"
+    );
+    assert_cu_within(
+        "10MiB three-leg Hybrid crank high asset",
+        crank_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let data = env.svm.get_account(&env.market).unwrap().data;
+    let profile = state::read_asset_oracle_profile(&data, HIGH_ASSET).unwrap();
+    assert_eq!(profile.oracle_leg_count, 3);
+    assert_eq!(profile.last_good_oracle_slot, CRANK_SLOT);
+    assert_eq!(profile.oracle_leg_publish_times, [CRANK_TS; 3]);
+    assert_eq!(profile.mark_ewma_e6, 140_000);
+    let (_, group) = env.market_state();
+    assert_eq!(group.assets[HIGH_ASSET].effective_price, 140_000);
+    assert_eq!(group.assets[HIGH_ASSET].raw_oracle_target_price, 140_000);
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+}
+
 // Scale proof — the largest current market that fits Solana's 10 MiB account cap is valid AND a
 // real BPF trade on a HIGH asset index executes with O(1)-in-N compute.
 //
