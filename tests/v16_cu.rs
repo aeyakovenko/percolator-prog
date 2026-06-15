@@ -24421,6 +24421,242 @@ fn v16_attack_terminal_backing_withdraw_rekeys_after_authority_rotation() {
     );
 }
 
+// full-interface sweep (cron135): UpdateAuthority is intentionally available after ResolveMarket so
+// a terminal wind-down can still hand off compromised/cold keys. That must rekey terminal insurance
+// and backing withdrawal power without leaving the stale key able to drain funds or stranding CloseSlab.
+#[test]
+fn v16_attack_terminal_withdrawals_rekey_after_post_resolve_marketauth_handoff() {
+    let mut env = V16CuEnv::new();
+    let stale_authority = env.admin.insecure_clone();
+    let current_authority = Keypair::new();
+
+    env.top_up_insurance_domain_with_authority(&stale_authority, 0, 100);
+    env.top_up_backing_bucket_with_authority(&stale_authority, 0, 100, 100_000);
+    env.resolve();
+    let (_, group_resolved) = env.market_state();
+    assert_eq!(group_resolved.mode, percolator::MarketModeV16::Resolved);
+    assert_eq!(group_resolved.insurance, 100);
+    assert_eq!(group_resolved.insurance_domain_budget[0], 100);
+    assert_eq!(
+        group_resolved.source_backing_buckets[0].fresh_unliened_backing_num,
+        100 * BOUND_SCALE
+    );
+    assert_eq!(env.token_amount(env.vault), 200);
+
+    env.update_asset_authority_with_cu(&current_authority);
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(
+        profile.insurance_authority,
+        current_authority.pubkey().to_bytes(),
+        "post-resolve marketauth handoff rekeys terminal insurance authority"
+    );
+    assert_eq!(
+        profile.backing_bucket_authority,
+        current_authority.pubkey().to_bytes(),
+        "post-resolve marketauth handoff rekeys terminal backing authority"
+    );
+
+    let stale_insurance_dest = env.token_account(stale_authority.pubkey(), 0);
+    let market_before_stale_insurance = env.svm.get_account(&env.market).unwrap();
+    let vault_before_stale_insurance = env.svm.get_account(&env.vault).unwrap();
+    let stale_insurance_dest_before = env.svm.get_account(&stale_insurance_dest).unwrap();
+    env.svm.expire_blockhash();
+    let stale_insurance = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 100 },
+        vec![
+            AccountMeta::new(stale_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_insurance_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&stale_authority],
+    );
+    assert!(
+        stale_insurance.is_err(),
+        "stale marketauth must not keep terminal insurance withdrawal power after post-resolve handoff"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_stale_insurance,
+        "rejected stale terminal insurance withdrawal rolls back market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_stale_insurance,
+        "rejected stale terminal insurance withdrawal moves no SPL tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_insurance_dest).unwrap(),
+        stale_insurance_dest_before,
+        "rejected stale terminal insurance withdrawal pays no stale key"
+    );
+
+    let stale_backing_dest = env.token_account(stale_authority.pubkey(), 0);
+    let market_before_stale_backing = env.svm.get_account(&env.market).unwrap();
+    let vault_before_stale_backing = env.svm.get_account(&env.vault).unwrap();
+    let stale_backing_dest_before = env.svm.get_account(&stale_backing_dest).unwrap();
+    env.svm.expire_blockhash();
+    let stale_backing = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(stale_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&stale_authority],
+    );
+    assert!(
+        stale_backing.is_err(),
+        "stale marketauth must not keep terminal backing withdrawal power after post-resolve handoff"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_stale_backing,
+        "rejected stale terminal backing withdrawal rolls back market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_stale_backing,
+        "rejected stale terminal backing withdrawal moves no SPL tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_backing_dest).unwrap(),
+        stale_backing_dest_before,
+        "rejected stale terminal backing withdrawal pays no stale key"
+    );
+
+    let current_insurance_dest = env.token_account(current_authority.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let current_insurance = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 100 },
+        vec![
+            AccountMeta::new(current_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(current_insurance_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&current_authority],
+    );
+    assert!(
+        current_insurance.is_ok(),
+        "current authority can drain terminal insurance after post-resolve handoff: {current_insurance:?}"
+    );
+    assert_eq!(env.token_amount(current_insurance_dest), 100);
+
+    let current_backing_dest = env.token_account(current_authority.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let current_backing = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(current_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(current_backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&current_authority],
+    );
+    assert!(
+        current_backing.is_ok(),
+        "current authority can drain terminal backing after post-resolve handoff: {current_backing:?}"
+    );
+    assert_eq!(env.token_amount(current_backing_dest), 100);
+
+    let (_, group_drained) = env.market_state();
+    assert_eq!(group_drained.insurance, 0);
+    assert_eq!(group_drained.insurance_domain_budget[0], 0);
+    assert_eq!(
+        group_drained.source_backing_buckets[0].fresh_unliened_backing_num,
+        0
+    );
+    assert_eq!(group_drained.vault, 0);
+    assert_eq!(env.token_amount(env.vault), 0);
+
+    let stale_close_dest = env.token_account(stale_authority.pubkey(), 0);
+    let market_before_stale_close = env.svm.get_account(&env.market).unwrap();
+    let vault_before_stale_close = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let stale_close = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(stale_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(stale_close_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&stale_authority],
+    );
+    assert!(
+        stale_close.is_err(),
+        "stale marketauth must not reclaim the final slab after post-resolve handoff"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_stale_close,
+        "rejected stale CloseSlab leaves the market slab intact"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_stale_close,
+        "rejected stale CloseSlab leaves the primary vault intact"
+    );
+
+    let current_close_dest = env.token_account(current_authority.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let current_close = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(current_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(current_close_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&current_authority],
+    );
+    assert!(
+        current_close.is_ok(),
+        "current marketauth can reclaim the fully drained slab after post-resolve handoff: {current_close:?}"
+    );
+}
+
 // security.md sweep — terminal optional-ledger account-kind confusion (#35/#44): terminal
 // WithdrawInsurance is separate from live domain withdrawals and may rewrite an optional ledger before
 // paying SPL tokens. A funded portfolio from another market must not be accepted as that ledger, or a
