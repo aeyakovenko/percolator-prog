@@ -10020,6 +10020,9 @@ pub mod processor {
         if mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
+        if oracle_v16::permissionless_stale_matured(&cfg, authenticated_slot_or_fallback(0)) {
+            return Err(PercolatorError::OracleStale.into());
+        }
         cfg.permissionless_resolve_stale_slots = stale_slots;
         cfg.force_close_delay_slots = force_close_delay_slots;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)

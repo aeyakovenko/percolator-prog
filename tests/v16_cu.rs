@@ -51387,6 +51387,84 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     );
 }
 
+// security.md sweep - stale-resolve config drift (#30/#48): once the market is already old enough
+// for ResolveStalePermissionless, marketauth must not be able to move the resolve threshold forward.
+// Otherwise the fallback can be DoSed in the stale window by reconfiguring stale_slots before the
+// permissionless resolver captures the terminal snapshot.
+#[test]
+fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+
+    // Non-vacuous fresh control: before the stale boundary, marketauth can still tune the policy.
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    let fresh = env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 6,
+            force_close_delay_slots: 6,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        fresh.is_ok(),
+        "fresh ConfigurePermissionlessResolve remains reachable: {fresh:?}"
+    );
+    assert_eq!(env.market_state().0.permissionless_resolve_stale_slots, 6);
+
+    env.svm.warp_to_slot(40);
+    let (stale_cfg, stale_group) = env.market_state();
+    assert_eq!(stale_group.mode, MarketModeV16::Live);
+    assert!(
+        oracle_v16::permissionless_stale_matured(&stale_cfg, 40),
+        "test setup must be beyond the configured stale boundary"
+    );
+    let market_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let stale = env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 1_000,
+            force_close_delay_slots: 1_000,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale.is_err(),
+        "ConfigurePermissionlessResolve must reject once the market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale reconfiguration leaves resolve policy unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve remains live after rejected stale reconfiguration: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // Backing-withdrawal stress gate (the insurance path is tested by v16_attack_live_insurance_withdraw_rejects_
 // exposed_target_effective_lag 27623; the BACKING path uses the SAME live_domain_withdraw_health_or_shutdown_
 // view gate but was untested). Scenario the user flagged: an LP withdrawing (fresh) backing from an exposed,
