@@ -8551,6 +8551,9 @@ pub mod processor {
         expect_writable(admin_dest)?;
         expect_writable(market_ai)?;
         expect_writable(vault_token)?;
+        if admin_dest.key == market_ai.key {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
         expect_owner(market_ai, program_id)?;
         verify_token_program(token_program)?;
 
