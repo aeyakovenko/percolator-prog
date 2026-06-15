@@ -50819,6 +50819,35 @@ fn v16_bpf_10m_market_auth_mark_high_asset_stays_bounded() {
 
     let mut env = V16CuEnv::new();
     let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    let oracle_authority = Keypair::new();
+
+    env.svm.expire_blockhash();
+    let rotate_cu = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateAssetAuthority {
+            asset_index: HIGH_ASSET as u16,
+            kind: processor::ASSET_AUTH_ORACLE,
+            new_pubkey: oracle_authority.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(oracle_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&env.admin, &oracle_authority],
+    )
+    .expect("rotate high-asset oracle authority");
+    println!(
+        "v16 10MiB UpdateAssetAuthority(oracle): assets={N}, account_len={account_len}, \
+         asset={HIGH_ASSET}, CU={rotate_cu}"
+    );
+    assert_cu_within(
+        "10MiB high-asset UpdateAssetAuthority oracle",
+        rotate_cu,
+        CUSTODY_CU_LIMIT,
+    );
 
     env.svm.warp_to_slot(CONFIGURE_SLOT);
     env.svm.expire_blockhash();
@@ -50832,10 +50861,10 @@ fn v16_bpf_10m_market_auth_mark_high_asset_stays_bounded() {
             initial_mark_e6: PRICE,
         },
         vec![
-            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(oracle_authority.pubkey(), true),
             AccountMeta::new(env.market, false),
         ],
-        &[&env.admin],
+        &[&oracle_authority],
     )
     .expect("configure high-asset auth mark");
     println!(
@@ -50856,10 +50885,10 @@ fn v16_bpf_10m_market_auth_mark_high_asset_stays_bounded() {
             mark_e6: 333,
         },
         vec![
-            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(oracle_authority.pubkey(), true),
             AccountMeta::new(env.market, false),
         ],
-        &[&env.admin],
+        &[&oracle_authority],
     )
     .expect("push high-asset auth mark");
     println!(
