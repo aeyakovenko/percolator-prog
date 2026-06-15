@@ -10242,6 +10242,113 @@ fn v16_attack_stale_tradenocpi_currentness_threshold_is_bounded() {
 }
 
 #[test]
+fn v16_attack_stale_batch_nocpi_currentness_threshold_is_bounded() {
+    {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(7, 1_000, 1_000, 500);
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long_account = env.create_portfolio(&long_owner);
+        let short_account = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long_account, 100_000);
+        env.deposit(&short_owner, short_account, 100_000);
+        env.seed_n_leg_position_for_benchmark(long_account, short_account, 7);
+        env.svm.warp_to_slot(16);
+
+        let reduce_legs: Vec<BatchTradeLeg> = (0..7u16)
+            .map(|asset_index| BatchTradeLeg {
+                asset_index,
+                size_q: -(POS_SCALE as i128),
+                exec_price: 95,
+                fee_bps: 0,
+            })
+            .collect();
+        env.svm.expire_blockhash();
+        let batch_cu = env
+            .send(
+                ProgInstruction::BatchTradeNoCpi { legs: reduce_legs },
+                vec![
+                    AccountMeta::new(long_owner.pubkey(), true),
+                    AccountMeta::new(short_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(long_account, false),
+                    AccountMeta::new(short_account, false),
+                ],
+                &[&long_owner, &short_owner],
+            )
+            .expect("seven stale active legs remain below the batch currentness threshold");
+        println!("v16 stale 7-leg BatchTradeNoCpi threshold CU: {batch_cu}");
+        assert!(
+            batch_cu < 1_400_000,
+            "stale seven-leg BatchTradeNoCpi must stay under the tx limit: {batch_cu}"
+        );
+
+        let long = env.portfolio_state(long_account);
+        let short = env.portfolio_state(short_account);
+        assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 7);
+        assert_eq!(percolator::active_bitmap_count_ones(short.active_bitmap), 7);
+        for asset_index in 0..7usize {
+            assert_eq!(
+                active_leg_for_asset(&long, asset_index).basis_pos_q,
+                (9 * POS_SCALE) as i128
+            );
+            assert_eq!(
+                active_leg_for_asset(&short, asset_index).basis_pos_q,
+                -((9 * POS_SCALE) as i128)
+            );
+        }
+    }
+
+    {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(8, 1_000, 1_000, 500);
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long_account = env.create_portfolio(&long_owner);
+        let short_account = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long_account, 100_000);
+        env.deposit(&short_owner, short_account, 100_000);
+        env.seed_n_leg_position_for_benchmark(long_account, short_account, 8);
+        env.svm.warp_to_slot(16);
+
+        let reduce_legs: Vec<BatchTradeLeg> = (0..8u16)
+            .map(|asset_index| BatchTradeLeg {
+                asset_index,
+                size_q: -(POS_SCALE as i128),
+                exec_price: 95,
+                fee_bps: 0,
+            })
+            .collect();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let long_before = env.svm.get_account(&long_account).unwrap();
+        let short_before = env.svm.get_account(&short_account).unwrap();
+        env.svm.expire_blockhash();
+        let stale_batch = env.send(
+            ProgInstruction::BatchTradeNoCpi { legs: reduce_legs },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+                AccountMeta::new(short_account, false),
+            ],
+            &[&long_owner, &short_owner],
+        );
+        let stale_err =
+            stale_batch.expect_err("eight stale active legs must pre-crank before batch trading");
+        assert!(
+            stale_err.contains("Custom(19)") || stale_err.contains("custom program error: 0x13"),
+            "eight-leg stale active batch should reject as EngineStale, got: {stale_err}"
+        );
+        assert!(
+            !stale_err.contains("exceeded CUs"),
+            "eight-leg stale active batch must reject before the CU cliff: {stale_err}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&long_account).unwrap(), long_before);
+        assert_eq!(env.svm.get_account(&short_account).unwrap(), short_before);
+    }
+}
+
+#[test]
 fn v16_bpf_close_resolved_moves_payout_tokens_with_ledger() {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
