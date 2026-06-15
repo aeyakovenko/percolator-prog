@@ -50685,6 +50685,65 @@ fn v16_bpf_10m_market_permissionless_reuse_high_asset_stays_bounded() {
     assert_eq!(profile.oracle_authority, creator_key.to_bytes());
 }
 
+// LoF/DoS sweep - even though nonzero permissionless fees only remain usable
+// up to their fee/vault frontier, the market authority must still be able to
+// retire and reuse a true tail slot on the largest market account.
+#[test]
+fn v16_bpf_10m_market_admin_reuse_tail_asset_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const REUSE_PRICE: u64 = 125;
+    const RETIRE_SLOT: u64 = 2;
+    const REUSE_SLOT: u64 = 3;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+
+    env.svm.warp_to_slot(RETIRE_SLOT);
+    let retire_cu = env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        HIGH_ASSET as u16,
+        RETIRE_SLOT,
+        0,
+    );
+    assert_cu_within(
+        "10MiB admin tail retire",
+        retire_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (retired_cfg, retired_group) = env.market_state();
+    let reuse_market_id = retired_group.next_market_id;
+    assert_eq!(
+        retired_group.assets[HIGH_ASSET].lifecycle,
+        AssetLifecycleV16::Retired
+    );
+    assert_eq!(retired_cfg.free_market_slot_count, 1);
+
+    env.svm.warp_to_slot(REUSE_SLOT);
+    let activate_cu = env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+        HIGH_ASSET as u16,
+        REUSE_SLOT,
+        REUSE_PRICE,
+    );
+    println!(
+        "v16 10MiB admin tail reuse: assets={N}, account_len={account_len}, \
+         retire_CU={retire_cu}, activate_CU={activate_cu}"
+    );
+    assert_cu_within(
+        "10MiB admin tail re-activate",
+        activate_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.free_market_slot_count, 0);
+    assert_eq!(group.assets[HIGH_ASSET].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(group.assets[HIGH_ASSET].market_id, reuse_market_id);
+    assert_eq!(group.assets[HIGH_ASSET].effective_price, REUSE_PRICE);
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+}
+
 // LoF/DoS sweep - secondary base-unit swaps are value-moving public custody
 // routes but should remain independent of market account size and should not
 // mutate engine state. Keep that true on the largest market account.
