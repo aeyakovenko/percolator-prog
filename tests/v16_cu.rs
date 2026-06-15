@@ -15376,7 +15376,44 @@ fn v16_attack_account_type_confusion_rejected() {
     env.deposit(&lb, pb, 1_000_000);
     let (_, g0) = env.market_state();
 
-    // 1) withdraw naming the MARKET account as the portfolio.
+    // 1) deposit naming the MARKET account as the portfolio. Deposit credits the
+    // engine before the SPL transfer, so this value-in alias must reject before
+    // either accounting or custody moves.
+    let deposit_src = env.token_account(la.pubkey(), 123);
+    let market_before_deposit = env.svm.get_account(&env.market).unwrap();
+    let vault_before_deposit = env.svm.get_account(&env.vault).unwrap();
+    let source_before_deposit = env.svm.get_account(&deposit_src).unwrap();
+    env.svm.expire_blockhash();
+    let r0 = env.send(
+        ProgInstruction::Deposit { amount: 123 },
+        vec![
+            AccountMeta::new(la.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(deposit_src, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&la],
+    );
+    assert!(r0.is_err(), "deposit with market-as-portfolio must reject");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_deposit,
+        "rejected alias deposit leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_deposit,
+        "rejected alias deposit leaves vault custody unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&deposit_src).unwrap(),
+        source_before_deposit,
+        "rejected alias deposit pulls no source tokens"
+    );
+
+    // 2) withdraw naming the MARKET account as the portfolio.
     let dest = Pubkey::new_unique();
     env.svm
         .set_account(
@@ -15405,7 +15442,7 @@ fn v16_attack_account_type_confusion_rejected() {
     );
     assert!(r1.is_err(), "withdraw with market-as-portfolio must reject");
 
-    // 2) trade naming the VAULT as account_a.
+    // 3) trade naming the VAULT as account_a.
     env.svm.expire_blockhash();
     let r2 = env.send(
         ProgInstruction::TradeNoCpi {
@@ -15425,7 +15462,7 @@ fn v16_attack_account_type_confusion_rejected() {
     );
     assert!(r2.is_err(), "trade with vault-as-portfolio must reject");
 
-    // 3) crank naming an uninitialized (system) account as the portfolio.
+    // 4) crank naming an uninitialized (system) account as the portfolio.
     let junk = Pubkey::new_unique();
     env.svm
         .set_account(
