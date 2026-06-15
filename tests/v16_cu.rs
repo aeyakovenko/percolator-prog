@@ -50524,6 +50524,82 @@ fn v16_bpf_10m_market_refine_resolved_bound_stays_bounded() {
 }
 
 #[test]
+fn v16_bpf_10m_market_high_asset_fee_redirect_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const TRADE_SIZE: i128 = (10_000 * POS_SCALE) as i128;
+    const FEE_BPS: u64 = 100;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    let redirect_cu = env.update_fee_redirect_policy_with_cu(10_000);
+    assert_cu_within(
+        "10MiB high-asset UpdateFeeRedirectPolicy",
+        redirect_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 5_000_000);
+    env.deposit(&short_owner, short_account, 5_000_000);
+
+    let domain_budget =
+        |env: &V16CuEnv, domain: usize| env.market_state().1.insurance_domain_budget[domain];
+    let market0_before = domain_budget(&env, 0) + domain_budget(&env, 1);
+    let high_long_domain = 2 * HIGH_ASSET;
+    let high_short_domain = high_long_domain + 1;
+    let high_before =
+        domain_budget(&env, high_long_domain) + domain_budget(&env, high_short_domain);
+    let insurance_before = env.market_state().1.insurance;
+
+    env.svm.warp_to_slot(10);
+    env.svm.expire_blockhash();
+    let trade_cu = env.trade_asset_with_cu(
+        HIGH_ASSET as u16,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        TRADE_SIZE,
+        PRICE,
+        FEE_BPS,
+    );
+    println!(
+        "v16 10MiB high-asset fee redirect: assets={N}, account_len={account_len}, \
+         redirect_CU={redirect_cu}, trade_CU={trade_cu}"
+    );
+    assert_cu_within("10MiB high-asset fee-redirect trade", trade_cu, TRADE_CU_LIMIT);
+
+    let (_, group) = env.market_state();
+    let fee_delta = group.insurance - insurance_before;
+    let market0_delta = group.insurance_domain_budget[0] + group.insurance_domain_budget[1]
+        - market0_before;
+    let high_delta = group.insurance_domain_budget[high_long_domain]
+        + group.insurance_domain_budget[high_short_domain]
+        - high_before;
+    assert!(fee_delta > 0, "high-tail fee trade must be non-vacuous");
+    assert_eq!(
+        market0_delta, fee_delta,
+        "100% redirect sends all high-tail trade fees into market-0 domains"
+    );
+    assert_eq!(
+        high_delta, 0,
+        "100% redirect leaves no local fee budget in high-tail domains"
+    );
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+    assert!(
+        group.vault >= group.c_tot + group.insurance,
+        "senior conservation after high-tail fee redirect"
+    );
+    assert_domain_budget_remaining_total_consistent(&group, "10MiB high-tail fee redirect");
+}
+
+#[test]
 fn v16_bpf_10m_market_force_close_high_asset_stays_bounded() {
     const N: usize = 5_834;
     const HIGH_ASSET: usize = N - 1;
