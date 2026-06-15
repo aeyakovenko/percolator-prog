@@ -8648,6 +8648,105 @@ fn v16_attack_underfunded_sync_with_cranker_reward_owner_can_close_payer() {
 }
 
 #[test]
+fn v16_attack_maintenance_swept_empty_portfolio_cannot_block_terminal_slab_close() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 40,
+    );
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1);
+
+    env.svm.warp_to_slot(10);
+    env.sync_maintenance_fee_with_cu(portfolio, None, 10);
+    let (_, after_sync) = env.market_state();
+    assert_eq!(
+        after_sync.insurance, 1,
+        "maintenance sync swept the dust capital into terminal-drainable insurance"
+    );
+    assert_eq!(
+        after_sync.materialized_portfolio_count, 1,
+        "fee-swept zero account remains materialized until an authorized close"
+    );
+    assert_eq!(env.portfolio_state(portfolio).capital, 0);
+
+    env.resolve();
+    let terminal_withdraw_before_cleanup = {
+        let dest = env.token_account(admin.pubkey(), 0);
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::WithdrawInsurance { amount: 1 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+    };
+    assert!(
+        terminal_withdraw_before_cleanup.is_err(),
+        "terminal insurance drain must wait for materialized zero-account cleanup"
+    );
+
+    let close_slab_before_cleanup = {
+        let dest = env.token_account(admin.pubkey(), 0);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+    };
+    assert!(
+        close_slab_before_cleanup.is_err(),
+        "fee-swept materialized zero account must block final slab close before cleanup"
+    );
+
+    let market_lamports_before_cleanup = env.svm.get_account(&env.market).unwrap().lamports;
+    let portfolio_lamports = env.svm.get_account(&portfolio).unwrap().lamports;
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&admin],
+    )
+    .expect("marketauth can terminal-clean a fee-swept empty portfolio");
+    let (_, after_cleanup) = env.market_state();
+    assert_eq!(after_cleanup.materialized_portfolio_count, 0);
+    assert_eq!(after_cleanup.insurance, 1);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports_before_cleanup + portfolio_lamports,
+        "terminal cleanup sweeps the abandoned portfolio rent"
+    );
+
+    let (insurance_dest, _) = env.withdraw_terminal_insurance_with_authority(&admin, 1);
+    assert_eq!(env.token_amount(insurance_dest), 1);
+    let (_, after_terminal_withdraw) = env.market_state();
+    assert_eq!(after_terminal_withdraw.insurance, 0);
+    assert_eq!(after_terminal_withdraw.vault, 0);
+    env.close_slab_with_cu();
+}
+
+#[test]
 fn v16_bpf_nonflat_fee_sync_settles_hidden_loss_before_sweeping_fee() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 100,
