@@ -10816,6 +10816,209 @@ fn v16_attack_resolved_payout_short_canonical_vault_rolls_back_receipts() {
     assert!(receipt.resolved_payout_receipt.finalized);
 }
 
+// LoF sweep - terminal payout paths stage resolved payout receipts before the transfer accounts are
+// validated. A payout above u64::MAX must reject without burning the payout state: direct close is
+// stopped by the engine's arithmetic guard, and deferred top-up reaches the wrapper's u64 bridge.
+#[test]
+fn v16_attack_terminal_payouts_over_u64_max_roll_back_receipts() {
+    let over = u64::MAX as u128 + 1;
+
+    let mut close_env = V16CuEnv::new();
+    let close_owner = Keypair::new();
+    let close_portfolio = close_env.create_portfolio(&close_owner);
+    {
+        let mut market_account = close_env
+            .svm
+            .get_account(&close_env.market)
+            .expect("market account");
+        let mut portfolio_account = close_env
+            .svm
+            .get_account(&close_portfolio)
+            .expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = over;
+        group.c_tot = over;
+        account.capital = over;
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        close_env
+            .svm
+            .set_account(close_env.market, market_account)
+            .unwrap();
+        close_env
+            .svm
+            .set_account(close_portfolio, portfolio_account)
+            .unwrap();
+    }
+    close_env.set_token_account_amount(
+        close_env.vault,
+        close_env.mint,
+        close_env.vault_authority,
+        u64::MAX,
+    );
+    let close_dest = close_env.token_account_for_mint(close_env.mint, close_owner.pubkey(), 0);
+    let close_market_before = close_env.svm.get_account(&close_env.market).unwrap();
+    let close_portfolio_before = close_env.svm.get_account(&close_portfolio).unwrap();
+    let close_vault_before = close_env.svm.get_account(&close_env.vault).unwrap();
+    let close_dest_before = close_env.svm.get_account(&close_dest).unwrap();
+
+    close_env.svm.expire_blockhash();
+    let close_rejected = close_env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(close_owner.pubkey(), false),
+            AccountMeta::new(close_env.market, false),
+            AccountMeta::new(close_portfolio, false),
+            AccountMeta::new(close_dest, false),
+            AccountMeta::new(close_env.vault, false),
+            AccountMeta::new_readonly(close_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        close_rejected.is_err(),
+        "over-u64 CloseResolved payout must reject before truncating the SPL transfer"
+    );
+    let close_err = close_rejected.unwrap_err();
+    assert!(
+        close_err.contains("Custom(14)") || close_err.contains("Custom(9)"),
+        "over-u64 CloseResolved payout must reject before any payout burn, got {close_err}"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_env.market).unwrap(),
+        close_market_before,
+        "over-u64 CloseResolved rejection rolls back market payout accounting"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_portfolio).unwrap(),
+        close_portfolio_before,
+        "over-u64 CloseResolved rejection does not burn the user's capital or receipt"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_env.vault).unwrap(),
+        close_vault_before,
+        "over-u64 CloseResolved rejection leaves the vault untouched"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_dest).unwrap(),
+        close_dest_before,
+        "over-u64 CloseResolved rejection pays no truncated amount"
+    );
+
+    let mut topup_env = V16CuEnv::new();
+    let topup_owner = Keypair::new();
+    let topup_portfolio = topup_env.create_portfolio(&topup_owner);
+    {
+        let mut market_account = topup_env
+            .svm
+            .get_account(&topup_env.market)
+            .expect("market account");
+        let mut portfolio_account = topup_env
+            .svm
+            .get_account(&topup_portfolio)
+            .expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = over;
+        group.c_tot = 0;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = over;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: over,
+            terminal_claim_exact_receipts_num: over * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: over * BOUND_SCALE,
+            current_payout_rate_den: over * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: over * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: over,
+            paid_effective: 0,
+            finalized: false,
+        };
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        topup_env
+            .svm
+            .set_account(topup_env.market, market_account)
+            .unwrap();
+        topup_env
+            .svm
+            .set_account(topup_portfolio, portfolio_account)
+            .unwrap();
+    }
+    topup_env.set_token_account_amount(
+        topup_env.vault,
+        topup_env.mint,
+        topup_env.vault_authority,
+        u64::MAX,
+    );
+    let topup_dest = topup_env.token_account_for_mint(topup_env.mint, topup_owner.pubkey(), 0);
+    let topup_market_before = topup_env.svm.get_account(&topup_env.market).unwrap();
+    let topup_portfolio_before = topup_env.svm.get_account(&topup_portfolio).unwrap();
+    let topup_vault_before = topup_env.svm.get_account(&topup_env.vault).unwrap();
+    let topup_dest_before = topup_env.svm.get_account(&topup_dest).unwrap();
+
+    topup_env.svm.expire_blockhash();
+    let topup_rejected = topup_env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(topup_owner.pubkey(), false),
+            AccountMeta::new(topup_env.market, false),
+            AccountMeta::new(topup_portfolio, false),
+            AccountMeta::new(topup_dest, false),
+            AccountMeta::new(topup_env.vault, false),
+            AccountMeta::new_readonly(topup_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        topup_rejected.is_err(),
+        "over-u64 ClaimResolvedPayoutTopup payout must reject before truncating the SPL transfer"
+    );
+    let topup_err = topup_rejected.unwrap_err();
+    assert!(
+        topup_err.contains("Custom(9)"),
+        "over-u64 ClaimResolvedPayoutTopup must reject as InvalidInstruction (Custom 9), got {topup_err}"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_env.market).unwrap(),
+        topup_market_before,
+        "over-u64 top-up rejection rolls back payout ledger accounting"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_portfolio).unwrap(),
+        topup_portfolio_before,
+        "over-u64 top-up rejection leaves the receipt claimable"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_env.vault).unwrap(),
+        topup_vault_before,
+        "over-u64 top-up rejection leaves the vault untouched"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_dest).unwrap(),
+        topup_dest_before,
+        "over-u64 top-up rejection pays no truncated amount"
+    );
+}
+
 #[test]
 fn v16_attack_close_resolved_requires_owner_signature_during_exit_window() {
     let mut env = V16CuEnv::new();
