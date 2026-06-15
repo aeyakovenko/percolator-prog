@@ -9603,6 +9603,10 @@ pub mod processor {
         if !live_authority_matches(&cfg_pre.marketauth, authority.key) {
             return Err(PercolatorError::Unauthorized.into());
         }
+        let authenticated_slot = authenticated_slot_or_fallback(now_slot);
+        if oracle_v16::permissionless_stale_matured(&cfg_pre, authenticated_slot) {
+            return Err(PercolatorError::OracleStale.into());
+        }
 
         let cfg_after = {
             let mut data = market_ai.try_borrow_mut_data()?;
@@ -9624,7 +9628,6 @@ pub mod processor {
             if asset_index >= configured_slots {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
-            let authenticated_slot = authenticated_slot_or_fallback(now_slot);
             let mut reset_profile = None;
             match action {
                 ASSET_ACTION_ACTIVATE => {

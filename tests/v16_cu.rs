@@ -52505,6 +52505,134 @@ fn v16_attack_permissionless_asset_shutdown_rejects_when_resolve_matured() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// security.md sweep - stale-resolve privileged lifecycle drift (#30/#35/#48): the market authority
+// can normally move an empty asset into DrainOnly or Retired without token movement. Once the base
+// market is resolve-matured, those live lifecycle mutations must freeze too; otherwise the terminal
+// snapshot and trader exit surface can be changed in the stale window before permissionless resolve.
+#[test]
+fn v16_attack_marketauth_lifecycle_actions_reject_when_resolve_matured() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    env.svm.warp_to_slot(1);
+    env.activate_asset(1, 1, 100);
+    env.svm.warp_to_slot(2);
+    env.activate_asset(2, 2, 100);
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+
+    // Non-vacuous fresh controls: marketauth lifecycle actions are reachable before stale maturity.
+    env.svm.warp_to_slot(4);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+        1,
+        0,
+        0,
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::DrainOnly,
+        "fresh marketauth DrainOnly path is reachable"
+    );
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        4,
+        0,
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Retired,
+        "fresh marketauth Retire path is reachable"
+    );
+
+    env.svm.warp_to_slot(40);
+    let (stale_cfg, stale_group) = env.market_state();
+    assert_eq!(stale_group.mode, MarketModeV16::Live);
+    assert!(
+        oracle_v16::permissionless_stale_matured(&stale_cfg, 40),
+        "test setup must be beyond the permissionless resolve stale boundary"
+    );
+    assert_eq!(stale_group.assets[2].lifecycle, AssetLifecycleV16::Active);
+
+    let before_drain = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let stale_drain = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+            asset_index: 2,
+            now_slot: 0,
+            initial_price: 0,
+            insurance_authority: admin.pubkey().to_bytes(),
+            insurance_operator: admin.pubkey().to_bytes(),
+            backing_bucket_authority: admin.pubkey().to_bytes(),
+            oracle_authority: admin.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale_drain.is_err(),
+        "marketauth DrainOnly must reject once the base market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_drain,
+        "rejected stale DrainOnly leaves lifecycle state unchanged"
+    );
+
+    let before_retire = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let stale_retire = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_RETIRE,
+            asset_index: 2,
+            now_slot: 40,
+            initial_price: 0,
+            insurance_authority: admin.pubkey().to_bytes(),
+            insurance_operator: admin.pubkey().to_bytes(),
+            backing_bucket_authority: admin.pubkey().to_bytes(),
+            oracle_authority: admin.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale_retire.is_err(),
+        "marketauth Retire must reject once the base market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_retire,
+        "rejected stale Retire leaves lifecycle state unchanged"
+    );
+    assert_eq!(
+        env.market_state().1.assets[2].lifecycle,
+        AssetLifecycleV16::Active,
+        "stale marketauth lifecycle actions cannot alter the active asset"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve still succeeds after rejected stale lifecycle actions: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // security.md sweep - stale-resolve oracle restart drift (#30/#37/#48): a permissionless
 // asset admin can restart its own Recovery asset and install a fresh per-asset oracle profile.
 // Once the base market is resolve-matured, that lifecycle/oracle restart must freeze; otherwise a
