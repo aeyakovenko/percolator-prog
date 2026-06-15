@@ -58063,6 +58063,173 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
     }
 }
 
+// CU/DoS sweep: the CPI currentness preflight runs after LP matcher-config authorization and before
+// invoking the matcher. A legacy taker portfolio can be grown by that preflight; if the same account
+// is also 8-leg active-stale, the EngineStale rejection must roll that growth back and must not give
+// the hostile matcher a writable context.
+#[test]
+fn v16_attack_tradecpi_active_stale_rolls_back_legacy_taker_before_matcher() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(8, 1_000, 1_000, 500);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 100_000);
+    env.deposit(&lp, la, 100_000);
+    env.seed_current_n_leg_position_for_benchmark(ta, la, 8);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &la,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; MATCHER_CONTEXT_LEN],
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
+
+    let mut hostile_ctx = env.svm.get_account(&ctx).unwrap();
+    hostile_ctx.data[0] = 0; // over-fill mode if matcher CPI is reached
+    env.svm.set_account(ctx, hostile_ctx).unwrap();
+
+    env.svm.expire_blockhash();
+    let fresh_err = env
+        .send(
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q: -(POS_SCALE as i128),
+                fee_bps: 0,
+                limit_price: 0,
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker],
+        )
+        .expect_err("fresh active-current control should reach matcher validation");
+    assert!(
+        fresh_err.contains("InvalidAccountData"),
+        "fresh active-current TradeCpi should fail from hostile matcher validation, got {fresh_err}"
+    );
+
+    env.svm.warp_to_slot(16);
+    env.mutate_market(|_, group| {
+        for asset_index in 0..8usize {
+            group
+                .accrue_asset_to_not_atomic(asset_index, 16, 95, 0, true)
+                .unwrap();
+            group.assets[asset_index].raw_oracle_target_price = 95;
+        }
+    });
+    let mut legacy_taker = env.svm.get_account(&ta).unwrap();
+    legacy_taker.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(ta, legacy_taker).unwrap();
+    assert_eq!(
+        env.svm.get_account(&ta).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup simulates a legacy active-stale taker"
+    );
+
+    let mut hostile_ctx = env.svm.get_account(&ctx).unwrap();
+    hostile_ctx.data[0] = 0;
+    env.svm.set_account(ctx, hostile_ctx).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+
+    env.svm.expire_blockhash();
+    let stale_err = env
+        .send(
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q: -(POS_SCALE as i128),
+                fee_bps: 0,
+                limit_price: 0,
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker],
+        )
+        .expect_err("legacy active-stale TradeCpi must reject before matcher CPI");
+    assert!(
+        stale_err.contains("Custom(19)") || stale_err.contains("custom program error: 0x13"),
+        "legacy active-stale TradeCpi must fail as EngineStale before hostile matcher validation, got {stale_err}"
+    );
+    assert!(
+        !stale_err.contains("InvalidAccountData"),
+        "legacy active-stale TradeCpi must not reach hostile matcher validation: {stale_err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected legacy active-stale TradeCpi leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ta).unwrap(),
+        taker_before,
+        "rejected legacy active-stale TradeCpi rolls back the taker preflight realloc"
+    );
+    assert_eq!(
+        env.svm.get_account(&ta).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed legacy active-stale TradeCpi does not leave the taker expanded"
+    );
+    assert_eq!(
+        env.svm.get_account(&la).unwrap(),
+        lp_before,
+        "rejected legacy active-stale TradeCpi leaves LP matcher config and positions unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "rejected legacy active-stale TradeCpi never gives the hostile matcher a writable context"
+    );
+}
+
 // CU/DoS hardening: stale-resolve-matured TradeCpi must fail before the external matcher CPI.
 // This is the single-fill ctx-return path counterpart to the batched return_data sentinel above.
 // While fresh the hostile over-fill reaches matcher-return validation; once stale, the wrapper must
