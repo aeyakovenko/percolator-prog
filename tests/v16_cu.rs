@@ -50469,6 +50469,61 @@ fn v16_bpf_10m_market_claim_resolved_topup_stays_bounded() {
 }
 
 #[test]
+fn v16_bpf_10m_market_refine_resolved_bound_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const INITIAL_BOUND: u128 = 100 * BOUND_SCALE;
+    const DECREASE: u128 = 25 * BOUND_SCALE;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    env.mutate_market(|_, group| {
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 0,
+            terminal_claim_bound_unreceipted_num: INITIAL_BOUND,
+            current_payout_rate_num: INITIAL_BOUND,
+            current_payout_rate_den: INITIAL_BOUND,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+    });
+
+    let refine_cu = env.refine_resolved_unreceipted_bound_with_cu(DECREASE);
+    println!(
+        "v16 10MiB RefineResolvedUnreceiptedBound: assets={N}, account_len={account_len}, \
+         CU={refine_cu}"
+    );
+    assert_cu_within(
+        "10MiB RefineResolvedUnreceiptedBound",
+        refine_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group
+            .resolved_payout_ledger
+            .terminal_claim_bound_unreceipted_num,
+        INITIAL_BOUND - DECREASE
+    );
+    assert_eq!(
+        group.resolved_payout_ledger.current_payout_rate_num,
+        INITIAL_BOUND - DECREASE
+    );
+    assert_eq!(
+        group.resolved_payout_ledger.current_payout_rate_den,
+        INITIAL_BOUND - DECREASE
+    );
+}
+
+#[test]
 fn v16_bpf_10m_market_force_close_high_asset_stays_bounded() {
     const N: usize = 5_834;
     const HIGH_ASSET: usize = N - 1;
