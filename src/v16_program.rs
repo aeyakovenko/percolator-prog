@@ -2645,6 +2645,7 @@ pub mod state {
             MarketModeV16,
             u64,
             u64,
+            usize,
             alloc::vec::Vec<u64>,
         ),
         ProgramError,
@@ -2700,6 +2701,7 @@ pub mod state {
             decode_market_mode(wire.mode)?,
             wire.current_slot.get(),
             engine_config.max_trading_fee_bps,
+            engine_config.max_market_slots as usize,
             prices,
         ))
     }
@@ -7225,14 +7227,21 @@ pub mod processor {
         let (
             mode_pre,
             current_slot_pre,
+            max_market_slots,
             oracle_prices,
             stale_matured,
             backing_fee_policy_active,
             fee_bounds_ok,
         ) = {
             let market_data = market_ai.try_borrow_data()?;
-            let (cfg_pre, mode_pre, current_slot_pre, max_trading_fee_bps, oracle_prices) =
-                state::read_asset_effective_prices(&market_data, &asset_indices)?;
+            let (
+                cfg_pre,
+                mode_pre,
+                current_slot_pre,
+                max_trading_fee_bps,
+                max_market_slots,
+                oracle_prices,
+            ) = state::read_asset_effective_prices(&market_data, &asset_indices)?;
             let authenticated_slot = authenticated_slot_or_fallback(current_slot_pre);
             let mut stale_matured = false;
             for &asset_index in &asset_indices {
@@ -7254,6 +7263,7 @@ pub mod processor {
             (
                 mode_pre,
                 current_slot_pre,
+                max_market_slots,
                 oracle_prices,
                 stale_matured,
                 cfg_pre.backing_trade_fee_policy_count != 0,
@@ -7380,8 +7390,6 @@ pub mod processor {
             });
         }
 
-        let (_, _, max_market_slots, _) =
-            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         handle_batch_execute_zero_copy(
             program_id,
             signer_a.key,
