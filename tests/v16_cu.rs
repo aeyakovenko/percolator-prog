@@ -52151,6 +52151,145 @@ fn v16_bpf_10m_market_refresh_high_asset_stays_bounded() {
 }
 
 #[test]
+fn v16_bpf_10m_market_high_asset_funding_crank_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const TRADE_SLOT: u64 = 1;
+    const PREMIUM_SLOT: u64 = 2;
+    const FUNDING_SLOT: u64 = 3;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    let account_len =
+        grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, INITIAL_PRICE);
+    env.configure_ewma_mark_for_asset_as_admin(HIGH_ASSET as u16, TRADE_SLOT, INITIAL_PRICE, 1, 0);
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 10_000_000);
+    env.deposit(&short_owner, short, 10_000_000);
+    env.svm.warp_to_slot(TRADE_SLOT);
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        HIGH_ASSET as u16,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        INITIAL_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(PREMIUM_SLOT);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PushEwmaMark {
+            asset_index: HIGH_ASSET as u16,
+            now_slot: PREMIUM_SLOT,
+            mark_e6: INITIAL_PRICE * 2,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("push high-asset EWMA premium");
+
+    env.svm.expire_blockhash();
+    let premium_apply_cu = env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: HIGH_ASSET as u16,
+            now_slot: PREMIUM_SLOT,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    assert_cu_within(
+        "10MiB high-asset funding premium apply",
+        premium_apply_cu,
+        CRANK_CU_LIMIT,
+    );
+    env.svm.expire_blockhash();
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: HIGH_ASSET as u16,
+            now_slot: PREMIUM_SLOT,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    let (_, premium_group) = env.market_state();
+    assert_eq!(
+        premium_group.funding_epoch, 0,
+        "fresh high-index premium does not charge funding in its own slot"
+    );
+    assert!(
+        premium_group.assets[HIGH_ASSET].effective_price > INITIAL_PRICE,
+        "premium apply moved the high-index effective price"
+    );
+
+    env.svm.warp_to_slot(FUNDING_SLOT);
+    env.svm.expire_blockhash();
+    let funding_cu = env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: HIGH_ASSET as u16,
+            now_slot: FUNDING_SLOT,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    println!(
+        "v16 10MiB high-asset funding crank: assets={N}, account_len={account_len}, \
+         asset={HIGH_ASSET}, premium_apply_CU={premium_apply_cu}, funding_CU={funding_cu}"
+    );
+    assert_cu_within(
+        "10MiB high-asset funding crank",
+        funding_cu,
+        CRANK_CU_LIMIT,
+    );
+    let (_, funded_group) = env.market_state();
+    assert_eq!(
+        funded_group.funding_epoch, 1,
+        "high-index funding branch actually accrued"
+    );
+    assert_eq!(funded_group.assets[HIGH_ASSET].f_long_num, -(ADL_ONE as i128));
+    assert_eq!(funded_group.assets[HIGH_ASSET].f_short_num, ADL_ONE as i128);
+    assert_eq!(
+        funded_group.vault as u64,
+        env.token_amount(env.vault),
+        "high-index funding crank preserves real vault accounting"
+    );
+    assert!(funded_group.vault >= funded_group.c_tot + funded_group.insurance);
+}
+
+#[test]
 fn v16_bpf_10m_market_auth_mark_high_asset_stays_bounded() {
     const N: usize = 5_834;
     const HIGH_ASSET: usize = N - 1;
