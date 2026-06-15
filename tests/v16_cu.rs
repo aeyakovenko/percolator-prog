@@ -51405,6 +51405,35 @@ fn v16_bpf_10m_market_sync_maintenance_fee_max_tail_legs_stays_bounded() {
             - reward
     );
     assert_eq!(after_group.vault as u64, env.token_amount(env.vault));
+
+    let before_self_group = after_group;
+    let before_self_taker = after_taker;
+    env.svm.warp_to_slot(SYNC_SLOT + 1);
+    let self_sync_cu =
+        env.sync_maintenance_fee_with_cu(taker_account, Some(taker_account), SYNC_SLOT + 1);
+    println!(
+        "v16 10MiB SyncMaintenanceFee max tail self-crank: assets={N}, legs={TAIL_LEGS}, \
+         account_len={new_len}, CU={self_sync_cu}"
+    );
+    assert!(
+        self_sync_cu < 1_400_000,
+        "10MiB SyncMaintenanceFee max tail self-crank CU {self_sync_cu} must fit the tx limit"
+    );
+    let after_self_group = env.market_state().1;
+    let after_self_taker = env.portfolio_state(taker_account);
+    let self_net_loss = before_self_taker.capital - after_self_taker.capital;
+    let self_insurance_gain = after_self_group.insurance - before_self_group.insurance;
+    assert_eq!(
+        self_net_loss, self_insurance_gain,
+        "self-crank reward nets against the payer so only retained insurance is lost"
+    );
+    assert_eq!(
+        after_self_group.insurance_domain_budget[0] + after_self_group.insurance_domain_budget[1],
+        before_self_group.insurance_domain_budget[0]
+            + before_self_group.insurance_domain_budget[1]
+            + self_insurance_gain
+    );
+    assert_eq!(after_self_group.vault as u64, env.token_amount(env.vault));
 }
 
 // LoF sweep - after a max-size market resolves, users with the full active-leg
