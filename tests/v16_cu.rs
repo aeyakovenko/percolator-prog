@@ -7,7 +7,8 @@ use percolator::{
 use percolator_prog::{
     constants::{
         ASSET_ORACLE_WRAPPER_LEN, MARKET_GROUP_OFF, MATCHER_ABI_VERSION, MATCHER_CONTEXT_MIN_LEN,
-        ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_AUTH_MARK,
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
     },
     ix::{BatchTradeCpiLeg, BatchTradeLeg, Instruction as ProgInstruction},
     oracle_v16, processor, state,
@@ -50806,6 +50807,75 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
     assert!(percolator::active_bitmap_is_empty(
         short_after.active_bitmap
     ));
+}
+
+#[test]
+fn v16_bpf_10m_market_auth_mark_high_asset_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const CONFIGURE_SLOT: u64 = 1;
+    const PUSH_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new();
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+
+    env.svm.warp_to_slot(CONFIGURE_SLOT);
+    env.svm.expire_blockhash();
+    let configure_cu = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: HIGH_ASSET as u16,
+            now_slot: CONFIGURE_SLOT,
+            initial_mark_e6: PRICE,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("configure high-asset auth mark");
+    println!(
+        "v16 10MiB ConfigureAuthMark: assets={N}, account_len={account_len}, \
+         asset={HIGH_ASSET}, CU={configure_cu}"
+    );
+    assert_cu_within("10MiB ConfigureAuthMark", configure_cu, CUSTODY_CU_LIMIT);
+
+    env.svm.warp_to_slot(PUSH_SLOT);
+    env.svm.expire_blockhash();
+    let push_cu = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PushAuthMark {
+            asset_index: HIGH_ASSET as u16,
+            now_slot: PUSH_SLOT,
+            mark_e6: 333,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("push high-asset auth mark");
+    println!(
+        "v16 10MiB PushAuthMark: assets={N}, account_len={account_len}, \
+         asset={HIGH_ASSET}, CU={push_cu}"
+    );
+    assert_cu_within("10MiB PushAuthMark", push_cu, CUSTODY_CU_LIMIT);
+
+    let account = env.svm.get_account(&env.market).unwrap();
+    let profile = state::read_asset_oracle_profile(&account.data, HIGH_ASSET).unwrap();
+    assert_eq!(profile.oracle_mode, ORACLE_MODE_AUTH_MARK);
+    assert_eq!(profile.mark_ewma_e6, 333);
+    assert_eq!(profile.mark_ewma_last_slot, PUSH_SLOT);
+    assert_eq!(profile.oracle_target_price_e6, 333);
+    let (_, group) = env.market_state();
+    assert_eq!(group.assets[HIGH_ASSET].effective_price, PRICE);
 }
 
 #[test]
