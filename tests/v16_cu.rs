@@ -8485,7 +8485,7 @@ fn v16_attack_bug113_maintenance_fee_siphon_to_parasitic_asset() {
 }
 
 #[test]
-fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
+fn v16_bpf_underfunded_flat_sync_owner_can_close_after_fee_sweep() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 40,
     );
@@ -8505,11 +8505,27 @@ fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
         group_after_flat_sync.insurance, 1,
         "underfunded flat sync sweeps the remaining capital into insurance"
     );
-    assert_eq!(group_after_flat_sync.materialized_portfolio_count, 1);
+    assert_eq!(
+        group_after_flat_sync.materialized_portfolio_count, 2,
+        "unsigned live maintenance sync must not dematerialize the user-owned payer"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports_before_close,
+        "public sync must not absorb live portfolio rent"
+    );
+    assert_eq!(env.portfolio_state(long_portfolio).capital, 0);
+
+    env.close_portfolio_with_cu(&long_owner, long_portfolio);
+    let (_, group_after_owner_close) = env.market_state();
+    assert_eq!(
+        group_after_owner_close.materialized_portfolio_count, 1,
+        "owner ClosePortfolio remains the live dematerialization path after fee sweep"
+    );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap().lamports,
         market_lamports_before_close + long_lamports_before_close,
-        "dust-closed portfolio rent should move into the market slab"
+        "owner close sweeps the dust payer rent into the market slab"
     );
     if let Some(closed_long_account) = env.svm.get_account(&long_portfolio) {
         assert_eq!(closed_long_account.lamports, 0);
@@ -8567,7 +8583,7 @@ fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
 }
 
 #[test]
-fn v16_attack_underfunded_sync_with_cranker_reward_still_closes_payer() {
+fn v16_attack_underfunded_sync_with_cranker_reward_owner_can_close_payer() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 40,
     );
@@ -8601,13 +8617,26 @@ fn v16_attack_underfunded_sync_with_cranker_reward_still_closes_payer() {
         "cranker receives only the configured share of the swept dust fee"
     );
     assert_eq!(
-        group_after_sync.materialized_portfolio_count, 1,
-        "dust payer is still closed even when a cranker reward is paid"
+        group_after_sync.materialized_portfolio_count, 2,
+        "unsigned live maintenance sync must not close the user-owned payer"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports_before_close,
+        "public sync must not absorb the live payer's rent"
+    );
+    assert_eq!(env.portfolio_state(payer_portfolio).capital, 0);
+
+    env.close_portfolio_with_cu(&payer_owner, payer_portfolio);
+    let (_, group_after_owner_close) = env.market_state();
+    assert_eq!(
+        group_after_owner_close.materialized_portfolio_count, 1,
+        "owner ClosePortfolio remains available after underfunded sync with a cranker reward"
     );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap().lamports,
         market_lamports_before_close + payer_lamports_before_close,
-        "dust-closed payer rent moves into the market slab"
+        "owner close moves the dust payer rent into the market slab"
     );
     if let Some(closed_payer_account) = env.svm.get_account(&payer_portfolio) {
         assert_eq!(closed_payer_account.lamports, 0);
