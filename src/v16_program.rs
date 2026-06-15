@@ -8440,42 +8440,67 @@ pub mod processor {
         let long_domain = asset_index
             .checked_mul(2)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        let (bump, amount_u64) = verify_domain_withdrawal_preflight(
-            program_id,
-            market_ai,
-            operator,
-            dest_token,
-            vault_token,
-            vault_authority_ai,
-            long_domain,
-            amount,
-            true,
-            DOMAIN_WITHDRAW_AUTH_INSURANCE,
-        )?;
+        let amount_u64 = amount_to_u64(amount)?;
+        {
+            let market_data = market_ai.try_borrow_data()?;
+            let (cfg, mode, configured_slots, _) =
+                state::read_market_config_mode_and_capacity(&market_data)?;
+            if (mode != MarketModeV16::Live && mode != MarketModeV16::Resolved)
+                || asset_index >= configured_slots
+                || long_domain >= configured_slots.saturating_mul(2)
+            {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
+            expect_key(vault_authority_ai, &vault_authority)?;
+            verify_withdrawable_token_accounts(
+                dest_token,
+                operator.key,
+                vault_token,
+                &vault_authority,
+                &cfg,
+            )?;
+            require_token_balance(vault_token, amount_u64)?;
+        }
+        let (_, bump) = derive_vault_authority(program_id, market_ai.key);
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
-            if group.header.mode != 0 {
+            let live_mode = group.header.mode == 0;
+            let resolved_mode = group.header.mode == 1;
+            if !live_mode && !resolved_mode {
                 return Err(PercolatorError::EngineLockActive.into());
             }
             let configured_slots = group.header.config.max_market_slots.get() as usize;
             if asset_index >= configured_slots || asset_index >= group.markets.len() {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
-            let shutdown_drain =
-                live_domain_withdraw_health_or_shutdown_view(&cfg, &group, long_domain)?;
             let authorities = domain_authorities_from_view(&group, &cfg, long_domain)?;
-            let local_authorized =
-                live_authority_matches(&authorities.insurance_operator, operator.key);
-            let admin_shutdown_authorized = asset_index != 0
-                && shutdown_drain
-                && live_authority_matches(&cfg.marketauth, operator.key);
-            if !local_authorized && !admin_shutdown_authorized {
-                return Err(PercolatorError::Unauthorized.into());
-            }
-            let ledger_authority = if admin_shutdown_authorized && !local_authorized {
-                cfg.marketauth
+            let ledger_authority = if live_mode {
+                let shutdown_drain =
+                    live_domain_withdraw_health_or_shutdown_view(&cfg, &group, long_domain)?;
+                let local_authorized =
+                    live_authority_matches(&authorities.insurance_operator, operator.key);
+                let admin_shutdown_authorized = asset_index != 0
+                    && shutdown_drain
+                    && live_authority_matches(&cfg.marketauth, operator.key);
+                if !local_authorized && !admin_shutdown_authorized {
+                    return Err(PercolatorError::Unauthorized.into());
+                }
+                if admin_shutdown_authorized && !local_authorized {
+                    cfg.marketauth
+                } else {
+                    authorities.insurance_authority
+                }
             } else {
+                if group.header.materialized_portfolio_count.get() != 0
+                    || group.header.c_tot.get() != 0
+                {
+                    return Err(PercolatorError::EngineLockActive.into());
+                }
+                if !live_authority_matches(&authorities.insurance_authority, operator.key) {
+                    return Err(PercolatorError::Unauthorized.into());
+                }
                 authorities.insurance_authority
             };
             let available = market_insurance_withdraw_capacity_view(&group, asset_index)?;
