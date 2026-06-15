@@ -60449,6 +60449,94 @@ fn v16_attack_init_portfolio_ignored_extra_accounts_are_cu_bounded() {
     );
 }
 
+// Public-interface DoS sweep: duplicate account metas take the adapter's alias-preserving Rc-clone
+// path instead of the unique-account path above. A cheap public instruction with ignored duplicated
+// tails must not become a compute amplifier before the legacy processor drops those accounts.
+#[test]
+fn v16_attack_init_portfolio_duplicate_ignored_accounts_are_cu_bounded() {
+    const UNIQUE_EXTRAS: usize = 28;
+
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    env.ensure_signer_account(owner.pubkey());
+    let mut extras = Vec::with_capacity(UNIQUE_EXTRAS);
+    for _ in 0..UNIQUE_EXTRAS {
+        let key = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: Vec::new(),
+                    owner: solana_sdk::system_program::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        extras.push(key);
+    }
+
+    let send_init = |env: &mut V16CuEnv, extra_accounts: Vec<AccountMeta>| -> u64 {
+        let portfolio = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                portfolio,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: vec![0u8; env.portfolio_account_len],
+                    owner: env.program_id,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let mut accounts = vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ];
+        accounts.extend(extra_accounts);
+        env.svm.expire_blockhash();
+        env.send(ProgInstruction::InitPortfolio, accounts, &[&owner])
+            .expect("InitPortfolio with duplicate ignored trailing accounts")
+    };
+
+    let baseline_cu = send_init(&mut env, Vec::new());
+    let mut duplicate_tail = Vec::with_capacity(UNIQUE_EXTRAS * 2);
+    duplicate_tail.extend(
+        extras
+            .iter()
+            .copied()
+            .map(|key| AccountMeta::new_readonly(key, false)),
+    );
+    duplicate_tail.extend(
+        extras
+            .iter()
+            .rev()
+            .copied()
+            .map(|key| AccountMeta::new_readonly(key, false)),
+    );
+    let duplicate_cu = send_init(&mut env, duplicate_tail);
+
+    println!(
+        "v16 InitPortfolio duplicate ignored extras: baseline={baseline_cu}, duplicate={duplicate_cu}"
+    );
+    assert!(
+        duplicate_cu > baseline_cu,
+        "duplicate ignored accounts must reach the deployed adapter duplicate path"
+    );
+    assert!(
+        duplicate_cu <= baseline_cu + 75_000,
+        "duplicate ignored accounts consumed {duplicate_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "init_portfolio duplicate ignored account path",
+        duplicate_cu,
+        150_000,
+    );
+}
+
 // SOL-010 (reinitialization): InitPortfolio targets a program-owned account and SETS its owner. An
 // attacker could try to re-init a VICTIM's already-funded portfolio -- which would reset its capital
 // and reassign ownership, a severe LOF (victim's vaulted tokens orphaned). The is_initialized guard
