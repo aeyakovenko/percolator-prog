@@ -52651,6 +52651,75 @@ fn v16_bpf_10m_market_cpi_and_batch_trade_paths_stay_bounded() {
         -sz
     );
 
+    let tail_cpi_taker = Keypair::new();
+    let tail_cpi_lp = Keypair::new();
+    let tail_cpi_taker_account = env.create_portfolio(&tail_cpi_taker);
+    let tail_cpi_lp_account = env.create_portfolio(&tail_cpi_lp);
+    env.deposit(&tail_cpi_taker, tail_cpi_taker_account, 10_000_000);
+    env.deposit(&tail_cpi_lp, tail_cpi_lp_account, 10_000_000);
+    let (tail_cpi_ctx, tail_cpi_delegate, _) =
+        env.init_matcher_context_authorized(matcher_program, &tail_cpi_lp, tail_cpi_lp_account);
+    let max_matcher_tail: Vec<Pubkey> = (0..percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS)
+        .map(|_| {
+            let key = Pubkey::new_unique();
+            env.svm
+                .set_account(
+                    key,
+                    Account {
+                        lamports: 1_000_000_000,
+                        data: vec![0u8; 8],
+                        owner: Pubkey::default(),
+                        executable: false,
+                        rent_epoch: 0,
+                    },
+                )
+                .unwrap();
+            key
+        })
+        .collect();
+    let mut tail_cpi_metas = vec![
+        AccountMeta::new(tail_cpi_taker.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(tail_cpi_taker_account, false),
+        AccountMeta::new(tail_cpi_lp_account, false),
+        AccountMeta::new_readonly(matcher_program, false),
+        AccountMeta::new(tail_cpi_ctx, false),
+        AccountMeta::new_readonly(tail_cpi_delegate, false),
+    ];
+    tail_cpi_metas.extend(
+        max_matcher_tail
+            .iter()
+            .copied()
+            .map(|key| AccountMeta::new_readonly(key, false)),
+    );
+    env.svm.expire_blockhash();
+    let tail_cpi_cu = env
+        .send(
+            ProgInstruction::TradeCpi {
+                asset_index: HIGH_ASSET as u16,
+                size_q: sz,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            tail_cpi_metas,
+            &[&tail_cpi_taker],
+        )
+        .expect("10MiB high-asset TradeCpi with exact max matcher tail must execute");
+    assert_cu_within(
+        "10MiB high-asset TradeCpi max matcher tail",
+        tail_cpi_cu,
+        TRADE_CU_LIMIT,
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(tail_cpi_taker_account), HIGH_ASSET)
+            .basis_pos_q,
+        sz
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(tail_cpi_lp_account), HIGH_ASSET).basis_pos_q,
+        -sz
+    );
+
     let batch_taker = Keypair::new();
     let batch_lp = Keypair::new();
     let batch_taker_account = env.create_portfolio(&batch_taker);
@@ -52780,6 +52849,7 @@ fn v16_bpf_10m_market_cpi_and_batch_trade_paths_stay_bounded() {
     println!(
         "v16 10MiB CPI/batch trades: assets={N}, account_len={account_len}, \
          TradeCpi asset[{HIGH_ASSET}] CU={trade_cpi_cu}, \
+         TradeCpi max-tail asset[{HIGH_ASSET}] CU={tail_cpi_cu}, \
          BatchTradeNoCpi low+high CU={batch_nocpi_cu}, \
          BatchTradeCpi low+high CU={batch_cpi_cu}"
     );
