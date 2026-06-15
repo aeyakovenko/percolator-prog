@@ -50895,6 +50895,146 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
 }
 
 #[test]
+fn v16_bpf_10m_market_refresh_high_asset_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const TRADE_SLOT: u64 = 1;
+    const REFRESH_SLOT: u64 = 2;
+    const NEXT_MARK: u64 = 125;
+
+    let mut env = V16CuEnv::new();
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.svm.warp_to_slot(TRADE_SLOT);
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        HIGH_ASSET as u16,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(REFRESH_SLOT);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PushAuthMark {
+            asset_index: HIGH_ASSET as u16,
+            now_slot: REFRESH_SLOT,
+            mark_e6: NEXT_MARK,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("push high-asset auth mark before refresh");
+
+    let (_, before_group) = env.market_state();
+    let before_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, HIGH_ASSET)
+            .unwrap();
+    assert_eq!(
+        before_group.assets[HIGH_ASSET].effective_price, PRICE,
+        "PushAuthMark stores the target but does not apply it before the crank"
+    );
+    assert_eq!(
+        before_profile.mark_ewma_e6, NEXT_MARK,
+        "test setup must give Refresh a pending high-index mark"
+    );
+
+    env.svm.expire_blockhash();
+    let first_refresh_cu = env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: HIGH_ASSET as u16,
+            now_slot: REFRESH_SLOT,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    println!(
+        "v16 10MiB PermissionlessCrank Refresh: assets={N}, account_len={account_len}, \
+         asset={HIGH_ASSET}, first_CU={first_refresh_cu}"
+    );
+    assert_cu_within(
+        "10MiB PermissionlessCrank Refresh first",
+        first_refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (_, after_first_group) = env.market_state();
+    let after_first = env.portfolio_state(long);
+    let after_first_leg = active_leg_for_asset(&after_first, HIGH_ASSET);
+    assert_eq!(
+        after_first_group.assets[HIGH_ASSET].effective_price, NEXT_MARK,
+        "first refresh applies the pending high-index auth mark"
+    );
+    assert_ne!(
+        after_first_leg.k_snap, after_first_group.assets[HIGH_ASSET].k_long,
+        "the mark-applying refresh advances the asset after account refresh, so one more \
+         bounded refresh is required to settle the touched account"
+    );
+
+    env.svm.expire_blockhash();
+    let second_refresh_cu = env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: HIGH_ASSET as u16,
+            now_slot: REFRESH_SLOT,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    println!(
+        "v16 10MiB PermissionlessCrank Refresh second: assets={N}, account_len={account_len}, \
+         asset={HIGH_ASSET}, CU={second_refresh_cu}"
+    );
+    assert_cu_within(
+        "10MiB PermissionlessCrank Refresh second",
+        second_refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (_, after_group) = env.market_state();
+    let after = env.portfolio_state(long);
+    let after_leg = active_leg_for_asset(&after, HIGH_ASSET);
+    assert_eq!(
+        after_leg.k_snap, after_group.assets[HIGH_ASSET].k_long,
+        "second refresh settles the high-index long leg made stale by the mark-applying refresh"
+    );
+    assert_eq!(
+        after.health_cert.cert_oracle_epoch, after_group.oracle_epoch,
+        "refresh re-certifies the cranked portfolio"
+    );
+    assert_eq!(
+        after_group.assets[HIGH_ASSET].effective_price, NEXT_MARK,
+        "refresh applies the high-index auth mark"
+    );
+}
+
+#[test]
 fn v16_bpf_10m_market_auth_mark_high_asset_stays_bounded() {
     const N: usize = 5_834;
     const HIGH_ASSET: usize = N - 1;
