@@ -50600,6 +50600,92 @@ fn v16_bpf_10m_market_high_asset_fee_redirect_stays_bounded() {
 }
 
 #[test]
+fn v16_bpf_10m_market_final_append_activation_stays_bounded() {
+    const N: usize = 5_834;
+    const PREV_N: usize = N - 1;
+    const PRICE: u64 = 100;
+    const ACTIVATE_SLOT: u64 = 25;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        PREV_N,
+    );
+    env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+    let (_, template_group) = env.market_state();
+    let template_asset = template_group.assets[0];
+    let prev_len = state::market_account_len_for_capacity(PREV_N).unwrap();
+    let new_len = state::market_account_len_for_capacity(N).unwrap();
+    let next_len = state::market_account_len_for_capacity(N + 1).unwrap();
+    assert!(
+        new_len <= 10 * 1024 * 1024 && next_len > 10 * 1024 * 1024,
+        "test must append the last legal asset slot under the 10MiB account cap"
+    );
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        assert_eq!(acct.data.len(), prev_len);
+        acct.lamports = acct
+            .lamports
+            .max(solana_sdk::rent::Rent::default().minimum_balance(new_len));
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    env.mutate_market(|_cfg, group| {
+        group.config.max_market_slots = PREV_N as u32;
+        group.next_market_id = (PREV_N as u64) + 1;
+        for asset_index in 1..PREV_N {
+            let market_id = (asset_index as u64) + 1;
+            let mut asset = template_asset;
+            asset.market_id = market_id;
+            group.assets[asset_index] = asset;
+            group.source_backing_buckets[2 * asset_index] =
+                percolator::BackingBucketV16::empty_for_market(market_id);
+            group.source_backing_buckets[2 * asset_index + 1] =
+                percolator::BackingBucketV16::empty_for_market(market_id);
+        }
+    });
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        let profile0 = state::read_asset_oracle_profile(&acct.data, 0).unwrap();
+        for asset_index in 1..PREV_N {
+            state::write_asset_oracle_profile(&mut acct.data, asset_index, &profile0).unwrap();
+        }
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    env.svm.warp_to_slot(ACTIVATE_SLOT);
+    env.svm.expire_blockhash();
+    let append_cu = env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+        PREV_N as u16,
+        ACTIVATE_SLOT,
+        PRICE,
+    );
+    println!(
+        "v16 10MiB final UpdateAssetLifecycle append: prev_assets={PREV_N}, \
+         final_assets={N}, prev_len={prev_len}, new_len={new_len}, CU={append_cu}"
+    );
+    assert_cu_within(
+        "10MiB final UpdateAssetLifecycle append",
+        append_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let market_account = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(market_account.data.len(), new_len);
+    let (_, group) = env.market_state();
+    assert_eq!(group.config.max_market_slots as usize, N);
+    assert_eq!(group.next_market_id, (N as u64) + 1);
+    assert_eq!(group.assets[PREV_N].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(group.assets[PREV_N].market_id, N as u64);
+    assert_eq!(group.assets[PREV_N].effective_price, PRICE);
+}
+
+#[test]
 fn v16_bpf_10m_market_force_close_high_asset_stays_bounded() {
     const N: usize = 5_834;
     const HIGH_ASSET: usize = N - 1;
