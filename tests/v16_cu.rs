@@ -62477,6 +62477,85 @@ fn v16_attack_sync_maintenance_rejects_when_resolve_matured() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// LoF/DoS sweep: SyncMaintenanceFee is permissionless and can credit an optional cranker reward.
+// The stale-Live boundary is covered above; this pins the already-Resolved boundary. The engine may
+// accept an inert sync, but a cranker must not be able to mutate terminal accounting, debit a user's
+// resolved payout basis, or collect a reward after the market enters wind-down.
+#[test]
+fn v16_attack_sync_maintenance_does_not_move_after_resolve() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    env.update_maintenance_fee_policy_with_cu(5_000);
+
+    let owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&owner, portfolio, 100_000);
+
+    env.svm.warp_to_slot(3);
+    env.sync_maintenance_fee_with_cu(portfolio, Some(cranker), 3);
+    let fresh_user = env.portfolio_state(portfolio);
+    let fresh_cranker = env.portfolio_state(cranker);
+    assert_eq!(fresh_user.last_fee_slot, 3);
+    assert!(
+        fresh_cranker.capital > 0,
+        "fresh maintenance sync credits the cranker reward"
+    );
+
+    env.resolve();
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+    env.svm.warp_to_slot(40);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let cranker_before = env.svm.get_account(&cranker).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let post_resolve_sync = env.send(
+        ProgInstruction::SyncMaintenanceFee { now_slot: 40 },
+        vec![
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(cranker, false),
+        ],
+        &[],
+    );
+    let sync_cu = post_resolve_sync.expect("post-resolve maintenance sync is accepted as inert");
+    assert_cu_within(
+        "post-resolve inert SyncMaintenanceFee",
+        sync_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "inert post-resolve maintenance sync leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "inert post-resolve maintenance sync does not debit the resolved user"
+    );
+    assert_eq!(
+        env.svm.get_account(&cranker).unwrap(),
+        cranker_before,
+        "inert post-resolve maintenance sync does not credit the cranker"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "inert post-resolve maintenance sync moves no custody"
+    );
+
+    let dest = env.close_resolved(&owner, portfolio);
+    assert!(
+        env.token_amount(dest) > 0,
+        "user's resolved payout remains live after the inert post-resolve sync"
+    );
+}
+
 // security.md sweep - stale SyncMaintenanceFee legacy cranker rollback (#5/#30/#44/#48):
 // SyncMaintenanceFee is permissionless and grows both the charged portfolio and
 // optional cranker reward portfolio before the stale-market freeze check. Once
