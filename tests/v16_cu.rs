@@ -46772,6 +46772,104 @@ fn v16_bpf_terminal_insurance_partial_ledger_ignores_other_authority_budget_on_1
     assert_eq!(group.vault as u64, env.token_amount(env.vault));
 }
 
+#[test]
+fn v16_bpf_terminal_asset_insurance_partial_ledger_middle_domain_stays_bounded_on_10m_market() {
+    const N: usize = 5_834;
+    const MIDDLE_ASSET: usize = N / 2;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const FUNDED: u128 = 123;
+    const PARTIAL: u128 = 1;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    let middle_authority = Keypair::new();
+    let profile0 = {
+        let data = env.svm.get_account(&env.market).unwrap().data;
+        state::read_asset_oracle_profile(&data, 0).unwrap()
+    };
+    let template = env.market_state().1.assets[0];
+    env.mutate_market(|_cfg, group| {
+        let middle_market_id = (MIDDLE_ASSET as u64) + 1;
+        let mut middle = template;
+        middle.market_id = middle_market_id;
+        group.assets[MIDDLE_ASSET] = middle;
+        let (long_domain, short_domain) = (2 * MIDDLE_ASSET, 2 * MIDDLE_ASSET + 1);
+        group.source_backing_buckets[long_domain] =
+            percolator::BackingBucketV16::empty_for_market(middle_market_id);
+        group.source_backing_buckets[short_domain] =
+            percolator::BackingBucketV16::empty_for_market(middle_market_id);
+    });
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        state::write_asset_oracle_profile(&mut acct.data, MIDDLE_ASSET, &profile0).unwrap();
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+    let admin = env.admin.insecure_clone();
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&middle_authority),
+        MIDDLE_ASSET as u16,
+        processor::ASSET_AUTH_INSURANCE,
+        middle_authority.pubkey().to_bytes(),
+    )
+    .expect("rotate middle insurance authority");
+
+    let middle_domain = (2 * MIDDLE_ASSET + 1) as u16;
+    env.top_up_insurance_domain_with_authority_and_cu(&middle_authority, middle_domain, FUNDED);
+    let before_resolve = env.market_state().1;
+    assert_eq!(
+        before_resolve.insurance_domain_budget[middle_domain as usize],
+        FUNDED,
+        "setup funds only a middle-domain authority budget"
+    );
+
+    let ledger = env.insurance_ledger_account();
+    env.resolve();
+    let dest = env.token_account_for_mint(env.mint, middle_authority.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let withdraw_cu = env
+        .send(
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index: MIDDLE_ASSET as u16,
+                amount: PARTIAL,
+            },
+            vec![
+                AccountMeta::new(middle_authority.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&middle_authority],
+        )
+        .expect("terminal asset-indexed insurance withdrawal");
+    println!(
+        "v16 10MiB terminal middle-domain partial WithdrawInsuranceAsset + ledger: \
+         assets={N}, account_len={account_len}, middle_domain={middle_domain}, CU={withdraw_cu}"
+    );
+    assert_cu_within(
+        "10MiB middle-domain terminal partial WithdrawInsuranceAsset with ledger",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), PARTIAL as u64);
+
+    let ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_state.authority, middle_authority.pubkey().to_bytes());
+    assert_eq!(ledger_state.total_withdrawn_atoms, PARTIAL);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, FUNDED - PARTIAL);
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.insurance_domain_budget[middle_domain as usize],
+        FUNDED - PARTIAL
+    );
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+}
+
 // LIVENESS: no trader can block marketauth's asset cleanup. After force_close_delay_slots, the
 // permissionless force-close winds down a retired asset by netting a long against a short at the
 // frozen mark. A griefer who sits on a maximally-complex (14-leg) STALE portfolio cannot stall this:
