@@ -51037,6 +51037,123 @@ fn v16_bpf_10m_market_sync_maintenance_fee_max_tail_legs_stays_bounded() {
     assert_eq!(after_group.vault as u64, env.token_amount(env.vault));
 }
 
+// LoF sweep - after a max-size market resolves, users with the full active-leg
+// cap on high-tail assets must still be able to close and recover capital.
+#[test]
+fn v16_bpf_10m_market_close_resolved_max_tail_legs_stays_bounded() {
+    const N: usize = 5_834;
+    const TAIL_LEGS: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
+    const FIRST_TAIL_ASSET: usize = N - TAIL_LEGS;
+    const PRICE: u64 = 100;
+    const TRADE_SLOT: u64 = 10;
+    const DEPOSIT: u128 = 100_000_000;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(
+        TAIL_LEGS as u16,
+        1_000,
+        1_000,
+        500,
+    );
+    for asset_index in 0..TAIL_LEGS as u16 {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 1, PRICE);
+    }
+    let (_, template_group) = env.market_state();
+    let template_asset = template_group.assets[0];
+
+    let new_len = state::market_account_len_for_capacity(N).unwrap();
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        acct.data.resize(new_len, 0u8);
+        acct.lamports = acct.lamports.max(new_len as u64 * 10);
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+    env.mutate_market(|_cfg, group| {
+        group.config.max_market_slots = N as u32;
+        group.next_market_id = (N as u64) + 1;
+        for asset_index in FIRST_TAIL_ASSET..N {
+            let market_id = (asset_index as u64) + 1;
+            let mut asset = template_asset;
+            asset.market_id = market_id;
+            group.assets[asset_index] = asset;
+            group.source_backing_buckets[2 * asset_index] =
+                percolator::BackingBucketV16::empty_for_market(market_id);
+            group.source_backing_buckets[2 * asset_index + 1] =
+                percolator::BackingBucketV16::empty_for_market(market_id);
+        }
+    });
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        let profile0 = state::read_asset_oracle_profile(&acct.data, 0).unwrap();
+        for asset_index in FIRST_TAIL_ASSET..N {
+            state::write_asset_oracle_profile(&mut acct.data, asset_index, &profile0).unwrap();
+        }
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, DEPOSIT);
+    env.deposit(&lp, lp_account, DEPOSIT);
+
+    let legs: Vec<BatchTradeLeg> = (FIRST_TAIL_ASSET..N)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index: asset_index as u16,
+            size_q: POS_SCALE as i128,
+            exec_price: PRICE,
+            fee_bps: 0,
+        })
+        .collect();
+    env.svm.warp_to_slot(TRADE_SLOT);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::BatchTradeNoCpi { legs },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        &[&taker, &lp],
+    )
+    .expect("open 14 high-tail legs before resolved close");
+    assert_eq!(
+        percolator::active_bitmap_count_ones(env.portfolio_state(taker_account).active_bitmap),
+        TAIL_LEGS as u32
+    );
+
+    let resolve_cu = env.resolve();
+    assert_cu_within("10MiB max-tail ResolveMarket", resolve_cu, CUSTODY_CU_LIMIT);
+
+    let (taker_dest, taker_close_cu) = env.close_resolved_with_cu(&taker, taker_account);
+    let (lp_dest, lp_close_cu) = env.close_resolved_with_cu(&lp, lp_account);
+    println!(
+        "v16 10MiB CloseResolved max tail legs: assets={N}, legs={TAIL_LEGS}, \
+         account_len={new_len}, resolve_CU={resolve_cu}, taker_CU={taker_close_cu}, \
+         lp_CU={lp_close_cu}"
+    );
+    assert!(
+        taker_close_cu < 1_400_000,
+        "10MiB max-tail taker CloseResolved CU {taker_close_cu} must fit the tx limit"
+    );
+    assert!(
+        lp_close_cu < 1_400_000,
+        "10MiB max-tail LP CloseResolved CU {lp_close_cu} must fit the tx limit"
+    );
+    assert_eq!(env.token_amount(taker_dest), DEPOSIT as u64);
+    assert_eq!(env.token_amount(lp_dest), DEPOSIT as u64);
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.materialized_portfolio_count, 2,
+        "CloseResolved pays value but does not perform the separate account close"
+    );
+    assert_eq!(group.vault, 0);
+    assert_eq!(env.token_amount(env.vault), 0);
+}
+
 #[test]
 fn v16_bpf_10m_market_settle_b_high_asset_stays_bounded() {
     const N: usize = 5_834;
