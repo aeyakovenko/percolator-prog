@@ -52616,6 +52616,136 @@ fn v16_bpf_10m_market_batch_14_high_tail_assets_stays_bounded() {
 }
 
 #[test]
+fn v16_bpf_10m_market_stale_seven_high_tail_trade_stays_bounded() {
+    const N: usize = 5_834;
+    const TAIL_LEGS: usize = 7;
+    const FIRST_TAIL_ASSET: usize = N - TAIL_LEGS;
+    const OPEN_PRICE: u64 = 100;
+    const STALE_PRICE: u64 = 95;
+    const OPEN_SLOT: u64 = 1;
+    const STALE_SLOT: u64 = 16;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(
+        TAIL_LEGS as u16,
+        1_000,
+        1_000,
+        500,
+    );
+    for asset_index in 0..TAIL_LEGS as u16 {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, OPEN_SLOT, OPEN_PRICE);
+    }
+    let (_, template_group) = env.market_state();
+    let template_asset = template_group.assets[0];
+
+    let new_len = state::market_account_len_for_capacity(N).unwrap();
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        acct.data.resize(new_len, 0u8);
+        acct.lamports = acct.lamports.max(new_len as u64 * 10);
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+    env.mutate_market(|_cfg, group| {
+        group.config.max_market_slots = N as u32;
+        group.next_market_id = (N as u64) + 1;
+        for asset_index in FIRST_TAIL_ASSET..N {
+            let market_id = (asset_index as u64) + 1;
+            let mut asset = template_asset;
+            asset.market_id = market_id;
+            group.assets[asset_index] = asset;
+            group.source_backing_buckets[2 * asset_index] =
+                percolator::BackingBucketV16::empty_for_market(market_id);
+            group.source_backing_buckets[2 * asset_index + 1] =
+                percolator::BackingBucketV16::empty_for_market(market_id);
+        }
+    });
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        let profile0 = state::read_asset_oracle_profile(&acct.data, 0).unwrap();
+        for asset_index in FIRST_TAIL_ASSET..N {
+            state::write_asset_oracle_profile(&mut acct.data, asset_index, &profile0).unwrap();
+        }
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 100_000_000);
+    env.deposit(&lp, lp_account, 100_000_000);
+
+    let legs: Vec<BatchTradeLeg> = (FIRST_TAIL_ASSET..N)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index: asset_index as u16,
+            size_q: (10 * POS_SCALE) as i128,
+            exec_price: OPEN_PRICE,
+            fee_bps: 0,
+        })
+        .collect();
+    env.svm.warp_to_slot(OPEN_SLOT);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::BatchTradeNoCpi { legs },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        &[&taker, &lp],
+    )
+    .expect("open seven high-tail legs before stale threshold probe");
+
+    env.mutate_market(|_, group| {
+        for asset_index in FIRST_TAIL_ASSET..N {
+            group
+                .accrue_asset_to_not_atomic(asset_index, STALE_SLOT, STALE_PRICE, 0, true)
+                .unwrap();
+            group.assets[asset_index].raw_oracle_target_price = STALE_PRICE;
+        }
+    });
+    let stale_taker = env.portfolio_state(taker_account);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(stale_taker.active_bitmap),
+        TAIL_LEGS as u32
+    );
+    assert!(
+        stale_taker.health_cert.cert_oracle_epoch < env.market_state().1.oracle_epoch,
+        "setup must make the seven-leg certificate stale"
+    );
+
+    env.svm.warp_to_slot(STALE_SLOT);
+    env.svm.expire_blockhash();
+    let trade_cu = env.trade_asset_with_cu(
+        FIRST_TAIL_ASSET as u16,
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        -(POS_SCALE as i128),
+        STALE_PRICE,
+        0,
+    );
+    println!(
+        "v16 10MiB stale seven-leg high-tail TradeNoCpi: assets={N}, legs={TAIL_LEGS}, \
+         account_len={new_len}, CU={trade_cu}"
+    );
+    assert!(
+        trade_cu < 1_400_000,
+        "stale seven-leg high-tail trade CU {trade_cu} must fit the tx limit"
+    );
+    let taker_after = env.portfolio_state(taker_account);
+    assert_eq!(
+        active_leg_for_asset(&taker_after, FIRST_TAIL_ASSET).basis_pos_q,
+        (9 * POS_SCALE) as i128,
+        "stale inline settlement path still applies the requested reduction"
+    );
+    assert_eq!(env.market_state().1.vault as u64, env.token_amount(env.vault));
+}
+
+#[test]
 fn v16_bpf_10m_market_terminal_backing_ledger_paths_stay_bounded() {
     const N: usize = 5_834;
     const HIGH_ASSET: usize = N - 1;
