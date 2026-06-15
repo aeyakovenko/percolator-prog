@@ -33,6 +33,7 @@ fn craft(mode: u8, req_id: u64, lp: u64, asset: u64, oracle: u64, req: i128) -> 
         6 => price = 0,                              // zero exec price
         7 => { flags = FLAG_VALID; size = req / 2 }  // unflagged partial (no PARTIAL_OK)
         10 => { flags = FLAG_VALID | FLAG_PARTIAL_OK; size = req / 2 } // valid flagged partial
+        11 => { flags = FLAG_VALID | FLAG_PARTIAL_OK; price = 1; size = req / 2 } // valid partial at epsilon price
         _ => {}                                      // honest full fill -> wrapper accepts
     }
     let mut b = [0u8; 64];

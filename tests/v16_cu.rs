@@ -40671,6 +40671,182 @@ fn assert_cpi_spread_price_caps_paid_trade_driven_mark_move(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+fn try_hostile_partial_epsilon_cpi_trade_with_cu(
+    env: &mut V16CuEnv,
+    path: CpiReportedPricePath,
+    owner_a: &Keypair,
+    account_a: Pubkey,
+    owner_b: &Keypair,
+    account_b: Pubkey,
+    asset_index: u16,
+    size_q: i128,
+    fee_bps: u64,
+) -> Result<u64, String> {
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &account_b,
+        &owner_b.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 11; // flagged partial at exec_price=1.
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, owner_b, account_b, ctx, delegate, 1);
+    env.svm.expire_blockhash();
+    match path {
+        CpiReportedPricePath::Single => env.try_trade_cpi_with_cu_on_asset(
+            owner_a,
+            account_a,
+            owner_b,
+            account_b,
+            hostile,
+            ctx,
+            delegate,
+            asset_index,
+            size_q,
+            fee_bps,
+        ),
+        CpiReportedPricePath::Batch => env.send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index,
+                    size_q,
+                    fee_bps,
+                    limit_price: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(owner_a.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account_a, false),
+                AccountMeta::new(account_b, false),
+                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[owner_a],
+        ),
+    }
+}
+
+fn assert_cpi_partial_epsilon_price_caps_paid_trade_driven_mark_move(
+    mode: TradeDrivenMarkMode,
+    path: CpiReportedPricePath,
+) {
+    const ASSET_INDEX: u16 = 1;
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const MAX_FEE_BPS: u64 = 37;
+    const SIZE_Q: i128 = (1000u128 * POS_SCALE) as i128;
+    const PARTIAL_Q: u128 = 500u128 * POS_SCALE;
+
+    let accepted_price = oracle_v16::clamp_toward_engine_dt(MARK, 1, CAP_BPS, 4);
+    let candidate_mark =
+        percolator_prog::policy_v16::ewma_update(MARK, accepted_price, 1, 1, 5, 0, 0);
+    let candidate_move_bps = percolator_prog::policy_v16::price_move_bps_ceil(MARK, candidate_mark)
+        .expect("candidate partial mark move");
+    assert!(
+        candidate_move_bps > MAX_FEE_BPS,
+        "{mode:?} {path:?}: epsilon partial setup must exceed the fee cap before clamping"
+    );
+
+    let mut env = trade_driven_mark_cpi_env(mode, ASSET_INDEX);
+    let taker = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp = Keypair::new();
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 4_000_000_000);
+    env.deposit(&lp, lp_account, 4_000_000_000);
+    let insurance_before = env.market_state().1.insurance;
+
+    let trade = try_hostile_partial_epsilon_cpi_trade_with_cu(
+        &mut env,
+        path,
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        ASSET_INDEX,
+        SIZE_Q,
+        0,
+    );
+    assert!(
+        trade.is_ok(),
+        "{mode:?} {path:?}: valid epsilon-priced partial CPI fill must not DoS: {trade:?}"
+    );
+
+    let profile = trade_driven_mark_profile(&env, ASSET_INDEX);
+    assert!(
+        profile.mark_ewma_e6 < MARK,
+        "{mode:?} {path:?}: epsilon partial CPI fill should move the trade-driven mark down"
+    );
+    assert_eq!(
+        profile.mark_ewma_last_slot, 5,
+        "{mode:?} {path:?}: partial CPI fill records the trade slot"
+    );
+    let mark_move_bps =
+        percolator_prog::policy_v16::price_move_bps_ceil(MARK, profile.mark_ewma_e6)
+            .expect("actual partial mark move");
+    assert_eq!(
+        mark_move_bps, MAX_FEE_BPS,
+        "{mode:?} {path:?}: epsilon partial CPI mark movement should bind at the fee cap"
+    );
+
+    let group = env.market_state().1;
+    assert_eq!(
+        group.assets[ASSET_INDEX as usize].oi_eff_long_q, PARTIAL_Q,
+        "{mode:?} {path:?}: taker opens only the executed partial quantity"
+    );
+    assert_eq!(
+        group.assets[ASSET_INDEX as usize].oi_eff_short_q, PARTIAL_Q,
+        "{mode:?} {path:?}: LP opens only the executed partial quantity"
+    );
+    let fee_paid = group.insurance - insurance_before;
+    assert!(
+        fee_paid > 0,
+        "{mode:?} {path:?}: epsilon partial CPI fill must pay a fee"
+    );
+    let trade_notional = PARTIAL_Q * accepted_price as u128 / POS_SCALE;
+    let externality_notional = trade_notional * 2;
+    let paid_move_bps = fee_paid * 10_000 / externality_notional;
+    assert!(
+        mark_move_bps <= paid_move_bps as u64,
+        "{mode:?} {path:?}: partial mark move ({mark_move_bps} bps) must be covered by paid fee ({paid_move_bps} bps)"
+    );
+}
+
 fn assert_cpi_same_slot_trade_driven_mark_does_not_compound(
     mode: TradeDrivenMarkMode,
     path: CpiReportedPricePath,
@@ -40798,6 +40974,21 @@ fn v16_attack_cpi_spread_prices_cap_paid_ewma_and_hybrid_mark_move() {
                 path,
                 -((1000u128 * POS_SCALE) as i128),
             );
+        }
+    }
+}
+
+// CPI partial-fill parity for the EWMA/no-CPI fix: validate_matcher_return accepts nonzero
+// FLAG_PARTIAL_OK fills at any nonzero exec price. An epsilon-priced partial must therefore remain
+// live, but the trade-driven mark move must be fee-capped and sized to the executed partial only.
+#[test]
+fn v16_attack_cpi_partial_epsilon_prices_cap_paid_ewma_and_hybrid_mark_move() {
+    for mode in [
+        TradeDrivenMarkMode::EwmaMark,
+        TradeDrivenMarkMode::HybridAfterHours,
+    ] {
+        for path in [CpiReportedPricePath::Single, CpiReportedPricePath::Batch] {
+            assert_cpi_partial_epsilon_price_caps_paid_trade_driven_mark_move(mode, path);
         }
     }
 }
@@ -61382,8 +61573,8 @@ fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
 }
 
 // security.md sweep - TradeCpi flagged partial fill (#22/#39): the matcher ABI allows a partial
-// fill only when FLAG_PARTIAL_OK is set and the price equals the oracle echo. Exercise that accepted
-// path end-to-end so it cannot drift into an overfill, zero-fill, or fee-on-request-size bug.
+// fill only when FLAG_PARTIAL_OK is set. Exercise the accepted oracle-priced path end-to-end so it
+// cannot drift into an overfill, zero-fill, or fee-on-request-size bug.
 #[test]
 fn v16_attack_hostile_matcher_single_tradecpi_flagged_partial_fills_exactly() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
