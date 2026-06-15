@@ -50590,6 +50590,101 @@ fn v16_bpf_10m_market_force_close_high_asset_stays_bounded() {
     assert_eq!(restarted_group.assets[HIGH_ASSET].effective_price, PRICE);
 }
 
+// LoF/DoS sweep - permissionless reuse of a retired high-index slot takes a
+// different public branch from appending a new asset. At base fee 1, asset
+// 1727 is the highest index whose doubled fee remains below MAX_VAULT_TVL;
+// keep that boundary live on a max-size market account.
+#[test]
+fn v16_bpf_10m_market_permissionless_reuse_high_asset_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = 1_727;
+    const PRICE: u64 = 100;
+    const REUSE_PRICE: u64 = 175;
+    const RETIRE_SLOT: u64 = 2;
+    const REUSE_SLOT: u64 = 3;
+    const BASE_INIT_FEE: u128 = 1;
+    const EXPECTED_INIT_FEE: u128 = BASE_INIT_FEE << (HIGH_ASSET / 32);
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    let policy_cu = env.update_market_init_fee_policy_with_cu(BASE_INIT_FEE);
+    assert_cu_within(
+        "10MiB UpdateMarketInitFeePolicy",
+        policy_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    env.svm.warp_to_slot(RETIRE_SLOT);
+    let retire_cu = env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        HIGH_ASSET as u16,
+        RETIRE_SLOT,
+        0,
+    );
+    assert_cu_within(
+        "10MiB UpdateAssetLifecycle Retire",
+        retire_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (retired_cfg, retired_group) = env.market_state();
+    assert_eq!(
+        retired_group.assets[HIGH_ASSET].lifecycle,
+        AssetLifecycleV16::Retired
+    );
+    assert_eq!(retired_cfg.free_market_slot_count, 1);
+
+    let creator = Keypair::new();
+    let creator_key = creator.pubkey();
+    env.svm.warp_to_slot(REUSE_SLOT);
+    let (fee_source, reuse_cu) = env.activate_permissionless_asset_with_fee(
+        &creator,
+        HIGH_ASSET as u16,
+        REUSE_SLOT,
+        REUSE_PRICE,
+        creator_key,
+        creator_key,
+        creator_key,
+        creator_key,
+        EXPECTED_INIT_FEE,
+    );
+    println!(
+        "v16 10MiB permissionless high-asset reuse: assets={N}, account_len={account_len}, \
+         retire_CU={retire_cu}, reuse_CU={reuse_cu}"
+    );
+    assert_cu_within(
+        "10MiB permissionless high-asset reuse",
+        reuse_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let (cfg, reused_group) = env.market_state();
+    assert_eq!(cfg.free_market_slot_count, 0);
+    assert_eq!(
+        reused_group.assets[HIGH_ASSET].lifecycle,
+        AssetLifecycleV16::Active
+    );
+    assert_eq!(
+        reused_group.assets[HIGH_ASSET].effective_price,
+        REUSE_PRICE
+    );
+    assert_eq!(env.token_amount(fee_source), 0);
+    assert_eq!(env.token_amount(env.vault), EXPECTED_INIT_FEE as u64);
+    assert_eq!(reused_group.vault, EXPECTED_INIT_FEE);
+    assert_eq!(
+        reused_group.insurance_domain_budget[0] + reused_group.insurance_domain_budget[1],
+        EXPECTED_INIT_FEE,
+        "reuse fee is credited into zero-asset insurance domains"
+    );
+
+    let market_account = env.svm.get_account(&env.market).expect("market account");
+    let profile = state::read_asset_oracle_profile(&market_account.data, HIGH_ASSET).unwrap();
+    assert_eq!(profile.asset_admin, creator_key.to_bytes());
+    assert_eq!(profile.insurance_authority, creator_key.to_bytes());
+    assert_eq!(profile.insurance_operator, creator_key.to_bytes());
+    assert_eq!(profile.backing_bucket_authority, creator_key.to_bytes());
+    assert_eq!(profile.oracle_authority, creator_key.to_bytes());
+}
+
 #[test]
 fn v16_bpf_10m_market_recovery_tools_high_asset_stay_bounded() {
     const N: usize = 5_834;
