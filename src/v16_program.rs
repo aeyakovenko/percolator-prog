@@ -21,6 +21,7 @@ use solana_program::{
     clock::Clock,
     declare_id,
     entrypoint::ProgramResult,
+    hash::hashv,
     instruction::{AccountMeta, Instruction as SolInstruction},
     program::{invoke, invoke_signed},
     program_error::ProgramError,
@@ -6534,7 +6535,7 @@ pub mod processor {
             max_market_slots,
             &[asset_index],
         )?;
-        let req_id = current_slot_pre.wrapping_add(1);
+        let req_id = matcher_request_id(current_slot_pre, matcher_ctx)?;
         let lp_account_id = matcher_lp_account_id(&delegate);
 
         invoke_matcher(
@@ -6853,7 +6854,7 @@ pub mod processor {
             .ok_or(ProgramError::NotEnoughAccountKeys)?;
         validate_matcher_tail(tail, market_ai, account_a_ai, account_b_ai, program_id)?;
 
-        let req_id = current_slot_pre.wrapping_add(1);
+        let req_id = matcher_request_id(current_slot_pre, matcher_ctx)?;
         let lp_account_id = matcher_lp_account_id(&delegate);
 
         // Build the matcher batch request: per leg, (asset, that asset's oracle price, signed size).
@@ -11560,6 +11561,26 @@ pub mod processor {
     fn matcher_lp_account_id(delegate: &Pubkey) -> u64 {
         let bytes = delegate.to_bytes();
         u64::from_le_bytes(bytes[0..8].try_into().unwrap())
+    }
+
+    fn matcher_request_id(
+        current_slot: u64,
+        matcher_ctx: &AccountInfo,
+    ) -> Result<u64, ProgramError> {
+        let slot_bytes = current_slot.to_le_bytes();
+        let data = matcher_ctx.try_borrow_data()?;
+        let prefix = data
+            .get(..matcher_abi::MATCHER_RETURN_BYTES)
+            .ok_or(ProgramError::InvalidAccountData)?;
+        let digest = hashv(&[
+            b"percolator-v16-matcher-req",
+            &slot_bytes,
+            matcher_ctx.key.as_ref(),
+            prefix,
+        ]);
+        Ok(u64::from_le_bytes(
+            digest.to_bytes()[0..8].try_into().unwrap(),
+        ))
     }
 
     fn invoke_matcher<'a>(

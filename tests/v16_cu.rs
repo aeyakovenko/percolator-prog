@@ -51204,6 +51204,112 @@ fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
     );
 }
 
+// security.md sweep - stale matcher context replay (#39/#49): the single TradeCpi path reads the
+// matcher return from a persistent matcher-owned context account. A matcher that returns Ok without
+// writing a fresh prefix must not let a taker replay the previous same-slot return.
+#[test]
+fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_tradecpi_return() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 10_000_000);
+    env.deposit(&lp, la, 10_000_000);
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &la,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 9; // faithful fill writes a valid return prefix.
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
+
+    let size_q = POS_SCALE as i128;
+    let send_trade = |env: &mut V16CuEnv| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker],
+        )
+    };
+
+    let first = send_trade(&mut env);
+    assert!(first.is_ok(), "faithful control fill writes return: {first:?}");
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(ta), 0).basis_pos_q,
+        size_q
+    );
+
+    let mut stale_ctx = env.svm.get_account(&ctx).unwrap();
+    assert_eq!(
+        u32::from_le_bytes(stale_ctx.data[0..4].try_into().unwrap()),
+        MATCHER_ABI_VERSION,
+        "control fill left a valid return prefix in matcher context"
+    );
+    stale_ctx.data[64] = 12; // no-write mode outside the return prefix.
+    env.svm.set_account(ctx, stale_ctx).unwrap();
+
+    let replay = send_trade(&mut env);
+    assert!(
+        replay.is_err(),
+        "a matcher that returns Ok without writing must not replay the stale context return: {replay:?}"
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(ta), 0).basis_pos_q,
+        size_q,
+        "no stale replay fill"
+    );
+}
+
 // DoS/manipulation rate-limit: PushEwmaMark feeds a SMOOTHED mark (EWMA over dt slots). A mark
 // authority must not defeat the per-slot rate limit by pushing repeatedly within ONE slot (each push
 // compounding toward an extreme value -> instant mark manipulation -> mis-liquidation). The EWMA

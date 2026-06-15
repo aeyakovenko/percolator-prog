@@ -1,7 +1,8 @@
 //! Adversarial matcher for end-to-end testing of the wrapper's validate_matcher_return on BOTH the
 //! batch CPI (tag 3, via set_return_data) and the single TradeCpi (tag 0, via the ctx-account return
-//! region). It returns CRAFTED returns; the attack "mode" is read from ctx_account.data[0] (set by the
-//! test). The wrapper MUST reject every hostile mode and accept only the honest one.
+//! region). It returns CRAFTED returns; the attack "mode" is read from ctx_account.data[0] (or
+//! data[64] when nonzero, for stale-return probes). The wrapper MUST reject every hostile mode and
+//! accept only the honest one.
 #![allow(unexpected_cfgs)]
 use solana_program::{
     account_info::AccountInfo, entrypoint, entrypoint::ProgramResult, program::set_return_data,
@@ -57,7 +58,13 @@ fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResul
             let lp = u64::from_le_bytes(data[11..19].try_into().unwrap());
             let oracle = u64::from_le_bytes(data[19..27].try_into().unwrap());
             let req = i128::from_le_bytes(data[27..43].try_into().unwrap());
-            let mode = accounts[1].try_borrow_data()?[0];
+            let mode = {
+                let d = accounts[1].try_borrow_data()?;
+                if d.len() > 64 && d[64] != 0 { d[64] } else { d[0] }
+            };
+            if mode == 12 {
+                return Ok(());
+            }
             let rec = craft(mode, req_id, lp, asset, oracle, req);
             let mut d = accounts[1].try_borrow_mut_data()?;
             d[0..64].copy_from_slice(&rec);
@@ -71,7 +78,13 @@ fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResul
             }
             let req_id = u64::from_le_bytes(data[2..10].try_into().unwrap());
             let lp = u64::from_le_bytes(data[10..18].try_into().unwrap());
-            let mode = accounts[1].try_borrow_data()?[0];
+            let mode = {
+                let d = accounts[1].try_borrow_data()?;
+                if d.len() > 64 && d[64] != 0 { d[64] } else { d[0] }
+            };
+            if mode == 12 {
+                return Ok(());
+            }
             let mut out = [0u8; 16 * 64];
             let emit = if mode == 8 { n.saturating_sub(1) } else { n }; // mode 8 = short return length
             for i in 0..n {
