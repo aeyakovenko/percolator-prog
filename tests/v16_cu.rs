@@ -49331,6 +49331,185 @@ fn v16_attack_update_asset_authority_rejects_zero_domain_authority() {
     env.close_slab_with_cu();
 }
 
+// LoF/terminal authority sweep: UpdateAuthority covers market/asset-0 handoff, but non-base assets
+// use UpdateAssetAuthority. After resolution, rekeying a funded asset's insurance/backing authorities
+// must revoke the stale domain keys and keep terminal withdrawals live for the new keys.
+#[test]
+fn v16_attack_terminal_asset_authority_handoff_revokes_stale_domain_keys() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let old_insurance = Keypair::new();
+    let old_backing = Keypair::new();
+    let new_insurance = Keypair::new();
+    let new_backing = Keypair::new();
+
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        old_insurance.pubkey(),
+        old_insurance.pubkey(),
+        old_backing.pubkey(),
+        admin.pubkey(),
+    );
+    env.top_up_insurance_domain_with_authority(&old_insurance, 2, 100);
+    env.top_up_backing_bucket_with_authority(&old_backing, 2, 100, 100_000);
+    let (_, funded) = env.market_state();
+    assert_eq!(funded.insurance_domain_budget[2], 100);
+    assert_eq!(
+        funded.source_backing_buckets[2].fresh_unliened_backing_num,
+        100 * BOUND_SCALE,
+        "asset-1 backing is funded through the old backing authority"
+    );
+    assert_eq!(env.token_amount(env.vault), 200);
+
+    env.resolve();
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&new_insurance),
+        1,
+        processor::ASSET_AUTH_INSURANCE,
+        new_insurance.pubkey().to_bytes(),
+    )
+    .expect("asset admin rotates terminal insurance authority");
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&new_backing),
+        1,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        new_backing.pubkey().to_bytes(),
+    )
+    .expect("asset admin rotates terminal backing authority");
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(profile.insurance_authority, new_insurance.pubkey().to_bytes());
+    assert_eq!(
+        profile.backing_bucket_authority,
+        new_backing.pubkey().to_bytes()
+    );
+
+    let old_insurance_dest = env.token_account(old_insurance.pubkey(), 0);
+    let market_before_old_insurance = env.svm.get_account(&env.market).unwrap();
+    let vault_before_old_insurance = env.svm.get_account(&env.vault).unwrap();
+    let old_insurance_dest_before = env.svm.get_account(&old_insurance_dest).unwrap();
+    env.svm.expire_blockhash();
+    let stale_insurance = env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 1,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(old_insurance.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(old_insurance_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&old_insurance],
+    );
+    assert!(
+        stale_insurance.is_err(),
+        "stale asset-1 insurance authority must not drain terminal insurance after handoff"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_old_insurance);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before_old_insurance);
+    assert_eq!(
+        env.svm.get_account(&old_insurance_dest).unwrap(),
+        old_insurance_dest_before
+    );
+
+    let old_backing_dest = env.token_account(old_backing.pubkey(), 0);
+    let market_before_old_backing = env.svm.get_account(&env.market).unwrap();
+    let vault_before_old_backing = env.svm.get_account(&env.vault).unwrap();
+    let old_backing_dest_before = env.svm.get_account(&old_backing_dest).unwrap();
+    env.svm.expire_blockhash();
+    let stale_backing = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(old_backing.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(old_backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&old_backing],
+    );
+    assert!(
+        stale_backing.is_err(),
+        "stale asset-1 backing authority must not drain terminal backing after handoff"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_old_backing);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before_old_backing);
+    assert_eq!(
+        env.svm.get_account(&old_backing_dest).unwrap(),
+        old_backing_dest_before
+    );
+
+    let new_insurance_dest = env.token_account(new_insurance.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let current_insurance = env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 1,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(new_insurance.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(new_insurance_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&new_insurance],
+    );
+    assert!(
+        current_insurance.is_ok(),
+        "current asset-1 insurance authority can drain terminal insurance: {current_insurance:?}"
+    );
+    assert_eq!(env.token_amount(new_insurance_dest), 100);
+
+    let new_backing_dest = env.token_account(new_backing.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let current_backing = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(new_backing.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(new_backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&new_backing],
+    );
+    assert!(
+        current_backing.is_ok(),
+        "current asset-1 backing authority can drain terminal backing: {current_backing:?}"
+    );
+    assert_eq!(env.token_amount(new_backing_dest), 100);
+
+    let (_, drained) = env.market_state();
+    assert_eq!(drained.insurance, 0);
+    assert_eq!(drained.insurance_domain_budget[2], 0);
+    assert_eq!(
+        drained.source_backing_buckets[2].fresh_unliened_backing_num,
+        0
+    );
+    assert_eq!(drained.vault as u64, env.token_amount(env.vault));
+    env.close_slab_with_cu();
+}
+
 // Product spec — cross-asset BACKING isolation (counterpart to the domain-insurance isolation test):
 // a faulty/insolvent permissionless asset must not drain ANOTHER asset's backing bucket. Fund both
 // assets' backing, drive asset 1 insolvent + liquidate, and assert asset 0's backing buckets are
