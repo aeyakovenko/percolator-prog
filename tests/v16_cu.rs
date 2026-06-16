@@ -49883,6 +49883,120 @@ fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit(
     assert_domain_budget_remaining_total_consistent(&funded_group, "funded permissionless create");
 }
 
+// full-interface sweep: permissionless asset activation charges a fee on a path that can grow the
+// market account and credit asset-0 insurance. A loaded non-SPL executable token-program id must reject
+// before any realloc, asset install, fee debit, or insurance/vault accounting change.
+#[test]
+fn v16_attack_permissionless_create_rejects_wrong_token_program_before_realloc() {
+    const FEE: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(FEE);
+    env.svm.warp_to_slot(1);
+
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    let source = env.token_account(creator.pubkey(), FEE as u64);
+    let fake_token_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(fake_token_program, &matcher_bytes);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let (_, group_before) = env.market_state();
+    assert_eq!(
+        group_before.config.max_market_slots, 1,
+        "starts as a one-asset market"
+    );
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        rejected.is_err(),
+        "permissionless create must reject a loaded non-SPL token program"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-token activation must not realloc or install a new asset"
+    );
+    assert_eq!(
+        env.svm.get_account(&source).unwrap(),
+        source_before,
+        "wrong-token activation must not debit the creator's fee source"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "wrong-token activation must not touch canonical vault custody"
+    );
+    let (_, rejected_group) = env.market_state();
+    assert_eq!(
+        rejected_group.config.max_market_slots, group_before.config.max_market_slots,
+        "wrong-token activation must not append a market slot"
+    );
+    assert_eq!(rejected_group.vault, group_before.vault);
+    assert_eq!(rejected_group.insurance, group_before.insurance);
+    assert_eq!(
+        rejected_group.insurance_domain_budget,
+        group_before.insurance_domain_budget
+    );
+
+    let control_source = env.token_account(creator.pubkey(), FEE as u64);
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(control_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        accepted.is_ok(),
+        "same permissionless create succeeds with the real token program: {accepted:?}"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.config.max_market_slots, 2);
+    assert_eq!(group.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(env.token_amount(control_source), 0);
+    assert_eq!(env.token_amount(env.vault), FEE as u64);
+    assert_eq!(group.vault, FEE);
+    assert_eq!(group.insurance, FEE);
+    assert_domain_budget_remaining_total_consistent(&group, "permissionless wrong-token control");
+}
+
 // security.md sweep - permissionless init-fee vault binding (#44/#48): asset activation charges
 // the public creator before growing a new market slot. A funded creator must not be able to route the
 // fee into a non-canonical vault-authority-owned token account and still install a new asset, which
