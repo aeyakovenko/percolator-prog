@@ -20962,6 +20962,84 @@ fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
 }
 
 #[test]
+fn v16_attack_lp_can_disable_broken_matcher_config_without_external_accounts() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+
+    let enabled_cfg = env.portfolio_matcher_config(lp);
+    assert_eq!(enabled_cfg.enabled, 1);
+    assert_eq!(enabled_cfg.matcher_program, matcher_program.to_bytes());
+    assert_eq!(enabled_cfg.matcher_context, ctx.to_bytes());
+    assert_eq!(enabled_cfg.matcher_delegate, delegate.to_bytes());
+
+    let mut broken_ctx = env.svm.get_account(&ctx).unwrap();
+    broken_ctx.owner = Pubkey::new_unique();
+    env.svm.set_account(ctx, broken_ctx).unwrap();
+
+    let market_before_bad_fill = env.svm.get_account(&env.market).unwrap();
+    let taker_before_bad_fill = env.svm.get_account(&taker).unwrap();
+    let lp_before_bad_fill = env.svm.get_account(&lp).unwrap();
+    let ctx_before_bad_fill = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let bad_fill = env.send(
+        ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q: (5 * POS_SCALE) as i128,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+        vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker_owner],
+    );
+    assert!(
+        bad_fill.is_err(),
+        "a corrupted external matcher context must not be usable while the LP config is enabled"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_bad_fill);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before_bad_fill);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before_bad_fill);
+    assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before_bad_fill);
+
+    let market_before_disable = env.svm.get_account(&env.market).unwrap();
+    env.set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 0);
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_disable);
+    assert_eq!(
+        env.portfolio_matcher_config(lp),
+        state::PortfolioMatcherConfigV16::default(),
+        "LP owner must be able to revoke a broken matcher tuple without supplying the broken dependency"
+    );
+
+    let lp_after_disable = env.svm.get_account(&lp).unwrap();
+    let reenable = env.try_set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 1);
+    assert!(
+        reenable.is_err(),
+        "re-enabling must still validate the external matcher context"
+    );
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_after_disable);
+    assert_eq!(
+        env.portfolio_matcher_config(lp),
+        state::PortfolioMatcherConfigV16::default()
+    );
+}
+
+#[test]
 fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
