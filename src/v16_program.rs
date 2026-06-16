@@ -21,6 +21,7 @@ use solana_program::{
     clock::Clock,
     declare_id,
     entrypoint::ProgramResult,
+    hash::hashv,
     instruction::{AccountMeta, Instruction as SolInstruction},
     program::{invoke, invoke_signed},
     program_error::ProgramError,
@@ -6534,7 +6535,17 @@ pub mod processor {
             max_market_slots,
             &[asset_index],
         )?;
-        let req_id = current_slot_pre.wrapping_add(1);
+        let req_id = matcher_context_bound_req_id(
+            current_slot_pre,
+            market_ai.key,
+            account_a_ai.key,
+            account_b_ai.key,
+            matcher_prog.key,
+            matcher_ctx,
+            asset_index,
+            oracle_price,
+            size_q,
+        )?;
         let lp_account_id = matcher_lp_account_id(&delegate);
 
         invoke_matcher(
@@ -11560,6 +11571,40 @@ pub mod processor {
     fn matcher_lp_account_id(delegate: &Pubkey) -> u64 {
         let bytes = delegate.to_bytes();
         u64::from_le_bytes(bytes[0..8].try_into().unwrap())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn matcher_context_bound_req_id(
+        current_slot: u64,
+        market: &Pubkey,
+        account_a: &Pubkey,
+        account_b: &Pubkey,
+        matcher_program: &Pubkey,
+        matcher_ctx: &AccountInfo<'_>,
+        asset_index: u16,
+        oracle_price_e6: u64,
+        req_size: i128,
+    ) -> Result<u64, ProgramError> {
+        let current_slot_bytes = current_slot.to_le_bytes();
+        let asset_index_bytes = asset_index.to_le_bytes();
+        let oracle_price_bytes = oracle_price_e6.to_le_bytes();
+        let req_size_bytes = req_size.to_le_bytes();
+        let ctx_data = matcher_ctx.try_borrow_data()?;
+        let ctx_len = core::cmp::min(ctx_data.len(), matcher_abi::MATCHER_RETURN_BYTES);
+        let h = hashv(&[
+            b"percolator-v16-single-matcher-req",
+            &current_slot_bytes,
+            market.as_ref(),
+            account_a.as_ref(),
+            account_b.as_ref(),
+            matcher_program.as_ref(),
+            matcher_ctx.key.as_ref(),
+            &asset_index_bytes,
+            &oracle_price_bytes,
+            &req_size_bytes,
+            &ctx_data[..ctx_len],
+        ]);
+        Ok(u64::from_le_bytes(h.as_ref()[0..8].try_into().unwrap()))
     }
 
     fn invoke_matcher<'a>(
