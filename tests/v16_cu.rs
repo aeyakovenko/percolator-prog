@@ -66373,6 +66373,69 @@ fn v16_attack_stale_policy_writes_are_config_only_and_resolution_stays_live() {
     env.close_slab_with_cu();
 }
 
+// LoF/DoS sweep (cron135): stale-resolve freezes value-moving live paths, but it must not
+// trap already-empty portfolios in the materialized count. Owner dematerialization stays live
+// in the stale window so permissionless resolve and terminal CloseSlab cannot be blocked by
+// abandoned empty accounts.
+#[test]
+fn v16_attack_stale_empty_portfolio_close_remains_live_before_resolve() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "fresh empty portfolio is materialized before the stale boundary"
+    );
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+    env.svm.warp_to_slot(40);
+    assert!(
+        oracle_v16::permissionless_stale_matured(&env.market_state().0, 40),
+        "test setup is past the authenticated stale-resolve boundary"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+
+    let market_lamports_before_close = env.svm.get_account(&env.market).unwrap().lamports;
+    let portfolio_lamports_before_close = env.svm.get_account(&portfolio).unwrap().lamports;
+    let close_cu = env.close_portfolio_with_cu(&owner, portfolio);
+    assert_cu_within("stale empty portfolio close", close_cu, CUSTODY_CU_LIMIT);
+
+    let (_, group_after_close) = env.market_state();
+    assert_eq!(
+        group_after_close.mode,
+        MarketModeV16::Live,
+        "ClosePortfolio dematerializes only; it does not resolve the market"
+    );
+    assert_eq!(
+        group_after_close.materialized_portfolio_count, 0,
+        "empty stale-window portfolio no longer blocks terminal wind-down"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports_before_close + portfolio_lamports_before_close,
+        "stale ClosePortfolio still sweeps rent into the market slab"
+    );
+    if let Some(closed_account) = env.svm.get_account(&portfolio) {
+        assert_eq!(closed_account.lamports, 0);
+        assert!(closed_account.data.is_empty() || !state::is_initialized(&closed_account.data));
+    }
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    )
+    .expect("permissionless resolve remains live after stale-window empty close");
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+    env.close_slab_with_cu();
+}
+
 // security.md sweep - stale-resolve materialization DoS (#30/#48): InitPortfolio is public and
 // increments materialized_portfolio_count. Once the authenticated clock reaches the permissionless
 // resolve threshold, a new empty portfolio must not be materializable in the stale window, or an
