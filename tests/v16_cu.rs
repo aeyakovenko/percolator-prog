@@ -12070,6 +12070,163 @@ fn v16_cu_permissionless_crank_refresh_is_bounded() {
     assert!(refresh_cu <= CRANK_CU_LIMIT);
 }
 
+// Public-interface DoS sweep: PermissionlessCrank accepts a tail for hybrid oracle updates, but
+// auth-mark/manual refreshes ignore it. A hostile cranker can still stuff duplicated readonly
+// accounts through the deployed adapter path; this must not turn a live refresh into a CU amplifier.
+#[test]
+fn v16_attack_permissionless_crank_auth_mark_duplicate_ignored_tail_is_cu_bounded() {
+    const UNIQUE_EXTRAS: usize = 28;
+    const NEXT_MARK: u64 = 110;
+    const CRANK_SLOT: u64 = 3;
+
+    fn setup_pending_auth_mark() -> (V16CuEnv, Pubkey) {
+        let mut env = V16CuEnv::new();
+        env.configure_auth_mark_with_cu(0, 100);
+        let long_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short_owner = Keypair::new();
+        let short = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long, 1_000_000);
+        env.deposit(&short_owner, short, 1_000_000);
+        env.trade_with_cu(
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            POS_SCALE as i128,
+            100,
+            0,
+        );
+        env.svm.warp_to_slot(CRANK_SLOT);
+        env.push_auth_mark_with_cu(CRANK_SLOT, NEXT_MARK);
+        assert_eq!(
+            env.market_state().1.assets[0].effective_price, 100,
+            "PushAuthMark stores the target but does not apply it before the crank"
+        );
+        (env, long)
+    }
+
+    let (mut baseline_env, baseline_long) = setup_pending_auth_mark();
+    baseline_env.svm.expire_blockhash();
+    let baseline_cu = baseline_env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: CRANK_SLOT,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(baseline_env.payer.pubkey(), true),
+                AccountMeta::new(baseline_env.market, false),
+                AccountMeta::new(baseline_long, false),
+            ],
+            &[],
+        )
+        .expect("baseline auth-mark refresh");
+    let (_, baseline_after) = baseline_env.market_state();
+    assert_eq!(
+        baseline_after.assets[0].effective_price, NEXT_MARK,
+        "baseline refresh applies the pending auth mark"
+    );
+
+    let (mut hostile_env, hostile_long) = setup_pending_auth_mark();
+    let before = hostile_env.market_state().1;
+    let mut extras = Vec::with_capacity(UNIQUE_EXTRAS);
+    for _ in 0..UNIQUE_EXTRAS {
+        let key = Pubkey::new_unique();
+        hostile_env
+            .svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: Vec::new(),
+                    owner: solana_sdk::system_program::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        extras.push(key);
+    }
+    let mut hostile_accounts = vec![
+        AccountMeta::new(hostile_env.payer.pubkey(), true),
+        AccountMeta::new(hostile_env.market, false),
+        AccountMeta::new(hostile_long, false),
+    ];
+    hostile_accounts.extend(
+        extras
+            .iter()
+            .copied()
+            .map(|key| AccountMeta::new_readonly(key, false)),
+    );
+    hostile_accounts.extend(
+        extras
+            .iter()
+            .rev()
+            .copied()
+            .map(|key| AccountMeta::new_readonly(key, false)),
+    );
+
+    hostile_env.svm.expire_blockhash();
+    let hostile_cu = hostile_env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: CRANK_SLOT,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            hostile_accounts,
+            &[],
+        )
+        .expect("auth-mark refresh with duplicated ignored tail");
+
+    println!(
+        "v16 PermissionlessCrank auth-mark duplicate ignored tail: baseline={baseline_cu}, hostile={hostile_cu}"
+    );
+    assert!(
+        hostile_cu > baseline_cu,
+        "duplicated tail must reach the deployed adapter duplicate-account path"
+    );
+    assert!(
+        hostile_cu <= baseline_cu + 75_000,
+        "duplicated ignored tail consumed {hostile_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "PermissionlessCrank auth-mark duplicate ignored tail",
+        hostile_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (_, hostile_after) = hostile_env.market_state();
+    assert_eq!(
+        hostile_after.assets[0].effective_price, NEXT_MARK,
+        "ignored tail must not block auth-mark refresh progress"
+    );
+    assert_eq!(hostile_after.vault, before.vault, "refresh moves no custody");
+    assert_eq!(
+        hostile_after.c_tot, before.c_tot,
+        "refresh cannot mint or burn capital"
+    );
+    assert_eq!(
+        hostile_after.insurance, before.insurance,
+        "ignored tail cannot mint a cranker reward"
+    );
+    assert_eq!(
+        active_leg_for_asset(&hostile_env.portfolio_state(hostile_long), 0).basis_pos_q,
+        POS_SCALE as i128,
+        "hostile-tail refresh leaves the user position intact"
+    );
+}
+
 // PermissionlessCrank action=0 ignores the caller fee_bps field. A hostile cranker supplying
 // u64::MAX must not inject fees or DoS refresh progress.
 #[test]
