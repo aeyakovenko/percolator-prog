@@ -40088,6 +40088,107 @@ fn v16_attack_force_close_requires_opposite_sides() {
     );
 }
 
+// security.md sweep - ForceCloseAbandonedAsset order independence (#2/#33/#48): the unsigned recovery
+// cleanup path accepts two victim portfolios and must close exposure based on their leg sides, not on
+// caller-supplied account order. Existing force-close controls pass the long first; this drives the
+// short-first branch and half-closes so a sign/direction inversion would increase OI instead of making
+// bounded progress.
+#[test]
+fn v16_attack_force_close_short_first_pair_reduces_without_direction_inversion() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    const DELAY: u64 = 5;
+    const SHUT: u64 = 10;
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(long), 1).side,
+        SideV16::Long
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(short), 1).side,
+        SideV16::Short
+    );
+
+    env.svm.warp_to_slot(SHUT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        SHUT,
+        0,
+    );
+    env.svm.warp_to_slot(SHUT + DELAY + 1);
+
+    let cranker = Keypair::new();
+    let half_close = POS_SCALE / 2;
+    let cu = env
+        .try_force_close_abandoned_asset_with_cu(
+            &cranker,
+            short,
+            long,
+            1,
+            SHUT + DELAY + 1,
+            half_close,
+        )
+        .expect("short-first force-close must make progress");
+    assert_cu_within(
+        "ForceCloseAbandonedAsset short-first half-close",
+        cu,
+        TRADE_CU_LIMIT,
+    );
+
+    let group = env.market_state().1;
+    assert_eq!(
+        group.assets[1].oi_eff_long_q,
+        POS_SCALE - half_close,
+        "short-first force-close reduces long OI by exactly close_q"
+    );
+    assert_eq!(
+        group.assets[1].oi_eff_short_q,
+        POS_SCALE - half_close,
+        "short-first force-close reduces short OI by exactly close_q"
+    );
+    let long_leg = active_leg_for_asset(&env.portfolio_state(long), 1);
+    let short_leg = active_leg_for_asset(&env.portfolio_state(short), 1);
+    assert_eq!(long_leg.side, SideV16::Long, "long side did not flip");
+    assert_eq!(short_leg.side, SideV16::Short, "short side did not flip");
+    assert_eq!(
+        long_leg.basis_pos_q,
+        (POS_SCALE - half_close) as i128,
+        "long position shrank instead of growing"
+    );
+    assert_eq!(
+        short_leg.basis_pos_q,
+        -((POS_SCALE - half_close) as i128),
+        "short position shrank instead of growing"
+    );
+    assert_eq!(
+        group.vault as u64,
+        env.token_amount(env.vault),
+        "short-first force-close keeps accounting tied to custody"
+    );
+    assert!(
+        group.vault >= group.c_tot + group.insurance,
+        "senior conservation after short-first force-close"
+    );
+}
+
 // security.md sweep - ForceCloseAbandonedAsset oversized close_q (#14/#33/#48): the cranker controls
 // a u128 close_q, but the handler must clamp it to the opposing abandoned positions before casting to
 // the signed trade request. A huge close_q must not wrap negative, over-close, or corrupt OI.
