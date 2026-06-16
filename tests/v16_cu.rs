@@ -66106,6 +66106,195 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     );
 }
 
+// LoF/DoS sweep (cron135): several marketauth policy updates are intentionally config-only and
+// do not use the stale-resolve freeze gate. If those writes are accepted after the authenticated
+// stale boundary, they must not reopen any value-moving path or prevent permissionless resolve,
+// resolved payouts, empty-portfolio cleanup, or final slab reclaim.
+#[test]
+fn v16_attack_stale_policy_writes_are_config_only_and_resolution_stays_live() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let owner_a = Keypair::new();
+    let owner_b = Keypair::new();
+    let portfolio_a = env.create_portfolio(&owner_a);
+    let portfolio_b = env.create_portfolio(&owner_b);
+    env.deposit(&owner_a, portfolio_a, 100_000);
+    env.deposit(&owner_b, portfolio_b, 100_000);
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+    env.svm.warp_to_slot(40);
+    assert!(
+        oracle_v16::permissionless_stale_matured(&env.market_state().0, 40),
+        "test setup is past the authenticated stale-resolve boundary"
+    );
+
+    let send_policy = |env: &mut V16CuEnv, ix: ProgInstruction, label: &str| {
+        env.svm.expire_blockhash();
+        let r = env.send(
+            ix,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            r.is_ok(),
+            "{label} remains an accepted config-only write after stale maturity: {r:?}"
+        );
+    };
+    send_policy(
+        &mut env,
+        ProgInstruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: 1_234,
+        },
+        "UpdateLiquidationFeePolicy",
+    );
+    send_policy(
+        &mut env,
+        ProgInstruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 4_321,
+        },
+        "UpdateMaintenanceFeePolicy",
+    );
+    send_policy(
+        &mut env,
+        ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps: 9_999 },
+        "UpdateFeeRedirectPolicy",
+    );
+    send_policy(
+        &mut env,
+        ProgInstruction::UpdateMarketInitFeePolicy { min_init_fee: 77 },
+        "UpdateMarketInitFeePolicy",
+    );
+    send_policy(
+        &mut env,
+        ProgInstruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 88,
+        },
+        "UpdateTradeFeePolicy",
+    );
+    send_policy(
+        &mut env,
+        ProgInstruction::UpdateBackingFeePolicy {
+            domain: 0,
+            fee_bps: 55,
+            insurance_share_bps: 5_000,
+        },
+        "UpdateBackingFeePolicy",
+    );
+
+    let (cfg_after_policy, group_after_policy) = env.market_state();
+    assert_eq!(group_after_policy.mode, MarketModeV16::Live);
+    assert_eq!(cfg_after_policy.liquidation_cranker_fee_share_bps, 1_234);
+    assert_eq!(cfg_after_policy.maintenance_cranker_fee_share_bps, 4_321);
+    assert_eq!(cfg_after_policy.fee_redirect_to_market_0_bps, 9_999);
+    assert_eq!(cfg_after_policy.permissionless_market_init_fee, 77);
+    assert_eq!(cfg_after_policy.trade_fee_base_bps, 88);
+    assert_eq!(cfg_after_policy.backing_trade_fee_policy_count, 1);
+    let market_after_policy = env.svm.get_account(&env.market).unwrap();
+    let portfolio_a_after_policy = env.svm.get_account(&portfolio_a).unwrap();
+    let portfolio_b_after_policy = env.svm.get_account(&portfolio_b).unwrap();
+    let vault_after_policy = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let stale_trade = env.send(
+        ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        vec![
+            AccountMeta::new(owner_a.pubkey(), true),
+            AccountMeta::new(owner_b.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio_a, false),
+            AccountMeta::new(portfolio_b, false),
+        ],
+        &[&owner_a, &owner_b],
+    );
+    assert!(
+        stale_trade.is_err(),
+        "accepted stale policy writes must not reopen TradeNoCpi"
+    );
+
+    let stale_topup_source = env.token_account_for_mint(env.mint, admin.pubkey(), 25);
+    let stale_topup_source_before = env.svm.get_account(&stale_topup_source).unwrap();
+    env.svm.expire_blockhash();
+    let stale_topup = env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 0,
+            amount: 25,
+            expiry_slot: 1_000,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_topup_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale_topup.is_err(),
+        "accepted stale policy writes must not reopen value-in backing top-ups"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_after_policy,
+        "rejected stale value paths leave the post-policy market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio_a).unwrap(),
+        portfolio_a_after_policy,
+        "rejected stale value paths leave portfolio A unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio_b).unwrap(),
+        portfolio_b_after_policy,
+        "rejected stale value paths leave portfolio B unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_after_policy,
+        "rejected stale value paths move no custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_topup_source).unwrap(),
+        stale_topup_source_before,
+        "rejected stale top-up pulls no source tokens"
+    );
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    )
+    .expect("permissionless resolve remains live after stale config-only policy writes");
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+
+    env.svm.warp_to_slot(46);
+    let dest_a = env.close_resolved(&owner_a, portfolio_a);
+    let dest_b = env.close_resolved(&owner_b, portfolio_b);
+    assert_eq!(env.token_amount(dest_a), 100_000);
+    assert_eq!(env.token_amount(dest_b), 100_000);
+    env.close_portfolio_with_cu(&owner_a, portfolio_a);
+    env.close_portfolio_with_cu(&owner_b, portfolio_b);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "empty resolved portfolios remain cleanable after stale policy writes"
+    );
+    env.close_slab_with_cu();
+}
+
 // security.md sweep - stale-resolve materialization DoS (#30/#48): InitPortfolio is public and
 // increments materialized_portfolio_count. Once the authenticated clock reaches the permissionless
 // resolve threshold, a new empty portfolio must not be materializable in the stale window, or an
