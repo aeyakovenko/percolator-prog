@@ -9185,6 +9185,119 @@ fn v16_attack_close_portfolio_rejects_occupied_source_domain_without_claim_bound
 }
 
 #[test]
+fn v16_attack_tradenocpi_rejects_duplicate_source_domain_sparse_state_atomically() {
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, 250, 10_000);
+    let owner_a = Keypair::new();
+    let owner_b = Keypair::new();
+    let account_a = env.create_portfolio(&owner_a);
+    let account_b = env.create_portfolio(&owner_b);
+    env.deposit(&owner_a, account_a, 1_000_000);
+    env.deposit(&owner_b, account_b, 1_000_000);
+    env.add_source_positive_pnl(account_a, 1, 40);
+    env.crank(
+        account_a,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 0,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    assert!(
+        env.portfolio_state(account_a).source_claim_bound_num[1] != 0,
+        "setup must create a canonical source-backed positive-PnL domain"
+    );
+
+    let canonical_account_a = env.svm.get_account(&account_a).unwrap();
+    let mut poisoned_account_a = canonical_account_a.clone();
+    let (_, _, max_market_slots, _) = state::read_market_config_mode_and_capacity(
+        &env.svm.get_account(&env.market).unwrap().data,
+    )
+    .unwrap();
+    {
+        let view = state::portfolio_view_mut_for_market_slots(
+            &mut poisoned_account_a.data,
+            max_market_slots,
+        )
+        .unwrap();
+        let source_slot = view
+            .header
+            .source_domains
+            .iter()
+            .position(|slot| slot.is_occupied() && slot.domain.get() == 1)
+            .expect("canonical source-domain slot");
+        let duplicate_slot = if source_slot == 0 { 1 } else { 0 };
+        view.header.source_domains[duplicate_slot] = view.header.source_domains[source_slot];
+        assert!(
+            view.header
+                .source_domains
+                .iter()
+                .filter(|slot| slot.is_occupied() && slot.domain.get() == 1)
+                .count()
+                >= 2,
+            "test precondition: forged account has duplicate occupied source-domain tags"
+        );
+    }
+    env.svm.set_account(account_a, poisoned_account_a).unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let account_a_before = env.svm.get_account(&account_a).unwrap();
+    let account_b_before = env.svm.get_account(&account_b).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.try_trade_asset_with_cu(
+        0,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    assert!(
+        rejected.is_err(),
+        "TradeNoCpi must reject duplicate sparse source-domain tags before committing a fill"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected malformed source-domain trade leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&account_a).unwrap(),
+        account_a_before,
+        "rejected malformed source-domain trade leaves attacker account bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&account_b).unwrap(),
+        account_b_before,
+        "rejected malformed source-domain trade leaves counterparty account bytes unchanged"
+    );
+
+    env.svm.set_account(account_a, canonical_account_a).unwrap();
+    env.svm.expire_blockhash();
+    let trade_cu = env.trade_asset_with_cu(
+        0,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    assert_cu_within(
+        "TradeNoCpi after canonical source-domain restore",
+        trade_cu,
+        TRADE_CU_LIMIT,
+    );
+}
+
+#[test]
 fn v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
