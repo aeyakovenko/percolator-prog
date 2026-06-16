@@ -69084,6 +69084,87 @@ fn v16_attack_close_slab_readonly_primary_dest_rolls_back_before_reclaim() {
     assert!(closed_market.data.iter().all(|b| *b == 0));
 }
 
+// full-interface sweep: CloseSlab uses the supplied SPL Token program for both the final dust sweep and
+// the vault close. A loaded non-SPL executable must reject before any vault transfer, token-account close,
+// or market slab reclaim; the same terminal close must remain live through the real token program.
+#[test]
+fn v16_attack_close_slab_rejects_wrong_token_program_before_reclaim() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+    env.resolve();
+
+    let fake_token_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(fake_token_program, &matcher_bytes);
+
+    let primary_dest = env.token_account(admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&primary_dest).unwrap();
+    let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "CloseSlab must reject a non-SPL token program before final reclaim"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-token CloseSlab must not reclaim the market slab"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "wrong-token CloseSlab must not sweep or close the primary vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&primary_dest).unwrap(),
+        dest_before,
+        "wrong-token CloseSlab must not pay the destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&admin.pubkey()).unwrap(),
+        admin_before,
+        "wrong-token CloseSlab must not transfer market rent"
+    );
+
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "same CloseSlab succeeds with the real token program: {ok:?}"
+    );
+    assert_eq!(env.token_amount(primary_dest), 7);
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(closed_market.lamports, 0);
+    assert!(closed_market.data.iter().all(|b| *b == 0));
+}
+
 // [from pr114]
 // full-interface sweep (cron38): the optional secondary reserve is validated before CloseSlab sweeps
 // primary dust. A canonical secondary vault with close_authority set must reject atomically; otherwise
