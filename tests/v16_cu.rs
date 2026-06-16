@@ -61572,6 +61572,122 @@ fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
     );
 }
 
+// security.md sweep - stale matcher return-data replay (#39/#49): BatchTradeCpi reads matcher output
+// from Solana return data, which is transaction-scoped. A matcher that sets valid return data for one
+// batch CPI and then returns Ok without setting return data for a second same-transaction batch must
+// not let the wrapper replay the stale first response.
+#[test]
+fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 10_000_000);
+    env.deposit(&lp, la, 10_000_000);
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &la,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[64] = 13; // first batch writes return data; second same-tx batch writes nothing.
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
+
+    let size_q = POS_SCALE as i128;
+    let program_id = env.program_id;
+    let market = env.market;
+    let taker_key = taker.pubkey();
+    let batch_ix = || Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(taker_key, true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        data: ProgInstruction::BatchTradeCpi {
+            legs: vec![
+                BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+                BatchTradeCpiLeg {
+                    asset_index: 1,
+                    size_q: -size_q,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+            ],
+        }
+        .encode(),
+    };
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+
+    env.svm.expire_blockhash();
+    let replay = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), batch_ix(), batch_ix()],
+        &[&taker],
+    );
+    assert!(
+        replay.is_err(),
+        "a matcher that omits second-call return data must not replay stale batch return data: {replay:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ta).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&la).unwrap(), lp_before);
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "failed replay transaction must roll back the first matcher context write"
+    );
+}
+
 // security.md sweep - TradeCpi flagged partial fill (#22/#39): the matcher ABI allows a partial
 // fill only when FLAG_PARTIAL_OK is set. Exercise the accepted oracle-priced path end-to-end so it
 // cannot drift into an overfill, zero-fill, or fee-on-request-size bug.
