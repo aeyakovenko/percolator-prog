@@ -57830,6 +57830,41 @@ fn v16_attack_batch_tradecpi_duplicate_assets_reject_before_hostile_matcher_cpi(
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(env.svm.get_account(&ta).unwrap(), taker_before);
     assert_eq!(env.svm.get_account(&la).unwrap(), lp_before);
+
+    for (label, bad_size) in [("zero", 0i128), ("i128-min", i128::MIN)] {
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_before = env.svm.get_account(&ta).unwrap();
+        let lp_before = env.svm.get_account(&la).unwrap();
+        let malformed_err = send(
+            &mut env,
+            vec![
+                BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: bad_size,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+                BatchTradeCpiLeg {
+                    asset_index: 1,
+                    size_q: -sz,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+            ],
+        )
+        .expect_err("malformed-size BatchTradeCpi must reject before matcher CPI");
+        assert!(
+            malformed_err.contains("Custom(9)"),
+            "{label} malformed BatchTradeCpi must fail as InvalidInstruction before hostile matcher validation, got {malformed_err}"
+        );
+        assert!(
+            !malformed_err.contains("InvalidAccountData"),
+            "{label} malformed BatchTradeCpi must not reach hostile matcher validation: {malformed_err}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&ta).unwrap(), taker_before);
+        assert_eq!(env.svm.get_account(&la).unwrap(), lp_before);
+    }
 }
 
 #[test]
