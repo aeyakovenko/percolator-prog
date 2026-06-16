@@ -41742,6 +41742,164 @@ fn assert_cpi_spread_price_caps_paid_trade_driven_mark_move(
     );
 }
 
+fn assert_cpi_tiny_fill_prices_mark_move_against_existing_oi(
+    mode: TradeDrivenMarkMode,
+    path: CpiReportedPricePath,
+    size_q: i128,
+) {
+    const ASSET_INDEX: u16 = 1;
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const MAX_FEE_BPS: u64 = 10_000;
+    const SPREAD_BPS: u32 = 9_000;
+    const OPEN_Q: i128 = (100u128 * POS_SCALE) as i128;
+    const TINY_Q_ABS: u128 = POS_SCALE;
+
+    let matcher_exec_price = if size_q > 0 {
+        MARK * (10_000 + SPREAD_BPS as u64) / 10_000
+    } else {
+        MARK * (10_000 - SPREAD_BPS as u64) / 10_000
+    };
+    let accepted_price = oracle_v16::clamp_toward_engine_dt(MARK, matcher_exec_price, CAP_BPS, 1);
+    assert_ne!(
+        accepted_price, MARK,
+        "{mode:?} {path:?}: setup must exercise an off-mark accepted CPI price"
+    );
+
+    let mut env = trade_driven_mark_cpi_env_with_fees(mode, ASSET_INDEX, 0, MAX_FEE_BPS);
+    let seed_long = Keypair::new();
+    let seed_long_account = env.create_portfolio(&seed_long);
+    let seed_short = Keypair::new();
+    let seed_short_account = env.create_portfolio(&seed_short);
+    env.deposit(&seed_long, seed_long_account, 10_000_000_000);
+    env.deposit(&seed_short, seed_short_account, 10_000_000_000);
+    env.trade_asset_with_cu(
+        ASSET_INDEX,
+        &seed_long,
+        seed_long_account,
+        &seed_short,
+        seed_short_account,
+        OPEN_Q,
+        MARK,
+        0,
+    );
+
+    let (_, opened_group) = env.market_state();
+    let long_before = opened_group.assets[ASSET_INDEX as usize].oi_eff_long_q;
+    let short_before = opened_group.assets[ASSET_INDEX as usize].oi_eff_short_q;
+    assert_eq!(
+        long_before,
+        OPEN_Q.unsigned_abs(),
+        "{mode:?} {path:?}: setup opened long OI at the mark"
+    );
+    assert_eq!(
+        short_before,
+        OPEN_Q.unsigned_abs(),
+        "{mode:?} {path:?}: setup opened short OI at the mark"
+    );
+    let insurance_before_tiny = opened_group.insurance;
+    let mark_before_tiny = trade_driven_mark_profile(&env, ASSET_INDEX).mark_ewma_e6;
+    assert_eq!(
+        mark_before_tiny, MARK,
+        "{mode:?} {path:?}: at-mark setup must not pre-move the trade-driven mark"
+    );
+
+    let taker = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp = Keypair::new();
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 3_000_000_000);
+    env.deposit(&lp, lp_account, 3_000_000_000);
+
+    let tiny = try_cpi_spread_trade_with_cu(
+        &mut env,
+        path,
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        ASSET_INDEX,
+        size_q,
+        0,
+        SPREAD_BPS,
+        SPREAD_BPS,
+    );
+    assert!(
+        tiny.is_ok(),
+        "{mode:?} {path:?}: tiny CPI fill must not be DoSed by an off-oracle matcher price: {tiny:?}"
+    );
+
+    let profile = trade_driven_mark_profile(&env, ASSET_INDEX);
+    let (_, final_group) = env.market_state();
+    assert_eq!(
+        final_group.assets[ASSET_INDEX as usize].oi_eff_long_q,
+        long_before + TINY_Q_ABS,
+        "{mode:?} {path:?}: tiny CPI fill increased long OI"
+    );
+    assert_eq!(
+        final_group.assets[ASSET_INDEX as usize].oi_eff_short_q,
+        short_before + TINY_Q_ABS,
+        "{mode:?} {path:?}: tiny CPI fill increased short OI"
+    );
+    if size_q > 0 {
+        assert!(
+            profile.mark_ewma_e6 > mark_before_tiny,
+            "{mode:?} {path:?}: high matcher print should move the mark upward"
+        );
+    } else {
+        assert!(
+            profile.mark_ewma_e6 < mark_before_tiny,
+            "{mode:?} {path:?}: low matcher print should move the mark downward"
+        );
+    }
+    let fee_paid = final_group.insurance - insurance_before_tiny;
+    assert!(
+        fee_paid > 0,
+        "{mode:?} {path:?}: tiny off-oracle CPI fill must pay a nonzero mark-movement fee"
+    );
+    let externality_notional = 2u128
+        .checked_mul(long_before.max(short_before))
+        .and_then(|v| v.checked_mul(MARK as u128))
+        .and_then(|v| v.checked_div(POS_SCALE))
+        .expect("existing OI externality notional");
+    let paid_move_bps = fee_paid * 10_000 / externality_notional;
+    let mark_move_bps =
+        percolator_prog::policy_v16::price_move_bps_ceil(mark_before_tiny, profile.mark_ewma_e6)
+            .expect("actual tiny CPI mark move");
+    assert!(
+        mark_move_bps > 0,
+        "{mode:?} {path:?}: tiny CPI fill should exercise a nonzero mark move"
+    );
+    assert!(
+        mark_move_bps <= paid_move_bps as u64,
+        "{mode:?} {path:?}: tiny CPI mark move ({mark_move_bps} bps) must be paid against existing OI ({paid_move_bps} bps), not just fill notional"
+    );
+}
+
+// CPI externality parity for the EWMA/no-CPI fix: when market OI already exists, a tiny matcher
+// fill can move the trade-driven mark for everyone. The dynamic fee must therefore size the mark
+// movement against the pre-existing max-side OI, not only against the tiny fill's own notional.
+#[test]
+fn v16_attack_cpi_tiny_fill_mark_move_is_paid_against_existing_oi() {
+    for mode in [
+        TradeDrivenMarkMode::EwmaMark,
+        TradeDrivenMarkMode::HybridAfterHours,
+    ] {
+        for path in [CpiReportedPricePath::Single, CpiReportedPricePath::Batch] {
+            assert_cpi_tiny_fill_prices_mark_move_against_existing_oi(
+                mode,
+                path,
+                POS_SCALE as i128,
+            );
+            assert_cpi_tiny_fill_prices_mark_move_against_existing_oi(
+                mode,
+                path,
+                -(POS_SCALE as i128),
+            );
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn try_hostile_partial_epsilon_cpi_trade_with_cu(
     env: &mut V16CuEnv,
