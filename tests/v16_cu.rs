@@ -15575,6 +15575,152 @@ fn v16_audit_resolved_maintenance_fee_multi_asset_stays_recoverable() {
     assert_domain_budget_remaining_total_consistent(&group, "multi-asset resolved maintenance fee");
 }
 
+// LoF/DoS sweep (cron135): several policy knobs are accepted config-only writes even after
+// ResolveMarket, but they must not alter resolved engine state, reopen live-only backing-fee policy,
+// redirect terminal maintenance fees to a permissionless asset, or block the final wind-down.
+#[test]
+fn v16_attack_post_resolve_policy_writes_do_not_change_terminal_fee_routing() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 5,
+    );
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+
+    env.svm.warp_to_slot(1);
+    env.activate_asset(1, 1, 100);
+    env.svm.warp_to_slot(100);
+    env.resolve();
+    let (cfg_resolved, group_resolved) = env.market_state();
+    assert_eq!(group_resolved.mode, MarketModeV16::Resolved);
+    assert_eq!(
+        group_resolved.insurance_domain_budget[2] + group_resolved.insurance_domain_budget[3],
+        0,
+        "asset-1 starts with no terminal insurance budget"
+    );
+
+    let send_config_only = |env: &mut V16CuEnv, ix: ProgInstruction, label: &str| {
+        env.svm.expire_blockhash();
+        env.send(
+            ix,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        )
+        .unwrap_or_else(|err| panic!("{label} should remain config-only after resolve: {err}"));
+    };
+    send_config_only(
+        &mut env,
+        ProgInstruction::UpdateLiquidationFeePolicy {
+            cranker_share_bps: 10_000,
+        },
+        "UpdateLiquidationFeePolicy",
+    );
+    send_config_only(
+        &mut env,
+        ProgInstruction::UpdateMaintenanceFeePolicy {
+            cranker_share_bps: 10_000,
+        },
+        "UpdateMaintenanceFeePolicy",
+    );
+    send_config_only(
+        &mut env,
+        ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps: 10_000 },
+        "UpdateFeeRedirectPolicy",
+    );
+    send_config_only(
+        &mut env,
+        ProgInstruction::UpdateMarketInitFeePolicy { min_init_fee: 77 },
+        "UpdateMarketInitFeePolicy",
+    );
+    send_config_only(
+        &mut env,
+        ProgInstruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 88,
+        },
+        "UpdateTradeFeePolicy",
+    );
+
+    let (cfg_after_policy, group_after_policy) = env.market_state();
+    assert_eq!(group_after_policy.mode, MarketModeV16::Resolved);
+    assert_eq!(group_after_policy.vault, group_resolved.vault);
+    assert_eq!(group_after_policy.c_tot, group_resolved.c_tot);
+    assert_eq!(group_after_policy.insurance, group_resolved.insurance);
+    assert_eq!(
+        cfg_after_policy.fee_redirect_to_market_0_bps, 10_000,
+        "post-resolve redirect config write is accepted but must stay terminal-inert"
+    );
+    assert_eq!(cfg_after_policy.trade_fee_base_bps, 88);
+    assert_eq!(cfg_after_policy.permissionless_market_init_fee, 77);
+    assert_ne!(cfg_after_policy.trade_fee_base_bps, cfg_resolved.trade_fee_base_bps);
+    let market_after_policy = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let backing_reject = env.send(
+        ProgInstruction::UpdateBackingFeePolicy {
+            domain: 0,
+            fee_bps: 1,
+            insurance_share_bps: 0,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        backing_reject.is_err(),
+        "UpdateBackingFeePolicy must remain live-only after resolve"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_after_policy,
+        "rejected post-resolve backing policy leaves terminal state unchanged"
+    );
+
+    let dest = env.close_resolved(&owner, portfolio);
+    assert!(
+        env.token_amount(dest) < 1_000,
+        "resolved close charged a real maintenance fee"
+    );
+    let (_, group_after_close) = env.market_state();
+    assert!(group_after_close.insurance > 0);
+    assert_eq!(
+        group_after_close.insurance_domain_budget[2] + group_after_close.insurance_domain_budget[3],
+        0,
+        "post-resolve redirect policy must not route terminal maintenance fees to asset-1"
+    );
+    let sum_budgets: u128 = group_after_close.insurance_domain_budget.iter().sum();
+    assert!(
+        sum_budgets >= group_after_close.insurance,
+        "terminal maintenance insurance must stay withdrawable after post-resolve policy writes"
+    );
+    assert_domain_budget_remaining_total_consistent(
+        &group_after_close,
+        "post-resolve policy terminal maintenance",
+    );
+    assert_eq!(
+        group_after_close.c_tot, 0,
+        "resolved close fully wound down user capital"
+    );
+
+    let insurance_to_sweep = group_after_close.insurance;
+    env.close_portfolio_with_cu(&owner, portfolio);
+    let (_, group_after_portfolio_close) = env.market_state();
+    assert_eq!(
+        group_after_portfolio_close.materialized_portfolio_count, 0,
+        "terminal insurance drain waits until the user account is dematerialized"
+    );
+    env.withdraw_terminal_insurance_with_authority(&admin, insurance_to_sweep);
+    env.close_slab_with_cu();
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(closed_market.lamports, 0);
+    assert!(closed_market.data.iter().all(|b| *b == 0));
+}
+
 // security.md sweep - resolved top-up custody (#33/#44/#48): ClaimResolvedPayoutTopup is
 // intentionally unsigned so a third party can help finish a user's payout, but it must only pay to
 // the portfolio owner's valid collateral account. A bad destination must not burn the receipt.
