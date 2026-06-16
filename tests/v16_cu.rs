@@ -68841,6 +68841,108 @@ fn v16_attack_terminal_insurance_withdraw_rejects_delegated_vault_without_debiti
     assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
 }
 
+// full-interface sweep: SwapSecondaryForPrimary performs a user-signed primary transfer followed by
+// a vault-signed secondary payout. A loaded non-SPL executable token-program id must reject before
+// either leg moves value, and the same accounts must remain usable with the real token program.
+#[test]
+fn v16_attack_swap_secondary_rejects_wrong_token_program_before_transfer() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 10);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let fake_token_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(fake_token_program, &matcher_bytes);
+
+    let primary_source_before = env.svm.get_account(&primary_source).unwrap();
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(primary_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "SwapSecondaryForPrimary must reject a loaded non-SPL token program"
+    );
+    assert_eq!(
+        env.svm.get_account(&primary_source).unwrap(),
+        primary_source_before,
+        "wrong-token swap must not pull primary collateral"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "wrong-token swap must not credit primary custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        secondary_dest_before,
+        "wrong-token swap must not pay secondary collateral"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "wrong-token swap must not debit the secondary reserve"
+    );
+
+    env.svm.expire_blockhash();
+    let ok_cu = env
+        .send(
+            ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new(primary_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new(secondary_dest, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("SwapSecondaryForPrimary with the real token program");
+    assert_cu_within(
+        "SwapSecondaryForPrimary wrong-token-program control",
+        ok_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(primary_source), 0);
+    assert_eq!(env.token_amount(env.vault), 10);
+    assert_eq!(env.token_amount(secondary_dest), 10);
+    assert_eq!(env.token_amount(secondary_vault), 40);
+}
+
 // [from pr114]
 // full-interface sweep: SwapSecondaryForPrimary validates two distinct vault legs before either SPL
 // transfer. The secondary reserve is covered above; the primary vault must also reject if it carries a
