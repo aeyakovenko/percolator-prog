@@ -6555,6 +6555,47 @@ fn v16_attack_restart_asset_oracle_rejects_backing_state_without_mutation() {
 }
 
 #[test]
+fn v16_attack_restart_asset_oracle_checks_nonzero_asset_short_backing_domain() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.activate_asset(1, 1, 100);
+    env.top_up_backing_bucket_with_authority(&admin, 3, 500, 1_000);
+    let funded = env.market_state().1;
+    assert!(
+        funded.source_backing_buckets[3].fresh_unliened_backing_num > 0,
+        "test precondition: asset-1 short backing bucket is funded"
+    );
+
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&admin, 1, 2)
+        .expect("asset admin shuts down empty asset 1");
+    let before_restart = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let restart = env.try_restart_asset_oracle_with_authority(&admin, 1, 3, 150);
+    assert!(
+        restart.is_err(),
+        "restart must check the target asset's short backing domain before reinitializing"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_restart,
+        "rejected asset-1 restart leaves short-domain backing bytes unchanged"
+    );
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[3].fresh_unliened_backing_num,
+        funded.source_backing_buckets[3].fresh_unliened_backing_num,
+        "asset-1 short backing bucket remains recoverable after rejected restart"
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+}
+
+#[test]
 fn v16_attack_restart_asset_oracle_rejects_backing_fee_earnings_without_mutation() {
     let mut env = V16CuEnv::new();
     let admin = env.admin.insecure_clone();
