@@ -52403,6 +52403,97 @@ fn v16_attack_base_unit_mints_changeable_only_when_empty() {
     );
 }
 
+// LoF/DoS sweep (cron135): UpdateBaseUnitMints is intentionally value-empty gated, not
+// materialized-count gated. An abandoned-but-empty portfolio must not DoS an otherwise empty
+// base-unit handoff, and the existing portfolio must remain usable under the updated config.
+#[test]
+fn v16_attack_empty_materialized_portfolio_cannot_dos_base_unit_handoff() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "empty initialized portfolio is materialized before the base-unit update"
+    );
+    assert_eq!(env.market_state().1.vault, 0);
+    assert_eq!(env.market_state().1.c_tot, 0);
+    assert_eq!(env.market_state().1.insurance, 0);
+
+    let secondary = env.create_mint();
+    let update_cu = env.update_base_unit_mints_with_cu(env.mint, secondary);
+    assert_cu_within(
+        "base-unit update with empty materialized portfolio",
+        update_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (cfg_after_update, group_after_update) = env.market_state();
+    assert_eq!(
+        cfg_after_update.secondary_collateral_mint,
+        secondary.to_bytes(),
+        "base-unit secondary mint updates even while an empty portfolio is materialized"
+    );
+    assert_eq!(
+        group_after_update.materialized_portfolio_count, 1,
+        "base-unit update does not dematerialize or duplicate the empty portfolio"
+    );
+
+    env.deposit(&owner, portfolio, 123);
+    assert_eq!(
+        env.portfolio_state(portfolio).capital,
+        123,
+        "pre-existing empty portfolio can deposit after the base-unit handoff"
+    );
+    let (dest, _) = env.withdraw_with_cu(&owner, portfolio, 123);
+    assert_eq!(
+        env.token_amount(dest),
+        123,
+        "pre-existing portfolio can withdraw exact primary collateral after the handoff"
+    );
+    assert_eq!(env.market_state().1.c_tot, 0);
+    assert_eq!(env.market_state().1.vault, 0);
+
+    env.close_portfolio_with_cu(&owner, portfolio);
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 0);
+    env.resolve();
+
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let primary_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    let secondary_dest = env.token_account_for_mint(secondary, admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let close = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new(secondary_dest, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        close.is_ok(),
+        "terminal CloseSlab remains reachable after an empty-portfolio base-unit handoff: {close:?}"
+    );
+}
+
 // security.md sweep — base-unit reserve liveness (#44/#48): accounting-empty is not enough to
 // change away from an already configured secondary mint. The old canonical PDA reserve may still
 // hold secondary tokens, and CloseSlab can only recover the currently configured secondary reserve.
