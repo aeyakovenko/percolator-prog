@@ -57412,6 +57412,180 @@ fn v16_attack_batch_tradecpi_duplicate_assets_reject_before_hostile_matcher_cpi(
     assert_eq!(env.svm.get_account(&la).unwrap(), lp_before);
 }
 
+#[test]
+fn v16_attack_batch_tradecpi_high_duplicate_assets_reject_before_hostile_matcher_cpi() {
+    const HIGH_ASSET: usize = 128;
+    const MARKET_SLOTS: usize = HIGH_ASSET + 1;
+    const PRICE: u64 = 100;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: 14,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            ..V16CuMarketParams::default()
+        },
+        MARKET_SLOTS,
+    );
+    env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+    let template = env.market_state().1.assets[0];
+    let high_market_id = (HIGH_ASSET as u64) + 1;
+    env.mutate_market(|_, group| {
+        group.config.max_market_slots = MARKET_SLOTS as u32;
+        group.next_market_id = (MARKET_SLOTS as u64) + 1;
+        let mut high = template;
+        high.market_id = high_market_id;
+        group.assets[HIGH_ASSET] = high;
+        let (ld, sd) = (2 * HIGH_ASSET, 2 * HIGH_ASSET + 1);
+        group.source_backing_buckets[ld] =
+            percolator::BackingBucketV16::empty_for_market(high_market_id);
+        group.source_backing_buckets[sd] =
+            percolator::BackingBucketV16::empty_for_market(high_market_id);
+    });
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        let profile0 = state::read_asset_oracle_profile(&acct.data, 0).unwrap();
+        state::write_asset_oracle_profile(&mut acct.data, HIGH_ASSET, &profile0).unwrap();
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &la,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; MATCHER_CONTEXT_LEN],
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
+
+    let send = |env: &mut V16CuEnv, legs: Vec<BatchTradeCpiLeg>| {
+        let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
+        data[0] = 0;
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::BatchTradeCpi { legs },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+                AccountMeta::new_readonly(hostile, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker],
+        )
+    };
+    let sz = (5 * POS_SCALE) as i128;
+
+    let distinct_err = send(
+        &mut env,
+        vec![
+            BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: sz,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            BatchTradeCpiLeg {
+                asset_index: HIGH_ASSET as u16,
+                size_q: -sz,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+        ],
+    )
+    .expect_err("distinct high-asset hostile batch should reach matcher-return validation");
+    assert!(
+        distinct_err.contains("InvalidAccountData"),
+        "distinct high-asset hostile control should fail from matcher-return validation, got {distinct_err}"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+    let duplicate_err = send(
+        &mut env,
+        vec![
+            BatchTradeCpiLeg {
+                asset_index: HIGH_ASSET as u16,
+                size_q: sz,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            BatchTradeCpiLeg {
+                asset_index: HIGH_ASSET as u16,
+                size_q: -sz,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+        ],
+    )
+    .expect_err("duplicate high-asset BatchTradeCpi must reject before matcher CPI");
+    assert!(
+        duplicate_err.contains("Custom(9)"),
+        "duplicate high-asset BatchTradeCpi must fail as InvalidInstruction before hostile matcher validation, got {duplicate_err}"
+    );
+    assert!(
+        !duplicate_err.contains("InvalidAccountData"),
+        "duplicate high-asset BatchTradeCpi must not reach hostile matcher validation: {duplicate_err}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ta).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&la).unwrap(), lp_before);
+}
+
 // BatchTradeNoCpi end-state margin: a leg that is individually margin-INFEASIBLE (it would leave the
 // taker holding two full positions at once) is rejected as a standalone trade, but the SAME leg in a
 // batch that also closes the offsetting position SUCCEEDS, because the batch checks initial margin
