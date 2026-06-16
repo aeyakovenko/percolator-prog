@@ -57450,6 +57450,129 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
     );
 }
 
+// BatchTradeNoCpi grows legacy portfolios to the market-slot-sized layout before its duplicate-asset
+// prepass rejects malformed legs. A duplicate batch must roll that growth back, or any public caller could
+// permanently expand another user's legacy account without producing a trade.
+#[test]
+fn v16_attack_batch_nocpi_duplicate_assets_rolls_back_legacy_realloc() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+
+    for account_key in [taker_account, lp_account] {
+        let mut account = env.svm.get_account(&account_key).unwrap();
+        account.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+        env.svm.set_account(account_key, account).unwrap();
+    }
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_account).unwrap();
+    let lp_before = env.svm.get_account(&lp_account).unwrap();
+    assert_eq!(
+        taker_before.data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup uses a legacy taker account"
+    );
+    assert_eq!(
+        lp_before.data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup uses a legacy LP account"
+    );
+
+    let sz = (5 * POS_SCALE) as i128;
+    env.svm.expire_blockhash();
+    let duplicate = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![
+                BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: sz,
+                    exec_price: 100,
+                    fee_bps: 100,
+                },
+                BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: -sz,
+                    exec_price: 100,
+                    fee_bps: 100,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(
+        duplicate.is_err(),
+        "duplicate-asset BatchTradeNoCpi must reject on legacy portfolios"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "duplicate legacy batch leaves the market byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_account).unwrap(),
+        taker_before,
+        "duplicate legacy batch rolls back taker realloc and zero-fill"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_account).unwrap(),
+        lp_before,
+        "duplicate legacy batch rolls back LP realloc and zero-fill"
+    );
+
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![
+                BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: sz,
+                    exec_price: 100,
+                    fee_bps: 100,
+                },
+                BatchTradeLeg {
+                    asset_index: 1,
+                    size_q: -sz,
+                    exec_price: 100,
+                    fee_bps: 100,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(
+        ok.is_ok(),
+        "distinct-asset BatchTradeNoCpi still grows the legacy accounts and executes: {ok:?}"
+    );
+    assert!(
+        env.svm.get_account(&taker_account).unwrap().data.len() > PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "successful control grows the taker account only after a valid batch"
+    );
+    assert!(
+        env.svm.get_account(&lp_account).unwrap().data.len() > PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "successful control grows the LP account only after a valid batch"
+    );
+}
+
 // CU/DoS hardening: duplicate-asset BatchTradeCpi is structurally invalid and must reject before
 // matcher CPI. The existing duplicate test proves rollback; this hostile sentinel proves the wrapper
 // does not call the matcher first.
