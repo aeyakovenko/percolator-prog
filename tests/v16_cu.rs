@@ -33724,8 +33724,8 @@ fn v16_attack_exposure_transfer_chain_conserves() {
 }
 
 // security.md sweep — token program validation (#44): deposit/withdraw must verify the token program
-// account is the real SPL Token program. Injecting a different program must reject — no routing the
-// transfer CPI through an attacker-controlled program.
+// account is the real SPL Token program. Injecting a different loaded executable program must reject
+// inside the wrapper gate — no routing the transfer CPI through an attacker-controlled program.
 #[test]
 fn v16_attack_wrong_token_program_rejected() {
     let mut env = V16CuEnv::new();
@@ -33733,7 +33733,9 @@ fn v16_attack_wrong_token_program_rejected() {
     let p = env.create_portfolio(&owner);
     env.deposit(&owner, p, 1_000_000);
     let (_, g0) = env.market_state();
-    let fake_token_program = Pubkey::new_unique(); // not spl_token::ID
+    let fake_token_program = Pubkey::new_unique(); // loaded executable, but not spl_token::ID
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(fake_token_program, &matcher_bytes);
     let dest = Pubkey::new_unique();
     env.svm
         .set_account(
@@ -33779,6 +33781,8 @@ fn v16_attack_wrong_token_program_rejected() {
     assert_eq!(env.market_state().1.vault, g0.vault, "vault unchanged");
     // deposit with a bogus token program -> reject.
     let src = env.token_account_for_mint(env.mint, owner.pubkey(), 100);
+    let src_before = env.svm.get_account(&src).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
     env.svm.expire_blockhash();
     let r2 = env.send(
         ProgInstruction::Deposit { amount: 100 },
@@ -33795,6 +33799,21 @@ fn v16_attack_wrong_token_program_rejected() {
     assert!(
         r2.is_err(),
         "deposit with a non-SPL-token program must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&src).unwrap(),
+        src_before,
+        "deposit source is not debited by a loaded non-SPL token program"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "deposit vault is not credited by a loaded non-SPL token program"
+    );
+    assert_eq!(
+        env.portfolio_state(p).capital,
+        1_000_000,
+        "deposit accounting is not credited by a loaded non-SPL token program"
     );
     // correct token program still works.
     let (good, _) = env.withdraw_with_cu(&owner, p, 500_000);
