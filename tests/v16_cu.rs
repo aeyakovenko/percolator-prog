@@ -21666,6 +21666,106 @@ fn v16_attack_tradecpi_limit_price_enforced() {
     assert_eq!(g1.vault, g1.c_tot + g1.insurance, "conservation after fill");
 }
 
+// security.md sweep - TradeCpi limit_price floor for shorts (#19/#39): the slippage inequality flips
+// for a taker sell/short. A matcher filling below the requested floor must reject atomically, while
+// a permissive floor remains live so takers can still exit through the CPI route.
+#[test]
+fn v16_attack_tradecpi_short_limit_price_floor_enforced() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let maker_owner = Keypair::new();
+    let maker = env.create_portfolio(&maker_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&maker_owner, maker, 1_000_000);
+    // spread matcher: oracle=100, base spread 500 bps -> taker sell bid is below 100.
+    let (ctx, delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+        matcher_program,
+        &maker_owner,
+        maker,
+        500,
+        1_000,
+    );
+    let do_trade = |env: &mut V16CuEnv, limit: u64| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q: -((10 * POS_SCALE) as i128),
+                fee_bps: 100,
+                limit_price: limit,
+            },
+            vec![
+                AccountMeta::new(taker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker, false),
+                AccountMeta::new(maker, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker_owner],
+        )
+    };
+
+    let (_, g0) = env.market_state();
+    let market_before_tight = env.svm.get_account(&env.market).unwrap();
+    let taker_before_tight = env.svm.get_account(&taker).unwrap();
+    let maker_before_tight = env.svm.get_account(&maker).unwrap();
+    let ctx_before_tight = env.svm.get_account(&ctx).unwrap();
+
+    let r_tight = do_trade(&mut env, 100);
+    assert!(
+        r_tight.is_err(),
+        "short with floor at oracle must reject when matcher fills below it"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_tight,
+        "post-CPI short-limit rejection rolls back market writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker).unwrap(),
+        taker_before_tight,
+        "post-CPI short-limit rejection rolls back taker writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&maker).unwrap(),
+        maker_before_tight,
+        "post-CPI short-limit rejection rolls back maker writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before_tight,
+        "post-CPI short-limit rejection rolls back matcher context writes"
+    );
+    assert_eq!(
+        env.portfolio_state(taker).legs[0].basis_pos_q,
+        0,
+        "no short fill on rejected floor violation"
+    );
+    assert_eq!(
+        env.market_state().1.vault,
+        g0.vault,
+        "vault unchanged by rejected short trade"
+    );
+
+    let r_ok = do_trade(&mut env, 1);
+    assert!(
+        r_ok.is_ok(),
+        "short with permissive floor executes: {r_ok:?}"
+    );
+    assert!(
+        env.portfolio_state(taker).legs[0].basis_pos_q < 0,
+        "taker short filled under permissive floor"
+    );
+    let (_, g1) = env.market_state();
+    assert_eq!(g1.vault, g1.c_tot + g1.insurance, "conservation after short fill");
+}
+
 // security.md sweep — TradeCpi zero-fill (#39): a zero-capacity matcher (max_fill_abs=0) returns
 // exec_size=0. The wrapper must handle it cleanly — reject or no-op — never create phantom OI/basis,
 // charge a fee on nothing, or corrupt conservation.
