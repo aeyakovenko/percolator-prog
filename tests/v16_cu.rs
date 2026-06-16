@@ -11807,6 +11807,66 @@ fn v16_cu_permissionless_crank_refresh_is_bounded() {
     assert!(refresh_cu <= CRANK_CU_LIMIT);
 }
 
+// PermissionlessCrank action=0 ignores the caller fee_bps field. A hostile cranker supplying
+// u64::MAX must not inject fees or DoS refresh progress.
+#[test]
+fn v16_attack_permissionless_refresh_ignores_hostile_fee_bps() {
+    let mut env = V16CuEnv::new();
+    let long_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short_owner = Keypair::new();
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    let before = env.market_state().1;
+
+    env.svm.warp_to_slot(1);
+    let refresh_cu = env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: u64::MAX,
+            recovery_reason: 0,
+        },
+    );
+    assert_cu_within(
+        "PermissionlessCrank Refresh hostile fee_bps",
+        refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+    let after = env.market_state().1;
+    assert_eq!(
+        after.current_slot, 1,
+        "hostile fee_bps must not block refresh progress"
+    );
+    assert_eq!(after.vault, before.vault, "refresh moves no custody");
+    assert_eq!(after.c_tot, before.c_tot, "refresh cannot mint/burn capital");
+    assert_eq!(
+        after.insurance, before.insurance,
+        "refresh ignores caller fee_bps and charges no insurance"
+    );
+    assert_eq!(after.assets[0].oi_eff_long_q, before.assets[0].oi_eff_long_q);
+    assert_eq!(after.assets[0].oi_eff_short_q, before.assets[0].oi_eff_short_q);
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(long), 0).basis_pos_q,
+        POS_SCALE as i128,
+        "refresh leaves the user position intact"
+    );
+}
+
 #[test]
 fn v16_bpf_permissionless_crank_uses_authenticated_clock_slot_not_caller_slot() {
     let mut env = V16CuEnv::new();
