@@ -8515,6 +8515,96 @@ fn v16_attack_sync_maintenance_rejects_cross_market_cranker_reward() {
     );
 }
 
+#[test]
+fn v16_attack_sync_maintenance_rejects_cross_market_charged_portfolio_atomically() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    let local_owner = Keypair::new();
+    let local_portfolio = env.create_portfolio(&local_owner);
+    env.deposit(&local_owner, local_portfolio, 100_000_000);
+
+    let params = V16CuMarketParams {
+        max_portfolio_assets: 1,
+        maintenance_fee_per_slot: 58,
+        ..V16CuMarketParams::default()
+    };
+    let (market_b, _vault_authority_b, vault_b) =
+        init_independent_market_same_mint(&mut env, params);
+    let foreign_owner = Keypair::new();
+    let foreign_portfolio = init_portfolio_on_market(
+        &mut env,
+        market_b,
+        &foreign_owner,
+        params.max_portfolio_assets as usize,
+    );
+    deposit_to_market(
+        &mut env,
+        market_b,
+        vault_b,
+        &foreign_owner,
+        foreign_portfolio,
+        100_000_000,
+    );
+
+    let mut legacy_foreign = env.svm.get_account(&foreign_portfolio).unwrap();
+    legacy_foreign.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm
+        .set_account(foreign_portfolio, legacy_foreign)
+        .unwrap();
+
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let foreign_before = env.svm.get_account(&foreign_portfolio).unwrap();
+    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
+    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+    assert_eq!(
+        foreign_before.data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup uses a funded legacy portfolio bound to market B"
+    );
+
+    env.svm.warp_to_slot(10);
+    env.svm.expire_blockhash();
+    let rejected = env
+        .try_sync_maintenance_fee_with_cu(foreign_portfolio, None, 10)
+        .expect_err("market-A maintenance sync must reject a market-B charged portfolio");
+    assert!(
+        rejected.contains("TransactionError") || rejected.contains("InstructionError"),
+        "unexpected cross-market charged portfolio rejection: {rejected}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_a_before,
+        "rejected cross-market maintenance sync must not credit market A insurance"
+    );
+    assert_eq!(
+        env.svm.get_account(&market_b).unwrap(),
+        market_b_before,
+        "rejected cross-market maintenance sync must not mutate market B accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&foreign_portfolio).unwrap(),
+        foreign_before,
+        "rejected cross-market maintenance sync must roll back legacy realloc and capital debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&foreign_portfolio).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed cross-market maintenance sync leaves the foreign charged account legacy-sized"
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+
+    env.svm.expire_blockhash();
+    env.sync_maintenance_fee_with_cu(local_portfolio, None, 10);
+    assert_eq!(
+        env.portfolio_state(local_portfolio).last_fee_slot,
+        10,
+        "same-market maintenance sync still succeeds after the rejected foreign-target probe"
+    );
+}
+
 // Regression for #113 — permissionless cross-asset maintenance-fee siphon (FIXED).
 // credit_maintenance_fee_to_active_market_budgets_view (v16_program 5298) previously split every
 // maintenance fee equally across all ACTIVE assets' insurance domains with no positions/activity
