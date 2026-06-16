@@ -67748,6 +67748,229 @@ fn v16_attack_value_topups_reject_wrong_token_program() {
     );
 }
 
+// full-interface sweep: outbound domain withdrawals share the opposite value-moving shape from
+// top-ups: market/ledger budgets are debited before the signed SPL transfer on the successful path.
+// A loaded non-SPL executable must reject before any debit on live insurance, backing principal, or
+// backing earnings, and each route must remain live with the real token program.
+#[test]
+fn v16_attack_domain_withdrawals_reject_wrong_token_program_before_debit() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let fake_token_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(fake_token_program, &matcher_bytes);
+
+    let insurance_ledger = env.insurance_ledger_account();
+    env.top_up_insurance_domain_with_authority_ledger_and_cu(&admin, insurance_ledger, 0, 100);
+    let insurance_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&insurance_ledger).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&insurance_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected_insurance = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+            AccountMeta::new(insurance_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_insurance.is_err(),
+        "WithdrawInsuranceAsset must reject a non-SPL token program"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-token insurance withdraw must not debit market budgets"
+    );
+    assert_eq!(
+        env.svm.get_account(&insurance_ledger).unwrap(),
+        ledger_before,
+        "wrong-token insurance withdraw must not rewrite the ledger"
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.svm.get_account(&insurance_dest).unwrap(), dest_before);
+
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(insurance_ledger, false),
+        ],
+        &[&admin],
+    )
+    .expect("live insurance withdraw with real token program");
+    assert_eq!(env.token_amount(insurance_dest), 40);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance_domain_budget[0], 60);
+
+    let backing_ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(backing_ledger, 1, 100, 10_000);
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].utilization_fee_earnings = 30;
+        group.vault += 30;
+    });
+    let (_, funded) = env.market_state();
+    env.set_token_account_amount(
+        env.vault,
+        env.mint,
+        env.vault_authority,
+        funded.vault as u64,
+    );
+
+    let backing_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&backing_ledger).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&backing_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected_principal = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+            AccountMeta::new(backing_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_principal.is_err(),
+        "WithdrawBackingBucket must reject a non-SPL token program"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-token backing-principal withdraw must not debit market budgets"
+    );
+    assert_eq!(
+        env.svm.get_account(&backing_ledger).unwrap(),
+        ledger_before,
+        "wrong-token backing-principal withdraw must not rewrite the ledger"
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.svm.get_account(&backing_dest).unwrap(), dest_before);
+
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(backing_ledger, false),
+        ],
+        &[&admin],
+    )
+    .expect("backing principal withdraw with real token program");
+    assert_eq!(env.token_amount(backing_dest), 40);
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num,
+        60 * BOUND_SCALE
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&backing_ledger).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&backing_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected_earnings = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_ledger, false),
+            AccountMeta::new(backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_earnings.is_err(),
+        "WithdrawBackingBucketEarnings must reject a non-SPL token program"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-token backing-earnings withdraw must not debit market budgets"
+    );
+    assert_eq!(
+        env.svm.get_account(&backing_ledger).unwrap(),
+        ledger_before,
+        "wrong-token backing-earnings withdraw must not rewrite the ledger"
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.svm.get_account(&backing_dest).unwrap(), dest_before);
+
+    env.withdraw_backing_bucket_earnings_to_admin_token_with_cu(backing_ledger, backing_dest, 1, 10);
+    assert_eq!(env.token_amount(backing_dest), 50);
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.source_backing_buckets[1].utilization_fee_earnings,
+        20
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        group.vault as u64,
+        "valid withdrawal controls keep accounting matched to custody"
+    );
+}
+
 // [from pr114]
 // full-interface sweep: live WithdrawInsuranceAsset is distinct from terminal WithdrawInsurance and
 // backing withdrawals. A delegated canonical vault must be rejected before debiting the live domain
