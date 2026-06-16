@@ -8371,6 +8371,60 @@ fn v16_attack_sync_maintenance_bad_cranker_rolls_back_fee() {
 }
 
 #[test]
+fn v16_attack_sync_maintenance_reward_cannot_alias_market_slab() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    let payer_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    env.deposit(&payer_owner, payer_portfolio, 100_000_000);
+    env.update_maintenance_fee_policy_with_cu(4_000);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let payer_before = env.svm.get_account(&payer_portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.warp_to_slot(10);
+    env.svm.expire_blockhash();
+    let rejected = env
+        .try_sync_maintenance_fee_with_cu(payer_portfolio, Some(env.market), 10)
+        .expect_err("market slab must not be accepted as a cranker reward portfolio");
+    assert!(
+        rejected.contains("TransactionError") || rejected.contains("InstructionError"),
+        "unexpected market-slab cranker rejection: {rejected}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "market-slab reward alias must not mutate market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&payer_portfolio).unwrap(),
+        payer_before,
+        "market-slab reward alias must not charge the payer"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "market-slab reward alias moves no custody"
+    );
+
+    let cranker_owner = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.svm.expire_blockhash();
+    env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
+    assert_eq!(
+        env.portfolio_state(payer_portfolio).last_fee_slot,
+        10,
+        "same-slot valid reward sync remains live after the rejected alias"
+    );
+    assert!(
+        env.portfolio_state(cranker_portfolio).capital > 0,
+        "valid cranker reward path still pays the reward"
+    );
+}
+
+#[test]
 fn v16_attack_sync_maintenance_rejects_cross_market_cranker_reward() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 58,
