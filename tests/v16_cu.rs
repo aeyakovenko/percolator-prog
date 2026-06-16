@@ -68613,6 +68613,102 @@ fn v16_attack_resolved_payout_wrong_token_program_rolls_back_terminal_state() {
     assert_eq!(topup_env.market_state().1.vault, 0);
 }
 
+// full-interface sweep: terminal WithdrawInsurance is separate from live domain withdrawals and
+// resolved user payouts. A loaded non-SPL executable token-program id must reject before terminal
+// insurance, vault, or optional-ledger accounting can be debited.
+#[test]
+fn v16_attack_terminal_insurance_rejects_wrong_token_program_before_debit() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let fake_token_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(fake_token_program, &matcher_bytes);
+
+    env.top_up_insurance(100);
+    env.resolve();
+    let ledger = env.insurance_ledger_account();
+    let dest = env.token_account(admin.pubkey(), 0);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "terminal WithdrawInsurance must reject a loaded non-SPL token program"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-token terminal insurance withdraw must not debit market budgets"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "wrong-token terminal insurance withdraw must not rewrite the ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "wrong-token terminal insurance withdraw must not touch the vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "wrong-token terminal insurance withdraw pays no tokens"
+    );
+
+    env.svm.expire_blockhash();
+    let ok_cu = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    )
+    .expect("terminal WithdrawInsurance with the real token program");
+    assert_cu_within(
+        "terminal WithdrawInsurance wrong-token-program control",
+        ok_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), 40);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 60);
+    assert_eq!(group.vault, 60);
+    let ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+}
+
 // [from pr114]
 // security.md sweep - terminal insurance vault custody (#33/#44/#48): terminal WithdrawInsurance
 // debits resolved insurance and the optional ledger before validating token custody. A canonical vault
