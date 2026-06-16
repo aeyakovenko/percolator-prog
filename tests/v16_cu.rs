@@ -14515,6 +14515,142 @@ fn v16_attack_permissionless_reuse_rejects_fee_vault_fragmentation() {
     assert_eq!(group_reused.vault - group_retired.vault, FEE);
 }
 
+// full-interface sweep: permissionless retired-slot reuse is distinct from append and mutates an existing
+// canonical retired slot before charging the init fee. A loaded non-SPL executable token-program id must reject
+// before the slot is reactivated, the reusable-slot counter is consumed, or creator/vault custody changes.
+#[test]
+fn v16_attack_permissionless_reuse_rejects_wrong_token_program_before_slot_reactivation() {
+    const FEE: u128 = 40;
+    let mut env = V16CuEnv::new();
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    env.update_market_init_fee_policy_with_cu(FEE);
+
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        FEE,
+    );
+    env.svm.warp_to_slot(3);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        3,
+        0,
+    );
+    let (cfg_retired, group_retired) = env.market_state();
+    assert_eq!(cfg_retired.free_market_slot_count, 1);
+    assert_eq!(group_retired.assets[1].lifecycle, AssetLifecycleV16::Retired);
+
+    let source = env.token_account(creator.pubkey(), FEE as u64);
+    let source_before = env.svm.get_account(&source).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let fake_token_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(fake_token_program, &matcher_bytes);
+
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 4,
+            initial_price: 250,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        rejected.is_err(),
+        "retired-slot reuse must reject a loaded non-SPL token program"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-token reuse must not reactivate the retired slot or consume the reusable counter"
+    );
+    assert_eq!(
+        env.svm.get_account(&source).unwrap(),
+        source_before,
+        "wrong-token reuse must not debit the creator's fee source"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "wrong-token reuse must not touch canonical vault custody"
+    );
+    let (cfg_after_reject, group_after_reject) = env.market_state();
+    assert_eq!(cfg_after_reject.free_market_slot_count, 1);
+    assert_eq!(
+        group_after_reject.assets[1].lifecycle,
+        AssetLifecycleV16::Retired
+    );
+    assert_eq!(group_after_reject.insurance, group_retired.insurance);
+    assert_eq!(group_after_reject.vault, group_retired.vault);
+    assert_eq!(
+        group_after_reject.insurance_domain_budget,
+        group_retired.insurance_domain_budget
+    );
+
+    let control_source = env.token_account(creator.pubkey(), FEE as u64);
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 4,
+            initial_price: 250,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(control_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        accepted.is_ok(),
+        "same retired-slot reuse succeeds with the real token program: {accepted:?}"
+    );
+    let (cfg_reused, group_reused) = env.market_state();
+    assert_eq!(cfg_reused.free_market_slot_count, 0);
+    assert_eq!(group_reused.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(group_reused.assets[1].effective_price, 250);
+    assert_eq!(env.token_amount(control_source), 0);
+    assert_eq!(env.token_amount(env.vault), (FEE * 2) as u64);
+    assert_eq!(group_reused.insurance - group_retired.insurance, FEE);
+    assert_eq!(group_reused.vault - group_retired.vault, FEE);
+    assert_domain_budget_remaining_total_consistent(
+        &group_reused,
+        "permissionless reuse wrong-token control",
+    );
+}
+
 // Coverage probe (Finding-G-adjacent): the RETIRE side of UpdateAssetLifecycle calls canonicalize_
 // retired_asset_slot_view (v16_program 8928), which REJECTS unless the slot's insurance_domain_budget
 // (long/short), spent, pending-loss-barrier, and backing utilization-earnings are ALL zero. If that
