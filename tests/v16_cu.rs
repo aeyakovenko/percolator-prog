@@ -67539,6 +67539,139 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
     );
 }
 
+// full-interface sweep: the value top-up handlers must pin the SPL Token program before they credit
+// market accounting. A loaded, executable non-SPL program id must reject on all top-up routes without
+// pulling donor tokens, crediting insurance/backing, or touching the vault.
+#[test]
+fn v16_attack_value_topups_reject_wrong_token_program() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let fake_token_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(fake_token_program, &matcher_bytes);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let assert_core_unchanged = |env: &V16CuEnv, label: &str| {
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label}: wrong token program must not mutate market accounting"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "{label}: wrong token program must not touch the vault"
+        );
+    };
+
+    let insurance_source = env.token_account_for_mint(env.mint, admin.pubkey(), 11);
+    let insurance_source_before = env.svm.get_account(&insurance_source).unwrap();
+    env.svm.expire_blockhash();
+    let insurance_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsurance { amount: 11 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        insurance_reject.is_err(),
+        "TopUpInsurance must reject a non-SPL token program"
+    );
+    assert_core_unchanged(&env, "TopUpInsurance");
+    assert_eq!(
+        env.svm.get_account(&insurance_source).unwrap(),
+        insurance_source_before,
+        "rejected insurance top-up must not pull donor tokens"
+    );
+
+    let domain_source = env.token_account_for_mint(env.mint, admin.pubkey(), 12);
+    let domain_source_before = env.svm.get_account(&domain_source).unwrap();
+    env.svm.expire_blockhash();
+    let domain_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 12,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(domain_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        domain_reject.is_err(),
+        "TopUpInsuranceDomain must reject a non-SPL token program"
+    );
+    assert_core_unchanged(&env, "TopUpInsuranceDomain");
+    assert_eq!(
+        env.svm.get_account(&domain_source).unwrap(),
+        domain_source_before,
+        "rejected domain top-up must not pull donor tokens"
+    );
+
+    let backing_source = env.token_account_for_mint(env.mint, admin.pubkey(), 13);
+    let backing_source_before = env.svm.get_account(&backing_source).unwrap();
+    env.svm.expire_blockhash();
+    let backing_reject = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 13,
+            expiry_slot: 10_000,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        backing_reject.is_err(),
+        "TopUpBackingBucket must reject a non-SPL token program"
+    );
+    assert_core_unchanged(&env, "TopUpBackingBucket");
+    assert_eq!(
+        env.svm.get_account(&backing_source).unwrap(),
+        backing_source_before,
+        "rejected backing top-up must not pull donor tokens"
+    );
+
+    let (_insurance_ok_source, _) = env.top_up_insurance_with_cu(11);
+    let (_domain_ok_source, _) = env.top_up_insurance_domain_with_authority_and_cu(&admin, 0, 12);
+    let (_backing_ok_source, _) = env.top_up_backing_bucket_with_cu(1, 13, 10_000);
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.insurance, 23);
+    assert_eq!(
+        group_after.source_backing_buckets[1].fresh_unliened_backing_num,
+        13 * BOUND_SCALE
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        group_after.vault as u64,
+        "valid top-up controls keep accounting matched to custody"
+    );
+}
+
 // [from pr114]
 // full-interface sweep: live WithdrawInsuranceAsset is distinct from terminal WithdrawInsurance and
 // backing withdrawals. A delegated canonical vault must be rejected before debiting the live domain
