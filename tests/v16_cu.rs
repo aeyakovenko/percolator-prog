@@ -40245,6 +40245,149 @@ fn v16_attack_force_close_requires_opposite_sides() {
     );
 }
 
+// security.md sweep - ForceCloseAbandonedAsset duplicate-account alias (#26/#44/#48): the public
+// recovery route takes two writable portfolio slots. Passing the same account twice must reject before
+// any legacy-account realloc or engine mutation; otherwise a duplicated AccountInfo path could become a
+// DoS/mutation hazard. A distinct same-market pair remains closeable afterward.
+#[test]
+fn v16_attack_force_close_rejects_same_portfolio_alias_before_realloc() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    const DELAY: u64 = 5;
+    const SHUT: u64 = 10;
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+
+    let long_alias_owner = Keypair::new();
+    let short_alias_owner = Keypair::new();
+    let long_ok_owner = Keypair::new();
+    let short_ok_owner = Keypair::new();
+    let long_alias = env.create_portfolio(&long_alias_owner);
+    let short_alias = env.create_portfolio(&short_alias_owner);
+    let long_ok = env.create_portfolio(&long_ok_owner);
+    let short_ok = env.create_portfolio(&short_ok_owner);
+    for (owner, portfolio) in [
+        (&long_alias_owner, long_alias),
+        (&short_alias_owner, short_alias),
+        (&long_ok_owner, long_ok),
+        (&short_ok_owner, short_ok),
+    ] {
+        env.deposit(owner, portfolio, 1_000_000);
+    }
+    env.trade_asset_with_cu(
+        1,
+        &long_alias_owner,
+        long_alias,
+        &short_alias_owner,
+        short_alias,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &long_ok_owner,
+        long_ok,
+        &short_ok_owner,
+        short_ok,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(SHUT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        SHUT,
+        0,
+    );
+    env.svm.warp_to_slot(SHUT + DELAY + 1);
+
+    let mut legacy_alias = env.svm.get_account(&long_alias).unwrap();
+    legacy_alias.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(long_alias, legacy_alias).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let alias_before = env.svm.get_account(&long_alias).unwrap();
+    let short_alias_before = env.svm.get_account(&short_alias).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    let cranker = Keypair::new();
+    env.ensure_signer_account(cranker.pubkey());
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ForceCloseAbandonedAsset {
+            asset_index: 1,
+            now_slot: SHUT + DELAY + 1,
+            close_q: POS_SCALE,
+        },
+        vec![
+            AccountMeta::new(cranker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_alias, false),
+            AccountMeta::new(long_alias, false),
+        ],
+        &[&cranker],
+    );
+    assert!(
+        rejected.is_err(),
+        "force-close must reject when both writable portfolio slots alias the same account"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "same-account force-close rejection leaves market byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&long_alias).unwrap(),
+        alias_before,
+        "same-account force-close rejects before reallocating or mutating the legacy alias"
+    );
+    assert_eq!(
+        env.svm.get_account(&short_alias).unwrap(),
+        short_alias_before,
+        "same-account force-close rejection leaves the real counterparty untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "same-account force-close rejection moves no custody"
+    );
+
+    env.svm.expire_blockhash();
+    let ok = env.try_force_close_abandoned_asset_with_cu(
+        &cranker,
+        long_ok,
+        short_ok,
+        1,
+        SHUT + DELAY + 1,
+        POS_SCALE,
+    );
+    assert!(
+        ok.is_ok(),
+        "distinct same-market abandoned pair still force-closes after alias rejection: {ok:?}"
+    );
+    let group = env.market_state().1;
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(long_ok), 1),
+        "valid control closes the long leg"
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(short_ok), 1),
+        "valid control closes the short leg"
+    );
+    assert_eq!(
+        group.assets[1].oi_eff_long_q, POS_SCALE,
+        "only the alias pair remains open on the long side"
+    );
+    assert_eq!(
+        group.assets[1].oi_eff_short_q, POS_SCALE,
+        "only the alias pair remains open on the short side"
+    );
+}
+
 // security.md sweep - ForceCloseAbandonedAsset order independence (#2/#33/#48): the unsigned recovery
 // cleanup path accepts two victim portfolios and must close exposure based on their leg sides, not on
 // caller-supplied account order. Existing force-close controls pass the long first; this drives the
