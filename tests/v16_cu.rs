@@ -38387,6 +38387,155 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_backing_gate() {
 }
 
 #[test]
+fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_backing_earnings_gate() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    let admin = env.admin.insecure_clone();
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 2, 100, 10_000);
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[2].utilization_fee_earnings = 30;
+        group.vault += 30;
+    });
+    env.set_token_account_amount(
+        env.vault,
+        env.mint,
+        env.vault_authority,
+        env.market_state().1.vault as u64,
+    );
+
+    let stale_long_owner = Keypair::new();
+    let stale_short_owner = Keypair::new();
+    let stale_long = env.create_portfolio(&stale_long_owner);
+    let stale_short = env.create_portfolio(&stale_short_owner);
+    env.deposit(&stale_long_owner, stale_long, 1_000_000_000);
+    env.deposit(&stale_short_owner, stale_short, 1_000_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &stale_long_owner,
+        stale_long,
+        &stale_short_owner,
+        stale_short,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    let cranker_owner = Keypair::new();
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.svm.warp_to_slot(3);
+    for _ in 0..3 {
+        env.svm.expire_blockhash();
+        env.crank(
+            cranker,
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: 3,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+        );
+    }
+    env.svm.expire_blockhash();
+    env.crank(
+        cranker,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 1,
+            now_slot: 3,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+
+    let dest = env.token_account(admin.pubkey(), 0);
+    let withdraw_earnings = |env: &mut V16CuEnv| {
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::WithdrawBackingBucketEarnings {
+                domain: 2,
+                amount: 10,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ledger, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+    };
+
+    let before_mask = env.market_state().1;
+    assert!(before_mask.loss_stale_active);
+    assert!(before_mask.assets[1].slot_last < before_mask.current_slot);
+    assert_eq!(
+        before_mask.source_backing_buckets[2].utilization_fee_earnings, 30,
+        "asset-1 backing-provider earnings are owed"
+    );
+    assert!(
+        withdraw_earnings(&mut env).is_err(),
+        "asset-1 live backing earnings are initially locked by its loss-stale exposure"
+    );
+
+    env.svm.expire_blockhash();
+    env.crank(
+        cranker,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 3,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
+    let after_unrelated_refresh = env.market_state().1;
+    assert!(
+        after_unrelated_refresh.assets[1].slot_last < after_unrelated_refresh.current_slot,
+        "asset 1 remains locally loss-stale after the unrelated asset-0 refresh"
+    );
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+
+    let rejected = withdraw_earnings(&mut env);
+    assert!(
+        rejected.is_err(),
+        "an unrelated refresh must not make asset-1 backing earnings withdrawable while asset 1 is loss-stale"
+    );
+    let after_withdraw_attempt = env.market_state().1;
+    assert_eq!(
+        after_withdraw_attempt.source_backing_buckets[2].utilization_fee_earnings,
+        after_unrelated_refresh.source_backing_buckets[2].utilization_fee_earnings,
+        "rejected stale-asset earnings withdrawal must leave provider earnings untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "rejected stale-asset earnings withdrawal must leave the provider ledger untouched"
+    );
+    assert_eq!(
+        after_withdraw_attempt.vault, after_unrelated_refresh.vault,
+        "rejected stale-asset earnings withdrawal must leave vault accounting untouched"
+    );
+    assert_eq!(
+        env.token_amount(dest),
+        0,
+        "rejected stale-asset earnings withdrawal pays no tokens"
+    );
+}
+
+#[test]
 fn v16_attack_unexposed_target_move_cannot_grief_live_insurance_withdrawals() {
     let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
         V16CuMarketParams {
