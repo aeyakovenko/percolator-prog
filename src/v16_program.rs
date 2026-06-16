@@ -4912,8 +4912,28 @@ pub mod processor {
         {
             return Err(PercolatorError::EngineLockActive.into());
         }
+        if asset_local_loss_stale_view(group, asset_index) {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
         reject_exposed_target_effective_lag_view(group, asset_index)?;
         Ok(false)
+    }
+
+    fn asset_local_loss_stale_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> bool {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return true;
+        }
+        let asset = &group.markets[asset_index].engine.asset;
+        matches!(
+            asset.lifecycle,
+            ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY
+        ) && asset.slot_last.get() < group.header.current_slot.get()
+            && asset_local_has_position_or_loss_state_view(group, asset_index)
     }
 
     fn asset_has_exposed_target_effective_lag_view(
