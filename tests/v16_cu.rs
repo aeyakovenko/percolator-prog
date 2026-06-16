@@ -32455,6 +32455,108 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
     );
 }
 
+// LoF/DoS sweep: Withdraw grows legacy portfolio storage before the engine provenance check and
+// then performs a signed vault transfer. A market-A legacy portfolio supplied to market B must
+// reject atomically: no foreign vault drain, no capital debit, and no public realloc debris.
+#[test]
+fn v16_attack_legacy_cross_market_withdraw_rolls_back_realloc_and_transfer() {
+    let mut env = V16CuEnv::new();
+    let attacker = Keypair::new();
+    let pa = env.create_portfolio(&attacker);
+    env.deposit(&attacker, pa, 1_000_000);
+
+    let mut pa_legacy = env.svm.get_account(&pa).unwrap();
+    pa_legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(pa, pa_legacy).unwrap();
+    assert_eq!(
+        env.svm.get_account(&pa).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup starts from a funded legacy market-A portfolio"
+    );
+
+    let params = V16CuMarketParams::default();
+    let (market_b, vault_authority_b, vault_b) =
+        init_independent_market_same_mint(&mut env, params);
+    let victim = Keypair::new();
+    let pb = init_portfolio_on_market(
+        &mut env,
+        market_b,
+        &victim,
+        params.max_portfolio_assets as usize,
+    );
+    deposit_to_market(&mut env, market_b, vault_b, &victim, pb, 1_000_000);
+
+    let dest = env.token_account_for_mint(env.mint, attacker.pubkey(), 0);
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let pa_before = env.svm.get_account(&pa).unwrap();
+    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
+    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::Withdraw { amount: 1_000_000 },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(pa, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(vault_b, false),
+            AccountMeta::new_readonly(vault_authority_b, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&attacker],
+    );
+    assert!(
+        rejected.is_err(),
+        "legacy Withdraw must reject a market-A portfolio supplied to market B"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_a_before,
+        "rejected foreign legacy withdraw leaves market A unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&market_b).unwrap(),
+        market_b_before,
+        "rejected foreign legacy withdraw leaves market B unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&pa).unwrap(),
+        pa_before,
+        "rejected foreign legacy withdraw rolls back realloc and capital debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&pa).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed foreign withdraw leaves no public legacy realloc debris"
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "rejected foreign legacy withdraw pays nothing"
+    );
+
+    let (same_market_dest, cu) = env.withdraw_with_cu(&attacker, pa, 1_000_000);
+    assert_cu_within("same-market legacy Withdraw after foreign reject", cu, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        env.token_amount(same_market_dest),
+        1_000_000,
+        "same-market legacy withdraw remains live after rejected foreign probe"
+    );
+    assert_eq!(
+        env.svm.get_account(&pa).unwrap().data.len(),
+        env.portfolio_account_len,
+        "successful same-market withdraw grows legacy storage"
+    );
+}
+
 // full-interface sweep (cron57): Deposit is a value-in path, but it must still reject a portfolio
 // stamped for another market. Otherwise an attacker could pull their source tokens into market B while
 // crediting a market-A portfolio, creating cross-market accounting drift and stranded custody.
