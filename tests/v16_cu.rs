@@ -15567,6 +15567,40 @@ fn v16_attack_crank_caller_funding_rate_injection_rejected() {
             rr
         );
     }
+
+    let mut legacy_target = env.svm.get_account(&pa).unwrap();
+    legacy_target.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(pa, legacy_target).unwrap();
+    let legacy_before = env.svm.get_account(&pa).unwrap();
+    let market_before_invalid_action = env.svm.get_account(&env.market).unwrap();
+    for action in [3u8, u8::MAX] {
+        env.svm.expire_blockhash();
+        let r = env.send(
+            ProgInstruction::PermissionlessCrank {
+                action,
+                asset_index: 0,
+                now_slot: 5,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            crank_accts(&env),
+            &[],
+        );
+        assert!(r.is_err(), "invalid crank action {action} must reject");
+        assert_eq!(
+            env.svm.get_account(&pa).unwrap(),
+            legacy_before,
+            "invalid crank action must not grow or rewrite the legacy target portfolio"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_invalid_action,
+            "invalid crank action must not rewrite market/oracle state"
+        );
+    }
+
     // a legitimate rate-0 crank still works and conserves.
     env.svm.expire_blockhash();
     let r = env.send(
