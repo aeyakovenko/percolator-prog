@@ -22177,6 +22177,82 @@ fn v16_attack_cure_deposit_rejects_delegated_canonical_vault() {
     );
 }
 
+// full-interface sweep: CureAndCancelClose validates the optional-deposit SPL Token program before
+// canceling close progress or crediting capital. A loaded non-SPL executable must not get to the
+// engine mutation, because the transfer happens after that mutation in the successful path.
+#[test]
+fn v16_attack_cure_deposit_rejects_wrong_token_program_before_cancel() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 100);
+    env.seed_cancellable_close_progress(portfolio);
+
+    let fake_token_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(fake_token_program, &matcher_bytes);
+
+    let source = env.token_account_for_mint(env.mint, owner.pubkey(), 50);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CureAndCancelClose {
+            optional_deposit: 50,
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "CureAndCancelClose must reject a non-SPL token program before canceling close progress"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected wrong-token cure leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected wrong-token cure leaves close progress and capital unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&source).unwrap(),
+        source_before,
+        "rejected wrong-token cure pulls no optional-deposit tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected wrong-token cure leaves vault custody unchanged"
+    );
+    let still_open = env.portfolio_state(portfolio);
+    assert!(still_open.close_progress.active);
+    assert!(!still_open.close_progress.canceled);
+
+    env.cure_and_cancel_close_with_cu(&owner, portfolio, source, 50);
+    let cured = env.portfolio_state(portfolio);
+    assert!(cured.close_progress.canceled);
+    assert_eq!(cured.capital, 150);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault),
+        "valid cure control keeps accounting matched to custody"
+    );
+}
+
 // security.md sweep - CureAndCancelClose owner gating (#6/#48): canceling a close-progress ledger is
 // liveness-sensitive. A non-owner must not be able to cancel a victim's forced-close recovery state or
 // move optional-deposit tokens; the real owner must still be able to cure afterward.
