@@ -58951,6 +58951,84 @@ fn v16_attack_batch_nocpi_malformed_size_rolls_back_legacy_realloc() {
     assert!(env.svm.get_account(&lp_account).unwrap().data.len() > PORTFOLIO_ENGINE_ACCOUNT_LEN);
 }
 
+// LoF/DoS sweep (cron135): single TradeNoCpi already rejects extreme sizes, and the malformed-batch
+// test above covers zero/i128::MIN. BatchTradeNoCpi has its own fee reconstruction and aggregate
+// accounting path, so very large non-min sizes must also reject cleanly without leaving attacker-
+// triggered legacy realloc growth or partial market state behind.
+#[test]
+fn v16_attack_batch_nocpi_extreme_size_rejects_without_legacy_realloc() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+
+    for account_key in [taker_account, lp_account] {
+        let mut account = env.svm.get_account(&account_key).unwrap();
+        account.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+        env.svm.set_account(account_key, account).unwrap();
+    }
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_account).unwrap();
+    let lp_before = env.svm.get_account(&lp_account).unwrap();
+    assert_eq!(taker_before.data.len(), PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    assert_eq!(lp_before.data.len(), PORTFOLIO_ENGINE_ACCOUNT_LEN);
+
+    let valid_size = (5 * POS_SCALE) as i128;
+    for (label, bad_size) in [("i128-max", i128::MAX), ("near-i128-min", i128::MIN + 1)] {
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![
+                    BatchTradeLeg {
+                        asset_index: 0,
+                        size_q: bad_size,
+                        exec_price: percolator::MAX_ORACLE_PRICE,
+                        fee_bps: 100,
+                    },
+                    BatchTradeLeg {
+                        asset_index: 1,
+                        size_q: -valid_size,
+                        exec_price: 100,
+                        fee_bps: 100,
+                    },
+                ],
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+                AccountMeta::new(lp_account, false),
+            ],
+            &[&taker, &lp],
+        );
+        assert!(
+            rejected.is_err(),
+            "{label} BatchTradeNoCpi leg must reject cleanly"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label} extreme-size batch leaves the market byte-identical"
+        );
+        assert_eq!(
+            env.svm.get_account(&taker_account).unwrap(),
+            taker_before,
+            "{label} extreme-size batch rolls back taker realloc and zero-fill"
+        );
+        assert_eq!(
+            env.svm.get_account(&lp_account).unwrap(),
+            lp_before,
+            "{label} extreme-size batch rolls back LP realloc and zero-fill"
+        );
+    }
+}
+
 // CU/DoS hardening: duplicate-asset BatchTradeCpi is structurally invalid and must reject before
 // matcher CPI. The existing duplicate test proves rollback; this hostile sentinel proves the wrapper
 // does not call the matcher first.
