@@ -333,6 +333,25 @@ fn make_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
     data
 }
 
+fn make_delegated_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
+    let mut data = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint,
+            owner,
+            amount,
+            delegate: COption::Some(Pubkey::new_unique()),
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: amount,
+            close_authority: COption::None,
+        },
+        &mut data,
+    )
+    .unwrap();
+    data
+}
+
 fn make_pyth_data(
     feed_id: &[u8; 32],
     price: i64,
@@ -52189,6 +52208,173 @@ fn v16_attack_base_unit_mint_reset_rejects_fake_old_primary_reserve() {
         env.market_state().0.collateral_mint,
         replacement_primary.to_bytes(),
         "replacement primary mint stored only after the canonical old reserve is empty"
+    );
+}
+
+// UpdateBaseUnitMints proves that old reserves are empty before rotating them out of the config. Emptiness
+// alone is insufficient: a delegated canonical old reserve is unsafe custody and must not be accepted as the
+// proof that the old rail is clean, otherwise a market authority can bury an unsafe vault behind a mint reset.
+#[test]
+fn v16_attack_base_unit_mint_reset_rejects_delegated_empty_old_reserves() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let old_secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, old_secondary);
+
+    let old_secondary_vault = canonical_vault_ata(env.vault_authority, old_secondary);
+    env.svm
+        .set_account(
+            old_secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_delegated_token_data(old_secondary, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let replacement_secondary = env.create_mint();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let old_secondary_before = env.svm.get_account(&old_secondary_vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected_secondary = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: replacement_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(replacement_secondary, false),
+            AccountMeta::new_readonly(old_secondary_vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_secondary.is_err(),
+        "empty but delegated old secondary reserve must not prove the rail clean"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected delegated-secondary proof leaves configured mints unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&old_secondary_vault).unwrap(),
+        old_secondary_before,
+        "delegated old secondary reserve remains recoverable"
+    );
+
+    env.svm
+        .set_account(
+            old_secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(old_secondary, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let accepted_secondary = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: replacement_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(replacement_secondary, false),
+            AccountMeta::new_readonly(old_secondary_vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        accepted_secondary.is_ok(),
+        "same old secondary reserve can rotate once delegate is removed: {accepted_secondary:?}"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_delegated_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let replacement_primary = env.create_mint();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let old_primary_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected_primary = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: replacement_primary.to_bytes(),
+            secondary_mint: replacement_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(replacement_primary, false),
+            AccountMeta::new_readonly(replacement_secondary, false),
+            AccountMeta::new_readonly(env.vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_primary.is_err(),
+        "empty but delegated old primary reserve must not prove the rail clean"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected delegated-primary proof leaves configured mints unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        old_primary_before,
+        "delegated old primary reserve remains recoverable"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let accepted_primary = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: replacement_primary.to_bytes(),
+            secondary_mint: replacement_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(replacement_primary, false),
+            AccountMeta::new_readonly(replacement_secondary, false),
+            AccountMeta::new_readonly(env.vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        accepted_primary.is_ok(),
+        "same old primary reserve can rotate once delegate is removed: {accepted_primary:?}"
     );
 }
 
