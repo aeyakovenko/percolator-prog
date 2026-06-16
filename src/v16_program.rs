@@ -9413,6 +9413,9 @@ pub mod processor {
         let side = decode_side(side)?;
         let mut data = market_ai.try_borrow_mut_data()?;
         let (_cfg, mut group) = state::market_view_mut(&mut data)?;
+        if group.header.mode == 1 {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
         group
             .finalize_side_reset_not_atomic(asset_index as usize, side)
             .map_err(map_v16_error)
