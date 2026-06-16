@@ -58201,6 +58201,134 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
     );
 }
 
+// SOL-028 (slippage) + atomicity: BatchTradeCpi must also enforce the short/sell floor branch
+// per leg. A single short leg filled below its floor must abort the whole mixed-direction batch.
+#[test]
+fn v16_attack_batch_cpi_short_limit_floor_aborts_whole_batch() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+    // spread matcher: buys fill above oracle, sells fill below oracle.
+    let (ctx, delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+        matcher_program,
+        &lp,
+        la,
+        500,
+        1_000,
+    );
+    let sz = (5 * POS_SCALE) as i128;
+    let metas = |env: &V16CuEnv| {
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let r = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![
+                BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: sz,
+                    fee_bps: 100,
+                    limit_price: 1_000_000,
+                },
+                BatchTradeCpiLeg {
+                    asset_index: 1,
+                    size_q: -sz,
+                    fee_bps: 100,
+                    limit_price: 100,
+                },
+            ],
+        },
+        metas(&env),
+        &[&taker],
+    );
+    assert!(
+        r.is_err(),
+        "a short floor violation must abort the whole batch"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "post-CPI mixed batch rejection rolls back market writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&ta).unwrap(),
+        taker_before,
+        "post-CPI mixed batch rejection rolls back taker writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&la).unwrap(),
+        lp_before,
+        "post-CPI mixed batch rejection rolls back LP writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "post-CPI mixed batch rejection rolls back matcher context writes"
+    );
+    let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
+    assert!(
+        !has_active_leg_for_asset(&t, 0) && !has_active_leg_for_asset(&t, 1),
+        "atomic: no leg filled when the short floor is violated"
+    );
+
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![
+                BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: sz,
+                    fee_bps: 100,
+                    limit_price: 1_000_000,
+                },
+                BatchTradeCpiLeg {
+                    asset_index: 1,
+                    size_q: -sz,
+                    fee_bps: 100,
+                    limit_price: 1,
+                },
+            ],
+        },
+        metas(&env),
+        &[&taker],
+    );
+    assert!(
+        ok.is_ok(),
+        "mixed batch with permissive short floor must execute: {ok:?}"
+    );
+    let t2 = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
+    assert!(active_leg_for_asset(&t2, 0).basis_pos_q > 0);
+    assert!(active_leg_for_asset(&t2, 1).basis_pos_q < 0);
+    let (_, g1) = env.market_state();
+    assert_eq!(
+        g1.vault,
+        g1.c_tot + g1.insurance,
+        "conservation after mixed batch fill"
+    );
+}
+
 // security.md sweep - BatchTradeCpi zero-fill atomicity (#22/#39): batch strategies require every
 // leg to fill. A zero-capacity matcher returning exec_size=0 must reject the whole batch, not create
 // phantom no-op success or partially advance matcher/protocol state.
