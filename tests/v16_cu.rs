@@ -59929,6 +59929,162 @@ fn v16_attack_batch_fees_isolated_to_each_asset_domain() {
     assert_domain_budget_remaining_total_consistent(&after, "batch fee domain isolation");
 }
 
+// security.md sweep - batch dust fee reconstruction (#37/#49): the batch wrapper reconstructs
+// per-leg fees from the engine's aggregate result. Dust notional is the rounding edge where an
+// aggregate/floor split could make a valid batch free, reject it as a false DoS, or credit the wrong
+// asset domain. Cover both direct and permissionless-LP CPI batch routes.
+#[test]
+fn v16_attack_batch_dust_fees_round_up_and_reconstruct_per_leg() {
+    #[derive(Clone, Copy)]
+    enum Path {
+        NoCpi,
+        Cpi,
+    }
+
+    for path in [Path::NoCpi, Path::Cpi] {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+        env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+        env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+        let taker = Keypair::new();
+        let lp = Keypair::new();
+        let ta = env.create_portfolio(&taker);
+        let la = env.create_portfolio(&lp);
+        env.deposit(&taker, ta, 1_000_000);
+        env.deposit(&lp, la, 1_000_000);
+
+        let before = env.market_state().1;
+        let b0 = before.insurance_domain_budget[0] + before.insurance_domain_budget[1];
+        let b1 = before.insurance_domain_budget[2] + before.insurance_domain_budget[3];
+        let dust_size = (POS_SCALE / 100) as i128;
+        let label = match path {
+            Path::NoCpi => "BatchTradeNoCpi",
+            Path::Cpi => "BatchTradeCpi",
+        };
+
+        env.svm.expire_blockhash();
+        match path {
+            Path::NoCpi => {
+                env.send(
+                    ProgInstruction::BatchTradeNoCpi {
+                        legs: vec![
+                            BatchTradeLeg {
+                                asset_index: 0,
+                                size_q: dust_size,
+                                exec_price: 100,
+                                fee_bps: 1,
+                            },
+                            BatchTradeLeg {
+                                asset_index: 1,
+                                size_q: dust_size,
+                                exec_price: 100,
+                                fee_bps: 1,
+                            },
+                        ],
+                    },
+                    vec![
+                        AccountMeta::new(taker.pubkey(), true),
+                        AccountMeta::new(lp.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(ta, false),
+                        AccountMeta::new(la, false),
+                    ],
+                    &[&taker, &lp],
+                )
+                .unwrap_or_else(|e| panic!("{label} dust batch must execute, got {e}"));
+            }
+            Path::Cpi => {
+                let matcher_program = Pubkey::new_unique();
+                let matcher_bytes =
+                    std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+                env.svm.add_program(matcher_program, &matcher_bytes);
+                let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, la);
+                env.send(
+                    ProgInstruction::BatchTradeCpi {
+                        legs: vec![
+                            BatchTradeCpiLeg {
+                                asset_index: 0,
+                                size_q: dust_size,
+                                fee_bps: 1,
+                                limit_price: 0,
+                            },
+                            BatchTradeCpiLeg {
+                                asset_index: 1,
+                                size_q: dust_size,
+                                fee_bps: 1,
+                                limit_price: 0,
+                            },
+                        ],
+                    },
+                    vec![
+                        AccountMeta::new(taker.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(ta, false),
+                        AccountMeta::new(la, false),
+                        AccountMeta::new_readonly(matcher_program, false),
+                        AccountMeta::new(ctx, false),
+                        AccountMeta::new_readonly(delegate, false),
+                    ],
+                    &[&taker],
+                )
+                .unwrap_or_else(|e| panic!("{label} dust batch must execute, got {e}"));
+            }
+        }
+
+        let after = env.market_state().1;
+        let a0 = (after.insurance_domain_budget[0] + after.insurance_domain_budget[1]) - b0;
+        let a1 = (after.insurance_domain_budget[2] + after.insurance_domain_budget[3]) - b1;
+        assert_eq!(
+            after.insurance - before.insurance,
+            4,
+            "{label} charges both sides of both dust legs; no free batch"
+        );
+        assert_eq!(
+            a0, 2,
+            "{label} asset0 dust leg credits exactly one rounded-up fee per side"
+        );
+        assert_eq!(
+            a1, 2,
+            "{label} asset1 dust leg credits exactly one rounded-up fee per side"
+        );
+        assert_eq!(
+            after.assets[0].oi_eff_long_q, dust_size as u128,
+            "{label} asset0 dust leg opened non-vacuously"
+        );
+        assert_eq!(
+            after.assets[1].oi_eff_long_q, dust_size as u128,
+            "{label} asset1 dust leg opened non-vacuously"
+        );
+        assert_eq!(after.vault, before.vault, "{label} does not mint value");
+        assert_eq!(
+            after.vault,
+            after.c_tot + after.insurance,
+            "{label} preserves exact conservation after fee reconstruction"
+        );
+        assert_domain_budget_remaining_total_consistent(
+            &after,
+            "batch dust fee reconstruction",
+        );
+        let taker_after = env.portfolio_state(ta);
+        let lp_after = env.portfolio_state(la);
+        assert_eq!(
+            active_leg_for_asset(&taker_after, 0).basis_pos_q,
+            dust_size
+        );
+        assert_eq!(
+            active_leg_for_asset(&taker_after, 1).basis_pos_q,
+            dust_size
+        );
+        assert_eq!(
+            active_leg_for_asset(&lp_after, 0).basis_pos_q,
+            -dust_size
+        );
+        assert_eq!(
+            active_leg_for_asset(&lp_after, 1).basis_pos_q,
+            -dust_size
+        );
+    }
+}
+
 // LOF: the batch's single end-state initial-margin check protects the COUNTERPARTY too. A funded
 // taker cannot use a batch to force an undercapitalized LP into a position it cannot margin — the
 // engine certifies BOTH accounts (long and short) on the final portfolio, so the batch reverts.
