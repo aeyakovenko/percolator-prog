@@ -12,9 +12,9 @@ extern crate std;
 
 use alloc::vec::Vec;
 use percolator::{
-    v16_domain_count_for_market_slots, MarketModeV16, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, RebalanceRequestV16, SideV16, SourceCreditStateV16,
-    TradeRequestV16, V16Config, V16Error, BOUND_SCALE,
+    v16_domain_count_for_market_slots, AutoCrankObservationV16, AutoCrankOutcomeV16,
+    AutoCrankPlanV16, AutoCrankWorkV16, MarketModeV16, RebalanceRequestV16, SideV16,
+    SourceCreditStateV16, TradeRequestV16, V16Config, V16Error, BOUND_SCALE,
 };
 use solana_program::{
     account_info::AccountInfo,
@@ -10343,12 +10343,10 @@ pub mod processor {
         if funding_rate_e9 != 0 || recovery_reason != 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        if action == 1 && fee_bps != 0 {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
         if action > 2 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        let _ = fee_bps;
         let (target_header, _) =
             state::read_portfolio_owner_preflight(&portfolio_ai.try_borrow_data()?)?;
         if target_header.market_group_id != market_ai.key.to_bytes()
@@ -10366,18 +10364,6 @@ pub mod processor {
             if asset_index_usize >= group.header.config.max_market_slots.get() as usize {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
-            let crank_action = match action {
-                0 => PermissionlessCrankActionV16::Refresh,
-                1 => PermissionlessCrankActionV16::Liquidate(percolator::LiquidationRequestV16 {
-                    asset_index: asset_index_usize,
-                    close_q,
-                    fee_bps: group.header.config.liquidation_fee_bps.get(),
-                }),
-                2 => PermissionlessCrankActionV16::SettleB {
-                    asset_index: asset_index_usize,
-                },
-                _ => return Err(PercolatorError::InvalidInstruction.into()),
-            };
             let mut oracle_profile =
                 read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
             let now_unix_ts = Clock::get().map(|c| c.unix_timestamp).unwrap_or_else(|_| {
@@ -10387,7 +10373,7 @@ pub mod processor {
                     .oracle_target_publish_time
                     .saturating_add(i64::try_from(elapsed_slots).unwrap_or(i64::MAX))
             });
-            let reward_enabled = action == 1 && cfg.liquidation_cranker_fee_share_bps != 0;
+            let reward_enabled = cfg.liquidation_cranker_fee_share_bps != 0;
             let mut oracle_tail = tail;
             let mut cranker_portfolio_ai = None;
             if reward_enabled {
@@ -10471,121 +10457,140 @@ pub mod processor {
                 cfg.oracle_leg_prices_e6 = oracle_profile.oracle_leg_prices_e6;
                 cfg.oracle_leg_publish_times = oracle_profile.oracle_leg_publish_times;
             }
+            group
+                .accrue_asset_to_not_atomic(
+                    asset_index_usize,
+                    authenticated_now_slot,
+                    crank_price,
+                    computed_funding_rate_e9,
+                    true,
+                )
+                .map_err(map_v16_error)?;
 
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
             let mut portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
             let insurance_before = group.header.insurance.get();
-            let is_liquidation = matches!(crank_action, PermissionlessCrankActionV16::Liquidate(_));
-            if let Some(cranker_ai) = cranker_portfolio_ai {
-                let mut cranker_data = cranker_ai.try_borrow_mut_data()?;
-                let mut cranker = state::portfolio_view_mut_for_market_slots(
-                    &mut cranker_data,
-                    max_market_slots,
-                )?;
-                expect_portfolio_view_account_key(&cranker, cranker_ai.key)?;
-                expect_portfolio_view_owner(&cranker, owner.key)?;
-                cranker
-                    .validate_with_market(&group.as_view())
-                    .map_err(map_v16_error)?;
-                if let PermissionlessCrankActionV16::Liquidate(liq) = crank_action {
-                    group
-                        .accrue_asset_to_not_atomic(
-                            asset_index_usize,
+            let mut observations = Vec::with_capacity(percolator::V16_MAX_PORTFOLIO_ASSETS_N);
+            observations.push(AutoCrankObservationV16 {
+                asset_index: asset_index_usize,
+                effective_price: crank_price,
+                funding_rate_e9: computed_funding_rate_e9,
+            });
+            let active_bitmap = portfolio
+                .header
+                .active_bitmap
+                .map(percolator::V16PodU64::get);
+            let mut leg_slot = 0usize;
+            while leg_slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
+                if percolator::active_bitmap_get(active_bitmap, leg_slot) {
+                    let leg = portfolio.header.legs[leg_slot]
+                        .try_to_runtime()
+                        .map_err(map_v16_error)?;
+                    let leg_asset = leg.asset_index as usize;
+                    if leg.active
+                        && leg_asset != asset_index_usize
+                        && !observations.iter().any(|o| o.asset_index == leg_asset)
+                        && leg_asset < group.header.config.max_market_slots.get() as usize
+                    {
+                        let mut leg_profile =
+                            read_oracle_profile_from_view(&group, &cfg, leg_asset)?;
+                        if let Ok(leg_price) = hybrid_effective_price_for_crank_view(
+                            &cfg,
+                            &mut leg_profile,
+                            &group,
+                            leg_asset,
                             authenticated_now_slot,
-                            crank_price,
-                            computed_funding_rate_e9,
-                            true,
-                        )
+                            now_unix_ts,
+                            &[],
+                        ) {
+                            if let Ok(leg_funding_rate_e9) = permissionless_funding_rate_e9_view(
+                                &leg_profile,
+                                &group,
+                                leg_asset,
+                                leg_price,
+                            ) {
+                                observations.push(AutoCrankObservationV16 {
+                                    asset_index: leg_asset,
+                                    effective_price: leg_price,
+                                    funding_rate_e9: leg_funding_rate_e9,
+                                });
+                            }
+                        }
+                    }
+                }
+                leg_slot += 1;
+            }
+            let result = group
+                .permissionless_auto_crank_not_atomic(
+                    &mut portfolio,
+                    AutoCrankWorkV16 {
+                        now_slot: authenticated_now_slot,
+                        observations: observations.as_slice(),
+                        liquidation_max_close_q: close_q,
+                        resolved_close_fee_rate_per_slot: 0,
+                    },
+                )
+                .map_err(map_v16_error)?;
+
+            let selected_fee_asset = match result.selected {
+                AutoCrankPlanV16::RefreshAccount {
+                    asset_index: Some(i),
+                }
+                | AutoCrankPlanV16::SettleBChunk { asset_index: i }
+                | AutoCrankPlanV16::Liquidate { asset_index: i } => i,
+                _ => asset_index_usize,
+            };
+            let selected_liquidation =
+                matches!(result.selected, AutoCrankPlanV16::Liquidate { .. });
+            if matches!(result.outcome, AutoCrankOutcomeV16::ResolvedClose(_)) {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
+            let retained_fee = group
+                .header
+                .insurance
+                .get()
+                .saturating_sub(insurance_before);
+            let mut retained_for_domains = retained_fee;
+            if selected_liquidation {
+                if let Some(cranker_ai) = cranker_portfolio_ai {
+                    let mut cranker_data = cranker_ai.try_borrow_mut_data()?;
+                    let mut cranker = state::portfolio_view_mut_for_market_slots(
+                        &mut cranker_data,
+                        max_market_slots,
+                    )?;
+                    expect_portfolio_view_account_key(&cranker, cranker_ai.key)?;
+                    expect_portfolio_view_owner(&cranker, owner.key)?;
+                    cranker
+                        .validate_with_market(&group.as_view())
                         .map_err(map_v16_error)?;
-                    group
-                        .liquidate_account_not_atomic(&mut portfolio, liq)
-                        .map_err(map_v16_error)?;
-                } else {
-                    group
-                        .permissionless_crank_not_atomic(
-                            &mut portfolio,
-                            PermissionlessCrankRequestV16 {
-                                now_slot: authenticated_now_slot,
-                                asset_index: asset_index_usize,
-                                effective_price: crank_price,
-                                funding_rate_e9: computed_funding_rate_e9,
-                                action: crank_action,
-                            },
-                        )
+                    let reward = retained_fee
+                        .checked_mul(cfg.liquidation_cranker_fee_share_bps as u128)
+                        .ok_or(PercolatorError::EngineArithmeticOverflow)?
+                        / 10_000;
+                    let reward = core::cmp::min(reward, retained_fee);
+                    if reward != 0 {
+                        group
+                            .credit_account_from_insurance_not_atomic(&mut cranker, reward)
+                            .map_err(map_v16_error)?;
+                    }
+                    retained_for_domains = retained_fee
+                        .checked_sub(reward)
+                        .ok_or(PercolatorError::EngineCounterUnderflow)?;
+                    cranker
+                        .validate_with_market(&group.as_view())
                         .map_err(map_v16_error)?;
                 }
-                let retained_fee = group
-                    .header
-                    .insurance
-                    .get()
-                    .saturating_sub(insurance_before);
-                let reward = retained_fee
-                    .checked_mul(cfg.liquidation_cranker_fee_share_bps as u128)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?
-                    / 10_000;
-                let reward = core::cmp::min(reward, retained_fee);
-                if reward != 0 {
-                    group
-                        .credit_account_from_insurance_not_atomic(&mut cranker, reward)
-                        .map_err(map_v16_error)?;
-                }
-                let retained_after_reward = retained_fee
-                    .checked_sub(reward)
-                    .ok_or(PercolatorError::EngineCounterUnderflow)?;
-                credit_market_fee_split_across_domains_view(
-                    &cfg,
-                    &mut group,
-                    asset_index_usize,
-                    retained_after_reward,
-                )?;
+            }
+            credit_market_fee_split_across_domains_view(
+                &cfg,
+                &mut group,
+                selected_fee_asset,
+                retained_for_domains,
+            )?;
+            if selected_liquidation {
                 group.validate_shape().map_err(map_v16_error)?;
-                cranker
-                    .validate_with_market(&group.as_view())
-                    .map_err(map_v16_error)?;
-            } else {
-                if let PermissionlessCrankActionV16::Liquidate(liq) = crank_action {
-                    group
-                        .accrue_asset_to_not_atomic(
-                            asset_index_usize,
-                            authenticated_now_slot,
-                            crank_price,
-                            computed_funding_rate_e9,
-                            true,
-                        )
-                        .map_err(map_v16_error)?;
-                    group
-                        .liquidate_account_not_atomic(&mut portfolio, liq)
-                        .map_err(map_v16_error)?;
-                } else {
-                    group
-                        .permissionless_crank_not_atomic(
-                            &mut portfolio,
-                            PermissionlessCrankRequestV16 {
-                                now_slot: authenticated_now_slot,
-                                asset_index: asset_index_usize,
-                                effective_price: crank_price,
-                                funding_rate_e9: computed_funding_rate_e9,
-                                action: crank_action,
-                            },
-                        )
-                        .map_err(map_v16_error)?;
-                }
-                let retained_fee = group
-                    .header
-                    .insurance
-                    .get()
-                    .saturating_sub(insurance_before);
-                credit_market_fee_split_across_domains_view(
-                    &cfg,
-                    &mut group,
-                    asset_index_usize,
-                    retained_fee,
-                )?;
-                if is_liquidation {
-                    group.validate_shape().map_err(map_v16_error)?;
-                }
             }
             cfg_after = cfg;
         }
@@ -10613,8 +10618,11 @@ pub mod processor {
         expect_writable(portfolio_ai)?;
         expect_owner(market_ai, program_id)?;
         expect_owner(portfolio_ai, program_id)?;
-        let (_, _, max_market_slots, _) =
+        let (_, mode, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        if mode == MarketModeV16::Resolved {
+            return handle_close_resolved(program_id, accounts, fee_bps as u128);
+        }
         handle_permissionless_crank_zero_copy(
             program_id,
             owner,
