@@ -47015,6 +47015,111 @@ fn v16_attack_matcher_tail_account_count_is_capped() {
     }
 }
 
+// CU/DoS sweep: the matcher-tail cap above uses unique benign accounts. A caller can also repeat the
+// same benign account up to the cap, which takes the runtime duplicate-account path and is still
+// forwarded into the external matcher CPI. This pins that exact shape on the batch/return-data route:
+// duplicate tails remain live for honest matchers, fill real legs, and add only bounded CU overhead.
+#[test]
+fn v16_attack_batch_tradecpi_duplicate_matcher_tail_is_cu_bounded() {
+    const MAX_TAIL: usize = percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS;
+
+    fn run_batch_with_tail(tail: &[Pubkey]) -> u64 {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+        for asset_index in 0..2 {
+            env.configure_auth_mark_for_asset_as_admin(asset_index, 1, 100);
+        }
+        for key in tail {
+            if env.svm.get_account(key).is_none() {
+                env.svm
+                    .set_account(
+                        *key,
+                        Account {
+                            lamports: 1_000_000_000,
+                            data: vec![0u8; 8],
+                            owner: Pubkey::default(),
+                            executable: false,
+                            rent_epoch: 0,
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes =
+            std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let taker = Keypair::new();
+        let lp = Keypair::new();
+        let taker_account = env.create_portfolio(&taker);
+        let lp_account = env.create_portfolio(&lp);
+        env.deposit(&taker, taker_account, 2_000_000);
+        env.deposit(&lp, lp_account, 2_000_000);
+        let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, lp_account);
+
+        let legs = vec![
+            BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: (5 * POS_SCALE) as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            BatchTradeCpiLeg {
+                asset_index: 1,
+                size_q: -(5 * POS_SCALE as i128),
+                fee_bps: 100,
+                limit_price: 0,
+            },
+        ];
+        let mut accounts = vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ];
+        accounts.extend(
+            tail.iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(ProgInstruction::BatchTradeCpi { legs }, accounts, &[&taker])
+            .expect("BatchTradeCpi with duplicate benign matcher tail");
+        let taker_after = env.portfolio_state(taker_account);
+        assert!(
+            has_active_leg_for_asset(&taker_after, 0) && has_active_leg_for_asset(&taker_after, 1),
+            "duplicate-tail BatchTradeCpi must fill both real legs"
+        );
+        assert_cu_within(
+            "BatchTradeCpi duplicate matcher tail",
+            cu,
+            MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+        );
+        cu
+    }
+
+    let baseline_cu = run_batch_with_tail(&[]);
+    let duplicate_key = Pubkey::new_unique();
+    let duplicate_tail = vec![duplicate_key; MAX_TAIL];
+    let duplicate_cu = run_batch_with_tail(&duplicate_tail);
+    println!(
+        "v16 BatchTradeCpi duplicate matcher tail: baseline={baseline_cu}, duplicate={duplicate_cu}"
+    );
+    assert!(
+        duplicate_cu > baseline_cu,
+        "duplicate matcher tail should exercise the higher-cost account path"
+    );
+    assert!(
+        duplicate_cu <= baseline_cu + 120_000,
+        "duplicate matcher tail overhead too high: baseline={baseline_cu}, duplicate={duplicate_cu}"
+    );
+}
+
 // security.md sweep — oracle confidence filter rejects wide-confidence feeds (#37/#39): the hybrid
 // (Pyth) oracle gates a feed by its confidence interval — `conf*10000 > price*conf_filter_bps` rejects
 // (src/v16_program.rs:3844). Attacker goal: configure/use the oracle against a feed with a huge
