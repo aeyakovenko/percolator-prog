@@ -10723,6 +10723,71 @@ fn v16_attack_stale_batch_nocpi_currentness_threshold_is_bounded() {
     }
 }
 
+// CU/DoS sweep: the large-stale-portfolio currentness preflight intentionally only rejects when the
+// trade touches an already-active stale asset. Opening a fresh asset skips that gate, so cover the
+// worst valid boundary for the highest-overhead public route: 13 stale active legs opening the 14th
+// through BatchTradeCpi. This must remain live, but below the transaction CU cap.
+#[test]
+fn v16_attack_stale_thirteen_leg_fresh_asset_batch_cpi_stays_bounded() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 100_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    env.seed_n_leg_position_for_benchmark(long_account, short_account, 13);
+    env.svm.warp_to_slot(16);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (ctx, delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &short_owner, short_account);
+    env.svm.expire_blockhash();
+    let fresh_asset_trade = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 13,
+                size_q: POS_SCALE as i128,
+                fee_bps: 0,
+                limit_price: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_account, false),
+            AccountMeta::new(short_account, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&long_owner],
+    );
+    let cu = fresh_asset_trade
+        .expect("fresh-asset BatchTradeCpi from thirteen-leg stale account must stay under tx CU");
+    println!("v16 13-stale-leg fresh-asset BatchTradeCpi CU: {cu}");
+    assert!(cu < 1_400_000, "fresh-asset BatchTradeCpi CU {cu}");
+    let long_after = env.portfolio_state(long_account);
+    let short_after = env.portfolio_state(short_account);
+    assert_eq!(
+        active_leg_for_asset(&long_after, 13).basis_pos_q,
+        POS_SCALE as i128,
+        "fresh asset opened on the taker"
+    );
+    assert_eq!(
+        active_leg_for_asset(&short_after, 13).basis_pos_q,
+        -(POS_SCALE as i128),
+        "fresh asset opened on the LP"
+    );
+    let (_, group) = env.market_state();
+    assert!(
+        group.vault >= group.c_tot + group.insurance,
+        "fresh-asset stale-boundary trade preserves senior conservation"
+    );
+}
+
 #[test]
 fn v16_bpf_close_resolved_moves_payout_tokens_with_ledger() {
     let mut env = V16CuEnv::new();
