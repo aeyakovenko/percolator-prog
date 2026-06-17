@@ -67099,6 +67099,143 @@ fn v16_attack_stale_withdraw_rolls_back_legacy_realloc_and_signed_transfer() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// LoF/DoS sweep (cron135): the stale legacy-withdraw rollback must also hold on the
+// secondary collateral rail. Secondary withdrawals validate a different vault/mint branch before
+// growing legacy storage; a stale reject must not leave the realloc behind or pay from the secondary
+// reserve.
+#[test]
+fn v16_attack_stale_secondary_withdraw_rolls_back_legacy_realloc_and_signed_transfer() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary, env.vault_authority, 100_000),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+
+    // Non-vacuous control: while fresh, the same legacy-account + secondary-rail shape succeeds.
+    env.svm.warp_to_slot(4);
+    let fresh_owner = Keypair::new();
+    let fresh = env.create_portfolio(&fresh_owner);
+    env.deposit(&fresh_owner, fresh, 200_000);
+    let mut fresh_legacy = env.svm.get_account(&fresh).unwrap();
+    fresh_legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(fresh, fresh_legacy).unwrap();
+    let fresh_dest = env.token_account_for_mint(secondary, fresh_owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let fresh_cu = env
+        .send(
+            ProgInstruction::Withdraw { amount: 50_000 },
+            vec![
+                AccountMeta::new(fresh_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(fresh, false),
+                AccountMeta::new(fresh_dest, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&fresh_owner],
+        )
+        .expect("fresh legacy secondary Withdraw");
+    assert_cu_within(
+        "fresh legacy secondary Withdraw",
+        fresh_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(fresh_dest), 50_000);
+    assert_eq!(
+        env.svm.get_account(&fresh).unwrap().data.len(),
+        env.portfolio_account_len,
+        "fresh secondary withdraw grows legacy storage before debiting"
+    );
+    assert_eq!(env.portfolio_state(fresh).capital, 150_000);
+
+    let stale_owner = Keypair::new();
+    let stale = env.create_portfolio(&stale_owner);
+    env.deposit(&stale_owner, stale, 200_000);
+    let mut stale_legacy = env.svm.get_account(&stale).unwrap();
+    stale_legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(stale, stale_legacy).unwrap();
+    let stale_dest = env.token_account_for_mint(secondary, stale_owner.pubkey(), 0);
+
+    env.svm.warp_to_slot(40);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&stale).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let dest_before = env.svm.get_account(&stale_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::Withdraw { amount: 50_000 },
+        vec![
+            AccountMeta::new(stale_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale, false),
+            AccountMeta::new(stale_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&stale_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "legacy secondary withdraw must reject once the market is resolve-matured"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale secondary withdraw leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale).unwrap(),
+        portfolio_before,
+        "stale secondary withdraw rolls back the pre-stale realloc and debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed stale secondary withdraw does not leave public legacy growth behind"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "stale secondary withdraw does not debit the secondary reserve"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_dest).unwrap(),
+        dest_before,
+        "stale secondary withdraw pays no secondary collateral"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless resolve remains live after rejected stale secondary withdraw: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // security.md sweep - stale Deposit legacy realloc rollback (#5/#30/#44/#48):
 // Deposit verifies custody accounts before it grows legacy portfolio storage, but the stale-market
 // freeze lives after that growth. A stale deposit must roll back the legacy realloc and must not pull
