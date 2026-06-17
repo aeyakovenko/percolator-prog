@@ -20299,6 +20299,119 @@ fn v16_attack_trade_fee_rounds_up_no_free_dust_trades() {
     );
 }
 
+// LoF/fee-splitting probe: the configured base fee must not be bypassed by splitting a meaningful
+// position into fills whose individual fee notional floors below one base unit. This extends
+// v16_attack_trade_fee_rounds_up_no_free_dust_trades from "notional == 1 rounds up" to the missing
+// adversarial branch: "notional floors to 0 before fee rounding."
+#[test]
+fn v16_probe_trade_base_fee_cannot_be_split_below_notional_floor() {
+    #[derive(Clone, Copy)]
+    enum Path {
+        TradeNoCpi,
+        BatchTradeNoCpi,
+        BatchTradeCpi,
+    }
+
+    for path in [Path::TradeNoCpi, Path::BatchTradeNoCpi, Path::BatchTradeCpi] {
+        let label = match path {
+            Path::TradeNoCpi => "TradeNoCpi",
+            Path::BatchTradeNoCpi => "BatchTradeNoCpi",
+            Path::BatchTradeCpi => "BatchTradeCpi",
+        };
+        let mut env = V16CuEnv::new();
+        env.update_trade_fee_policy_with_cu(10_000);
+        let long_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short_owner = Keypair::new();
+        let short = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long, 1_000_000);
+        env.deposit(&short_owner, short, 1_000_000);
+
+        let matcher = if matches!(path, Path::BatchTradeCpi) {
+            let matcher_program = Pubkey::new_unique();
+            let matcher_bytes =
+                std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+            env.svm.add_program(matcher_program, &matcher_bytes);
+            let (ctx, delegate, _) =
+                env.init_auth_matcher_context(matcher_program, &short_owner, short);
+            Some((matcher_program, ctx, delegate))
+        } else {
+            None
+        };
+
+        let step = (POS_SCALE / 200) as i128; // price 100 => floor notional 0 per individual trade.
+        let target = POS_SCALE as i128;
+        let mut opened = 0i128;
+        let insurance_before = env.market_state().1.insurance;
+        while opened < target {
+            env.svm.expire_blockhash();
+            let r = match path {
+                Path::TradeNoCpi => env.try_trade_asset_with_cu(
+                    0,
+                    &long_owner,
+                    long,
+                    &short_owner,
+                    short,
+                    step,
+                    100,
+                    0,
+                ),
+                Path::BatchTradeNoCpi => env.send(
+                    ProgInstruction::BatchTradeNoCpi {
+                        legs: vec![BatchTradeLeg {
+                            asset_index: 0,
+                            size_q: step,
+                            exec_price: 100,
+                            fee_bps: 0,
+                        }],
+                    },
+                    vec![
+                        AccountMeta::new(long_owner.pubkey(), true),
+                        AccountMeta::new(short_owner.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(long, false),
+                        AccountMeta::new(short, false),
+                    ],
+                    &[&long_owner, &short_owner],
+                ),
+                Path::BatchTradeCpi => {
+                    let (matcher_program, ctx, delegate) = matcher.expect("matcher");
+                    env.send(
+                        ProgInstruction::BatchTradeCpi {
+                            legs: vec![BatchTradeCpiLeg {
+                                asset_index: 0,
+                                size_q: step,
+                                fee_bps: 0,
+                                limit_price: 0,
+                            }],
+                        },
+                        vec![
+                            AccountMeta::new(long_owner.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(long, false),
+                            AccountMeta::new(short, false),
+                            AccountMeta::new_readonly(matcher_program, false),
+                            AccountMeta::new(ctx, false),
+                            AccountMeta::new_readonly(delegate, false),
+                        ],
+                        &[&long_owner],
+                    )
+                }
+            };
+            if r.is_err() {
+                break;
+            }
+            opened += step;
+        }
+
+        let insurance_after = env.market_state().1.insurance;
+        assert!(
+            opened < target || insurance_after > insurance_before,
+            "{label} split sub-atom trades accumulated {opened} position units with no base-fee growth"
+        );
+    }
+}
+
 // security.md sweep — over-liquidation (#2): liquidating a bankrupt account with close_q FAR larger
 // than its position must clamp to the actual size — never over-close into phantom OI, negative OI,
 // or manufactured value. Attacker success = excess close_q creating value / corrupting OI.
