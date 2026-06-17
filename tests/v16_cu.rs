@@ -12281,6 +12281,172 @@ fn v16_attack_permissionless_crank_auth_mark_duplicate_ignored_tail_is_cu_bounde
     );
 }
 
+// Public-interface DoS sweep: reward-enabled liquidation has a distinct tail splitter from refresh:
+// when the final account is a program-owned reward portfolio, preceding accounts are treated as the
+// oracle tail. AuthMark liquidations ignore that oracle tail, so a caller can stuff duplicated benign
+// accounts before a valid reward account. The liquidation must still make progress, pay exactly the
+// same bounded reward, and keep the extra adapter/CPI account work bounded.
+#[test]
+fn v16_attack_reward_liquidation_duplicate_ignored_tail_is_cu_bounded() {
+    const UNIQUE_EXTRAS: usize = 28;
+    const LIQ_SLOT: u64 = 30;
+
+    fn setup_liquidatable_auth_mark_reward_env() -> (V16CuEnv, Keypair, Pubkey, Pubkey) {
+        let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+        env.update_liquidation_fee_policy_with_cu(5_000);
+        env.configure_auth_mark_with_cu(0, 1_000_000);
+
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let cranker_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        let cranker = env.create_portfolio(&cranker_owner);
+        env.deposit(&long_owner, long, 100_000_000);
+        env.deposit(&short_owner, short, 100_000);
+        env.deposit(&cranker_owner, cranker, 1_000);
+        env.trade_asset_with_cu(
+            0,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            POS_SCALE as i128,
+            1_000_000,
+            0,
+        );
+
+        for slot in 1..=LIQ_SLOT {
+            env.svm.warp_to_slot(slot);
+            let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    action: 0,
+                    asset_index: 0,
+                    now_slot: slot,
+                    funding_rate_e9: 0,
+                    close_q: 0,
+                    fee_bps: 0,
+                    recovery_reason: 0,
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(short, false),
+                ],
+                &[],
+            );
+        }
+        assert!(
+            env.portfolio_state(short).health_cert.certified_liq_deficit != 0,
+            "setup must leave the short liquidatable"
+        );
+        (env, cranker_owner, short, cranker)
+    }
+
+    fn run_liquidation_with_tail(tail: &[Pubkey]) -> (u64, u128, u128) {
+        let (mut env, cranker_owner, short, cranker) = setup_liquidatable_auth_mark_reward_env();
+        for key in tail {
+            if env.svm.get_account(key).is_none() {
+                env.svm
+                    .set_account(
+                        *key,
+                        Account {
+                            lamports: 1_000_000_000,
+                            data: Vec::new(),
+                            owner: solana_sdk::system_program::ID,
+                            executable: false,
+                            rent_epoch: 0,
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+
+        let cranker_before = env.portfolio_state(cranker).capital;
+        let before = env.market_state().1;
+        let mut accounts = vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+        ];
+        accounts.extend(
+            tail.iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+        accounts.push(AccountMeta::new(cranker, false));
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    action: 1,
+                    asset_index: 0,
+                    now_slot: LIQ_SLOT,
+                    funding_rate_e9: 0,
+                    close_q: POS_SCALE,
+                    fee_bps: 0,
+                    recovery_reason: 0,
+                },
+                accounts,
+                &[&cranker_owner],
+            )
+            .expect("reward liquidation with ignored tail");
+        let after = env.market_state().1;
+        let reward_delta = env.portfolio_state(cranker).capital - cranker_before;
+        let insurance_delta = after.insurance - before.insurance;
+        assert!(
+            reward_delta > 0,
+            "liquidation must pay a real cranker reward"
+        );
+        assert_eq!(
+            after.vault, before.vault,
+            "liquidation reward is an internal split, not a vault mint"
+        );
+        assert!(
+            after.vault >= after.c_tot + after.insurance,
+            "senior conservation after reward liquidation"
+        );
+        assert_cu_within(
+            "PermissionlessCrank reward liquidation duplicate ignored tail",
+            cu,
+            CRANK_CU_LIMIT,
+        );
+        (cu, reward_delta, insurance_delta)
+    }
+
+    let (baseline_cu, baseline_reward, baseline_insurance_delta) = run_liquidation_with_tail(&[]);
+
+    let extras: Vec<_> = (0..UNIQUE_EXTRAS).map(|_| Pubkey::new_unique()).collect();
+    let mut duplicate_tail = Vec::with_capacity(UNIQUE_EXTRAS * 2);
+    duplicate_tail.extend(extras.iter().copied());
+    duplicate_tail.extend(extras.iter().rev().copied());
+    let (hostile_cu, hostile_reward, hostile_insurance_delta) =
+        run_liquidation_with_tail(&duplicate_tail);
+
+    println!(
+        "v16 reward liquidation duplicate ignored tail: baseline={baseline_cu}, hostile={hostile_cu}"
+    );
+    assert!(
+        hostile_cu > baseline_cu,
+        "duplicated ignored tail should exercise the higher-cost account path"
+    );
+    assert!(
+        hostile_cu <= baseline_cu + 100_000,
+        "duplicated reward-liquidation tail consumed {hostile_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_eq!(
+        hostile_reward, baseline_reward,
+        "ignored duplicate tail must not change the cranker reward"
+    );
+    assert_eq!(
+        hostile_insurance_delta, baseline_insurance_delta,
+        "ignored duplicate tail must not change the retained fee split"
+    );
+}
+
 // PermissionlessCrank action=0 ignores the caller fee_bps field. A hostile cranker supplying
 // u64::MAX must not inject fees or DoS refresh progress.
 #[test]
