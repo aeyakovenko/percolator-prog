@@ -20373,13 +20373,20 @@ fn v16_probe_trade_base_fee_cannot_be_split_below_notional_floor() {
     #[derive(Clone, Copy)]
     enum Path {
         TradeNoCpi,
+        TradeCpi,
         BatchTradeNoCpi,
         BatchTradeCpi,
     }
 
-    for path in [Path::TradeNoCpi, Path::BatchTradeNoCpi, Path::BatchTradeCpi] {
+    for path in [
+        Path::TradeNoCpi,
+        Path::TradeCpi,
+        Path::BatchTradeNoCpi,
+        Path::BatchTradeCpi,
+    ] {
         let label = match path {
             Path::TradeNoCpi => "TradeNoCpi",
+            Path::TradeCpi => "TradeCpi",
             Path::BatchTradeNoCpi => "BatchTradeNoCpi",
             Path::BatchTradeCpi => "BatchTradeCpi",
         };
@@ -20392,7 +20399,7 @@ fn v16_probe_trade_base_fee_cannot_be_split_below_notional_floor() {
         env.deposit(&long_owner, long, 1_000_000);
         env.deposit(&short_owner, short, 1_000_000);
 
-        let matcher = if matches!(path, Path::BatchTradeCpi) {
+        let matcher = if matches!(path, Path::TradeCpi | Path::BatchTradeCpi) {
             let matcher_program = Pubkey::new_unique();
             let matcher_bytes =
                 std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
@@ -20421,6 +20428,21 @@ fn v16_probe_trade_base_fee_cannot_be_split_below_notional_floor() {
                     100,
                     0,
                 ),
+                Path::TradeCpi => {
+                    let (matcher_program, ctx, delegate) = matcher.expect("matcher");
+                    env.try_trade_cpi_with_cu_on_asset(
+                        &long_owner,
+                        long,
+                        &short_owner,
+                        short,
+                        matcher_program,
+                        ctx,
+                        delegate,
+                        0,
+                        step,
+                        0,
+                    )
+                }
                 Path::BatchTradeNoCpi => env.send(
                     ProgInstruction::BatchTradeNoCpi {
                         legs: vec![BatchTradeLeg {
