@@ -47015,6 +47015,98 @@ fn v16_attack_matcher_tail_account_count_is_capped() {
     }
 }
 
+// CU/DoS sweep: the cap test above proves unique exact-cap tails on single TradeCpi. The
+// adapter also has a duplicate-account path when the same benign tail account is repeated. This
+// pins that route for the single-fill matcher CPI, which uses different request/return plumbing
+// from BatchTradeCpi: the fill must remain live, exercise the higher-cost path, and stay bounded.
+#[test]
+fn v16_attack_tradecpi_duplicate_matcher_tail_is_cu_bounded() {
+    const MAX_TAIL: usize = percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS;
+
+    fn run_trade_with_tail(tail: &[Pubkey]) -> u64 {
+        let mut env = V16CuEnv::new();
+        for key in tail {
+            if env.svm.get_account(key).is_none() {
+                env.svm
+                    .set_account(
+                        *key,
+                        Account {
+                            lamports: 1_000_000_000,
+                            data: vec![0u8; 8],
+                            owner: Pubkey::default(),
+                            executable: false,
+                            rent_epoch: 0,
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes =
+            std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let taker = Keypair::new();
+        let lp = Keypair::new();
+        let taker_account = env.create_portfolio(&taker);
+        let lp_account = env.create_portfolio(&lp);
+        env.deposit(&taker, taker_account, 2_000_000);
+        env.deposit(&lp, lp_account, 2_000_000);
+        let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, lp_account);
+
+        let mut accounts = vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ];
+        accounts.extend(
+            tail.iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::TradeCpi {
+                    asset_index: 0,
+                    size_q: (5 * POS_SCALE) as i128,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+                accounts,
+                &[&taker],
+            )
+            .expect("TradeCpi with duplicate benign matcher tail");
+        assert!(
+            has_active_leg_for_asset(&env.portfolio_state(taker_account), 0),
+            "duplicate-tail TradeCpi must fill a real leg"
+        );
+        assert_cu_within("TradeCpi duplicate matcher tail", cu, TRADE_CU_LIMIT);
+        cu
+    }
+
+    let baseline_cu = run_trade_with_tail(&[]);
+    let duplicate_key = Pubkey::new_unique();
+    let duplicate_tail = vec![duplicate_key; MAX_TAIL];
+    let duplicate_cu = run_trade_with_tail(&duplicate_tail);
+    println!(
+        "v16 TradeCpi duplicate matcher tail: baseline={baseline_cu}, duplicate={duplicate_cu}"
+    );
+    assert!(
+        duplicate_cu > baseline_cu,
+        "duplicate matcher tail should exercise the higher-cost account path"
+    );
+    assert!(
+        duplicate_cu <= baseline_cu + 100_000,
+        "duplicate matcher tail overhead too high: baseline={baseline_cu}, duplicate={duplicate_cu}"
+    );
+}
+
 // CU/DoS sweep: the matcher-tail cap above uses unique benign accounts. A caller can also repeat the
 // same benign account up to the cap, which takes the runtime duplicate-account path and is still
 // forwarded into the external matcher CPI. This pins that exact shape on the batch/return-data route:
