@@ -1,0 +1,347 @@
+{
+  "arithmetic_axioms": [
+    "axiom_loss_weight_nonzero",
+    "axiom_social_loss_book_split",
+    "kani_any_loss_weight"
+  ],
+  "assumptions": [
+    "SVM rollback on Err (only committed Ok exits are proven)",
+    "SCHED: some actor eventually submits an available public crank",
+    "ArithmeticAxiom: wide div/mul outputs opaque, discharged by reference/differential fuzz",
+    "Wrapper proves account routing / auth / oracle freshness / rollback boundaries"
+  ],
+  "contracts": {
+    "accrue_asset_to_not_atomic": {
+      "class_proof_source": "KERNEL_VALUE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "account refresh / crank / fees"
+    },
+    "activate_empty_asset_slot_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "asset lifecycle / oracle / market admin"
+    },
+    "activate_empty_market_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "asset lifecycle / oracle / market admin"
+    },
+    "activate_empty_market_slot_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "asset lifecycle / oracle / market admin"
+    },
+    "add_account_source_positive_pnl_not_atomic": {
+      "class_proof_source": "FLOW_VALIDATOR",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "positive-PnL attribution / convert"
+    },
+    "add_fresh_counterparty_backing_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "counterparty backing"
+    },
+    "add_source_positive_claim_bound_not_atomic": {
+      "class_proof_source": "CLOSURE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "source-credit lien lifecycle"
+    },
+    "canonicalize_retired_empty_asset_slot_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "asset lifecycle / oracle / market admin"
+    },
+    "charge_account_backing_fee_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "counterparty backing"
+    },
+    "claim_resolved_payout_topup_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "close / resolve / realize"
+    },
+    "close_resolved_account_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": "A7 resolved close (kernel_resolved_close_progress)",
+      "transition_class": "close / resolve / realize"
+    },
+    "consume_source_credit_lien_from_counterparty_not_atomic": {
+      "class_proof_source": "CLOSURE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "source-credit lien lifecycle"
+    },
+    "consume_source_credit_lien_from_insurance_not_atomic": {
+      "class_proof_source": "CLOSURE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "source-credit lien lifecycle"
+    },
+    "convert_released_pnl_to_capital_not_atomic": {
+      "class_proof_source": "FLOW_VALIDATOR",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "positive-PnL attribution / convert"
+    },
+    "create_source_credit_lien_from_counterparty_not_atomic": {
+      "class_proof_source": "CLOSURE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "source-credit lien lifecycle"
+    },
+    "create_source_credit_lien_from_insurance_not_atomic": {
+      "class_proof_source": "CLOSURE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "source-credit lien lifecycle"
+    },
+    "credit_account_from_insurance_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "domain insurance"
+    },
+    "credit_backing_provider_earnings_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "counterparty backing"
+    },
+    "credit_domain_insurance_budget_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "domain insurance"
+    },
+    "cure_and_cancel_close_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "close / resolve / realize"
+    },
+    "deposit_domain_insurance_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "domain insurance"
+    },
+    "deposit_fresh_counterparty_backing_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "counterparty backing"
+    },
+    "deposit_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "user capital flow"
+    },
+    "deregister_empty_materialized_portfolio_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "asset lifecycle / oracle / market admin"
+    },
+    "execute_batch_with_fee_loss_stale_scoped_not_atomic": {
+      "class_proof_source": "WHOLE_BODY_COMPOSITION",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "leg mutation / trade / batch"
+    },
+    "execute_trade_with_fee_loss_stale_scoped_not_atomic": {
+      "class_proof_source": "WHOLE_BODY_COMPOSITION",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "leg mutation / trade / batch"
+    },
+    "expire_source_backing_bucket_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "counterparty backing"
+    },
+    "finalize_side_reset_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "asset lifecycle / oracle / market admin"
+    },
+    "force_asset_recovery_not_atomic": {
+      "class_proof_source": "KERNEL_VALUE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "recovery / liquidation / forfeit"
+    },
+    "forfeit_recovery_leg_not_atomic": {
+      "class_proof_source": "KERNEL_VALUE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "recovery / liquidation / forfeit"
+    },
+    "full_account_refresh_not_atomic": {
+      "class_proof_source": "KERNEL_VALUE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "account refresh / crank / fees"
+    },
+    "grow_asset_slot_capacity_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "asset lifecycle / oracle / market admin"
+    },
+    "impair_account_source_credit_lien_from_insurance_not_atomic": {
+      "class_proof_source": "CLOSURE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "source-credit lien lifecycle"
+    },
+    "impair_source_credit_lien_from_counterparty_not_atomic": {
+      "class_proof_source": "CLOSURE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "source-credit lien lifecycle"
+    },
+    "impair_source_credit_lien_from_insurance_not_atomic": {
+      "class_proof_source": "CLOSURE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "source-credit lien lifecycle"
+    },
+    "liquidate_account_not_atomic": {
+      "class_proof_source": "KERNEL_VALUE",
+      "class_tier": "THEOREM",
+      "liveness": "A5 risk reduction (kernel_reduce_position_delta)",
+      "transition_class": "recovery / liquidation / forfeit"
+    },
+    "mark_asset_drain_only_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "asset lifecycle / oracle / market admin"
+    },
+    "permissionless_auto_crank_not_atomic": {
+      "class_proof_source": "KERNEL_VALUE",
+      "class_tier": "THEOREM",
+      "liveness": "dispatcher(select_auto_crank_plan)",
+      "transition_class": "account refresh / crank / fees"
+    },
+    "rebalance_reduce_position_not_atomic": {
+      "class_proof_source": "WHOLE_BODY_COMPOSITION",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "leg mutation / trade / batch"
+    },
+    "refine_resolved_unreceipted_bound_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "close / resolve / realize"
+    },
+    "register_empty_materialized_portfolio_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "asset lifecycle / oracle / market admin"
+    },
+    "release_account_source_credit_liens_if_unneeded_not_atomic": {
+      "class_proof_source": "CLOSURE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "source-credit lien lifecycle"
+    },
+    "release_source_credit_lien_from_counterparty_not_atomic": {
+      "class_proof_source": "CLOSURE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "source-credit lien lifecycle"
+    },
+    "release_source_credit_lien_from_insurance_not_atomic": {
+      "class_proof_source": "CLOSURE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "source-credit lien lifecycle"
+    },
+    "reserve_insurance_credit_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "domain insurance"
+    },
+    "reset_empty_asset_oracle_anchor_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "asset lifecycle / oracle / market admin"
+    },
+    "resolve_market_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "close / resolve / realize"
+    },
+    "restart_empty_asset_preserving_insurance_budget_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "asset lifecycle / oracle / market admin"
+    },
+    "retire_empty_asset_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "asset lifecycle / oracle / market admin"
+    },
+    "set_asset_raw_oracle_target_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "asset lifecycle / oracle / market admin"
+    },
+    "sync_account_fee_to_slot_not_atomic": {
+      "class_proof_source": "KERNEL_VALUE",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "account refresh / crank / fees"
+    },
+    "withdraw_backing_provider_earnings_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "counterparty backing"
+    },
+    "withdraw_domain_insurance_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "domain insurance"
+    },
+    "withdraw_fresh_counterparty_backing_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "counterparty backing"
+    },
+    "withdraw_not_atomic": {
+      "class_proof_source": "DIRECT_FRAME",
+      "class_tier": "THEOREM",
+      "liveness": null,
+      "transition_class": "user capital flow"
+    }
+  },
+  "engine": "percolator v16",
+  "public_entrypoints": 55
+}

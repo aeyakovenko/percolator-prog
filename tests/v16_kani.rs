@@ -1029,7 +1029,7 @@ fn kani_v16_init_market_payload_rejects_trailing_byte() {
             max_account_b_settlement_chunks: 1,
             max_bankrupt_close_chunks: 1,
             max_bankrupt_close_lifetime_slots: 100,
-            public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
+            public_b_chunk_atoms: 1,
             maintenance_fee_per_slot: 0,
         },
         extra,
