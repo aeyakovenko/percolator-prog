@@ -65,9 +65,11 @@ def main() -> int:
         fail(gaps, "old direct permissionless_crank_not_atomic must not be public in manifest")
 
     assumptions = set(manifest.get("assumptions", []))
-    expected_assumption = "Wrapper proves account routing / auth / oracle freshness / rollback boundaries"
+    expected_assumption = (
+        "Wrapper proves account routing / auth / oracle freshness / engine Err propagation boundaries"
+    )
     if expected_assumption not in assumptions:
-        fail(gaps, "manifest must name wrapper routing/auth/oracle obligations")
+        fail(gaps, "manifest must name wrapper routing/auth/oracle/error-propagation obligations")
 
     src = read("src/v16_program.rs")
     if src.count(".permissionless_auto_crank_not_atomic(") != 1:
@@ -78,6 +80,14 @@ def main() -> int:
         fail(gaps, "wrapper public PermissionlessCrank instruction dispatch is missing")
     if "handle_close_resolved(program_id, accounts" not in src:
         fail(gaps, "resolved payout route must remain explicit wrapper terminal handling")
+    auto_pos = src.find(".permissionless_auto_crank_not_atomic(")
+    if auto_pos >= 0:
+        auto_stmt_end = src.find(";", auto_pos)
+        auto_stmt = src[auto_pos:auto_stmt_end if auto_stmt_end >= 0 else len(src)]
+        if ".map_err(map_v16_error)?" not in auto_stmt:
+            fail(gaps, "engine auto-crank Err must be mapped and propagated with ?")
+    if re.search(r"\.map_err\(map_v16_error\)\s*;", src):
+        fail(gaps, "engine Err mapped with map_v16_error must not be dropped")
 
     kani = read("tests/v16_kani.rs")
     duplicate_markers = [
@@ -107,6 +117,7 @@ def main() -> int:
     print(f"  engine rev: {CERTIFIED_ENGINE_REV}")
     print("  imported manifest: audits/engine_contracts.json")
     print("  public crank route: wrapper PermissionlessCrank -> engine auto-crank")
+    print("  engine Err propagation: mapped engine errors are returned to SVM")
     print("  wrapper Kani scope: serialization / matcher ABI only")
     return 0
 

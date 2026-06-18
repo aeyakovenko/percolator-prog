@@ -8,7 +8,7 @@
     "SVM rollback on Err (only committed Ok exits are proven)",
     "SCHED: some actor eventually submits an available public crank",
     "ArithmeticAxiom: wide div/mul outputs opaque, discharged by reference/differential fuzz",
-    "Wrapper proves account routing / auth / oracle freshness / rollback boundaries"
+    "Wrapper proves account routing / auth / oracle freshness / engine Err propagation boundaries"
   ],
   "contracts": {
     "accrue_asset_to_not_atomic": {

@@ -71238,17 +71238,56 @@ fn v16_attack_rebalance_reduce_overshoot_clamps_to_flat_no_flip() {
     );
 }
 
-// [from pr125]
-// DoS/safety sweep — permissionless SettleB (PermissionlessCrank action=2) cannot corrupt or drain a
-// healthy account. SettleB is the bankrupt-account chunk-settlement crank; it is PERMISSIONLESS (anyone
-// may target any portfolio) and, unlike Liquidate (action=1), pays NO cranker reward. The existing crank
-// tests only exercise action=0 (Refresh) and action=1 (Liquidate) — the action=2 dispatch is otherwise
-// untested end-to-end. A SettleB on a flat, solvent account has nothing to settle, so it MUST be a safe
-// no-op for value: the account's capital and the market's vault/c_tot are conserved, no reward is minted,
-// and the owner can still withdraw in full afterward (no fund-trap). Guards the untested permissionless
-// dispatch against being abused to corrupt, drain, or freeze an unrelated healthy account.
+// Wrapper/engine boundary sweep - with_one_portfolio_view must propagate engine errors to the
+// instruction. An owner-signed RebalanceReduce on an empty portfolio reaches the engine reducer with
+// no active leg to reduce; the engine returns InvalidLeg, and the wrapper must surface that non-zero
+// result as a transaction error instead of normalizing it to Ok.
 #[test]
-fn v16_attack_permissionless_settle_b_on_healthy_account_is_safe_noop() {
+fn v16_attack_rebalance_reduce_empty_position_propagates_engine_invalid_leg() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::RebalanceReduce {
+            asset_index: 0,
+            reduce_q: 1,
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    let err = rejected.expect_err("empty-position RebalanceReduce must return the engine error");
+    assert!(
+        err.contains("Custom(18)") || err.contains("custom program error: 0x12"),
+        "empty-position RebalanceReduce must propagate EngineInvalidLeg (Custom 18), got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "propagated engine Err leaves market bytes unchanged under SVM rollback"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "propagated engine Err leaves portfolio bytes unchanged under SVM rollback"
+    );
+}
+
+// [from pr125]
+// DoS/safety sweep - permissionless auto-crank cannot corrupt or drain a healthy account. A flat,
+// solvent account has no work to settle, so the public crank must be a safe no-op for value: the
+// account's capital and the market's vault/c_tot are conserved, no reward is minted, and the owner
+// can still withdraw in full afterward.
+#[test]
+fn v16_attack_permissionless_auto_crank_on_healthy_account_is_safe_noop() {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
     let p = env.create_portfolio(&owner);
@@ -71258,7 +71297,7 @@ fn v16_attack_permissionless_settle_b_on_healthy_account_is_safe_noop() {
     let cap0 = env.portfolio_state(p).capital;
     assert_eq!(cap0, 1_000, "account funded and flat");
 
-    // A third party permissionlessly cranks SettleB (action=2) against the healthy account.
+    // A third party permissionlessly cranks the healthy account.
     env.svm.warp_to_slot(5);
     env.svm.expire_blockhash();
     let _ = env.send(
@@ -71278,8 +71317,8 @@ fn v16_attack_permissionless_settle_b_on_healthy_account_is_safe_noop() {
         ],
         &[],
     );
-    // Whether the engine treats "nothing to settle" as a no-op (Ok) or NonProgress (Err), the invariant is
-    // the same: NO value moved and NO state corruption.
+
+    // No value moved and no state corruption leaked through the permissionless no-op.
     let (_, g1) = env.market_state();
     assert_eq!(
         env.portfolio_state(p).capital,
