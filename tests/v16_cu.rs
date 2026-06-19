@@ -17681,12 +17681,12 @@ fn v16_regression_resolved_multiwinner_haircut_no_overpay_no_strand() {
 // engine backing_double_claim_fuzz port (LoF) — Fresh-bucket counterparty backing principal is
 // provider-recoverable: WithdrawBackingBucket has NO resolved-payout-snapshot gate. residual()
 // (the junior payout pool feeding the resolved snapshot) must therefore EXCLUDE that principal.
-// The currently-pinned engine counts it, so a resolved junior winner with ZERO honest residual is
-// still paid out of the provider's backing — the same vault atoms the provider can still withdraw.
-// Whoever closes second is robbed (loss of funds). This drives the bug end-to-end through the
-// public CloseResolved + WithdrawBackingBucket handlers; the winner closing first captures the
-// payout snapshot via the buggy residual(). FAILS against the pinned (pre-fix) engine, PASSES once
-// residual() excludes recoverable counterparty backing principal.
+// A pre-fix engine counted it, so a resolved junior winner with ZERO honest residual could be
+// paid out of the provider's backing — the same vault atoms the provider can still withdraw.
+// Whoever closed second was robbed (loss of funds). This drives the fixed behavior end-to-end
+// through the public CloseResolved + WithdrawBackingBucket handlers; the winner closing first
+// captures the payout snapshot, and residual() must exclude recoverable counterparty backing
+// principal.
 #[test]
 fn v16_attack_resolved_junior_winner_double_claims_provider_backing() {
     const CAPITAL: u128 = 1_000;
@@ -17746,8 +17746,8 @@ fn v16_attack_resolved_junior_winner_double_claims_provider_backing() {
     assert_eq!(g.materialized_portfolio_count, 0, "winner dematerialized");
 
     // The provider must recover its FULL principal — recoverable, no snapshot gate. (On the
-    // pinned engine the run already failed the winner_payout assertion above, before reaching
-    // here; on the fixed engine the backing is intact and this withdrawal succeeds.)
+    // pre-fix engine the run failed the winner_payout assertion above before reaching here; on the
+    // current fixed engine the backing is intact and this withdrawal succeeds.
     let admin_pubkey = env.admin.pubkey();
     let provider_dest = env.token_account(admin_pubkey, 0);
     env.withdraw_backing_bucket_to_admin_token_with_cu(provider_dest, domain, BACKING);
