@@ -26137,6 +26137,72 @@ fn v16_attack_close_resolved_dest_validation() {
         "no payout to foreign dest"
     );
 
+    // frozen initialized dest -> reject. This reaches the token-account state branch, distinct
+    // from the mint/owner branches above, after CloseResolved has already computed payout state.
+    let frozen_dest = Pubkey::new_unique();
+    let mut frozen_data = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: env.mint,
+            owner: owner.pubkey(),
+            amount: 0,
+            delegate: COption::None,
+            state: AccountState::Frozen,
+            is_native: COption::None,
+            delegated_amount: 0,
+            close_authority: COption::None,
+        },
+        &mut frozen_data,
+    )
+    .unwrap();
+    env.svm
+        .set_account(
+            frozen_dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: frozen_data,
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let frozen_before = env.svm.get_account(&frozen_dest).unwrap();
+    assert!(
+        cr(&mut env, frozen_dest, &owner).is_err(),
+        "CloseResolved to a frozen dest must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&frozen_dest).unwrap(),
+        frozen_before,
+        "no payout to frozen dest"
+    );
+
+    // zeroed SPL-owned account -> reject at token unpack without burning the pending payout.
+    let zeroed_dest = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            zeroed_dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; TokenAccount::LEN],
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let zeroed_before = env.svm.get_account(&zeroed_dest).unwrap();
+    assert!(
+        cr(&mut env, zeroed_dest, &owner).is_err(),
+        "CloseResolved to an uninitialized token account must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&zeroed_dest).unwrap(),
+        zeroed_before,
+        "no payout to uninitialized dest"
+    );
+
     assert_eq!(
         env.market_state().1.vault,
         g0.vault,
