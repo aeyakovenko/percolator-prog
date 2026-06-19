@@ -63859,6 +63859,108 @@ fn v16_attack_deposit_rejects_cross_market_portfolio_substitution() {
     );
 }
 
+// The wrapper header can be structurally valid while the embedded engine provenance is stale.
+// Deposit must propagate the engine rejection before custody movement, and a restored account
+// must remain live so stale layouts cannot strand ordinary deposits.
+#[test]
+fn v16_attack_deposit_rejects_stale_engine_layout_discriminator_atomically() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let source = env.token_account(owner.pubkey(), 123);
+
+    let mut corrupted = env.svm.get_account(&portfolio).unwrap();
+    let mut portfolio_state = state::read_portfolio(&corrupted.data).unwrap();
+    let current_layout = portfolio_state.provenance_header.layout_discriminator.get();
+    assert!(current_layout > 0, "current engine layout discriminator is nonzero");
+    portfolio_state.provenance_header =
+        percolator::ProvenanceHeaderV16Account::from_runtime(&percolator::ProvenanceHeaderV16 {
+            market_group_id: portfolio_state.provenance_header.market_group_id,
+            portfolio_account_id: portfolio_state.provenance_header.portfolio_account_id,
+            owner: portfolio_state.provenance_header.owner,
+            version: portfolio_state.provenance_header.version.get(),
+            layout_discriminator: current_layout - 1,
+        });
+    state::write_portfolio(&mut corrupted.data, &portfolio_state).unwrap();
+    env.svm.set_account(portfolio, corrupted).unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::Deposit { amount: 123 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    let err = rejected.expect_err("stale engine layout discriminator must reject");
+    assert!(
+        err.contains("Custom(16)"),
+        "stale engine layout should fail as EngineProvenanceMismatch, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale-layout deposit leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected stale-layout deposit leaves the portfolio bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&source).unwrap(),
+        source_before,
+        "rejected stale-layout deposit pulls no source tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale-layout deposit credits no vault tokens"
+    );
+
+    let mut restored = env.svm.get_account(&portfolio).unwrap();
+    let mut portfolio_state = state::read_portfolio(&restored.data).unwrap();
+    portfolio_state.provenance_header =
+        percolator::ProvenanceHeaderV16Account::from_runtime(&percolator::ProvenanceHeaderV16 {
+            market_group_id: portfolio_state.provenance_header.market_group_id,
+            portfolio_account_id: portfolio_state.provenance_header.portfolio_account_id,
+            owner: portfolio_state.provenance_header.owner,
+            version: portfolio_state.provenance_header.version.get(),
+            layout_discriminator: current_layout,
+        });
+    state::write_portfolio(&mut restored.data, &portfolio_state).unwrap();
+    env.svm.set_account(portfolio, restored).unwrap();
+
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::Deposit { amount: 123 },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .expect("restored current-layout portfolio deposit still works");
+    assert_cu_within("stale-layout restored Deposit", cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 123);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(env.vault), 123);
+}
+
 
 // The backing withdrawal rails must reject a delegated canonical vault, not only non-canonical vault
 // fragments. A delegate on the real vault is unsafe custody: if either principal or earnings debited
