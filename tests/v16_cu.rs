@@ -10481,6 +10481,77 @@ fn v16_attack_refresh_crank_rejects_invalid_final_market_shape() {
     );
 }
 
+// The SettleB crank returns from the engine before the normal accrual tail and has no cranker reward
+// branch, so it is a separate rollback boundary from Refresh and Liquidate. A bad final market shape
+// must not let a public B-settlement mutate the target account.
+#[test]
+fn v16_attack_settle_b_crank_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        public_b_chunk_atoms: 1,
+        ..V16CuMarketParams::default()
+    });
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.mark_b_stale_gap(long_account, 0, 3);
+    assert!(
+        active_leg_for_asset(&env.portfolio_state(long_account), 0).b_stale,
+        "test setup must create a non-vacuous B-stale settlement target"
+    );
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let before_market = env.svm.get_account(&env.market).unwrap().data;
+    let before_long = env.svm.get_account(&long_account).unwrap().data;
+
+    env.svm.warp_to_slot(1);
+    env.svm.expire_blockhash();
+    let result = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 2,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        result.is_err(),
+        "SettleB must reject invalid market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before_market,
+        "failed SettleB must roll back market data"
+    );
+    assert_eq!(
+        env.svm.get_account(&long_account).unwrap().data,
+        before_long,
+        "failed SettleB must roll back portfolio data"
+    );
+}
+
 #[test]
 fn v16_bpf_cranker_reward_liquidation_rejects_invalid_shape_without_paying_reward() {
     let mut env = V16CuEnv::new();
