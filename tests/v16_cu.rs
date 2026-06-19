@@ -39478,6 +39478,113 @@ fn v16_attack_liquidation_reward_wrong_owner_rejects_before_oracle_tail_parse() 
     );
 }
 
+// CU/DoS hardening: a reward-tail portfolio can have a valid wrapper header and signer binding
+// while its embedded engine layout is stale. The optional reward preflight must reject that account
+// before parsing the oracle tail or mutating the target/liquidation state.
+#[test]
+fn v16_attack_liquidation_reward_stale_layout_rejects_before_oracle_tail_parse() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0xb2u8; 32];
+    let initial_oracle = env.set_pyth_price_with_conf(&feed, 1_000_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial_oracle],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure hybrid oracle");
+
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let reward_owner = Keypair::new();
+    let reward = env.create_portfolio(&reward_owner);
+    let bogus_oracle = env.program_account(8);
+
+    set_test_clock(&mut env, 2, 101);
+    let send = |env: &mut V16CuEnv| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                action: 1,
+                asset_index: 0,
+                now_slot: 2,
+                funding_rate_e9: 0,
+                close_q: POS_SCALE,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(reward_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+                AccountMeta::new_readonly(bogus_oracle, false),
+                AccountMeta::new(reward, false),
+            ],
+            &[&reward_owner],
+        )
+    };
+
+    let authorized_oracle_err =
+        send(&mut env).expect_err("fresh reward account should reach bogus oracle parsing");
+    assert!(
+        !authorized_oracle_err.contains("InvalidAccountData"),
+        "fresh reward account must not trip account-data provenance before oracle parsing: {authorized_oracle_err}"
+    );
+
+    let mut reward_account = env.svm.get_account(&reward).unwrap();
+    let mut reward_state = state::read_portfolio(&reward_account.data).unwrap();
+    let current_layout = reward_state.provenance_header.layout_discriminator.get();
+    assert!(current_layout > 0, "current engine layout discriminator is nonzero");
+    reward_state.provenance_header =
+        percolator::ProvenanceHeaderV16Account::from_runtime(&percolator::ProvenanceHeaderV16 {
+            market_group_id: reward_state.provenance_header.market_group_id,
+            portfolio_account_id: reward_state.provenance_header.portfolio_account_id,
+            owner: reward_state.provenance_header.owner,
+            version: reward_state.provenance_header.version.get(),
+            layout_discriminator: current_layout - 1,
+        });
+    state::write_portfolio(&mut reward_account.data, &reward_state).unwrap();
+    env.svm.set_account(reward, reward_account).unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim).unwrap();
+    let reward_before = env.svm.get_account(&reward).unwrap();
+    let stale_layout_err =
+        send(&mut env).expect_err("stale-layout reward account must reject before oracle parsing");
+    assert!(
+        stale_layout_err.contains("InvalidAccountData"),
+        "stale reward layout should fail in reward-account preflight, got {stale_layout_err}"
+    );
+    assert!(
+        !stale_layout_err.contains("Custom(29)") && !stale_layout_err.contains("IllegalOwner"),
+        "stale reward layout must not reach the bogus oracle parser: {stale_layout_err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale-layout reward preflight leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&victim).unwrap(),
+        victim_before,
+        "stale-layout reward preflight leaves victim bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&reward).unwrap(),
+        reward_before,
+        "stale-layout reward preflight leaves reward bytes unchanged"
+    );
+}
+
 // security.md sweep - liquidation reward legacy realloc rollback (#5/#6/#35/#44):
 // the reward tail is detected before the crank path refreshes oracle/profile state, and a legacy-sized
 // reward portfolio is grown before the later owner/provenance validation. A wrong signer must roll back
