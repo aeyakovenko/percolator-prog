@@ -10415,6 +10415,72 @@ fn v16_bpf_no_cranker_liquidation_rejects_invalid_final_market_shape() {
     );
 }
 
+// Non-liquidation PermissionlessCrank updates oracle/profile state before entering the engine and,
+// unlike the liquidation branch, does not perform an explicit wrapper-side final shape check. This
+// pins the engine-error propagation boundary for Refresh: if the engine rejects a bad final market
+// shape, the full instruction must roll back the pre-engine wrapper writes too.
+#[test]
+fn v16_attack_refresh_crank_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+    env.configure_ewma_mark_with_cu(0, 100, 1, 0);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_ewma_mark_with_cu(1, 101);
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let before_market = env.svm.get_account(&env.market).unwrap().data;
+    let before_long = env.svm.get_account(&long_account).unwrap().data;
+
+    let result = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 1,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_account, false),
+        ],
+        &[],
+    );
+
+    assert!(
+        result.is_err(),
+        "refresh crank must reject instead of persisting an invalid market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before_market,
+        "failed refresh crank must roll back market data"
+    );
+    assert_eq!(
+        env.svm.get_account(&long_account).unwrap().data,
+        before_long,
+        "failed refresh crank must roll back portfolio data"
+    );
+}
+
 #[test]
 fn v16_bpf_cranker_reward_liquidation_rejects_invalid_shape_without_paying_reward() {
     let mut env = V16CuEnv::new();
