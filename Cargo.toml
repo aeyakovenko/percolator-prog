@@ -50,12 +50,12 @@ pinocchio = "0.6"
 arrayref = "0.3"
 num-derive = "0.4"
 num-traits = "0.2"
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "0e4b6dabf7a09fd1730f15b4f5ca9c4b7d883c46" }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "bbe745a26fb3fa7deda4bedb3560eb3499dd295f" }
 anchor-lang-v2 = { git = "https://github.com/solana-foundation/anchor", rev = "e3cf760826fa0a60f247635ea0572e59861ec9b5", package = "anchor-lang-v2", default-features = false, features = ["alloc", "guardrails"], optional = true }
 
 [target.'cfg(not(target_os = "solana"))'.dependencies]
 # Host tests use the same zero-copy account/view API as the SBF/program target.
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "0e4b6dabf7a09fd1730f15b4f5ca9c4b7d883c46" }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "bbe745a26fb3fa7deda4bedb3560eb3499dd295f" }
 
 [dev-dependencies]
 bincode = "1"
