@@ -10552,6 +10552,96 @@ fn v16_attack_settle_b_crank_rejects_invalid_final_market_shape() {
     );
 }
 
+// Terminal top-up is a separate public value path from CloseResolved. Keep its invalid-shape
+// rollback boundary pinned so a pending receipt cannot pay through a bad market final state.
+#[test]
+fn v16_attack_claim_resolved_topup_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    {
+        let mut market_account = env.svm.get_account(&env.market).expect("market account");
+        let mut portfolio_account = env.svm.get_account(&portfolio).expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        env.svm.set_account(env.market, market_account).unwrap();
+        env.svm.set_account(portfolio, portfolio_account).unwrap();
+    }
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 60);
+    let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_portfolio = env.svm.get_account(&portfolio).unwrap();
+    let before_vault = env.svm.get_account(&env.vault).unwrap();
+    let before_dest = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "ClaimResolvedPayoutTopup must reject invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_market,
+        "failed top-up must roll back market data"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        before_portfolio,
+        "failed top-up must leave the receipt claimable"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        before_vault,
+        "failed top-up must not debit the vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        before_dest,
+        "failed top-up must not pay the destination"
+    );
+}
+
 #[test]
 fn v16_bpf_cranker_reward_liquidation_rejects_invalid_shape_without_paying_reward() {
     let mut env = V16CuEnv::new();
