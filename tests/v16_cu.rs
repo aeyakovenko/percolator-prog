@@ -47083,6 +47083,53 @@ fn v16_attack_base_unit_mints_reject_mismatched_decimals() {
     );
 }
 
+// LoF/DoS sweep (cron135): primary and secondary rails must remain distinct. A collapsed pair would
+// let secondary withdrawals and swaps target the primary mint namespace, so UpdateBaseUnitMints must
+// reject the same mint before any market config mutation.
+#[test]
+fn v16_attack_base_unit_mints_reject_primary_secondary_alias() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: env.mint.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(env.mint, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "base-unit primary and secondary mints must not alias"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected primary/secondary alias must not partially update market config"
+    );
+    assert_eq!(
+        env.market_state().0.secondary_collateral_mint,
+        [0u8; 32],
+        "no secondary rail is installed after the rejected alias"
+    );
+
+    let matching_secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, matching_secondary);
+    assert_eq!(
+        env.market_state().0.secondary_collateral_mint,
+        matching_secondary.to_bytes(),
+        "distinct same-decimal base-unit pair still configures"
+    );
+}
+
 // security.md sweep — asset-0 / market admin is bounded (#5 / README L85): even the market-wide admin
 // cannot reach into a PERMISSIONLESSLY-created asset's own domain insurance (that is gated by that
 // asset's operator), nor can it withdraw a user's portfolio collateral (gated by the portfolio owner).
