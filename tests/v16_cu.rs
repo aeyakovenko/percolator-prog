@@ -8905,7 +8905,6 @@ fn v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let taker_data = env.svm.get_account(&taker_account).unwrap().data;
     let maker_data = env.svm.get_account(&maker_account).unwrap().data;
-    let matcher_data = env.svm.get_account(&matcher_ctx).unwrap().data;
     let (_, group) = state::read_market(&market_data).unwrap();
     let taker = state::read_portfolio(&taker_data).unwrap();
     let maker = state::read_portfolio(&maker_data).unwrap();
@@ -8922,15 +8921,12 @@ fn v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
         group.insurance, 20,
         "passive matcher fills at oracle price; 100 bps charges 10 to each side"
     );
+    let matcher_cfg = env.portfolio_matcher_config(maker_account);
+    assert_eq!(matcher_cfg.enabled & 1, 1, "matcher config remains enabled");
     assert_eq!(
-        u32::from_le_bytes(matcher_data[0..4].try_into().unwrap()),
-        MATCHER_ABI_VERSION,
-        "LiteSVM matcher path must use the same ABI version as the wrapper"
-    );
-    assert_eq!(
-        u64::from_le_bytes(matcher_data[56..64].try_into().unwrap()),
-        0,
-        "matcher must echo the requested asset index in the v3 return slot"
+        matcher_cfg.enabled >> 1,
+        1,
+        "TradeCpi advances the LP-owned matcher request sequence exactly once"
     );
     assert_eq!(group.c_tot + group.insurance, group.vault);
 }
@@ -8976,7 +8972,6 @@ fn v16_bpf_tradecpi_external_matcher_executes_on_added_asset() {
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let taker_data = env.svm.get_account(&taker_account).unwrap().data;
     let maker_data = env.svm.get_account(&maker_account).unwrap().data;
-    let matcher_data = env.svm.get_account(&matcher_ctx).unwrap().data;
     let (_, group) = state::read_market(&market_data).unwrap();
     let taker = state::read_portfolio(&taker_data).unwrap();
     let maker = state::read_portfolio(&maker_data).unwrap();
@@ -9000,10 +8995,12 @@ fn v16_bpf_tradecpi_external_matcher_executes_on_added_asset() {
         group.insurance, 50,
         "passive matcher fills asset 2 at 250; notional=2500 and 100 bps charges 25 to each side"
     );
+    let matcher_cfg = env.portfolio_matcher_config(maker_account);
+    assert_eq!(matcher_cfg.enabled & 1, 1, "matcher config remains enabled");
     assert_eq!(
-        u64::from_le_bytes(matcher_data[56..64].try_into().unwrap()),
-        2,
-        "external matcher must echo the requested nonzero asset index"
+        matcher_cfg.enabled >> 1,
+        1,
+        "TradeCpi advances the LP-owned matcher request sequence exactly once"
     );
     assert_eq!(group.c_tot + group.insurance, group.vault);
 }
@@ -49958,6 +49955,110 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
     );
 }
 
+// Stale-return replay: the matcher writes a valid return for the first same-transaction TradeCpi,
+// then returns success without emitting data for the second. The wrapper must reject the second call,
+// not reuse the first call's matcher output from the context account.
+#[test]
+fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_single_return_data() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 10_000_000);
+    env.deposit(&lp, la, 10_000_000);
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &la,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[64] = 13; // first call emits return data; second same-tx call emits nothing.
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
+
+    let size_q = POS_SCALE as i128;
+    let program_id = env.program_id;
+    let market = env.market;
+    let taker_key = taker.pubkey();
+    let trade_ix = || Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(taker_key, true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        data: ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q,
+            fee_bps: 100,
+            limit_price: 0,
+        }
+        .encode(),
+    };
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+
+    env.svm.expire_blockhash();
+    let replay = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), trade_ix(), trade_ix()],
+        &[&taker],
+    );
+    assert!(
+        replay.is_err(),
+        "a matcher that omits second-call return data must not replay stale single TradeCpi data: {replay:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ta).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&la).unwrap(), lp_before);
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "failed replay transaction must roll back the first matcher context mutation"
+    );
+}
+
 // full-interface sweep / issue: removing the LP signer from TradeCpi is only safe if Percolator
 // verifies that the LP owner explicitly authorized this matcher program/context. A hostile matcher can
 // otherwise return a perfectly well-formed oracle-priced fill and force a victim LP portfolio into a
@@ -51046,11 +51147,11 @@ fn v16_attack_marketauth_terminal_close_cannot_burn_pending_payout_topup() {
     );
 }
 
-// End-to-end adversarial coverage of the PRODUCTION single-fill path: a hostile matcher writes a
-// crafted tag-0 return into the ctx account (over-fill / reversed / forged echo / zero-price /
-// unflagged-partial). handle_trade_cpi reads the ctx return + validate_matcher_return must REJECT
-// every hostile mode (no position opened); only the faithful reply executes. Complements the batch
-// (tag-3 / return_data) hostile test and the validation unit test.
+// End-to-end adversarial coverage of the PRODUCTION single-fill path: a hostile matcher emits a
+// crafted return-data reply (over-fill / reversed / forged echo / zero-price / unflagged-partial).
+// handle_trade_cpi reads return data + validate_matcher_return must REJECT every hostile mode (no
+// position opened); only the faithful reply executes. Complements the batch hostile test and the
+// validation unit test.
 #[test]
 fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);

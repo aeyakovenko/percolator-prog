@@ -757,7 +757,7 @@ pub mod state {
                 .get(..config_len)
                 .ok_or(PercolatorError::InvalidAccountLen)?,
         );
-        if cfg.enabled > 1 {
+        if cfg.enabled != 0 && (cfg.enabled & 1) == 0 {
             return Err(ProgramError::InvalidAccountData);
         }
         Ok(cfg)
@@ -769,7 +769,7 @@ pub mod state {
         cfg: &PortfolioMatcherConfigV16,
     ) -> Result<(), ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;
-        if cfg.enabled > 1 {
+        if cfg.enabled != 0 && (cfg.enabled & 1) == 0 {
             return Err(ProgramError::InvalidAccountData);
         }
         let bytes = matcher_config_bytes_mut(data)?;
@@ -6394,7 +6394,7 @@ pub mod processor {
         matcher_delegate_key: &Pubkey,
     ) -> Result<usize, ProgramError> {
         let cfg = state::read_portfolio_matcher_config(&account_b_ai.try_borrow_data()?)?;
-        if cfg.enabled != 1
+        if (cfg.enabled & 1) != 1
             || cfg.matcher_program != matcher_prog_key.to_bytes()
             || cfg.matcher_context != matcher_ctx_key.to_bytes()
             || cfg.matcher_delegate != matcher_delegate_key.to_bytes()
@@ -6402,6 +6402,22 @@ pub mod processor {
             return Err(PercolatorError::Unauthorized.into());
         }
         Ok(7)
+    }
+
+    fn advance_matcher_req_id(account_b_ai: &AccountInfo) -> Result<u64, ProgramError> {
+        let mut data = account_b_ai.try_borrow_mut_data()?;
+        let mut cfg = state::read_portfolio_matcher_config(&data)?;
+        if (cfg.enabled & 1) != 1 {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        let sequence = cfg.enabled >> 1;
+        if sequence == (u64::MAX >> 1) {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let next = sequence + 1;
+        cfg.enabled = (next << 1) | 1;
+        state::write_portfolio_matcher_config(&mut data, &cfg)?;
+        Ok(next)
     }
 
     fn validate_matcher_tail<'a>(
@@ -6534,19 +6550,18 @@ pub mod processor {
             max_market_slots,
             &[asset_index],
         )?;
-        let req_id = current_slot_pre.wrapping_add(1);
+        let req_id = advance_matcher_req_id(account_b_ai)?;
         let lp_account_id = matcher_lp_account_id(&delegate);
+        let matcher_legs = [(asset_index, oracle_price, size_q)];
 
-        invoke_matcher(
+        invoke_matcher_batch(
             matcher_prog,
             matcher_ctx,
             matcher_delegate,
             tail,
             req_id,
-            asset_index,
             lp_account_id,
-            oracle_price,
-            size_q,
+            &matcher_legs,
             &[
                 b"matcher",
                 market_ai.key.as_ref(),
@@ -6558,10 +6573,12 @@ pub mod processor {
             ],
         )?;
 
-        let ret = {
-            let data = matcher_ctx.try_borrow_data()?;
-            matcher_abi::read_matcher_return(&data)?
-        };
+        let (ret_program, ret_data) = solana_program::program::get_return_data()
+            .ok_or(PercolatorError::InvalidInstruction)?;
+        if ret_program != *matcher_prog.key || ret_data.len() != matcher_abi::MATCHER_RETURN_BYTES {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let ret = matcher_abi::read_matcher_return(&ret_data)?;
         matcher_abi::validate_matcher_return(
             &ret,
             lp_account_id,
@@ -6764,7 +6781,6 @@ pub mod processor {
         // re-parsing the market once per leg).
         let (
             mode_pre,
-            current_slot_pre,
             max_market_slots,
             oracle_prices,
             stale_matured,
@@ -6800,7 +6816,6 @@ pub mod processor {
             });
             (
                 mode_pre,
-                current_slot_pre,
                 max_market_slots,
                 oracle_prices,
                 stale_matured,
@@ -6853,7 +6868,7 @@ pub mod processor {
             .ok_or(ProgramError::NotEnoughAccountKeys)?;
         validate_matcher_tail(tail, market_ai, account_a_ai, account_b_ai, program_id)?;
 
-        let req_id = current_slot_pre.wrapping_add(1);
+        let req_id = advance_matcher_req_id(account_b_ai)?;
         let lp_account_id = matcher_lp_account_id(&delegate);
 
         // Build the matcher batch request: per leg, (asset, that asset's oracle price, signed size).
@@ -11560,52 +11575,6 @@ pub mod processor {
     fn matcher_lp_account_id(delegate: &Pubkey) -> u64 {
         let bytes = delegate.to_bytes();
         u64::from_le_bytes(bytes[0..8].try_into().unwrap())
-    }
-
-    fn invoke_matcher<'a>(
-        matcher_prog: &AccountInfo<'a>,
-        matcher_ctx: &AccountInfo<'a>,
-        matcher_delegate: &AccountInfo<'a>,
-        tail: &[AccountInfo<'a>],
-        req_id: u64,
-        asset_index: u16,
-        lp_account_id: u64,
-        oracle_price_e6: u64,
-        req_size: i128,
-        seeds: &[&[u8]],
-    ) -> ProgramResult {
-        let mut data = [0u8; 67];
-        data[0] = 0;
-        data[1..9].copy_from_slice(&req_id.to_le_bytes());
-        data[9..11].copy_from_slice(&(asset_index as u16).to_le_bytes());
-        data[11..19].copy_from_slice(&lp_account_id.to_le_bytes());
-        data[19..27].copy_from_slice(&oracle_price_e6.to_le_bytes());
-        data[27..43].copy_from_slice(&req_size.to_le_bytes());
-
-        let mut metas = Vec::with_capacity(2 + tail.len());
-        metas.push(AccountMeta::new_readonly(*matcher_delegate.key, true));
-        metas.push(AccountMeta::new(*matcher_ctx.key, false));
-        for ai in tail {
-            if ai.is_writable {
-                metas.push(AccountMeta::new(*ai.key, ai.is_signer));
-            } else {
-                metas.push(AccountMeta::new_readonly(*ai.key, ai.is_signer));
-            }
-        }
-
-        let ix = SolInstruction {
-            program_id: *matcher_prog.key,
-            accounts: metas,
-            data: data.to_vec(),
-        };
-        let mut infos = Vec::with_capacity(3 + tail.len());
-        infos.push(matcher_delegate.clone());
-        infos.push(matcher_ctx.clone());
-        infos.push(matcher_prog.clone());
-        for ai in tail {
-            infos.push(ai.clone());
-        }
-        invoke_signed(&ix, &infos, &[seeds])
     }
 
     fn amount_to_u64(amount: u128) -> Result<u64, ProgramError> {

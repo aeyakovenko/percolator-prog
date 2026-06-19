@@ -319,7 +319,10 @@ Authority fields are split by scope:
 - **`AssetOracleProfileV16.asset_admin`**: per-asset cold key that rotates that asset's scoped authorities
 - **`AssetOracleProfileV16.insurance_authority` / `insurance_operator` / `backing_bucket_authority` / `oracle_authority`**: per-asset operational authorities
 
-Matcher requests do not use a persisted market nonce. The wrapper invokes the matcher and requires the response to echo the request id, LP identity, asset index, oracle price, and requested size/sign constraints.
+Matcher requests use a wrapper-owned sequence stored in the LP portfolio matcher config. The low
+bit is the enabled flag and the high bits are the request sequence. The wrapper increments it before
+matcher CPI and requires the return data to echo the request id, LP identity, asset index, oracle
+price, and requested size/sign constraints.
 
 ### Vault token account (market collateral)
 - SPL Token account holding collateral for this market
@@ -357,8 +360,8 @@ wrong matcher program/context/delegate, wrong LP owner, or wrong LP portfolio al
 - account owned by matcher program
 - matcher programs should initialize/configure the context under their own LP-owner signature
   policy and store/check the expected delegate PDA
-- matcher writes its return prefix into the first bytes
-- Percolator reads and validates the prefix after CPI
+- matcher-owned state passed to the matcher CPI
+- Percolator reads matcher results from Solana return data and validates the ABI fields after CPI
 
 ---
 
@@ -423,8 +426,9 @@ This section describes intent and operational ordering, not argument-by-argument
 - **TradeNoCpi**
   - trade without external matcher (used for testing / deterministic scenarios)
 - **TradeCpi**
-  - trade via LP-chosen matcher CPI with strict binding + validation. The LP portfolio must already
-    store an enabled matcher config for the passed matcher program/context/delegate tuple.
+  - trade via LP-chosen matcher CPI with strict binding + validation. The wrapper submits a one-leg
+    matcher tag-3 request and validates the returned data. The LP portfolio must already store an
+    enabled matcher config for the passed matcher program/context/delegate tuple.
 - **BatchTradeNoCpi** (tag 66)
   - atomic multi-leg batch (up to the portfolio asset cap) against one taker/LP pair; each leg's
     **signed** `size_q` sets its direction, so a single batch can carry a mixed long/short spread.
@@ -505,9 +509,9 @@ Percolator treats a matcher like a price/size oracle **with rules** chosen by th
   - matcher program must be executable
   - context must not be executable
   - context owner must be matcher program
-  - context length must be sufficient for the return prefix
+  - context length must satisfy the wrapper's matcher context minimum
 - **Request echo binding**: response must echo the request id and echoed request fields
-- **ABI validation**: strict validation of return prefix fields
+- **ABI validation**: strict validation of return-data fields
 - **Execution size discipline**: engine trade uses matcher's `exec_size` (never the user's requested size)
 
 ### What the matcher controls (LP-scoped)
@@ -895,7 +899,7 @@ These are intended hard boundaries enforced in code and test suites:
 - missing, disabled, or argument-mismatched LP matcher config
 - bad matcher shape (non-executable program, executable ctx, wrong ctx owner, short ctx)
 - matcher delegate PDA mismatch / wrong PDA shape
-- ABI prefix invalid (flags, echoed fields, size constraints)
+- matcher return data invalid (flags, echoed fields, size constraints)
 
 These are expected and should be treated as **hard safety rejections**, not transient errors.
 
