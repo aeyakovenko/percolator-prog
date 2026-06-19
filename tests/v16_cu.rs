@@ -70503,10 +70503,67 @@ fn v16_bpf_10m_market_batch_14_high_tail_assets_stays_bounded() {
         "senior conservation after 10MiB 14-leg batch"
     );
 
-    // The no-CPI path is the bounded max-shape public path here. A matching CPI probe currently
-    // exceeds the 1.4M CU meter on bbe745a and is tracked as a separate CU frontier rather than a
-    // passing coverage test in this PR.
+    // The no-CPI path is the bounded max-shape public path here. A matching 14-leg CPI probe
+    // currently exceeds the 1.4M CU meter on bbe745a; keep the adjacent 13-leg high-tail CPI
+    // frontier covered without pretending the full CPI shape is bounded.
+    const CPI_TAIL_LEGS: usize = 13;
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let cpi_taker = Keypair::new();
+    let cpi_lp = Keypair::new();
+    let cpi_taker_account = env.create_portfolio(&cpi_taker);
+    let cpi_lp_account = env.create_portfolio(&cpi_lp);
+    env.deposit(&cpi_taker, cpi_taker_account, 100_000_000);
+    env.deposit(&cpi_lp, cpi_lp_account, 100_000_000);
+    let (ctx, delegate, _) =
+        env.init_matcher_context_authorized(matcher_program, &cpi_lp, cpi_lp_account);
+    let cpi_legs: Vec<BatchTradeCpiLeg> = (N - CPI_TAIL_LEGS..N)
+        .map(|asset_index| BatchTradeCpiLeg {
+            asset_index: asset_index as u16,
+            size_q: POS_SCALE as i128,
+            fee_bps: 100,
+            limit_price: 0,
+        })
+        .collect();
 
+    env.svm.expire_blockhash();
+    let batch_cpi_cu = env
+        .send(
+            ProgInstruction::BatchTradeCpi { legs: cpi_legs },
+            vec![
+                AccountMeta::new(cpi_taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(cpi_taker_account, false),
+                AccountMeta::new(cpi_lp_account, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&cpi_taker],
+        )
+        .expect("10MiB 13-leg high-tail BatchTradeCpi must execute");
+    println!(
+        "v16 10MiB BatchTradeCpi 13 high-tail legs: assets={N}, account_len={new_len}, \
+         first_asset={}, CU={batch_cpi_cu}",
+        N - CPI_TAIL_LEGS
+    );
+    assert!(
+        batch_cpi_cu < 1_400_000,
+        "10MiB 13-leg high-tail BatchTradeCpi CU {batch_cpi_cu} must fit the tx limit"
+    );
+    let cpi_taker_state = env.portfolio_state(cpi_taker_account);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&cpi_taker_state)),
+        CPI_TAIL_LEGS as u32,
+        "CPI batch opens the covered high-tail active-leg count"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+    assert!(
+        group.vault >= group.c_tot + group.insurance,
+        "senior conservation after 10MiB high-tail CPI batch"
+    );
 }
 
 
