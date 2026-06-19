@@ -59042,6 +59042,216 @@ fn v16_attack_hybrid_liquidation_bad_reward_tail_rolls_back_oracle_update() {
     assert_eq!(group.assets[0].raw_oracle_target_price, 2_000_000);
 }
 
+// Public-interface DoS/LoF sweep: hybrid liquidation with rewards uses the most complex crank
+// account split: required oracle accounts first, optional cranker reward portfolio last. Duplicated
+// surplus accounts between them must not block the valid liquidation, alter the reward split, or
+// create unbounded duplicate-account adapter work.
+#[test]
+fn v16_attack_hybrid_reward_liquidation_duplicate_surplus_tail_is_cu_bounded() {
+    const UNIQUE_EXTRAS: usize = 28;
+    const LIQ_SLOT: u64 = 2;
+    const LIQ_UNIX_TS: i64 = 101;
+    let feed = [0xadu8; 32];
+
+    fn setup_liquidatable_hybrid_reward_env(
+        feed: [u8; 32],
+    ) -> (V16CuEnv, Keypair, Pubkey, Pubkey, Pubkey) {
+        let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+        env.update_liquidation_fee_policy_with_cu(5_000);
+        set_test_clock(&mut env, 1, 100);
+        let initial = env.set_pyth_price_with_conf(&feed, 1_000_000, -6, 0, 100);
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0u8; 32], [0u8; 32]],
+            &[initial],
+            1,
+            100,
+            0,
+            0,
+            10,
+            0,
+        )
+        .expect("configure one-leg hybrid oracle");
+
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let cranker_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        let cranker = env.create_portfolio(&cranker_owner);
+        env.deposit(&long_owner, long, 100_000_000);
+        env.deposit(&short_owner, short, 100_000);
+        env.deposit(&cranker_owner, cranker, 1_000);
+        env.trade_asset_with_cu(
+            0,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            POS_SCALE as i128,
+            1_000_000,
+            0,
+        );
+
+        set_test_clock(&mut env, LIQ_SLOT, LIQ_UNIX_TS);
+        let fresh = env.set_pyth_price_with_conf(&feed, 2_000_000, -6, 0, LIQ_UNIX_TS);
+        (env, cranker_owner, short, cranker, fresh)
+    }
+
+    fn add_system_accounts(env: &mut V16CuEnv, count: usize) -> Vec<Pubkey> {
+        let mut extras = Vec::with_capacity(count);
+        for _ in 0..count {
+            let key = Pubkey::new_unique();
+            env.svm
+                .set_account(
+                    key,
+                    Account {
+                        lamports: 1_000_000_000,
+                        data: Vec::new(),
+                        owner: solana_sdk::system_program::ID,
+                        executable: false,
+                        rent_epoch: 0,
+                    },
+                )
+                .unwrap();
+            extras.push(key);
+        }
+        extras
+    }
+
+    fn run_liquidation(
+        mut env: V16CuEnv,
+        cranker_owner: Keypair,
+        short: Pubkey,
+        cranker: Pubkey,
+        oracle_tail: &[Pubkey],
+    ) -> (u64, u128, u128, u128, u128) {
+        let cranker_before = env.portfolio_state(cranker).capital.get();
+        let before = env.market_state().1;
+        let mut accounts = vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+        ];
+        accounts.extend(
+            oracle_tail
+                .iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+        accounts.push(AccountMeta::new(cranker, false));
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    action: 1,
+                    asset_index: 0,
+                    now_slot: LIQ_SLOT,
+                    funding_rate_e9: 0,
+                    close_q: POS_SCALE,
+                    fee_bps: 0,
+                    recovery_reason: 0,
+                },
+                accounts,
+                &[&cranker_owner],
+            )
+            .expect("hybrid reward liquidation with oracle tail");
+        let after = env.market_state().1;
+        let reward_delta = env.portfolio_state(cranker).capital.get() - cranker_before;
+        let insurance_delta = after.insurance - before.insurance;
+        assert_eq!(
+            after.assets[0].raw_oracle_target_price, 2_000_000,
+            "fresh hybrid oracle update must persist"
+        );
+        assert!(
+            reward_delta > 0,
+            "hybrid liquidation must pay a real cranker reward"
+        );
+        assert_eq!(
+            after.vault, before.vault,
+            "cranker reward is an internal insurance split, not a vault mint"
+        );
+        assert!(
+            after.vault >= after.c_tot + after.insurance,
+            "senior conservation after hybrid reward liquidation"
+        );
+        (cu, reward_delta, insurance_delta, after.c_tot, after.insurance)
+    }
+
+    let (baseline_env, baseline_owner, baseline_short, baseline_cranker, baseline_fresh) =
+        setup_liquidatable_hybrid_reward_env(feed);
+    let (
+        baseline_cu,
+        baseline_reward,
+        baseline_insurance_delta,
+        baseline_c_tot,
+        baseline_insurance,
+    ) = run_liquidation(
+        baseline_env,
+        baseline_owner,
+        baseline_short,
+        baseline_cranker,
+        &[baseline_fresh],
+    );
+
+    let (mut hostile_env, hostile_owner, hostile_short, hostile_cranker, hostile_fresh) =
+        setup_liquidatable_hybrid_reward_env(feed);
+    let extras = add_system_accounts(&mut hostile_env, UNIQUE_EXTRAS);
+    let mut oracle_tail = Vec::with_capacity(1 + UNIQUE_EXTRAS * 2);
+    oracle_tail.push(hostile_fresh);
+    oracle_tail.extend(extras.iter().copied());
+    oracle_tail.extend(extras.iter().rev().copied());
+    let (
+        hostile_cu,
+        hostile_reward,
+        hostile_insurance_delta,
+        hostile_c_tot,
+        hostile_insurance,
+    ) = run_liquidation(
+        hostile_env,
+        hostile_owner,
+        hostile_short,
+        hostile_cranker,
+        &oracle_tail,
+    );
+
+    println!(
+        "v16 hybrid reward liquidation duplicate surplus tail: baseline={baseline_cu}, hostile={hostile_cu}"
+    );
+    assert!(
+        hostile_cu > baseline_cu,
+        "duplicated surplus tail must reach the deployed adapter duplicate-account path"
+    );
+    assert!(
+        hostile_cu <= baseline_cu + 100_000,
+        "duplicated hybrid reward-liquidation tail consumed {hostile_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "PermissionlessCrank hybrid reward liquidation duplicate surplus tail",
+        hostile_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert_eq!(
+        hostile_reward, baseline_reward,
+        "surplus oracle tail must not alter the cranker reward"
+    );
+    assert_eq!(
+        hostile_insurance_delta, baseline_insurance_delta,
+        "surplus oracle tail must not alter retained insurance"
+    );
+    assert_eq!(
+        hostile_c_tot, baseline_c_tot,
+        "surplus oracle tail must not alter post-liquidation capital accounting"
+    );
+    assert_eq!(
+        hostile_insurance, baseline_insurance,
+        "surplus oracle tail must not alter final insurance accounting"
+    );
+}
+
 // [from pr114]
 // full-interface sweep: live asset-0 insurance withdrawal must follow the current hot
 // insurance_operator, not stale marketauth/asset-admin privilege. This is value-moving: after the
