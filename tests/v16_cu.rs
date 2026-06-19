@@ -6,9 +6,8 @@ use percolator::{
 };
 use percolator_prog::{
     constants::{
-        ASSET_ORACLE_WRAPPER_LEN, MARKET_GROUP_OFF, MATCHER_ABI_VERSION,
-        MATCHER_CONTEXT_MIN_LEN, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
-        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        ASSET_ORACLE_WRAPPER_LEN, MARKET_GROUP_OFF, MATCHER_ABI_VERSION, MATCHER_CONTEXT_MIN_LEN,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, PORTFOLIO_ENGINE_ACCOUNT_LEN,
     },
     ix::{BatchTradeCpiLeg, BatchTradeLeg, Instruction as ProgInstruction},
     oracle_v16, processor, state,
@@ -55,6 +54,7 @@ fn active_leg_for_asset(
         .legs
         .iter()
         .copied()
+        .filter_map(|leg| leg.try_to_runtime().ok())
         .find(|leg| leg.active && leg.asset_index as usize == asset_index)
         .unwrap()
 }
@@ -63,7 +63,28 @@ fn has_active_leg_for_asset(account: &PortfolioAccountV16, asset_index: usize) -
     account
         .legs
         .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
         .any(|leg| leg.active && leg.asset_index as usize == asset_index)
+}
+
+fn active_bitmap(account: &PortfolioAccountV16) -> percolator::V16ActiveBitmap {
+    state::portfolio_active_bitmap(account)
+}
+
+fn leg(account: &PortfolioAccountV16, slot: usize) -> percolator::PortfolioLegV16 {
+    account.legs[slot].try_to_runtime().unwrap()
+}
+
+fn health_cert(account: &PortfolioAccountV16) -> percolator::HealthCertV16 {
+    account.health_cert.try_to_runtime().unwrap()
+}
+
+fn close_progress(account: &PortfolioAccountV16) -> CloseProgressLedgerV16 {
+    account.close_progress.try_to_runtime().unwrap()
+}
+
+fn resolved_receipt(account: &PortfolioAccountV16) -> ResolvedPayoutReceiptV16 {
+    account.resolved_payout_receipt.try_to_runtime().unwrap()
 }
 
 fn assert_domain_budget_remaining_total_consistent(group: &MarketGroupV16, label: &str) {
@@ -504,8 +525,7 @@ fn init_host_market_data_for_serializer_probe() -> Vec<u8> {
     wrapper.oracle_mode = percolator_prog::constants::ORACLE_MODE_MANUAL;
     wrapper.mark_ewma_e6 = params.initial_price;
     wrapper.oracle_target_price_e6 = params.initial_price;
-    wrapper.mark_ewma_halflife_slots =
-        percolator_prog::constants::DEFAULT_MARK_EWMA_HALFLIFE_SLOTS;
+    wrapper.mark_ewma_halflife_slots = percolator_prog::constants::DEFAULT_MARK_EWMA_HALFLIFE_SLOTS;
 
     let mut data = vec![
         0u8;
@@ -1202,20 +1222,21 @@ impl V16CuEnv {
         let mut portfolio_account = self.svm.get_account(&portfolio).expect("portfolio account");
         let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
         let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
-        account.close_progress = CloseProgressLedgerV16 {
-            active: true,
-            finalized: false,
-            canceled: false,
-            close_id: 1,
-            asset_index: 0,
-            market_id: group.assets[0].market_id,
-            domain_side: SideV16::Long,
-            gross_loss_at_close_start: 10,
-            drift_reference_slot: 0,
-            max_close_slot: 10,
-            residual_remaining: 10,
-            ..CloseProgressLedgerV16::EMPTY
-        };
+        account.close_progress =
+            percolator::CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+                active: true,
+                finalized: false,
+                canceled: false,
+                close_id: 1,
+                asset_index: 0,
+                market_id: group.assets[0].market_id,
+                domain_side: SideV16::Long,
+                gross_loss_at_close_start: 10,
+                drift_reference_slot: 0,
+                max_close_slot: 10,
+                residual_remaining: 10,
+                ..CloseProgressLedgerV16::EMPTY
+            });
         group.pending_domain_loss_barriers[0] = 1;
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
@@ -1509,7 +1530,7 @@ impl V16CuEnv {
             .expect("portfolio account");
         let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
         let mut portfolio = state::read_portfolio(&portfolio_data.data).unwrap();
-        let old_capital = portfolio.capital;
+        let old_capital = portfolio.capital.get();
         if new_capital < old_capital {
             let delta = old_capital - new_capital;
             group.c_tot -= delta;
@@ -1519,8 +1540,8 @@ impl V16CuEnv {
             group.c_tot += delta;
             group.vault += delta;
         }
-        portfolio.capital = new_capital;
-        portfolio.health_cert.valid = false;
+        portfolio.capital = percolator::V16PodU128::new(new_capital);
+        portfolio.health_cert.valid = 0;
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_data.data, &portfolio).unwrap();
         self.svm.set_account(self.market, market_account).unwrap();
@@ -1535,19 +1556,21 @@ impl V16CuEnv {
             .expect("portfolio account");
         let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
         let mut portfolio = state::read_portfolio(&portfolio_data.data).unwrap();
-        if portfolio.capital != 0 {
-            group.c_tot -= portfolio.capital;
-            group.vault -= portfolio.capital;
-            portfolio.capital = 0;
+        let capital = portfolio.capital.get();
+        if capital != 0 {
+            group.c_tot -= capital;
+            group.vault -= capital;
+            portfolio.capital = percolator::V16PodU128::new(0);
         }
         assert_eq!(
-            portfolio.pnl, 0,
+            portfolio.pnl.get(),
+            0,
             "security seed expects neutral starting pnl"
         );
         let loss_i128 = i128::try_from(loss).unwrap();
-        portfolio.pnl = -loss_i128;
+        portfolio.pnl = percolator::V16PodI128::new(-loss_i128);
         group.negative_pnl_account_count += 1;
-        portfolio.health_cert.valid = false;
+        portfolio.health_cert.valid = 0;
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_data.data, &portfolio).unwrap();
         self.svm.set_account(self.market, market_account).unwrap();
@@ -1563,17 +1586,18 @@ impl V16CuEnv {
         let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
         let mut portfolio = state::read_portfolio(&portfolio_data.data).unwrap();
         assert!(
-            portfolio.capital > loss,
+            portfolio.capital.get() > loss,
             "loss must remain fully covered by capital"
         );
         assert_eq!(
-            portfolio.pnl, 0,
+            portfolio.pnl.get(),
+            0,
             "security seed expects neutral starting pnl"
         );
         let loss_i128 = i128::try_from(loss).unwrap();
-        portfolio.pnl = -loss_i128;
+        portfolio.pnl = percolator::V16PodI128::new(-loss_i128);
         group.negative_pnl_account_count += 1;
-        portfolio.health_cert.valid = false;
+        portfolio.health_cert.valid = 0;
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_data.data, &portfolio).unwrap();
         self.svm.set_account(self.market, market_account).unwrap();
@@ -1592,9 +1616,11 @@ impl V16CuEnv {
             .get_account(&portfolio_key)
             .expect("portfolio account");
         let mut portfolio = state::read_portfolio(&portfolio_data.data).unwrap();
-        portfolio.residual_crystallized_loss_atoms_total = crystallized_loss_atoms;
-        portfolio.residual_spent_principal_atoms_total = spent_principal_atoms;
-        portfolio.residual_received_atoms_total = received_atoms;
+        portfolio.residual_crystallized_loss_atoms_total =
+            percolator::V16PodU128::new(crystallized_loss_atoms);
+        portfolio.residual_spent_principal_atoms_total =
+            percolator::V16PodU128::new(spent_principal_atoms);
+        portfolio.residual_received_atoms_total = percolator::V16PodU128::new(received_atoms);
         state::write_portfolio(&mut portfolio_data.data, &portfolio).unwrap();
         self.svm.set_account(portfolio_key, portfolio_data).unwrap();
     }
@@ -2202,19 +2228,22 @@ impl V16CuEnv {
     // Set a Switchboard On-Demand feed account (owned by the Switchboard program). The leg binds by
     // ACCOUNT KEY (read_switchboard_price_e6 checks price_ai.key == expected_feed_key), so the returned
     // pubkey is what goes into oracle_leg_feeds.
-    fn set_switchboard_price(
-        &mut self,
-        value: i128,
-        std_dev: i128,
-        publish_time: i64,
-    ) -> Pubkey {
+    fn set_switchboard_price(&mut self, value: i128, std_dev: i128, publish_time: i64) -> Pubkey {
         let key = Pubkey::new_unique();
         self.svm
             .set_account(
                 key,
                 Account {
                     lamports: 1_000_000_000,
-                    data: make_switchboard_data(&[0xABu8; 32], value, std_dev, publish_time, 3, 1, 1),
+                    data: make_switchboard_data(
+                        &[0xABu8; 32],
+                        value,
+                        std_dev,
+                        publish_time,
+                        3,
+                        1,
+                        1,
+                    ),
                     owner: oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
                     executable: false,
                     rent_epoch: 0,
@@ -3896,7 +3925,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
     assert_eq!(group.vault, 210);
     assert_eq!(group.c_tot, 100);
     assert_eq!(group.insurance, 33);
-    assert_eq!(account.capital, 100);
+    assert_eq!(account.capital.get(), 100);
     assert_eq!(
         group.source_backing_buckets[1].status,
         BackingBucketStatusV16::Fresh
@@ -4181,7 +4210,7 @@ fn v16_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
     let account = state::read_portfolio(&portfolio_data).unwrap();
     assert_eq!(group.vault, 1_000);
     assert_eq!(group.c_tot, 1_000);
-    assert_eq!(account.capital, 1_000);
+    assert_eq!(account.capital.get(), 1_000);
 
     let dest = env.withdraw(&owner, portfolio, 400);
     assert_eq!(env.token_amount(dest), 400);
@@ -4192,7 +4221,7 @@ fn v16_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
     let account = state::read_portfolio(&portfolio_data).unwrap();
     assert_eq!(group.vault, 600);
     assert_eq!(group.c_tot, 600);
-    assert_eq!(account.capital, 600);
+    assert_eq!(account.capital.get(), 600);
 
     let insurance_source = env.top_up_insurance(250);
     assert_eq!(env.token_amount(insurance_source), 0);
@@ -4283,7 +4312,7 @@ fn v16_bpf_failed_deposit_spl_transfer_rolls_back_engine_credit() {
     let account = env.portfolio_state(portfolio);
     assert_eq!(group.vault, 0);
     assert_eq!(group.c_tot, 0);
-    assert_eq!(account.capital, 0);
+    assert_eq!(account.capital.get(), 0);
 }
 
 #[test]
@@ -4493,7 +4522,7 @@ fn v16_bpf_failed_withdraw_spl_transfer_rolls_back_engine_debit() {
     let account = env.portfolio_state(portfolio);
     assert_eq!(group.vault, 100);
     assert_eq!(group.c_tot, 100);
-    assert_eq!(account.capital, 100);
+    assert_eq!(account.capital.get(), 100);
     assert_eq!(env.token_amount(dest), 0);
 }
 
@@ -5210,13 +5239,22 @@ fn v16_attack_privileged_reactivate_invalid_price_keeps_retired_slot_reusable() 
         admin.pubkey().to_bytes(),
         "valid privileged reactivation must install admin ownership only after valid pricing"
     );
-    assert_eq!(profile_after.insurance_authority, new_insurance.pubkey().to_bytes());
-    assert_eq!(profile_after.insurance_operator, new_operator.pubkey().to_bytes());
+    assert_eq!(
+        profile_after.insurance_authority,
+        new_insurance.pubkey().to_bytes()
+    );
+    assert_eq!(
+        profile_after.insurance_operator,
+        new_operator.pubkey().to_bytes()
+    );
     assert_eq!(
         profile_after.backing_bucket_authority,
         new_backing.pubkey().to_bytes()
     );
-    assert_eq!(profile_after.oracle_authority, new_oracle.pubkey().to_bytes());
+    assert_eq!(
+        profile_after.oracle_authority,
+        new_oracle.pubkey().to_bytes()
+    );
 }
 
 #[test]
@@ -6317,8 +6355,14 @@ fn v16_attack_cross_asset_admin_cannot_restart_other_asset_oracle() {
     env.try_shutdown_asset_with_authority(&asset1_admin, 1, 4)
         .expect("asset-1 admin shuts down its own asset");
     let (_, recovery_group) = env.market_state();
-    assert_eq!(recovery_group.assets[0].lifecycle, AssetLifecycleV16::Recovery);
-    assert_eq!(recovery_group.assets[1].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(
+        recovery_group.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+    assert_eq!(
+        recovery_group.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
 
     let market_before = env.svm.get_account(&env.market).unwrap();
     env.svm.warp_to_slot(5);
@@ -6473,10 +6517,12 @@ fn v16_bpf_tradenocpi_executes_and_is_bounded() {
     assert_eq!(env.token_amount(env.vault), 2_000_000);
     println!(
         "TradeNoCpi BPF long_basis={}, short_basis={}, insurance={}",
-        long.legs[0].basis_pos_q, short.legs[0].basis_pos_q, group.insurance
+        long.legs[0].basis_pos_q.get(),
+        short.legs[0].basis_pos_q.get(),
+        group.insurance
     );
-    assert_eq!(long.legs[0].basis_pos_q, (10 * POS_SCALE) as i128);
-    assert_eq!(short.legs[0].basis_pos_q, -((10 * POS_SCALE) as i128));
+    assert_eq!(long.legs[0].basis_pos_q.get(), (10 * POS_SCALE) as i128);
+    assert_eq!(short.legs[0].basis_pos_q.get(), -((10 * POS_SCALE) as i128));
     assert_eq!(
         group.assets[0].effective_price, 100,
         "consented execution price must not move the effective oracle price"
@@ -6642,7 +6688,7 @@ fn v16_bpf_perps_positive_smoke_cross_margin_pnl_convert_close_and_withdraw() {
 
     let cross_open = env.portfolio_state(cross_account);
     assert_eq!(
-        percolator::active_bitmap_count_ones(cross_open.active_bitmap),
+        percolator::active_bitmap_count_ones(active_bitmap(&cross_open)),
         2
     );
     assert_eq!(
@@ -6690,12 +6736,13 @@ fn v16_bpf_perps_positive_smoke_cross_margin_pnl_convert_close_and_withdraw() {
     let cross_after_refresh = env.portfolio_state(cross_account);
     let counterparty_after_refresh = env.portfolio_state(counterparty_account);
     assert_eq!(
-        cross_after_refresh.pnl, EXPECTED_PNL,
+        cross_after_refresh.pnl.get(),
+        EXPECTED_PNL,
         "cross-margin account should realize +5 while carrying two active legs"
     );
-    assert_eq!(counterparty_after_refresh.pnl, 0);
+    assert_eq!(counterparty_after_refresh.pnl.get(), 0);
     assert_eq!(
-        counterparty_after_refresh.capital,
+        counterparty_after_refresh.capital.get(),
         DEPOSIT - EXPECTED_PNL as u128
     );
 
@@ -6732,13 +6779,18 @@ fn v16_bpf_perps_positive_smoke_cross_margin_pnl_convert_close_and_withdraw() {
 
     let cross_flat = env.portfolio_state(cross_account);
     let counterparty_flat = env.portfolio_state(counterparty_account);
-    assert!(percolator::active_bitmap_is_empty(cross_flat.active_bitmap));
-    assert!(percolator::active_bitmap_is_empty(
-        counterparty_flat.active_bitmap
-    ));
-    assert_eq!(cross_flat.pnl, EXPECTED_PNL);
-    assert_eq!(cross_flat.capital, DEPOSIT);
-    assert_eq!(counterparty_flat.capital, DEPOSIT - EXPECTED_PNL as u128);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &cross_flat
+    )));
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &counterparty_flat
+    )));
+    assert_eq!(cross_flat.pnl.get(), EXPECTED_PNL);
+    assert_eq!(cross_flat.capital.get(), DEPOSIT);
+    assert_eq!(
+        counterparty_flat.capital.get(),
+        DEPOSIT - EXPECTED_PNL as u128
+    );
 
     let convert_cu =
         env.convert_released_pnl_with_cu(&cross_owner, cross_account, EXPECTED_PNL as u128);
@@ -6748,14 +6800,21 @@ fn v16_bpf_perps_positive_smoke_cross_margin_pnl_convert_close_and_withdraw() {
         MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
     );
     let cross_after_convert = env.portfolio_state(cross_account);
-    assert_eq!(cross_after_convert.pnl, 0);
-    assert_eq!(cross_after_convert.capital, DEPOSIT + EXPECTED_PNL as u128);
+    assert_eq!(cross_after_convert.pnl.get(), 0);
+    assert_eq!(
+        cross_after_convert.capital.get(),
+        DEPOSIT + EXPECTED_PNL as u128
+    );
 
-    let cross_dest = env.withdraw(&cross_owner, cross_account, cross_after_convert.capital);
+    let cross_dest = env.withdraw(
+        &cross_owner,
+        cross_account,
+        cross_after_convert.capital.get(),
+    );
     let counterparty_dest = env.withdraw(
         &counterparty_owner,
         counterparty_account,
-        counterparty_flat.capital,
+        counterparty_flat.capital.get(),
     );
     assert_eq!(
         env.token_amount(cross_dest) as u128,
@@ -6852,8 +6911,8 @@ fn v16_bpf_cross_margin_positive_pnl_allows_trading_negative_leg_before_convert(
     assert_eq!(moved_group.assets[1].effective_price, ASSET1_MARK);
 
     let cross_before_close = env.portfolio_state(cross_account);
-    assert_eq!(cross_before_close.pnl, EXPECTED_POSITIVE_PNL);
-    assert_eq!(cross_before_close.capital, DEPOSIT);
+    assert_eq!(cross_before_close.pnl.get(), EXPECTED_POSITIVE_PNL);
+    assert_eq!(cross_before_close.capital.get(), DEPOSIT);
     assert_eq!(
         active_leg_for_asset(&cross_before_close, 1).basis_pos_q,
         ASSET1_SIZE_Q,
@@ -6885,9 +6944,10 @@ fn v16_bpf_cross_margin_positive_pnl_allows_trading_negative_leg_before_convert(
         !has_active_leg_for_asset(&cross_after_close, 1),
         "negative-PnL leg should close without converting positive PnL first"
     );
-    assert_eq!(cross_after_close.capital, DEPOSIT);
+    assert_eq!(cross_after_close.capital.get(), DEPOSIT);
     assert_eq!(
-        cross_after_close.pnl, EXPECTED_NET_PNL_AFTER_NEGATIVE_CLOSE,
+        cross_after_close.pnl.get(),
+        EXPECTED_NET_PNL_AFTER_NEGATIVE_CLOSE,
         "asset[1] loss should net against the existing source-backed positive PnL"
     );
 }
@@ -7041,7 +7101,8 @@ fn run_source_credit_watermark_trade_case(
 
     let cross_before = env.portfolio_state(cross_account);
     assert_eq!(
-        cross_before.pnl, EXPECTED_POSITIVE_PNL,
+        cross_before.pnl.get(),
+        EXPECTED_POSITIVE_PNL,
         "{path:?} {direction:?} setup must create source-backed positive PnL"
     );
     let (_, before_withdraw_group) = env.market_state();
@@ -7143,7 +7204,10 @@ fn run_source_credit_watermark_trade_case(
         "{path:?} {direction:?} must not dilute live positive claims"
     );
     assert!(
-        cross_after.source_lien_effective_reserved[winning_domain] > 0,
+        state::portfolio_source_domain(&cross_after, winning_domain)
+            .source_lien_effective_reserved
+            .get()
+            > 0,
         "{path:?} {direction:?} must reserve source credit once surplus backing exists"
     );
 }
@@ -7233,8 +7297,8 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
     }
 
     let cross_before = env.portfolio_state(cross_account);
-    assert_eq!(cross_before.pnl, EXPECTED_POSITIVE_PNL);
-    assert_eq!(cross_before.capital, DEPOSIT);
+    assert_eq!(cross_before.pnl.get(), EXPECTED_POSITIVE_PNL);
+    assert_eq!(cross_before.capital.get(), DEPOSIT);
     assert_eq!(
         active_leg_for_asset(&cross_before, 1).basis_pos_q,
         ASSET1_SIZE_Q,
@@ -7322,20 +7386,20 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
         active_leg_for_asset(&cross_after, 1).basis_pos_q,
         ASSET1_SIZE_Q + SAFE_INCREASE_Q
     );
-    assert_eq!(cross_after.capital, DEPOSIT);
-    assert_eq!(cross_after.pnl, EXPECTED_NET_PNL_AFTER_REFRESH);
+    assert_eq!(cross_after.capital.get(), DEPOSIT);
+    assert_eq!(cross_after.pnl.get(), EXPECTED_NET_PNL_AFTER_REFRESH);
     assert!(
-        cross_after.capital < cross_after.health_cert.certified_initial_req,
+        cross_after.capital.get() < health_cert(&cross_after).certified_initial_req,
         "without positive PnL credit this risk increase would fail initial margin"
     );
     assert!(
-        cross_after.health_cert.certified_equity as u128
-            >= cross_after.health_cert.certified_initial_req
+        health_cert(&cross_after).certified_equity as u128
+            >= health_cert(&cross_after).certified_initial_req
     );
     let source_lien_effective_reserved: u128 = cross_after
-        .source_lien_effective_reserved
+        .source_domains
         .iter()
-        .copied()
+        .map(|slot| slot.source_lien_effective_reserved.get())
         .sum();
     assert!(
         source_lien_effective_reserved > 0,
@@ -7343,13 +7407,13 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
     );
     assert!(
         cross_after
-            .source_lien_counterparty_backing_num
+            .source_domains
             .iter()
-            .any(|amount| *amount != 0)
+            .any(|slot| slot.source_lien_counterparty_backing_num.get() != 0)
             || cross_after
-                .source_lien_insurance_backing_num
+                .source_domains
                 .iter()
-                .any(|amount| *amount != 0),
+                .any(|slot| slot.source_lien_insurance_backing_num.get() != 0),
         "source-credit IM lien must be backed by counterparty backing or reserved insurance"
     );
 
@@ -7557,8 +7621,8 @@ fn v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides() {
         CRANK_CU_LIMIT,
     );
     let long_after = env.portfolio_state(long_account);
-    assert_eq!(long_after.pnl, 0);
-    assert_eq!(long_after.capital, DEPOSIT - 1);
+    assert_eq!(long_after.pnl.get(), 0);
+    assert_eq!(long_after.capital.get(), DEPOSIT - 1);
 
     let short_refresh_cu = env.crank(
         short_account,
@@ -7578,8 +7642,8 @@ fn v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides() {
         CRANK_CU_LIMIT,
     );
     let short_after = env.portfolio_state(short_account);
-    assert_eq!(short_after.pnl, 1);
-    assert_eq!(short_after.capital, DEPOSIT);
+    assert_eq!(short_after.pnl.get(), 1);
+    assert_eq!(short_after.capital.get(), DEPOSIT);
 
     let close_cu = env.trade_with_cu(
         &long_owner,
@@ -7597,10 +7661,14 @@ fn v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides() {
     );
     let long_flat = env.portfolio_state(long_account);
     let short_flat = env.portfolio_state(short_account);
-    assert!(percolator::active_bitmap_is_empty(long_flat.active_bitmap));
-    assert!(percolator::active_bitmap_is_empty(short_flat.active_bitmap));
-    assert_eq!(long_flat.capital, DEPOSIT - 1);
-    assert_eq!(short_flat.pnl, 1);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &long_flat
+    )));
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &short_flat
+    )));
+    assert_eq!(long_flat.capital.get(), DEPOSIT - 1);
+    assert_eq!(short_flat.pnl.get(), 1);
 
     let convert_cu = env.convert_released_pnl_with_cu(&short_owner, short_account, 1);
     assert_cu_within(
@@ -7609,8 +7677,8 @@ fn v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides() {
         CUSTODY_CU_LIMIT,
     );
     let short_after_convert = env.portfolio_state(short_account);
-    assert_eq!(short_after_convert.pnl, 0);
-    assert_eq!(short_after_convert.capital, DEPOSIT + 1);
+    assert_eq!(short_after_convert.pnl.get(), 0);
+    assert_eq!(short_after_convert.capital.get(), DEPOSIT + 1);
 
     let (_, group) = env.market_state();
     assert_eq!(group.c_tot, DEPOSIT * 2);
@@ -7763,11 +7831,11 @@ fn v16_bpf_trade_refreshes_stale_related_portfolio_leg_on_demand() {
     let long_before_push = env.portfolio_state(long_account);
     let short_before_push = env.portfolio_state(short_account);
     assert_eq!(
-        long_before_push.health_cert.cert_oracle_epoch,
+        health_cert(&long_before_push).cert_oracle_epoch,
         group_before_push.oracle_epoch
     );
     assert_eq!(
-        short_before_push.health_cert.cert_oracle_epoch,
+        health_cert(&short_before_push).cert_oracle_epoch,
         group_before_push.oracle_epoch
     );
 
@@ -7791,11 +7859,11 @@ fn v16_bpf_trade_refreshes_stale_related_portfolio_leg_on_demand() {
     let short_stale = env.portfolio_state(short_account);
     assert_eq!(group_after_push.assets[1].effective_price, 105);
     assert!(
-        long_stale.health_cert.cert_oracle_epoch < group_after_push.oracle_epoch,
+        health_cert(&long_stale).cert_oracle_epoch < group_after_push.oracle_epoch,
         "asset[1] mark push made the participating long portfolio cert stale"
     );
     assert!(
-        short_stale.health_cert.cert_oracle_epoch < group_after_push.oracle_epoch,
+        health_cert(&short_stale).cert_oracle_epoch < group_after_push.oracle_epoch,
         "asset[1] mark push made the participating short portfolio cert stale"
     );
     assert_ne!(
@@ -7830,11 +7898,13 @@ fn v16_bpf_trade_refreshes_stale_related_portfolio_leg_on_demand() {
     let long_after = env.portfolio_state(long_account);
     let short_after = env.portfolio_state(short_account);
     assert_eq!(
-        long_after.health_cert.cert_oracle_epoch, group_after_trade.oracle_epoch,
+        health_cert(&long_after).cert_oracle_epoch,
+        group_after_trade.oracle_epoch,
         "trade refreshed and re-certified the long account"
     );
     assert_eq!(
-        short_after.health_cert.cert_oracle_epoch, group_after_trade.oracle_epoch,
+        health_cert(&short_after).cert_oracle_epoch,
+        group_after_trade.oracle_epoch,
         "trade refreshed and re-certified the short account"
     );
     assert_eq!(
@@ -7852,11 +7922,11 @@ fn v16_bpf_trade_refreshes_stale_related_portfolio_leg_on_demand() {
     assert!(has_active_leg_for_asset(&long_after, 1));
     assert!(has_active_leg_for_asset(&short_after, 1));
     assert_eq!(
-        percolator::active_bitmap_count_ones(long_after.active_bitmap),
+        percolator::active_bitmap_count_ones(active_bitmap(&long_after)),
         2
     );
     assert_eq!(
-        percolator::active_bitmap_count_ones(short_after.active_bitmap),
+        percolator::active_bitmap_count_ones(active_bitmap(&short_after)),
         2
     );
 }
@@ -7932,11 +8002,11 @@ fn v16_bpf_tradecpi_refreshes_stale_traded_portfolio_leg_on_demand() {
         "test setup must make the traded market asset fresh"
     );
     assert!(
-        taker_stale.health_cert.cert_oracle_epoch < group_after_mark.oracle_epoch,
+        health_cert(&taker_stale).cert_oracle_epoch < group_after_mark.oracle_epoch,
         "mark crank made the taker's traded asset leg stale"
     );
     assert!(
-        lp_stale.health_cert.cert_oracle_epoch < group_after_mark.oracle_epoch,
+        health_cert(&lp_stale).cert_oracle_epoch < group_after_mark.oracle_epoch,
         "mark crank made the LP's traded asset leg stale"
     );
     assert_ne!(
@@ -7973,11 +8043,13 @@ fn v16_bpf_tradecpi_refreshes_stale_traded_portfolio_leg_on_demand() {
     let taker_after = env.portfolio_state(taker_account);
     let lp_after = env.portfolio_state(lp_account);
     assert_eq!(
-        taker_after.health_cert.cert_oracle_epoch, group_after_trade.oracle_epoch,
+        health_cert(&taker_after).cert_oracle_epoch,
+        group_after_trade.oracle_epoch,
         "TradeCpi refreshed and re-certified the taker"
     );
     assert_eq!(
-        lp_after.health_cert.cert_oracle_epoch, group_after_trade.oracle_epoch,
+        health_cert(&lp_after).cert_oracle_epoch,
+        group_after_trade.oracle_epoch,
         "TradeCpi refreshed and re-certified the LP"
     );
     assert_eq!(
@@ -8030,9 +8102,9 @@ fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
     let (_, group) = state::read_market(&market_data).unwrap();
     let payer = state::read_portfolio(&payer_data).unwrap();
     let cranker = state::read_portfolio(&cranker_data).unwrap();
-    assert_eq!(payer.last_fee_slot, 10);
-    assert_eq!(payer.capital, 100_000_000 - 580);
-    assert_eq!(cranker.capital, 232);
+    assert_eq!(payer.last_fee_slot.get(), 10);
+    assert_eq!(payer.capital.get(), 100_000_000 - 580);
+    assert_eq!(cranker.capital.get(), 232);
     assert_eq!(group.insurance, 348);
     assert_domain_budget_remaining_total_consistent(&group, "maintenance fee with cranker share");
 }
@@ -8082,9 +8154,9 @@ fn v16_attack_sync_maintenance_bad_cranker_rolls_back_fee() {
     let cranker_portfolio = env.create_portfolio(&cranker_owner);
     env.svm.expire_blockhash();
     env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
-    assert_eq!(env.portfolio_state(payer_portfolio).last_fee_slot, 10);
+    assert_eq!(env.portfolio_state(payer_portfolio).last_fee_slot.get(), 10);
     assert!(
-        env.portfolio_state(cranker_portfolio).capital > 0,
+        env.portfolio_state(cranker_portfolio).capital.get() > 0,
         "valid cranker reward path should still pay the cranker share"
     );
 }
@@ -8227,9 +8299,9 @@ fn v16_attack_sync_maintenance_rejects_cross_market_cranker_reward() {
     let local_cranker_portfolio = env.create_portfolio(&local_cranker_owner);
     env.svm.expire_blockhash();
     env.sync_maintenance_fee_with_cu(payer_portfolio, Some(local_cranker_portfolio), 10);
-    assert_eq!(env.portfolio_state(payer_portfolio).last_fee_slot, 10);
+    assert_eq!(env.portfolio_state(payer_portfolio).last_fee_slot.get(), 10);
     assert!(
-        env.portfolio_state(local_cranker_portfolio).capital > 0,
+        env.portfolio_state(local_cranker_portfolio).capital.get() > 0,
         "same-market cranker still receives the reward"
     );
 }
@@ -8244,8 +8316,9 @@ fn v16_attack_sync_maintenance_rejects_cross_market_cranker_reward() {
 #[test]
 fn v16_attack_bug113_maintenance_fee_siphon_to_parasitic_asset() {
     // capacity 1 (asset-1 is appended at index == configured_slots, growing to 2), maintenance fee 58/slot.
-    let mut env =
-        V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(1, 10_000, 10_000, 10_000, 58);
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
     env.update_market_init_fee_policy_with_cu(1); // permissionless create enabled (nonzero fee)
 
     // Honest depositor H on the real market (asset 0).
@@ -8258,22 +8331,36 @@ fn v16_attack_bug113_maintenance_fee_siphon_to_parasitic_asset() {
     env.ensure_signer_account(attacker.pubkey());
     env.svm.warp_to_slot(1);
     env.activate_permissionless_asset_with_fee(
-        &attacker, 1, 1, 100,
-        attacker.pubkey(), attacker.pubkey(), attacker.pubkey(), attacker.pubkey(), 1,
+        &attacker,
+        1,
+        1,
+        100,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
     );
     let (_, g_pre) = env.market_state();
-    assert_eq!(g_pre.assets[1].lifecycle, AssetLifecycleV16::Active, "parasite asset-1 active");
+    assert_eq!(
+        g_pre.assets[1].lifecycle,
+        AssetLifecycleV16::Active,
+        "parasite asset-1 active"
+    );
     // asset-1 domains (2 = long, 3 = short) start empty: it has no positions and was never funded.
     assert_eq!(g_pre.insurance_domain_budget[2], 0);
     assert_eq!(g_pre.insurance_domain_budget[3], 0);
 
     // Charge H's maintenance fee (58 * 10 slots = 580).
     env.svm.warp_to_slot(10);
-    let h_cap_before = env.portfolio_state(h).capital;
+    let h_cap_before = env.portfolio_state(h).capital.get();
     env.svm.expire_blockhash();
     env.sync_maintenance_fee_with_cu(h, None, 10);
-    let fee_paid = h_cap_before - env.portfolio_state(h).capital;
-    assert!(fee_paid > 0, "H actually paid a maintenance fee (non-vacuous)");
+    let fee_paid = h_cap_before - env.portfolio_state(h).capital.get();
+    assert!(
+        fee_paid > 0,
+        "H actually paid a maintenance fee (non-vacuous)"
+    );
 
     // SECURITY PROPERTY: the parasitic zero-activity asset-1 must have captured NOTHING of H's fee.
     let (_, g) = env.market_state();
@@ -8293,7 +8380,10 @@ fn v16_attack_bug113_maintenance_fee_siphon_to_parasitic_asset() {
         fee_paid,
         "the full retained maintenance fee must land in asset-0 insurance"
     );
-    assert_domain_budget_remaining_total_consistent(&g, "after #113-fix maintenance fee to asset-0");
+    assert_domain_budget_remaining_total_consistent(
+        &g,
+        "after #113-fix maintenance fee to asset-0",
+    );
 
     // And the attacker must not be able to withdraw any of it as that asset's insurance_operator.
     env.svm.expire_blockhash();
@@ -8371,8 +8461,8 @@ fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
     env.sync_maintenance_fee_with_cu(fresh_long_portfolio, None, 11);
     let (_, group_after_nonflat_sync) = env.market_state();
     let long_after_nonflat_sync = env.portfolio_state(fresh_long_portfolio);
-    assert_eq!(long_after_nonflat_sync.capital, 1_000);
-    assert_eq!(long_after_nonflat_sync.last_fee_slot, 10);
+    assert_eq!(long_after_nonflat_sync.capital.get(), 1_000);
+    assert_eq!(long_after_nonflat_sync.last_fee_slot.get(), 10);
     assert_eq!(
         env.svm
             .get_account(&fresh_long_portfolio)
@@ -8401,7 +8491,7 @@ fn v16_attack_underfunded_sync_with_cranker_reward_still_closes_payer() {
     env.svm.warp_to_slot(10);
     let market_lamports_before_close = env.svm.get_account(&env.market).unwrap().lamports;
     let payer_lamports_before_close = env.svm.get_account(&payer_portfolio).unwrap().lamports;
-    let cranker_cap_before = env.portfolio_state(cranker_portfolio).capital;
+    let cranker_cap_before = env.portfolio_state(cranker_portfolio).capital.get();
     let sync_cu = env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
     println!("v16 underfunded SyncMaintenanceFee with cranker reward CU: {sync_cu}");
     assert_cu_within(
@@ -8416,7 +8506,7 @@ fn v16_attack_underfunded_sync_with_cranker_reward_still_closes_payer() {
         "underfunded sync retains the non-cranker share in insurance"
     );
     assert_eq!(
-        env.portfolio_state(cranker_portfolio).capital,
+        env.portfolio_state(cranker_portfolio).capital.get(),
         cranker_cap_before + 1,
         "cranker receives only the configured share of the swept dust fee"
     );
@@ -8460,8 +8550,8 @@ fn v16_bpf_nonflat_fee_sync_settles_hidden_loss_before_sweeping_fee() {
     );
 
     let long_before_move = env.portfolio_state(long_portfolio);
-    assert_eq!(long_before_move.capital, 100);
-    assert_eq!(long_before_move.pnl, 0);
+    assert_eq!(long_before_move.capital.get(), 100);
+    assert_eq!(long_before_move.pnl.get(), 0);
 
     env.mutate_market(|_, group| {
         group.accrue_asset_to_not_atomic(0, 1, 50, 0, true).unwrap();
@@ -8471,10 +8561,11 @@ fn v16_bpf_nonflat_fee_sync_settles_hidden_loss_before_sweeping_fee() {
 
     let long_with_hidden_loss = env.portfolio_state(long_portfolio);
     assert_eq!(
-        long_with_hidden_loss.capital, 100,
+        long_with_hidden_loss.capital.get(),
+        100,
         "the price move should be hidden until the account is touched"
     );
-    assert_eq!(long_with_hidden_loss.pnl, 0);
+    assert_eq!(long_with_hidden_loss.pnl.get(), 0);
     let (_, group_with_hidden_loss) = env.market_state();
     assert_eq!(group_with_hidden_loss.insurance, 0);
     assert_eq!(group_with_hidden_loss.c_tot, 1_100);
@@ -8489,9 +8580,9 @@ fn v16_bpf_nonflat_fee_sync_settles_hidden_loss_before_sweeping_fee() {
 
     let long_after_sync = env.portfolio_state(long_portfolio);
     let (_, group_after_sync) = env.market_state();
-    assert_eq!(long_after_sync.capital, 0);
-    assert_eq!(long_after_sync.pnl, 0);
-    assert_eq!(long_after_sync.last_fee_slot, 1);
+    assert_eq!(long_after_sync.capital.get(), 0);
+    assert_eq!(long_after_sync.pnl.get(), 0);
+    assert_eq!(long_after_sync.last_fee_slot.get(), 1);
     assert_eq!(
         group_after_sync.insurance, 50,
         "only capital remaining after the hidden loss is settled can be swept as fee"
@@ -8801,11 +8892,13 @@ fn v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
     let maker = state::read_portfolio(&maker_data).unwrap();
     println!(
         "TradeCpi BPF taker_basis={}, maker_basis={}, insurance={}",
-        taker.legs[0].basis_pos_q, maker.legs[0].basis_pos_q, group.insurance
+        taker.legs[0].basis_pos_q.get(),
+        maker.legs[0].basis_pos_q.get(),
+        group.insurance
     );
     assert_eq!(group.assets[0].effective_price, 100);
-    assert_eq!(taker.legs[0].basis_pos_q, (10 * POS_SCALE) as i128);
-    assert_eq!(maker.legs[0].basis_pos_q, -((10 * POS_SCALE) as i128));
+    assert_eq!(taker.legs[0].basis_pos_q.get(), (10 * POS_SCALE) as i128);
+    assert_eq!(maker.legs[0].basis_pos_q.get(), -((10 * POS_SCALE) as i128));
     assert_eq!(
         group.insurance, 20,
         "passive matcher fills at oracle price; 100 bps charges 10 to each side"
@@ -8874,8 +8967,8 @@ fn v16_bpf_tradecpi_external_matcher_executes_on_added_asset() {
     assert_eq!(group.assets[2].effective_price, 250);
     assert_eq!(group.assets[2].oi_eff_long_q, 10 * POS_SCALE);
     assert_eq!(group.assets[2].oi_eff_short_q, 10 * POS_SCALE);
-    assert_eq!(taker.active_bitmap, active_bitmap_with(&[0]));
-    assert_eq!(maker.active_bitmap, active_bitmap_with(&[0]));
+    assert_eq!(active_bitmap(&taker), active_bitmap_with(&[0]));
+    assert_eq!(active_bitmap(&maker), active_bitmap_with(&[0]));
     assert_eq!(
         active_leg_for_asset(&taker, 2).basis_pos_q,
         (10 * POS_SCALE) as i128
@@ -8944,7 +9037,7 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
     let short = state::read_portfolio(&short_data).unwrap();
     assert_eq!(group.slot_last, 1);
     assert_eq!(group.assets[0].effective_price, 200);
-    assert!(percolator::active_bitmap_is_empty(short.active_bitmap));
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&short)));
 }
 
 #[test]
@@ -9004,7 +9097,7 @@ fn v16_bpf_tradenocpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
     assert_eq!(before_group.insurance, 1_000_000);
     let before_probe_state = state::read_portfolio(&before_probe.data).unwrap();
     assert!(
-        before_probe_state.health_cert.certified_liq_deficit != 0,
+        health_cert(&before_probe_state).certified_liq_deficit != 0,
         "probe must be liquidatable before the attempted recycling trade"
     );
 
@@ -9100,7 +9193,7 @@ fn v16_bpf_tradecpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
     let before_matcher = env.svm.get_account(&matcher_ctx).unwrap();
     let before_probe_state = state::read_portfolio(&before_probe.data).unwrap();
     assert!(
-        before_probe_state.health_cert.certified_liq_deficit != 0,
+        health_cert(&before_probe_state).certified_liq_deficit != 0,
         "probe must be liquidatable before the attempted matcher recycling trade"
     );
 
@@ -9173,14 +9266,14 @@ fn v16_bpf_tradenocpi_rejects_when_counterparty_starts_bankrupt() {
     let before_extractor = env.svm.get_account(&extractor).unwrap();
     let before_probe = env.svm.get_account(&probe).unwrap();
     let before_probe_state = state::read_portfolio(&before_probe.data).unwrap();
-    assert_eq!(before_probe_state.capital, 0);
+    assert_eq!(before_probe_state.capital.get(), 0);
     assert!(
-        before_probe_state.pnl < 0,
+        before_probe_state.pnl.get() < 0,
         "probe must start bankrupt before the attempted recycling trade"
     );
-    assert!(before_probe_state.health_cert.valid);
+    assert!(health_cert(&before_probe_state).valid);
     assert!(
-        before_probe_state.health_cert.certified_equity < 0,
+        health_cert(&before_probe_state).certified_equity < 0,
         "refreshed probe certificate must confirm negative equity before the attempted trade"
     );
 
@@ -9259,14 +9352,14 @@ fn v16_bpf_tradecpi_rejects_when_counterparty_starts_bankrupt() {
     let before_probe = env.svm.get_account(&probe).unwrap();
     let before_matcher = env.svm.get_account(&matcher_ctx).unwrap();
     let before_probe_state = state::read_portfolio(&before_probe.data).unwrap();
-    assert_eq!(before_probe_state.capital, 0);
+    assert_eq!(before_probe_state.capital.get(), 0);
     assert!(
-        before_probe_state.pnl < 0,
+        before_probe_state.pnl.get() < 0,
         "probe must start bankrupt before the attempted matcher recycling trade"
     );
-    assert!(before_probe_state.health_cert.valid);
+    assert!(health_cert(&before_probe_state).valid);
     assert!(
-        before_probe_state.health_cert.certified_equity < 0,
+        health_cert(&before_probe_state).certified_equity < 0,
         "refreshed probe certificate must confirm negative equity before the attempted matcher trade"
     );
 
@@ -9353,10 +9446,10 @@ fn v16_bpf_tradenocpi_rejects_when_both_counterparties_start_bankrupt() {
     let before_short = env.svm.get_account(&short_account).unwrap();
     let before_long_state = state::read_portfolio(&before_long.data).unwrap();
     let before_short_state = state::read_portfolio(&before_short.data).unwrap();
-    assert!(before_long_state.health_cert.valid);
-    assert!(before_short_state.health_cert.valid);
-    assert!(before_long_state.health_cert.certified_equity < 0);
-    assert!(before_short_state.health_cert.certified_equity < 0);
+    assert!(health_cert(&before_long_state).valid);
+    assert!(health_cert(&before_short_state).valid);
+    assert!(health_cert(&before_long_state).certified_equity < 0);
+    assert!(health_cert(&before_short_state).certified_equity < 0);
 
     let close = env.try_trade_asset_with_cu(
         0,
@@ -9412,8 +9505,14 @@ fn v16_bpf_tradenocpi_allows_both_counterparties_with_capitalized_losses_to_risk
     let (_, before_group) = env.market_state();
     let before_long = env.portfolio_state(long_account);
     let before_short = env.portfolio_state(short_account);
-    assert!(before_long.pnl < 0 && before_long.capital > before_long.pnl.unsigned_abs());
-    assert!(before_short.pnl < 0 && before_short.capital > before_short.pnl.unsigned_abs());
+    assert!(
+        before_long.pnl.get() < 0
+            && before_long.capital.get() > before_long.pnl.get().unsigned_abs()
+    );
+    assert!(
+        before_short.pnl.get() < 0
+            && before_short.capital.get() > before_short.pnl.get().unsigned_abs()
+    );
 
     env.trade_with_cu(
         &long_owner,
@@ -9432,8 +9531,8 @@ fn v16_bpf_tradenocpi_allows_both_counterparties_with_capitalized_losses_to_risk
         after_group.insurance, before_group.insurance,
         "capitalized losses must settle from account capital, not insurance"
     );
-    assert_eq!(after_long.pnl, 0);
-    assert_eq!(after_short.pnl, 0);
+    assert_eq!(after_long.pnl.get(), 0);
+    assert_eq!(after_short.pnl.get(), 0);
     assert!(!has_active_leg_for_asset(&after_long, 0));
     assert!(!has_active_leg_for_asset(&after_short, 0));
 }
@@ -9493,11 +9592,11 @@ fn v16_bpf_liquidatable_solvent_account_can_risk_reduce_without_insurance_drain(
     let before_short = env.portfolio_state(short_account);
     assert_eq!(before_group.insurance, 1_000_000);
     assert!(
-        before_short.health_cert.certified_liq_deficit != 0,
+        health_cert(&before_short).certified_liq_deficit != 0,
         "short account should be liquidatable before the safe risk reduction"
     );
     assert!(
-        before_short.health_cert.certified_equity > 0,
+        health_cert(&before_short).certified_equity > 0,
         "short account should still be solvent before the safe risk reduction"
     );
 
@@ -9525,8 +9624,8 @@ fn v16_bpf_liquidatable_solvent_account_can_risk_reduce_without_insurance_drain(
     assert!(!has_active_leg_for_asset(&after_long, 0));
     assert!(!has_active_leg_for_asset(&after_short, 0));
     assert!(
-        after_long.health_cert.certified_liq_deficit == 0
-            && after_short.health_cert.certified_liq_deficit == 0,
+        health_cert(&after_long).certified_liq_deficit == 0
+            && health_cert(&after_short).certified_liq_deficit == 0,
         "both accounts must be non-liquidatable after the risk reduction"
     );
 }
@@ -9713,7 +9812,10 @@ fn v16_bpf_full_14_leg_refresh_crank_is_under_tx_limit() {
     let (_, group) = state::read_market(&market_data).unwrap();
     let long = state::read_portfolio(&long_data).unwrap();
     assert_eq!(group.config.max_portfolio_assets, 14);
-    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 14);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&long)),
+        14
+    );
     assert!(
         group.assets[0].slot_last > before_slot_last,
         "full-14 refresh crank must commit bounded asset progress"
@@ -9760,8 +9862,11 @@ fn v16_bpf_full_14_leg_liquidation_crank_is_under_tx_limit() {
     let (_, group) = state::read_market(&market_data).unwrap();
     let long = state::read_portfolio(&long_data).unwrap();
     assert_eq!(group.config.max_portfolio_assets, 14);
-    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 13);
-    assert!(!long.legs[0].active);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&long)),
+        13
+    );
+    assert!(!leg(&long, 0).active);
     assert_eq!(group.assets[0].oi_eff_long_q, 0);
     assert_eq!(group.assets[0].oi_eff_short_q, 0);
 }
@@ -9797,13 +9902,16 @@ fn v16_bpf_current_full_14_leg_tradenocpi_is_under_tx_limit() {
     let short_data = env.svm.get_account(&short_account).unwrap().data;
     let long = state::read_portfolio(&long_data).unwrap();
     let short = state::read_portfolio(&short_data).unwrap();
-    assert_eq!(percolator::active_bitmap_count_ones(long.active_bitmap), 14);
     assert_eq!(
-        percolator::active_bitmap_count_ones(short.active_bitmap),
+        percolator::active_bitmap_count_ones(active_bitmap(&long)),
         14
     );
-    assert_eq!(long.legs[0].basis_pos_q, (9 * POS_SCALE) as i128);
-    assert_eq!(short.legs[0].basis_pos_q, -((9 * POS_SCALE) as i128));
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&short)),
+        14
+    );
+    assert_eq!(long.legs[0].basis_pos_q.get(), (9 * POS_SCALE) as i128);
+    assert_eq!(short.legs[0].basis_pos_q.get(), -((9 * POS_SCALE) as i128));
 }
 
 #[test]
@@ -9866,7 +9974,7 @@ fn v16_bpf_close_resolved_moves_payout_tokens_with_ledger() {
     let account = state::read_portfolio(&portfolio_data).unwrap();
     assert_eq!(group.vault, 0);
     assert_eq!(group.c_tot, 0);
-    assert_eq!(account.capital, 0);
+    assert_eq!(account.capital.get(), 0);
 }
 
 #[test]
@@ -9913,9 +10021,9 @@ fn v16_bpf_failed_close_resolved_transfer_rolls_back_payout_state() {
     let account = env.portfolio_state(portfolio);
     assert_eq!(group.vault, 1_000);
     assert_eq!(group.c_tot, 1_000);
-    assert_eq!(account.capital, 1_000);
+    assert_eq!(account.capital.get(), 1_000);
     assert!(
-        !account.resolved_payout_receipt.present,
+        !resolved_receipt(&account).present,
         "failed payout must not persist a paid/finalized receipt"
     );
     assert_eq!(env.token_amount(dest), 0);
@@ -9947,14 +10055,15 @@ fn v16_bpf_failed_claim_resolved_topup_rolls_back_receipt_and_ledger() {
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: 100 * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: 100,
-            paid_effective: 40,
-            finalized: false,
-        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         env.svm.set_account(env.market, market_account).unwrap();
@@ -10004,9 +10113,9 @@ fn v16_bpf_failed_claim_resolved_topup_rolls_back_receipt_and_ledger() {
             .terminal_claim_exact_receipts_num,
         100 * BOUND_SCALE
     );
-    assert_eq!(account.resolved_payout_receipt.paid_effective, 40);
+    assert_eq!(resolved_receipt(&account).paid_effective, 40);
     assert!(
-        !account.resolved_payout_receipt.finalized,
+        !resolved_receipt(&account).finalized,
         "failed top-up must leave the pending receipt claimable"
     );
     assert_eq!(env.token_amount(dest), 0);
@@ -10023,8 +10132,8 @@ fn v16_bpf_failed_claim_resolved_topup_rolls_back_receipt_and_ledger() {
     let (_, group) = env.market_state();
     let account = env.portfolio_state(portfolio);
     assert_eq!(group.vault, 0);
-    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
-    assert!(account.resolved_payout_receipt.finalized);
+    assert_eq!(resolved_receipt(&account).paid_effective, 100);
+    assert!(resolved_receipt(&account).finalized);
 }
 
 #[test]
@@ -10090,8 +10199,8 @@ fn v16_attack_resolved_payout_short_canonical_vault_rolls_back_receipts() {
     let rejected_portfolio = close_env.portfolio_state(portfolio);
     assert_eq!(rejected_group.vault, 1_000);
     assert_eq!(rejected_group.c_tot, 1_000);
-    assert_eq!(rejected_portfolio.capital, 1_000);
-    assert!(!rejected_portfolio.resolved_payout_receipt.present);
+    assert_eq!(rejected_portfolio.capital.get(), 1_000);
+    assert!(!resolved_receipt(&rejected_portfolio).present);
 
     close_env.set_token_account_amount(
         close_env.vault,
@@ -10119,7 +10228,7 @@ fn v16_attack_resolved_payout_short_canonical_vault_rolls_back_receipts() {
         .expect("CloseResolved succeeds once canonical vault liquidity matches accounting");
     assert_eq!(close_env.token_amount(dest), 1_000);
     assert_eq!(close_env.market_state().1.vault, 0);
-    assert_eq!(close_env.portfolio_state(portfolio).capital, 0);
+    assert_eq!(close_env.portfolio_state(portfolio).capital.get(), 0);
 
     let mut topup_env = V16CuEnv::new();
     let topup_owner = Keypair::new();
@@ -10151,14 +10260,15 @@ fn v16_attack_resolved_payout_short_canonical_vault_rolls_back_receipts() {
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: 100 * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: 100,
-            paid_effective: 40,
-            finalized: false,
-        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         topup_env
@@ -10224,8 +10334,8 @@ fn v16_attack_resolved_payout_short_canonical_vault_rolls_back_receipts() {
     let topup_receipt = topup_env.portfolio_state(topup_portfolio);
     assert_eq!(topup_group.vault, 60);
     assert_eq!(topup_group.resolved_payout_ledger.snapshot_residual, 100);
-    assert_eq!(topup_receipt.resolved_payout_receipt.paid_effective, 40);
-    assert!(!topup_receipt.resolved_payout_receipt.finalized);
+    assert_eq!(resolved_receipt(&topup_receipt).paid_effective, 40);
+    assert!(!resolved_receipt(&topup_receipt).finalized);
 
     topup_env.set_token_account_amount(
         topup_env.vault,
@@ -10248,12 +10358,14 @@ fn v16_attack_resolved_payout_short_canonical_vault_rolls_back_receipts() {
             ],
             &[],
         )
-        .expect("ClaimResolvedPayoutTopup succeeds once canonical vault liquidity matches accounting");
+        .expect(
+            "ClaimResolvedPayoutTopup succeeds once canonical vault liquidity matches accounting",
+        );
     assert_eq!(topup_env.token_amount(topup_dest), 60);
     assert_eq!(topup_env.market_state().1.vault, 0);
     let receipt = topup_env.portfolio_state(topup_portfolio);
-    assert_eq!(receipt.resolved_payout_receipt.paid_effective, 100);
-    assert!(receipt.resolved_payout_receipt.finalized);
+    assert_eq!(resolved_receipt(&receipt).paid_effective, 100);
+    assert!(resolved_receipt(&receipt).finalized);
 }
 
 #[test]
@@ -10345,7 +10457,7 @@ fn v16_attack_close_resolved_requires_owner_signature_during_exit_window() {
     let account = env.portfolio_state(portfolio);
     assert_eq!(group.vault, 0);
     assert_eq!(group.c_tot, 0);
-    assert_eq!(account.capital, 0);
+    assert_eq!(account.capital.get(), 0);
 }
 
 #[test]
@@ -10433,7 +10545,7 @@ fn v16_attack_close_resolved_after_exit_window_is_permissionless_but_not_stealab
     let account = env.portfolio_state(portfolio);
     assert_eq!(group.vault, 0);
     assert_eq!(group.c_tot, 0);
-    assert_eq!(account.capital, 0);
+    assert_eq!(account.capital.get(), 0);
 }
 
 // security.md sweep - permissionless CloseResolved legacy rollback (#5/#26/#44/#48):
@@ -10541,7 +10653,7 @@ fn v16_attack_permissionless_close_resolved_bad_dest_rolls_back_legacy_realloc()
     );
     assert_eq!(env.token_amount(owner_dest), 1_000);
     assert_eq!(env.market_state().1.vault, 0);
-    assert_eq!(env.portfolio_state(portfolio).capital, 0);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
 }
 
 // security.md sweep — CloseResolved caller-supplied fee_rate_per_slot must be IGNORED (Copenhagen
@@ -10604,8 +10716,16 @@ fn v16_attack_close_resolved_ignores_spoofed_fee_rate_param() {
         "victim must receive the FULL deposit; the caller-supplied fee_rate_per_slot must be ignored"
     );
     let (_, g) = env.market_state();
-    assert_eq!(env.portfolio_state(victim).capital, 0, "account fully closed");
-    assert_eq!(g.vault, g.c_tot + g.insurance, "conservation after terminal close");
+    assert_eq!(
+        env.portfolio_state(victim).capital.get(),
+        0,
+        "account fully closed"
+    );
+    assert_eq!(
+        g.vault,
+        g.c_tot + g.insurance,
+        "conservation after terminal close"
+    );
 }
 
 #[test]
@@ -10782,7 +10902,9 @@ fn v16_attack_terminal_insurance_short_canonical_vault_rolls_back_budget_and_led
         ],
         &[&admin],
     )
-    .expect("terminal WithdrawInsurance succeeds once canonical vault liquidity matches accounting");
+    .expect(
+        "terminal WithdrawInsurance succeeds once canonical vault liquidity matches accounting",
+    );
     assert_eq!(env.token_amount(dest), 40);
     assert_eq!(env.token_amount(env.vault), 60);
     let ledger_state =
@@ -10902,15 +11024,13 @@ fn v16_bpf_failed_backing_earnings_withdraw_rolls_back_bucket_and_ledger() {
     let (_, group) = env.market_state();
     assert_eq!(group.vault, 130, "vault accounting rolled back");
     assert_eq!(
-        group.source_backing_buckets[1].utilization_fee_earnings,
-        30,
+        group.source_backing_buckets[1].utilization_fee_earnings, 30,
         "earnings counter rolled back"
     );
     let ledger_state =
         state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
     assert_eq!(
-        ledger_state.last_observed_bucket_earnings_atoms,
-        30,
+        ledger_state.last_observed_bucket_earnings_atoms, 30,
         "ledger observed earnings rolled back"
     );
     assert_eq!(
@@ -10940,13 +11060,13 @@ fn v16_bpf_close_resolved_pays_positive_pnl_through_engine_ledger() {
     let account = state::read_portfolio(&portfolio_data).unwrap();
     assert_eq!(group.vault, 0);
     assert_eq!(group.c_tot, 0);
-    assert_eq!(account.capital, 0);
-    assert_eq!(account.pnl, 0);
+    assert_eq!(account.capital.get(), 0);
+    assert_eq!(account.pnl.get(), 0);
     // Source-backed positive pnl is REALIZED into capital at resolved close (the
     // realize_source_backed_claims step) and paid out as capital — not parked as a junior payout
     // receipt against the backing it is underwritten by. The winner is fully paid (1_250 above)
     // and winds down with NO resolved receipt outstanding.
-    assert!(!account.resolved_payout_receipt.present);
+    assert!(!resolved_receipt(&account).present);
 }
 
 #[test]
@@ -11953,15 +12073,15 @@ fn v16_bpf_auth_mark_target_effective_lag_counts_toward_liquidation_health() {
 
     let lagged_long = env.portfolio_state(long_portfolio);
     assert!(
-        lagged_long.health_cert.valid,
+        health_cert(&lagged_long).valid,
         "refresh must write a health certificate"
     );
     assert!(
-        lagged_long.health_cert.certified_maintenance_req > INITIAL_MARK as u128,
+        health_cert(&lagged_long).certified_maintenance_req > INITIAL_MARK as u128,
         "maintenance must include the adverse target/effective lag penalty"
     );
     assert!(
-        lagged_long.health_cert.certified_liq_deficit > 0,
+        health_cert(&lagged_long).certified_liq_deficit > 0,
         "lagged adverse AuthMark target must make the under-margined long liquidatable"
     );
 
@@ -12202,7 +12322,7 @@ fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
     let convert_cu = pnl_env.convert_released_pnl_with_cu(&owner, portfolio, 40);
     assert_cu_within("ConvertReleasedPnl", convert_cu, CUSTODY_CU_LIMIT);
     let account = pnl_env.portfolio_state(portfolio);
-    assert_eq!(account.capital, 40);
+    assert_eq!(account.capital.get(), 40);
     pnl_env.sync_backing_domain_ledger_with_cu(pnl_ledger, 1);
     let ledger_data = pnl_env.svm.get_account(&pnl_ledger).unwrap().data;
     let ledger_state = state::read_backing_domain_ledger(&ledger_data).unwrap();
@@ -12410,10 +12530,13 @@ fn run_account_residual_counter_credit_case(
 
     let taker_initial = env.portfolio_state(taker_account);
     let lp_initial = env.portfolio_state(lp_account);
-    assert_eq!(taker_initial.residual_crystallized_loss_atoms_total, 0);
-    assert_eq!(taker_initial.residual_spent_principal_atoms_total, 0);
-    assert_eq!(taker_initial.residual_received_atoms_total, 0);
-    assert_eq!(lp_initial.residual_received_atoms_total, 0);
+    assert_eq!(
+        taker_initial.residual_crystallized_loss_atoms_total.get(),
+        0
+    );
+    assert_eq!(taker_initial.residual_spent_principal_atoms_total.get(), 0);
+    assert_eq!(taker_initial.residual_received_atoms_total.get(), 0);
+    assert_eq!(lp_initial.residual_received_atoms_total.get(), 0);
 
     env.set_residual_reward_counters_for_test(taker_account, crystallized_loss_atoms, 0, 0);
     let cu = execute_account_residual_counter_trade_path(
@@ -12435,27 +12558,33 @@ fn run_account_residual_counter_credit_case(
     let taker_after = env.portfolio_state(taker_account);
     let lp_after = env.portfolio_state(lp_account);
     assert_eq!(
-        taker_after.residual_crystallized_loss_atoms_total, crystallized_loss_atoms,
+        taker_after.residual_crystallized_loss_atoms_total.get(),
+        crystallized_loss_atoms,
         "{path:?}: trading consumes reward budget but never reduces crystallized loss"
     );
     assert_eq!(
-        taker_after.residual_spent_principal_atoms_total, expected_credit,
+        taker_after.residual_spent_principal_atoms_total.get(),
+        expected_credit,
         "{path:?}: taker spends only real principal from the residual budget"
     );
     assert_eq!(
-        taker_after.residual_received_atoms_total, 0,
+        taker_after.residual_received_atoms_total.get(),
+        0,
         "{path:?}: the source trader does not self-credit LP rewards"
     );
     assert_eq!(
-        lp_after.residual_received_atoms_total, expected_credit,
+        lp_after.residual_received_atoms_total.get(),
+        expected_credit,
         "{path:?}: LP receives the deterministic residual credit"
     );
     assert_eq!(
-        lp_after.residual_spent_principal_atoms_total, 0,
+        lp_after.residual_spent_principal_atoms_total.get(),
+        0,
         "{path:?}: passive LP did not spend its own residual budget"
     );
     assert_ne!(
-        lp_after.residual_received_atoms_total, PRICE as u128,
+        lp_after.residual_received_atoms_total.get(),
+        PRICE as u128,
         "{path:?}: counter must not credit leveraged notional"
     );
 }
@@ -12569,11 +12698,13 @@ fn v16_bpf_account_residual_reward_counter_accumulates_across_batch_legs() {
         let taker_after = env.portfolio_state(taker_account);
         let lp_after = env.portfolio_state(lp_account);
         assert_eq!(
-            taker_after.residual_spent_principal_atoms_total, 100,
+            taker_after.residual_spent_principal_atoms_total.get(),
+            100,
             "two 50-atom principal increases spend exactly 100 atoms"
         );
         assert_eq!(
-            lp_after.residual_received_atoms_total, 100,
+            lp_after.residual_received_atoms_total.get(),
+            100,
             "batch LP receives the sum of per-leg real-principal credits"
         );
     }
@@ -12783,7 +12914,8 @@ fn run_backing_residual_counter_trade_path_case(path: BackingResidualCounterTrad
 
     let winner_before_convert = env.portfolio_state(winner_account);
     assert_eq!(
-        winner_before_convert.pnl, EXPECTED_PNL as i128,
+        winner_before_convert.pnl.get(),
+        EXPECTED_PNL as i128,
         "{path:?} setup must produce the source-backed positive PnL through the trade path"
     );
     assert!(
@@ -12824,7 +12956,8 @@ fn run_backing_residual_counter_trade_path_case(path: BackingResidualCounterTrad
         "{path:?} close path must release the PnL by flattening the real trade leg"
     );
     assert_eq!(
-        winner_after_close.pnl, EXPECTED_PNL as i128,
+        winner_after_close.pnl.get(),
+        EXPECTED_PNL as i128,
         "{path:?} close path must preserve the source-backed PnL before conversion"
     );
 
@@ -12836,7 +12969,7 @@ fn run_backing_residual_counter_trade_path_case(path: BackingResidualCounterTrad
     );
     let winner_after_convert = env.portfolio_state(winner_account);
     assert_eq!(
-        winner_after_convert.capital,
+        winner_after_convert.capital.get(),
         1_000 + EXPECTED_PNL,
         "{path:?} backed released PnL converts into senior capital"
     );
@@ -13051,7 +13184,7 @@ fn v16_bpf_recovery_and_reset_tags_are_bounded_and_update_state() {
     assert_cu_within("RebalanceReduce", reduce_cu, CUSTODY_CU_LIMIT);
     let (_, group) = reduce_env.market_state();
     let long = reduce_env.portfolio_state(long_account);
-    assert_eq!(long.legs[0].basis_pos_q, POS_SCALE as i128);
+    assert_eq!(long.legs[0].basis_pos_q.get(), POS_SCALE as i128);
     assert_eq!(group.assets[0].oi_eff_long_q, POS_SCALE);
 
     let mut forfeit_env = V16CuEnv::new();
@@ -13078,8 +13211,8 @@ fn v16_bpf_recovery_and_reset_tags_are_bounded_and_update_state() {
     assert_cu_within("ForfeitRecoveryLeg", forfeit_cu, CUSTODY_CU_LIMIT);
     let (_, group) = forfeit_env.market_state();
     let long = forfeit_env.portfolio_state(long_account);
-    assert!(percolator::active_bitmap_is_empty(long.active_bitmap));
-    assert_eq!(long.legs[0].basis_pos_q, 0);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&long)));
+    assert_eq!(long.legs[0].basis_pos_q.get(), 0);
     assert_eq!(group.assets[0].oi_eff_long_q, 0);
 
     let mut cure_env = V16CuEnv::new();
@@ -13091,8 +13224,8 @@ fn v16_bpf_recovery_and_reset_tags_are_bounded_and_update_state() {
     assert_cu_within("CureAndCancelClose", cure_cu, CUSTODY_CU_LIMIT);
     let (_, group) = cure_env.market_state();
     let account = cure_env.portfolio_state(portfolio);
-    assert!(account.close_progress.canceled);
-    assert_eq!(account.capital, 20);
+    assert!(close_progress(&account).canceled);
+    assert_eq!(account.capital.get(), 20);
     assert_eq!(group.c_tot, 20);
     assert_eq!(group.vault, 20);
     assert_eq!(group.pending_domain_loss_barriers[0], 0);
@@ -13141,14 +13274,15 @@ fn v16_bpf_resolved_payout_tags_are_bounded_and_update_state() {
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: 100 * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: 100,
-            paid_effective: 40,
-            finalized: false,
-        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         claim_env
@@ -13174,8 +13308,8 @@ fn v16_bpf_resolved_payout_tags_are_bounded_and_update_state() {
     let (_, group) = claim_env.market_state();
     let account = claim_env.portfolio_state(portfolio);
     assert_eq!(group.vault, 0);
-    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
-    assert!(account.resolved_payout_receipt.finalized);
+    assert_eq!(resolved_receipt(&account).paid_effective, 100);
+    assert!(resolved_receipt(&account).finalized);
 
     let mut refine_env = V16CuEnv::new();
     refine_env.mutate_market(|_, group| {
@@ -13248,18 +13382,18 @@ fn v16_audit_insolvent_resolved_winner_can_dematerialize() {
     let _dest = env.close_resolved(&owner, portfolio);
 
     let account = state::read_portfolio(&env.svm.get_account(&portfolio).unwrap().data).unwrap();
-    assert_eq!(account.capital, 0, "capital paid out");
-    assert_eq!(account.pnl, 0, "pnl zeroed by resolved close");
+    assert_eq!(account.capital.get(), 0, "capital paid out");
+    assert_eq!(account.pnl.get(), 0, "pnl zeroed by resolved close");
     // A fully-paid (haircut) resolved winner must reach a CLOSABLE receipt state so the
     // portfolio can dematerialize: either finalized, or cleared/absent once it has been
     // paid its full entitlement at the terminal rate. If it can't, materialized_portfolio_count
     // stays >= 1 and the market is permanently un-drainable (no WithdrawInsurance, no CloseSlab).
     assert!(
-        !account.resolved_payout_receipt.present || account.resolved_payout_receipt.finalized,
+        !resolved_receipt(&account).present || resolved_receipt(&account).finalized,
         "haircut winner's receipt must be closable (finalized or cleared at the terminal rate); \
          present={} finalized={}",
-        account.resolved_payout_receipt.present,
-        account.resolved_payout_receipt.finalized,
+        resolved_receipt(&account).present,
+        resolved_receipt(&account).finalized,
     );
 
     // The consequence: the owner must be able to reclaim the fully-settled
@@ -13293,7 +13427,7 @@ fn v16_audit_withdraw_after_cure_and_cancel_close() {
     env.withdraw_with_cu(&owner, portfolio, 100);
     let account = state::read_portfolio(&env.svm.get_account(&portfolio).unwrap().data).unwrap();
     assert_eq!(
-        account.capital, 0,
+        account.capital.get(), 0,
         "a flat, solvent user must be able to withdraw their capital after curing a cancelled close",
     );
 }
@@ -13406,7 +13540,10 @@ fn v16_attack_permissionless_reuse_invalid_price_keeps_slot_reusable() {
     );
     let (cfg_retired, group_retired) = env.market_state();
     assert_eq!(cfg_retired.free_market_slot_count, 1);
-    assert_eq!(group_retired.assets[1].lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(
+        group_retired.assets[1].lifecycle,
+        AssetLifecycleV16::Retired
+    );
     let market_before = env.svm.get_account(&env.market).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
 
@@ -13513,13 +13650,23 @@ fn v16_attack_retire_rejects_funded_insurance_domain_budget() {
     env.svm.warp_to_slot(1);
     // Permissionlessly append asset-1 with the attacker as all four domain authorities.
     env.activate_permissionless_asset_with_fee(
-        &attacker, 1, 1, 100,
-        attacker.pubkey(), attacker.pubkey(), attacker.pubkey(), attacker.pubkey(), 1,
+        &attacker,
+        1,
+        1,
+        100,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
     );
     // Fund asset-1's long insurance domain (domain 2); attacker is its insurance_authority.
     env.top_up_insurance_domain_with_authority(&attacker, 2, 5_000);
     let (_, g_pre) = env.market_state();
-    assert!(g_pre.insurance_domain_budget[2] > 0, "asset-1 domain funded (non-vacuous)");
+    assert!(
+        g_pre.insurance_domain_budget[2] > 0,
+        "asset-1 domain funded (non-vacuous)"
+    );
 
     let admin = env.admin.insecure_clone();
     let market = env.market;
@@ -13568,7 +13715,10 @@ fn v16_attack_retire_rejects_funded_insurance_domain_budget() {
     env.svm.warp_to_slot(4);
     env.svm.expire_blockhash();
     let retire2 = env.send(retire_ix(4), retire_metas(), &[&admin]);
-    assert!(retire2.is_ok(), "RETIRE succeeds once the domain budget is drained: {retire2:?}");
+    assert!(
+        retire2.is_ok(),
+        "RETIRE succeeds once the domain budget is drained: {retire2:?}"
+    );
     assert_eq!(
         env.market_state().1.assets[1].lifecycle,
         AssetLifecycleV16::Retired,
@@ -13666,8 +13816,7 @@ fn v16_attack_retire_rejects_funded_backing_bucket() {
         "asset-1 retired after backing principal is drained"
     );
     assert_eq!(
-        retired_group.source_backing_buckets[2].fresh_unliened_backing_num,
-        0,
+        retired_group.source_backing_buckets[2].fresh_unliened_backing_num, 0,
         "retired slot carries no stale backing principal"
     );
 }
@@ -13697,8 +13846,7 @@ fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
         "asset-1 backing principal is present (non-vacuous)"
     );
     assert_eq!(
-        funded_group.source_backing_buckets[2].utilization_fee_earnings,
-        EARNINGS,
+        funded_group.source_backing_buckets[2].utilization_fee_earnings, EARNINGS,
         "asset-1 backing provider earnings are owed (non-vacuous)"
     );
 
@@ -13756,8 +13904,7 @@ fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
         "principal remains recoverable after rejected premature withdrawal"
     );
     assert_eq!(
-        still_funded_group.source_backing_buckets[2].utilization_fee_earnings,
-        EARNINGS,
+        still_funded_group.source_backing_buckets[2].utilization_fee_earnings, EARNINGS,
         "earnings remain recoverable after rejected premature withdrawal"
     );
 
@@ -13835,8 +13982,7 @@ fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
         "asset-1 retired after backing-provider funds are paid"
     );
     assert_eq!(
-        retired_group.source_backing_buckets[2].utilization_fee_earnings,
-        0,
+        retired_group.source_backing_buckets[2].utilization_fee_earnings, 0,
         "retired slot carries no stale provider earnings"
     );
 }
@@ -13902,8 +14048,15 @@ fn v16_audit_resolved_maintenance_fee_multi_asset_stays_recoverable() {
     env.ensure_signer_account(appender.pubkey());
     env.svm.warp_to_slot(1);
     env.activate_permissionless_asset_with_fee(
-        &appender, 1, 1, 100,
-        appender.pubkey(), appender.pubkey(), appender.pubkey(), appender.pubkey(), 1,
+        &appender,
+        1,
+        1,
+        100,
+        appender.pubkey(),
+        appender.pubkey(),
+        appender.pubkey(),
+        appender.pubkey(),
+        1,
     );
 
     // Accrue ~100 slots of maintenance fee, then resolve and close.
@@ -13959,14 +14112,15 @@ fn v16_attack_resolved_payout_topup_bad_dest_does_not_burn_receipt() {
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: 100 * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: 100,
-            paid_effective: 40,
-            finalized: false,
-        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         env.svm.set_account(env.market, market_account).unwrap();
@@ -14023,11 +14177,12 @@ fn v16_attack_resolved_payout_topup_bad_dest_does_not_burn_receipt() {
 
     let account = env.portfolio_state(portfolio);
     assert_eq!(
-        account.resolved_payout_receipt.paid_effective, 40,
+        resolved_receipt(&account).paid_effective,
+        40,
         "rejected bad destinations must not burn the pending receipt"
     );
     assert!(
-        !account.resolved_payout_receipt.finalized,
+        !resolved_receipt(&account).finalized,
         "receipt remains claimable after rejected bad destinations"
     );
     assert_eq!(env.market_state().1.vault, 60, "accounting vault unchanged");
@@ -14046,8 +14201,8 @@ fn v16_attack_resolved_payout_topup_bad_dest_does_not_burn_receipt() {
         "correct destination receives the pending top-up"
     );
     let account = env.portfolio_state(portfolio);
-    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
-    assert!(account.resolved_payout_receipt.finalized);
+    assert_eq!(resolved_receipt(&account).paid_effective, 100);
+    assert!(resolved_receipt(&account).finalized);
     assert_eq!(env.market_state().1.vault, 0);
 }
 
@@ -14119,13 +14274,14 @@ fn v16_regression_mark_to_market_settles_conservation_under_price_move() {
         g1.vault >= g1.c_tot + g1.insurance,
         "senior conservation: vault >= c_tot + insurance"
     );
-    let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
+    let total_equity =
+        (a.capital.get() as i128 + a.pnl.get()) + (b.capital.get() as i128 + b.pnl.get());
     assert_eq!(
         total_equity, 2_000_000,
         "total equity (capital+pnl) conserved across both accounts"
     );
     let residual = g1.vault as i128 - g1.c_tot as i128 - g1.insurance as i128;
-    let pos_pnl = a.pnl.max(0) + b.pnl.max(0);
+    let pos_pnl = a.pnl.get().max(0) + b.pnl.get().max(0);
     assert!(
         residual >= pos_pnl,
         "positive PnL must be backed by residual (no un-backed winner)"
@@ -14181,7 +14337,8 @@ fn v16_regression_profit_realization_roundtrip_conserves() {
     let (_, g) = env.market_state();
     assert_eq!(g.assets[0].oi_eff_long_q, 0, "flat after close");
     assert_eq!(g.assets[0].oi_eff_short_q, 0, "flat after close");
-    let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
+    let total_equity =
+        (a.capital.get() as i128 + a.pnl.get()) + (b.capital.get() as i128 + b.pnl.get());
     assert_eq!(
         total_equity, 2_000_000,
         "total equity conserved through open->mark->close"
@@ -14189,7 +14346,7 @@ fn v16_regression_profit_realization_roundtrip_conserves() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
     let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
     assert!(
-        residual >= a.pnl.max(0) + b.pnl.max(0),
+        residual >= a.pnl.get().max(0) + b.pnl.get().max(0),
         "positive pnl backed by residual"
     );
 }
@@ -14265,10 +14422,12 @@ fn v16_regression_profit_withdraw_no_value_printed() {
     // Each withdraws its full capital through the token vault.
     let cap_a = state::read_portfolio(&env.svm.get_account(&pa).unwrap().data)
         .unwrap()
-        .capital;
+        .capital
+        .get();
     let cap_b = state::read_portfolio(&env.svm.get_account(&pb).unwrap().data)
         .unwrap()
-        .capital;
+        .capital
+        .get();
     env.svm.expire_blockhash();
     let dest_a = env.withdraw(&la, pa, cap_a);
     env.svm.expire_blockhash();
@@ -14390,7 +14549,10 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
     let before_leg = active_leg_for_asset(&before_account, 0);
     assert_eq!(before_leg.side, SideV16::Long);
     assert_eq!(before_leg.b_snap, 0, "fresh leg starts at B snap 0");
-    assert!(before_leg.loss_weight > 0, "leg participates in social-loss B settlement");
+    assert!(
+        before_leg.loss_weight > 0,
+        "leg participates in social-loss B settlement"
+    );
     let (_, before_group) = env.market_state();
     let vault_before = before_group.vault;
     let c_tot_before = before_group.c_tot;
@@ -14438,7 +14600,7 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
         "one public SettleB call advances only one configured chunk"
     );
     assert!(
-        after_first_leg.b_stale && after_first.b_stale_state,
+        after_first_leg.b_stale && after_first.b_stale_state != 0,
         "remaining B gap stays explicitly marked stale"
     );
     assert_eq!(
@@ -14447,8 +14609,14 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
         "SettleB advances the account snapshot, not the market loss index"
     );
     let (_, g_after_first) = env.market_state();
-    assert_eq!(g_after_first.vault, vault_before, "SettleB moves no custody");
-    assert_eq!(g_after_first.c_tot, c_tot_before, "SettleB does not mint capital");
+    assert_eq!(
+        g_after_first.vault, vault_before,
+        "SettleB moves no custody"
+    );
+    assert_eq!(
+        g_after_first.c_tot, c_tot_before,
+        "SettleB does not mint capital"
+    );
     assert_eq!(
         g_after_first.insurance, insurance_before,
         "SettleB does not debit insurance"
@@ -14461,20 +14629,29 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
         2,
         "second SettleB call advances exactly one more chunk"
     );
-    assert!(after_second.b_stale_state, "one chunk remains after second call");
+    assert!(
+        after_second.b_stale_state != 0,
+        "one chunk remains after second call"
+    );
 
     settle_b_once(&mut env).expect("final permissionless SettleB chunk");
     let after_final = env.portfolio_state(long);
     let final_leg = active_leg_for_asset(&after_final, 0);
     assert_eq!(final_leg.b_snap, 3, "all B debt settled after three chunks");
     assert!(
-        !final_leg.b_stale && !after_final.b_stale_state,
+        !final_leg.b_stale && after_final.b_stale_state == 0,
         "final chunk clears B-stale state"
     );
     let (_, g_end) = env.market_state();
-    assert_eq!(g_end.vault, vault_before, "no custody change after all chunks");
+    assert_eq!(
+        g_end.vault, vault_before,
+        "no custody change after all chunks"
+    );
     assert_eq!(g_end.c_tot, c_tot_before, "capital invariant preserved");
-    assert_eq!(g_end.insurance, insurance_before, "insurance invariant preserved");
+    assert_eq!(
+        g_end.insurance, insurance_before,
+        "insurance invariant preserved"
+    );
     assert!(
         g_end.vault >= g_end.c_tot + g_end.insurance,
         "senior conservation after permissionless B settlement"
@@ -14615,7 +14792,8 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
     let a = state::read_portfolio(&env.svm.get_account(&pa).unwrap().data).unwrap();
     let b = state::read_portfolio(&env.svm.get_account(&pb).unwrap().data).unwrap();
     let (_, g) = env.market_state();
-    let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
+    let total_equity =
+        (a.capital.get() as i128 + a.pnl.get()) + (b.capital.get() as i128 + b.pnl.get());
     assert_eq!(
         total_equity, 4_000_000,
         "total equity conserved across divergent cross-asset moves"
@@ -14623,7 +14801,7 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
     let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
     assert!(
-        residual >= a.pnl.max(0) + b.pnl.max(0),
+        residual >= a.pnl.get().max(0) + b.pnl.get().max(0),
         "positive pnl backed by residual"
     );
 }
@@ -14999,7 +15177,8 @@ fn v16_attack_fee_accrual_does_not_lock_user_funds() {
     let _ = env.try_sync_maintenance_fee_with_cu(p, None, 500);
     let remaining = state::read_portfolio(&env.svm.get_account(&p).unwrap().data)
         .unwrap()
-        .capital;
+        .capital
+        .get();
     assert!(
         remaining > 0 && remaining < 1_000_000,
         "fees took some but not all capital (got {})",
@@ -15016,7 +15195,7 @@ fn v16_attack_fee_accrual_does_not_lock_user_funds() {
         "user recovered full post-fee capital (no LoF)"
     );
     let after = state::read_portfolio(&env.svm.get_account(&p).unwrap().data).unwrap();
-    assert_eq!(after.capital, 0, "capital fully withdrawn");
+    assert_eq!(after.capital.get(), 0, "capital fully withdrawn");
     let (_, g) = env.market_state();
     assert!(
         g.vault >= g.c_tot + g.insurance,
@@ -15104,20 +15283,24 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
         "price actually moved up (got {})",
         g.assets[0].effective_price
     );
-    assert_eq!(sh.capital, 0, "short was driven insolvent (capital wiped)");
+    assert_eq!(
+        sh.capital.get(),
+        0,
+        "short was driven insolvent (capital wiped)"
+    );
     // The crux: the vault never owes more (senior) than it holds, no matter the bad debt.
     assert!(
         g.vault >= g.c_tot + g.insurance,
         "senior conservation holds under insolvency"
     );
     let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
-    let pos_pnl = lo.pnl.max(0) + sh.pnl.max(0);
+    let pos_pnl = lo.pnl.get().max(0) + sh.pnl.get().max(0);
     assert!(residual >= pos_pnl, "winner profit capped by residual — bad debt socialized, not printed (residual {} pos_pnl {})", residual, pos_pnl);
     // No capital was conjured: total realized capital <= total deposited.
     assert!(
-        (lo.capital + sh.capital) <= 1_000_250,
+        (lo.capital.get() + sh.capital.get()) <= 1_000_250,
         "no capital printed (got {})",
-        lo.capital + sh.capital
+        lo.capital.get() + sh.capital.get()
     );
 }
 
@@ -15218,7 +15401,7 @@ fn v16_attack_insurance_backstop_absorbs_bad_debt_no_underflow() {
     );
     let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
     assert!(
-        residual >= lo.pnl.max(0) + sh.pnl.max(0),
+        residual >= lo.pnl.get().max(0) + sh.pnl.get().max(0),
         "winner profit backed by residual"
     );
 }
@@ -15407,10 +15590,11 @@ fn v16_regression_premium_funding_settlement_conserves_vault() {
     );
     let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
     assert!(
-        residual >= a.pnl.max(0) + b.pnl.max(0),
+        residual >= a.pnl.get().max(0) + b.pnl.get().max(0),
         "positive pnl backed by residual"
     );
-    let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
+    let total_equity =
+        (a.capital.get() as i128 + a.pnl.get()) + (b.capital.get() as i128 + b.pnl.get());
     assert!(
         total_equity + g.insurance as i128 <= g.vault as i128,
         "no value over-distributed beyond the vault"
@@ -15464,7 +15648,8 @@ fn v16_attack_convert_released_pnl_respects_caller_cap() {
     assert!(ra.is_ok(), "huge-cap convert should succeed: {:?}", ra);
     let acct_a = env.portfolio_state(a);
     assert_eq!(
-        acct_a.capital, RELEASED,
+        acct_a.capital.get(),
+        RELEASED,
         "huge cap converts EXACTLY the released amount, not more"
     );
 
@@ -15503,7 +15688,7 @@ fn v16_attack_convert_released_pnl_respects_caller_cap() {
         RELEASED - 1
     );
     assert_eq!(
-        env.portfolio_state(b).capital,
+        env.portfolio_state(b).capital.get(),
         0,
         "rejected convert moves nothing"
     );
@@ -15563,7 +15748,7 @@ fn v16_attack_convert_released_pnl_rejects_cross_market_portfolio_substitution()
         "foreign conversion target is genuinely bound to market A"
     );
     assert_eq!(
-        env.portfolio_state(foreign).pnl,
+        env.portfolio_state(foreign).pnl.get(),
         RELEASED as i128,
         "foreign setup has released positive PnL before the substitution attempt"
     );
@@ -15600,7 +15785,7 @@ fn v16_attack_convert_released_pnl_rejects_cross_market_portfolio_substitution()
         "control conversion target is genuinely bound to market B"
     );
     assert_eq!(
-        env.portfolio_state(local).pnl,
+        env.portfolio_state(local).pnl.get(),
         RELEASED as i128,
         "control setup has released positive PnL on market B"
     );
@@ -15656,13 +15841,17 @@ fn v16_attack_convert_released_pnl_rejects_cross_market_portfolio_substitution()
         ],
         &[&local_owner],
     );
-    assert!(ok.is_ok(), "same-market ConvertReleasedPnl succeeds: {ok:?}");
+    assert!(
+        ok.is_ok(),
+        "same-market ConvertReleasedPnl succeeds: {ok:?}"
+    );
     let local_after = env.portfolio_state(local);
     assert_eq!(
-        local_after.capital, RELEASED,
+        local_after.capital.get(),
+        RELEASED,
         "same-market conversion moves released PnL into local senior capital"
     );
-    assert_eq!(local_after.pnl, 0, "released PnL is consumed");
+    assert_eq!(local_after.pnl.get(), 0, "released PnL is consumed");
     let (_, market_b_after) =
         state::read_market(&env.svm.get_account(&market_b).unwrap().data).unwrap();
     assert_eq!(
@@ -15805,7 +15994,8 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         "both prices moved up"
     );
     assert_eq!(
-        v.capital, 0,
+        v.capital.get(),
+        0,
         "victim's shared capital wiped by cross-asset losses"
     );
     assert!(
@@ -15856,7 +16046,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
     // The winner's ConvertReleasedPnl is residual-bounded: it can NEVER pull paper pnl into capital
     // beyond the residual backing, no matter the pnl figure.
     let residual2 = (g2.vault - g2.c_tot - g2.insurance) as u128;
-    let cap_before = env.portfolio_state(cp).capital;
+    let cap_before = env.portfolio_state(cp).capital.get();
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::ConvertReleasedPnl {
@@ -15869,7 +16059,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         ],
         &[&cp_owner],
     );
-    let converted = env.portfolio_state(cp).capital - cap_before;
+    let converted = env.portfolio_state(cp).capital.get() - cap_before;
     assert!(
         converted <= residual2,
         "winner conversion bounded by residual ({} <= {})",
@@ -15892,7 +16082,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
             },
         )
         .unwrap();
-    let cap_now = env.portfolio_state(cp).capital;
+    let cap_now = env.portfolio_state(cp).capital.get();
     let _ = env.send(
         ProgInstruction::Withdraw { amount: cap_now },
         vec![
@@ -15988,11 +16178,13 @@ fn v16_regression_resolved_open_positions_recover_fairly_order_robust() {
     );
     let mid = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
     assert_eq!(
-        mid.capital, 1_000_000,
+        mid.capital.get(),
+        1_000_000,
         "premature winner close is a no-op: capital fully preserved"
     );
     assert_eq!(
-        mid.pnl, 100_000,
+        mid.pnl.get(),
+        100_000,
         "premature winner close preserves parked pnl"
     );
 
@@ -16016,16 +16208,16 @@ fn v16_regression_resolved_open_positions_recover_fairly_order_robust() {
     assert_eq!(out_sh, 900_000, "loser recovers capital - realized loss");
     let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
     let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
-    assert_eq!(a.capital, 0, "long fully wound down");
-    assert_eq!(b.capital, 0, "short fully wound down");
+    assert_eq!(a.capital.get(), 0, "long fully wound down");
+    assert_eq!(b.capital.get(), 0, "short fully wound down");
     // The winner's positive pnl is source-backed (the directional trade created source credit),
     // so at resolved close it is REALIZED into capital and paid as capital — no junior payout
     // receipt is parked. The account winds down completely (pnl 0, capital 0, no receipt).
     assert!(
-        !a.resolved_payout_receipt.present,
+        !resolved_receipt(&a).present,
         "winner fully paid via capital realization, no dangling receipt"
     );
-    assert_eq!(a.pnl, 0, "winner pnl fully realized");
+    assert_eq!(a.pnl.get(), 0, "winner pnl fully realized");
     let (_, g) = env.market_state();
     assert_eq!(g.vault, 0, "vault fully drained, no funds stranded");
 }
@@ -16074,9 +16266,9 @@ fn v16_regression_resolved_multiwinner_haircut_no_overpay_no_strand() {
     // CRUX 2 (no strand): every winner's receipt is closable and the portfolio dematerializes.
     for (o, p) in owners.iter().zip(ports.iter()) {
         let a = state::read_portfolio(&env.svm.get_account(p).unwrap().data).unwrap();
-        assert_eq!(a.capital, 0, "winner capital fully paid");
+        assert_eq!(a.capital.get(), 0, "winner capital fully paid");
         assert!(
-            !a.resolved_payout_receipt.present || a.resolved_payout_receipt.finalized,
+            !resolved_receipt(&a).present || resolved_receipt(&a).finalized,
             "receipt closable after retry"
         );
         env.close_portfolio_with_cu(o, *p); // panics if dematerialization is blocked
@@ -16137,8 +16329,8 @@ fn v16_attack_resolved_junior_winner_double_claims_provider_backing() {
         group.pnl_matured_pos_tot = FACE;
         group.pnl_pos_bound_tot = FACE;
         group.pnl_pos_bound_tot_num = FACE * BOUND_SCALE;
-        account.pnl = FACE as i128;
-        account.last_fee_slot = 1;
+        account.pnl = percolator::V16PodI128::new(FACE as i128);
+        account.last_fee_slot = percolator::V16PodU64::new(1);
         // payout_snapshot_captured left false: the first CloseResolved captures it via residual().
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
@@ -16263,7 +16455,8 @@ fn v16_attack_crank_future_now_slot_does_not_overaccrue() {
         "price bounded by real elapsed time + circuit breaker"
     );
     // value conserved: no massive funding/fee over-charge drained capital.
-    let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
+    let total_equity =
+        (a.capital.get() as i128 + a.pnl.get()) + (b.capital.get() as i128 + b.pnl.get());
     assert_eq!(g.vault, 2 * DEPOSIT, "no tokens created/destroyed");
     assert!(
         total_equity + g.insurance as i128 <= g.vault as i128,
@@ -16331,7 +16524,7 @@ fn v16_attack_resolved_payout_replay_extracts_nothing() {
     assert_eq!(won, 1_100_000, "winner fully paid");
     let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
     assert!(
-        a.resolved_payout_receipt.finalized || !a.resolved_payout_receipt.present,
+        resolved_receipt(&a).finalized || !resolved_receipt(&a).present,
         "winner receipt finalized/cleared"
     );
     let (_, g_after) = env.market_state();
@@ -16529,7 +16722,7 @@ fn v16_attack_resolved_payout_dual_mint_replay_extracts_nothing() {
     );
     let winner = env.portfolio_state(lo);
     assert!(
-        winner.resolved_payout_receipt.finalized || !winner.resolved_payout_receipt.present,
+        resolved_receipt(&winner).finalized || !resolved_receipt(&winner).present,
         "secondary payout finalized the shared receipt"
     );
     let (_, after_secondary_payout) = env.market_state();
@@ -16646,14 +16839,15 @@ fn v16_attack_resolved_payout_topup_secondary_rail_exhausts_shared_receipt() {
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: 100 * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: 100,
-            paid_effective: 40,
-            finalized: false,
-        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         env.svm.set_account(env.market, market_account).unwrap();
@@ -16690,8 +16884,8 @@ fn v16_attack_resolved_payout_topup_secondary_rail_exhausts_shared_receipt() {
         "secondary reserve was spent by the top-up"
     );
     let account = env.portfolio_state(portfolio);
-    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
-    assert!(account.resolved_payout_receipt.finalized);
+    assert_eq!(resolved_receipt(&account).paid_effective, 100);
+    assert!(resolved_receipt(&account).finalized);
     assert_eq!(
         env.market_state().1.vault,
         0,
@@ -16964,14 +17158,15 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: 100 * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: 100,
-            paid_effective: 40,
-            finalized: false,
-        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         topup_env
@@ -17055,8 +17250,8 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
     assert_eq!(topup_env.token_amount(topup_dest), 60);
     assert_eq!(topup_env.token_amount(secondary_vault), 0);
     let receipt = topup_env.portfolio_state(topup_portfolio);
-    assert_eq!(receipt.resolved_payout_receipt.paid_effective, 100);
-    assert!(receipt.resolved_payout_receipt.finalized);
+    assert_eq!(resolved_receipt(&receipt).paid_effective, 100);
+    assert!(resolved_receipt(&receipt).finalized);
     assert_eq!(topup_env.market_state().1.vault, 0);
 }
 
@@ -17131,7 +17326,10 @@ fn v16_attack_terminal_insurance_rejects_noncanonical_secondary_vault() {
         "terminal WithdrawInsurance must reject a non-canonical secondary reserve"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-    assert_eq!(env.svm.get_account(&env.vault).unwrap(), primary_vault_before);
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before
+    );
     assert_eq!(
         env.svm.get_account(&canonical_secondary_vault).unwrap(),
         canonical_before,
@@ -17367,8 +17565,8 @@ fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
     // difference is the in-vault §6.2 residual buffer, not lost value).
     let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
     let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
-    let accounted = (a.capital as i128 + a.pnl)
-        + (b.capital as i128 + b.pnl)
+    let accounted = (a.capital.get() as i128 + a.pnl.get())
+        + (b.capital.get() as i128 + b.pnl.get())
         + env.market_state().1.insurance as i128;
     assert!(
         accounted <= 2_000_000,
@@ -17437,7 +17635,7 @@ fn v16_attack_trade_fee_bps_bounded_and_conserving() {
     let a = state::read_portfolio(&env.svm.get_account(&pa).unwrap().data).unwrap();
     let b = state::read_portfolio(&env.svm.get_account(&pb).unwrap().data).unwrap();
     assert!(
-        a.capital > 0 && b.capital > 0,
+        a.capital.get() > 0 && b.capital.get() > 0,
         "fee did not drain either party to zero"
     );
 }
@@ -17462,6 +17660,7 @@ fn v16_attack_conservation_under_deposit_withdraw_trade_churn() {
                 state::read_portfolio(&env.svm.get_account(p).unwrap().data)
                     .unwrap()
                     .capital
+                    .get()
             })
             .sum();
         assert_eq!(g.c_tot, sum, "[{}] c_tot == Σ capitals", tag);
@@ -17503,7 +17702,8 @@ fn v16_attack_conservation_under_deposit_withdraw_trade_churn() {
     for (o, p) in [(&a, pa), (&b, pb), (&c, pc)] {
         let cap = state::read_portfolio(&env.svm.get_account(&p).unwrap().data)
             .unwrap()
-            .capital;
+            .capital
+            .get();
         if cap > 0 {
             env.svm.expire_blockhash();
             env.withdraw(o, p, cap);
@@ -17568,7 +17768,7 @@ fn v16_regression_resolve_before_settlement_uses_official_price() {
     }
     let lost = {
         let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
-        assert_eq!(b.capital, 0, "loser wound down");
+        assert_eq!(b.capital.get(), 0, "loser wound down");
         2_000_000u128.saturating_sub(won)
     };
     // CORRECT behavior: resolve settles at the OFFICIAL accrued price (100). The unaccrued mark push
@@ -17586,9 +17786,9 @@ fn v16_regression_resolve_before_settlement_uses_official_price() {
     let (_, g) = env.market_state();
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
     let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
-    assert_eq!(a.capital, 0, "long fully wound down");
+    assert_eq!(a.capital.get(), 0, "long fully wound down");
     assert!(
-        a.resolved_payout_receipt.finalized || !a.resolved_payout_receipt.present,
+        resolved_receipt(&a).finalized || !resolved_receipt(&a).present,
         "receipt closable"
     );
 }
@@ -17665,13 +17865,13 @@ fn v16_regression_crank_idempotent_at_settlement_fixed_point() {
         "effective price unchanged by same-slot re-crank"
     );
     assert_eq!(
-        (lo2.capital, lo2.pnl),
-        (lo1.capital, lo1.pnl),
+        (lo2.capital.get(), lo2.pnl.get()),
+        (lo1.capital.get(), lo1.pnl.get()),
         "long pnl/capital not double-accrued"
     );
     assert_eq!(
-        (sh2.capital, sh2.pnl),
-        (sh1.capital, sh1.pnl),
+        (sh2.capital.get(), sh2.pnl.get()),
+        (sh1.capital.get(), sh1.pnl.get()),
         "short pnl/capital not double-accrued"
     );
     assert_eq!(
@@ -17731,16 +17931,17 @@ fn v16_attack_portfolio_reuse_after_close_is_clean() {
     if r.is_ok() {
         let a = state::read_portfolio(&env.svm.get_account(&p).unwrap().data).unwrap();
         assert_eq!(
-            a.capital, 0,
+            a.capital.get(),
+            0,
             "reused portfolio starts with zero capital (no stale value)"
         );
-        assert_eq!(a.pnl, 0, "no stale pnl carried over");
+        assert_eq!(a.pnl.get(), 0, "no stale pnl carried over");
         assert!(
-            !a.resolved_payout_receipt.present,
+            !resolved_receipt(&a).present,
             "no stale resolved receipt carried over"
         );
         assert!(
-            percolator::active_bitmap_is_empty(a.active_bitmap),
+            percolator::active_bitmap_is_empty(active_bitmap(&a)),
             "no stale positions"
         );
         // and a fresh deposit credits exactly the deposited amount.
@@ -17748,7 +17949,8 @@ fn v16_attack_portfolio_reuse_after_close_is_clean() {
         env.deposit(&new_owner, p, 500);
         let a2 = state::read_portfolio(&env.svm.get_account(&p).unwrap().data).unwrap();
         assert_eq!(
-            a2.capital, 500,
+            a2.capital.get(),
+            500,
             "fresh deposit credits exactly 500 (no stale base)"
         );
     }
@@ -17909,7 +18111,7 @@ fn v16_attack_over_liquidation_clamps_to_position() {
     // the short is fully closed (position gone), not over-closed into a phantom opposite position.
     let sh = state::read_portfolio(&env.svm.get_account(&short_account).unwrap().data).unwrap();
     assert!(
-        percolator::active_bitmap_is_empty(sh.active_bitmap),
+        percolator::active_bitmap_is_empty(active_bitmap(&sh)),
         "short position fully closed, no phantom flip"
     );
 }
@@ -18087,7 +18289,7 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
         }
     }
     let v_before = state::read_portfolio(&env.svm.get_account(&victim).unwrap().data).unwrap();
-    let equity_before = v_before.capital as i128 + v_before.pnl;
+    let equity_before = v_before.capital.get() as i128 + v_before.pnl.get();
     let (_, g_before) = env.market_state();
     // attacker tries to liquidate the victim's LOSING leg (asset1).
     env.svm.expire_blockhash();
@@ -18109,7 +18311,7 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
         &[],
     );
     let v_after = state::read_portfolio(&env.svm.get_account(&victim).unwrap().data).unwrap();
-    let equity_after = v_after.capital as i128 + v_after.pnl;
+    let equity_after = v_after.capital.get() as i128 + v_after.pnl.get();
     let (_, g_after) = env.market_state();
     // the solvent victim's total equity is not reduced by the liquidation attempt (no unfair drain).
     assert!(
@@ -18166,7 +18368,7 @@ fn v16_attack_convert_then_withdraw_pays_exactly_backed_amount() {
     );
     assert!(cr.is_ok(), "convert backed pnl should succeed: {:?}", cr);
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         BACKED,
         "capital == backed amount after convert"
     );
@@ -18178,8 +18380,8 @@ fn v16_attack_convert_then_withdraw_pays_exactly_backed_amount() {
         "winner receives EXACTLY the backed amount (no more, no less)"
     );
     let a = env.portfolio_state(p);
-    assert_eq!(a.capital, 0, "capital fully withdrawn");
-    assert_eq!(a.pnl, 0, "no residual pnl");
+    assert_eq!(a.capital.get(), 0, "capital fully withdrawn");
+    assert_eq!(a.pnl.get(), 0, "no residual pnl");
     let (_, g) = env.market_state();
     assert_eq!(
         g.vault,
@@ -18265,12 +18467,12 @@ fn v16_attack_zero_amount_inputs_are_safe() {
     );
     // capitals unchanged.
     assert_eq!(
-        env.portfolio_state(pa).capital,
+        env.portfolio_state(pa).capital.get(),
         1_000_000,
         "pa capital unchanged"
     );
     assert_eq!(
-        env.portfolio_state(pb).capital,
+        env.portfolio_state(pb).capital.get(),
         1_000_000,
         "pb capital unchanged"
     );
@@ -18289,7 +18491,10 @@ fn v16_attack_backing_withdraw_cannot_strand_liened_winner() {
     env.add_source_positive_pnl(p, 1, 40); // liens the 40 to back p's +PnL
     let (_, g0) = env.market_state();
     let p0 = env.portfolio_state(p);
-    assert!(p0.pnl > 0, "winner has backed positive pnl (non-vacuous)");
+    assert!(
+        p0.pnl.get() > 0,
+        "winner has backed positive pnl (non-vacuous)"
+    );
     let dest = env.token_account_for_mint(env.mint, env.admin.pubkey(), 0);
 
     // try to withdraw the LIENED backing (full 40, and a partial 1) -> must reject.
@@ -18331,8 +18536,8 @@ fn v16_attack_backing_withdraw_cannot_strand_liened_winner() {
         "vault unchanged by rejected backing withdraws"
     );
     assert_eq!(
-        env.portfolio_state(p).pnl,
-        p0.pnl,
+        env.portfolio_state(p).pnl.get(),
+        p0.pnl.get(),
         "winner's backed pnl preserved"
     );
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
@@ -18380,7 +18585,7 @@ fn v16_attack_deposit_underfunded_source_is_atomic() {
     );
     // ATOMIC: no capital credited, vault/c_tot unchanged, source untouched.
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         0,
         "no capital credited on failed deposit (no free mint)"
     );
@@ -18411,7 +18616,7 @@ fn v16_attack_deposit_underfunded_source_is_atomic() {
         "valid in-balance deposit succeeds after the failed one"
     );
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         100,
         "valid deposit credits exactly 100"
     );
@@ -18440,16 +18645,17 @@ fn v16_attack_sync_maintenance_fee_future_slot_no_overcharge() {
     let a = env.portfolio_state(p);
     // fee reflects ~10 real slots (10*58 = 580), NOT 1_000_000 slots (which would drain everything).
     assert!(
-        a.capital >= 1_000_000 - 10_000,
+        a.capital.get() >= 1_000_000 - 10_000,
         "fee bounded by real elapsed slots, not the lie (capital {})",
-        a.capital
+        a.capital.get()
     );
     assert!(
-        a.capital < 1_000_000,
+        a.capital.get() < 1_000_000,
         "some fee was charged for the real elapsed time (non-vacuous)"
     );
     assert_eq!(
-        a.last_fee_slot, 10,
+        a.last_fee_slot.get(),
+        10,
         "fee settled to the authenticated clock slot, not the spoofed future"
     );
     let (_, g) = env.market_state();
@@ -18463,11 +18669,11 @@ fn v16_attack_sync_maintenance_fee_future_slot_no_overcharge() {
         "exact conservation under slot-spoof attempt"
     );
     // a follow-up sync at the same real slot is a no-op (no further drain).
-    let cap_before = env.portfolio_state(p).capital;
+    let cap_before = env.portfolio_state(p).capital.get();
     env.svm.expire_blockhash();
     let _ = env.try_sync_maintenance_fee_with_cu(p, None, 1_000_000);
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         cap_before,
         "same-real-slot re-sync is a no-op despite future now_slot"
     );
@@ -18730,7 +18936,7 @@ fn v16_attack_withdraw_wrong_mint_dest_rejected() {
     );
     // capital NOT debited (atomic): the failed transfer rolls back the whole op.
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         1_000_000,
         "capital not debited on failed withdraw"
     );
@@ -18834,7 +19040,7 @@ fn v16_attack_tradecpi_spoofed_matcher_binding_rejected() {
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
     assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged");
     assert_eq!(
-        env.portfolio_state(taker).legs[0].basis_pos_q,
+        env.portfolio_state(taker).legs[0].basis_pos_q.get(),
         0,
         "taker has no position"
     );
@@ -19229,8 +19435,8 @@ fn v16_attack_tradecpi_matcher_config_arguments_must_match_account_bytes() {
         0,
         "rejected injections create no OI"
     );
-    assert_eq!(env.portfolio_state(taker).legs[0].basis_pos_q, 0);
-    assert_eq!(env.portfolio_state(lp).legs[0].basis_pos_q, 0);
+    assert_eq!(env.portfolio_state(taker).legs[0].basis_pos_q.get(), 0);
+    assert_eq!(env.portfolio_state(lp).legs[0].basis_pos_q.get(), 0);
 
     let ok = send(&mut env, honest, honest_ctx, honest_delegate);
     assert!(
@@ -19597,7 +19803,10 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
         self_single.is_err(),
         "TradeCpi must reject a self-program matcher tuple before CPI"
     );
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_fill);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_fill
+    );
     assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before_fill);
     assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before_fill);
 
@@ -19626,7 +19835,10 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
         self_batch.is_err(),
         "BatchTradeCpi must reject a self-program matcher tuple before CPI"
     );
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_fill);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_fill
+    );
     assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before_fill);
     assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before_fill);
 
@@ -19958,12 +20170,12 @@ fn v16_attack_permissionless_lp_cpi_rejects_wrong_delegate_owner_or_account_bind
         "no OI created by rejected CPI attempts"
     );
     assert_eq!(
-        env.portfolio_state(taker).legs[0].basis_pos_q,
+        env.portfolio_state(taker).legs[0].basis_pos_q.get(),
         0,
         "taker untouched"
     );
     assert_eq!(
-        env.portfolio_state(lp).legs[0].basis_pos_q,
+        env.portfolio_state(lp).legs[0].basis_pos_q.get(),
         0,
         "LP untouched"
     );
@@ -20036,8 +20248,8 @@ fn v16_attack_nocpi_trades_still_require_lp_owner_signature() {
     let group = env.market_state().1;
     assert_eq!(group.assets[0].oi_eff_long_q, 0);
     assert_eq!(group.assets[1].oi_eff_long_q, 0);
-    assert_eq!(env.portfolio_state(taker).legs[0].basis_pos_q, 0);
-    assert_eq!(env.portfolio_state(lp).legs[0].basis_pos_q, 0);
+    assert_eq!(env.portfolio_state(taker).legs[0].basis_pos_q.get(), 0);
+    assert_eq!(env.portfolio_state(lp).legs[0].basis_pos_q.get(), 0);
 }
 
 // security.md sweep — TradeCpi limit_price slippage guard (#19/#39): with a spread matcher filling
@@ -20092,7 +20304,7 @@ fn v16_attack_tradecpi_limit_price_enforced() {
         "buy with limit at oracle must reject when matcher fills above it (slippage guard)"
     );
     assert_eq!(
-        env.portfolio_state(taker).legs[0].basis_pos_q,
+        env.portfolio_state(taker).legs[0].basis_pos_q.get(),
         0,
         "no fill on rejected tight-limit trade"
     );
@@ -20105,7 +20317,7 @@ fn v16_attack_tradecpi_limit_price_enforced() {
     let r_ok = do_trade(&mut env, 1_000_000);
     assert!(r_ok.is_ok(), "buy with generous limit executes: {:?}", r_ok);
     assert!(
-        env.portfolio_state(taker).legs[0].basis_pos_q > 0,
+        env.portfolio_state(taker).legs[0].basis_pos_q.get() > 0,
         "taker filled under generous limit"
     );
     let (_, g1) = env.market_state();
@@ -20159,12 +20371,12 @@ fn v16_attack_tradecpi_zero_fill_is_clean() {
         "no phantom short OI from zero-fill"
     );
     assert_eq!(
-        env.portfolio_state(taker).legs[0].basis_pos_q,
+        env.portfolio_state(taker).legs[0].basis_pos_q.get(),
         0,
         "taker has no basis from zero-fill"
     );
     assert_eq!(
-        env.portfolio_state(maker).legs[0].basis_pos_q,
+        env.portfolio_state(maker).legs[0].basis_pos_q.get(),
         0,
         "maker has no basis from zero-fill"
     );
@@ -20219,7 +20431,7 @@ fn v16_attack_tradecpi_self_trade_rejected() {
         "no OI fabricated by self-trade"
     );
     assert_eq!(
-        env.portfolio_state(acct).legs[0].basis_pos_q,
+        env.portfolio_state(acct).legs[0].basis_pos_q.get(),
         0,
         "no wash position"
     );
@@ -20242,7 +20454,7 @@ fn v16_attack_cure_deposit_exact_and_atomic() {
     let (_, g_pre) = env.market_state();
     env.cure_and_cancel_close_with_cu(&a_owner, a, src_a, 50);
     assert_eq!(
-        env.portfolio_state(a).capital,
+        env.portfolio_state(a).capital.get(),
         150,
         "cure deposit credits capital exactly (100 + 50)"
     );
@@ -20290,7 +20502,7 @@ fn v16_attack_cure_deposit_exact_and_atomic() {
         "cure deposit exceeding source balance must reject"
     );
     assert_eq!(
-        env.portfolio_state(b).capital,
+        env.portfolio_state(b).capital.get(),
         100,
         "no capital credited on failed cure (no free-mint)"
     );
@@ -20389,17 +20601,20 @@ fn v16_attack_cure_deposit_rejects_noncanonical_vault() {
         "rejected cure fragment leaves the fake vault untouched"
     );
     assert!(
-        !env.portfolio_state(portfolio).close_progress.canceled,
+        !close_progress(&env.portfolio_state(portfolio)).canceled,
         "close-progress remains active after rejected fragment cure"
     );
 
     env.cure_and_cancel_close_with_cu(&owner, portfolio, source, 50);
     let cured = env.portfolio_state(portfolio);
-    assert!(cured.close_progress.canceled);
-    assert_eq!(cured.capital, 150);
+    assert!(close_progress(&cured).canceled);
+    assert_eq!(cured.capital.get(), 150);
     assert_eq!(env.token_amount(source), 0);
     assert_eq!(env.token_amount(fake_vault), 0);
-    assert_eq!(env.market_state().1.vault as u64, env.token_amount(env.vault));
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault)
+    );
 }
 
 // security.md sweep - CureAndCancelClose owner gating (#6/#48): canceling a close-progress ledger is
@@ -20454,7 +20669,7 @@ fn v16_attack_cure_and_cancel_close_owner_gated() {
         "rejected non-owner cure must not pull optional-deposit tokens"
     );
     assert!(
-        !env.portfolio_state(victim).close_progress.canceled,
+        !close_progress(&env.portfolio_state(victim)).canceled,
         "victim close-progress remains active after attacker rejection"
     );
 
@@ -20462,11 +20677,12 @@ fn v16_attack_cure_and_cancel_close_owner_gated() {
     env.cure_and_cancel_close_with_cu(&owner, victim, owner_source, 0);
     let cured = env.portfolio_state(victim);
     assert!(
-        cured.close_progress.canceled,
+        close_progress(&cured).canceled,
         "real owner can still cure and cancel after rejected attacker attempt"
     );
     assert_eq!(
-        cured.capital, 100,
+        cured.capital.get(),
+        100,
         "zero-deposit cure does not change capital"
     );
 }
@@ -20645,20 +20861,21 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
         let mut portfolio_b_account = env.svm.get_account(&portfolio_b).unwrap();
         let (cfg_b, mut group_b) = state::read_market(&market_b_account.data).unwrap();
         let mut account_b = state::read_portfolio(&portfolio_b_account.data).unwrap();
-        account_b.close_progress = CloseProgressLedgerV16 {
-            active: true,
-            finalized: false,
-            canceled: false,
-            close_id: 1,
-            asset_index: 0,
-            market_id: group_b.assets[0].market_id,
-            domain_side: SideV16::Long,
-            gross_loss_at_close_start: 10,
-            drift_reference_slot: 0,
-            max_close_slot: 10,
-            residual_remaining: 10,
-            ..CloseProgressLedgerV16::EMPTY
-        };
+        account_b.close_progress =
+            percolator::CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+                active: true,
+                finalized: false,
+                canceled: false,
+                close_id: 1,
+                asset_index: 0,
+                market_id: group_b.assets[0].market_id,
+                domain_side: SideV16::Long,
+                gross_loss_at_close_start: 10,
+                drift_reference_slot: 0,
+                max_close_slot: 10,
+                residual_remaining: 10,
+                ..CloseProgressLedgerV16::EMPTY
+            });
         group_b.pending_domain_loss_barriers[0] = 1;
         state::write_market(&mut market_b_account.data, &cfg_b, &group_b).unwrap();
         state::write_portfolio(&mut portfolio_b_account.data, &account_b).unwrap();
@@ -20694,8 +20911,8 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
     assert_eq!(env.token_amount(vault_b), 150);
     let account_b = state::read_portfolio(&env.svm.get_account(&portfolio_b).unwrap().data)
         .expect("market-B portfolio after cure");
-    assert_eq!(account_b.capital, 150);
-    assert!(account_b.close_progress.canceled);
+    assert_eq!(account_b.capital.get(), 150);
+    assert!(close_progress(&account_b).canceled);
     let (_, group_b) = state::read_market(&env.svm.get_account(&market_b).unwrap().data).unwrap();
     assert_eq!(group_b.vault, 150);
     assert_eq!(group_b.c_tot, 150);
@@ -20714,7 +20931,7 @@ fn v16_attack_position_flip_enforces_initial_margin() {
     env.deposit(&la, pa, 100); // exactly enough for notional 100 at 100% IM
     env.deposit(&lb, pb, 10_000_000); // counterparty well-funded
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0); // la long 1 (notional 100)
-    let basis_open = env.portfolio_state(pa).legs[0].basis_pos_q;
+    let basis_open = env.portfolio_state(pa).legs[0].basis_pos_q.get();
     assert_eq!(basis_open, POS_SCALE as i128, "la opened long 1");
 
     // ATTACK: flip to SHORT 2 (sell 3) -> needs margin 200 > capital 100 -> must reject.
@@ -20725,7 +20942,7 @@ fn v16_attack_position_flip_enforces_initial_margin() {
         "flip into an under-margined short (2x notional) must reject"
     );
     assert_eq!(
-        env.portfolio_state(pa).legs[0].basis_pos_q,
+        env.portfolio_state(pa).legs[0].basis_pos_q.get(),
         basis_open,
         "position unchanged by rejected over-flip"
     );
@@ -20739,7 +20956,7 @@ fn v16_attack_position_flip_enforces_initial_margin() {
         r_ok
     );
     assert_eq!(
-        env.portfolio_state(pa).legs[0].basis_pos_q,
+        env.portfolio_state(pa).legs[0].basis_pos_q.get(),
         -(POS_SCALE as i128),
         "la is now short 1 after flip"
     );
@@ -20811,7 +21028,7 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
     );
     assert_eq!(env.token_amount(dest), 0, "no funds stolen by non-owner");
     assert_eq!(
-        env.portfolio_state(pa).capital,
+        env.portfolio_state(pa).capital.get(),
         1_000_000,
         "pa capital intact"
     );
@@ -20848,7 +21065,7 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
         "non-owner trade leaves the honest counterparty untouched"
     );
     assert_eq!(
-        env.portfolio_state(pa).legs[0].basis_pos_q,
+        env.portfolio_state(pa).legs[0].basis_pos_q.get(),
         0,
         "no unauthorized position opened on pa"
     );
@@ -20986,7 +21203,7 @@ fn v16_regression_vault_pinned_to_canonical_ata_no_fragmentation() {
         "FIXED: deposit to a non-canonical vault-authority-owned account is rejected"
     );
     assert_eq!(
-        env.portfolio_state(ap).capital,
+        env.portfolio_state(ap).capital.get(),
         0,
         "no capital credited via a fake vault"
     );
@@ -21119,7 +21336,7 @@ fn v16_attack_withdraw_to_third_party_dest_rejected() {
         "no funds delivered to a third-party dest"
     );
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         1_000_000,
         "capital not debited on rejected withdraw"
     );
@@ -23210,7 +23427,11 @@ fn v16_attack_deposit_from_vault_as_source_rejected() {
         r.is_err(),
         "deposit using the vault as source must reject (source not owned by depositor)"
     );
-    assert_eq!(env.portfolio_state(ap).capital, 0, "no free capital minted");
+    assert_eq!(
+        env.portfolio_state(ap).capital.get(),
+        0,
+        "no free capital minted"
+    );
     let (_, g1) = env.market_state();
     assert_eq!(g1.vault, g0.vault, "vault accounting unchanged");
     assert_eq!(
@@ -23240,7 +23461,7 @@ fn v16_attack_deposit_from_vault_as_source_rejected() {
         "deposit from a third-party-owned source must reject"
     );
     assert_eq!(
-        env.portfolio_state(ap).capital,
+        env.portfolio_state(ap).capital.get(),
         0,
         "no capital credited from a non-owned source"
     );
@@ -23372,11 +23593,14 @@ fn v16_attack_pnl_pos_tot_consistent_through_sign_flips() {
         let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
         let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
         let (_, g) = env.market_state();
-        let sum_pos = (a.pnl.max(0) + b.pnl.max(0)) as u128;
+        let sum_pos = (a.pnl.get().max(0) + b.pnl.get().max(0)) as u128;
         assert_eq!(
-            g.pnl_pos_tot, sum_pos,
+            g.pnl_pos_tot,
+            sum_pos,
             "[{}] pnl_pos_tot == Σ max(0,pnl) (a.pnl={} b.pnl={})",
-            tag, a.pnl, b.pnl
+            tag,
+            a.pnl.get(),
+            b.pnl.get()
         );
         assert!(
             g.vault >= g.c_tot + g.insurance,
@@ -23462,7 +23686,7 @@ fn v16_attack_withdraw_respects_margin_and_recoverable() {
         "conservative margin reserves capital under the worst-case envelope"
     );
     assert_eq!(
-        env.portfolio_state(pa).capital,
+        env.portfolio_state(pa).capital.get(),
         1_000,
         "capital intact after rejected withdraws (no partial debit)"
     );
@@ -23471,10 +23695,10 @@ fn v16_attack_withdraw_respects_margin_and_recoverable() {
     env.svm.expire_blockhash();
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, -(6 * POS_SCALE as i128), 100, 0);
     assert!(
-        percolator::active_bitmap_is_empty(env.portfolio_state(pa).active_bitmap),
+        percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(pa))),
         "la flat after close"
     );
-    let cap = env.portfolio_state(pa).capital;
+    let cap = env.portfolio_state(pa).capital.get();
     env.svm.expire_blockhash();
     let (dest, _) = env.withdraw_with_cu(&la, pa, cap);
     assert_eq!(
@@ -23483,7 +23707,7 @@ fn v16_attack_withdraw_respects_margin_and_recoverable() {
         "full capital recovered after closing (no LoF)"
     );
     assert_eq!(
-        env.portfolio_state(pa).capital,
+        env.portfolio_state(pa).capital.get(),
         0,
         "capital fully withdrawn"
     );
@@ -24085,10 +24309,11 @@ fn v16_attack_funding_direction_mark_below_index_conserves() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
     let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
     assert!(
-        residual >= a.pnl.max(0) + b.pnl.max(0),
+        residual >= a.pnl.get().max(0) + b.pnl.get().max(0),
         "positive pnl backed by residual"
     );
-    let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
+    let total_equity =
+        (a.capital.get() as i128 + a.pnl.get()) + (b.capital.get() as i128 + b.pnl.get());
     assert!(
         total_equity + g.insurance as i128 <= g.vault as i128,
         "no over-distribution"
@@ -24286,7 +24511,10 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
             ],
             &[&old_admin],
         );
-        assert!(rejected.is_err(), "{label} must reject for stale marketauth");
+        assert!(
+            rejected.is_err(),
+            "{label} must reject for stale marketauth"
+        );
         let cfg = env.market_state().0;
         assert_eq!(cfg.marketauth, cfg_after_rotation.marketauth);
         assert_eq!(
@@ -24407,7 +24635,8 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
     env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
     let cranker = env.portfolio_state(cranker_portfolio);
     assert_eq!(
-        cranker.capital, 232,
+        cranker.capital.get(),
+        232,
         "new marketauth's maintenance share pays the public cranker path"
     );
 }
@@ -24499,7 +24728,7 @@ fn v16_regression_roundtrip_recovers_fully_at_resolution() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
     let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
     assert!(
-        residual >= b.pnl.max(0),
+        residual >= b.pnl.get().max(0),
         "short's junior recovery pnl is backed by residual"
     );
     // resolution pays EVERYONE their full fair value — no permanent LoF from the junior-pnl mechanism.
@@ -24562,17 +24791,17 @@ fn v16_attack_tradecpi_thin_maker_margin_protected() {
         "no OI created by the rejected over-fill"
     );
     assert_eq!(
-        env.portfolio_state(maker).legs[0].basis_pos_q,
+        env.portfolio_state(maker).legs[0].basis_pos_q.get(),
         0,
         "maker took no position"
     );
     assert_eq!(
-        env.portfolio_state(taker).legs[0].basis_pos_q,
+        env.portfolio_state(taker).legs[0].basis_pos_q.get(),
         0,
         "taker took no position"
     );
     assert_eq!(
-        env.portfolio_state(maker).capital,
+        env.portfolio_state(maker).capital.get(),
         1_000,
         "maker capital intact"
     );
@@ -24749,7 +24978,7 @@ fn v16_attack_close_resolved_dest_validation() {
         "vault unchanged by rejected payouts"
     );
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         1_000_000,
         "portfolio still owed its capital"
     );
@@ -24856,14 +25085,15 @@ fn v16_attack_resolved_payout_paths_cannot_use_market_as_portfolio_alias() {
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: 100 * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: 100,
-            paid_effective: 40,
-            finalized: false,
-        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         topup_env
@@ -24974,14 +25204,15 @@ fn v16_attack_claim_resolved_topup_bad_dest_rolls_back_legacy_realloc() {
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: 100 * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: 100,
-            paid_effective: 40,
-            finalized: false,
-        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         env.svm.set_account(env.market, market_account).unwrap();
@@ -25067,8 +25298,8 @@ fn v16_attack_claim_resolved_topup_bad_dest_rolls_back_legacy_realloc() {
         "same legacy receipt remains claimable after the rejected bad-dest attempt"
     );
     let account = env.portfolio_state(portfolio);
-    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
-    assert!(account.resolved_payout_receipt.finalized);
+    assert_eq!(resolved_receipt(&account).paid_effective, 100);
+    assert!(resolved_receipt(&account).finalized);
 }
 
 // security.md sweep — liquidation of a healthy account (#2): an account above maintenance margin must
@@ -25085,7 +25316,7 @@ fn v16_attack_healthy_account_not_liquidatable() {
     env.deposit(&la, pa, 1_000_000);
     env.deposit(&lb, pb, 1_000_000);
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
-    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q;
+    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q.get();
     assert!(basis0 != 0, "la opened a position");
     let (_, g0) = env.market_state();
 
@@ -25112,12 +25343,12 @@ fn v16_attack_healthy_account_not_liquidatable() {
 
     // healthy account: position intact, no fee extracted, conservation.
     assert_eq!(
-        env.portfolio_state(pa).legs[0].basis_pos_q,
+        env.portfolio_state(pa).legs[0].basis_pos_q.get(),
         basis0,
         "healthy account's position NOT force-closed by liquidation"
     );
     assert_eq!(
-        env.portfolio_state(pa).capital,
+        env.portfolio_state(pa).capital.get(),
         1_000_000,
         "healthy account capital not docked a liquidation fee"
     );
@@ -26936,7 +27167,7 @@ fn v16_attack_rebalance_reduce_owner_gated() {
     env.deposit(&la, pa, 1_000_000);
     env.deposit(&lb, pb, 1_000_000);
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
-    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q;
+    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q.get();
     assert!(basis0 != 0, "la opened a position");
     let (_, g0) = env.market_state();
 
@@ -26961,7 +27192,7 @@ fn v16_attack_rebalance_reduce_owner_gated() {
         "non-owner force-reduce of a victim's position must reject"
     );
     assert_eq!(
-        env.portfolio_state(pa).legs[0].basis_pos_q,
+        env.portfolio_state(pa).legs[0].basis_pos_q.get(),
         basis0,
         "victim's position not reduced by attacker"
     );
@@ -26991,7 +27222,11 @@ fn v16_attack_rebalance_reduce_owner_gated() {
         r_owner
     );
     assert!(
-        env.portfolio_state(pa).legs[0].basis_pos_q.unsigned_abs() < basis0.unsigned_abs(),
+        env.portfolio_state(pa).legs[0]
+            .basis_pos_q
+            .get()
+            .unsigned_abs()
+            < basis0.unsigned_abs(),
         "owner reduced their own position"
     );
     let (_, g1) = env.market_state();
@@ -27140,7 +27375,10 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
     let local_after = state::read_portfolio(&env.svm.get_account(&local).unwrap().data)
         .expect("market-B local portfolio");
     assert!(
-        active_leg_for_asset(&local_after, 0).basis_pos_q.unsigned_abs() < POS_SCALE,
+        active_leg_for_asset(&local_after, 0)
+            .basis_pos_q
+            .unsigned_abs()
+            < POS_SCALE,
         "same-market reduce advanced the local position"
     );
     let (_, market_b_after) =
@@ -27179,7 +27417,9 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         group.recovery_reason = Some(PermissionlessRecoveryReasonV16::BelowProgressFloor);
     });
     assert_eq!(
-        env.portfolio_state(foreign).provenance_header.market_group_id,
+        env.portfolio_state(foreign)
+            .provenance_header
+            .market_group_id,
         env.market.to_bytes(),
         "foreign forfeit target is genuinely bound to market A"
     );
@@ -27300,13 +27540,16 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         ],
         &[&local_owner],
     );
-    assert!(ok.is_ok(), "same-market ForfeitRecoveryLeg succeeds: {ok:?}");
+    assert!(
+        ok.is_ok(),
+        "same-market ForfeitRecoveryLeg succeeds: {ok:?}"
+    );
     let local_after = env.portfolio_state(local);
     assert!(
-        percolator::active_bitmap_is_empty(local_after.active_bitmap),
+        percolator::active_bitmap_is_empty(active_bitmap(&local_after)),
         "same-market forfeit clears the local recovery leg"
     );
-    assert_eq!(local_after.legs[0].basis_pos_q, 0);
+    assert_eq!(local_after.legs[0].basis_pos_q.get(), 0);
     let (_, market_b_after) =
         state::read_market(&env.svm.get_account(&market_b).unwrap().data).unwrap();
     assert_eq!(
@@ -27403,13 +27646,13 @@ fn v16_attack_refine_resolved_bound_over_decrease_is_atomic() {
         let mut c = state::read_portfolio(&pc.data).unwrap();
         // C donates its capital to the junior residual.
         g.c_tot -= 500_000;
-        c.capital = 0;
-        c.last_fee_slot = 1;
+        c.capital = percolator::V16PodU128::new(0);
+        c.last_fee_slot = percolator::V16PodU64::new(1);
         // A and B hold matured junior positive pnl.
-        a.pnl = 250_000;
-        a.last_fee_slot = 1;
-        b.pnl = 250_000;
-        b.last_fee_slot = 1;
+        a.pnl = percolator::V16PodI128::new(250_000);
+        a.last_fee_slot = percolator::V16PodU64::new(1);
+        b.pnl = percolator::V16PodI128::new(250_000);
+        b.last_fee_slot = percolator::V16PodU64::new(1);
         g.pnl_pos_tot = 500_000;
         g.pnl_matured_pos_tot = 500_000;
         g.pnl_pos_bound_tot = 500_000;
@@ -27548,7 +27791,7 @@ fn v16_attack_recovery_tools_owner_gated() {
     env.deposit(&la, pa, 1_000_000);
     env.deposit(&lb, pb, 1_000_000);
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
-    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q;
+    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q.get();
     let (_, g0) = env.market_state();
     let mallory = Keypair::new();
     env.ensure_signer_account(mallory.pubkey());
@@ -27590,7 +27833,7 @@ fn v16_attack_recovery_tools_owner_gated() {
 
     // victim's position untouched, conservation.
     assert_eq!(
-        env.portfolio_state(pa).legs[0].basis_pos_q,
+        env.portfolio_state(pa).legs[0].basis_pos_q.get(),
         basis0,
         "victim's position untouched by recovery-tool griefing"
     );
@@ -27848,6 +28091,7 @@ fn v16_attack_long_sequence_conservation() {
                 state::read_portfolio(&env.svm.get_account(pp).unwrap().data)
                     .unwrap()
                     .capital
+                    .get()
             })
             .sum();
         assert_eq!(g.c_tot, sum, "[{}] c_tot == Σcapitals", tag);
@@ -28061,7 +28305,8 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
     let (_, g) = env.market_state();
     assert_eq!(g.assets[0].oi_eff_long_q, 0, "asset0 flat after close");
     assert_eq!(g.assets[1].oi_eff_long_q, 0, "asset1 flat after close");
-    let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
+    let total_equity =
+        (a.capital.get() as i128 + a.pnl.get()) + (b.capital.get() as i128 + b.pnl.get());
     assert_eq!(
         total_equity, 4_000_000,
         "total equity conserved through divergent cross-asset close"
@@ -28074,7 +28319,7 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
     );
     let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
     assert!(
-        residual >= a.pnl.max(0) + b.pnl.max(0),
+        residual >= a.pnl.get().max(0) + b.pnl.get().max(0),
         "positive pnl backed by residual"
     );
 }
@@ -28096,8 +28341,8 @@ fn v16_attack_maintenance_fee_with_open_position_conserves() {
     env.deposit(&lb, pb, 1_000_000);
     env.update_maintenance_fee_policy_with_cu(0);
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
-    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q;
-    let cap0 = env.portfolio_state(pa).capital;
+    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q.get();
+    let cap0 = env.portfolio_state(pa).capital.get();
     let (_, g0) = env.market_state();
 
     // accrue fees incrementally across several slots (each crank+sync advances bounded by max_accrual_dt).
@@ -28125,12 +28370,12 @@ fn v16_attack_maintenance_fee_with_open_position_conserves() {
         );
         env.svm.expire_blockhash();
         let _ = env.try_sync_maintenance_fee_with_cu(pa, None, slot);
-        let cap = env.portfolio_state(pa).capital;
+        let cap = env.portfolio_state(pa).capital.get();
         let step = prev_cap - cap;
         max_step = max_step.max(step);
         prev_cap = cap;
     }
-    let cap_final = env.portfolio_state(pa).capital;
+    let cap_final = env.portfolio_state(pa).capital.get();
     let fee = cap0 - cap_final;
     let (_, g1) = env.market_state();
     assert!(
@@ -28161,7 +28406,7 @@ fn v16_attack_maintenance_fee_with_open_position_conserves() {
         "accounting vault == real vault balance"
     );
     assert_eq!(
-        env.portfolio_state(pa).legs[0].basis_pos_q,
+        env.portfolio_state(pa).legs[0].basis_pos_q.get(),
         basis0,
         "fee accrual did not disturb the position"
     );
@@ -28222,7 +28467,7 @@ fn v16_attack_deposit_with_parked_pnl_clean() {
         }
     }
     let a0 = env.portfolio_state(lo);
-    assert!(a0.pnl > 0, "long has parked pnl (non-vacuous)");
+    assert!(a0.pnl.get() > 0, "long has parked pnl (non-vacuous)");
     let (_, g0) = env.market_state();
     let resid0 = g0.vault as i128 - g0.c_tot as i128 - g0.insurance as i128;
 
@@ -28232,12 +28477,13 @@ fn v16_attack_deposit_with_parked_pnl_clean() {
     let a1 = env.portfolio_state(lo);
     let (_, g1) = env.market_state();
     assert_eq!(
-        a1.capital,
-        a0.capital + 500_000,
+        a1.capital.get(),
+        a0.capital.get() + 500_000,
         "capital credited exactly by the deposit"
     );
     assert_eq!(
-        a1.pnl, a0.pnl,
+        a1.pnl.get(),
+        a0.pnl.get(),
         "parked pnl UNCHANGED by the deposit (no double-count/disturbance)"
     );
     assert_eq!(
@@ -28262,7 +28508,7 @@ fn v16_attack_deposit_with_parked_pnl_clean() {
         "residual backing of the junior pnl unchanged by the deposit"
     );
     assert!(
-        resid1 >= a1.pnl.max(0),
+        resid1 >= a1.pnl.get().max(0),
         "junior pnl still backed by residual"
     );
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
@@ -28281,12 +28527,12 @@ fn v16_attack_two_sided_trade_fee_symmetric() {
     env.deposit(&la, pa, 1_000_000);
     env.deposit(&lb, pb, 1_000_000);
     let (_, g0) = env.market_state();
-    let ca0 = env.portfolio_state(pa).capital;
-    let cb0 = env.portfolio_state(pb).capital;
+    let ca0 = env.portfolio_state(pa).capital.get();
+    let cb0 = env.portfolio_state(pb).capital.get();
     // trade with a fee (notional 100 @ POS_SCALE, 100 bps).
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 100);
-    let ca1 = env.portfolio_state(pa).capital;
-    let cb1 = env.portfolio_state(pb).capital;
+    let ca1 = env.portfolio_state(pa).capital.get();
+    let cb1 = env.portfolio_state(pb).capital.get();
     let (_, g1) = env.market_state();
     let fee_a = ca0 - ca1;
     let fee_b = cb0 - cb1;
@@ -28479,7 +28725,7 @@ fn v16_attack_update_base_unit_mints_guarded() {
 // full-interface sweep (cron18) — cross-market portfolio substitution must NOT drain a foreign market's
 // vault. A portfolio is bound to its market via provenance_header.market_group_id (= the market account
 // key, stamped at InitPortfolio); validate_with_market (called on every fund path) rejects a mismatch.
-// Attack: deposit into market A (crediting P_a.capital), then withdraw the same amount from a SECOND
+// Attack: deposit into market A (crediting P_a.capital.get()), then withdraw the same amount from a SECOND
 // market B's vault using P_a — would drain market B's other users if the binding were missing.
 #[test]
 fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
@@ -28675,7 +28921,7 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
         "market-A funds recovered before close probe"
     );
     assert_eq!(
-        env.portfolio_state(pa).capital,
+        env.portfolio_state(pa).capital.get(),
         0,
         "P_a is flat and otherwise closeable"
     );
@@ -29466,14 +29712,15 @@ fn v16_attack_claim_resolved_topup_rejects_cross_market_portfolio_payout() {
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: 100 * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: 100,
-            paid_effective: 40,
-            finalized: false,
-        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         env.svm.set_account(market, market_account).unwrap();
@@ -30106,7 +30353,8 @@ fn v16_attack_funding_and_fee_combined_conserve() {
     assert_domain_budget_remaining_total_consistent(&g, "funding plus maintenance fee");
     let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
     let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
-    let total_equity = (a.capital as i128 + a.pnl) + (b.capital as i128 + b.pnl);
+    let total_equity =
+        (a.capital.get() as i128 + a.pnl.get()) + (b.capital.get() as i128 + b.pnl.get());
     assert!(
         total_equity + g.insurance as i128 <= g.vault as i128,
         "no value over-distributed"
@@ -30132,12 +30380,12 @@ fn v16_attack_exposure_transfer_chain_conserves() {
     // A long vs B short.
     env.trade_asset_with_cu(0, &a, pa, &b, pb, POS_SCALE as i128, 100, 0);
     assert_eq!(
-        env.portfolio_state(pa).legs[0].basis_pos_q,
+        env.portfolio_state(pa).legs[0].basis_pos_q.get(),
         POS_SCALE as i128,
         "A long"
     );
     assert_eq!(
-        env.portfolio_state(pb).legs[0].basis_pos_q,
+        env.portfolio_state(pb).legs[0].basis_pos_q.get(),
         -(POS_SCALE as i128),
         "B short"
     );
@@ -30145,17 +30393,17 @@ fn v16_attack_exposure_transfer_chain_conserves() {
     env.svm.expire_blockhash();
     env.trade_asset_with_cu(0, &b, pb, &c, pc, POS_SCALE as i128, 100, 0);
     assert_eq!(
-        env.portfolio_state(pb).legs[0].basis_pos_q,
+        env.portfolio_state(pb).legs[0].basis_pos_q.get(),
         0,
         "B now flat (exposure passed to C)"
     );
     assert_eq!(
-        env.portfolio_state(pc).legs[0].basis_pos_q,
+        env.portfolio_state(pc).legs[0].basis_pos_q.get(),
         -(POS_SCALE as i128),
         "C now short"
     );
     assert_eq!(
-        env.portfolio_state(pa).legs[0].basis_pos_q,
+        env.portfolio_state(pa).legs[0].basis_pos_q.get(),
         POS_SCALE as i128,
         "A still long"
     );
@@ -30227,7 +30475,7 @@ fn v16_attack_wrong_token_program_rejected() {
         "no tokens delivered via a bogus token program"
     );
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         1_000_000,
         "capital not debited"
     );
@@ -30376,8 +30624,14 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_bucket()
     env.top_up_backing_bucket(0, 500, 10_000);
     env.top_up_backing_bucket_with_authority(&asset1_backing, 2, 300, 10_000);
     let (_, funded) = env.market_state();
-    assert_eq!(funded.source_backing_buckets[0].fresh_unliened_backing_num, 500 * BOUND_SCALE);
-    assert_eq!(funded.source_backing_buckets[2].fresh_unliened_backing_num, 300 * BOUND_SCALE);
+    assert_eq!(
+        funded.source_backing_buckets[0].fresh_unliened_backing_num,
+        500 * BOUND_SCALE
+    );
+    assert_eq!(
+        funded.source_backing_buckets[2].fresh_unliened_backing_num,
+        300 * BOUND_SCALE
+    );
 
     let dest = env.token_account_for_mint(env.mint, asset1_backing.pubkey(), 0);
     let market_before = env.svm.get_account(&env.market).unwrap();
@@ -30510,9 +30764,20 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
         group.vault += 65;
     });
     let (_, funded) = env.market_state();
-    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, funded.vault as u64);
-    assert_eq!(funded.source_backing_buckets[0].utilization_fee_earnings, 40);
-    assert_eq!(funded.source_backing_buckets[2].utilization_fee_earnings, 25);
+    env.set_token_account_amount(
+        env.vault,
+        env.mint,
+        env.vault_authority,
+        funded.vault as u64,
+    );
+    assert_eq!(
+        funded.source_backing_buckets[0].utilization_fee_earnings,
+        40
+    );
+    assert_eq!(
+        funded.source_backing_buckets[2].utilization_fee_earnings,
+        25
+    );
 
     let dest = env.token_account_for_mint(env.mint, asset1_backing.pubkey(), 0);
     let market_before = env.svm.get_account(&env.market).unwrap();
@@ -30595,13 +30860,11 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
     assert_eq!(env.token_amount(dest), 10);
     let (_, after) = env.market_state();
     assert_eq!(
-        after.source_backing_buckets[0].utilization_fee_earnings,
-        40,
+        after.source_backing_buckets[0].utilization_fee_earnings, 40,
         "asset-0 earnings remain fully withdrawable"
     );
     assert_eq!(
-        after.source_backing_buckets[2].utilization_fee_earnings,
-        15,
+        after.source_backing_buckets[2].utilization_fee_earnings, 15,
         "asset-1 own-domain earnings were debited"
     );
     assert_eq!(after.vault as u64, env.token_amount(env.vault));
@@ -30704,7 +30967,7 @@ fn v16_attack_convert_bounded_by_available_backing() {
             recovery_reason: 0,
         },
     );
-    let cap_before = env.portfolio_state(p).capital;
+    let cap_before = env.portfolio_state(p).capital.get();
     let (_, g0) = env.market_state();
     // convert with a huge cap -> released amount must be bounded by the available backing.
     env.svm.expire_blockhash();
@@ -30719,7 +30982,7 @@ fn v16_attack_convert_bounded_by_available_backing() {
         ],
         &[&owner],
     );
-    let converted = env.portfolio_state(p).capital - cap_before;
+    let converted = env.portfolio_state(p).capital.get() - cap_before;
     assert!(
         converted <= BACKING,
         "convert released at most the available backing ({} <= {})",
@@ -30786,7 +31049,7 @@ fn v16_attack_undersized_portfolio_account_realloced_safely() {
     // and the realloced portfolio works correctly (no corruption): a deposit credits exactly.
     env.deposit(&owner, small, 1_000);
     assert_eq!(
-        env.portfolio_state(small).capital,
+        env.portfolio_state(small).capital.get(),
         1_000,
         "realloced portfolio credits a deposit exactly (no OOB/corruption)"
     );
@@ -30824,13 +31087,16 @@ fn v16_attack_legacy_portfolio_storage_reallocs_on_deposit_without_corruption() 
         "Deposit must grow legacy portfolio storage before mutating it"
     );
     assert_eq!(
-        env.portfolio_state(portfolio).capital,
+        env.portfolio_state(portfolio).capital.get(),
         1_000,
         "deposit credits exactly after legacy storage growth"
     );
     let (_, group_after_deposit) = env.market_state();
     assert_eq!(group_after_deposit.c_tot, 1_000);
-    assert_eq!(group_after_deposit.vault as u64, env.token_amount(env.vault));
+    assert_eq!(
+        group_after_deposit.vault as u64,
+        env.token_amount(env.vault)
+    );
 
     let dest = env.withdraw(&owner, portfolio, 1_000);
     assert_eq!(
@@ -30838,7 +31104,7 @@ fn v16_attack_legacy_portfolio_storage_reallocs_on_deposit_without_corruption() 
         1_000,
         "withdraw recovers the full deposit after legacy storage growth"
     );
-    assert_eq!(env.portfolio_state(portfolio).capital, 0);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
     let (_, group_after_withdraw) = env.market_state();
     assert_eq!(group_after_withdraw.c_tot, 0);
     assert_eq!(
@@ -30905,6 +31171,7 @@ fn v16_attack_max_leg_multi_asset_conserves() {
             state::read_portfolio(&env.svm.get_account(p).unwrap().data)
                 .unwrap()
                 .capital
+                .get()
         })
         .sum();
     assert_eq!(g.c_tot, sum, "c_tot == Σcapitals across all legs");
@@ -30969,16 +31236,16 @@ fn v16_attack_full_feed_roundtrip_conserves() {
     env.svm.expire_blockhash();
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, -(POS_SCALE as i128), 100, 100);
     assert!(
-        percolator::active_bitmap_is_empty(env.portfolio_state(pa).active_bitmap),
+        percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(pa))),
         "la flat"
     );
     assert!(
-        percolator::active_bitmap_is_empty(env.portfolio_state(pb).active_bitmap),
+        percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(pb))),
         "lb flat"
     );
     // both withdraw all their capital.
-    let cap_a = env.portfolio_state(pa).capital;
-    let cap_b = env.portfolio_state(pb).capital;
+    let cap_a = env.portfolio_state(pa).capital.get();
+    let cap_b = env.portfolio_state(pb).capital.get();
     env.svm.expire_blockhash();
     let da = env.withdraw(&la, pa, cap_a);
     env.svm.expire_blockhash();
@@ -31042,6 +31309,7 @@ fn v16_attack_sequence_with_liquidation_conserves() {
                 state::read_portfolio(&env.svm.get_account(p).unwrap().data)
                     .unwrap()
                     .capital
+                    .get()
             })
             .sum();
         assert_eq!(g.c_tot, sum, "[{}] c_tot == Σcapitals", tag);
@@ -31358,7 +31626,7 @@ fn v16_attack_withdraw_to_noninitialized_dest_rejected() {
     );
     // capital not debited by either rejected withdraw.
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         1_000_000,
         "capital intact after rejected withdraws"
     );
@@ -31420,7 +31688,7 @@ fn v16_attack_wrong_vault_authority_rejected() {
         "no tokens out via a wrong vault_authority"
     );
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         1_000_000,
         "capital not debited"
     );
@@ -31481,7 +31749,7 @@ fn v16_attack_init_portfolio_foreign_account_rejected() {
     let p = env.create_portfolio(&owner);
     env.deposit(&owner, p, 1_000);
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         1_000,
         "proper portfolio works"
     );
@@ -31571,12 +31839,12 @@ fn v16_attack_self_crank_maintenance_fee_conserves() {
     let pa = env.create_portfolio(&la);
     env.deposit(&la, pa, 100_000_000);
     env.update_maintenance_fee_policy_with_cu(4_000); // cranker takes 40%
-    let cap0 = env.portfolio_state(pa).capital;
+    let cap0 = env.portfolio_state(pa).capital.get();
     let (_, g0) = env.market_state();
     // la syncs its OWN fee, naming ITSELF as the cranker.
     env.svm.warp_to_slot(10);
     let _ = env.try_sync_maintenance_fee_with_cu(pa, Some(pa), 10);
-    let cap1 = env.portfolio_state(pa).capital;
+    let cap1 = env.portfolio_state(pa).capital.get();
     let (_, g1) = env.market_state();
     // net effect on la's capital = -(fee) + (cranker share). insurance += (fee - cranker share).
     let net_loss = cap0.saturating_sub(cap1);
@@ -31719,7 +31987,7 @@ fn v16_attack_close_portfolio_with_pnl_rejected() {
         },
     );
     assert!(
-        env.portfolio_state(p).pnl > 0,
+        env.portfolio_state(p).pnl.get() > 0,
         "p holds parked positive pnl (non-vacuous)"
     );
     // ClosePortfolio must reject (PnL != 0).
@@ -31736,7 +32004,7 @@ fn v16_attack_close_portfolio_with_pnl_rejected() {
     assert!(r.is_err(), "ClosePortfolio with parked pnl must reject");
     // the account and its pnl are intact (not discarded), conservation holds.
     assert!(
-        env.portfolio_state(p).pnl > 0,
+        env.portfolio_state(p).pnl.get() > 0,
         "parked pnl NOT discarded by the rejected close"
     );
     let (_, g) = env.market_state();
@@ -31831,7 +32099,7 @@ fn v16_attack_large_amount_deposit_withdraw_exact() {
         "deposit above MAX_VAULT_TVL must reject (overflow/abuse cap)"
     );
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         0,
         "no capital credited on over-cap deposit"
     );
@@ -31840,7 +32108,7 @@ fn v16_attack_large_amount_deposit_withdraw_exact() {
     let big: u128 = MAX_TVL - 7;
     env.deposit(&owner, p, big);
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         big,
         "capital credited exactly (no overflow/truncation)"
     );
@@ -31909,7 +32177,7 @@ fn v16_attack_tradecpi_atomic_fill_vs_capacity() {
         "no phantom OI from rejected over-capacity trade"
     );
     assert_eq!(
-        env.portfolio_state(taker).legs[0].basis_pos_q,
+        env.portfolio_state(taker).legs[0].basis_pos_q.get(),
         0,
         "no partial/phantom position"
     );
@@ -31928,7 +32196,7 @@ fn v16_attack_tradecpi_atomic_fill_vs_capacity() {
         100,
     );
     assert!(r_ok.is_ok(), "within-capacity TradeCpi fills: {:?}", r_ok);
-    let basis = env.portfolio_state(taker).legs[0].basis_pos_q;
+    let basis = env.portfolio_state(taker).legs[0].basis_pos_q.get();
     assert_eq!(
         basis, POS_SCALE as i128,
         "taker filled exactly the requested within-capacity amount"
@@ -31988,7 +32256,7 @@ fn v16_attack_third_party_withdraw_preserves_pnl_backing() {
             );
         }
     }
-    let long_pnl = env.portfolio_state(plo).pnl;
+    let long_pnl = env.portfolio_state(plo).pnl.get();
     assert!(long_pnl > 0, "long has parked pnl (non-vacuous)");
     let (_, g0) = env.market_state();
     let resid0 = g0.vault as i128 - g0.c_tot as i128 - g0.insurance as i128;
@@ -32005,7 +32273,7 @@ fn v16_attack_third_party_withdraw_preserves_pnl_backing() {
         "third-party withdraw did NOT change the residual backing the winner"
     );
     assert!(
-        resid1 >= env.portfolio_state(plo).pnl.max(0),
+        resid1 >= env.portfolio_state(plo).pnl.get().max(0),
         "long's pnl still fully backed"
     );
     assert_eq!(
@@ -32060,7 +32328,7 @@ fn v16_attack_cumulative_tvl_cap_enforced() {
         "deposit pushing the vault over MAX_VAULT_TVL must reject (cumulative cap)"
     );
     assert_eq!(
-        env.portfolio_state(pb).capital,
+        env.portfolio_state(pb).capital.get(),
         0,
         "no capital credited over the cap"
     );
@@ -32145,7 +32413,10 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
         assert_eq!(group.vault, percolator::MAX_VAULT_TVL);
         assert_eq!(group.insurance, 1);
         assert_eq!(env.token_amount(ok_source), 0);
-        assert_eq!(env.token_amount(env.vault) as u128, percolator::MAX_VAULT_TVL);
+        assert_eq!(
+            env.token_amount(env.vault) as u128,
+            percolator::MAX_VAULT_TVL
+        );
     }
 
     {
@@ -32207,7 +32478,10 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
         assert_eq!(group.insurance_domain_budget[0], 1);
         assert_eq!(group.insurance_domain_budget_remaining_total, 1);
         assert_eq!(env.token_amount(ok_source), 0);
-        assert_eq!(env.token_amount(env.vault) as u128, percolator::MAX_VAULT_TVL);
+        assert_eq!(
+            env.token_amount(env.vault) as u128,
+            percolator::MAX_VAULT_TVL
+        );
     }
 
     {
@@ -32261,7 +32535,10 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
             BOUND_SCALE
         );
         assert_eq!(env.token_amount(ok_source), 0);
-        assert_eq!(env.token_amount(env.vault) as u128, percolator::MAX_VAULT_TVL);
+        assert_eq!(
+            env.token_amount(env.vault) as u128,
+            percolator::MAX_VAULT_TVL
+        );
     }
 }
 
@@ -32314,7 +32591,11 @@ fn v16_attack_portfolio_as_market_rejected() {
         0,
         "no funds drained via type confusion"
     );
-    assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital intact");
+    assert_eq!(
+        env.portfolio_state(p).capital.get(),
+        1_000_000,
+        "capital intact"
+    );
     assert_eq!(env.market_state().1.vault, g0.vault, "vault unchanged");
 }
 
@@ -32379,7 +32660,7 @@ fn v16_attack_wrong_mint_vault_rejected() {
         "no tokens out via a wrong-mint vault"
     );
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         1_000_000,
         "capital not debited"
     );
@@ -32432,7 +32713,7 @@ fn v16_attack_no_fee_liquidation_cranker_gets_nothing() {
             &[],
         );
     }
-    let cranker0 = env.portfolio_state(cranker_account).capital;
+    let cranker0 = env.portfolio_state(cranker_account).capital.get();
     let (_, g0) = env.market_state();
     // liquidate with the cranker portfolio (4 accounts).
     env.svm.expire_blockhash();
@@ -32459,7 +32740,7 @@ fn v16_attack_no_fee_liquidation_cranker_gets_nothing() {
     );
     // cranker got NO reward (no fee configured).
     assert_eq!(
-        env.portfolio_state(cranker_account).capital,
+        env.portfolio_state(cranker_account).capital.get(),
         cranker0,
         "cranker receives no reward in a no-fee liquidation"
     );
@@ -32531,7 +32812,7 @@ fn v16_attack_withdraw_requires_flat_regardless_of_size() {
         "bulk withdraw also blocked while positioned"
     );
     assert_eq!(
-        env.portfolio_state(pa).capital,
+        env.portfolio_state(pa).capital.get(),
         10_000_000,
         "capital intact (no partial debit)"
     );
@@ -32539,10 +32820,10 @@ fn v16_attack_withdraw_requires_flat_regardless_of_size() {
     env.svm.expire_blockhash();
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, -(POS_SCALE as i128), 100, 0);
     assert!(
-        percolator::active_bitmap_is_empty(env.portfolio_state(pa).active_bitmap),
+        percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(pa))),
         "la flat after close"
     );
-    let cap = env.portfolio_state(pa).capital;
+    let cap = env.portfolio_state(pa).capital.get();
     let (d2, _) = env.withdraw_with_cu(&la, pa, cap);
     assert_eq!(
         env.token_amount(d2) as u128,
@@ -32605,7 +32886,11 @@ fn v16_attack_withdraw_blocked_during_active_close() {
         0,
         "no funds withdrawn during active close"
     );
-    assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital intact");
+    assert_eq!(
+        env.portfolio_state(p).capital.get(),
+        1_000_000,
+        "capital intact"
+    );
     // after curing+cancelling the close (Finding E), withdraw works again.
     let src = env.token_account(owner.pubkey(), 0);
     env.cure_and_cancel_close_with_cu(&owner, p, src, 0);
@@ -32638,7 +32923,7 @@ fn v16_attack_trade_blocked_during_active_close() {
         "trade on an account with an active forced-close must reject"
     );
     assert_eq!(
-        env.portfolio_state(pa).legs[0].basis_pos_q,
+        env.portfolio_state(pa).legs[0].basis_pos_q.get(),
         0,
         "no position opened during active close"
     );
@@ -32758,7 +33043,7 @@ fn v16_attack_deposit_during_active_close_safe() {
     let p = env.create_portfolio(&owner);
     env.deposit(&owner, p, 1_000_000);
     env.seed_cancellable_close_progress(p);
-    let cap0 = env.portfolio_state(p).capital;
+    let cap0 = env.portfolio_state(p).capital.get();
     let (_, g0) = env.market_state();
     // attempt a plain deposit during the active close.
     let src = env.token_account_for_mint(env.mint, owner.pubkey(), 500);
@@ -32775,7 +33060,7 @@ fn v16_attack_deposit_during_active_close_safe() {
         ],
         &[&owner],
     );
-    let cap1 = env.portfolio_state(p).capital;
+    let cap1 = env.portfolio_state(p).capital.get();
     let (_, g1) = env.market_state();
     // either outcome must conserve: capital change == vault change == source debit, accounting intact.
     if r.is_ok() {
@@ -33123,12 +33408,13 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
     let cranker = env.portfolio_state(cranker_portfolio);
     let (_, group) = env.market_state();
     assert_eq!(
-        payer.capital,
+        payer.capital.get(),
         100_000_000 - 580,
         "bounded policy charges exactly the elapsed maintenance fee"
     );
     assert_eq!(
-        cranker.capital, 232,
+        cranker.capital.get(),
+        232,
         "preserved 40% maintenance cranker share still pays a real bounded reward"
     );
     assert_eq!(
@@ -33602,7 +33888,10 @@ fn v16_attack_resolved_backing_withdraw_requires_full_user_wind_down() {
     env.resolve();
     let g = env.market_state().1;
     assert_eq!(g.mode, percolator::MarketModeV16::Resolved, "resolved");
-    assert!(g.c_tot > 0, "user capital still open after resolve (non-vacuous gate)");
+    assert!(
+        g.c_tot > 0,
+        "user capital still open after resolve (non-vacuous gate)"
+    );
     assert!(
         g.materialized_portfolio_count > 0,
         "user portfolio still materialized after resolve"
@@ -33643,7 +33932,10 @@ fn v16_attack_resolved_backing_withdraw_requires_full_user_wind_down() {
         dest_before,
         "no backing tokens may leave to the authority before users are wound down"
     );
-    assert!(g_after.vault >= g_after.c_tot + g_after.insurance, "senior conservation intact");
+    assert!(
+        g_after.vault >= g_after.c_tot + g_after.insurance,
+        "senior conservation intact"
+    );
 }
 
 // security.md sweep — per-asset WithdrawInsuranceAsset budget conservation (#6): the asset insurance
@@ -34093,8 +34385,12 @@ fn v16_attack_live_insurance_withdraw_rejects_while_stressed_or_hlocked() {
 
     // Each engine "insurance still protecting loss" flag must independently block the withdrawal.
     let cases: [(&str, fn(&mut MarketGroupV16, bool)); 3] = [
-        ("bankruptcy_hlock_active", |g, v| g.bankruptcy_hlock_active = v),
-        ("threshold_stress_active", |g, v| g.threshold_stress_active = v),
+        ("bankruptcy_hlock_active", |g, v| {
+            g.bankruptcy_hlock_active = v
+        }),
+        ("threshold_stress_active", |g, v| {
+            g.threshold_stress_active = v
+        }),
         ("loss_stale_active", |g, v| g.loss_stale_active = v),
     ];
     for (label, set) in cases {
@@ -34216,8 +34512,7 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_insurance_gate() {
         "rejected stale-asset withdrawal must leave the domain budget untouched"
     );
     assert_eq!(
-        after_withdraw_attempt.insurance,
-        after_unrelated_refresh.insurance,
+        after_withdraw_attempt.insurance, after_unrelated_refresh.insurance,
         "rejected stale-asset withdrawal must leave insurance untouched"
     );
 }
@@ -34522,8 +34817,14 @@ fn v16_attack_swap_secondary_rejects_vault_source_or_dest_aliases() {
         vault_dest.is_err(),
         "SwapSecondaryForPrimary must reject the secondary vault as the user destination"
     );
-    assert_eq!(env.svm.get_account(&admin_primary).unwrap(), admin_primary_before);
-    assert_eq!(env.svm.get_account(&env.vault).unwrap(), primary_vault_before);
+    assert_eq!(
+        env.svm.get_account(&admin_primary).unwrap(),
+        admin_primary_before
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before
+    );
     assert_eq!(
         env.svm.get_account(&secondary_vault).unwrap(),
         secondary_vault_before,
@@ -34548,7 +34849,10 @@ fn v16_attack_swap_secondary_rejects_vault_source_or_dest_aliases() {
         ],
         &[&admin],
     );
-    assert!(ok.is_ok(), "same accounts without aliasing swap cleanly: {ok:?}");
+    assert!(
+        ok.is_ok(),
+        "same accounts without aliasing swap cleanly: {ok:?}"
+    );
     assert_eq!(env.token_amount(admin_primary), 0);
     assert_eq!(env.token_amount(admin_secondary), 10);
     assert_eq!(env.token_amount(secondary_vault), 40);
@@ -35659,7 +35963,10 @@ fn v16_attack_force_close_abandoned_asset_rejects_when_resolve_matured() {
     );
     let recovery_group = env.market_state().1;
     assert_eq!(recovery_group.mode, MarketModeV16::Live);
-    assert_eq!(recovery_group.assets[1].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(
+        recovery_group.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
 
     env.svm.warp_to_slot(FRESH_FORCE_SLOT);
     let (fresh_cfg, fresh_group) = env.market_state();
@@ -36206,15 +36513,7 @@ fn assert_no_cpi_tiny_exit_accepts_extreme_reported_price(
 
     env.svm.expire_blockhash();
     try_no_cpi_reported_price_trade_with_cu(
-        &mut env,
-        path,
-        &owner_a,
-        account_a,
-        &owner_b,
-        account_b,
-        OPEN_Q,
-        MARK,
-        0,
+        &mut env, path, &owner_a, account_a, &owner_b, account_b, OPEN_Q, MARK, 0,
     )
     .unwrap_or_else(|err| panic!("{path:?}: setup open at mark failed: {err}"));
     let (_, opened_group) = env.market_state();
@@ -36297,15 +36596,7 @@ fn assert_no_cpi_tiny_open_accepts_extreme_reported_price(
 
     env.svm.expire_blockhash();
     try_no_cpi_reported_price_trade_with_cu(
-        &mut env,
-        path,
-        &owner_a,
-        account_a,
-        &owner_b,
-        account_b,
-        OPEN_Q,
-        MARK,
-        0,
+        &mut env, path, &owner_a, account_a, &owner_b, account_b, OPEN_Q, MARK, 0,
     )
     .unwrap_or_else(|err| panic!("{path:?}: setup open at mark failed: {err}"));
     let (_, opened_group) = env.market_state();
@@ -36392,9 +36683,8 @@ fn assert_no_cpi_extreme_reported_price_caps_paid_ewma_move(
     let accepted_price = oracle_v16::clamp_toward_engine_dt(MARK, reported_price, CAP_BPS, 4);
     let candidate_mark =
         percolator_prog::policy_v16::ewma_update(MARK, accepted_price, 1, 1, TRADE_SLOT, 0, 0);
-    let candidate_move_bps =
-        percolator_prog::policy_v16::price_move_bps_ceil(MARK, candidate_mark)
-            .expect("candidate move bps");
+    let candidate_move_bps = percolator_prog::policy_v16::price_move_bps_ceil(MARK, candidate_mark)
+        .expect("candidate move bps");
     assert!(
         candidate_move_bps > MAX_FEE_BPS,
         "{path:?}: setup must make the unclamped EWMA candidate exceed the market fee cap"
@@ -36554,33 +36844,33 @@ fn v16_attack_unbacked_paper_pnl_not_counted_as_equity() {
     let g = env.market_state().1;
     eprintln!(
         "PHANTOMDBG cap={} pnl={} cert_eq={} valid={} residual={}",
-        win.capital,
-        win.pnl,
-        win.health_cert.certified_equity,
-        win.health_cert.valid,
+        win.capital.get(),
+        win.pnl.get(),
+        health_cert(&win).certified_equity,
+        health_cert(&win).valid,
         g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance)
     );
     // non-vacuity: the winner really does carry a large positive paper PnL.
     assert!(
-        win.pnl > 1_000,
+        win.pnl.get() > 1_000,
         "winner carries large paper profit (non-vacuous), pnl={}",
-        win.pnl
+        win.pnl.get()
     );
     // THE INVARIANT: certified equity must NOT include that paper profit at face value. It is bounded by
     // capital + the realizable (backed) support, which is at most the residual — far below capital+pnl.
-    let face_equity = win.capital as i128 + win.pnl;
-    assert!(win.health_cert.valid, "winner cert refreshed");
+    let face_equity = win.capital.get() as i128 + win.pnl.get();
+    assert!(health_cert(&win).valid, "winner cert refreshed");
     assert!(
-        win.health_cert.certified_equity < face_equity,
+        health_cert(&win).certified_equity < face_equity,
         "un-backed paper profit must NOT be counted at face: certified_equity={} < capital+pnl={}",
-        win.health_cert.certified_equity,
+        health_cert(&win).certified_equity,
         face_equity
     );
     let residual = g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance);
     assert!(
-        (win.health_cert.certified_equity as u128) <= win.capital + residual + 1,
+        (health_cert(&win).certified_equity as u128) <= win.capital.get() + residual + 1,
         "certified equity bounded by capital + residual-backed support (no phantom collateral): eq={} cap={} residual={}",
-        win.health_cert.certified_equity, win.capital, residual
+        health_cert(&win).certified_equity, win.capital.get(), residual
     );
     assert!(
         g.vault >= g.c_tot + g.insurance,
@@ -36886,7 +37176,7 @@ fn v16_attack_cross_margin_requirement_is_gross_not_netted() {
 
     // Leg 1: x LONG asset 0.
     env.trade_asset_with_cu(0, &xo, x, &yo, y, POS_SCALE as i128, 100, 0);
-    let req1 = env.portfolio_state(x).health_cert.certified_initial_req;
+    let req1 = health_cert(&env.portfolio_state(x)).certified_initial_req;
     assert!(
         req1 > 0,
         "single-leg initial margin requirement is positive (non-vacuous), req1={}",
@@ -36896,9 +37186,9 @@ fn v16_attack_cross_margin_requirement_is_gross_not_netted() {
     // Leg 2: x SHORT asset 1 (opposite direction, different underlying — a netting model would 'offset').
     env.trade_asset_with_cu(1, &xo, x, &yo, y, -(POS_SCALE as i128), 100, 0);
     let xs = env.portfolio_state(x);
-    let req2 = xs.health_cert.certified_initial_req;
+    let req2 = health_cert(&xs).certified_initial_req;
     assert_eq!(
-        percolator::active_bitmap_count_ones(xs.active_bitmap),
+        percolator::active_bitmap_count_ones(active_bitmap(&xs)),
         2,
         "x holds two legs"
     );
@@ -37024,7 +37314,7 @@ fn v16_attack_multi_account_asymmetric_funding_conserves() {
     let mut senior: i128 = 0;
     for p in [l1, l2, sh] {
         let a = state::read_portfolio(&env.svm.get_account(&p).unwrap().data).unwrap();
-        senior += a.capital as i128 + a.pnl.min(0);
+        senior += a.capital.get() as i128 + a.pnl.get().min(0);
     }
     assert!(
         senior <= (3 * DEPOSIT) as i128,
@@ -37066,9 +37356,9 @@ fn v16_attack_convert_released_pnl_cannot_mint_from_unbacked_pnl() {
         .saturating_sub(g_pre.c_tot)
         .saturating_sub(g_pre.insurance);
     assert!(
-        pre.pnl > residual_pre as i128,
+        pre.pnl.get() > residual_pre as i128,
         "non-vacuous: pnl ({}) exceeds the backing residual ({})",
-        pre.pnl,
+        pre.pnl.get(),
         residual_pre
     );
 
@@ -37093,7 +37383,7 @@ fn v16_attack_convert_released_pnl_cannot_mint_from_unbacked_pnl() {
 
     let post = env.portfolio_state(p);
     let g = env.market_state().1;
-    let minted = post.capital as i128 - pre.capital as i128;
+    let minted = post.capital.get() as i128 - pre.capital.get() as i128;
     // ANTI-MINT: capital grew by AT MOST the residual that actually backed the pnl — never the full 100.
     assert!(
         minted <= residual_pre as i128,
@@ -37106,13 +37396,13 @@ fn v16_attack_convert_released_pnl_cannot_mint_from_unbacked_pnl() {
         "exactly the backed portion (40) converts to capital"
     );
     assert!(
-        minted < pre.pnl,
+        minted < pre.pnl.get(),
         "the unbacked excess (60) is NOT converted to capital"
     );
     // realizable value conserved: capital_before + backed (== capital_after); no phantom value created.
     assert_eq!(
-        post.capital as i128,
-        pre.capital as i128 + residual_pre as i128,
+        post.capital.get() as i128,
+        pre.capital.get() as i128 + residual_pre as i128,
         "realizable value conserved"
     );
     // no vault minting + senior conservation.
@@ -37223,9 +37513,9 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
     let g = env.market_state().1;
     // non-vacuity: the winner really does carry a paper gain after the moves.
     assert!(
-        win.pnl > 0,
+        win.pnl.get() > 0,
         "winner carries a positive paper gain (non-vacuous), pnl={}",
-        win.pnl
+        win.pnl.get()
     );
     // NO MINT across the whole ADL+settle sequence: the vault still holds exactly the original deposits.
     assert_eq!(g.vault, vault0, "ADL + settlement minted no vault tokens");
@@ -37237,11 +37527,14 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
     // the winner cannot escape the deleverage: its REALIZABLE value (capital + backed pnl) is bounded by
     // capital + residual — the deleveraged/unbacked gain is NOT spendable (certified equity reflects it).
     let residual = g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance);
-    assert!(win.health_cert.valid, "winner cert valid after settlement");
     assert!(
-        (win.health_cert.certified_equity as u128) <= win.capital + residual + 1,
+        health_cert(&win).valid,
+        "winner cert valid after settlement"
+    );
+    assert!(
+        (health_cert(&win).certified_equity as u128) <= win.capital.get() + residual + 1,
         "winner realizable value bounded by capital+residual (deleverage not escaped): eq={} cap={} residual={}",
-        win.health_cert.certified_equity, win.capital, residual
+        health_cert(&win).certified_equity, win.capital.get(), residual
     );
     // The deleverage caps how much the winner can realize: the surviving gain equals exactly the backed
     // portion (a winner can never pull more than the system holds — and the vault was never minted, above).
@@ -37283,13 +37576,13 @@ fn v16_attack_deposit_does_not_dilute_junior_backing() {
         .vault
         .saturating_sub(g_pre.c_tot)
         .saturating_sub(g_pre.insurance);
-    assert!(h_pre.health_cert.valid, "holder cert valid");
+    assert!(health_cert(&h_pre).valid, "holder cert valid");
     assert!(
-        h_pre.pnl > 0,
+        h_pre.pnl.get() > 0,
         "holder carries positive (backed) junior pnl, pnl={}",
-        h_pre.pnl
+        h_pre.pnl.get()
     );
-    let eq_pre = h_pre.health_cert.certified_equity;
+    let eq_pre = health_cert(&h_pre).certified_equity;
 
     // a DIFFERENT account makes a large deposit.
     let wo = Keypair::new();
@@ -37324,11 +37617,20 @@ fn v16_attack_deposit_does_not_dilute_junior_backing() {
     );
     // the holder's realizable claim (capital + backed pnl) and pnl are byte-identical.
     assert_eq!(
-        h_post.health_cert.certified_equity, eq_pre,
+        health_cert(&h_post).certified_equity,
+        eq_pre,
         "holder certified equity unchanged by w's deposit"
     );
-    assert_eq!(h_post.capital, h_pre.capital, "holder capital unchanged");
-    assert_eq!(h_post.pnl, h_pre.pnl, "holder junior pnl unchanged");
+    assert_eq!(
+        h_post.capital.get(),
+        h_pre.capital.get(),
+        "holder capital unchanged"
+    );
+    assert_eq!(
+        h_post.pnl.get(),
+        h_pre.pnl.get(),
+        "holder junior pnl unchanged"
+    );
     // conservation, and the deposit landed as real tokens.
     assert_eq!(
         g_post.vault,
@@ -37372,14 +37674,14 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
             recovery_reason: 0,
         },
     );
-    let eq0 = env.portfolio_state(h).health_cert.certified_equity;
+    let eq0 = health_cert(&env.portfolio_state(h)).certified_equity;
     let g0 = env.market_state().1;
     let residual0 = g0
         .vault
         .saturating_sub(g0.c_tot)
         .saturating_sub(g0.insurance);
     assert!(
-        env.portfolio_state(h).pnl > 0,
+        env.portfolio_state(h).pnl.get() > 0,
         "holder carries backed junior pnl"
     );
 
@@ -37420,7 +37722,7 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
         },
     );
     assert_eq!(
-        env.portfolio_state(h).health_cert.certified_equity,
+        health_cert(&env.portfolio_state(h)).certified_equity,
         eq0,
         "holder equity unchanged by insurance top-up"
     );
@@ -37452,10 +37754,15 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
     let hf = env.portfolio_state(h);
     let gf = env.market_state().1;
     assert_eq!(
-        hf.health_cert.certified_equity, eq0,
+        health_cert(&hf).certified_equity,
+        eq0,
         "holder equity unchanged across BOTH insurance ops"
     );
-    assert_eq!(hf.pnl, env.portfolio_state(h).pnl, "holder pnl stable");
+    assert_eq!(
+        hf.pnl.get(),
+        env.portfolio_state(h).pnl.get(),
+        "holder pnl stable"
+    );
     assert_eq!(
         gf.vault as u64,
         env.token_amount(env.vault),
@@ -37494,9 +37801,9 @@ fn v16_attack_recovery_blocks_pnl_conversion() {
     );
     let pre = env.portfolio_state(p);
     assert!(
-        pre.pnl > 0,
+        pre.pnl.get() > 0,
         "holder has backed junior pnl to (attempt to) convert, pnl={}",
-        pre.pnl
+        pre.pnl.get()
     );
 
     // transition to Recovery.
@@ -37529,10 +37836,15 @@ fn v16_attack_recovery_blocks_pnl_conversion() {
     let post = env.portfolio_state(p);
     let g_post = env.market_state().1;
     assert_eq!(
-        post.capital, pre.capital,
+        post.capital.get(),
+        pre.capital.get(),
         "no junior->senior conversion: capital unchanged"
     );
-    assert_eq!(post.pnl, pre.pnl, "junior pnl stays junior (not converted)");
+    assert_eq!(
+        post.pnl.get(),
+        pre.pnl.get(),
+        "junior pnl stays junior (not converted)"
+    );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap().data,
         before.data,
@@ -37692,16 +38004,16 @@ fn v16_attack_cross_margin_leg_close_releases_its_margin() {
 
     // open leg 0 (LONG asset 0) -> req1; then leg 1 (SHORT asset 1) -> req2 == 2*req1 (gross).
     env.trade_asset_with_cu(0, &xo, x, &yo, y, POS_SCALE as i128, 100, 0);
-    let req1 = env.portfolio_state(x).health_cert.certified_initial_req;
+    let req1 = health_cert(&env.portfolio_state(x)).certified_initial_req;
     env.trade_asset_with_cu(1, &xo, x, &yo, y, -(POS_SCALE as i128), 100, 0);
-    let req2 = env.portfolio_state(x).health_cert.certified_initial_req;
+    let req2 = health_cert(&env.portfolio_state(x)).certified_initial_req;
     assert_eq!(
         req2,
         2 * req1,
         "two legs charge the gross sum (precondition)"
     );
     assert_eq!(
-        percolator::active_bitmap_count_ones(env.portfolio_state(x).active_bitmap),
+        percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(x))),
         2,
         "x has 2 legs"
     );
@@ -37710,12 +38022,12 @@ fn v16_attack_cross_margin_leg_close_releases_its_margin() {
     env.svm.expire_blockhash();
     env.trade_asset_with_cu(0, &xo, x, &yo, y, -(POS_SCALE as i128), 100, 0);
     let xs = env.portfolio_state(x);
-    let req_after = xs.health_cert.certified_initial_req;
+    let req_after = health_cert(&xs).certified_initial_req;
     let g = env.market_state().1;
 
     // SYMMETRIC RELEASE: closing leg 0 removed exactly its requirement -> back to a single leg's req.
     assert_eq!(
-        percolator::active_bitmap_count_ones(xs.active_bitmap),
+        percolator::active_bitmap_count_ones(active_bitmap(&xs)),
         1,
         "asset-0 leg fully closed, one leg left"
     );
@@ -37727,11 +38039,11 @@ fn v16_attack_cross_margin_leg_close_releases_its_margin() {
     );
     // x is still healthy (equity covers the remaining single-leg requirement).
     assert!(
-        xs.health_cert.valid && xs.health_cert.certified_equity >= 0,
+        health_cert(&xs).valid && health_cert(&xs).certified_equity >= 0,
         "x healthy with the remaining leg"
     );
     assert!(
-        (xs.health_cert.certified_equity as u128) >= req_after,
+        (health_cert(&xs).certified_equity as u128) >= req_after,
         "equity still covers the remaining requirement"
     );
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
@@ -37785,7 +38097,7 @@ fn v16_attack_convert_then_withdraw_extracts_exactly_backed() {
         &[&o],
     );
     assert!(rc.is_ok(), "convert backed pnl should succeed: {:?}", rc);
-    let cap_after_convert = env.portfolio_state(p).capital;
+    let cap_after_convert = env.portfolio_state(p).capital.get();
     assert_eq!(
         cap_after_convert,
         DEP + BACK,
@@ -37805,7 +38117,7 @@ fn v16_attack_convert_then_withdraw_extracts_exactly_backed() {
     );
     let pf = env.portfolio_state(p);
     let g = env.market_state().1;
-    assert_eq!(pf.capital, 0, "winner fully withdrawn");
+    assert_eq!(pf.capital.get(), 0, "winner fully withdrawn");
     assert_eq!(
         g.vault, 0,
         "vault drained to exactly the funded amount (deposit + LP backing), no residual mint"
@@ -37861,7 +38173,7 @@ fn v16_attack_liquidation_cranker_reward_bounded_by_fee() {
             &[],
         );
     }
-    let c0 = env.portfolio_state(c).capital;
+    let c0 = env.portfolio_state(c).capital.get();
     let (_, g0) = env.market_state();
 
     // liquidate the insolvent short, crediting the cranker portfolio.
@@ -37889,7 +38201,7 @@ fn v16_attack_liquidation_cranker_reward_bounded_by_fee() {
     );
     assert!(r.is_ok(), "liquidation with a fee should proceed: {:?}", r);
     let (_, g1) = env.market_state();
-    let cranker_reward = env.portfolio_state(c).capital as i128 - c0 as i128;
+    let cranker_reward = env.portfolio_state(c).capital.get() as i128 - c0 as i128;
     let ins_delta = g1.insurance as i128 - g0.insurance as i128;
     let total_fee = cranker_reward + ins_delta;
 
@@ -37969,7 +38281,7 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
 
     let market_before = env.svm.get_account(&env.market).unwrap();
     let short_before = env.svm.get_account(&s).unwrap();
-    let short_cap_before = env.portfolio_state(s).capital;
+    let short_cap_before = env.portfolio_state(s).capital.get();
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
@@ -38004,7 +38316,7 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
         "alias rejection leaves liquidated account byte-identical"
     );
     assert_eq!(
-        env.portfolio_state(s).capital,
+        env.portfolio_state(s).capital.get(),
         short_cap_before,
         "no self-reward paid into the victim account"
     );
@@ -38043,7 +38355,7 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
         "market-slab reward alias rejection leaves liquidated account byte-identical"
     );
 
-    let cranker_cap_before = env.portfolio_state(c).capital;
+    let cranker_cap_before = env.portfolio_state(c).capital.get();
     env.svm.expire_blockhash();
     let accepted = env.send(
         ProgInstruction::PermissionlessCrank {
@@ -38069,7 +38381,7 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
         accepted
     );
     assert!(
-        env.portfolio_state(c).capital > cranker_cap_before,
+        env.portfolio_state(c).capital.get() > cranker_cap_before,
         "positive control: distinct cranker received a real reward"
     );
     let (_, group) = env.market_state();
@@ -38232,7 +38544,7 @@ fn v16_attack_liquidation_cranker_reward_rejects_wrong_owner() {
         );
     }
     assert!(
-        env.portfolio_state(s).health_cert.certified_liq_deficit != 0,
+        health_cert(&env.portfolio_state(s)).certified_liq_deficit != 0,
         "short is liquidatable before probing the reward-owner gate"
     );
 
@@ -38241,7 +38553,7 @@ fn v16_attack_liquidation_cranker_reward_rejects_wrong_owner() {
     let market_before = env.svm.get_account(&env.market).unwrap();
     let short_before = env.svm.get_account(&s).unwrap();
     let cranker_before = env.svm.get_account(&c).unwrap();
-    let cranker_cap_before = env.portfolio_state(c).capital;
+    let cranker_cap_before = env.portfolio_state(c).capital.get();
 
     env.svm.expire_blockhash();
     let rejected = env.send(
@@ -38282,7 +38594,7 @@ fn v16_attack_liquidation_cranker_reward_rejects_wrong_owner() {
         "wrong-owner reward rejection does not mutate the cranker portfolio"
     );
     assert_eq!(
-        env.portfolio_state(c).capital,
+        env.portfolio_state(c).capital.get(),
         cranker_cap_before,
         "no unauthorized reward is credited"
     );
@@ -38311,7 +38623,7 @@ fn v16_attack_liquidation_cranker_reward_rejects_wrong_owner() {
         "the actual reward portfolio owner can still claim the cranker reward: {accepted:?}"
     );
     assert!(
-        env.portfolio_state(c).capital > cranker_cap_before,
+        env.portfolio_state(c).capital.get() > cranker_cap_before,
         "positive control: the authorized cranker receives a real reward"
     );
 }
@@ -38447,11 +38759,11 @@ fn v16_attack_liquidation_wrong_owner_rolls_back_legacy_reward_realloc() {
         );
     }
     assert!(
-        env.portfolio_state(s).health_cert.certified_liq_deficit != 0,
+        health_cert(&env.portfolio_state(s)).certified_liq_deficit != 0,
         "short is liquidatable before probing the legacy reward rollback"
     );
 
-    let cranker_cap_before = env.portfolio_state(c).capital;
+    let cranker_cap_before = env.portfolio_state(c).capital.get();
     let mut legacy_cranker = env.svm.get_account(&c).unwrap();
     legacy_cranker.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
     env.svm.set_account(c, legacy_cranker).unwrap();
@@ -38540,7 +38852,7 @@ fn v16_attack_liquidation_wrong_owner_rolls_back_legacy_reward_realloc() {
         "successful retry grows the legacy reward portfolio"
     );
     assert!(
-        env.portfolio_state(c).capital > cranker_cap_before,
+        env.portfolio_state(c).capital.get() > cranker_cap_before,
         "authorized retry credits a real cranker reward"
     );
 }
@@ -38584,7 +38896,7 @@ fn v16_attack_liquidation_rejects_cross_market_cranker_reward() {
         );
     }
     assert!(
-        env.portfolio_state(s).health_cert.certified_liq_deficit != 0,
+        health_cert(&env.portfolio_state(s)).certified_liq_deficit != 0,
         "short is liquidatable before the reward-account substitution attempt"
     );
 
@@ -38719,7 +39031,7 @@ fn v16_attack_liquidation_rejects_cross_market_cranker_reward() {
     );
 
     let local_cranker = env.create_portfolio(&foreign_owner);
-    let local_cap_before = env.portfolio_state(local_cranker).capital;
+    let local_cap_before = env.portfolio_state(local_cranker).capital.get();
     env.svm.expire_blockhash();
     let accepted = env.send(
         ProgInstruction::PermissionlessCrank {
@@ -38745,7 +39057,7 @@ fn v16_attack_liquidation_rejects_cross_market_cranker_reward() {
         accepted
     );
     assert!(
-        env.portfolio_state(local_cranker).capital > local_cap_before,
+        env.portfolio_state(local_cranker).capital.get() > local_cap_before,
         "positive control: same-market cranker receives a real reward"
     );
     let (_, group) = env.market_state();
@@ -38805,7 +39117,7 @@ fn v16_attack_liquidation_fee_capped() {
             &[],
         );
     }
-    let c0 = env.portfolio_state(c).capital;
+    let c0 = env.portfolio_state(c).capital.get();
     let (_, g0) = env.market_state();
 
     env.svm.expire_blockhash();
@@ -38832,7 +39144,7 @@ fn v16_attack_liquidation_fee_capped() {
     );
     assert!(r.is_ok(), "liquidation should proceed: {:?}", r);
     let (_, g1) = env.market_state();
-    let cranker_reward = (env.portfolio_state(c).capital as i128 - c0 as i128) as u128;
+    let cranker_reward = (env.portfolio_state(c).capital.get() as i128 - c0 as i128) as u128;
     let ins_delta = (g1.insurance as i128 - g0.insurance as i128) as u128;
     let total_fee = cranker_reward + ins_delta;
 
@@ -38999,7 +39311,7 @@ fn v16_attack_leveraged_bad_debt_socialized_not_printed() {
     }
     // NON-VACUITY: the short is insolvent — its capital was fully consumed by the loss.
     assert_eq!(
-        env.portfolio_state(s).capital,
+        env.portfolio_state(s).capital.get(),
         0,
         "short capital wiped to 0 by the loss (bad debt exists)"
     );
@@ -39051,7 +39363,7 @@ fn v16_attack_leveraged_bad_debt_socialized_not_printed() {
     );
     // short capital still 0 (never negative); senior conservation preserved through the bad-debt event.
     assert_eq!(
-        env.portfolio_state(s).capital,
+        env.portfolio_state(s).capital.get(),
         0,
         "short capital floored at 0 (never negative)"
     );
@@ -39064,7 +39376,7 @@ fn v16_attack_leveraged_bad_debt_socialized_not_printed() {
     let lw = env.portfolio_state(l);
     let residual = g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance);
     assert!(
-        (lw.health_cert.certified_equity as u128) <= lw.capital + residual + 1,
+        (health_cert(&lw).certified_equity as u128) <= lw.capital.get() + residual + 1,
         "winner realizable bounded by capital+residual (bad debt not realizable)"
     );
 }
@@ -39092,11 +39404,11 @@ fn v16_attack_dust_position_margin_floored() {
 
     let xs = env.portfolio_state(x);
     assert_eq!(
-        percolator::active_bitmap_count_ones(xs.active_bitmap),
+        percolator::active_bitmap_count_ones(active_bitmap(&xs)),
         1,
         "dust position opened"
     );
-    let req = xs.health_cert.certified_initial_req;
+    let req = health_cert(&xs).certified_initial_req;
     // FLOOR: the requirement is the min_nonzero_im_req floor (600), NOT the tiny proportional ~50.
     assert!(
         req >= 600,
@@ -39133,7 +39445,7 @@ fn v16_attack_margin_gap_zone_no_liq_no_risk_increase() {
     env.deposit(&xo, x, 100);
     env.deposit(&yo, y, 1_000_000);
     env.trade_asset_with_cu(0, &xo, x, &yo, y, -(POS_SCALE as i128), 100, 0); // x SHORT POS_SCALE
-    let basis0 = env.portfolio_state(x).legs[0].basis_pos_q;
+    let basis0 = env.portfolio_state(x).legs[0].basis_pos_q.get();
     assert!(basis0 != 0, "x opened a short");
 
     // move the mark up so x's requirements land between MM and IM (the gap).
@@ -39158,9 +39470,9 @@ fn v16_attack_margin_gap_zone_no_liq_no_risk_increase() {
         &[],
     );
     let xs = env.portfolio_state(x);
-    let eq = xs.health_cert.certified_equity;
-    let mreq = xs.health_cert.certified_maintenance_req as i128;
-    let ireq = xs.health_cert.certified_initial_req as i128;
+    let eq = health_cert(&xs).certified_equity;
+    let mreq = health_cert(&xs).certified_maintenance_req as i128;
+    let ireq = health_cert(&xs).certified_initial_req as i128;
     // precondition: equity is strictly inside the gap (MM < equity < IM).
     assert!(
         eq > mreq,
@@ -39175,7 +39487,8 @@ fn v16_attack_margin_gap_zone_no_liq_no_risk_increase() {
         ireq
     );
     assert_eq!(
-        xs.health_cert.certified_liq_deficit, 0,
+        health_cert(&xs).certified_liq_deficit,
+        0,
         "no liquidation deficit in the gap"
     );
 
@@ -39199,7 +39512,7 @@ fn v16_attack_margin_gap_zone_no_liq_no_risk_increase() {
         &[],
     );
     assert_eq!(
-        env.portfolio_state(x).legs[0].basis_pos_q,
+        env.portfolio_state(x).legs[0].basis_pos_q.get(),
         basis0,
         "in-gap account NOT liquidated (position intact)"
     );
@@ -39212,7 +39525,7 @@ fn v16_attack_margin_gap_zone_no_liq_no_risk_increase() {
         "risk increase in the margin gap must reject (under-margined for IM)"
     );
     assert_eq!(
-        env.portfolio_state(x).legs[0].basis_pos_q,
+        env.portfolio_state(x).legs[0].basis_pos_q.get(),
         basis0,
         "position unchanged by rejected risk increase"
     );
@@ -39247,11 +39560,11 @@ fn v16_attack_dust_position_maintenance_floored() {
 
     let xs = env.portfolio_state(x);
     assert_eq!(
-        percolator::active_bitmap_count_ones(xs.active_bitmap),
+        percolator::active_bitmap_count_ones(active_bitmap(&xs)),
         1,
         "dust position opened"
     );
-    let mreq = xs.health_cert.certified_maintenance_req;
+    let mreq = health_cert(&xs).certified_maintenance_req;
     // FLOOR: maintenance req is the min_nonzero_mm_req floor (599), not the proportional ~25.
     assert!(
         mreq >= 599,
@@ -39264,7 +39577,7 @@ fn v16_attack_dust_position_maintenance_floored() {
     );
     // and the maintenance floor is below the initial floor (a real gap remains for the dust leg).
     assert!(
-        mreq <= xs.health_cert.certified_initial_req,
+        mreq <= health_cert(&xs).certified_initial_req,
         "maint floor <= initial floor"
     );
 
@@ -39347,13 +39660,13 @@ fn v16_attack_cross_margin_netting_conserves() {
     let g = env.market_state().1;
     // both legs live, requirement gross (covers both); portfolio solvent (equity covers maintenance).
     assert_eq!(
-        percolator::active_bitmap_count_ones(xs.active_bitmap),
+        percolator::active_bitmap_count_ones(active_bitmap(&xs)),
         2,
         "x holds both legs"
     );
-    assert!(xs.health_cert.valid, "x cert valid");
+    assert!(health_cert(&xs).valid, "x cert valid");
     assert!(
-        xs.health_cert.certified_equity >= xs.health_cert.certified_maintenance_req as i128,
+        health_cert(&xs).certified_equity >= health_cert(&xs).certified_maintenance_req as i128,
         "x solvent (equity >= maint req)"
     );
     assert!(
@@ -39456,7 +39769,7 @@ fn v16_attack_over_liquidation_fee_clamped_to_position() {
     // the position is fully closed (clamped to the actual size), not over-closed into a phantom.
     let sl = env.portfolio_state(s);
     assert!(
-        sl.legs[0].basis_pos_q.unsigned_abs() <= POS_SCALE,
+        sl.legs[0].basis_pos_q.get().unsigned_abs() <= POS_SCALE,
         "position closed at most to its actual size (no phantom over-close)"
     );
     assert_eq!(g1.vault, g0.vault, "fee internal, no vault mint");
@@ -39516,11 +39829,11 @@ fn v16_attack_tradecpi_short_fill_rejects_atomically() {
 
     // ROLLBACK: no partial position created on either side; book and vault unchanged.
     assert!(
-        percolator::active_bitmap_is_empty(env.portfolio_state(taker_account).active_bitmap),
+        percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(taker_account))),
         "taker has NO position (no partial fill)"
     );
     assert!(
-        percolator::active_bitmap_is_empty(env.portfolio_state(maker_account).active_bitmap),
+        percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(maker_account))),
         "maker has NO position"
     );
     let (_, g1) = env.market_state();
@@ -39550,7 +39863,8 @@ fn v16_attack_tradecpi_short_fill_rejects_atomically() {
     );
     let taker = env.portfolio_state(taker_account);
     assert_eq!(
-        taker.legs[0].basis_pos_q, cap as i128,
+        taker.legs[0].basis_pos_q.get(),
+        cap as i128,
         "an at-cap request fills fully and cleanly"
     );
     let g = env.market_state().1;
@@ -39607,7 +39921,7 @@ fn v16_attack_tradecpi_fee_is_mark_pinned_not_matcher_quoted() {
             "position priced at the mark"
         );
         assert_eq!(
-            env.portfolio_state(t).pnl,
+            env.portfolio_state(t).pnl.get(),
             0,
             "no off-market PnL from the matcher quote"
         );
@@ -39671,11 +39985,11 @@ fn v16_attack_tradecpi_enforces_maker_margin() {
 
     // ROLLBACK: no position on either side, no OI, vault unchanged.
     assert!(
-        percolator::active_bitmap_is_empty(env.portfolio_state(t).active_bitmap),
+        percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(t))),
         "taker has no position"
     );
     assert!(
-        percolator::active_bitmap_is_empty(env.portfolio_state(m).active_bitmap),
+        percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(m))),
         "maker has no position"
     );
     let (_, g1) = env.market_state();
@@ -39702,7 +40016,7 @@ fn v16_attack_tradecpi_enforces_maker_margin() {
     );
     assert!(ok.is_ok(), "well-capitalized maker fills cleanly: {:?}", ok);
     assert_eq!(
-        env.portfolio_state(m).legs[0].basis_pos_q,
+        env.portfolio_state(m).legs[0].basis_pos_q.get(),
         -((10 * POS_SCALE) as i128),
         "maker took the opposite leg"
     );
@@ -39780,7 +40094,7 @@ fn v16_attack_tradecpi_matcher_tail_cannot_carry_protocol_state() {
     );
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
     assert_eq!(
-        env.portfolio_state(victim).capital,
+        env.portfolio_state(victim).capital.get(),
         1_000_000,
         "victim portfolio untouched"
     );
@@ -39889,8 +40203,8 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_carry_protocol_state() {
         "vault unchanged by rejected tail poison"
     );
     assert_eq!(
-        env.portfolio_state(victim).capital,
-        victim_before.capital,
+        env.portfolio_state(victim).capital.get(),
+        victim_before.capital.get(),
         "victim portfolio untouched"
     );
 
@@ -40448,7 +40762,10 @@ fn v16_attack_chainlink_oracle_malformed_fields_reject_without_mutation() {
     let mut bad_disc = valid();
     bad_disc[0] ^= 0xff;
     cases.push(("bad discriminator", bad_disc));
-    cases.push(("zero version", make_chainlink_data(0, 8, 1, 1, 1, 100, 10_000)));
+    cases.push((
+        "zero version",
+        make_chainlink_data(0, 8, 1, 1, 1, 100, 10_000),
+    ));
     cases.push((
         "zero latest round",
         make_chainlink_data(1, 8, 0, 1, 1, 100, 10_000),
@@ -40458,7 +40775,10 @@ fn v16_attack_chainlink_oracle_malformed_fields_reject_without_mutation() {
         make_chainlink_data(1, 8, 1, 2, 1, 100, 10_000),
     ));
     cases.push(("zero slot", make_chainlink_data(1, 8, 1, 1, 0, 100, 10_000)));
-    cases.push(("zero publish time", make_chainlink_data(1, 8, 1, 1, 1, 0, 10_000)));
+    cases.push((
+        "zero publish time",
+        make_chainlink_data(1, 8, 1, 1, 1, 0, 10_000),
+    ));
     cases.push((
         "decimals over bound",
         make_chainlink_data(1, 19, 1, 1, 1, 100, 10_000),
@@ -40484,10 +40804,7 @@ fn v16_attack_chainlink_oracle_malformed_fields_reject_without_mutation() {
             100,
             0,
         );
-        assert!(
-            rejected.is_err(),
-            "malformed Chainlink {label} must reject"
-        );
+        assert!(rejected.is_err(), "malformed Chainlink {label} must reject");
         assert_eq!(
             env.svm.get_account(&env.market).unwrap().data,
             before,
@@ -40684,25 +41001,12 @@ fn v16_attack_hybrid_oracle_rejects_duplicate_or_malformed_leg_config() {
     let oracle0 = env.set_pyth_price_with_conf(&feed0, 200_000, -6, 0, 100);
     let oracle1 = env.set_pyth_price_with_conf(&feed1, 300_000, -6, 0, 100);
     let oracle2 = env.set_pyth_price_with_conf(&feed2, 400_000, -6, 0, 100);
-    let configure = |env: &mut V16CuEnv,
-                     count: u8,
-                     flags: u8,
-                     feeds: [[u8; 32]; 3],
-                     accounts: &[Pubkey]| {
-        env.try_configure_hybrid_asset_with_conf_filter_cu(
-            0,
-            count,
-            flags,
-            feeds,
-            accounts,
-            1,
-            100,
-            0,
-            0,
-            100,
-            0,
-        )
-    };
+    let configure =
+        |env: &mut V16CuEnv, count: u8, flags: u8, feeds: [[u8; 32]; 3], accounts: &[Pubkey]| {
+            env.try_configure_hybrid_asset_with_conf_filter_cu(
+                0, count, flags, feeds, accounts, 1, 100, 0, 0, 100, 0,
+            )
+        };
     let before = env.svm.get_account(&env.market).unwrap().data;
 
     for (label, count, flags, feeds, accounts) in [
@@ -40737,10 +41041,7 @@ fn v16_attack_hybrid_oracle_rejects_duplicate_or_malformed_leg_config() {
     ] {
         env.svm.expire_blockhash();
         let rejected = configure(&mut env, count, flags, feeds, &accounts);
-        assert!(
-            rejected.is_err(),
-            "hybrid oracle {label} must reject"
-        );
+        assert!(rejected.is_err(), "hybrid oracle {label} must reject");
         assert_eq!(
             env.svm.get_account(&env.market).unwrap().data,
             before,
@@ -40749,14 +41050,8 @@ fn v16_attack_hybrid_oracle_rejects_duplicate_or_malformed_leg_config() {
     }
 
     env.svm.expire_blockhash();
-    configure(
-        &mut env,
-        1,
-        0,
-        [feed0, [0u8; 32], [0u8; 32]],
-        &[oracle0],
-    )
-    .expect("well-formed one-leg hybrid oracle should configure");
+    configure(&mut env, 1, 0, [feed0, [0u8; 32], [0u8; 32]], &[oracle0])
+        .expect("well-formed one-leg hybrid oracle should configure");
     assert_eq!(
         env.market_state().1.assets[0].effective_price,
         200_000,
@@ -40827,7 +41122,16 @@ fn v16_attack_hybrid_oracle_scalar_bounds_reject_atomically() {
     reject_unchanged(&mut env, 1, 60, 0, 10, 0, 500, "zero soft-stale slots");
     reject_unchanged(&mut env, 1, 60, 3, 0, 0, 500, "zero fallback EWMA halflife");
     reject_unchanged(&mut env, 1, 60, 3, 10, 2, 500, "bad invert flag");
-    reject_unchanged(&mut env, 1, 60, 3, 10, 0, 10_001, "confidence filter over 100%");
+    reject_unchanged(
+        &mut env,
+        1,
+        60,
+        3,
+        10,
+        0,
+        10_001,
+        "confidence filter over 100%",
+    );
 
     env.svm.expire_blockhash();
     let ok = send_tx(
@@ -41366,7 +41670,11 @@ fn v16_attack_cloned_portfolio_cannot_withdraw() {
         .unwrap();
     // sanity: the clone's stored id is the ORIGINAL key, not its own.
     let cloned = state::read_portfolio(&env.svm.get_account(&clone).unwrap().data).unwrap();
-    assert_eq!(cloned.capital, 1_000, "clone carries the copied capital");
+    assert_eq!(
+        cloned.capital.get(),
+        1_000,
+        "clone carries the copied capital"
+    );
 
     // ATTACK: withdraw the (copied) capital via the clone account -> must reject on the id binding.
     let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
@@ -41402,7 +41710,7 @@ fn v16_attack_cloned_portfolio_cannot_withdraw() {
         "c_tot unchanged (no duplicated capital)"
     );
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         1_000,
         "original portfolio still holds its capital"
     );
@@ -41464,10 +41772,14 @@ fn v16_attack_tradenocpi_self_trade_rejected() {
     );
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
     assert!(
-        percolator::active_bitmap_is_empty(env.portfolio_state(p).active_bitmap),
+        percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(p))),
         "no position opened"
     );
-    assert_eq!(env.portfolio_state(p).capital, 1_000_000, "capital intact");
+    assert_eq!(
+        env.portfolio_state(p).capital.get(),
+        1_000_000,
+        "capital intact"
+    );
 }
 
 #[test]
@@ -41569,10 +41881,10 @@ fn v16_attack_batch_trade_self_trade_rejected() {
         group.insurance, 0,
         "no fee churned by rejected batch self-trades"
     );
-    assert!(percolator::active_bitmap_is_empty(
-        env.portfolio_state(p).active_bitmap
-    ));
-    assert_eq!(env.portfolio_state(p).capital, 1_000_000);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(p)
+    )));
+    assert_eq!(env.portfolio_state(p).capital.get(), 1_000_000);
 }
 
 // security.md sweep — deposit into an uninitialized portfolio rejects (#44/#45): an account that was
@@ -41705,7 +42017,7 @@ fn v16_attack_deposit_wrong_mint_source_rejects() {
     let owner = Keypair::new();
     let p = env.create_portfolio(&owner);
     let (_, g0) = env.market_state();
-    let cap0 = env.portfolio_state(p).capital;
+    let cap0 = env.portfolio_state(p).capital.get();
 
     // a source token account of a DIFFERENT mint (not the market's collateral mint).
     let other_mint = env.create_mint();
@@ -41733,7 +42045,7 @@ fn v16_attack_deposit_wrong_mint_source_rejects() {
         "wrong-mint tokens not pulled"
     );
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         cap0,
         "no capital credited from a wrong-mint deposit"
     );
@@ -41761,7 +42073,7 @@ fn v16_attack_deposit_wrong_mint_source_rejects() {
     );
     assert!(ok.is_ok(), "correct-mint deposit works: {:?}", ok);
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         cap0 + 500,
         "correct-mint deposit credits capital"
     );
@@ -41927,7 +42239,7 @@ fn v16_attack_withdraw_to_frozen_dest_rejects_clean() {
 
     // NO half-applied withdraw: capital and vault are fully intact.
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         1_000,
         "capital NOT debited on the rejected withdraw"
     );
@@ -41983,7 +42295,7 @@ fn v16_attack_direct_vault_donation_mints_nothing() {
 
     // NO MINT: the donation credited NO capital and did NOT change the accounting.
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         1_000,
         "donation credits no capital to anyone"
     );
@@ -42005,7 +42317,11 @@ fn v16_attack_direct_vault_donation_mints_nothing() {
         1_000,
         "withdraw settles against the accounting (1000), not the donation"
     );
-    assert_eq!(env.portfolio_state(p).capital, 0, "capital fully withdrawn");
+    assert_eq!(
+        env.portfolio_state(p).capital.get(),
+        0,
+        "capital fully withdrawn"
+    );
     assert_eq!(
         env.token_amount(env.vault),
         500,
@@ -42039,8 +42355,8 @@ fn v16_attack_convert_released_pnl_owner_gated() {
             recovery_reason: 0,
         },
     );
-    let cap0 = env.portfolio_state(p).capital;
-    let pnl0 = env.portfolio_state(p).pnl;
+    let cap0 = env.portfolio_state(p).capital.get();
+    let pnl0 = env.portfolio_state(p).pnl.get();
     assert!(pnl0 > 0, "victim has backed junior pnl");
     let mut legacy = env.svm.get_account(&p).unwrap();
     legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
@@ -42099,12 +42415,12 @@ fn v16_attack_convert_released_pnl_owner_gated() {
 
     // neither attempt converted anything.
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         cap0,
         "capital unchanged by rejected converts"
     );
     assert_eq!(
-        env.portfolio_state(p).pnl,
+        env.portfolio_state(p).pnl.get(),
         pnl0,
         "junior pnl not converted by an unauthorized caller"
     );
@@ -42129,7 +42445,7 @@ fn v16_attack_convert_released_pnl_owner_gated() {
         "owner-signed convert grows the legacy portfolio before converting"
     );
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         cap0 + 40,
         "owner converts the backed 40 to capital"
     );
@@ -42604,7 +42920,10 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         ],
         &[&admin],
     );
-    assert!(ewma.is_ok(), "valid EWMA configuration should succeed: {ewma:?}");
+    assert!(
+        ewma.is_ok(),
+        "valid EWMA configuration should succeed: {ewma:?}"
+    );
     let (cfg_ewma, _) = env.market_state();
     assert_eq!(
         cfg_ewma.oracle_mode,
@@ -42672,7 +42991,10 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         ],
         &[&admin],
     );
-    assert!(auth.is_ok(), "valid AuthMark configuration should succeed: {auth:?}");
+    assert!(
+        auth.is_ok(),
+        "valid AuthMark configuration should succeed: {auth:?}"
+    );
 
     env.svm.warp_to_slot(4);
     reject_unchanged(
@@ -43397,7 +43719,7 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance() {
     let g1 = env.market_state().1;
     // non-vacuity: asset-1 actually reached insolvency.
     assert_eq!(
-        env.portfolio_state(b1).capital,
+        env.portfolio_state(b1).capital.get(),
         0,
         "asset-1 short was driven insolvent (non-vacuous)"
     );
@@ -43821,7 +44143,7 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_backing() {
 
     let g1 = env.market_state().1;
     assert_eq!(
-        env.portfolio_state(b1).capital,
+        env.portfolio_state(b1).capital.get(),
         0,
         "asset-1 short driven insolvent (non-vacuous)"
     );
@@ -44190,7 +44512,7 @@ fn v16_attack_backing_fee_split_conserves() {
     // Force capital low so the parked positive-PnL claim is NEEDED as IM (triggers the source lien).
     env.force_portfolio_capital_for_benchmark(cross_account, 2_600);
     assert_eq!(
-        env.portfolio_state(cross_account).pnl,
+        env.portfolio_state(cross_account).pnl.get(),
         1_000,
         "setup must create source-backed positive PnL"
     );
@@ -44216,12 +44538,13 @@ fn v16_attack_backing_fee_split_conserves() {
     let budget_before = gb.insurance_domain_budget[WINNING_DOMAIN];
     let provider_before = gb.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings;
     let ctot_before = gb.c_tot;
-    let cap_cross_before = env.portfolio_state(cross_account).capital;
-    let cap_cp_before = env.portfolio_state(counterparty_account).capital;
+    let cap_cross_before = env.portfolio_state(cross_account).capital.get();
+    let cap_cp_before = env.portfolio_state(counterparty_account).capital.get();
     let lien_before: u128 = env
         .portfolio_state(cross_account)
-        .source_lien_counterparty_backing_num
+        .source_domains
         .iter()
+        .map(|slot| slot.source_lien_counterparty_backing_num.get())
         .sum();
 
     // Risk-increasing trade: grows the IM source-credit lien -> draws fresh backing -> charges the fee.
@@ -44242,12 +44565,13 @@ fn v16_attack_backing_fee_split_conserves() {
     let budget_delta = ga.insurance_domain_budget[WINNING_DOMAIN] - budget_before;
     let provider_delta =
         ga.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings - provider_before;
-    let cap_cross_after = env.portfolio_state(cross_account).capital;
-    let cap_cp_after = env.portfolio_state(counterparty_account).capital;
+    let cap_cross_after = env.portfolio_state(cross_account).capital.get();
+    let cap_cp_after = env.portfolio_state(counterparty_account).capital.get();
     let lien_after: u128 = env
         .portfolio_state(cross_account)
-        .source_lien_counterparty_backing_num
+        .source_domains
         .iter()
+        .map(|slot| slot.source_lien_counterparty_backing_num.get())
         .sum();
     let charged = (cap_cross_before - cap_cross_after) + (cap_cp_before - cap_cp_after);
 
@@ -44965,8 +45289,7 @@ fn v16_attack_permissionless_append_invalid_price_rolls_back_realloc_and_fee() {
         );
         let (_, rejected_group) = env.market_state();
         assert_eq!(
-            rejected_group.config.max_market_slots,
-            group_before.config.max_market_slots,
+            rejected_group.config.max_market_slots, group_before.config.max_market_slots,
             "{label} must not append a market slot"
         );
         assert_eq!(
@@ -45080,7 +45403,7 @@ fn v16_attack_permissionless_append_cannot_freeze_flat_withdrawal() {
         before.config.max_market_slots, 1,
         "starts as a one-asset market"
     );
-    assert_eq!(env.portfolio_state(portfolio).capital, DEPOSIT);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), DEPOSIT);
 
     let creator = Keypair::new();
     let cp = creator.pubkey();
@@ -45105,9 +45428,9 @@ fn v16_attack_permissionless_append_cannot_freeze_flat_withdrawal() {
         DEPOSIT as u64,
         "full pre-append capital withdraws after the unrelated append"
     );
-    assert_eq!(account.capital, 0, "portfolio capital fully debited");
+    assert_eq!(account.capital.get(), 0, "portfolio capital fully debited");
     assert!(
-        percolator::active_bitmap_is_empty(account.active_bitmap),
+        percolator::active_bitmap_is_empty(active_bitmap(&account)),
         "flat account remains exposure-free"
     );
     assert_eq!(
@@ -45115,7 +45438,8 @@ fn v16_attack_permissionless_append_cannot_freeze_flat_withdrawal() {
         "only the user's collateral left c_tot"
     );
     assert_eq!(
-        after_withdraw.vault, appended.vault - DEPOSIT,
+        after_withdraw.vault,
+        appended.vault - DEPOSIT,
         "accounting vault debited exactly the withdrawal"
     );
     assert_eq!(
@@ -45236,7 +45560,7 @@ fn v16_attack_dual_mint_shared_credit_no_double_withdraw() {
     let (primary_dest, _) = env.withdraw_with_cu(&owner, portfolio, 1_000);
     assert_eq!(env.token_amount(primary_dest), 1_000);
     assert_eq!(
-        env.portfolio_state(portfolio).capital,
+        env.portfolio_state(portfolio).capital.get(),
         0,
         "primary withdrawal exhausted the shared credit"
     );
@@ -45328,7 +45652,8 @@ fn v16_attack_dual_mint_domain_insurance_no_double_withdraw() {
         .expect("primary insurance withdrawal exhausts the budget");
     assert_eq!(env.token_amount(primary_dest), 100);
     assert_eq!(
-        env.market_state().1.insurance_domain_budget[0], 0,
+        env.market_state().1.insurance_domain_budget[0],
+        0,
         "first withdrawal exhausted the shared insurance budget"
     );
 
@@ -45495,7 +45820,8 @@ fn v16_attack_base_unit_mint_reset_requires_old_secondary_reserve_empty() {
         )
         .unwrap();
     assert_eq!(
-        env.market_state().1.vault, 0,
+        env.market_state().1.vault,
+        0,
         "market accounting is empty despite raw secondary reserve custody"
     );
 
@@ -45532,7 +45858,12 @@ fn v16_attack_base_unit_mint_reset_requires_old_secondary_reserve_empty() {
         "rejected reset leaves the old secondary reserve recoverable"
     );
 
-    env.set_token_account_amount(first_secondary_vault, first_secondary, env.vault_authority, 0);
+    env.set_token_account_amount(
+        first_secondary_vault,
+        first_secondary,
+        env.vault_authority,
+        0,
+    );
     env.svm.expire_blockhash();
     let ok = env.send(
         ProgInstruction::UpdateBaseUnitMints {
@@ -45801,7 +46132,7 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
         "no user collateral drained to admin"
     );
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         10_000,
         "user capital intact"
     );
@@ -46054,7 +46385,10 @@ fn grow_market_to_10m_with_high_active_asset(
     assert_eq!(g.assets[high_asset].lifecycle, AssetLifecycleV16::Active);
     assert_eq!(g.assets[high_asset].effective_price, price);
     assert_eq!(g.assets[high_asset].market_id, high_market_id);
-    assert_eq!(env.svm.get_account(&env.market).unwrap().data.len(), new_len);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data.len(),
+        new_len
+    );
     new_len
 }
 
@@ -46163,7 +46497,9 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
         group.assets[HIGH_ASSET].effective_price >= 200,
         "adverse high-asset mark actually moved"
     );
-    assert!(percolator::active_bitmap_is_empty(short_after.active_bitmap));
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &short_after
+    )));
 }
 
 // Scale proof — the largest current market that fits Solana's 10 MiB account cap is valid AND a
@@ -46366,12 +46702,12 @@ fn v16_bpf_10m_market_over_5000_assets_trades_with_bounded_cu() {
     let long = env.portfolio_state(long_account);
     let short = env.portfolio_state(short_account);
     assert_eq!(
-        long.legs[0].basis_pos_q,
+        long.legs[0].basis_pos_q.get(),
         (10 * POS_SCALE) as i128,
         "long leg basis"
     );
     assert_eq!(
-        short.legs[0].basis_pos_q,
+        short.legs[0].basis_pos_q.get(),
         -((10 * POS_SCALE) as i128),
         "short leg basis"
     );
@@ -46417,7 +46753,9 @@ fn v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market()
     let new_len = state::market_account_len_for_capacity(N).unwrap();
     let next_len = state::market_account_len_for_capacity(N + 1).unwrap();
     assert!(
-        N > 5_000 && new_len <= SOLANA_MAX_ACCOUNT_DATA_LEN && next_len > SOLANA_MAX_ACCOUNT_DATA_LEN,
+        N > 5_000
+            && new_len <= SOLANA_MAX_ACCOUNT_DATA_LEN
+            && next_len > SOLANA_MAX_ACCOUNT_DATA_LEN,
         "test should exercise the maximal near-10 MiB market capacity"
     );
     {
@@ -46453,7 +46791,9 @@ fn v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market()
 
     let last_domain = (2 * HIGH_ASSET + 1) as u16;
     let admin = env.admin.insecure_clone();
-    let topup_cu = env.top_up_insurance_domain_with_authority_and_cu(&admin, last_domain, FUNDED).1;
+    let topup_cu = env
+        .top_up_insurance_domain_with_authority_and_cu(&admin, last_domain, FUNDED)
+        .1;
     assert_cu_within(
         "10MiB terminal last-domain insurance top-up",
         topup_cu,
@@ -46462,8 +46802,7 @@ fn v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market()
 
     let before_resolve = env.market_state().1;
     assert_eq!(
-        before_resolve.insurance_domain_budget[last_domain as usize],
-        FUNDED,
+        before_resolve.insurance_domain_budget[last_domain as usize], FUNDED,
         "only the last domain is funded"
     );
     assert_eq!(before_resolve.insurance, FUNDED);
@@ -46495,13 +46834,11 @@ fn v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market()
         "all per-domain insurance is consumed"
     );
     assert_eq!(
-        after_withdraw.insurance_domain_budget[last_domain as usize],
-        0,
+        after_withdraw.insurance_domain_budget[last_domain as usize], 0,
         "last-domain budget principal is consumed"
     );
     assert_eq!(
-        after_withdraw.insurance_domain_spent[last_domain as usize],
-        0,
+        after_withdraw.insurance_domain_spent[last_domain as usize], 0,
         "terminal withdrawal reduces budget rather than recording spent"
     );
 
@@ -46536,7 +46873,9 @@ fn v16_bpf_terminal_insurance_ledger_last_domain_withdraw_stays_bounded_on_10m_m
     let new_len = state::market_account_len_for_capacity(N).unwrap();
     let next_len = state::market_account_len_for_capacity(N + 1).unwrap();
     assert!(
-        N > 5_000 && new_len <= SOLANA_MAX_ACCOUNT_DATA_LEN && next_len > SOLANA_MAX_ACCOUNT_DATA_LEN,
+        N > 5_000
+            && new_len <= SOLANA_MAX_ACCOUNT_DATA_LEN
+            && next_len > SOLANA_MAX_ACCOUNT_DATA_LEN,
         "test should exercise the maximal near-10 MiB market capacity"
     );
     {
@@ -46616,7 +46955,9 @@ fn v16_bpf_terminal_insurance_initialized_ledger_full_drain_stays_bounded_on_10m
     let new_len = state::market_account_len_for_capacity(N).unwrap();
     let next_len = state::market_account_len_for_capacity(N + 1).unwrap();
     assert!(
-        N > 5_000 && new_len <= SOLANA_MAX_ACCOUNT_DATA_LEN && next_len > SOLANA_MAX_ACCOUNT_DATA_LEN,
+        N > 5_000
+            && new_len <= SOLANA_MAX_ACCOUNT_DATA_LEN
+            && next_len > SOLANA_MAX_ACCOUNT_DATA_LEN,
         "test should exercise the maximal near-10 MiB market capacity"
     );
     {
@@ -46653,8 +46994,12 @@ fn v16_bpf_terminal_insurance_initialized_ledger_full_drain_stays_bounded_on_10m
     let last_domain = (2 * HIGH_ASSET + 1) as u16;
     let admin = env.admin.insecure_clone();
     let ledger = env.insurance_ledger_account();
-    let (_source, topup_cu) =
-        env.top_up_insurance_domain_with_authority_ledger_and_cu(&admin, ledger, last_domain, FUNDED);
+    let (_source, topup_cu) = env.top_up_insurance_domain_with_authority_ledger_and_cu(
+        &admin,
+        ledger,
+        last_domain,
+        FUNDED,
+    );
     assert_cu_within(
         "10MiB terminal last-domain TopUpInsuranceDomain with ledger",
         topup_cu,
@@ -46921,8 +47266,7 @@ fn v16_bpf_terminal_asset_insurance_partial_ledger_middle_domain_stays_bounded_o
     env.top_up_insurance_domain_with_authority_and_cu(&middle_authority, middle_domain, FUNDED);
     let before_resolve = env.market_state().1;
     assert_eq!(
-        before_resolve.insurance_domain_budget[middle_domain as usize],
-        FUNDED,
+        before_resolve.insurance_domain_budget[middle_domain as usize], FUNDED,
         "setup funds only a middle-domain authority budget"
     );
 
@@ -47187,8 +47531,14 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
         after_nocpi.vault, before.vault,
         "vault unchanged by rejected no-CPI batch"
     );
-    assert_eq!(env.portfolio_state(ta).capital, taker_before.capital);
-    assert_eq!(env.portfolio_state(la).capital, lp_before.capital);
+    assert_eq!(
+        env.portfolio_state(ta).capital.get(),
+        taker_before.capital.get()
+    );
+    assert_eq!(
+        env.portfolio_state(la).capital.get(),
+        lp_before.capital.get()
+    );
 
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
@@ -47244,8 +47594,14 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
         after_cpi.vault, before.vault,
         "vault unchanged by rejected CPI batch"
     );
-    assert_eq!(env.portfolio_state(ta).capital, taker_before.capital);
-    assert_eq!(env.portfolio_state(la).capital, lp_before.capital);
+    assert_eq!(
+        env.portfolio_state(ta).capital.get(),
+        taker_before.capital.get()
+    );
+    assert_eq!(
+        env.portfolio_state(la).capital.get(),
+        lp_before.capital.get()
+    );
 
     env.svm.expire_blockhash();
     let clean = env.send(
@@ -47554,7 +47910,7 @@ fn v16_bpf_batch_trade_14_legs_under_tx_limit() {
     println!("v16 batch 14-leg fresh BatchTradeNoCpi CU: {cu}");
     assert!(cu < 1_400_000, "14-leg batch CU {cu} must fit the tx limit");
     let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
-    assert_eq!(percolator::active_bitmap_count_ones(t.active_bitmap), 14);
+    assert_eq!(percolator::active_bitmap_count_ones(active_bitmap(&t)), 14);
 }
 
 // security.md sweep — batch active-leg cap atomicity (#22/#30/#35): the matcher ABI can return up to
@@ -47654,10 +48010,13 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
             ],
             &[&taker, &lp],
         );
-        assert!(ok.is_ok(), "exact-cap BatchTradeNoCpi must still execute: {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "exact-cap BatchTradeNoCpi must still execute: {ok:?}"
+        );
         let taker_after = env.portfolio_state(taker_account);
         assert_eq!(
-            percolator::active_bitmap_count_ones(taker_after.active_bitmap),
+            percolator::active_bitmap_count_ones(active_bitmap(&taker_after)),
             CAP as u32,
             "exact-cap no-CPI batch opened exactly 14 legs"
         );
@@ -47666,7 +48025,8 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
     {
         let (mut env, taker, taker_account, lp, lp_account) = setup_env();
         let matcher_program = Pubkey::new_unique();
-        let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+        let matcher_bytes =
+            std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
         env.svm.add_program(matcher_program, &matcher_bytes);
         let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, lp_account);
         let market_before = env.svm.get_account(&env.market).unwrap();
@@ -47715,10 +48075,13 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
             ],
             &[&taker],
         );
-        assert!(ok.is_ok(), "exact-cap BatchTradeCpi must still execute: {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "exact-cap BatchTradeCpi must still execute: {ok:?}"
+        );
         let taker_after = env.portfolio_state(taker_account);
         assert_eq!(
-            percolator::active_bitmap_count_ones(taker_after.active_bitmap),
+            percolator::active_bitmap_count_ones(active_bitmap(&taker_after)),
             CAP as u32,
             "exact-cap CPI batch opened exactly 14 legs"
         );
@@ -47851,8 +48214,8 @@ fn v16_attack_batch_tradecpi_configured_leg_cap_rejects_before_hostile_matcher_c
     let taker_before = env.svm.get_account(&taker_account).unwrap();
     let lp_before = env.svm.get_account(&lp_account).unwrap();
     let ctx_before = env.svm.get_account(&ctx).unwrap();
-    let over_cap_err = send(&mut env, OVER)
-        .expect_err("over-cap BatchTradeCpi must reject before matcher CPI");
+    let over_cap_err =
+        send(&mut env, OVER).expect_err("over-cap BatchTradeCpi must reject before matcher CPI");
     assert!(
         over_cap_err.contains("Custom(9)"),
         "over-cap BatchTradeCpi must fail as InvalidInstruction before hostile matcher validation, got {over_cap_err}"
@@ -47940,7 +48303,11 @@ fn v16_attack_batch_decode_oversized_vectors_reject_before_allocation() {
         })
         .collect();
     env.svm.expire_blockhash();
-    let cpi = env.send(ProgInstruction::BatchTradeCpi { legs: cpi_legs }, vec![], &[]);
+    let cpi = env.send(
+        ProgInstruction::BatchTradeCpi { legs: cpi_legs },
+        vec![],
+        &[],
+    );
     let cpi_err = cpi.expect_err("oversized BatchTradeCpi must reject");
     assert!(
         cpi_err.contains("InvalidInstructionData"),
@@ -48449,13 +48816,13 @@ fn v16_attack_batch_cpi_fee_bps_bounded_for_permissionless_lp() {
             "vault unchanged by rejected over-fee batch"
         );
         assert_eq!(
-            env.portfolio_state(taker_account).capital,
-            taker_before.capital,
+            env.portfolio_state(taker_account).capital.get(),
+            taker_before.capital.get(),
             "taker capital untouched"
         );
         assert_eq!(
-            env.portfolio_state(lp_account).capital,
-            lp_before.capital,
+            env.portfolio_state(lp_account).capital.get(),
+            lp_before.capital.get(),
             "LP capital untouched"
         );
     }
@@ -48527,7 +48894,7 @@ fn v16_bpf_batch_trade_cpi_14_legs_under_tx_limit() {
         "14-leg batch CPI CU {cu} must fit the tx limit"
     );
     let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
-    assert_eq!(percolator::active_bitmap_count_ones(t.active_bitmap), 14);
+    assert_eq!(percolator::active_bitmap_count_ones(active_bitmap(&t)), 14);
 }
 
 // Isolation: per-leg fees in an atomic batch are credited to the CORRECT asset's insurance domains,
@@ -48901,13 +49268,13 @@ fn v16_attack_batch_tradecpi_zero_fill_rejects_atomically() {
     let group_after_reject = env.market_state().1;
     assert_eq!(group_after_reject.assets[0].oi_eff_long_q, 0);
     assert_eq!(group_after_reject.assets[1].oi_eff_long_q, 0);
-    assert_eq!(group_after_reject.insurance, 0, "no fee credited on zero-fill batch");
-
-    let (ok_ctx, ok_delegate, _) = env.init_matcher_context_authorized(
-        matcher_program,
-        &lp,
-        lp_portfolio,
+    assert_eq!(
+        group_after_reject.insurance, 0,
+        "no fee credited on zero-fill batch"
     );
+
+    let (ok_ctx, ok_delegate, _) =
+        env.init_matcher_context_authorized(matcher_program, &lp, lp_portfolio);
     env.svm.expire_blockhash();
     let ok = env.send(
         ProgInstruction::BatchTradeCpi { legs },
@@ -48920,8 +49287,7 @@ fn v16_attack_batch_tradecpi_zero_fill_rejects_atomically() {
     );
     let taker_after = env.portfolio_state(taker_portfolio);
     assert!(
-        has_active_leg_for_asset(&taker_after, 0)
-            && has_active_leg_for_asset(&taker_after, 1),
+        has_active_leg_for_asset(&taker_after, 0) && has_active_leg_for_asset(&taker_after, 1),
         "successful control fills both batch legs"
     );
 }
@@ -48979,9 +49345,7 @@ fn v16_attack_batch_tradecpi_rejects_stale_resolve_matured_atomically() {
     env.svm.warp_to_slot(4);
     env.svm.expire_blockhash();
     let fresh = env.send(
-        ProgInstruction::BatchTradeCpi {
-            legs: legs.clone(),
-        },
+        ProgInstruction::BatchTradeCpi { legs: legs.clone() },
         accounts(&env),
         &[&taker],
     );
@@ -49152,9 +49516,7 @@ fn v16_attack_batch_tradecpi_stale_rejects_before_hostile_matcher_cpi() {
     env.svm.expire_blockhash();
     let fresh_err = env
         .send(
-            ProgInstruction::BatchTradeCpi {
-                legs: legs.clone(),
-            },
+            ProgInstruction::BatchTradeCpi { legs: legs.clone() },
             accounts(&env),
             &[&taker],
         )
@@ -49452,9 +49814,7 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
         env.svm.expire_blockhash();
         let fresh_err = env
             .send(
-                ProgInstruction::BatchTradeCpi {
-                    legs: legs.clone(),
-                },
+                ProgInstruction::BatchTradeCpi { legs: legs.clone() },
                 accounts(&env),
                 &[&taker],
             )
@@ -50378,11 +50738,11 @@ fn v16_attack_maintenance_fee_spam_cannot_overdrain() {
     let owner = Keypair::new();
     let p = env.create_portfolio(&owner);
     env.deposit(&owner, p, 1_000_000);
-    let cap0 = env.portfolio_state(p).capital;
+    let cap0 = env.portfolio_state(p).capital.get();
     env.svm.warp_to_slot(50);
     // first sync at slot 50: charges the elapsed-time maintenance fee.
     env.sync_maintenance_fee_with_cu(p, None, 50);
-    let cap1 = env.portfolio_state(p).capital;
+    let cap1 = env.portfolio_state(p).capital.get();
     assert!(
         cap1 < cap0,
         "first sync charges the accrued maintenance fee"
@@ -50393,7 +50753,7 @@ fn v16_attack_maintenance_fee_spam_cannot_overdrain() {
         let _ = env.try_sync_maintenance_fee_with_cu(p, None, 50);
     }
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         cap1,
         "spamming sync in one slot must not over-charge"
     );
@@ -50401,7 +50761,7 @@ fn v16_attack_maintenance_fee_spam_cannot_overdrain() {
     env.svm.expire_blockhash();
     let _ = env.try_sync_maintenance_fee_with_cu(p, None, 50 + 1_000_000);
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         cap1,
         "a future now_slot cannot charge future maintenance time"
     );
@@ -50410,7 +50770,7 @@ fn v16_attack_maintenance_fee_spam_cannot_overdrain() {
     env.svm.expire_blockhash();
     env.sync_maintenance_fee_with_cu(p, None, 100);
     assert!(
-        env.portfolio_state(p).capital < cap1,
+        env.portfolio_state(p).capital.get() < cap1,
         "advancing real time accrues additional fee"
     );
 }
@@ -50510,7 +50870,10 @@ fn v16_attack_init_market_rejects_grief_config_without_burning_market_account() 
             market_len,
             env.program_id,
         );
-        let market_before = env.svm.get_account(&market.pubkey()).expect("market account");
+        let market_before = env
+            .svm
+            .get_account(&market.pubkey())
+            .expect("market account");
 
         env.svm.expire_blockhash();
         let rejected = send_tx(
@@ -50530,7 +50893,9 @@ fn v16_attack_init_market_rejects_grief_config_without_burning_market_account() 
             "{label}: hostile InitMarket config must reject"
         );
         assert_eq!(
-            env.svm.get_account(&market.pubkey()).expect("market account"),
+            env.svm
+                .get_account(&market.pubkey())
+                .expect("market account"),
             market_before,
             "{label}: rejected InitMarket must not dirty the freshly allocated market account"
         );
@@ -50549,7 +50914,10 @@ fn v16_attack_init_market_rejects_grief_config_without_burning_market_account() 
             &[&admin],
         )
         .expect("valid InitMarket after rejected grief config");
-        let market_after_valid = env.svm.get_account(&market.pubkey()).expect("market account");
+        let market_after_valid = env
+            .svm
+            .get_account(&market.pubkey())
+            .expect("market account");
         let (cfg, group) = state::read_market(&market_after_valid.data).expect("valid market");
         assert_eq!(
             cfg.marketauth,
@@ -50826,7 +51194,7 @@ fn v16_attack_init_portfolio_cannot_use_market_as_portfolio_account() {
         initialized.provenance_header.market_group_id,
         env.market.to_bytes()
     );
-    assert_eq!(initialized.capital, 0);
+    assert_eq!(initialized.capital.get(), 0);
 }
 
 // SOL-010 (reinitialization): InitPortfolio targets a program-owned account and SETS its owner. An
@@ -50841,7 +51209,7 @@ fn v16_attack_init_portfolio_cannot_reinit_funded_victim() {
     env.deposit(&victim, vp, 500_000);
     let before = env.svm.get_account(&vp).unwrap().data.clone();
     let v_owner = env.portfolio_state(vp).owner;
-    let v_cap = env.portfolio_state(vp).capital;
+    let v_cap = env.portfolio_state(vp).capital.get();
     assert!(v_cap > 0);
     // attacker tries to re-initialize the victim's portfolio, claiming ownership.
     let attacker = Keypair::new();
@@ -50871,7 +51239,11 @@ fn v16_attack_init_portfolio_cannot_reinit_funded_victim() {
         v_owner,
         "ownership not reassigned"
     );
-    assert_eq!(env.portfolio_state(vp).capital, v_cap, "capital not reset");
+    assert_eq!(
+        env.portfolio_state(vp).capital.get(),
+        v_cap,
+        "capital not reset"
+    );
 }
 
 // SOL-010 / DoS: an initialized-but-empty portfolio still increments materialized_portfolio_count.
@@ -50882,7 +51254,7 @@ fn v16_attack_empty_portfolio_reinit_cannot_inflate_materialized_count() {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
     let portfolio = env.create_portfolio(&owner);
-    assert_eq!(env.portfolio_state(portfolio).capital, 0);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
     assert_eq!(
         env.market_state().1.materialized_portfolio_count,
         1,
@@ -50949,7 +51321,7 @@ fn v16_attack_close_portfolio_with_capital_rejected_no_strand() {
     let owner = Keypair::new();
     let p = env.create_portfolio(&owner);
     env.deposit(&owner, p, 400_000);
-    let cap = env.portfolio_state(p).capital;
+    let cap = env.portfolio_state(p).capital.get();
     let vault0 = env.token_amount(env.vault);
     assert!(cap > 0 && vault0 >= 400_000);
     env.svm.expire_blockhash();
@@ -50967,7 +51339,7 @@ fn v16_attack_close_portfolio_with_capital_rejected_no_strand() {
         "closing a funded portfolio must reject (would strand vault tokens)"
     );
     assert_eq!(
-        env.portfolio_state(p).capital,
+        env.portfolio_state(p).capital.get(),
         cap,
         "capital intact after rejected close"
     );
@@ -50992,7 +51364,7 @@ fn v16_attack_abandoned_empty_portfolio_cannot_block_slab_close() {
     let attacker = Keypair::new();
     let abandoned = env.create_portfolio(&attacker);
     assert_eq!(
-        env.portfolio_state(abandoned).capital,
+        env.portfolio_state(abandoned).capital.get(),
         0,
         "abandoned account starts empty"
     );
@@ -51173,14 +51545,15 @@ fn v16_attack_marketauth_terminal_close_cannot_burn_pending_payout_topup() {
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: 100 * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: 100,
-            paid_effective: 40,
-            finalized: false,
-        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         env.svm.set_account(env.market, market_account).unwrap();
@@ -51221,8 +51594,8 @@ fn v16_attack_marketauth_terminal_close_cannot_burn_pending_payout_topup() {
         "owner receives the pending top-up"
     );
     let account = env.portfolio_state(portfolio);
-    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
-    assert!(account.resolved_payout_receipt.finalized);
+    assert_eq!(resolved_receipt(&account).paid_effective, 100);
+    assert!(resolved_receipt(&account).finalized);
 
     env.svm.expire_blockhash();
     env.send(
@@ -51447,7 +51820,9 @@ fn v16_audit_per_asset_slot_growth_within_realloc_limit() {
     let l3 = state::market_account_len_for_capacity(3).unwrap();
     let per_slot_12 = l2 - l1;
     let per_slot_23 = l3 - l2;
-    println!("cap1={l1} cap2={l2} cap3={l3} per_slot(1->2)={per_slot_12} per_slot(2->3)={per_slot_23}");
+    println!(
+        "cap1={l1} cap2={l2} cap3={l3} per_slot(1->2)={per_slot_12} per_slot(2->3)={per_slot_23}"
+    );
     assert!(
         per_slot_12 <= MAX_PERMITTED_DATA_INCREASE && per_slot_23 <= MAX_PERMITTED_DATA_INCREASE,
         "one asset slot grows the market by {per_slot_12}/{per_slot_23} bytes > {MAX_PERMITTED_DATA_INCREASE} \
@@ -51632,10 +52007,7 @@ fn v16_attack_switchboard_low_sample_quorum_rejected_without_mutation() {
     };
     let before = env.svm.get_account(&env.market).unwrap().data;
 
-    for (label, num_samples, min_sample_size) in [
-        ("zero minimum", 3, 0),
-        ("below minimum", 1, 2),
-    ] {
+    for (label, num_samples, min_sample_size) in [("zero minimum", 3, 0), ("below minimum", 1, 2)] {
         let bad = install(&mut env, num_samples, min_sample_size);
         env.svm.expire_blockhash();
         let rejected = configure(&mut env, bad);
@@ -51880,7 +52252,7 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
     env.deposit(&la, pa, 1_000_000);
     env.deposit(&lb, pb, 1_000_000);
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
-    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q;
+    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q.get();
     assert!(basis0 != 0, "la opened a position");
     let (_, g0) = env.market_state();
 
@@ -51905,7 +52277,7 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
         "non-owner forfeit of a victim's recovery leg must reject"
     );
     assert_eq!(
-        env.portfolio_state(pa).legs[0].basis_pos_q,
+        env.portfolio_state(pa).legs[0].basis_pos_q.get(),
         basis0,
         "victim's position untouched by rejected griefing forfeit"
     );
@@ -52052,11 +52424,13 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
         metas(admin.pubkey()),
         &[&admin],
     );
-    assert!(r_ok.is_ok(), "admin valid ConfigurePermissionlessResolve should succeed: {r_ok:?}");
+    assert!(
+        r_ok.is_ok(),
+        "admin valid ConfigurePermissionlessResolve should succeed: {r_ok:?}"
+    );
     let cfg = env.market_state().0;
     assert_eq!(
-        cfg.permissionless_resolve_stale_slots,
-        1_000,
+        cfg.permissionless_resolve_stale_slots, 1_000,
         "valid timer must be stored"
     );
     assert_eq!(
@@ -52165,30 +52539,59 @@ fn v16_attack_live_backing_withdraw_rejects_exposed_target_effective_lag() {
     let short_portfolio = env.create_portfolio(&short_owner);
     env.deposit(&long_owner, long_portfolio, 1_000_000_000);
     env.deposit(&short_owner, short_portfolio, 1_000_000_000);
-    env.trade_with_cu(&long_owner, long_portfolio, &short_owner, short_portfolio, POS_SCALE as i128, INITIAL_MARK, 0);
+    env.trade_with_cu(
+        &long_owner,
+        long_portfolio,
+        &short_owner,
+        short_portfolio,
+        POS_SCALE as i128,
+        INITIAL_MARK,
+        0,
+    );
 
     // NON-VACUOUS: while healthy (no lag), the same backing withdrawal SUCCEEDS.
     let admin = env.admin.insecure_clone();
     let dest = env.token_account(admin.pubkey(), 0);
     env.svm.expire_blockhash();
     env.withdraw_backing_bucket_to_admin_token_with_cu(dest, 0, 100);
-    let backing_after_healthy = env.market_state().1.source_backing_buckets[0].fresh_unliened_backing_num;
-    assert!(backing_after_healthy < backing0, "healthy backing withdrawal works (gate open when healthy)");
+    let backing_after_healthy =
+        env.market_state().1.source_backing_buckets[0].fresh_unliened_backing_num;
+    assert!(
+        backing_after_healthy < backing0,
+        "healthy backing withdrawal works (gate open when healthy)"
+    );
 
     // Adverse mark move + crank -> exposed target/effective lag.
     env.svm.warp_to_slot(2);
     env.push_auth_mark_with_cu(2, TARGET_MARK);
-    env.crank(long_portfolio, ProgInstruction::PermissionlessCrank {
-        action: 0, asset_index: 0, now_slot: 2, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0,
-    });
+    env.crank(
+        long_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 2,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+    );
     let g = env.market_state().1;
-    assert_ne!(g.assets[0].raw_oracle_target_price, g.assets[0].effective_price, "real target/effective lag created");
+    assert_ne!(
+        g.assets[0].raw_oracle_target_price, g.assets[0].effective_price,
+        "real target/effective lag created"
+    );
 
     // ATTACK: withdraw backing during the exposed lag -> must REJECT (same health gate as insurance).
     env.svm.expire_blockhash();
     let r = send_tx(
-        &mut env.svm, env.program_id, &env.payer,
-        ProgInstruction::WithdrawBackingBucket { domain: 0, amount: 100 },
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: 100,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -52199,7 +52602,10 @@ fn v16_attack_live_backing_withdraw_rejects_exposed_target_effective_lag() {
         ],
         &[&admin],
     );
-    assert!(r.is_err(), "live WithdrawBackingBucket must reject while its exposed asset has target/effective lag");
+    assert!(
+        r.is_err(),
+        "live WithdrawBackingBucket must reject while its exposed asset has target/effective lag"
+    );
     assert_eq!(
         env.market_state().1.source_backing_buckets[0].fresh_unliened_backing_num,
         backing_after_healthy,
@@ -52220,7 +52626,11 @@ fn v16_attack_asset_activation_cooldown_enforced() {
 
     // Append at `first` (slot 5) -> sets last_asset_activation_slot = 5, grows slots to first+1.
     env.activate_asset(first, 5, price);
-    assert_eq!(env.market_state().1.config.max_market_slots as u16, first + 1, "first append grew slots");
+    assert_eq!(
+        env.market_state().1.config.max_market_slots as u16,
+        first + 1,
+        "first append grew slots"
+    );
 
     let metas = vec![
         AccountMeta::new(admin.pubkey(), true),
@@ -52239,8 +52649,18 @@ fn v16_attack_asset_activation_cooldown_enforced() {
 
     // ATTACK: append the NEXT asset in the SAME slot 5 -> elapsed 0 < cooldown(1) -> reject (anti-churn).
     env.svm.expire_blockhash();
-    let r_same = send_tx(&mut env.svm, env.program_id, &env.payer, ix(first + 1, 5), metas.clone(), &[&admin]);
-    assert!(r_same.is_err(), "same-slot activation within the cooldown must reject");
+    let r_same = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ix(first + 1, 5),
+        metas.clone(),
+        &[&admin],
+    );
+    assert!(
+        r_same.is_err(),
+        "same-slot activation within the cooldown must reject"
+    );
     assert_eq!(
         env.market_state().1.config.max_market_slots as u16,
         first + 1,
@@ -52250,8 +52670,18 @@ fn v16_attack_asset_activation_cooldown_enforced() {
     // After the cooldown (>= 1 slot elapsed), the same activation succeeds.
     env.svm.warp_to_slot(6);
     env.svm.expire_blockhash();
-    let r_after = send_tx(&mut env.svm, env.program_id, &env.payer, ix(first + 1, 6), metas, &[&admin]);
-    assert!(r_after.is_ok(), "activation after the cooldown should succeed: {r_after:?}");
+    let r_after = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ix(first + 1, 6),
+        metas,
+        &[&admin],
+    );
+    assert!(
+        r_after.is_ok(),
+        "activation after the cooldown should succeed: {r_after:?}"
+    );
     assert_eq!(
         env.market_state().1.config.max_market_slots as u16,
         first + 2,
@@ -52412,7 +52842,7 @@ fn v16_attack_convert_released_pnl_rejects_when_resolve_matured() {
         );
     }
     assert!(
-        env.portfolio_state(stale).pnl > 0,
+        env.portfolio_state(stale).pnl.get() > 0,
         "stale-path setup must have real released PnL to convert"
     );
 
@@ -52424,7 +52854,7 @@ fn v16_attack_convert_released_pnl_rejects_when_resolve_matured() {
         CUSTODY_CU_LIMIT,
     );
     assert_eq!(
-        env.portfolio_state(fresh).capital,
+        env.portfolio_state(fresh).capital.get(),
         RELEASED,
         "fresh conversion proves the staged PnL is actually convertible"
     );
@@ -52465,8 +52895,11 @@ fn v16_attack_convert_released_pnl_rejects_when_resolve_matured() {
         "rejected stale ConvertReleasedPnl moves no custody"
     );
     let stale_state_after = env.portfolio_state(stale);
-    assert_eq!(stale_state_after.capital, stale_state_before.capital);
-    assert_eq!(stale_state_after.pnl, stale_state_before.pnl);
+    assert_eq!(
+        stale_state_after.capital.get(),
+        stale_state_before.capital.get()
+    );
+    assert_eq!(stale_state_after.pnl.get(), stale_state_before.pnl.get());
 
     env.svm.expire_blockhash();
     let resolve = env.send(
@@ -52500,7 +52933,13 @@ fn v16_attack_withdraw_rejected_when_resolve_matured() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0, asset_index: 0, now_slot: 3, funding_rate_e9: 0, close_q: 0, fee_bps: 0, recovery_reason: 0,
+            action: 0,
+            asset_index: 0,
+            now_slot: 3,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -52513,7 +52952,11 @@ fn v16_attack_withdraw_rejected_when_resolve_matured() {
     // NON-VACUOUS: while the oracle is fresh (slot 4, 1 < 5 stale) the same withdraw SUCCEEDS.
     env.svm.warp_to_slot(4);
     let (d, _) = env.withdraw_with_cu(&owner, p, 100_000);
-    assert_eq!(env.token_amount(d), 100_000, "fresh-oracle withdraw succeeds (non-vacuous)");
+    assert_eq!(
+        env.token_amount(d),
+        100_000,
+        "fresh-oracle withdraw succeeds (non-vacuous)"
+    );
 
     // Warp far past the stale threshold -> market is resolve-matured.
     env.svm.warp_to_slot(40);
@@ -52532,7 +52975,10 @@ fn v16_attack_withdraw_rejected_when_resolve_matured() {
         ],
         &[&owner],
     );
-    assert!(r.is_err(), "withdraw must reject once the market is resolve-matured (#66 solvency gate)");
+    assert!(
+        r.is_err(),
+        "withdraw must reject once the market is resolve-matured (#66 solvency gate)"
+    );
 }
 
 // security.md sweep - stale Withdraw legacy realloc rollback (#5/#30/#44/#48):
@@ -52569,7 +53015,7 @@ fn v16_attack_stale_withdraw_rolls_back_legacy_realloc_and_signed_transfer() {
         "fresh withdraw grows legacy portfolio storage before debiting"
     );
     assert_eq!(
-        env.portfolio_state(fresh).capital,
+        env.portfolio_state(fresh).capital.get(),
         150_000,
         "fresh legacy withdraw debits exactly once"
     );
@@ -53500,11 +53946,11 @@ fn v16_attack_sync_maintenance_rejects_when_resolve_matured() {
     env.svm.warp_to_slot(4);
     env.sync_maintenance_fee_with_cu(portfolio, None, 4);
     assert_eq!(
-        env.portfolio_state(portfolio).last_fee_slot,
+        env.portfolio_state(portfolio).last_fee_slot.get(),
         4,
         "fresh maintenance sync advanced the fee slot"
     );
-    let fresh_capital = env.portfolio_state(portfolio).capital;
+    let fresh_capital = env.portfolio_state(portfolio).capital.get();
     assert!(
         fresh_capital < 100_000,
         "fresh maintenance sync charged capital"
@@ -53594,7 +54040,11 @@ fn v16_attack_stale_maintenance_rolls_back_legacy_cranker_reallocs() {
         env.svm.set_account(portfolio, legacy).unwrap();
     }
     let fresh_cu = env.sync_maintenance_fee_with_cu(fresh_payer, Some(fresh_cranker), 4);
-    assert_cu_within("fresh legacy SyncMaintenanceFee", fresh_cu, CUSTODY_CU_LIMIT);
+    assert_cu_within(
+        "fresh legacy SyncMaintenanceFee",
+        fresh_cu,
+        CUSTODY_CU_LIMIT,
+    );
     assert_eq!(
         env.svm.get_account(&fresh_payer).unwrap().data.len(),
         env.portfolio_account_len,
@@ -53605,9 +54055,9 @@ fn v16_attack_stale_maintenance_rolls_back_legacy_cranker_reallocs() {
         env.portfolio_account_len,
         "fresh maintenance sync grows the legacy cranker portfolio"
     );
-    assert_eq!(env.portfolio_state(fresh_payer).last_fee_slot, 4);
+    assert_eq!(env.portfolio_state(fresh_payer).last_fee_slot.get(), 4);
     assert!(
-        env.portfolio_state(fresh_cranker).capital > 0,
+        env.portfolio_state(fresh_cranker).capital.get() > 0,
         "fresh maintenance sync credits the cranker reward"
     );
 
@@ -53735,7 +54185,10 @@ fn v16_attack_forfeit_recovery_leg_rejects_when_resolve_matured() {
     });
     let (_, recovery_group) = env.market_state();
     assert_eq!(recovery_group.mode, MarketModeV16::Live);
-    assert_eq!(recovery_group.assets[0].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(
+        recovery_group.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
 
     env.svm.warp_to_slot(4);
     let fresh_cu = env.forfeit_recovery_leg_with_cu(&fresh_long_owner, fresh_long, 0, 1);
@@ -53849,7 +54302,10 @@ fn v16_attack_rebalance_reduce_rejects_when_resolve_matured() {
     // Non-vacuous control: while fresh, the same owner can reduce part of their position.
     env.svm.warp_to_slot(4);
     env.rebalance_reduce_with_cu(&long_owner, long, 0, POS_SCALE / 4);
-    let remaining = env.portfolio_state(long).legs[0].basis_pos_q.unsigned_abs();
+    let remaining = env.portfolio_state(long).legs[0]
+        .basis_pos_q
+        .get()
+        .unsigned_abs();
     assert!(
         remaining > 0 && remaining < POS_SCALE,
         "fresh RebalanceReduce partially reduced the position"
@@ -53934,11 +54390,12 @@ fn v16_attack_cure_and_cancel_close_rejects_when_resolve_matured() {
     env.cure_and_cancel_close_with_cu(&fresh_owner, fresh, fresh_source, 20);
     let fresh_after = env.portfolio_state(fresh);
     assert!(
-        fresh_after.close_progress.canceled,
+        close_progress(&fresh_after).canceled,
         "fresh CureAndCancelClose canceled close progress"
     );
     assert_eq!(
-        fresh_after.capital, 120,
+        fresh_after.capital.get(),
+        120,
         "fresh CureAndCancelClose credited the optional deposit"
     );
     assert_eq!(
@@ -54294,10 +54751,18 @@ fn v16_attack_live_domain_withdrawals_reject_when_resolve_matured() {
 fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
     let mut env = V16CuEnv::new();
     env.configure_auth_mark_with_cu(0, 100); // asset 0 auth-mark, oracle_authority = admin
-    // Activate asset 1 with a DISTINCT oracle_authority A1 (a real per-asset authority).
+                                             // Activate asset 1 with a DISTINCT oracle_authority A1 (a real per-asset authority).
     let a1 = Keypair::new();
     env.ensure_signer_account(a1.pubkey());
-    env.activate_asset_with_authorities(1, 1, 100, a1.pubkey(), a1.pubkey(), a1.pubkey(), a1.pubkey());
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        a1.pubkey(),
+        a1.pubkey(),
+        a1.pubkey(),
+        a1.pubkey(),
+    );
 
     // ATTACK: A1 (asset-1's oracle_authority) pushes ASSET 0's mark -> reject (per-asset isolation).
     env.svm.warp_to_slot(2);
@@ -54306,12 +54771,26 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 2, mark_e6: 9_999_999 },
-        vec![AccountMeta::new(a1.pubkey(), true), AccountMeta::new(env.market, false)],
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 9_999_999,
+        },
+        vec![
+            AccountMeta::new(a1.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
         &[&a1],
     );
-    assert!(r.is_err(), "asset-1's oracle_authority must NOT push asset-0's mark (per-asset isolation)");
-    assert_eq!(env.market_state().1.assets[0].effective_price, 100, "asset-0 mark unchanged by cross-asset push");
+    assert!(
+        r.is_err(),
+        "asset-1's oracle_authority must NOT push asset-0's mark (per-asset isolation)"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        100,
+        "asset-0 mark unchanged by cross-asset push"
+    );
 
     // CONTROL: asset-0's own authority (admin) pushes asset 0 -> accepted (proves the rejection was the
     // per-asset authority gate, not an unrelated failure).
@@ -54321,8 +54800,15 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 2, mark_e6: 150 },
-        vec![AccountMeta::new(admin.pubkey(), true), AccountMeta::new(env.market, false)],
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 150,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
         &[&admin],
     );
     assert!(ok.is_ok(), "asset-0's own authority pushes asset-0 (proves the rejection was the per-asset gate): {ok:?}");
@@ -54684,7 +55170,6 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
     }
 }
 
-
 // ===== Integrated novel coverage distilled from PR #125 and PR #114 (deduped vs the 485 existing tests) =====
 // [from pr125]
 // LoF sweep — deposit/withdraw amount > u64::MAX must reject, never truncate (SOL-014). The instruction
@@ -54704,7 +55189,7 @@ fn v16_attack_deposit_withdraw_amount_over_u64_max_rejects_no_truncation() {
 
     let over: u128 = u64::MAX as u128 + 1; // (over as u64) == 0 — the truncation trap
     let (_, g0) = env.market_state();
-    let cap0 = env.portfolio_state(p).capital;
+    let cap0 = env.portfolio_state(p).capital.get();
 
     // DEPOSIT over u64::MAX: must reject before any engine credit / token pull.
     let src = env.token_account(owner.pubkey(), 1_000);
@@ -54721,13 +55206,24 @@ fn v16_attack_deposit_withdraw_amount_over_u64_max_rejects_no_truncation() {
         ],
         &[&owner],
     );
-    assert!(r_dep.is_err(), "deposit of amount > u64::MAX must reject (no truncation credit)");
+    assert!(
+        r_dep.is_err(),
+        "deposit of amount > u64::MAX must reject (no truncation credit)"
+    );
     assert!(
         r_dep.unwrap_err().contains("Custom(9)"),
         "over-u64 deposit must be InvalidInstruction (Custom 9)"
     );
-    assert_eq!(env.token_amount(src), 1_000, "rejected over-u64 deposit pulled no tokens");
-    assert_eq!(env.portfolio_state(p).capital, cap0, "no engine credit minted by truncation");
+    assert_eq!(
+        env.token_amount(src),
+        1_000,
+        "rejected over-u64 deposit pulled no tokens"
+    );
+    assert_eq!(
+        env.portfolio_state(p).capital.get(),
+        cap0,
+        "no engine credit minted by truncation"
+    );
     assert_eq!(env.market_state().1.c_tot, g0.c_tot, "c_tot unchanged");
 
     // WITHDRAW over u64::MAX: must also reject before any engine debit / token transfer.
@@ -54746,13 +55242,24 @@ fn v16_attack_deposit_withdraw_amount_over_u64_max_rejects_no_truncation() {
         ],
         &[&owner],
     );
-    assert!(r_wd.is_err(), "withdraw of amount > u64::MAX must reject (no truncation debit)");
+    assert!(
+        r_wd.is_err(),
+        "withdraw of amount > u64::MAX must reject (no truncation debit)"
+    );
     assert!(
         r_wd.unwrap_err().contains("Custom(9)"),
         "over-u64 withdraw must be InvalidInstruction (Custom 9)"
     );
-    assert_eq!(env.token_amount(dest), 0, "rejected over-u64 withdraw delivered nothing");
-    assert_eq!(env.portfolio_state(p).capital, cap0, "capital unchanged by rejected over-u64 withdraw");
+    assert_eq!(
+        env.token_amount(dest),
+        0,
+        "rejected over-u64 withdraw delivered nothing"
+    );
+    assert_eq!(
+        env.portfolio_state(p).capital.get(),
+        cap0,
+        "capital unchanged by rejected over-u64 withdraw"
+    );
 }
 
 // [from pr125]
@@ -54791,7 +55298,10 @@ fn v16_attack_crank_liquidation_fee_bps_not_caller_injectable() {
         ],
         &[],
     );
-    assert!(r_fee.is_err(), "Liquidate crank with a caller-supplied fee_bps must reject");
+    assert!(
+        r_fee.is_err(),
+        "Liquidate crank with a caller-supplied fee_bps must reject"
+    );
     assert!(
         r_fee.unwrap_err().contains("Custom(9)"),
         "caller fee_bps injection must reject as InvalidInstruction (Custom 9), the parameter gate"
@@ -54869,8 +55379,16 @@ fn v16_attack_swap_on_single_mint_market_rejects_no_secondary() {
         "no-secondary swap must reject as InvalidMint (Custom 10)"
     );
     // Nothing moved: the rejection is before any transfer.
-    assert_eq!(env.token_amount(a), src_before, "no primary pulled by the rejected swap");
-    assert_eq!(env.token_amount(env.vault), vault_before, "primary vault unchanged");
+    assert_eq!(
+        env.token_amount(a),
+        src_before,
+        "no primary pulled by the rejected swap"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        vault_before,
+        "primary vault unchanged"
+    );
 }
 
 // [from pr125]
@@ -54920,7 +55438,10 @@ fn v16_attack_pyth_partial_verification_rejected() {
 
     // FULL verification (1) -> configures (proves the price is otherwise valid, isolating the gate).
     let (full_ok, full_err) = configure(1);
-    assert!(full_ok, "a FULLY-verified Pyth price configures: {full_err:?}");
+    assert!(
+        full_ok,
+        "a FULLY-verified Pyth price configures: {full_err:?}"
+    );
 
     // PARTIAL verification (0) -> reject: the price was not fully verified by the Pyth receiver.
     let (partial_ok, partial_err) = configure(0);
@@ -54990,7 +55511,10 @@ fn v16_attack_pyth_bad_discriminator_or_short_account_rejected() {
 
     // Corrupted anchor discriminator -> rejected before the price is parsed (type confusion blocked).
     let (disc_ok, disc_err) = configure(&|d| d[0] ^= 0xff);
-    assert!(!disc_ok, "a Pyth account with a wrong discriminator must reject");
+    assert!(
+        !disc_ok,
+        "a Pyth account with a wrong discriminator must reject"
+    );
     assert!(
         disc_err.unwrap().contains("Custom(26)"),
         "bad Pyth discriminator must be OracleInvalid (Custom 26)"
@@ -55051,7 +55575,7 @@ fn v16_attack_liquidation_full_cranker_share_takes_whole_fee_no_mint() {
             &[],
         );
     }
-    let c0 = env.portfolio_state(c).capital;
+    let c0 = env.portfolio_state(c).capital.get();
     let (_, g0) = env.market_state();
 
     // Liquidate the insolvent short, crediting the cranker portfolio.
@@ -55080,20 +55604,35 @@ fn v16_attack_liquidation_full_cranker_share_takes_whole_fee_no_mint() {
     assert!(r.is_ok(), "liquidation with a fee should proceed: {r:?}");
 
     let (_, g1) = env.market_state();
-    let cranker_reward = env.portfolio_state(c).capital as i128 - c0 as i128;
+    let cranker_reward = env.portfolio_state(c).capital.get() as i128 - c0 as i128;
     let ins_delta = g1.insurance as i128 - g0.insurance as i128;
     let total_fee = cranker_reward + ins_delta;
 
-    assert!(cranker_reward > 0, "cranker received a real reward (non-vacuous): {cranker_reward}");
+    assert!(
+        cranker_reward > 0,
+        "cranker received a real reward (non-vacuous): {cranker_reward}"
+    );
     assert!(total_fee > 0, "a liquidation fee was charged");
     // 100% share: the cranker takes the ENTIRE fee; insurance gets nothing.
-    assert_eq!(ins_delta, 0, "100%% share: no liquidation fee retained to insurance");
-    assert_eq!(cranker_reward, total_fee, "100%% share: cranker reward == the whole fee");
+    assert_eq!(
+        ins_delta, 0,
+        "100%% share: no liquidation fee retained to insurance"
+    );
+    assert_eq!(
+        cranker_reward, total_fee,
+        "100%% share: cranker reward == the whole fee"
+    );
     // The reward never exceeds the fee (no profit/mint beyond what was charged).
-    assert!(cranker_reward <= total_fee, "cranker reward bounded by the fee");
+    assert!(
+        cranker_reward <= total_fee,
+        "cranker reward bounded by the fee"
+    );
     // The fee is internal (liquidated account -> cranker), minting no vault tokens.
     assert_eq!(g1.vault, g0.vault, "liquidation fee mints no vault tokens");
-    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation through 100%-share liquidation");
+    assert!(
+        g1.vault >= g1.c_tot + g1.insurance,
+        "senior conservation through 100%-share liquidation"
+    );
 }
 
 // [from pr125]
@@ -55128,10 +55667,17 @@ fn v16_attack_sync_maintenance_full_cranker_share_conserves_no_insurance_underfl
     let cranker = env.portfolio_state(cranker_portfolio);
 
     // Same fee as the 40%-share test (the fee does not depend on the share): 580.
-    let fee = 100_000_000 - payer.capital;
-    assert_eq!(fee, 580, "maintenance fee charged is the same regardless of share");
+    let fee = 100_000_000 - payer.capital.get();
+    assert_eq!(
+        fee, 580,
+        "maintenance fee charged is the same regardless of share"
+    );
     // 100% share -> the cranker receives the ENTIRE fee...
-    assert_eq!(cranker.capital, 580, "cranker receives the full fee at 100% share");
+    assert_eq!(
+        cranker.capital.get(),
+        580,
+        "cranker receives the full fee at 100% share"
+    );
     // ...and NOTHING is retained to insurance (and no underflow: insurance is unchanged, not negative).
     assert_eq!(
         group.insurance, insurance_before,
@@ -55139,7 +55685,7 @@ fn v16_attack_sync_maintenance_full_cranker_share_conserves_no_insurance_underfl
     );
     // Conservation: the payer's debit equals exactly what the cranker received (insurance net zero).
     assert_eq!(
-        cranker.capital + (group.insurance - insurance_before),
+        cranker.capital.get() + (group.insurance - insurance_before),
         fee,
         "fee fully conserved: cranker reward + retained insurance == charged"
     );
@@ -55166,7 +55712,7 @@ fn v16_attack_rebalance_reduce_overshoot_clamps_to_flat_no_flip() {
     env.deposit(&lb, pb, 1_000_000);
     // la opens a LONG of POS_SCALE vs lb's short.
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
-    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q;
+    let basis0 = env.portfolio_state(pa).legs[0].basis_pos_q.get();
     assert!(basis0 > 0, "la opened a long position of POS_SCALE");
 
     // The owner force-reduces with reduce_q FAR larger than the position (3x). The clamp must cap the
@@ -55184,22 +55730,31 @@ fn v16_attack_rebalance_reduce_overshoot_clamps_to_flat_no_flip() {
         ],
         &[&la],
     );
-    assert!(r.is_ok(), "over-sized owner reduce should succeed (clamped): {r:?}");
+    assert!(
+        r.is_ok(),
+        "over-sized owner reduce should succeed (clamped): {r:?}"
+    );
 
-    let after = env.portfolio_state(pa).legs[0].basis_pos_q;
+    let after = env.portfolio_state(pa).legs[0].basis_pos_q.get();
     assert_eq!(
         after, 0,
         "over-reduce clamps to FLAT (0), never flips the long into a short"
     );
     // Defense-in-depth: the sign was never inverted (no opposite-side risk opened).
-    assert!(after >= 0, "position must not become negative (no backdoor short open)");
+    assert!(
+        after >= 0,
+        "position must not become negative (no backdoor short open)"
+    );
 
     let (_, g1) = env.market_state();
     assert_eq!(
         g1.assets[0].oi_eff_long_q, g1.assets[0].oi_eff_short_q,
         "OI still balanced after the clamped reduce"
     );
-    assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation holds");
+    assert!(
+        g1.vault >= g1.c_tot + g1.insurance,
+        "senior conservation holds"
+    );
 }
 
 // [from pr125]
@@ -55219,7 +55774,7 @@ fn v16_attack_permissionless_settle_b_on_healthy_account_is_safe_noop() {
     env.deposit(&owner, p, 1_000); // flat, solvent — nothing to settle
 
     let (_, g0) = env.market_state();
-    let cap0 = env.portfolio_state(p).capital;
+    let cap0 = env.portfolio_state(p).capital.get();
     assert_eq!(cap0, 1_000, "account funded and flat");
 
     // A third party permissionlessly cranks SettleB (action=2) against the healthy account.
@@ -55245,15 +55800,26 @@ fn v16_attack_permissionless_settle_b_on_healthy_account_is_safe_noop() {
     // Whether the engine treats "nothing to settle" as a no-op (Ok) or NonProgress (Err), the invariant is
     // the same: NO value moved and NO state corruption.
     let (_, g1) = env.market_state();
-    assert_eq!(env.portfolio_state(p).capital, cap0, "SettleB must not touch a healthy account's capital");
+    assert_eq!(
+        env.portfolio_state(p).capital.get(),
+        cap0,
+        "SettleB must not touch a healthy account's capital"
+    );
     assert_eq!(g1.vault, g0.vault, "SettleB must not move the market vault");
     assert_eq!(g1.c_tot, g0.c_tot, "SettleB must not move c_tot");
-    assert_eq!(g1.insurance, g0.insurance, "SettleB must not mint/burn insurance (no cranker reward)");
+    assert_eq!(
+        g1.insurance, g0.insurance,
+        "SettleB must not mint/burn insurance (no cranker reward)"
+    );
 
     // Liveness: the owner can still withdraw their full capital — the permissionless SettleB did not
     // freeze or trap the account.
     let (dest, _) = env.withdraw_with_cu(&owner, p, 1_000);
-    assert_eq!(env.token_amount(dest), 1_000, "account fully withdrawable after a permissionless SettleB");
+    assert_eq!(
+        env.token_amount(dest),
+        1_000,
+        "account fully withdrawable after a permissionless SettleB"
+    );
 }
 
 // [from pr125]
@@ -55329,14 +55895,21 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     env.svm.warp_to_slot(2);
     env.svm.expire_blockhash();
     let r0 = env.send(
-        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 2, mark_e6: 110 },
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 110,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
         ],
         &[&admin],
     );
-    assert!(r0.is_ok(), "admin (oracle authority) can push before rotation: {r0:?}");
+    assert!(
+        r0.is_ok(),
+        "admin (oracle authority) can push before rotation: {r0:?}"
+    );
 
     // Rotate the ORACLE authority admin -> newauth. admin signs as asset_admin; newauth co-signs (proves
     // control of the incoming key).
@@ -55356,20 +55929,30 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
         ],
         &[&admin, &newauth],
     );
-    assert!(rot.is_ok(), "asset_admin rotates the oracle authority: {rot:?}");
+    assert!(
+        rot.is_ok(),
+        "asset_admin rotates the oracle authority: {rot:?}"
+    );
 
     env.svm.warp_to_slot(3);
     // OLD authority (admin) is now REVOKED: its push must reject as Unauthorized.
     env.svm.expire_blockhash();
     let r_old = env.send(
-        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 3, mark_e6: 120 },
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 3,
+            mark_e6: 120,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
         ],
         &[&admin],
     );
-    assert!(r_old.is_err(), "the OLD oracle authority must be revoked after rotation");
+    assert!(
+        r_old.is_err(),
+        "the OLD oracle authority must be revoked after rotation"
+    );
     assert!(
         r_old.unwrap_err().contains("Custom(8)"),
         "revoked old authority push must be Unauthorized (Custom 8)"
@@ -55378,14 +55961,21 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     // NEW authority can push: rotation GRANTED control.
     env.svm.expire_blockhash();
     let r_new = env.send(
-        ProgInstruction::PushAuthMark { asset_index: 0, now_slot: 3, mark_e6: 120 },
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 3,
+            mark_e6: 120,
+        },
         vec![
             AccountMeta::new(newauth.pubkey(), true),
             AccountMeta::new(env.market, false),
         ],
         &[&newauth],
     );
-    assert!(r_new.is_ok(), "the NEW oracle authority can push after rotation: {r_new:?}");
+    assert!(
+        r_new.is_ok(),
+        "the NEW oracle authority can push after rotation: {r_new:?}"
+    );
 }
 
 // [from pr114]
@@ -55716,14 +56306,15 @@ fn v16_attack_claim_resolved_topup_rejects_delegated_vault_without_burning_recei
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: 100 * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: 100,
-            paid_effective: 40,
-            finalized: false,
-        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         env.svm.set_account(env.market, market_account).unwrap();
@@ -55803,9 +56394,9 @@ fn v16_attack_claim_resolved_topup_rejects_delegated_vault_without_burning_recei
         "destination receives nothing on rejected delegated-vault top-up"
     );
     let account = env.portfolio_state(portfolio);
-    assert_eq!(account.resolved_payout_receipt.paid_effective, 40);
+    assert_eq!(resolved_receipt(&account).paid_effective, 40);
     assert!(
-        !account.resolved_payout_receipt.finalized,
+        !resolved_receipt(&account).finalized,
         "receipt remains claimable after delegated-vault rejection"
     );
 
@@ -55834,8 +56425,8 @@ fn v16_attack_claim_resolved_topup_rejects_delegated_vault_without_burning_recei
         "same top-up succeeds after the vault is restored clean"
     );
     let account = env.portfolio_state(portfolio);
-    assert_eq!(account.resolved_payout_receipt.paid_effective, 100);
-    assert!(account.resolved_payout_receipt.finalized);
+    assert_eq!(resolved_receipt(&account).paid_effective, 100);
+    assert!(resolved_receipt(&account).finalized);
     assert_eq!(env.market_state().1.vault, 0);
 }
 
@@ -56317,7 +56908,10 @@ fn v16_attack_close_slab_rejects_closable_secondary_vault_before_reclaim() {
         secondary_vault_before,
         "closable secondary reserve remains untouched and recoverable"
     );
-    assert_eq!(env.svm.get_account(&primary_dest).unwrap(), primary_dest_before);
+    assert_eq!(
+        env.svm.get_account(&primary_dest).unwrap(),
+        primary_dest_before
+    );
     assert_eq!(
         env.svm.get_account(&secondary_dest).unwrap(),
         secondary_dest_before
@@ -56452,7 +57046,7 @@ fn v16_attack_hybrid_liquidation_bad_reward_tail_rolls_back_oracle_update() {
 
     let payer_owner = env.payer.insecure_clone();
     let valid_reward = env.create_portfolio(&payer_owner);
-    let reward_cap_before = env.portfolio_state(valid_reward).capital;
+    let reward_cap_before = env.portfolio_state(valid_reward).capital.get();
     env.svm.expire_blockhash();
     let accepted = env.send(
         ProgInstruction::PermissionlessCrank {
@@ -56478,7 +57072,7 @@ fn v16_attack_hybrid_liquidation_bad_reward_tail_rolls_back_oracle_update() {
         "same hybrid liquidation succeeds with a valid reward portfolio: {accepted:?}"
     );
     assert!(
-        env.portfolio_state(valid_reward).capital > reward_cap_before,
+        env.portfolio_state(valid_reward).capital.get() > reward_cap_before,
         "valid reward portfolio receives the cranker reward"
     );
     let (cfg, group) = env.market_state();
@@ -56736,12 +57330,10 @@ fn v16_attack_update_authority_handoff_rekeys_secondary_swap_authority() {
         )
         .unwrap();
 
-    let stale_primary_source =
-        env.token_account_for_mint(env.mint, old_marketauth.pubkey(), 20);
+    let stale_primary_source = env.token_account_for_mint(env.mint, old_marketauth.pubkey(), 20);
     let stale_secondary_dest =
         env.token_account_for_mint(secondary_mint, old_marketauth.pubkey(), 0);
-    let fresh_primary_source =
-        env.token_account_for_mint(env.mint, new_marketauth.pubkey(), 20);
+    let fresh_primary_source = env.token_account_for_mint(env.mint, new_marketauth.pubkey(), 20);
     let fresh_secondary_dest =
         env.token_account_for_mint(secondary_mint, new_marketauth.pubkey(), 0);
 
@@ -57086,16 +57678,26 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         )
     };
     let r = topup(&mut env, 0);
-    assert!(r.is_err(), "topup with lapsed expiry_slot=0 must reject: {r:?}");
+    assert!(
+        r.is_err(),
+        "topup with lapsed expiry_slot=0 must reject: {r:?}"
+    );
     assert_eq!(
         env.token_amount(env.vault),
         vault0,
         "rejected lapsed-expiry topup pulled no tokens into the vault"
     );
-    assert_eq!(env.token_amount(source), 50, "source balance intact after reject");
+    assert_eq!(
+        env.token_amount(source),
+        50,
+        "source balance intact after reject"
+    );
     // control: a future expiry is accepted and credits exactly the backing.
     let r_ok = topup(&mut env, 10_000);
-    assert!(r_ok.is_ok(), "future-expiry backing topup must succeed: {r_ok:?}");
+    assert!(
+        r_ok.is_ok(),
+        "future-expiry backing topup must succeed: {r_ok:?}"
+    );
     assert_eq!(
         env.token_amount(env.vault),
         vault0 + 50,
