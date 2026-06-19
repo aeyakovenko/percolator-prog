@@ -10642,6 +10642,38 @@ fn v16_attack_claim_resolved_topup_rejects_invalid_final_market_shape() {
     );
 }
 
+// Stale resolve is an unsigned terminal transition. It must not resolve the market through a bad
+// final shape and strand users in a malformed wind-down state.
+#[test]
+fn v16_attack_resolve_stale_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+    env.svm.warp_to_slot(40);
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let before_market = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "ResolveStalePermissionless must reject invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_market,
+        "failed stale resolve must roll back market data"
+    );
+}
+
 #[test]
 fn v16_bpf_cranker_reward_liquidation_rejects_invalid_shape_without_paying_reward() {
     let mut env = V16CuEnv::new();
