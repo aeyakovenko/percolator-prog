@@ -70552,7 +70552,7 @@ fn v16_bpf_10m_market_batch_14_high_tail_assets_stays_bounded() {
 
     // The no-CPI path is the bounded max-shape public path here. A matching 14-leg CPI probe
     // currently exceeds the 1.4M CU meter on bbe745a; keep the adjacent 13-leg high-tail CPI
-    // frontier covered without pretending the full CPI shape is bounded.
+    // frontier covered with the maximum matcher tail without pretending the full CPI shape is bounded.
     const CPI_TAIL_LEGS: usize = 13;
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
@@ -70573,31 +70573,57 @@ fn v16_bpf_10m_market_batch_14_high_tail_assets_stays_bounded() {
             limit_price: 0,
         })
         .collect();
+    let max_matcher_tail: Vec<Pubkey> = (0..percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS)
+        .map(|_| {
+            let key = Pubkey::new_unique();
+            env.svm
+                .set_account(
+                    key,
+                    Account {
+                        lamports: 1_000_000_000,
+                        data: vec![0u8; 8],
+                        owner: Pubkey::default(),
+                        executable: false,
+                        rent_epoch: 0,
+                    },
+                )
+                .unwrap();
+            key
+        })
+        .collect();
+    let mut cpi_metas = vec![
+        AccountMeta::new(cpi_taker.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(cpi_taker_account, false),
+        AccountMeta::new(cpi_lp_account, false),
+        AccountMeta::new_readonly(matcher_program, false),
+        AccountMeta::new(ctx, false),
+        AccountMeta::new_readonly(delegate, false),
+    ];
+    cpi_metas.extend(
+        max_matcher_tail
+            .iter()
+            .copied()
+            .map(|key| AccountMeta::new_readonly(key, false)),
+    );
 
     env.svm.expire_blockhash();
     let batch_cpi_cu = env
         .send(
             ProgInstruction::BatchTradeCpi { legs: cpi_legs },
-            vec![
-                AccountMeta::new(cpi_taker.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(cpi_taker_account, false),
-                AccountMeta::new(cpi_lp_account, false),
-                AccountMeta::new_readonly(matcher_program, false),
-                AccountMeta::new(ctx, false),
-                AccountMeta::new_readonly(delegate, false),
-            ],
+            cpi_metas,
             &[&cpi_taker],
         )
-        .expect("10MiB 13-leg high-tail BatchTradeCpi must execute");
+        .expect("10MiB 13-leg high-tail BatchTradeCpi with max matcher tail must execute");
     println!(
-        "v16 10MiB BatchTradeCpi 13 high-tail legs: assets={N}, account_len={new_len}, \
-         first_asset={}, CU={batch_cpi_cu}",
-        N - CPI_TAIL_LEGS
+        "v16 10MiB BatchTradeCpi 13 high-tail legs plus max matcher tail: \
+         assets={N}, account_len={new_len}, first_asset={}, tail_accounts={}, CU={batch_cpi_cu}",
+        N - CPI_TAIL_LEGS,
+        max_matcher_tail.len()
     );
     assert!(
         batch_cpi_cu < 1_400_000,
-        "10MiB 13-leg high-tail BatchTradeCpi CU {batch_cpi_cu} must fit the tx limit"
+        "10MiB 13-leg high-tail BatchTradeCpi with max matcher tail CU {batch_cpi_cu} must fit the tx limit"
     );
     let cpi_taker_state = env.portfolio_state(cpi_taker_account);
     assert_eq!(
