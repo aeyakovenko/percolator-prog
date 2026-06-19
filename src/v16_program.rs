@@ -195,6 +195,10 @@ pub mod state {
         pub residual_crystallized_loss_atoms_total: u128,
         pub residual_spent_principal_atoms_total: u128,
         pub residual_received_atoms_total: u128,
+        pub funding_long_paid_atoms_total: u128,
+        pub funding_long_received_atoms_total: u128,
+        pub funding_short_paid_atoms_total: u128,
+        pub funding_short_received_atoms_total: u128,
         pub source_claim_market_id: Vec<u64>,
         pub source_claim_bound_num: Vec<u128>,
         pub source_claim_liened_num: Vec<u128>,
@@ -2232,6 +2236,10 @@ pub mod state {
             core::ptr::addr_of_mut!((*ptr).residual_crystallized_loss_atoms_total).write(0);
             core::ptr::addr_of_mut!((*ptr).residual_spent_principal_atoms_total).write(0);
             core::ptr::addr_of_mut!((*ptr).residual_received_atoms_total).write(0);
+            core::ptr::addr_of_mut!((*ptr).funding_long_paid_atoms_total).write(0);
+            core::ptr::addr_of_mut!((*ptr).funding_long_received_atoms_total).write(0);
+            core::ptr::addr_of_mut!((*ptr).funding_short_paid_atoms_total).write(0);
+            core::ptr::addr_of_mut!((*ptr).funding_short_received_atoms_total).write(0);
             core::ptr::addr_of_mut!((*ptr).source_claim_market_id).write(source_claim_market_id);
             core::ptr::addr_of_mut!((*ptr).source_claim_bound_num).write(source_claim_bound_num);
             core::ptr::addr_of_mut!((*ptr).source_claim_liened_num).write(source_claim_liened_num);
@@ -2313,6 +2321,10 @@ pub mod state {
         account.residual_spent_principal_atoms_total =
             wire.residual_spent_principal_atoms_total.get();
         account.residual_received_atoms_total = wire.residual_received_atoms_total.get();
+        account.funding_long_paid_atoms_total = wire.funding_long_paid_atoms_total.get();
+        account.funding_long_received_atoms_total = wire.funding_long_received_atoms_total.get();
+        account.funding_short_paid_atoms_total = wire.funding_short_paid_atoms_total.get();
+        account.funding_short_received_atoms_total = wire.funding_short_received_atoms_total.get();
         account.fee_credits = wire.fee_credits.get();
         account.cancel_deposit_escrow = wire.cancel_deposit_escrow.get();
         account.active_bitmap = wire.active_bitmap.map(|v| v.get());
@@ -2387,6 +2399,14 @@ pub mod state {
             percolator::V16PodU128::new(account.residual_spent_principal_atoms_total);
         wire.residual_received_atoms_total =
             percolator::V16PodU128::new(account.residual_received_atoms_total);
+        wire.funding_long_paid_atoms_total =
+            percolator::V16PodU128::new(account.funding_long_paid_atoms_total);
+        wire.funding_long_received_atoms_total =
+            percolator::V16PodU128::new(account.funding_long_received_atoms_total);
+        wire.funding_short_paid_atoms_total =
+            percolator::V16PodU128::new(account.funding_short_paid_atoms_total);
+        wire.funding_short_received_atoms_total =
+            percolator::V16PodU128::new(account.funding_short_received_atoms_total);
         wire.fee_credits = percolator::V16PodI128::new(account.fee_credits);
         wire.cancel_deposit_escrow = percolator::V16PodU128::new(account.cancel_deposit_escrow);
         wire.last_fee_slot = percolator::V16PodU64::new(account.last_fee_slot);
@@ -8898,7 +8918,7 @@ pub mod processor {
         }
         let authenticated_now_slot = authenticated_slot_or_fallback(now_slot);
 
-        let sync_result = {
+        let close_after_sync = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             if group.header.mode == 0 {
@@ -8909,6 +8929,7 @@ pub mod processor {
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
 
+            let charged_total;
             if let Some(cranker_portfolio_ai) = accounts.get(2) {
                 if cranker_portfolio_ai.key == portfolio_ai.key {
                     let charged = group
@@ -8941,6 +8962,7 @@ pub mod processor {
                     portfolio
                         .validate_with_market(&group.as_view())
                         .map_err(map_v16_error)?;
+                    charged_total = charged;
                 } else {
                     let mut cranker_data = cranker_portfolio_ai.try_borrow_mut_data()?;
                     let mut cranker = state::portfolio_view_mut_for_market_slots(
@@ -8987,6 +9009,7 @@ pub mod processor {
                     cranker
                         .validate_with_market(&group.as_view())
                         .map_err(map_v16_error)?;
+                    charged_total = charged;
                 }
             } else {
                 let charged = group
@@ -9001,11 +9024,25 @@ pub mod processor {
                 portfolio
                     .validate_with_market(&group.as_view())
                     .map_err(map_v16_error)?;
+                charged_total = charged;
             }
 
-            Ok::<(), ProgramError>(())
+            let close_after_sync = if charged_total == 0 {
+                false
+            } else {
+                match group.deregister_empty_materialized_portfolio_not_atomic(
+                    &portfolio.as_view(),
+                ) {
+                    Ok(()) => true,
+                    Err(V16Error::LockActive) => false,
+                    Err(err) => return Err(map_v16_error(err)),
+                }
+            };
+            Ok::<bool, ProgramError>(close_after_sync)
         };
-        sync_result?;
+        if close_after_sync? {
+            close_portfolio_account_to_market_slab(portfolio_ai, market_ai)?;
+        }
         Ok(())
     }
 
