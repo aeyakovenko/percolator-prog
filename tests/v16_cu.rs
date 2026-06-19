@@ -77156,6 +77156,69 @@ fn v16_attack_close_slab_rejects_wrong_token_program_before_reclaim() {
 }
 
 
+// full-interface sweep: CloseSlab performs SPL vault transfers/close before the final market-rent
+// reclaim. If that last checked lamport add overflows, the whole instruction must roll back the prior
+// SPL CPIs too. This pins the late-error branch rather than another pre-CPI validation failure.
+#[test]
+fn v16_attack_close_slab_late_lamport_overflow_rolls_back_vault_cpis() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+    env.resolve();
+
+    let vault_lamports = env.svm.get_account(&env.vault).unwrap().lamports;
+    let mut admin_account = env.svm.get_account(&admin.pubkey()).unwrap();
+    admin_account.lamports = u64::MAX
+        .checked_sub(vault_lamports)
+        .expect("vault rent below u64::MAX");
+    env.svm.set_account(admin.pubkey(), admin_account).unwrap();
+
+    let primary_dest = env.token_account(admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&primary_dest).unwrap();
+    let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "CloseSlab must reject when the final market-rent reclaim overflows"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "late-overflow CloseSlab must not zero or drain the market slab"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "late-overflow CloseSlab must roll back the vault dust transfer and close_account CPI"
+    );
+    assert_eq!(
+        env.svm.get_account(&primary_dest).unwrap(),
+        dest_before,
+        "late-overflow CloseSlab must not credit the primary destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&admin.pubkey()).unwrap(),
+        admin_before,
+        "late-overflow CloseSlab must not keep vault rent or market rent"
+    );
+}
+
+
 
 
 // [from pr114]
