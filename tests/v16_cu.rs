@@ -60820,6 +60820,136 @@ fn v16_attack_permissionless_crank_auth_mark_duplicate_ignored_tail_is_cu_bounde
 }
 
 
+// Public-interface DoS sweep: Hybrid oracle cranks consume the first configured oracle accounts and
+// ignore any surplus tail accounts. A hostile cranker can still stuff duplicated readonly accounts
+// after the real oracle, so the valid oracle update must keep making progress with bounded CU.
+#[test]
+fn v16_attack_permissionless_crank_hybrid_duplicate_surplus_tail_is_cu_bounded() {
+    const UNIQUE_EXTRAS: usize = 28;
+    const CRANK_SLOT: u64 = 2;
+    const CRANK_UNIX_TS: i64 = 101;
+    let feed = [0x5au8; 32];
+
+    fn setup_hybrid(feed: [u8; 32]) -> (V16CuEnv, Pubkey, Pubkey) {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let initial = env.set_pyth_price_with_conf(&feed, 100, 0, 0, 100);
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0u8; 32], [0u8; 32]],
+            &[initial],
+            1,
+            100,
+            0,
+            0,
+            10,
+            0,
+        )
+        .expect("configure one-leg hybrid oracle");
+        let cranker_owner = Keypair::new();
+        let cranker_portfolio = env.create_portfolio(&cranker_owner);
+        set_test_clock(&mut env, CRANK_SLOT, CRANK_UNIX_TS);
+        let fresh = env.set_pyth_price_with_conf(&feed, 110, 0, 0, CRANK_UNIX_TS);
+        (env, cranker_portfolio, fresh)
+    }
+
+    let (mut baseline_env, baseline_cranker, baseline_fresh) = setup_hybrid(feed);
+    baseline_env.svm.expire_blockhash();
+    let baseline_cu = baseline_env.crank_with_oracle_tail(
+        baseline_cranker,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: CRANK_SLOT,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &[baseline_fresh],
+    );
+    let (_, baseline_after) = baseline_env.market_state();
+    assert_eq!(
+        baseline_after.assets[0].raw_oracle_target_price, 110_000_000,
+        "baseline hybrid crank applies the fresh Pyth price"
+    );
+
+    let (mut hostile_env, hostile_cranker, hostile_fresh) = setup_hybrid(feed);
+    let before = hostile_env.market_state().1;
+    let mut extras = Vec::with_capacity(UNIQUE_EXTRAS);
+    for _ in 0..UNIQUE_EXTRAS {
+        let key = Pubkey::new_unique();
+        hostile_env
+            .svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: Vec::new(),
+                    owner: solana_sdk::system_program::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        extras.push(key);
+    }
+    let mut oracle_tail = Vec::with_capacity(1 + UNIQUE_EXTRAS * 2);
+    oracle_tail.push(hostile_fresh);
+    oracle_tail.extend(extras.iter().copied());
+    oracle_tail.extend(extras.iter().rev().copied());
+
+    hostile_env.svm.expire_blockhash();
+    let hostile_cu = hostile_env.crank_with_oracle_tail(
+        hostile_cranker,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: CRANK_SLOT,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &oracle_tail,
+    );
+
+    println!(
+        "v16 PermissionlessCrank hybrid duplicate surplus tail: baseline={baseline_cu}, hostile={hostile_cu}"
+    );
+    assert!(
+        hostile_cu > baseline_cu,
+        "duplicated surplus tail must reach the deployed adapter duplicate-account path"
+    );
+    assert!(
+        hostile_cu <= baseline_cu + 100_000,
+        "duplicated hybrid surplus tail consumed {hostile_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "PermissionlessCrank hybrid duplicate surplus tail",
+        hostile_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (_, hostile_after) = hostile_env.market_state();
+    assert_eq!(
+        hostile_after.assets[0].raw_oracle_target_price, 110_000_000,
+        "surplus tail must not block the hybrid oracle update"
+    );
+    assert_eq!(hostile_after.vault, before.vault, "crank moves no custody");
+    assert_eq!(
+        hostile_after.c_tot, before.c_tot,
+        "crank cannot mint or burn capital"
+    );
+    assert_eq!(
+        hostile_after.insurance, before.insurance,
+        "surplus tail cannot create insurance or reward credit"
+    );
+}
+
+
 // Public-interface DoS sweep: reward-enabled liquidation has a distinct tail splitter from refresh:
 // when the final account is a program-owned reward portfolio, preceding accounts are treated as the
 // oracle tail. AuthMark liquidations ignore that oracle tail, so a caller can stuff duplicated benign
