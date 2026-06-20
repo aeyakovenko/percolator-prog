@@ -10306,6 +10306,7 @@ pub mod processor {
                 &vault_authority,
                 &cfg_after,
             )?;
+            verify_permissionless_payout_dest_token_account(dest_token)?;
             let payout_u64 = amount_to_u64(payout)?;
             require_token_balance(vault_token, payout_u64)?;
             let bump_arr = [bump];
@@ -10368,6 +10369,7 @@ pub mod processor {
                 &vault_authority,
                 &cfg,
             )?;
+            verify_permissionless_payout_dest_token_account(dest_token)?;
             let payout_u64 = amount_to_u64(payout)?;
             require_token_balance(vault_token, payout_u64)?;
             let bump_arr = [bump];
@@ -11906,6 +11908,16 @@ pub mod processor {
             || *vault_token_ai.key != canonical_vault_address(expected_vault_owner, &vault.mint)
         {
             return Err(PercolatorError::InvalidVaultAccount.into());
+        }
+        Ok(())
+    }
+
+    fn verify_permissionless_payout_dest_token_account(
+        dest_token_ai: &AccountInfo,
+    ) -> Result<(), ProgramError> {
+        let dest = unpack_token_account(dest_token_ai)?;
+        if dest.delegate.is_some() || dest.close_authority.is_some() {
+            return Err(PercolatorError::InvalidTokenAccount.into());
         }
         Ok(())
     }
