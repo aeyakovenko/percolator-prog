@@ -13090,6 +13090,42 @@ fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
     assert_eq!(fresh_cfg.mark_ewma_e6, 140_000);
     assert_eq!(fresh_cfg.last_good_oracle_slot, 2);
 
+    env.svm.warp_to_slot(3);
+    let market_before_missing = env.svm.get_account(&env.market).unwrap();
+    let keeper_before_missing = env.svm.get_account(&keeper_portfolio).unwrap();
+    env.svm.expire_blockhash();
+    let missing_before_soft_stale = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 3,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper_portfolio, false),
+        ],
+        &[],
+    );
+    assert!(
+        missing_before_soft_stale.is_err(),
+        "fresh hybrid crank must not silently fall back when oracle accounts are omitted"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_missing,
+        "missing pre-soft-stale oracle tail must not mutate the market"
+    );
+    assert_eq!(
+        env.svm.get_account(&keeper_portfolio).unwrap(),
+        keeper_before_missing,
+        "missing pre-soft-stale oracle tail must not mutate the keeper portfolio"
+    );
+
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
     let long_account = env.create_portfolio(&long_owner);
@@ -13138,6 +13174,35 @@ fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
     let (_, flat_group) = env.market_state();
     assert_eq!(flat_group.assets[0].oi_eff_long_q, 0);
     assert_eq!(flat_group.assets[0].oi_eff_short_q, 0);
+
+    env.svm.expire_blockhash();
+    let fallback_crank_cu = env.crank_with_oracle_tail(
+        keeper_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            action: 0,
+            asset_index: 0,
+            now_slot: 10,
+            funding_rate_e9: 0,
+            close_q: 0,
+            fee_bps: 0,
+            recovery_reason: 0,
+        },
+        &[],
+    );
+    assert_cu_within(
+        "HybridMark soft-stale missing-oracle fallback crank",
+        fallback_crank_cu,
+        CRANK_CU_LIMIT,
+    );
+    let (fallback_cfg, fallback_group) = env.market_state();
+    assert_eq!(
+        fallback_group.assets[0].effective_price, after_hours_cfg.mark_ewma_e6,
+        "soft-stale missing-oracle crank must move the flat asset to the fallback EWMA mark"
+    );
+    assert_eq!(
+        fallback_cfg.last_good_oracle_slot, fresh_cfg.last_good_oracle_slot,
+        "EWMA fallback must not pretend a fresh external oracle was observed"
+    );
 
     env.svm.warp_to_slot(11);
     let mut clock = env.svm.get_sysvar::<Clock>();
