@@ -15855,31 +15855,53 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
 
     let cranker = Keypair::new();
     env.ensure_signer_account(cranker.pubkey());
-    let settle_b_once = |env: &mut V16CuEnv| -> Result<u64, String> {
+    let ignored_tail: Vec<Pubkey> = (0..12).map(|_| Pubkey::new_unique()).collect();
+    for key in &ignored_tail {
+        env.svm
+            .set_account(
+                *key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: Vec::new(),
+                    owner: solana_sdk::system_program::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    }
+    let settle_b_once = |env: &mut V16CuEnv, tail: &[Pubkey]| -> Result<u64, String> {
         env.svm.expire_blockhash();
+        let mut accounts = vec![
+            AccountMeta::new_readonly(cranker.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+        ];
+        accounts.extend(
+            tail.iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
         env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 1,
                 close_q: 0,
                 observations: crank_observations(0),
             },
-            vec![
-                AccountMeta::new_readonly(cranker.pubkey(), false),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(long, false),
-            ],
+            accounts,
             &[],
         )
     };
 
     env.svm.warp_to_slot(1);
-    let first_cu = settle_b_once(&mut env).expect("first permissionless SettleB chunk");
+    let first_cu = settle_b_once(&mut env, &ignored_tail)
+        .expect("first permissionless SettleB chunk with hostile ignored tail");
     assert_cu_within("PermissionlessCrank SettleB", first_cu, CRANK_CU_LIMIT);
     let after_first = env.portfolio_state(long);
     let after_first_leg = active_leg_for_asset(&after_first, 0);
     assert_eq!(
         after_first_leg.b_snap, 1,
-        "auto-crank refreshes if needed, then advances one configured B chunk"
+        "auto-crank refreshes if needed, then advances one configured B chunk despite hostile hints"
     );
     assert!(
         after_first_leg.b_stale && after_first.b_stale_state != 0,
@@ -15901,10 +15923,10 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
     );
     assert_eq!(
         g_after_first.insurance, insurance_before,
-        "SettleB does not debit insurance"
+        "SettleB ignores the non-oracle tail and does not debit insurance"
     );
 
-    settle_b_once(&mut env).expect("second permissionless SettleB chunk");
+    settle_b_once(&mut env, &[]).expect("second permissionless SettleB chunk");
     let after_second = env.portfolio_state(long);
     assert_eq!(
         active_leg_for_asset(&after_second, 0).b_snap,
@@ -15916,7 +15938,7 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
         "one chunk remains after second call"
     );
 
-    settle_b_once(&mut env).expect("final permissionless SettleB chunk");
+    settle_b_once(&mut env, &[]).expect("final permissionless SettleB chunk");
     let after_final = env.portfolio_state(long);
     let final_leg = active_leg_for_asset(&after_final, 0);
     assert_eq!(final_leg.b_snap, 3, "all B debt settled after three chunks");
