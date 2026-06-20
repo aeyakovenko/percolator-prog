@@ -396,6 +396,30 @@ fn make_delegated_token_data(
     data
 }
 
+fn make_closable_token_data(
+    mint: Pubkey,
+    owner: Pubkey,
+    amount: u64,
+    close_authority: Pubkey,
+) -> Vec<u8> {
+    let mut data = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint,
+            owner,
+            amount,
+            delegate: COption::None,
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 0,
+            close_authority: COption::Some(close_authority),
+        },
+        &mut data,
+    )
+    .unwrap();
+    data
+}
+
 fn make_pyth_data(
     feed_id: &[u8; 32],
     price: i64,
@@ -10994,6 +11018,54 @@ fn v16_attack_permissionless_close_resolved_rejects_delegated_dest() {
         "delegated destination receives no payout"
     );
 
+    let closable_dest = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            closable_dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_closable_token_data(
+                    env.mint,
+                    victim_owner.pubkey(),
+                    0,
+                    attacker.pubkey(),
+                ),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let closable_before = env.svm.get_account(&closable_dest).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(victim_owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new(closable_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "permissionless CloseResolved must reject a victim-owned destination with close authority"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&victim).unwrap(), portfolio_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(
+        env.svm.get_account(&closable_dest).unwrap(),
+        closable_before,
+        "close-authority destination receives no payout"
+    );
+
     let clean_dest = env.token_account(victim_owner.pubkey(), 0);
     env.svm.expire_blockhash();
     env.send(
@@ -14552,6 +14624,47 @@ fn v16_attack_resolved_payout_topup_rejects_delegated_dest_without_burning_recei
         env.svm.get_account(&delegated_dest).unwrap(),
         dest_before,
         "delegated destination receives no payout"
+    );
+
+    let closable_dest = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            closable_dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_closable_token_data(env.mint, owner.pubkey(), 0, attacker.pubkey()),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let closable_before = env.svm.get_account(&closable_dest).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(closable_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "ClaimResolvedPayoutTopup must reject an owner destination with close authority"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(
+        env.svm.get_account(&closable_dest).unwrap(),
+        closable_before,
+        "close-authority destination receives no payout"
     );
 
     let account = env.portfolio_state(portfolio);
