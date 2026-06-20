@@ -42439,6 +42439,155 @@ fn v16_attack_chainlink_stale_feed_rejected_without_mutation() {
     );
 }
 
+// LoF/DoS sweep: future-dated oracle updates are distinct from merely stale updates. If accepted,
+// they can pin the stored leg publish time ahead of honest feeds and block later oracle progress.
+// Exercise the negative-age OracleStale branch for all external oracle sources through the public
+// configure route, then prove a current-timestamp feed of the same source still configures.
+#[test]
+fn v16_attack_future_dated_oracle_feeds_reject_without_pinning_publish_time() {
+    const NOW_SLOT: u64 = 10;
+    const NOW_TS: i64 = 1_000;
+    const FUTURE_TS: i64 = 1_060;
+    const SOFT_STALE_SLOTS: u64 = 100;
+    const SWITCHBOARD_SCALE: i128 = 1_000_000_000_000;
+
+    let configure = |env: &mut V16CuEnv, feed: [u8; 32], account: Pubkey| {
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0u8; 32], [0u8; 32]],
+            &[account],
+            NOW_SLOT,
+            NOW_TS,
+            0,
+            0,
+            SOFT_STALE_SLOTS,
+            0,
+        )
+    };
+
+    let mut pyth_env = V16CuEnv::new();
+    set_test_clock(&mut pyth_env, NOW_SLOT, NOW_TS);
+    let pyth_feed = [0x41u8; 32];
+    let future_pyth = pyth_env.set_pyth_price_with_conf(&pyth_feed, 100, 0, 0, FUTURE_TS);
+    let pyth_before = pyth_env.svm.get_account(&pyth_env.market).unwrap().data;
+    pyth_env.svm.expire_blockhash();
+    let pyth_rejected = configure(&mut pyth_env, pyth_feed, future_pyth);
+    assert!(
+        pyth_rejected.is_err(),
+        "future-dated Pyth feed must reject"
+    );
+    let pyth_err = pyth_rejected.unwrap_err();
+    assert!(
+        pyth_err.contains("Custom(27)"),
+        "future-dated Pyth feed must reject as OracleStale (Custom 27), got: {pyth_err}"
+    );
+    assert_eq!(
+        pyth_env.svm.get_account(&pyth_env.market).unwrap().data,
+        pyth_before,
+        "future-dated Pyth reject must not pin oracle state"
+    );
+    let current_pyth = pyth_env.set_pyth_price_with_conf(&pyth_feed, 100, 0, 0, NOW_TS);
+    pyth_env.svm.expire_blockhash();
+    configure(&mut pyth_env, pyth_feed, current_pyth)
+        .expect("current Pyth feed configures after future-dated reject");
+
+    let mut switchboard_env = V16CuEnv::new();
+    set_test_clock(&mut switchboard_env, NOW_SLOT, NOW_TS);
+    let future_switchboard =
+        switchboard_env.set_switchboard_price(100 * SWITCHBOARD_SCALE, 1, FUTURE_TS);
+    let switchboard_before = switchboard_env
+        .svm
+        .get_account(&switchboard_env.market)
+        .unwrap()
+        .data;
+    switchboard_env.svm.expire_blockhash();
+    let switchboard_rejected =
+        configure(&mut switchboard_env, future_switchboard.to_bytes(), future_switchboard);
+    assert!(
+        switchboard_rejected.is_err(),
+        "future-dated Switchboard feed must reject"
+    );
+    let switchboard_err = switchboard_rejected.unwrap_err();
+    assert!(
+        switchboard_err.contains("Custom(27)"),
+        "future-dated Switchboard feed must reject as OracleStale (Custom 27), got: {switchboard_err}"
+    );
+    assert_eq!(
+        switchboard_env
+            .svm
+            .get_account(&switchboard_env.market)
+            .unwrap()
+            .data,
+        switchboard_before,
+        "future-dated Switchboard reject must not pin oracle state"
+    );
+    let current_switchboard =
+        switchboard_env.set_switchboard_price(100 * SWITCHBOARD_SCALE, 1, NOW_TS);
+    switchboard_env.svm.expire_blockhash();
+    configure(
+        &mut switchboard_env,
+        current_switchboard.to_bytes(),
+        current_switchboard,
+    )
+    .expect("current Switchboard feed configures after future-dated reject");
+
+    let mut chainlink_env = V16CuEnv::new();
+    set_test_clock(&mut chainlink_env, NOW_SLOT, NOW_TS);
+    let install_chainlink = |env: &mut V16CuEnv, publish_time: i64| -> Pubkey {
+        let key = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_chainlink_data(1, 8, 1, 1, 1, publish_time as u32, 10_000),
+                    owner: oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        key
+    };
+    let future_chainlink = install_chainlink(&mut chainlink_env, FUTURE_TS);
+    let chainlink_before = chainlink_env
+        .svm
+        .get_account(&chainlink_env.market)
+        .unwrap()
+        .data;
+    chainlink_env.svm.expire_blockhash();
+    let chainlink_rejected =
+        configure(&mut chainlink_env, future_chainlink.to_bytes(), future_chainlink);
+    assert!(
+        chainlink_rejected.is_err(),
+        "future-dated Chainlink feed must reject"
+    );
+    let chainlink_err = chainlink_rejected.unwrap_err();
+    assert!(
+        chainlink_err.contains("Custom(27)"),
+        "future-dated Chainlink feed must reject as OracleStale (Custom 27), got: {chainlink_err}"
+    );
+    assert_eq!(
+        chainlink_env
+            .svm
+            .get_account(&chainlink_env.market)
+            .unwrap()
+            .data,
+        chainlink_before,
+        "future-dated Chainlink reject must not pin oracle state"
+    );
+    let current_chainlink = install_chainlink(&mut chainlink_env, NOW_TS);
+    chainlink_env.svm.expire_blockhash();
+    configure(
+        &mut chainlink_env,
+        current_chainlink.to_bytes(),
+        current_chainlink,
+    )
+    .expect("current Chainlink feed configures after future-dated reject");
+}
+
 // Hybrid oracle leg-shape gate: duplicate feed identities, stray feeds, and impossible divide flags
 // must reject before installing an oracle profile. Otherwise a config could double-count one feed or
 // advertise a divide leg that has no corresponding account.
