@@ -29372,6 +29372,80 @@ fn v16_attack_refine_resolved_bound_over_decrease_is_atomic() {
     );
 }
 
+// Full-interface rollback sweep: RefineResolvedUnreceiptedBound is a market-only terminal mutator.
+// Pin that an engine shape rejection becomes an instruction error and rolls back its payout edit.
+#[test]
+fn v16_attack_refine_resolved_bound_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new();
+    env.mutate_market(|_, group| {
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 0,
+            terminal_claim_bound_unreceipted_num: 100 * BOUND_SCALE,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+
+    let admin = env.admin.insecure_clone();
+    let before = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::RefineResolvedUnreceiptedBound {
+            decrease_num: BOUND_SCALE,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "RefineResolvedUnreceiptedBound must not persist an invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before,
+        "failed refine must roll back payout accounting and invalid shape"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance;
+    });
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::RefineResolvedUnreceiptedBound {
+            decrease_num: BOUND_SCALE,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        accepted.is_ok(),
+        "valid resolved-bound refine remains live after invalid-shape rejection: {accepted:?}"
+    );
+    assert_eq!(
+        env.market_state()
+            .1
+            .resolved_payout_ledger
+            .terminal_claim_bound_unreceipted_num,
+        99 * BOUND_SCALE
+    );
+}
+
 // security.md sweep — TopUpInsuranceDomain authorization (#6): a per-domain insurance top-up is gated
 // to the domain's insurance_authority (v16_program.rs:6577 expect_live_authority). A non-authority
 // must reject — no manipulating a domain's insurance/budget accounting by an unauthorized caller.
