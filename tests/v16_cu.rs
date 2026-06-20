@@ -25002,6 +25002,112 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     assert_eq!(env.token_amount(earnings_dest), 0);
 }
 
+// Full-interface rollback sweep: the inbound top-up routes optionally initialize/update program-owned
+// ledger accounts after tentatively crediting engine accounting and before the SPL transfer. A short
+// ledger account must fail at the late ledger write, with SVM rollback restoring market, vault, source,
+// and ledger bytes exactly; valid ledger controls prove the top-up routes remain live.
+#[test]
+fn v16_attack_value_topups_short_optional_ledgers_roll_back_after_engine_credit() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    let assert_rejected_short_ledger =
+        |env: &mut V16CuEnv, ix: ProgInstruction, amount: u64, label: &str| {
+            let source = env.token_account(admin.pubkey(), amount);
+            let short_ledger = env.program_account(1);
+            let source_before = env.svm.get_account(&source).unwrap();
+            let ledger_before = env.svm.get_account(&short_ledger).unwrap();
+            env.svm.expire_blockhash();
+            let rejected = env.send(
+                ix,
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(short_ledger, false),
+                ],
+                &[&admin],
+            );
+            assert!(
+                rejected.is_err(),
+                "{label} must reject a short optional ledger after engine-side credit is attempted"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before,
+                "{label} short-ledger reject rolls back market accounting"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                vault_before,
+                "{label} short-ledger reject moves no vault custody"
+            );
+            assert_eq!(
+                env.svm.get_account(&source).unwrap(),
+                source_before,
+                "{label} short-ledger reject pulls no source tokens"
+            );
+            assert_eq!(
+                env.svm.get_account(&short_ledger).unwrap(),
+                ledger_before,
+                "{label} short-ledger reject leaves ledger bytes unchanged"
+            );
+        };
+
+    assert_rejected_short_ledger(
+        &mut env,
+        ProgInstruction::TopUpInsurance { amount: 11 },
+        11,
+        "TopUpInsurance",
+    );
+    assert_rejected_short_ledger(
+        &mut env,
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 12,
+        },
+        12,
+        "TopUpInsuranceDomain",
+    );
+    assert_rejected_short_ledger(
+        &mut env,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 13,
+            expiry_slot: 10_000,
+        },
+        13,
+        "TopUpBackingBucket",
+    );
+
+    let insurance_ledger = env.insurance_ledger_account();
+    let domain_ledger = env.insurance_ledger_account();
+    let backing_ledger = env.backing_domain_ledger_account();
+    env.top_up_insurance_with_ledger_with_cu(insurance_ledger, 11);
+    env.top_up_insurance_domain_with_authority_ledger_and_cu(&admin, domain_ledger, 0, 12);
+    env.top_up_backing_bucket_with_ledger_with_cu(backing_ledger, 1, 13, 10_000);
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.insurance, 23);
+    assert_eq!(
+        group_after.insurance_domain_budget[0] + group_after.insurance_domain_budget[1],
+        23,
+        "valid insurance-ledger controls credit asset-0 insurance domains exactly"
+    );
+    assert_eq!(
+        group_after.source_backing_buckets[1].fresh_unliened_backing_num,
+        13 * BOUND_SCALE
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        group_after.vault as u64,
+        "accepted valid-ledger top-ups keep vault accounting matched to custody"
+    );
+}
+
 // security.md sweep — deposit source confusion (#35/#44): the deposit source must be a token account
 // owned by the depositor. Passing the VAULT (or any non-owned account) as the source must reject —
 // otherwise a vault->vault no-op transfer could credit capital for free (mint capital from nothing).
