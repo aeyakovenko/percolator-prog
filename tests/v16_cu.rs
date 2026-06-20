@@ -64861,6 +64861,85 @@ fn v16_attack_cure_deposit_rejects_delegated_canonical_vault() {
     );
 }
 
+// full-interface sweep: CureAndCancelClose validates the optional-deposit source mint before
+// canceling close progress or crediting capital. A wrong-mint source must not let a user cancel
+// a close ledger with unrelated tokens, and must leave the valid primary-mint cure path live.
+#[test]
+fn v16_attack_cure_deposit_rejects_wrong_mint_source_before_cancel() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 100);
+    env.seed_cancellable_close_progress(portfolio);
+
+    let wrong_mint = env.create_mint();
+    let wrong_source = env.token_account_for_mint(wrong_mint, owner.pubkey(), 50);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let wrong_source_before = env.svm.get_account(&wrong_source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CureAndCancelClose {
+            optional_deposit: 50,
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(wrong_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    let err = rejected.expect_err("wrong-mint cure optional deposit source must reject");
+    assert!(
+        err.contains("Custom(10)"),
+        "wrong-mint cure optional deposit source must reject as InvalidMint, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-mint cure leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "wrong-mint cure leaves close progress and capital unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&wrong_source).unwrap(),
+        wrong_source_before,
+        "wrong-mint cure spends no unrelated tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "wrong-mint cure leaves vault custody unchanged"
+    );
+    let still_open = env.portfolio_state(portfolio);
+    assert!(close_progress(&still_open).active);
+    assert!(!close_progress(&still_open).canceled);
+
+    let valid_source = env.token_account_for_mint(env.mint, owner.pubkey(), 50);
+    env.cure_and_cancel_close_with_cu(&owner, portfolio, valid_source, 50);
+    let cured = env.portfolio_state(portfolio);
+    assert!(close_progress(&cured).canceled);
+    assert_eq!(
+        cured.capital.get(),
+        150,
+        "valid cure credits exactly the primary-mint optional deposit"
+    );
+    assert_eq!(env.token_amount(valid_source), 0);
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault),
+        "valid cure control keeps accounting matched to custody"
+    );
+}
+
 // full-interface sweep: CureAndCancelClose validates the optional-deposit SPL Token program before
 // canceling close progress or crediting capital. A loaded non-SPL executable must not get to the
 // engine mutation, because the transfer happens after that mutation in the successful path.
