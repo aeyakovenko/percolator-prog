@@ -8766,6 +8766,82 @@ fn v16_bpf_close_portfolio_sweeps_rent_to_market_slab() {
     }
 }
 
+// LoF/DoS sweep: ClosePortfolio deregisters the empty portfolio before sweeping its rent into the
+// market slab. If the final lamport add overflows, SVM rollback must preserve the materialized count
+// and leave the user's portfolio closeable once the slab can receive rent again.
+#[test]
+fn v16_attack_close_portfolio_late_lamport_overflow_rolls_back_deregister() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "fresh empty portfolio is materialized before close"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    assert!(
+        portfolio_before.lamports != 0,
+        "test requires rent to sweep from the portfolio"
+    );
+
+    let mut saturated_market = market_before.clone();
+    saturated_market.lamports = u64::MAX;
+    env.svm
+        .set_account(env.market, saturated_market.clone())
+        .unwrap();
+    let saturated_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "ClosePortfolio must reject when the final rent sweep overflows"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        saturated_before,
+        "overflow rejection must roll back market lamports and materialized count"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "overflow rejection must not deregister the closeable portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "overflow rejection must not zero or drain the portfolio account"
+    );
+
+    env.svm.set_account(env.market, market_before).unwrap();
+    env.svm.expire_blockhash();
+    let ok_cu = env.close_portfolio_with_cu(&owner, portfolio);
+    assert_cu_within(
+        "ClosePortfolio late-lamport-overflow retry",
+        ok_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "same portfolio remains closeable after the overflow rejection"
+    );
+    let closed = env.svm.get_account(&portfolio).unwrap();
+    assert_eq!(closed.lamports, 0);
+    assert!(closed.data.is_empty() || !state::is_initialized(&closed.data));
+}
+
 #[test]
 fn v16_attack_non_owner_cannot_close_flat_portfolio() {
     let mut env = V16CuEnv::new();
