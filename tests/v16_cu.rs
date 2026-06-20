@@ -29641,6 +29641,58 @@ fn v16_attack_finalize_reset_side_requires_empty_side_counts() {
     );
 }
 
+// Full-interface rollback sweep: FinalizeResetSide is market-only and permissionless, so it does not
+// go through with_one_portfolio_view's wrapper-side validate_shape tail. Pin the engine-error boundary.
+#[test]
+fn v16_attack_finalize_reset_side_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new();
+    env.mutate_market(|_, group| {
+        group.assets[0].mode_long = SideModeV16::ResetPending;
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 0,
+        },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "FinalizeResetSide must not persist an invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before,
+        "failed reset finalization must roll back the mode change and invalid shape"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance;
+    });
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 0,
+        },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        accepted.is_ok(),
+        "valid empty reset side remains finalizable after invalid-shape rejection: {accepted:?}"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].mode_long,
+        SideModeV16::Normal
+    );
+}
+
 // security.md sweep - unsigned reset finalizer must not unlock drain-only sides (#30/#48):
 // FinalizeResetSide is intentionally permissionless, and Normal is an idempotent no-op, but DrainOnly
 // is a distinct risk throttle. A public caller must not be able to treat DrainOnly like ResetPending
