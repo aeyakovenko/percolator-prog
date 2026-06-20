@@ -59561,6 +59561,148 @@ fn v16_attack_close_slab_rejects_closable_secondary_vault_before_reclaim() {
     assert!(closed_market.data.iter().all(|b| *b == 0));
 }
 
+// full-interface sweep: CloseSlab validates the optional secondary user destination before it
+// sweeps primary dust or closes the market slab. A frozen secondary destination must fail
+// atomically; otherwise terminal cleanup could partially reclaim the primary side while leaving
+// secondary reserve dust stranded.
+#[test]
+fn v16_attack_close_slab_rejects_frozen_secondary_dest_before_primary_reclaim() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 11),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.resolve();
+
+    let primary_dest = env.token_account(admin.pubkey(), 0);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let mut frozen_secondary_dest = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: secondary_mint,
+            owner: admin.pubkey(),
+            amount: 0,
+            delegate: COption::None,
+            state: AccountState::Frozen,
+            is_native: COption::None,
+            delegated_amount: 0,
+            close_authority: COption::None,
+        },
+        &mut frozen_secondary_dest,
+    )
+    .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let primary_dest_before = env.svm.get_account(&primary_dest).unwrap();
+    let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+    let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
+
+    env.svm
+        .set_account(
+            secondary_dest,
+            Account {
+                data: frozen_secondary_dest,
+                ..secondary_dest_before.clone()
+            },
+        )
+        .unwrap();
+    let frozen_secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new(secondary_dest, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "CloseSlab must reject a frozen secondary destination before primary reclaim"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "frozen-secondary-dest CloseSlab must not zero the market"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "frozen secondary destination must not let primary dust sweep first"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "frozen secondary destination must not debit the secondary reserve"
+    );
+    assert_eq!(
+        env.svm.get_account(&primary_dest).unwrap(),
+        primary_dest_before,
+        "frozen secondary destination must not credit the primary destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        frozen_secondary_dest_before,
+        "frozen secondary destination remains unchanged after rejection"
+    );
+    assert_eq!(
+        env.svm.get_account(&admin.pubkey()).unwrap(),
+        admin_before,
+        "frozen secondary destination must not transfer market rent"
+    );
+
+    env.svm
+        .set_account(secondary_dest, secondary_dest_before)
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new(secondary_dest, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "same CloseSlab succeeds once the secondary destination is initialized: {ok:?}"
+    );
+    assert_eq!(env.token_amount(primary_dest), 7);
+    assert_eq!(env.token_amount(secondary_dest), 11);
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(closed_market.lamports, 0);
+    assert!(closed_market.data.iter().all(|b| *b == 0));
+}
+
 // [from pr114]
 // full-interface sweep: a liquidation crank can carry both a hybrid-oracle tail and an optional
 // program-owned cranker reward tail. A malformed reward tail must not let the valid oracle update
