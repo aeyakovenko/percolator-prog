@@ -25108,6 +25108,159 @@ fn v16_attack_value_topups_short_optional_ledgers_roll_back_after_engine_credit(
     );
 }
 
+// Full-interface rollback sweep: these outbound value routes accept program-owned ledger accounts and
+// can debit engine state before the final ledger write. A too-short ledger must not make the debit
+// persistent; valid-ledger controls prove the withdrawal paths remain live.
+#[test]
+fn v16_attack_value_withdrawals_short_optional_ledgers_roll_back_after_engine_debit() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+
+    env.top_up_insurance_domain_with_authority_and_cu(&admin, 0, 100);
+    let insurance_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    let short_insurance_ledger = env.program_account(1);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&insurance_dest).unwrap();
+    let ledger_before = env.svm.get_account(&short_insurance_ledger).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(short_insurance_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "WithdrawInsuranceAsset must reject a short optional ledger after engine debit is attempted"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "short-ledger insurance withdraw rolls back market budget debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "short-ledger insurance withdraw moves no vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&insurance_dest).unwrap(),
+        dest_before,
+        "short-ledger insurance withdraw pays no destination tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&short_insurance_ledger).unwrap(),
+        ledger_before,
+        "short-ledger insurance withdraw leaves ledger bytes unchanged"
+    );
+
+    let insurance_ledger = env.insurance_ledger_account();
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(insurance_ledger, false),
+        ],
+        &[&admin],
+    )
+    .expect("valid-ledger live insurance withdraw succeeds after short-ledger rollback");
+    assert_eq!(env.token_amount(insurance_dest), 10);
+
+    env.top_up_backing_bucket(1, 100, 10_000);
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].utilization_fee_earnings = 20;
+        group.vault += 20;
+    });
+    let (_, funded) = env.market_state();
+    env.set_token_account_amount(
+        env.vault,
+        env.mint,
+        env.vault_authority,
+        funded.vault as u64,
+    );
+    let earnings_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    let short_earnings_ledger = env.program_account(1);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&earnings_dest).unwrap();
+    let ledger_before = env.svm.get_account(&short_earnings_ledger).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_earnings_ledger, false),
+            AccountMeta::new(earnings_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "WithdrawBackingBucketEarnings must reject a short ledger after engine debit is attempted"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "short-ledger earnings withdraw rolls back market earnings debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "short-ledger earnings withdraw moves no vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&earnings_dest).unwrap(),
+        dest_before,
+        "short-ledger earnings withdraw pays no destination tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&short_earnings_ledger).unwrap(),
+        ledger_before,
+        "short-ledger earnings withdraw leaves ledger bytes unchanged"
+    );
+
+    let earnings_ledger = env.backing_domain_ledger_account();
+    env.withdraw_backing_bucket_earnings_to_admin_token_with_cu(
+        earnings_ledger,
+        earnings_dest,
+        1,
+        10,
+    );
+    assert_eq!(env.token_amount(earnings_dest), 10);
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault),
+        "valid-ledger withdrawal controls keep vault accounting matched to custody"
+    );
+}
+
 // security.md sweep — deposit source confusion (#35/#44): the deposit source must be a token account
 // owned by the depositor. Passing the VAULT (or any non-owned account) as the source must reject —
 // otherwise a vault->vault no-op transfer could credit capital for free (mint capital from nothing).
