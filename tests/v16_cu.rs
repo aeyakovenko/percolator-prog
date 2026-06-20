@@ -35218,6 +35218,124 @@ fn v16_attack_no_fee_liquidation_cranker_gets_nothing() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
 
+// full-interface sweep: keeper bots may include a reward-portfolio hint even when governance has
+// liquidation rewards disabled. With a nonzero liquidation fee but zero cranker share, that hint must
+// not become a signer/owner dependency, mutate the hinted portfolio, or block liquidation progress.
+#[test]
+fn v16_attack_liquidation_reward_hint_ignored_when_share_disabled() {
+    const LIQ_SLOT: u64 = 30;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    assert_eq!(
+        env.market_state().0.liquidation_cranker_fee_share_bps,
+        0,
+        "test setup keeps cranker rewards disabled while liquidation fees remain nonzero"
+    );
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let hint_owner = Keypair::new();
+    let keeper = Keypair::new();
+    env.ensure_signer_account(keeper.pubkey());
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let reward_hint = env.create_portfolio(&hint_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        1_000_000,
+        0,
+    );
+
+    for slot in 1..=LIQ_SLOT {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: slot,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        );
+    }
+    assert!(
+        health_cert(&env.portfolio_state(short)).certified_liq_deficit != 0,
+        "setup must make the target liquidatable before probing the disabled-reward hint"
+    );
+
+    let market_before = env.market_state().1;
+    let short_before = env.svm.get_account(&short).unwrap();
+    let hint_before = env.svm.get_account(&reward_hint).unwrap();
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                action: 1,
+                asset_index: 0,
+                now_slot: LIQ_SLOT,
+                funding_rate_e9: 0,
+                close_q: POS_SCALE,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(keeper.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+                AccountMeta::new(reward_hint, false),
+            ],
+            &[&keeper],
+        )
+        .expect("disabled-reward liquidation should ignore the extra reward hint");
+    assert_cu_within(
+        "PermissionlessCrank disabled-reward liquidation hint",
+        cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (_, market_after) = env.market_state();
+    assert_ne!(
+        env.svm.get_account(&short).unwrap(),
+        short_before,
+        "liquidation must still make progress with an ignored reward hint"
+    );
+    assert_eq!(
+        env.svm.get_account(&reward_hint).unwrap(),
+        hint_before,
+        "disabled reward hint must not be signer-checked, grown, or credited"
+    );
+    assert!(
+        market_after.insurance > market_before.insurance,
+        "nonzero liquidation fee is retained by market insurance when cranker share is disabled"
+    );
+    assert_eq!(
+        market_after.vault, market_before.vault,
+        "disabled-reward liquidation is an internal insurance split, not a vault mint"
+    );
+    assert!(
+        market_after.vault >= market_after.c_tot + market_after.insurance,
+        "senior conservation after disabled-reward hinted liquidation"
+    );
+}
+
 // security.md sweep — withdraw requires flat account (#19/#46): withdraw_not_atomic requires the
 // account to be FLAT (active_bitmap empty) — ANY open position blocks withdrawal, regardless of how
 // small the position or how large the capital. After closing, the full capital is recoverable (no
