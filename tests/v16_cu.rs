@@ -81192,6 +81192,119 @@ fn v16_attack_swap_secondary_rejects_wrong_token_program_before_transfer() {
     assert_eq!(env.token_amount(secondary_vault), 40);
 }
 
+// full-interface sweep: SwapSecondaryForPrimary has two SPL transfers. A system-owned secondary
+// destination with valid token bytes passes wrapper byte validation, so the primary transfer can run
+// before the secondary payout CPI fails. SVM rollback must restore both vaults and the user's source.
+#[test]
+fn v16_attack_swap_secondary_fake_dest_rolls_back_primary_leg() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 10);
+    let fake_secondary_dest = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            fake_secondary_dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, admin.pubkey(), 0),
+                owner: solana_sdk::system_program::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let source_before = env.svm.get_account(&primary_source).unwrap();
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let fake_dest_before = env.svm.get_account(&fake_secondary_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(primary_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(fake_secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "SwapSecondaryForPrimary must fail when the secondary payout account is not SPL-owned"
+    );
+    assert_eq!(
+        env.svm.get_account(&primary_source).unwrap(),
+        source_before,
+        "fake-dest swap must roll back the already-run primary transfer"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "fake-dest swap must not leave primary collateral in the vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "fake-dest swap must not debit the secondary reserve"
+    );
+    assert_eq!(
+        env.svm.get_account(&fake_secondary_dest).unwrap(),
+        fake_dest_before,
+        "fake secondary destination receives no durable token state change"
+    );
+
+    let clean_secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let ok_cu = env
+        .send(
+            ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new(primary_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new(clean_secondary_dest, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("same swap remains live with a clean SPL destination");
+    assert_cu_within(
+        "SwapSecondaryForPrimary fake-dest retry",
+        ok_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(primary_source), 0);
+    assert_eq!(env.token_amount(env.vault), 10);
+    assert_eq!(env.token_amount(clean_secondary_dest), 10);
+    assert_eq!(env.token_amount(secondary_vault), 40);
+}
+
 // full-interface sweep: CloseSlab validates the primary destination token account before sweeping
 // the primary vault, but SPL Token still enforces the writable bit at CPI time. A readonly primary
 // destination must fail without partially draining the vault or reclaiming the market.
