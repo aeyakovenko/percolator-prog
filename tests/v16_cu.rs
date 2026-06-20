@@ -6636,6 +6636,144 @@ fn v16_attack_restart_asset_oracle_rejects_backing_fee_earnings_without_mutation
     );
 }
 
+// LoF/DoS sweep (cron135): RestartAssetOracle rewrites an empty recovery asset and its per-asset
+// oracle profile. Backing-fee policy is stored in that profile and mirrored by a market-wide batch
+// gate, so restart must neither drop the policy (fee bypass) nor preserve only the counter (sticky
+// batch DoS after the admin clears it).
+#[test]
+fn v16_attack_restart_asset_oracle_preserves_backing_fee_policy_gate() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.activate_asset(1, 2, 100);
+    env.update_backing_fee_policy_with_cu(2, 77, 5_000);
+
+    let profile_before =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(env.market_state().0.backing_trade_fee_policy_count, 1);
+    assert_eq!(profile_before.backing_trade_fee_bps_long, 77);
+    assert_eq!(
+        profile_before.backing_trade_fee_insurance_share_bps_long,
+        5_000
+    );
+
+    env.svm.warp_to_slot(3);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&admin, 1, 3)
+        .expect("asset admin shuts down empty asset 1");
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    env.try_restart_asset_oracle_with_authority(&admin, 1, 4, 125)
+        .expect("asset admin restarts the empty recovery asset");
+
+    let (cfg_restarted, group_restarted) = env.market_state();
+    let profile_restarted =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(
+        group_restarted.assets[1].lifecycle,
+        AssetLifecycleV16::Active
+    );
+    assert_eq!(group_restarted.assets[1].effective_price, 125);
+    assert_eq!(
+        cfg_restarted.backing_trade_fee_policy_count, 1,
+        "restart must not reopen batch trading while the asset-1 backing-fee policy remains active"
+    );
+    assert_eq!(
+        profile_restarted.backing_trade_fee_bps_long, 77,
+        "restart must not drop the asset-1 backing-fee policy"
+    );
+    assert_eq!(
+        profile_restarted.backing_trade_fee_insurance_share_bps_long,
+        5_000
+    );
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+    let sz = (5 * POS_SCALE) as i128;
+
+    let market_before = env.svm.get_account(&env.market).unwrap().data;
+    let taker_before = env.svm.get_account(&ta).unwrap().data;
+    let lp_before = env.svm.get_account(&la).unwrap().data;
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![BatchTradeLeg {
+                asset_index: 0,
+                size_q: sz,
+                exec_price: 100,
+                fee_bps: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(
+        rejected.is_err(),
+        "a restarted asset's active backing-fee policy must still block batch trades"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_before
+    );
+    assert_eq!(env.svm.get_account(&ta).unwrap().data, taker_before);
+    assert_eq!(env.svm.get_account(&la).unwrap().data, lp_before);
+
+    env.update_backing_fee_policy_with_cu(2, 0, 0);
+    let cfg_cleared = env.market_state().0;
+    let profile_cleared =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(
+        cfg_cleared.backing_trade_fee_policy_count, 0,
+        "clearing the restarted asset policy must remove the global batch gate"
+    );
+    assert_eq!(profile_cleared.backing_trade_fee_bps_long, 0);
+
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![BatchTradeLeg {
+                asset_index: 0,
+                size_q: sz,
+                exec_price: 100,
+                fee_bps: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(
+        accepted.is_ok(),
+        "clearing the restarted policy must restore batch liveness: {accepted:?}"
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(ta), 0).basis_pos_q,
+        sz
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(la), 0).basis_pos_q,
+        -sz
+    );
+}
+
 #[test]
 fn v16_bpf_tradenocpi_executes_and_is_bounded() {
     let mut env = V16CuEnv::new();
