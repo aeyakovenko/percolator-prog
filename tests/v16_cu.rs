@@ -65022,6 +65022,121 @@ fn v16_attack_terminal_insurance_full_drain_stale_ledger_rolls_back_after_rotati
     assert_eq!(fresh_ledger_state.last_observed_insurance_atoms, 0);
 }
 
+// full-interface sweep (cron135): a terminal full-drain skips the early optional-ledger observation
+// read, then validates/writes the ledger only after the terminal insurance budget debit is staged.
+// A correctly initialized backing-domain ledger is program-owned and writable but the wrong ledger
+// kind; rejection must roll back the staged terminal debit and leave the real backing ledger intact.
+#[test]
+fn v16_attack_terminal_insurance_full_drain_rejects_backing_ledger_after_debit() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+
+    let backing_ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(backing_ledger, 1, 50, 10_000);
+    let backing_ledger_state =
+        state::read_backing_domain_ledger(&env.svm.get_account(&backing_ledger).unwrap().data)
+            .expect("backing ledger initialized");
+    assert_eq!(backing_ledger_state.domain, 1);
+    assert_eq!(backing_ledger_state.total_deposited_atoms, 50);
+
+    env.top_up_insurance(100);
+    env.resolve();
+    assert_eq!(env.market_state().1.insurance, 100);
+    assert_eq!(env.token_amount(env.vault), 150);
+
+    let dest = env.token_account(admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let backing_ledger_before = env.svm.get_account(&backing_ledger).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 100 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(backing_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "terminal full-drain must reject a backing-domain ledger on the insurance-ledger route"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-kind full-drain ledger rejection rolls back the staged terminal insurance debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "wrong-kind full-drain ledger rejection moves no vault tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&backing_ledger).unwrap(),
+        backing_ledger_before,
+        "wrong-kind full-drain rejection must not rewrite the backing ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "wrong-kind full-drain ledger rejection pays no destination tokens"
+    );
+    assert_eq!(env.market_state().1.insurance, 100);
+    assert_eq!(env.token_amount(env.vault), 150);
+
+    let insurance_ledger = env.insurance_ledger_account();
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 100 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(insurance_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "terminal full-drain remains live with a real insurance ledger: {ok:?}"
+    );
+    assert_eq!(env.token_amount(dest), 100);
+    assert_eq!(
+        env.token_amount(env.vault),
+        50,
+        "only the insurance amount is paid; backing custody remains"
+    );
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.insurance, 0);
+    assert_eq!(group_after.vault, 50);
+    let insurance_ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&insurance_ledger).unwrap().data)
+            .expect("insurance ledger initialized by full drain");
+    assert_eq!(insurance_ledger_state.total_withdrawn_atoms, 100);
+    assert_eq!(insurance_ledger_state.last_observed_insurance_atoms, 0);
+    assert_eq!(
+        env.svm.get_account(&backing_ledger).unwrap(),
+        backing_ledger_before,
+        "successful insurance full-drain must not touch the backing ledger"
+    );
+}
+
 // full-interface sweep (cron135): resolved WithdrawBackingBucket has a preflight that admits
 // marketauth, then a resolved-mode inner check that must require the current backing authority.
 // Backing funded before a handoff must not remain terminal-withdrawable by the stale authority.
