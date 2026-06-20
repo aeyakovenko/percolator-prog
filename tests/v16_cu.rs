@@ -67341,6 +67341,127 @@ fn v16_attack_force_close_rejects_same_portfolio_alias_before_realloc() {
     );
 }
 
+// Full-interface rollback sweep: ForceCloseAbandonedAsset expands both writable portfolio accounts
+// before reading their portfolio headers. Passing short program-owned non-portfolio accounts must not
+// persist that realloc or mutate the abandoned market; otherwise a permissionless cranker could turn
+// raw program accounts into permanent rent/state junk while probing force-close.
+#[test]
+fn v16_attack_force_close_raw_program_portfolio_realloc_rolls_back() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    const DELAY: u64 = 5;
+    const SHUT: u64 = 10;
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(SHUT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        SHUT,
+        0,
+    );
+    env.svm.warp_to_slot(SHUT + DELAY + 1);
+
+    let raw_a = env.program_account(1);
+    let raw_b = env.program_account(2);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let raw_a_before = env.svm.get_account(&raw_a).unwrap();
+    let raw_b_before = env.svm.get_account(&raw_b).unwrap();
+    let long_before = env.svm.get_account(&long).unwrap();
+    let short_before = env.svm.get_account(&short).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    let cranker = Keypair::new();
+    env.ensure_signer_account(cranker.pubkey());
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ForceCloseAbandonedAsset {
+            asset_index: 1,
+            now_slot: SHUT + DELAY + 1,
+            close_q: POS_SCALE,
+        },
+        vec![
+            AccountMeta::new(cranker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(raw_a, false),
+            AccountMeta::new(raw_b, false),
+        ],
+        &[&cranker],
+    );
+    assert!(
+        rejected.is_err(),
+        "force-close must reject raw program accounts that are not portfolios"
+    );
+    assert_eq!(
+        env.svm.get_account(&raw_a).unwrap(),
+        raw_a_before,
+        "raw first account must not keep the pre-validation realloc"
+    );
+    assert_eq!(
+        env.svm.get_account(&raw_b).unwrap(),
+        raw_b_before,
+        "raw second account must not keep the pre-validation realloc"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "raw-account force-close rejection leaves abandoned market byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&long).unwrap(),
+        long_before,
+        "raw-account rejection leaves real long account untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&short).unwrap(),
+        short_before,
+        "raw-account rejection leaves real short account untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "raw-account rejection moves no custody"
+    );
+
+    env.svm.expire_blockhash();
+    let ok = env.try_force_close_abandoned_asset_with_cu(
+        &cranker,
+        long,
+        short,
+        1,
+        SHUT + DELAY + 1,
+        POS_SCALE,
+    );
+    assert!(
+        ok.is_ok(),
+        "valid abandoned pair remains force-closeable after raw-account rejection: {ok:?}"
+    );
+    let group = env.market_state().1;
+    assert_eq!(group.assets[1].oi_eff_long_q, 0);
+    assert_eq!(group.assets[1].oi_eff_short_q, 0);
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+}
+
 // security.md sweep - ForceCloseAbandonedAsset order independence (#2/#33/#48): the unsigned recovery
 // cleanup path accepts two victim portfolios and must close exposure based on their leg sides, not on
 // caller-supplied account order. Existing force-close controls pass the long first; this drives the
