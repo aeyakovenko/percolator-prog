@@ -59945,6 +59945,225 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
     );
 }
 
+// full-interface sweep: inbound value rails pin the vault address, but the final SPL transfer is what
+// rejects a canonical vault account whose owner is not SPL Token. Each route mutates engine accounting
+// before that CPI, so rollback must restore market/portfolio/ledger/source/vault state exactly.
+#[test]
+fn v16_attack_value_in_fake_canonical_vault_rolls_back_engine_credit() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+
+    let poison_canonical_vault = |env: &mut V16CuEnv| {
+        env.svm
+            .set_account(
+                env.vault,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(env.mint, env.vault_authority, 0),
+                    owner: solana_sdk::system_program::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    };
+    let restore_canonical_vault = |env: &mut V16CuEnv| {
+        env.svm
+            .set_account(
+                env.vault,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(env.mint, env.vault_authority, 0),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    };
+
+    poison_canonical_vault(&mut env);
+    let deposit_source = env.token_account_for_mint(env.mint, owner.pubkey(), 21);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let source_before = env.svm.get_account(&deposit_source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::Deposit { amount: 21 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(deposit_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "Deposit must fail when the canonical vault account is not SPL-owned"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "fake-vault deposit must roll back portfolio capital credit"
+    );
+    assert_eq!(
+        env.svm.get_account(&deposit_source).unwrap(),
+        source_before,
+        "fake-vault deposit must not pull source tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "fake canonical vault remains byte-identical after rejected deposit"
+    );
+
+    poison_canonical_vault(&mut env);
+    let insurance_source = env.token_account_for_mint(env.mint, admin.pubkey(), 22);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let source_before = env.svm.get_account(&insurance_source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::TopUpInsurance { amount: 22 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "TopUpInsurance must fail when the canonical vault account is not SPL-owned"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "fake-vault insurance top-up rolls back market credit"
+    );
+    assert_eq!(
+        env.svm.get_account(&insurance_source).unwrap(),
+        source_before
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    poison_canonical_vault(&mut env);
+    let domain_source = env.token_account_for_mint(env.mint, admin.pubkey(), 23);
+    let domain_ledger = env.insurance_ledger_account();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&domain_ledger).unwrap();
+    let source_before = env.svm.get_account(&domain_source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 23,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(domain_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(domain_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "TopUpInsuranceDomain must fail when the canonical vault account is not SPL-owned"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "fake-vault domain top-up rolls back domain insurance credit"
+    );
+    assert_eq!(
+        env.svm.get_account(&domain_ledger).unwrap(),
+        ledger_before,
+        "fake-vault domain top-up rolls back ledger initialization"
+    );
+    assert_eq!(env.svm.get_account(&domain_source).unwrap(), source_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    poison_canonical_vault(&mut env);
+    let backing_source = env.token_account_for_mint(env.mint, admin.pubkey(), 24);
+    let backing_ledger = env.backing_domain_ledger_account();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&backing_ledger).unwrap();
+    let source_before = env.svm.get_account(&backing_source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 24,
+            expiry_slot: 10_000,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(backing_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "TopUpBackingBucket must fail when the canonical vault account is not SPL-owned"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "fake-vault backing top-up rolls back backing bucket credit"
+    );
+    assert_eq!(
+        env.svm.get_account(&backing_ledger).unwrap(),
+        ledger_before,
+        "fake-vault backing top-up rolls back ledger initialization"
+    );
+    assert_eq!(env.svm.get_account(&backing_source).unwrap(), source_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    restore_canonical_vault(&mut env);
+    let ok_deposit = env.deposit(&owner, portfolio, 21);
+    assert_eq!(env.token_amount(ok_deposit), 0);
+    let (_insurance_ok, _) = env.top_up_insurance_with_cu(22);
+    let (_domain_ok, _) =
+        env.top_up_insurance_domain_with_authority_ledger_and_cu(&admin, domain_ledger, 0, 23);
+    let (_backing_ok, _) =
+        env.top_up_backing_bucket_with_ledger_with_cu(backing_ledger, 1, 24, 10_000);
+    let (_, group_after) = env.market_state();
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 21);
+    assert_eq!(group_after.insurance, 45);
+    assert_eq!(
+        group_after.insurance_domain_budget[0] + group_after.insurance_domain_budget[1],
+        45,
+        "general and domain insurance top-ups credit total asset-0 insurance"
+    );
+    assert_eq!(
+        group_after.source_backing_buckets[1].fresh_unliened_backing_num,
+        24 * BOUND_SCALE
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        group_after.vault as u64,
+        "clean canonical vault controls keep accounting matched to SPL custody"
+    );
+}
+
 // [from pr114]
 // full-interface sweep (cron40): CloseResolved computes and records the resolved payout before
 // validating the supplied vault account. A delegated canonical vault must reject atomically, without
