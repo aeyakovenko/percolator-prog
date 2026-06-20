@@ -10536,10 +10536,7 @@ fn v16_attack_settle_b_crank_rejects_invalid_final_market_shape() {
         ],
         &[],
     );
-    assert!(
-        result.is_err(),
-        "SettleB must reject invalid market shape"
-    );
+    assert!(result.is_err(), "SettleB must reject invalid market shape");
     assert_eq!(
         env.svm.get_account(&env.market).unwrap().data,
         before_market,
@@ -39868,7 +39865,10 @@ fn v16_attack_liquidation_reward_stale_layout_rejects_before_oracle_tail_parse()
     let mut reward_account = env.svm.get_account(&reward).unwrap();
     let mut reward_state = state::read_portfolio(&reward_account.data).unwrap();
     let current_layout = reward_state.provenance_header.layout_discriminator.get();
-    assert!(current_layout > 0, "current engine layout discriminator is nonzero");
+    assert!(
+        current_layout > 0,
+        "current engine layout discriminator is nonzero"
+    );
     reward_state.provenance_header =
         percolator::ProvenanceHeaderV16Account::from_runtime(&percolator::ProvenanceHeaderV16 {
             market_group_id: reward_state.provenance_header.market_group_id,
@@ -42474,10 +42474,7 @@ fn v16_attack_future_dated_oracle_feeds_reject_without_pinning_publish_time() {
     let pyth_before = pyth_env.svm.get_account(&pyth_env.market).unwrap().data;
     pyth_env.svm.expire_blockhash();
     let pyth_rejected = configure(&mut pyth_env, pyth_feed, future_pyth);
-    assert!(
-        pyth_rejected.is_err(),
-        "future-dated Pyth feed must reject"
-    );
+    assert!(pyth_rejected.is_err(), "future-dated Pyth feed must reject");
     let pyth_err = pyth_rejected.unwrap_err();
     assert!(
         pyth_err.contains("Custom(27)"),
@@ -42503,8 +42500,11 @@ fn v16_attack_future_dated_oracle_feeds_reject_without_pinning_publish_time() {
         .unwrap()
         .data;
     switchboard_env.svm.expire_blockhash();
-    let switchboard_rejected =
-        configure(&mut switchboard_env, future_switchboard.to_bytes(), future_switchboard);
+    let switchboard_rejected = configure(
+        &mut switchboard_env,
+        future_switchboard.to_bytes(),
+        future_switchboard,
+    );
     assert!(
         switchboard_rejected.is_err(),
         "future-dated Switchboard feed must reject"
@@ -42558,8 +42558,11 @@ fn v16_attack_future_dated_oracle_feeds_reject_without_pinning_publish_time() {
         .unwrap()
         .data;
     chainlink_env.svm.expire_blockhash();
-    let chainlink_rejected =
-        configure(&mut chainlink_env, future_chainlink.to_bytes(), future_chainlink);
+    let chainlink_rejected = configure(
+        &mut chainlink_env,
+        future_chainlink.to_bytes(),
+        future_chainlink,
+    );
     assert!(
         chainlink_rejected.is_err(),
         "future-dated Chainlink feed must reject"
@@ -59652,7 +59655,13 @@ fn v16_attack_hybrid_reward_liquidation_duplicate_surplus_tail_is_cu_bounded() {
             after.vault >= after.c_tot + after.insurance,
             "senior conservation after hybrid reward liquidation"
         );
-        (cu, reward_delta, insurance_delta, after.c_tot, after.insurance)
+        (
+            cu,
+            reward_delta,
+            insurance_delta,
+            after.c_tot,
+            after.insurance,
+        )
     }
 
     let (baseline_env, baseline_owner, baseline_short, baseline_cranker, baseline_fresh) =
@@ -59678,19 +59687,14 @@ fn v16_attack_hybrid_reward_liquidation_duplicate_surplus_tail_is_cu_bounded() {
     oracle_tail.push(hostile_fresh);
     oracle_tail.extend(extras.iter().copied());
     oracle_tail.extend(extras.iter().rev().copied());
-    let (
-        hostile_cu,
-        hostile_reward,
-        hostile_insurance_delta,
-        hostile_c_tot,
-        hostile_insurance,
-    ) = run_liquidation(
-        hostile_env,
-        hostile_owner,
-        hostile_short,
-        hostile_cranker,
-        &oracle_tail,
-    );
+    let (hostile_cu, hostile_reward, hostile_insurance_delta, hostile_c_tot, hostile_insurance) =
+        run_liquidation(
+            hostile_env,
+            hostile_owner,
+            hostile_short,
+            hostile_cranker,
+            &oracle_tail,
+        );
 
     println!(
         "v16 hybrid reward liquidation duplicate surplus tail: baseline={baseline_cu}, hostile={hostile_cu}"
@@ -60348,21 +60352,17 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
     );
 }
 
-
-
 #[derive(Clone, Copy, Debug)]
 enum CpiReportedPricePath {
     Single,
     Batch,
 }
 
-
 #[derive(Clone, Copy, Debug)]
 enum TradeDrivenMarkMode {
     EwmaMark,
     HybridAfterHours,
 }
-
 
 #[derive(Clone, Copy, Debug)]
 enum MixedModeBatchPath {
@@ -60371,7 +60371,6 @@ enum MixedModeBatchPath {
 }
 
 // Net-new PR 135 loop coverage rebased on the zero-copy account layout.
-
 
 fn make_delegated_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
     let mut data = vec![0u8; TokenAccount::LEN];
@@ -60392,7 +60391,6 @@ fn make_delegated_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8
     data
 }
 
-
 fn make_closable_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
     let mut data = vec![0u8; TokenAccount::LEN];
     TokenAccount::pack(
@@ -60411,7 +60409,6 @@ fn make_closable_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8>
     .unwrap();
     data
 }
-
 
 // full-interface sweep (cron56): Deposit is the main value-in rail and validates the canonical vault
 // before growing or crediting the portfolio. A delegated canonical vault must reject atomically, without
@@ -60531,7 +60528,6 @@ fn v16_attack_deposit_rejects_delegated_canonical_vault_before_credit() {
     assert_eq!(env.portfolio_state(portfolio).capital.get(), 100);
 }
 
-
 #[test]
 fn v16_attack_restart_asset_oracle_checks_nonzero_asset_short_backing_domain() {
     let mut env = V16CuEnv::new();
@@ -60572,7 +60568,6 @@ fn v16_attack_restart_asset_oracle_checks_nonzero_asset_short_backing_domain() {
         AssetLifecycleV16::Recovery
     );
 }
-
 
 // full-interface sweep (cron135): SyncMaintenanceFee has a same-account branch for
 // `cranker_portfolio == charged_portfolio`. It must not double-borrow, double-credit, or lose funds:
@@ -60629,7 +60624,6 @@ fn v16_attack_sync_maintenance_self_cranker_alias_conserves_fee() {
     assert_domain_budget_remaining_total_consistent(&group, "maintenance fee self-cranker alias");
 }
 
-
 #[test]
 fn v16_attack_sync_maintenance_reward_cannot_alias_market_slab() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
@@ -60683,7 +60677,6 @@ fn v16_attack_sync_maintenance_reward_cannot_alias_market_slab() {
         "valid cranker reward path still pays the reward"
     );
 }
-
 
 #[test]
 fn v16_attack_sync_maintenance_rejects_cross_market_charged_portfolio_atomically() {
@@ -60774,13 +60767,6 @@ fn v16_attack_sync_maintenance_rejects_cross_market_charged_portfolio_atomically
         "same-market maintenance sync still succeeds after the rejected foreign-target probe"
     );
 }
-
-
-
-
-
-
-
 
 #[test]
 fn v16_attack_tradenocpi_rejects_duplicate_source_domain_sparse_state_atomically() {
@@ -60898,7 +60884,6 @@ fn v16_attack_tradenocpi_rejects_duplicate_source_domain_sparse_state_atomically
     );
 }
 
-
 #[test]
 fn v16_attack_stale_tradenocpi_currentness_threshold_is_bounded() {
     {
@@ -60931,8 +60916,14 @@ fn v16_attack_stale_tradenocpi_currentness_threshold_is_bounded() {
 
         let long = env.portfolio_state(long_account);
         let short = env.portfolio_state(short_account);
-        assert_eq!(percolator::active_bitmap_count_ones(active_bitmap(&long)), 7);
-        assert_eq!(percolator::active_bitmap_count_ones(active_bitmap(&short)), 7);
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&long)),
+            7
+        );
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&short)),
+            7
+        );
         assert_eq!(
             active_leg_for_asset(&long, 0).basis_pos_q,
             (9 * POS_SCALE) as i128
@@ -60983,7 +60974,6 @@ fn v16_attack_stale_tradenocpi_currentness_threshold_is_bounded() {
     }
 }
 
-
 #[test]
 fn v16_attack_stale_batch_nocpi_currentness_threshold_is_bounded() {
     {
@@ -61027,8 +61017,14 @@ fn v16_attack_stale_batch_nocpi_currentness_threshold_is_bounded() {
 
         let long = env.portfolio_state(long_account);
         let short = env.portfolio_state(short_account);
-        assert_eq!(percolator::active_bitmap_count_ones(active_bitmap(&long)), 7);
-        assert_eq!(percolator::active_bitmap_count_ones(active_bitmap(&short)), 7);
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&long)),
+            7
+        );
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&short)),
+            7
+        );
         for asset_index in 0..7usize {
             assert_eq!(
                 active_leg_for_asset(&long, asset_index).basis_pos_q,
@@ -61090,7 +61086,6 @@ fn v16_attack_stale_batch_nocpi_currentness_threshold_is_bounded() {
         assert_eq!(env.svm.get_account(&short_account).unwrap(), short_before);
     }
 }
-
 
 // CU/DoS sweep: the large-stale-portfolio currentness preflight intentionally only rejects when the
 // trade touches an already-active stale asset. Opening a fresh asset skips that gate, so cover the
@@ -61156,7 +61151,6 @@ fn v16_attack_stale_thirteen_leg_fresh_asset_batch_cpi_stays_bounded() {
         "fresh-asset stale-boundary trade preserves senior conservation"
     );
 }
-
 
 // LoF sweep - terminal payout paths stage resolved payout receipts before the transfer accounts are
 // validated. A payout above u64::MAX must reject without burning the payout state: direct close is
@@ -61285,14 +61279,15 @@ fn v16_attack_terminal_payouts_over_u64_max_roll_back_receipts() {
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: over * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: over,
-            paid_effective: 0,
-            finalized: false,
-        });
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: over * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: over,
+                paid_effective: 0,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         topup_env
@@ -61360,7 +61355,6 @@ fn v16_attack_terminal_payouts_over_u64_max_roll_back_receipts() {
         "over-u64 top-up rejection pays no truncated amount"
     );
 }
-
 
 // Public-interface DoS sweep: PermissionlessCrank accepts a tail for hybrid oracle updates, but
 // auth-mark/manual refreshes ignore it. A hostile cranker can still stuff duplicated readonly
@@ -61523,7 +61517,6 @@ fn v16_attack_permissionless_crank_auth_mark_duplicate_ignored_tail_is_cu_bounde
     );
 }
 
-
 // Public-interface DoS sweep: Hybrid oracle cranks consume the first configured oracle accounts and
 // ignore any surplus tail accounts. A hostile cranker can still stuff duplicated readonly accounts
 // after the real oracle, so the valid oracle update must keep making progress with bounded CU.
@@ -61652,7 +61645,6 @@ fn v16_attack_permissionless_crank_hybrid_duplicate_surplus_tail_is_cu_bounded()
         "surplus tail cannot create insurance or reward credit"
     );
 }
-
 
 // Public-interface DoS sweep: reward-enabled liquidation has a distinct tail splitter from refresh:
 // when the final account is a program-owned reward portfolio, preceding accounts are treated as the
@@ -61820,7 +61812,6 @@ fn v16_attack_reward_liquidation_duplicate_ignored_tail_is_cu_bounded() {
     );
 }
 
-
 // PermissionlessCrank action=0 ignores the caller fee_bps field. A hostile cranker supplying
 // u64::MAX must not inject fees or DoS refresh progress.
 #[test]
@@ -61889,7 +61880,6 @@ fn v16_attack_permissionless_refresh_ignores_hostile_fee_bps() {
         "refresh leaves the user position intact"
     );
 }
-
 
 // security.md sweep - retired-slot reuse fee custody (#33/#44/#48):
 // permissionless reuse is a separate UpdateAssetLifecycle branch from append. It must inherit the same
@@ -62076,7 +62066,6 @@ fn v16_attack_permissionless_reuse_rejects_fee_vault_fragmentation() {
     assert_eq!(group_reused.vault - group_retired.vault, FEE);
 }
 
-
 // full-interface sweep: permissionless retired-slot reuse is distinct from append and mutates an existing
 // canonical retired slot before charging the init fee. A loaded non-SPL executable token-program id must reject
 // before the slot is reactivated, the reusable-slot counter is consumed, or creator/vault custody changes.
@@ -62215,7 +62204,6 @@ fn v16_attack_permissionless_reuse_rejects_wrong_token_program_before_slot_react
         "permissionless reuse wrong-token control",
     );
 }
-
 
 // LoF/DoS sweep (cron135): several policy knobs are accepted config-only writes even after
 // ResolveMarket, but they must not alter resolved engine state, reopen live-only backing-fee policy,
@@ -62367,7 +62355,6 @@ fn v16_attack_post_resolve_policy_writes_do_not_change_terminal_fee_routing() {
     assert_eq!(closed_market.lamports, 0);
     assert!(closed_market.data.iter().all(|b| *b == 0));
 }
-
 
 // full-interface sweep (cron135): secondary terminal payouts use the same post-engine vault
 // validation as primary payouts. A canonical secondary reserve with a delegate set must reject
@@ -62544,14 +62531,15 @@ fn v16_attack_terminal_secondary_payouts_reject_delegated_canonical_vault() {
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: 100 * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: 100,
-            paid_effective: 40,
-            finalized: false,
-        });
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         topup_env
@@ -62646,7 +62634,6 @@ fn v16_attack_terminal_secondary_payouts_reject_delegated_canonical_vault() {
     assert!(resolved_receipt(&receipt).finalized);
     assert_eq!(topup_env.market_state().1.vault, 0);
 }
-
 
 // full-interface sweep (cron135): terminal insurance through the secondary reserve also reaches
 // token-account delegate validation only after terminal insurance and ledger accounting are staged.
@@ -62796,7 +62783,6 @@ fn v16_attack_terminal_insurance_rejects_delegated_secondary_vault() {
     assert_eq!(group.vault, 60);
 }
 
-
 #[test]
 fn v16_attack_lp_can_disable_broken_matcher_config_without_external_accounts() {
     let mut env = V16CuEnv::new();
@@ -62880,7 +62866,6 @@ fn v16_attack_lp_can_disable_broken_matcher_config_without_external_accounts() {
         state::PortfolioMatcherConfigV16::default()
     );
 }
-
 
 // security.md sweep - TradeCpi limit_price floor for shorts (#19/#39): the slippage inequality flips
 // for a taker sell/short. A matcher filling below the requested floor must reject atomically, while
@@ -62985,7 +62970,6 @@ fn v16_attack_tradecpi_short_limit_price_floor_enforced() {
         "conservation after short fill"
     );
 }
-
 
 // full-interface sweep: CureAndCancelClose uses a distinct optional-deposit value-in rail.
 // A delegated canonical vault is at the right address but unsafe custody; the cure must reject before
@@ -63105,7 +63089,6 @@ fn v16_attack_cure_deposit_rejects_delegated_canonical_vault() {
     );
 }
 
-
 // full-interface sweep: CureAndCancelClose validates the optional-deposit SPL Token program before
 // canceling close progress or crediting capital. A loaded non-SPL executable must not get to the
 // engine mutation, because the transfer happens after that mutation in the successful path.
@@ -63181,7 +63164,6 @@ fn v16_attack_cure_deposit_rejects_wrong_token_program_before_cancel() {
         "valid cure control keeps accounting matched to custody"
     );
 }
-
 
 // full-interface sweep (cron49): a backing-domain ledger is also bound to the live backing authority.
 // After rotating that authority, the old ledger must not be reusable on sync or top-up paths, or a
@@ -63340,7 +63322,6 @@ fn v16_attack_backing_ledger_rejects_stale_authority_after_rotation() {
     );
 }
 
-
 // full-interface sweep (cron55): the asset-0 insurance ledger is bound to the live insurance
 // authority. After rotation, the previous authority must not keep syncing the ledger, and the new
 // authority must not be able to top up through the previous authority's accounting state.
@@ -63489,7 +63470,6 @@ fn v16_attack_insurance_ledger_rejects_stale_authority_after_rotation() {
     );
 }
 
-
 // full-interface sweep (cron135): terminal WithdrawInsurance debits resolved-domain budgets by
 // insurance_authority, not the live insurance_operator. Insurance funded before an authority handoff
 // must not remain withdrawable by the stale key once the market resolves, while the current authority
@@ -63591,7 +63571,6 @@ fn v16_attack_terminal_insurance_withdraw_rekeys_after_authority_rotation() {
     assert_eq!(group_after.vault, 60);
     assert_eq!(group_after.insurance_domain_budget[0], 60);
 }
-
 
 // full-interface sweep (cron135): the terminal full-drain ledger fast path skips the early
 // observation read, so an initialized stale-authority ledger is rejected only after the in-memory
@@ -63715,7 +63694,6 @@ fn v16_attack_terminal_insurance_full_drain_stale_ledger_rolls_back_after_rotati
     assert_eq!(fresh_ledger_state.last_observed_insurance_atoms, 0);
 }
 
-
 // full-interface sweep (cron135): resolved WithdrawBackingBucket has a preflight that admits
 // marketauth, then a resolved-mode inner check that must require the current backing authority.
 // Backing funded before a handoff must not remain terminal-withdrawable by the stale authority.
@@ -63827,7 +63805,6 @@ fn v16_attack_terminal_backing_withdraw_rekeys_after_authority_rotation() {
         60 * BOUND_SCALE
     );
 }
-
 
 // full-interface sweep (cron135): UpdateAuthority is intentionally available after ResolveMarket so
 // a terminal wind-down can still hand off compromised/cold keys. That must rekey terminal insurance
@@ -64065,7 +64042,6 @@ fn v16_attack_terminal_withdrawals_rekey_after_post_resolve_marketauth_handoff()
     );
 }
 
-
 // security.md sweep - resolved-mode reserve rebalance (#30/#33/#44): SwapSecondaryForPrimary is
 // intentionally a marketauth base-unit custody rebalance, not a Live account mutation. If it runs while
 // users are waiting to CloseResolved, it must leave engine accounting byte-stable, keep the user payout
@@ -64183,7 +64159,6 @@ fn v16_attack_resolved_secondary_swap_preserves_payout_and_slab_liveness() {
     assert!(closed_market.data.iter().all(|b| *b == 0));
 }
 
-
 // ResolveMarket is a market-freezing admin path, not just a config write. After marketauth is handed
 // off, the rotated-out key must not retain the ability to force-resolve a live market and DoS users.
 #[test]
@@ -64261,7 +64236,6 @@ fn v16_attack_rotated_marketauth_cannot_resolve_market() {
     );
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
-
 
 // The stale-base-market gate covers every non-base oracle update route, not just PushAuthMark.
 // A permissionless asset's local oracle authority must not be able to reconfigure or refresh its
@@ -64509,7 +64483,6 @@ fn v16_attack_non_base_oracle_routes_reject_after_base_resolve_matured() {
     }
 }
 
-
 // RefineResolvedUnreceiptedBound mutates terminal payout accounting, so marketauth handoff must revoke
 // the old key on this wind-down path too. Otherwise a rotated-out admin could still haircut or DoS
 // resolved users by lowering the unreceipted claim bound after final resolution.
@@ -64635,7 +64608,6 @@ fn v16_attack_rotated_marketauth_cannot_refine_resolved_bound() {
     );
 }
 
-
 // LoF/DoS sweep: Withdraw grows legacy portfolio storage before the engine provenance check and
 // then performs a signed vault transfer. A market-A legacy portfolio supplied to market B must
 // reject atomically: no foreign vault drain, no capital debit, and no public realloc debris.
@@ -64741,7 +64713,6 @@ fn v16_attack_legacy_cross_market_withdraw_rolls_back_realloc_and_transfer() {
         "successful same-market withdraw grows legacy storage"
     );
 }
-
 
 // full-interface sweep (cron57): Deposit is a value-in path, but it must still reject a portfolio
 // stamped for another market. Otherwise an attacker could pull their source tokens into market B while
@@ -64860,7 +64831,10 @@ fn v16_attack_deposit_rejects_stale_engine_layout_discriminator_atomically() {
     let mut corrupted = env.svm.get_account(&portfolio).unwrap();
     let mut portfolio_state = state::read_portfolio(&corrupted.data).unwrap();
     let current_layout = portfolio_state.provenance_header.layout_discriminator.get();
-    assert!(current_layout > 0, "current engine layout discriminator is nonzero");
+    assert!(
+        current_layout > 0,
+        "current engine layout discriminator is nonzero"
+    );
     portfolio_state.provenance_header =
         percolator::ProvenanceHeaderV16Account::from_runtime(&percolator::ProvenanceHeaderV16 {
             market_group_id: portfolio_state.provenance_header.market_group_id,
@@ -64948,7 +64922,6 @@ fn v16_attack_deposit_rejects_stale_engine_layout_discriminator_atomically() {
     assert_eq!(env.token_amount(source), 0);
     assert_eq!(env.token_amount(env.vault), 123);
 }
-
 
 // The backing withdrawal rails must reject a delegated canonical vault, not only non-canonical vault
 // fragments. A delegate on the real vault is unsafe custody: if either principal or earnings debited
@@ -65139,7 +65112,6 @@ fn v16_attack_backing_withdrawals_reject_delegated_canonical_vault() {
     assert_eq!(ledger_after.total_earnings_withdrawn_atoms, 10);
     assert_eq!(ledger_after.last_observed_bucket_earnings_atoms, 20);
 }
-
 
 // full-interface sweep (cron135): backing principal and provider-fee earnings can be paid from the
 // configured secondary reserve, not only the primary vault. That path must inherit canonical-vault
@@ -65382,7 +65354,6 @@ fn v16_attack_backing_withdrawals_reject_delegated_secondary_reserve() {
     assert_eq!(ledger_after.last_observed_bucket_earnings_atoms, 20);
 }
 
-
 #[test]
 fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_backing_gate() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
@@ -65514,7 +65485,6 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_backing_gate() {
         "rejected stale-asset backing withdrawal pays no tokens"
     );
 }
-
 
 #[test]
 fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_backing_earnings_gate() {
@@ -65665,7 +65635,6 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_backing_earnings_gate() {
     );
 }
 
-
 // security.md sweep - ForceCloseAbandonedAsset duplicate-account alias (#26/#44/#48): the public
 // recovery route takes two writable portfolio slots. Passing the same account twice must reject before
 // any legacy-account realloc or engine mutation; otherwise a duplicated AccountInfo path could become a
@@ -65809,7 +65778,6 @@ fn v16_attack_force_close_rejects_same_portfolio_alias_before_realloc() {
     );
 }
 
-
 // security.md sweep - ForceCloseAbandonedAsset order independence (#2/#33/#48): the unsigned recovery
 // cleanup path accepts two victim portfolios and must close exposure based on their leg sides, not on
 // caller-supplied account order. Existing force-close controls pass the long first; this drives the
@@ -65911,7 +65879,6 @@ fn v16_attack_force_close_short_first_pair_reduces_without_direction_inversion()
     );
 }
 
-
 #[allow(clippy::too_many_arguments)]
 fn try_no_cpi_reported_price_trade_with_cu_on_asset(
     env: &mut V16CuEnv,
@@ -65956,7 +65923,6 @@ fn try_no_cpi_reported_price_trade_with_cu_on_asset(
         ),
     }
 }
-
 
 fn assert_no_cpi_same_slot_trade_driven_ewma_does_not_compound(path: NoCpiReportedPricePath) {
     const MARK: u64 = 1_000_000;
@@ -66049,7 +66015,6 @@ fn assert_no_cpi_same_slot_trade_driven_ewma_does_not_compound(path: NoCpiReport
     );
 }
 
-
 // Split-trade manipulation: same-slot repeats must not compound the trade-driven EWMA update. The
 // first fill can pay for and apply one bounded mark move; the second fill in the same slot remains
 // live but `ewma_update(dt==0)` must keep the mark fixed.
@@ -66062,7 +66027,6 @@ fn v16_attack_nocpi_same_slot_trade_driven_ewma_does_not_compound() {
         assert_no_cpi_same_slot_trade_driven_ewma_does_not_compound(path);
     }
 }
-
 
 fn assert_no_cpi_saturated_base_fee_keeps_trade_live_without_free_ewma_move(
     path: NoCpiReportedPricePath,
@@ -66124,7 +66088,6 @@ fn assert_no_cpi_saturated_base_fee_keeps_trade_live_without_free_ewma_move(
     assert_eq!(group.assets[0].oi_eff_short_q, SIZE_Q.unsigned_abs());
 }
 
-
 // Fee-headroom edge: if the configured base trade fee already consumes the max trading fee cap,
 // off-mark reported prices must still execute but cannot move the trade-driven EWMA without an
 // additional fee budget to pay for that movement.
@@ -66137,7 +66100,6 @@ fn v16_attack_nocpi_saturated_base_fee_does_not_dos_or_move_ewma_for_free() {
         assert_no_cpi_saturated_base_fee_keeps_trade_live_without_free_ewma_move(path);
     }
 }
-
 
 fn assert_no_cpi_asset_profile_caps_paid_trade_driven_mark_move(
     mode: TradeDrivenMarkMode,
@@ -66236,7 +66198,6 @@ fn assert_no_cpi_asset_profile_caps_paid_trade_driven_mark_move(
     );
 }
 
-
 // Asset-profile parity for the no-CPI EWMA fix: asset 0 mirrors trade-driven mark updates into the
 // wrapper config, while asset 1 stores them only in its oracle profile. Exercise that separate writeback
 // branch for both single and batch no-CPI routes, and keep asset 0 isolated.
@@ -66264,7 +66225,6 @@ fn v16_attack_nocpi_asset_profile_trade_driven_marks_are_paid_and_isolated() {
     }
 }
 
-
 fn trade_driven_mark_profile(env: &V16CuEnv, asset_index: u16) -> state::AssetOracleProfileV16 {
     state::read_asset_oracle_profile(
         &env.svm.get_account(&env.market).unwrap().data,
@@ -66273,11 +66233,9 @@ fn trade_driven_mark_profile(env: &V16CuEnv, asset_index: u16) -> state::AssetOr
     .unwrap()
 }
 
-
 fn trade_driven_mark_cpi_env(mode: TradeDrivenMarkMode, asset_index: u16) -> V16CuEnv {
     trade_driven_mark_cpi_env_with_fees(mode, asset_index, 0, 37)
 }
-
 
 fn trade_driven_mark_cpi_env_with_fees(
     mode: TradeDrivenMarkMode,
@@ -66337,7 +66295,6 @@ fn trade_driven_mark_cpi_env_with_fees(
     );
     env
 }
-
 
 #[allow(clippy::too_many_arguments)]
 fn try_cpi_spread_trade_with_cu(
@@ -66399,7 +66356,6 @@ fn try_cpi_spread_trade_with_cu(
         ),
     }
 }
-
 
 fn assert_cpi_spread_price_caps_paid_trade_driven_mark_move(
     mode: TradeDrivenMarkMode,
@@ -66497,7 +66453,6 @@ fn assert_cpi_spread_price_caps_paid_trade_driven_mark_move(
         "{mode:?} {path:?}: mark move ({mark_move_bps} bps) must be covered by paid fee ({paid_move_bps} bps)"
     );
 }
-
 
 fn assert_cpi_tiny_fill_prices_mark_move_against_existing_oi(
     mode: TradeDrivenMarkMode,
@@ -66633,7 +66588,6 @@ fn assert_cpi_tiny_fill_prices_mark_move_against_existing_oi(
     );
 }
 
-
 // CPI externality parity for the EWMA/no-CPI fix: when market OI already exists, a tiny matcher
 // fill can move the trade-driven mark for everyone. The dynamic fee must therefore size the mark
 // movement against the pre-existing max-side OI, not only against the tiny fill's own notional.
@@ -66657,7 +66611,6 @@ fn v16_attack_cpi_tiny_fill_mark_move_is_paid_against_existing_oi() {
         }
     }
 }
-
 
 #[allow(clippy::too_many_arguments)]
 fn try_hostile_partial_epsilon_cpi_trade_with_cu(
@@ -66749,7 +66702,6 @@ fn try_hostile_partial_epsilon_cpi_trade_with_cu(
     }
 }
 
-
 fn assert_cpi_partial_epsilon_price_caps_paid_trade_driven_mark_move(
     mode: TradeDrivenMarkMode,
     path: CpiReportedPricePath,
@@ -66835,7 +66787,6 @@ fn assert_cpi_partial_epsilon_price_caps_paid_trade_driven_mark_move(
         "{mode:?} {path:?}: partial mark move ({mark_move_bps} bps) must be covered by paid fee ({paid_move_bps} bps)"
     );
 }
-
 
 fn assert_cpi_same_slot_trade_driven_mark_does_not_compound(
     mode: TradeDrivenMarkMode,
@@ -66944,7 +66895,6 @@ fn assert_cpi_same_slot_trade_driven_mark_does_not_compound(
     );
 }
 
-
 // CPI parity for the EWMA/no-CPI fix: a matcher can return valid off-oracle full fills on both
 // single and batched CPI routes. Those fills must remain live, but EWMA/stale-hybrid movement must
 // use the same dt-clamped accepted price and fee-supported mark cap as the no-CPI paths.
@@ -66969,7 +66919,6 @@ fn v16_attack_cpi_spread_prices_cap_paid_ewma_and_hybrid_mark_move() {
     }
 }
 
-
 // CPI partial-fill parity for the EWMA/no-CPI fix: validate_matcher_return accepts nonzero
 // FLAG_PARTIAL_OK fills at any nonzero exec price. An epsilon-priced partial must therefore remain
 // live, but the trade-driven mark move must be fee-capped and sized to the executed partial only.
@@ -66985,7 +66934,6 @@ fn v16_attack_cpi_partial_epsilon_prices_cap_paid_ewma_and_hybrid_mark_move() {
     }
 }
 
-
 // CPI split-trade parity: matcher-returned off-oracle prices must obey the same same-slot
 // no-compounding rule as no-CPI reported prices in every trade-driven mark mode.
 #[test]
@@ -66999,7 +66947,6 @@ fn v16_attack_cpi_same_slot_trade_driven_marks_do_not_compound() {
         }
     }
 }
-
 
 fn assert_cpi_saturated_base_fee_keeps_trade_live_without_free_mark_move(
     mode: TradeDrivenMarkMode,
@@ -67071,7 +67018,6 @@ fn assert_cpi_saturated_base_fee_keeps_trade_live_without_free_mark_move(
     );
 }
 
-
 // CPI parity for the zero-headroom fee edge: matcher-returned off-oracle prices stay live, but EWMA
 // and stale-hybrid marks cannot move unless there is fee headroom beyond the configured base fee.
 #[test]
@@ -67085,7 +67031,6 @@ fn v16_attack_cpi_saturated_base_fee_does_not_dos_or_move_marks_for_free() {
         }
     }
 }
-
 
 fn auth_mark_reported_price_env() -> V16CuEnv {
     const MARK: u64 = 1_000_000;
@@ -67105,7 +67050,6 @@ fn auth_mark_reported_price_env() -> V16CuEnv {
     env.svm.warp_to_slot(5);
     env
 }
-
 
 fn auth_mark_no_cpi_fee_and_mark(
     path: NoCpiReportedPricePath,
@@ -67140,7 +67084,6 @@ fn auth_mark_no_cpi_fee_and_mark(
         profile.mark_ewma_e6,
     )
 }
-
 
 fn auth_mark_cpi_fee_and_mark(
     path: CpiReportedPricePath,
@@ -67177,7 +67120,6 @@ fn auth_mark_cpi_fee_and_mark(
         profile.mark_ewma_e6,
     )
 }
-
 
 // AUTH_MARK is price-managed but not trade-driven: off-oracle reported/matcher prices must neither
 // move the mark nor resize fees. This closes the mode boundary around the EWMA/hybrid fix.
@@ -67235,7 +67177,6 @@ fn v16_attack_auth_mark_prices_do_not_drive_mark_or_fee_across_trade_routes() {
     }
 }
 
-
 fn mixed_mode_batch_env() -> V16CuEnv {
     const MARK: u64 = 1_000_000;
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
@@ -67254,7 +67195,6 @@ fn mixed_mode_batch_env() -> V16CuEnv {
     env.svm.warp_to_slot(5);
     env
 }
-
 
 fn send_mixed_mode_batch_trade(
     env: &mut V16CuEnv,
@@ -67340,7 +67280,6 @@ fn send_mixed_mode_batch_trade(
     }
 }
 
-
 fn assert_mixed_mode_batch_updates_only_trade_driven_leg(path: MixedModeBatchPath) {
     const MARK: u64 = 1_000_000;
     const SIZE_Q: u128 = 1000u128 * POS_SCALE;
@@ -67397,7 +67336,6 @@ fn assert_mixed_mode_batch_updates_only_trade_driven_leg(path: MixedModeBatchPat
     );
 }
 
-
 // Multi-leg batch parity: when one atomic batch mixes a trade-driven EWMA leg with an AUTH_MARK leg,
 // only the EWMA leg may consume the off-oracle print for capped mark discovery. The AUTH_MARK leg
 // remains fixed even though it shares the same batch, counterparties, and matcher spread.
@@ -67407,7 +67345,6 @@ fn v16_attack_mixed_mode_batches_update_only_trade_driven_marks() {
         assert_mixed_mode_batch_updates_only_trade_driven_leg(path);
     }
 }
-
 
 // full-interface sweep - matcher-tail CU grief (#22/#27): the CPI matcher paths forward caller-supplied
 // remaining accounts to an external program. Benign tail accounts are allowed for matcher integrations,
@@ -67661,7 +67598,6 @@ fn v16_attack_matcher_tail_account_count_is_capped() {
     }
 }
 
-
 // CU/DoS sweep: the cap test above proves unique exact-cap tails on single TradeCpi. The
 // adapter also has a duplicate-account path when the same benign tail account is repeated. This
 // pins that route for the single-fill matcher CPI, which uses different request/return plumbing
@@ -67753,7 +67689,6 @@ fn v16_attack_tradecpi_duplicate_matcher_tail_is_cu_bounded() {
         "duplicate matcher tail overhead too high: baseline={baseline_cu}, duplicate={duplicate_cu}"
     );
 }
-
 
 // CU/DoS sweep: the matcher-tail cap above uses unique benign accounts. A caller can also repeat the
 // same benign account up to the cap, which takes the runtime duplicate-account path and is still
@@ -67860,6 +67795,92 @@ fn v16_attack_batch_tradecpi_duplicate_matcher_tail_is_cu_bounded() {
     );
 }
 
+// CU/DoS sweep: the generic duplicate-tail tests use a benign account that is not otherwise present
+// in the instruction. A caller can also repeat required matcher accounts in the remaining-account
+// tail. Those aliases are not protocol state, but they exercise the runtime's duplicate writable
+// account path for the matcher context and duplicate signer-PDA path for the matcher delegate. They
+// must not turn an otherwise live fill into a CU amplifier.
+#[test]
+fn v16_attack_tradecpi_required_matcher_tail_aliases_are_cu_bounded() {
+    const MAX_TAIL: usize = percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS;
+
+    #[derive(Clone, Copy)]
+    enum TailAlias {
+        None,
+        MatcherContextWritable,
+        MatcherDelegateReadonly,
+    }
+
+    fn run_trade_with_tail_alias(alias: TailAlias) -> u64 {
+        let mut env = V16CuEnv::new();
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes =
+            std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let taker = Keypair::new();
+        let lp = Keypair::new();
+        let taker_account = env.create_portfolio(&taker);
+        let lp_account = env.create_portfolio(&lp);
+        env.deposit(&taker, taker_account, 2_000_000);
+        env.deposit(&lp, lp_account, 2_000_000);
+        let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, lp_account);
+
+        let mut accounts = vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ];
+        match alias {
+            TailAlias::None => {}
+            TailAlias::MatcherContextWritable => {
+                accounts.extend((0..MAX_TAIL).map(|_| AccountMeta::new(ctx, false)));
+            }
+            TailAlias::MatcherDelegateReadonly => {
+                accounts.extend((0..MAX_TAIL).map(|_| AccountMeta::new_readonly(delegate, false)));
+            }
+        }
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::TradeCpi {
+                    asset_index: 0,
+                    size_q: (5 * POS_SCALE) as i128,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+                accounts,
+                &[&taker],
+            )
+            .expect("TradeCpi with required matcher account aliases in tail");
+        assert!(
+            has_active_leg_for_asset(&env.portfolio_state(taker_account), 0),
+            "required-account tail alias TradeCpi must fill a real leg"
+        );
+        assert_cu_within("TradeCpi required matcher tail alias", cu, TRADE_CU_LIMIT);
+        cu
+    }
+
+    let baseline_cu = run_trade_with_tail_alias(TailAlias::None);
+    let ctx_alias_cu = run_trade_with_tail_alias(TailAlias::MatcherContextWritable);
+    let delegate_alias_cu = run_trade_with_tail_alias(TailAlias::MatcherDelegateReadonly);
+    println!(
+        "v16 TradeCpi required matcher tail aliases: baseline={baseline_cu}, \
+         ctx_alias={ctx_alias_cu}, delegate_alias={delegate_alias_cu}"
+    );
+    assert!(
+        ctx_alias_cu <= baseline_cu + 120_000,
+        "matcher-ctx tail aliases add too much CU: baseline={baseline_cu}, ctx_alias={ctx_alias_cu}"
+    );
+    assert!(
+        delegate_alias_cu <= baseline_cu + 120_000,
+        "matcher-delegate tail aliases add too much CU: baseline={baseline_cu}, delegate_alias={delegate_alias_cu}"
+    );
+}
 
 // LoF/terminal authority sweep: UpdateAuthority covers market/asset-0 handoff, but non-base assets
 // use UpdateAssetAuthority. After resolution, rekeying a funded asset's insurance/backing authorities
@@ -68055,7 +68076,6 @@ fn v16_attack_terminal_asset_authority_handoff_revokes_stale_domain_keys() {
     env.close_slab_with_cu();
 }
 
-
 // full-interface sweep: permissionless asset activation charges a fee on a path that can grow the
 // market account and credit asset-0 insurance. A loaded non-SPL executable token-program id must reject
 // before any realloc, asset install, fee debit, or insurance/vault accounting change.
@@ -68169,7 +68189,6 @@ fn v16_attack_permissionless_create_rejects_wrong_token_program_before_realloc()
     assert_eq!(group.insurance, FEE);
     assert_domain_budget_remaining_total_consistent(&group, "permissionless wrong-token control");
 }
-
 
 // full-interface sweep: permissionless activation validates the fee vault before it appends a market
 // slot and credits the init fee into engine insurance. A canonical vault with a delegate is still unsafe
@@ -68310,7 +68329,6 @@ fn v16_attack_permissionless_create_rejects_delegated_canonical_fee_vault() {
     assert_eq!(group.insurance, FEE);
 }
 
-
 // LoF/DoS sweep (cron135): UpdateBaseUnitMints is intentionally value-empty gated, not
 // materialized-count gated. An abandoned-but-empty portfolio must not DoS an otherwise empty
 // base-unit handoff, and the existing portfolio must remain usable under the updated config.
@@ -68401,7 +68419,6 @@ fn v16_attack_empty_materialized_portfolio_cannot_dos_base_unit_handoff() {
         "terminal CloseSlab remains reachable after an empty-portfolio base-unit handoff: {close:?}"
     );
 }
-
 
 // The old-reserve emptiness proof for UpdateBaseUnitMints must be the canonical vault PDA. Otherwise
 // a market authority could pass an arbitrary empty token account for the old secondary mint while the
@@ -68512,7 +68529,6 @@ fn v16_attack_base_unit_mint_reset_rejects_fake_old_secondary_reserve() {
     );
 }
 
-
 // The old-primary reserve proof must also be pinned to the canonical vault PDA. Otherwise the market
 // authority could pass an arbitrary empty vault-authority-owned token account for the old primary mint,
 // rotate the primary mint away, and strand primary-vault dust that CloseSlab can no longer route.
@@ -68621,7 +68637,6 @@ fn v16_attack_base_unit_mint_reset_rejects_fake_old_primary_reserve() {
         "replacement primary mint stored only after the canonical old reserve is empty"
     );
 }
-
 
 // UpdateBaseUnitMints proves that old reserves are empty before rotating them out of the config. Emptiness
 // alone is insufficient: a delegated canonical old reserve is unsafe custody and must not be accepted as the
@@ -68790,7 +68805,6 @@ fn v16_attack_base_unit_mint_reset_rejects_delegated_empty_old_reserves() {
     );
 }
 
-
 // LoF/DoS sweep (cron135): the old-reserve proof for UpdateBaseUnitMints must reject
 // close-authority-bearing canonical reserves, too. An empty old reserve with a close authority is not clean
 // custody: the close authority can delete the canonical vault out-of-band after the rail is rotated away.
@@ -68958,7 +68972,6 @@ fn v16_attack_base_unit_mint_reset_rejects_closable_empty_old_reserves() {
     );
 }
 
-
 // DoS sweep — a max-size market must not make basic user portfolio lifecycle
 // rails non-live. Trades already cover max-size active positions; this keeps
 // the separate InitPortfolio/Deposit/Withdraw/ClosePortfolio public paths
@@ -69002,7 +69015,6 @@ fn v16_bpf_10m_market_portfolio_value_rails_stay_bounded() {
     assert_eq!(group.c_tot, 0);
     assert_eq!(group.materialized_portfolio_count, 0);
 }
-
 
 #[test]
 fn v16_bpf_10m_market_preexisting_portfolios_trade_after_growth() {
@@ -69075,7 +69087,6 @@ fn v16_bpf_10m_market_preexisting_portfolios_trade_after_growth() {
     assert!(group.vault >= group.c_tot + group.insurance);
 }
 
-
 // LoF/DoS sweep — a user stuck in the close-progress state must still be able
 // to cancel that recovery ledger on a max-size market. This is a distinct
 // recovery route from the flat Deposit/Withdraw/ClosePortfolio lifecycle.
@@ -69110,7 +69121,6 @@ fn v16_bpf_10m_market_cure_and_cancel_close_stays_bounded() {
         "canceling close progress releases the pending loss barrier"
     );
 }
-
 
 // DoS sweep — public resolution and wind-down entrypoints must not scale with
 // the largest market account that fits Solana's 10 MiB account cap. Existing CU
@@ -69166,7 +69176,6 @@ fn v16_bpf_10m_market_resolve_paths_stay_bounded() {
     assert_eq!(stale_group.resolved_slot, RESOLVE_SLOT);
 }
 
-
 #[test]
 fn v16_bpf_10m_market_claim_resolved_topup_stays_bounded() {
     const N: usize = 5_834;
@@ -69199,14 +69208,15 @@ fn v16_bpf_10m_market_claim_resolved_topup_stays_bounded() {
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: 100 * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: 100,
-            paid_effective: 40,
-            finalized: false,
-        });
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         env.svm.set_account(env.market, market_account).unwrap();
@@ -69227,7 +69237,6 @@ fn v16_bpf_10m_market_claim_resolved_topup_stays_bounded() {
     assert_eq!(resolved_receipt(&account).paid_effective, 100);
     assert!(resolved_receipt(&account).finalized);
 }
-
 
 #[test]
 fn v16_bpf_10m_market_refine_resolved_bound_stays_bounded() {
@@ -69283,7 +69292,6 @@ fn v16_bpf_10m_market_refine_resolved_bound_stays_bounded() {
         INITIAL_BOUND - DECREASE
     );
 }
-
 
 #[test]
 fn v16_bpf_10m_market_high_asset_fee_redirect_stays_bounded() {
@@ -69364,7 +69372,6 @@ fn v16_bpf_10m_market_high_asset_fee_redirect_stays_bounded() {
     );
     assert_domain_budget_remaining_total_consistent(&group, "10MiB high-tail fee redirect");
 }
-
 
 #[test]
 fn v16_bpf_10m_market_final_append_activation_stays_bounded() {
@@ -69479,7 +69486,6 @@ fn v16_bpf_10m_market_final_append_activation_stays_bounded() {
     assert_eq!(group.assets[PREV_N].market_id, N as u64);
     assert_eq!(group.assets[PREV_N].effective_price, PRICE);
 }
-
 
 #[test]
 fn v16_bpf_10m_market_force_close_high_asset_stays_bounded() {
@@ -69603,7 +69609,6 @@ fn v16_bpf_10m_market_force_close_high_asset_stays_bounded() {
     assert_eq!(restarted_group.assets[HIGH_ASSET].effective_price, PRICE);
 }
 
-
 // LoF/DoS sweep - permissionless reuse of a retired high-index slot takes a
 // different public branch from appending a new asset. At base fee 1, asset
 // 1727 is the highest index whose doubled fee remains below MAX_VAULT_TVL;
@@ -69696,7 +69701,6 @@ fn v16_bpf_10m_market_permissionless_reuse_high_asset_stays_bounded() {
     assert_eq!(profile.oracle_authority, creator_key.to_bytes());
 }
 
-
 // LoF/DoS sweep - even though nonzero permissionless fees only remain usable
 // up to their fee/vault frontier, the market authority must still be able to
 // retire and reuse a true tail slot on the largest market account.
@@ -69754,7 +69758,6 @@ fn v16_bpf_10m_market_admin_reuse_tail_asset_stays_bounded() {
     assert_eq!(group.assets[HIGH_ASSET].effective_price, REUSE_PRICE);
     assert_eq!(group.vault as u64, env.token_amount(env.vault));
 }
-
 
 // LoF/DoS sweep - secondary base-unit swaps are value-moving public custody
 // routes but should remain independent of market account size and should not
@@ -69816,7 +69819,6 @@ fn v16_bpf_10m_market_secondary_swap_stays_bounded_and_state_free() {
         "secondary swap must only move SPL custody, not rewrite max-size market state"
     );
 }
-
 
 // LoF sweep - terminal slab cleanup must recover both configured collateral
 // reserves before zeroing a max-size market account.
@@ -69912,7 +69914,6 @@ fn v16_bpf_10m_market_close_slab_secondary_reserve_stays_bounded() {
     );
 }
 
-
 #[test]
 fn v16_bpf_10m_market_recovery_tools_high_asset_stay_bounded() {
     const N: usize = 5_834;
@@ -69992,7 +69993,6 @@ fn v16_bpf_10m_market_recovery_tools_high_asset_stay_bounded() {
     );
 }
 
-
 #[test]
 fn v16_bpf_10m_market_sync_maintenance_fee_stays_bounded() {
     const N: usize = 5_834;
@@ -70037,7 +70037,6 @@ fn v16_bpf_10m_market_sync_maintenance_fee_stays_bounded() {
     );
     assert_eq!(group.vault as u64, env.token_amount(env.vault));
 }
-
 
 // DoS/CU sweep - SyncMaintenanceFee gets much larger when both stressors are
 // present: a max-size market account and a payer portfolio already carrying the
@@ -70224,7 +70223,6 @@ fn v16_bpf_10m_market_sync_maintenance_fee_max_tail_legs_stays_bounded() {
     assert_eq!(after_self_group.vault as u64, env.token_amount(env.vault));
 }
 
-
 // LoF sweep - after a max-size market resolves, users with the full active-leg
 // cap on high-tail assets must still be able to close and recover capital.
 #[test]
@@ -70382,7 +70380,6 @@ fn v16_bpf_10m_market_close_resolved_max_tail_legs_stays_bounded() {
     );
 }
 
-
 #[test]
 fn v16_bpf_10m_market_settle_b_high_asset_stays_bounded() {
     const N: usize = 5_834;
@@ -70450,7 +70447,6 @@ fn v16_bpf_10m_market_settle_b_high_asset_stays_bounded() {
     assert!(after_leg.b_stale);
     assert!(after.b_stale_state != 0);
 }
-
 
 #[test]
 fn v16_bpf_10m_market_liquidation_reward_high_asset_stays_bounded() {
@@ -70596,9 +70592,9 @@ fn v16_bpf_10m_market_liquidation_reward_high_asset_stays_bounded() {
         after_group.assets[HIGH_ASSET].effective_price > PRICE,
         "liquidation path applies the pending adverse high-tail mark"
     );
-    assert!(percolator::active_bitmap_is_empty(
-        active_bitmap(&short_after)
-    ));
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &short_after
+    )));
     assert_eq!(
         after_group.vault, before_group.vault,
         "liquidation reward is an internal fee split, not a vault mint"
@@ -70613,7 +70609,6 @@ fn v16_bpf_10m_market_liquidation_reward_high_asset_stays_bounded() {
         "10MiB high-tail liquidation reward",
     );
 }
-
 
 #[test]
 fn v16_bpf_10m_market_refresh_high_asset_stays_bounded() {
@@ -70747,7 +70742,8 @@ fn v16_bpf_10m_market_refresh_high_asset_stays_bounded() {
         "second refresh remains bounded and leaves the high-index long leg current"
     );
     assert_eq!(
-        health_cert(&after).cert_oracle_epoch, after_group.oracle_epoch,
+        health_cert(&after).cert_oracle_epoch,
+        after_group.oracle_epoch,
         "refresh re-certifies the cranked portfolio"
     );
     assert_eq!(
@@ -70755,7 +70751,6 @@ fn v16_bpf_10m_market_refresh_high_asset_stays_bounded() {
         "refresh applies the high-index auth mark"
     );
 }
-
 
 #[test]
 fn v16_bpf_10m_market_high_asset_funding_crank_stays_bounded() {
@@ -70895,7 +70890,6 @@ fn v16_bpf_10m_market_high_asset_funding_crank_stays_bounded() {
     assert!(funded_group.vault >= funded_group.c_tot + funded_group.insurance);
 }
 
-
 #[test]
 fn v16_bpf_10m_market_auth_mark_high_asset_stays_bounded() {
     const N: usize = 5_834;
@@ -70994,7 +70988,6 @@ fn v16_bpf_10m_market_auth_mark_high_asset_stays_bounded() {
     assert_eq!(group.assets[HIGH_ASSET].effective_price, PRICE);
 }
 
-
 #[test]
 fn v16_bpf_10m_market_configure_hybrid_high_asset_stays_bounded() {
     const N: usize = 5_834;
@@ -71056,7 +71049,6 @@ fn v16_bpf_10m_market_configure_hybrid_high_asset_stays_bounded() {
         "high-index asset anchor was reset to the hybrid target"
     );
 }
-
 
 #[test]
 fn v16_bpf_10m_market_three_leg_hybrid_high_asset_crank_stays_bounded() {
@@ -71137,7 +71129,6 @@ fn v16_bpf_10m_market_three_leg_hybrid_high_asset_crank_stays_bounded() {
     assert_eq!(group.assets[HIGH_ASSET].raw_oracle_target_price, 140_000);
     assert_eq!(group.vault as u64, env.token_amount(env.vault));
 }
-
 
 #[test]
 fn v16_bpf_10m_market_cpi_and_batch_trade_paths_stay_bounded() {
@@ -71437,7 +71428,6 @@ fn v16_bpf_10m_market_cpi_and_batch_trade_paths_stay_bounded() {
     );
 }
 
-
 #[test]
 fn v16_bpf_10m_market_batch_14_high_tail_assets_stays_bounded() {
     const N: usize = 5_834;
@@ -71641,7 +71631,6 @@ fn v16_bpf_10m_market_batch_14_high_tail_assets_stays_bounded() {
     );
 }
 
-
 #[test]
 fn v16_bpf_10m_market_stale_seven_high_tail_trade_stays_bounded() {
     const N: usize = 5_834;
@@ -71770,7 +71759,6 @@ fn v16_bpf_10m_market_stale_seven_high_tail_trade_stays_bounded() {
         env.token_amount(env.vault)
     );
 }
-
 
 #[test]
 fn v16_bpf_10m_market_stale_14_high_tail_trade_recovers_after_precrank() {
@@ -71940,23 +71928,28 @@ fn v16_bpf_10m_market_stale_14_high_tail_trade_recovers_after_precrank() {
         assert!(portfolio.b_stale_state == 0, "{label} B-stale flag cleared");
         assert!(health_cert(portfolio).valid, "{label} health cert valid");
         assert_eq!(
-            health_cert(portfolio).cert_oracle_epoch, refreshed_group.oracle_epoch,
+            health_cert(portfolio).cert_oracle_epoch,
+            refreshed_group.oracle_epoch,
             "{label} oracle cert current after catch-up refresh"
         );
         assert_eq!(
-            health_cert(portfolio).cert_funding_epoch, refreshed_group.funding_epoch,
+            health_cert(portfolio).cert_funding_epoch,
+            refreshed_group.funding_epoch,
             "{label} funding cert current after catch-up refresh"
         );
         assert_eq!(
-            health_cert(portfolio).cert_risk_epoch, refreshed_group.risk_epoch,
+            health_cert(portfolio).cert_risk_epoch,
+            refreshed_group.risk_epoch,
             "{label} risk cert current after catch-up refresh"
         );
         assert_eq!(
-            health_cert(portfolio).cert_asset_set_epoch, refreshed_group.asset_set_epoch,
+            health_cert(portfolio).cert_asset_set_epoch,
+            refreshed_group.asset_set_epoch,
             "{label} asset-set cert current after catch-up refresh"
         );
         assert_eq!(
-            health_cert(portfolio).active_bitmap_at_cert, active_bitmap(portfolio),
+            health_cert(portfolio).active_bitmap_at_cert,
+            active_bitmap(portfolio),
             "{label} cert active bitmap current after catch-up refresh"
         );
     }
@@ -71994,7 +71987,6 @@ fn v16_bpf_10m_market_stale_14_high_tail_trade_recovers_after_precrank() {
         env.token_amount(env.vault)
     );
 }
-
 
 #[test]
 fn v16_bpf_10m_market_terminal_backing_ledger_paths_stay_bounded() {
@@ -72108,7 +72100,6 @@ fn v16_bpf_10m_market_terminal_backing_ledger_paths_stay_bounded() {
     assert_eq!(ledger_state.last_observed_bucket_earnings_atoms, 0);
 }
 
-
 #[test]
 fn v16_bpf_10m_market_high_domain_backing_fee_policy_stays_bounded() {
     const N: usize = 5_834;
@@ -72168,7 +72159,6 @@ fn v16_bpf_10m_market_high_domain_backing_fee_policy_stays_bounded() {
         4_000
     );
 }
-
 
 #[test]
 fn v16_bpf_10m_market_high_asset_insurance_authority_rotation_stays_bounded() {
@@ -72261,7 +72251,6 @@ fn v16_bpf_10m_market_high_asset_insurance_authority_rotation_stays_bounded() {
     assert_eq!(group.vault as u64, env.token_amount(env.vault));
 }
 
-
 #[test]
 fn v16_bpf_10m_market_live_insurance_withdraw_high_asset_stays_bounded() {
     const N: usize = 5_834;
@@ -72341,7 +72330,6 @@ fn v16_bpf_10m_market_live_insurance_withdraw_high_asset_stays_bounded() {
     assert_eq!(ledger_state.authority, admin.pubkey().to_bytes());
 }
 
-
 #[test]
 fn v16_bpf_10m_market_convert_released_pnl_high_domain_stays_bounded() {
     const N: usize = 5_834;
@@ -72397,7 +72385,6 @@ fn v16_bpf_10m_market_convert_released_pnl_high_domain_stays_bounded() {
         "senior conservation after high-domain PnL conversion"
     );
 }
-
 
 // BatchTradeNoCpi grows legacy portfolios to the market-slot-sized layout before its duplicate-asset
 // prepass rejects malformed legs. A duplicate batch must roll that growth back, or any public caller could
@@ -72522,7 +72509,6 @@ fn v16_attack_batch_nocpi_duplicate_assets_rolls_back_legacy_realloc() {
     );
 }
 
-
 // BatchTradeNoCpi also rejects malformed leg sizes after growing legacy portfolios. A zero-size or
 // i128::MIN leg must not leave attacker-triggered storage growth behind, and a valid retry must remain
 // live afterward.
@@ -72634,7 +72620,6 @@ fn v16_attack_batch_nocpi_malformed_size_rolls_back_legacy_realloc() {
     assert!(env.svm.get_account(&lp_account).unwrap().data.len() > PORTFOLIO_ENGINE_ACCOUNT_LEN);
 }
 
-
 // LoF/DoS sweep (cron135): single TradeNoCpi already rejects extreme sizes, and the malformed-batch
 // test above covers zero/i128::MIN. BatchTradeNoCpi has its own fee reconstruction and aggregate
 // accounting path, so very large non-min sizes must also reject cleanly without leaving attacker-
@@ -72712,7 +72697,6 @@ fn v16_attack_batch_nocpi_extreme_size_rejects_without_legacy_realloc() {
         );
     }
 }
-
 
 #[test]
 fn v16_attack_batch_tradecpi_high_duplicate_assets_reject_before_hostile_matcher_cpi() {
@@ -72888,7 +72872,6 @@ fn v16_attack_batch_tradecpi_high_duplicate_assets_reject_before_hostile_matcher
     assert_eq!(env.svm.get_account(&la).unwrap(), lp_before);
 }
 
-
 // Lifecycle isolation: a retired slot still has market/account bytes, but direct public trade routes
 // must not reopen OI against it. The failed attempts must also leave the canonical retired slot reusable.
 #[test]
@@ -73041,7 +73024,6 @@ fn v16_attack_retired_asset_cannot_be_traded_before_reactivation() {
     assert_eq!(group.assets[1].oi_eff_short_q, POS_SCALE);
 }
 
-
 // security.md sweep - BatchTradeNoCpi fee bounds (#19/#37): the direct batch route uses the shared
 // batch execution/reconstruction path, not the single-trade handler. A hostile caller-supplied fee_bps
 // must be bounded before any leg opens or any fee is credited; the max valid fee remains live.
@@ -73120,7 +73102,6 @@ fn v16_attack_batch_nocpi_fee_bps_bounded_and_atomic() {
         "batch fee reconstruction preserves exact conservation"
     );
 }
-
 
 // security.md sweep - batch dust fee reconstruction (#37/#49): the batch wrapper reconstructs
 // per-leg fees from the engine's aggregate result. Dust notional is the rounding edge where an
@@ -73263,7 +73244,6 @@ fn v16_attack_batch_dust_fees_round_up_and_reconstruct_per_leg() {
     }
 }
 
-
 // SOL-028 (slippage) + atomicity: BatchTradeCpi must also enforce the short/sell floor branch
 // per leg. A single short leg filled below its floor must abort the whole mixed-direction batch.
 #[test]
@@ -73391,7 +73371,6 @@ fn v16_attack_batch_cpi_short_limit_floor_aborts_whole_batch() {
         "conservation after mixed batch fill"
     );
 }
-
 
 // CU/DoS sweep: the CPI currentness preflight runs after LP matcher-config authorization and before
 // invoking the matcher. A legacy taker portfolio can be grown by that preflight; if the same account
@@ -73560,7 +73539,6 @@ fn v16_attack_tradecpi_active_stale_rolls_back_legacy_taker_before_matcher() {
     );
 }
 
-
 // CU/DoS hardening: stale-resolve-matured TradeCpi must fail before the external matcher CPI.
 // This is the single-fill ctx-return path counterpart to the batched return_data sentinel above.
 // While fresh the hostile over-fill reaches matcher-return validation; once stale, the wrapper must
@@ -73717,7 +73695,6 @@ fn v16_attack_tradecpi_stale_rejects_before_hostile_matcher_cpi() {
     );
 }
 
-
 // CU/DoS hardening: TradeCpi must reject impossible caller fee_bps before invoking a matcher.
 // The single-fill path has separate ctx-account return plumbing from BatchTradeCpi, so a hostile
 // matcher is used as a sentinel: valid-fee input reaches matcher-return validation, over-fee input
@@ -73860,7 +73837,6 @@ fn v16_attack_tradecpi_fee_bps_rejects_before_hostile_matcher_cpi() {
     }
 }
 
-
 // security.md sweep - stale TradeNoCpi legacy realloc rollback (#30/#44/#48): the single-leg no-CPI
 // path grows both legacy portfolios before the stale-market freeze check. BatchNoCpi has its own
 // coverage; this keeps the one-leg public route from regressing independently.
@@ -73977,7 +73953,6 @@ fn v16_attack_tradenocpi_stale_reject_rolls_back_legacy_realloc() {
         "permissionless resolve remains live after the rejected stale legacy single trade: {resolve:?}"
     );
 }
-
 
 // security.md sweep - BatchTradeCpi flagged partial fills (#22/#39): the batch CPI path receives
 // N matcher returns through set_return_data, then rebuilds exec legs from each returned exec_size.
@@ -74117,7 +74092,6 @@ fn v16_attack_hostile_matcher_batch_tradecpi_flagged_partials_fill_exactly() {
     );
 }
 
-
 // InitMarket also trusts the supplied collateral mint as a permanent custody boundary. A SPL-owned
 // account with mint-sized data but an uninitialized payload must reject before the fresh market slab
 // is written, otherwise a bad bootstrap transaction can burn the account into an unusable market.
@@ -74220,7 +74194,6 @@ fn v16_attack_init_market_rejects_uninitialized_mint_without_burning_market_acco
     );
 }
 
-
 // InitMarket must also reject a valid-looking mint buffer that is not owned by SPL Token. Otherwise a
 // bootstrapper could pin a fake collateral mint and route every later custody check around SPL mint
 // authority, while still burning the fresh market account if the rejection happened after writes.
@@ -74311,7 +74284,6 @@ fn v16_attack_init_market_rejects_wrong_owner_mint_without_burning_market_accoun
     assert_eq!(group.assets[0].effective_price, params.initial_price);
 }
 
-
 // Public-interface DoS sweep: default deploys enter through the Anchor v2/Pinocchio adapter before
 // the legacy processor. That adapter scans the complete instruction account list for duplicate
 // runtime accounts, so ignored trailing accounts on a cheap permissionless route must remain bounded.
@@ -74388,7 +74360,6 @@ fn v16_attack_init_portfolio_ignored_extra_accounts_are_cu_bounded() {
         150_000,
     );
 }
-
 
 // Public-interface DoS sweep: duplicate account metas take the adapter's alias-preserving Rc-clone
 // path instead of the unique-account path above. A cheap public instruction with ignored duplicated
@@ -74477,7 +74448,6 @@ fn v16_attack_init_portfolio_duplicate_ignored_accounts_are_cu_bounded() {
         150_000,
     );
 }
-
 
 // security.md sweep - stale matcher return-data replay (#39/#49): BatchTradeCpi reads matcher output
 // from Solana return data, which is transaction-scoped. A matcher that sets valid return data for one
@@ -74595,7 +74565,6 @@ fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() {
     );
 }
 
-
 // security.md sweep - TradeCpi flagged partial fill (#22/#39): the matcher ABI allows a partial
 // fill only when FLAG_PARTIAL_OK is set. Exercise the accepted oracle-priced path end-to-end so it
 // cannot drift into an overfill, zero-fill, or fee-on-request-size bug.
@@ -74703,7 +74672,6 @@ fn v16_attack_hostile_matcher_single_tradecpi_flagged_partial_fills_exactly() {
     );
 }
 
-
 // Switchboard malformed-field hardening: a PullFeed can be owned by the right program, keyed to the
 // configured account, and pass quorum/confidence while still carrying uninitialized or nonsensical
 // result fields. Those must reject atomically instead of seeding a zero, negative, or uninitialized mark.
@@ -74796,7 +74764,6 @@ fn v16_attack_switchboard_malformed_result_fields_reject_without_mutation() {
         "accepted Switchboard result fields seed the expected mark"
     );
 }
-
 
 // security.md sweep - stale ConvertReleasedPnl legacy realloc rollback (#30/#33/#44/#48):
 // ConvertReleasedPnl uses the shared one-portfolio helper, which grows legacy accounts before
@@ -74906,7 +74873,10 @@ fn v16_attack_stale_convert_released_pnl_rolls_back_legacy_realloc() {
         "failed stale conversion does not leave a public legacy realloc behind"
     );
     let stale_state_after = env.portfolio_state(stale);
-    assert_eq!(stale_state_after.capital.get(), stale_state_before.capital.get());
+    assert_eq!(
+        stale_state_after.capital.get(),
+        stale_state_before.capital.get()
+    );
     assert_eq!(stale_state_after.pnl.get(), stale_state_before.pnl.get());
 
     env.svm.expire_blockhash();
@@ -74921,7 +74891,6 @@ fn v16_attack_stale_convert_released_pnl_rolls_back_legacy_realloc() {
     );
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
-
 
 // LoF/DoS sweep (cron135): the stale legacy-withdraw rollback must also hold on the
 // secondary collateral rail. Secondary withdrawals validate a different vault/mint branch before
@@ -75060,7 +75029,6 @@ fn v16_attack_stale_secondary_withdraw_rolls_back_legacy_realloc_and_signed_tran
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
-
 // security.md sweep - stale Deposit legacy realloc rollback (#5/#30/#44/#48):
 // Deposit verifies custody accounts before it grows legacy portfolio storage, but the stale-market
 // freeze lives after that growth. A stale deposit must roll back the legacy realloc and must not pull
@@ -75167,7 +75135,6 @@ fn v16_attack_stale_deposit_rolls_back_legacy_realloc_and_transfer() {
     );
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
-
 
 // LoF/DoS sweep (cron135): several marketauth policy updates are intentionally config-only and
 // do not use the stale-resolve freeze gate. If those writes are accepted after the authenticated
@@ -75360,7 +75327,6 @@ fn v16_attack_stale_policy_writes_are_config_only_and_resolution_stays_live() {
     env.close_slab_with_cu();
 }
 
-
 // LoF/DoS sweep (cron135): stale-resolve freezes value-moving live paths, but it must not
 // trap already-empty portfolios in the materialized count. Owner dematerialization stays live
 // in the stale window so permissionless resolve and terminal CloseSlab cannot be blocked by
@@ -75423,7 +75389,6 @@ fn v16_attack_stale_empty_portfolio_close_remains_live_before_resolve() {
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
     env.close_slab_with_cu();
 }
-
 
 // LoF/DoS sweep: SyncMaintenanceFee is permissionless and can credit an optional cranker reward.
 // The stale-Live boundary is covered above; this pins the already-Resolved boundary. The engine may
@@ -75504,7 +75469,6 @@ fn v16_attack_sync_maintenance_does_not_move_after_resolve() {
     );
 }
 
-
 // LoF/DoS sweep: SyncMaintenanceFee's resolved boundary is pinned above, but Recovery is a distinct
 // terminal/live-interrupt mode. A public cranker must not be able to keep charging maintenance fees
 // or collect a reward once the market is in Recovery; the call may reject or be accepted as inert, but
@@ -75578,7 +75542,6 @@ fn v16_attack_sync_maintenance_cannot_charge_or_reward_in_recovery() {
         "recovery maintenance sync must move no custody"
     );
 }
-
 
 // LoF/DoS sweep: RebalanceReduce and ForfeitRecoveryLeg both run through the common
 // one-portfolio wrapper, which can grow legacy portfolio storage before the stale-resolve freeze check.
@@ -75781,7 +75744,6 @@ fn v16_attack_stale_recovery_tools_roll_back_legacy_reallocs() {
     }
 }
 
-
 // LoF/liveness sweep - CureAndCancelClose has a separate optional-deposit rail that credits engine
 // capital before the SPL transfer is committed by the transaction. Amounts above u64::MAX must reject
 // at the wrapper bridge, not truncate to a smaller SPL transfer while canceling an active close ledger.
@@ -75867,7 +75829,6 @@ fn v16_attack_cure_optional_deposit_over_u64_max_rejects_no_truncation() {
         env.token_amount(env.vault)
     );
 }
-
 
 // LoF sweep - the market/top-up rails also bridge u128 engine accounting to u64 SPL transfers.
 // These are distinct from Deposit/Withdraw: a truncating bridge here could mint insurance budget,
@@ -76003,7 +75964,6 @@ fn v16_attack_value_topups_over_u64_max_reject_no_truncation() {
         "engine vault accounting still matches SPL custody after valid controls"
     );
 }
-
 
 // LoF sweep - outbound domain withdrawals also bridge u128 engine amounts to u64 SPL transfers, but
 // through the shared domain-withdrawal preflight rather than the user Withdraw handler. Amounts above
@@ -76160,7 +76120,6 @@ fn v16_attack_domain_withdrawals_over_u64_max_reject_no_truncation() {
     );
 }
 
-
 // LoF sweep - SwapSecondaryForPrimary is another u128 engine/public-interface amount that becomes a
 // u64 SPL transfer. A truncating bridge would let the market authority request u64::MAX + 1 primary
 // atoms, transfer zero primary atoms, and still drain secondary collateral. Drive that boundary through
@@ -76268,7 +76227,6 @@ fn v16_attack_swap_secondary_amount_over_u64_max_rejects_no_truncation() {
     assert_eq!(env.token_amount(secondary_dest), 10);
     assert_eq!(env.token_amount(secondary_vault), 15);
 }
-
 
 // full-interface sweep: the value top-up handlers must pin the SPL Token program before they credit
 // market accounting. A loaded, executable non-SPL program id must reject on all top-up routes without
@@ -76402,7 +76360,6 @@ fn v16_attack_value_topups_reject_wrong_token_program() {
         "valid top-up controls keep accounting matched to custody"
     );
 }
-
 
 // full-interface sweep: outbound domain withdrawals share the opposite value-moving shape from
 // top-ups: market/ledger budgets are debited before the signed SPL transfer on the successful path.
@@ -76629,7 +76586,6 @@ fn v16_attack_domain_withdrawals_reject_wrong_token_program_before_debit() {
     );
 }
 
-
 // [from pr114]
 // full-interface sweep: live WithdrawInsuranceAsset is distinct from terminal WithdrawInsurance and
 // backing withdrawals. A delegated canonical vault must be rejected before debiting the live domain
@@ -76770,7 +76726,6 @@ fn v16_attack_live_insurance_withdraw_rejects_delegated_vault_without_debiting_l
     assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
 }
 
-
 // full-interface sweep (cron135): live WithdrawInsuranceAsset can also pay through the configured
 // secondary base-unit reserve. That route must inherit the same delegated-vault rejection as the
 // primary vault before debiting live insurance budget or the optional ledger.
@@ -76906,7 +76861,6 @@ fn v16_attack_live_insurance_withdraw_rejects_delegated_secondary_reserve() {
     assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
 }
 
-
 // full-interface sweep: CloseResolved and ClaimResolvedPayoutTopup both compute their payout-side
 // engine deltas before reaching token-program validation. A loaded but non-SPL token-program
 // account must fail inside the handler and the SVM rollback must leave the payout state claimable.
@@ -77036,14 +76990,15 @@ fn v16_attack_resolved_payout_wrong_token_program_rolls_back_terminal_state() {
             payout_halted: false,
             finalized: false,
         };
-        account.resolved_payout_receipt = percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
-            present: true,
-            prior_bound_contribution_num: 100 * BOUND_SCALE,
-            live_released_face_at_receipt: 0,
-            terminal_positive_claim_face: 100,
-            paid_effective: 40,
-            finalized: false,
-        });
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
         state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
         topup_env
@@ -77131,7 +77086,6 @@ fn v16_attack_resolved_payout_wrong_token_program_rolls_back_terminal_state() {
     assert!(resolved_receipt(&account).finalized);
     assert_eq!(topup_env.market_state().1.vault, 0);
 }
-
 
 // full-interface sweep: terminal WithdrawInsurance is separate from live domain withdrawals and
 // resolved user payouts. A loaded non-SPL executable token-program id must reject before terminal
@@ -77228,7 +77182,6 @@ fn v16_attack_terminal_insurance_rejects_wrong_token_program_before_debit() {
     assert_eq!(ledger_state.total_withdrawn_atoms, 40);
     assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
 }
-
 
 // full-interface sweep: SwapSecondaryForPrimary performs a user-signed primary transfer followed by
 // a vault-signed secondary payout. A loaded non-SPL executable token-program id must reject before
@@ -77332,7 +77285,6 @@ fn v16_attack_swap_secondary_rejects_wrong_token_program_before_transfer() {
     assert_eq!(env.token_amount(secondary_vault), 40);
 }
 
-
 // full-interface sweep: CloseSlab validates the primary destination token account before sweeping
 // the primary vault, but SPL Token still enforces the writable bit at CPI time. A readonly primary
 // destination must fail without partially draining the vault or reclaiming the market.
@@ -77409,7 +77361,6 @@ fn v16_attack_close_slab_readonly_primary_dest_rolls_back_before_reclaim() {
     assert_eq!(closed_market.lamports, 0);
     assert!(closed_market.data.iter().all(|b| *b == 0));
 }
-
 
 // full-interface sweep: CloseSlab uses the supplied SPL Token program for both the final dust sweep and
 // the vault close. A loaded non-SPL executable must reject before any vault transfer, token-account close,
@@ -77492,7 +77443,6 @@ fn v16_attack_close_slab_rejects_wrong_token_program_before_reclaim() {
     assert!(closed_market.data.iter().all(|b| *b == 0));
 }
 
-
 // full-interface sweep: CloseSlab performs SPL vault transfers/close before the final market-rent
 // reclaim. If that last checked lamport add overflows, the whole instruction must roll back the prior
 // SPL CPIs too. This pins the late-error branch rather than another pre-CPI validation failure.
@@ -77554,9 +77504,6 @@ fn v16_attack_close_slab_late_lamport_overflow_rolls_back_vault_cpis() {
         "late-overflow CloseSlab must not keep vault rent or market rent"
     );
 }
-
-
-
 
 // [from pr114]
 // full-interface sweep: UpdateBaseUnitMints is marketauth-gated and can rewrite the empty market's
@@ -77645,7 +77592,6 @@ fn v16_attack_update_authority_handoff_rekeys_base_unit_mint_updates() {
         "primary-mint deposits remain live after the current-authority update"
     );
 }
-
 
 // The optional backing ledger is read and synced before the engine applies the fresh-backing
 // deposit. A lapsed expiry must not leave a partially synced/reinitialized provider ledger, nor
