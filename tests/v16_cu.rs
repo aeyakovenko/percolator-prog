@@ -67882,6 +67882,105 @@ fn v16_attack_tradecpi_required_matcher_tail_aliases_are_cu_bounded() {
     );
 }
 
+// Same alias class as the single TradeCpi probe, but through the batch matcher helper and
+// return-data parser. BatchTradeCpi uses a different CPI wrapper, so keep a direct litesvm guard
+// that required-account tail aliases cannot turn batched fills into a CU cliff.
+#[test]
+fn v16_attack_batch_tradecpi_required_matcher_tail_aliases_are_cu_bounded() {
+    const MAX_TAIL: usize = percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS;
+
+    #[derive(Clone, Copy)]
+    enum TailAlias {
+        None,
+        MatcherContextWritable,
+        MatcherDelegateReadonly,
+    }
+
+    fn run_batch_with_tail_alias(alias: TailAlias) -> u64 {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+        for asset_index in 0..2 {
+            env.configure_auth_mark_for_asset_as_admin(asset_index, 1, 100);
+        }
+
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes =
+            std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let taker = Keypair::new();
+        let lp = Keypair::new();
+        let taker_account = env.create_portfolio(&taker);
+        let lp_account = env.create_portfolio(&lp);
+        env.deposit(&taker, taker_account, 3_000_000);
+        env.deposit(&lp, lp_account, 3_000_000);
+        let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, lp_account);
+
+        let legs = vec![
+            BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: (5 * POS_SCALE) as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            BatchTradeCpiLeg {
+                asset_index: 1,
+                size_q: -(5 * POS_SCALE as i128),
+                fee_bps: 100,
+                limit_price: 0,
+            },
+        ];
+        let mut accounts = vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ];
+        match alias {
+            TailAlias::None => {}
+            TailAlias::MatcherContextWritable => {
+                accounts.extend((0..MAX_TAIL).map(|_| AccountMeta::new(ctx, false)));
+            }
+            TailAlias::MatcherDelegateReadonly => {
+                accounts.extend((0..MAX_TAIL).map(|_| AccountMeta::new_readonly(delegate, false)));
+            }
+        }
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(ProgInstruction::BatchTradeCpi { legs }, accounts, &[&taker])
+            .expect("BatchTradeCpi with required matcher account aliases in tail");
+        let taker_after = env.portfolio_state(taker_account);
+        assert!(
+            has_active_leg_for_asset(&taker_after, 0) && has_active_leg_for_asset(&taker_after, 1),
+            "required-account tail alias BatchTradeCpi must fill both real legs"
+        );
+        assert_cu_within(
+            "BatchTradeCpi required matcher tail alias",
+            cu,
+            MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+        );
+        cu
+    }
+
+    let baseline_cu = run_batch_with_tail_alias(TailAlias::None);
+    let ctx_alias_cu = run_batch_with_tail_alias(TailAlias::MatcherContextWritable);
+    let delegate_alias_cu = run_batch_with_tail_alias(TailAlias::MatcherDelegateReadonly);
+    println!(
+        "v16 BatchTradeCpi required matcher tail aliases: baseline={baseline_cu}, \
+         ctx_alias={ctx_alias_cu}, delegate_alias={delegate_alias_cu}"
+    );
+    assert!(
+        ctx_alias_cu <= baseline_cu + 120_000,
+        "batch matcher-ctx tail aliases add too much CU: baseline={baseline_cu}, ctx_alias={ctx_alias_cu}"
+    );
+    assert!(
+        delegate_alias_cu <= baseline_cu + 120_000,
+        "batch matcher-delegate tail aliases add too much CU: baseline={baseline_cu}, delegate_alias={delegate_alias_cu}"
+    );
+}
+
 // LoF/terminal authority sweep: UpdateAuthority covers market/asset-0 handoff, but non-base assets
 // use UpdateAssetAuthority. After resolution, rekeying a funded asset's insurance/backing authorities
 // must revoke the stale domain keys and keep terminal withdrawals live for the new keys.
