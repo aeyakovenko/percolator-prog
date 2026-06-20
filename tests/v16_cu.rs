@@ -80796,6 +80796,101 @@ fn v16_attack_close_slab_late_lamport_overflow_rolls_back_vault_cpis() {
     );
 }
 
+// full-interface sweep: the configured secondary reserve adds a second dust transfer + close_account
+// CPI before CloseSlab reaches the final market-rent reclaim. A late lamport overflow must roll back
+// both vault CPIs, not only the primary path covered above.
+#[test]
+fn v16_attack_close_slab_secondary_late_overflow_rolls_back_both_vault_cpis() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 11),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.resolve();
+
+    let primary_vault_lamports = env.svm.get_account(&env.vault).unwrap().lamports;
+    let secondary_vault_lamports = env.svm.get_account(&secondary_vault).unwrap().lamports;
+    let mut admin_account = env.svm.get_account(&admin.pubkey()).unwrap();
+    admin_account.lamports = u64::MAX
+        .checked_sub(primary_vault_lamports)
+        .and_then(|v| v.checked_sub(secondary_vault_lamports))
+        .expect("vault rents below u64::MAX");
+    env.svm.set_account(admin.pubkey(), admin_account).unwrap();
+
+    let primary_dest = env.token_account(admin.pubkey(), 0);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let primary_dest_before = env.svm.get_account(&primary_dest).unwrap();
+    let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+    let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new(secondary_dest, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "secondary CloseSlab must reject when the final market-rent reclaim overflows"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "secondary late-overflow CloseSlab must not zero or drain the market slab"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "secondary late-overflow CloseSlab must roll back the primary vault CPI"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "secondary late-overflow CloseSlab must roll back the secondary vault CPI"
+    );
+    assert_eq!(
+        env.svm.get_account(&primary_dest).unwrap(),
+        primary_dest_before,
+        "secondary late-overflow CloseSlab must not credit the primary destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        secondary_dest_before,
+        "secondary late-overflow CloseSlab must not credit the secondary destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&admin.pubkey()).unwrap(),
+        admin_before,
+        "secondary late-overflow CloseSlab must not keep either vault rent or market rent"
+    );
+}
+
 // [from pr114]
 // full-interface sweep: UpdateBaseUnitMints is marketauth-gated and can rewrite the empty market's
 // collateral mint configuration. After a handoff, the old marketauth must not be able to install a
