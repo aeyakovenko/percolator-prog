@@ -59273,6 +59273,163 @@ fn v16_attack_swap_secondary_rejects_delegated_secondary_vault() {
     assert_eq!(env.token_amount(secondary_vault), 40);
 }
 
+// SPL-shape sweep: SwapSecondaryForPrimary validates both user token accounts before it performs the
+// two SPL transfers. A frozen secondary destination must not let the primary-source transfer happen
+// first, otherwise a failed payout could lock the authority's primary collateral in the vault.
+#[test]
+fn v16_attack_swap_secondary_rejects_frozen_user_accounts_before_transfer() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let frozen_token_data = |mint: Pubkey, owner: Pubkey, amount: u64| {
+        let mut data = vec![0u8; TokenAccount::LEN];
+        TokenAccount::pack(
+            TokenAccount {
+                mint,
+                owner,
+                amount,
+                delegate: COption::None,
+                state: AccountState::Frozen,
+                is_native: COption::None,
+                delegated_amount: 0,
+                close_authority: COption::None,
+            },
+            &mut data,
+        )
+        .unwrap();
+        data
+    };
+
+    let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 10);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let send_swap = |env: &mut V16CuEnv| {
+        env.send(
+            ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new(primary_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new(secondary_dest, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+    };
+
+    let baseline_primary_vault = env.svm.get_account(&env.vault).unwrap();
+    let baseline_secondary_vault = env.svm.get_account(&secondary_vault).unwrap();
+    let baseline_source = env.svm.get_account(&primary_source).unwrap();
+    let baseline_dest = env.svm.get_account(&secondary_dest).unwrap();
+
+    env.svm
+        .set_account(
+            primary_source,
+            Account {
+                data: frozen_token_data(env.mint, admin.pubkey(), 10),
+                ..baseline_source.clone()
+            },
+        )
+        .unwrap();
+    let frozen_source_before = env.svm.get_account(&primary_source).unwrap();
+    env.svm.expire_blockhash();
+    let frozen_source = send_swap(&mut env);
+    assert!(
+        frozen_source.is_err(),
+        "SwapSecondaryForPrimary must reject a frozen primary source"
+    );
+    assert_eq!(
+        env.svm.get_account(&primary_source).unwrap(),
+        frozen_source_before,
+        "frozen-source rejection leaves the source untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        baseline_primary_vault,
+        "frozen-source rejection does not credit the primary vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        baseline_secondary_vault,
+        "frozen-source rejection does not debit the secondary reserve"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        baseline_dest,
+        "frozen-source rejection does not pay secondary collateral"
+    );
+
+    env.svm
+        .set_account(primary_source, baseline_source.clone())
+        .unwrap();
+    env.svm
+        .set_account(
+            secondary_dest,
+            Account {
+                data: frozen_token_data(secondary_mint, admin.pubkey(), 0),
+                ..baseline_dest.clone()
+            },
+        )
+        .unwrap();
+    let frozen_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+    env.svm.expire_blockhash();
+    let frozen_dest = send_swap(&mut env);
+    assert!(
+        frozen_dest.is_err(),
+        "SwapSecondaryForPrimary must reject a frozen secondary destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&primary_source).unwrap(),
+        baseline_source,
+        "frozen-destination rejection must not pull primary collateral first"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        baseline_primary_vault,
+        "frozen-destination rejection must not credit the primary vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        baseline_secondary_vault,
+        "frozen-destination rejection must not debit the secondary reserve"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        frozen_dest_before,
+        "frozen destination remains untouched"
+    );
+
+    env.svm.set_account(secondary_dest, baseline_dest).unwrap();
+    env.svm.expire_blockhash();
+    let ok = send_swap(&mut env);
+    assert!(
+        ok.is_ok(),
+        "swap succeeds once both user token accounts are initialized: {ok:?}"
+    );
+    assert_eq!(env.token_amount(primary_source), 0);
+    assert_eq!(env.token_amount(env.vault), 10);
+    assert_eq!(env.token_amount(secondary_dest), 10);
+    assert_eq!(env.token_amount(secondary_vault), 40);
+}
+
 // [from pr114]
 // full-interface sweep (cron38): the optional secondary reserve is validated before CloseSlab sweeps
 // primary dust. A canonical secondary vault with close_authority set must reject atomically; otherwise
