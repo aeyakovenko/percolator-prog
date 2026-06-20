@@ -70111,6 +70111,175 @@ fn v16_attack_base_unit_mint_reset_rejects_frozen_empty_old_reserves() {
     );
 }
 
+// LoF/DoS sweep (cron135): when both base-unit rails rotate in one instruction, the wrapper must
+// require the old primary proof and old secondary proof in order before writing the new config. A
+// missing or swapped proof must not partially update the market, while the correctly ordered proofs
+// must leave the new rails usable.
+#[test]
+fn v16_attack_base_unit_mint_reset_requires_both_old_reserve_proofs() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let old_secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, old_secondary);
+
+    let old_secondary_vault = canonical_vault_ata(env.vault_authority, old_secondary);
+    env.svm
+        .set_account(
+            old_secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(old_secondary, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let new_primary = env.create_mint();
+    let new_secondary = env.create_mint();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let old_primary_before = env.svm.get_account(&env.vault).unwrap();
+    let old_secondary_before = env.svm.get_account(&old_secondary_vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let missing_secondary_proof = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: new_primary.to_bytes(),
+            secondary_mint: new_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(new_primary, false),
+            AccountMeta::new_readonly(new_secondary, false),
+            AccountMeta::new_readonly(env.vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        missing_secondary_proof.is_err(),
+        "simultaneous base-unit rotation must require both old reserve proofs"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "missing old-secondary proof must not partially update configured mints"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        old_primary_before,
+        "missing old-secondary proof leaves old primary reserve untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&old_secondary_vault).unwrap(),
+        old_secondary_before,
+        "missing old-secondary proof leaves old secondary reserve untouched"
+    );
+
+    env.svm.expire_blockhash();
+    let swapped_proofs = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: new_primary.to_bytes(),
+            secondary_mint: new_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(new_primary, false),
+            AccountMeta::new_readonly(new_secondary, false),
+            AccountMeta::new_readonly(old_secondary_vault, false),
+            AccountMeta::new_readonly(env.vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        swapped_proofs.is_err(),
+        "simultaneous base-unit rotation must bind old primary/secondary proofs by mint"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "swapped old-reserve proofs must not partially update configured mints"
+    );
+
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: new_primary.to_bytes(),
+            secondary_mint: new_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(new_primary, false),
+            AccountMeta::new_readonly(new_secondary, false),
+            AccountMeta::new_readonly(env.vault, false),
+            AccountMeta::new_readonly(old_secondary_vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        accepted.is_ok(),
+        "correctly ordered old reserve proofs allow simultaneous base-unit rotation: {accepted:?}"
+    );
+    let (cfg, _) = env.market_state();
+    assert_eq!(cfg.collateral_mint, new_primary.to_bytes());
+    assert_eq!(cfg.secondary_collateral_mint, new_secondary.to_bytes());
+
+    let new_primary_vault = canonical_vault_ata(env.vault_authority, new_primary);
+    let new_secondary_vault = canonical_vault_ata(env.vault_authority, new_secondary);
+    env.svm
+        .set_account(
+            new_primary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(new_primary, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            new_secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(new_secondary, env.vault_authority, 25),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let primary_source = env.token_account_for_mint(new_primary, admin.pubkey(), 10);
+    let secondary_dest = env.token_account_for_mint(new_secondary, admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let swap = env.send(
+        ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(primary_source, false),
+            AccountMeta::new(new_primary_vault, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(new_secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        swap.is_ok(),
+        "new base-unit rails remain live after simultaneous rotation: {swap:?}"
+    );
+    assert_eq!(env.token_amount(primary_source), 0);
+    assert_eq!(env.token_amount(new_primary_vault), 10);
+    assert_eq!(env.token_amount(secondary_dest), 10);
+    assert_eq!(env.token_amount(new_secondary_vault), 15);
+}
+
 // DoS sweep — a max-size market must not make basic user portfolio lifecycle
 // rails non-live. Trades already cover max-size active positions; this keeps
 // the separate InitPortfolio/Deposit/Withdraw/ClosePortfolio public paths
