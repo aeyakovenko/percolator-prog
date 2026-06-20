@@ -6535,6 +6535,12 @@ pub mod processor {
             &[asset_index],
         )?;
         let req_id = current_slot_pre.wrapping_add(1);
+        let ctx_return_before = {
+            let data = matcher_ctx.try_borrow_data()?;
+            let mut before = [0u8; matcher_abi::MATCHER_RETURN_BYTES];
+            before.copy_from_slice(&data[..matcher_abi::MATCHER_RETURN_BYTES]);
+            before
+        };
         let lp_account_id = matcher_lp_account_id(&delegate);
 
         invoke_matcher(
@@ -6558,9 +6564,10 @@ pub mod processor {
             ],
         )?;
 
-        let ret = {
+        let (ret, ctx_return_unchanged) = {
             let data = matcher_ctx.try_borrow_data()?;
-            matcher_abi::read_matcher_return(&data)?
+            let unchanged = data[..matcher_abi::MATCHER_RETURN_BYTES] == ctx_return_before[..];
+            (matcher_abi::read_matcher_return(&data)?, unchanged)
         };
         matcher_abi::validate_matcher_return(
             &ret,
@@ -6570,6 +6577,9 @@ pub mod processor {
             size_q,
             req_id,
         )?;
+        if ret.exec_size != 0 && ctx_return_unchanged {
+            return Err(ProgramError::InvalidAccountData);
+        }
         if limit_price != 0 {
             let limit_ok = if size_q > 0 {
                 ret.exec_price_e6 <= limit_price
