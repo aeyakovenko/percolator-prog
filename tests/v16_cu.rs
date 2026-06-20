@@ -76228,6 +76228,264 @@ fn v16_attack_cure_optional_deposit_over_u64_max_rejects_no_truncation() {
     );
 }
 
+// full-interface sweep: value-in routes must reject frozen user source accounts before they credit
+// engine accounting. Otherwise a later SPL transfer failure could leave minted capital, insurance,
+// or backing principal without custody if rollback assumptions are ever broken at the boundary.
+#[test]
+fn v16_attack_value_in_routes_reject_frozen_sources_before_credit() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let primary_mint = env.mint;
+
+    let frozen_token_data = |owner: Pubkey, amount: u64| {
+        let mut data = vec![0u8; TokenAccount::LEN];
+        TokenAccount::pack(
+            TokenAccount {
+                mint: primary_mint,
+                owner,
+                amount,
+                delegate: COption::None,
+                state: AccountState::Frozen,
+                is_native: COption::None,
+                delegated_amount: 0,
+                close_authority: COption::None,
+            },
+            &mut data,
+        )
+        .unwrap();
+        data
+    };
+
+    let deposit_source = env.token_account(owner.pubkey(), 25);
+    let deposit_source_clean = env.svm.get_account(&deposit_source).unwrap();
+    env.svm
+        .set_account(
+            deposit_source,
+            Account {
+                data: frozen_token_data(owner.pubkey(), 25),
+                ..deposit_source_clean.clone()
+            },
+        )
+        .unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let frozen_source_before = env.svm.get_account(&deposit_source).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::Deposit { amount: 25 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(deposit_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "Deposit must reject a frozen source account before engine credit"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "frozen-source deposit must not credit market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "frozen-source deposit must not credit portfolio capital"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "frozen-source deposit must not move vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&deposit_source).unwrap(),
+        frozen_source_before,
+        "frozen-source deposit leaves source bytes unchanged"
+    );
+
+    let insurance_source = env.token_account(admin.pubkey(), 33);
+    let insurance_source_clean = env.svm.get_account(&insurance_source).unwrap();
+    env.svm
+        .set_account(
+            insurance_source,
+            Account {
+                data: frozen_token_data(admin.pubkey(), 33),
+                ..insurance_source_clean.clone()
+            },
+        )
+        .unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let frozen_source_before = env.svm.get_account(&insurance_source).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::TopUpInsurance { amount: 33 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "TopUpInsurance must reject a frozen source before insurance credit"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "frozen-source insurance top-up must not credit market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "frozen-source insurance top-up must not move vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&insurance_source).unwrap(),
+        frozen_source_before,
+        "frozen-source insurance top-up leaves source bytes unchanged"
+    );
+
+    let backing_source = env.token_account(admin.pubkey(), 44);
+    let backing_source_clean = env.svm.get_account(&backing_source).unwrap();
+    env.svm
+        .set_account(
+            backing_source,
+            Account {
+                data: frozen_token_data(admin.pubkey(), 44),
+                ..backing_source_clean.clone()
+            },
+        )
+        .unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let frozen_source_before = env.svm.get_account(&backing_source).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 44,
+            expiry_slot: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "TopUpBackingBucket must reject a frozen source before backing credit"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "frozen-source backing top-up must not credit market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "frozen-source backing top-up must not move vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&backing_source).unwrap(),
+        frozen_source_before,
+        "frozen-source backing top-up leaves source bytes unchanged"
+    );
+
+    env.svm
+        .set_account(deposit_source, deposit_source_clean)
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok_deposit = env.send(
+        ProgInstruction::Deposit { amount: 25 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(deposit_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        ok_deposit.is_ok(),
+        "deposit remains live once the source is initialized: {ok_deposit:?}"
+    );
+
+    env.svm
+        .set_account(insurance_source, insurance_source_clean)
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok_insurance = env.send(
+        ProgInstruction::TopUpInsurance { amount: 33 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok_insurance.is_ok(),
+        "insurance top-up remains live once the source is initialized: {ok_insurance:?}"
+    );
+
+    env.svm
+        .set_account(backing_source, backing_source_clean)
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok_backing = env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 44,
+            expiry_slot: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok_backing.is_ok(),
+        "backing top-up remains live once the source is initialized: {ok_backing:?}"
+    );
+
+    let (_, group) = env.market_state();
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 25);
+    assert_eq!(group.insurance, 33);
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num,
+        44 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.vault as u64,
+        env.token_amount(env.vault),
+        "engine custody accounting matches SPL vault after valid controls"
+    );
+}
+
 // LoF sweep - the market/top-up rails also bridge u128 engine accounting to u64 SPL transfers.
 // These are distinct from Deposit/Withdraw: a truncating bridge here could mint insurance budget,
 // domain budget, or backing principal while transferring zero tokens. Drive u64::MAX+1 through all
