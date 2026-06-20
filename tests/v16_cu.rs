@@ -48633,6 +48633,107 @@ fn v16_attack_base_unit_mints_reject_malformed_new_mint_accounts() {
     );
 }
 
+// LoF/DoS sweep (cron135): rotating the primary base-unit mint also requires an old-primary
+// reserve proof. A malformed new primary mint must reject before that reserve-proof branch, leaving
+// the old primary vault and market config byte-stable and retryable with a valid mint.
+#[test]
+fn v16_attack_base_unit_primary_mint_rejects_before_old_vault_proof() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let malformed_primary = Pubkey::new_unique();
+    let new_secondary = env.create_mint();
+    env.svm
+        .set_account(
+            malformed_primary,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; Mint::LEN],
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let old_primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: malformed_primary.to_bytes(),
+            secondary_mint: new_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(malformed_primary, false),
+            AccountMeta::new_readonly(new_secondary, false),
+        ],
+        &[&admin],
+    );
+    let err = rejected.expect_err("malformed primary base-unit mint must reject");
+    assert!(
+        err.contains("Custom(10)"),
+        "malformed primary base-unit mint must reject as InvalidMint before old-vault proof, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "malformed primary rejection must not partially update base-unit config"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        old_primary_vault_before,
+        "malformed primary rejection leaves the old primary reserve untouched"
+    );
+    assert_eq!(
+        env.market_state().0.collateral_mint,
+        env.mint.to_bytes(),
+        "primary rail remains pinned to the original mint after rejection"
+    );
+    assert_eq!(
+        env.market_state().0.secondary_collateral_mint,
+        [0u8; 32],
+        "secondary rail is not installed by a rejected primary-mint rotation"
+    );
+
+    let mut valid_primary = env.svm.get_account(&malformed_primary).unwrap();
+    valid_primary.data = make_mint_data();
+    env.svm
+        .set_account(malformed_primary, valid_primary)
+        .unwrap();
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: malformed_primary.to_bytes(),
+            secondary_mint: new_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(malformed_primary, false),
+            AccountMeta::new_readonly(new_secondary, false),
+            AccountMeta::new_readonly(env.vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        accepted.is_ok(),
+        "valid primary rotation remains live with the old-primary reserve proof: {accepted:?}"
+    );
+    let cfg = env.market_state().0;
+    assert_eq!(
+        cfg.collateral_mint,
+        malformed_primary.to_bytes(),
+        "valid retry stores the new primary mint"
+    );
+    assert_eq!(
+        cfg.secondary_collateral_mint,
+        new_secondary.to_bytes(),
+        "valid retry stores the new secondary mint"
+    );
+}
+
 // LoF/DoS sweep (cron135): primary and secondary rails must remain distinct. A collapsed pair would
 // let secondary withdrawals and swaps target the primary mint namespace, so UpdateBaseUnitMints must
 // reject the same mint before any market config mutation.
