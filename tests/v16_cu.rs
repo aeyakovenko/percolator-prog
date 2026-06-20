@@ -371,6 +371,30 @@ fn make_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
     data
 }
 
+fn make_delegated_destination_data(
+    mint: Pubkey,
+    owner: Pubkey,
+    delegate: Pubkey,
+    delegated_amount: u64,
+) -> Vec<u8> {
+    let mut data = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint,
+            owner,
+            amount: 0,
+            delegate: COption::Some(delegate),
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount,
+            close_authority: COption::None,
+        },
+        &mut data,
+    )
+    .unwrap();
+    data
+}
+
 fn make_pyth_data(
     feed_id: &[u8; 32],
     price: i64,
@@ -55757,6 +55781,244 @@ fn v16_attack_claim_resolved_topup_rejects_delegated_vault_without_burning_recei
     assert_eq!(resolved_receipt(&account).paid_effective, 100);
     assert!(resolved_receipt(&account).finalized);
     assert_eq!(env.market_state().1.vault, 0);
+}
+
+#[test]
+fn v16_attack_unsigned_resolved_payouts_reject_delegated_user_destinations() {
+    let mut close_env = V16CuEnv::new();
+    let close_owner = Keypair::new();
+    let close_portfolio = close_env.create_portfolio(&close_owner);
+    close_env.deposit(&close_owner, close_portfolio, 1_000_000);
+    close_env.resolve();
+
+    let close_delegate = Pubkey::new_unique();
+    let close_delegated_dest = Pubkey::new_unique();
+    close_env
+        .svm
+        .set_account(
+            close_delegated_dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_delegated_destination_data(
+                    close_env.mint,
+                    close_owner.pubkey(),
+                    close_delegate,
+                    1_000_000,
+                ),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let close_clean_dest =
+        close_env.token_account_for_mint(close_env.mint, close_owner.pubkey(), 0);
+    let close_market_before = close_env.svm.get_account(&close_env.market).unwrap();
+    let close_portfolio_before = close_env.svm.get_account(&close_portfolio).unwrap();
+    let close_vault_before = close_env.svm.get_account(&close_env.vault).unwrap();
+    let close_dest_before = close_env.svm.get_account(&close_delegated_dest).unwrap();
+
+    close_env.svm.expire_blockhash();
+    let close_rejected = close_env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(close_owner.pubkey(), false),
+            AccountMeta::new(close_env.market, false),
+            AccountMeta::new(close_portfolio, false),
+            AccountMeta::new(close_delegated_dest, false),
+            AccountMeta::new(close_env.vault, false),
+            AccountMeta::new_readonly(close_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        close_rejected.is_err(),
+        "CloseResolved must reject a user-owned payout destination with a delegate allowance"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_env.market).unwrap(),
+        close_market_before,
+        "delegated-dest CloseResolved must not commit payout accounting"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_portfolio).unwrap(),
+        close_portfolio_before,
+        "delegated-dest CloseResolved must not close or zero the portfolio"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_env.vault).unwrap(),
+        close_vault_before,
+        "delegated-dest CloseResolved must not debit the vault"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_delegated_dest).unwrap(),
+        close_dest_before,
+        "delegated destination receives nothing from the rejected close"
+    );
+
+    close_env.svm.expire_blockhash();
+    let close_ok = close_env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(close_owner.pubkey(), false),
+            AccountMeta::new(close_env.market, false),
+            AccountMeta::new(close_portfolio, false),
+            AccountMeta::new(close_clean_dest, false),
+            AccountMeta::new(close_env.vault, false),
+            AccountMeta::new_readonly(close_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        close_ok.is_ok(),
+        "same CloseResolved payout remains live with a clean destination: {close_ok:?}"
+    );
+    assert_eq!(close_env.token_amount(close_clean_dest), 1_000_000);
+
+    let mut topup_env = V16CuEnv::new();
+    let topup_owner = Keypair::new();
+    let topup_portfolio = topup_env.create_portfolio(&topup_owner);
+    {
+        let mut market_account = topup_env
+            .svm
+            .get_account(&topup_env.market)
+            .expect("market account");
+        let mut portfolio_account = topup_env
+            .svm
+            .get_account(&topup_portfolio)
+            .expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        topup_env
+            .svm
+            .set_account(topup_env.market, market_account)
+            .unwrap();
+        topup_env
+            .svm
+            .set_account(topup_portfolio, portfolio_account)
+            .unwrap();
+    }
+    topup_env.set_token_account_amount(
+        topup_env.vault,
+        topup_env.mint,
+        topup_env.vault_authority,
+        60,
+    );
+
+    let topup_delegate = Pubkey::new_unique();
+    let topup_delegated_dest = Pubkey::new_unique();
+    topup_env
+        .svm
+        .set_account(
+            topup_delegated_dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_delegated_destination_data(
+                    topup_env.mint,
+                    topup_owner.pubkey(),
+                    topup_delegate,
+                    60,
+                ),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let topup_clean_dest =
+        topup_env.token_account_for_mint(topup_env.mint, topup_owner.pubkey(), 0);
+    let topup_market_before = topup_env.svm.get_account(&topup_env.market).unwrap();
+    let topup_portfolio_before = topup_env.svm.get_account(&topup_portfolio).unwrap();
+    let topup_vault_before = topup_env.svm.get_account(&topup_env.vault).unwrap();
+    let topup_dest_before = topup_env.svm.get_account(&topup_delegated_dest).unwrap();
+
+    topup_env.svm.expire_blockhash();
+    let topup_rejected = topup_env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(topup_owner.pubkey(), false),
+            AccountMeta::new(topup_env.market, false),
+            AccountMeta::new(topup_portfolio, false),
+            AccountMeta::new(topup_delegated_dest, false),
+            AccountMeta::new(topup_env.vault, false),
+            AccountMeta::new_readonly(topup_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        topup_rejected.is_err(),
+        "ClaimResolvedPayoutTopup must reject a user-owned destination with a delegate allowance"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_env.market).unwrap(),
+        topup_market_before,
+        "delegated-dest top-up must not commit market payout changes"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_portfolio).unwrap(),
+        topup_portfolio_before,
+        "delegated-dest top-up must not burn the pending receipt"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_env.vault).unwrap(),
+        topup_vault_before,
+        "delegated-dest top-up must not debit the vault"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_delegated_dest).unwrap(),
+        topup_dest_before,
+        "delegated destination receives nothing from the rejected top-up"
+    );
+
+    topup_env.svm.expire_blockhash();
+    let topup_cu = topup_env.claim_resolved_payout_topup_with_cu(
+        topup_owner.pubkey(),
+        topup_portfolio,
+        topup_clean_dest,
+    );
+    assert_cu_within(
+        "ClaimResolvedPayoutTopup delegated-destination retry",
+        topup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(topup_env.token_amount(topup_clean_dest), 60);
+    let account = topup_env.portfolio_state(topup_portfolio);
+    assert_eq!(resolved_receipt(&account).paid_effective, 100);
+    assert!(resolved_receipt(&account).finalized);
 }
 
 // [from pr114]

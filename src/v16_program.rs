@@ -10235,7 +10235,7 @@ pub mod processor {
             verify_token_program(token_program)?;
             let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
             expect_key(vault_authority_ai, &vault_authority)?;
-            verify_withdrawable_token_accounts(
+            verify_unsigned_payout_token_accounts(
                 dest_token,
                 owner.key,
                 vault_token,
@@ -10297,7 +10297,7 @@ pub mod processor {
             verify_token_program(token_program)?;
             let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
             expect_key(vault_authority_ai, &vault_authority)?;
-            verify_withdrawable_token_accounts(
+            verify_unsigned_payout_token_accounts(
                 dest_token,
                 owner.key,
                 vault_token,
@@ -11741,6 +11741,27 @@ pub mod processor {
             || *vault_token_ai.key != canonical_vault_address(expected_vault_owner, &vault.mint)
         {
             return Err(PercolatorError::InvalidVaultAccount.into());
+        }
+        Ok(())
+    }
+
+    fn verify_unsigned_payout_token_accounts(
+        dest_token_ai: &AccountInfo,
+        expected_dest_owner: &Pubkey,
+        vault_token_ai: &AccountInfo,
+        expected_vault_owner: &Pubkey,
+        cfg: &WrapperConfigV16,
+    ) -> Result<(), ProgramError> {
+        verify_withdrawable_token_accounts(
+            dest_token_ai,
+            expected_dest_owner,
+            vault_token_ai,
+            expected_vault_owner,
+            cfg,
+        )?;
+        let dest = unpack_token_account(dest_token_ai)?;
+        if dest.delegate.is_some() {
+            return Err(PercolatorError::InvalidTokenAccount.into());
         }
         Ok(())
     }
