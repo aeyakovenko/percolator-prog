@@ -78884,6 +78884,92 @@ fn v16_attack_cure_optional_deposit_over_u64_max_rejects_no_truncation() {
     );
 }
 
+// LoF/liveness sweep - CureAndCancelClose is not just another value-in rail: a successful call cancels
+// an active close-progress ledger while optionally pulling collateral. A frozen optional-deposit source
+// must reject before that ledger is canceled or capital is credited, and the owner must still be able to
+// retry with a clean source.
+#[test]
+fn v16_attack_cure_optional_deposit_rejects_frozen_source_before_cancel() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 100);
+    env.seed_cancellable_close_progress(p);
+    assert!(
+        close_progress(&env.portfolio_state(p)).active,
+        "test setup must start from an active close ledger"
+    );
+
+    let frozen_source = env.token_account_for_mint(env.mint, owner.pubkey(), 20);
+    let mut source_account = env.svm.get_account(&frozen_source).unwrap();
+    source_account.data = make_frozen_token_data(env.mint, owner.pubkey(), 20);
+    env.svm.set_account(frozen_source, source_account).unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&p).unwrap();
+    let source_before = env.svm.get_account(&frozen_source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CureAndCancelClose {
+            optional_deposit: 20,
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(frozen_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "CureAndCancelClose must reject a frozen optional-deposit source"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "frozen-source cure leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&p).unwrap(),
+        portfolio_before,
+        "frozen-source cure leaves close-progress and capital unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&frozen_source).unwrap(),
+        source_before,
+        "frozen-source cure pulls no source tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "frozen-source cure credits no vault tokens"
+    );
+    assert!(
+        close_progress(&env.portfolio_state(p)).active,
+        "close ledger remains active after frozen-source rejection"
+    );
+    assert!(
+        !close_progress(&env.portfolio_state(p)).canceled,
+        "frozen-source rejection must not cancel the close ledger"
+    );
+
+    let ok_source = env.token_account_for_mint(env.mint, owner.pubkey(), 20);
+    env.cure_and_cancel_close_with_cu(&owner, p, ok_source, 20);
+    let cured = env.portfolio_state(p);
+    assert!(close_progress(&cured).canceled);
+    assert_eq!(cured.capital.get(), 120);
+    assert_eq!(env.token_amount(ok_source), 0);
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault)
+    );
+}
+
 // full-interface sweep: value-in routes must reject frozen user source accounts before they credit
 // engine accounting. Otherwise a later SPL transfer failure could leave minted capital, insurance,
 // or backing principal without custody if rollback assumptions are ever broken at the boundary.
