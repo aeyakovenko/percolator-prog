@@ -78250,6 +78250,119 @@ fn v16_attack_terminal_insurance_rejects_wrong_token_program_before_debit() {
     assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
 }
 
+// full-interface sweep: terminal WithdrawInsurance debits terminal insurance budgets and the
+// optional ledger before validating destination/vault token account layouts. A malformed but SPL-owned
+// destination must not burn the withdrawal capacity or strand the ledger.
+#[test]
+fn v16_attack_terminal_insurance_malformed_dest_rolls_back_budget_and_ledger() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance(100);
+    env.resolve();
+
+    let ledger = env.insurance_ledger_account();
+    let malformed_dest = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            malformed_dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; TokenAccount::LEN - 1],
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let clean_dest = env.token_account(admin.pubkey(), 0);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let malformed_dest_before = env.svm.get_account(&malformed_dest).unwrap();
+    let clean_dest_before = env.svm.get_account(&clean_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(malformed_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "terminal WithdrawInsurance must reject a malformed SPL-owned destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "malformed-dest terminal insurance withdraw must not debit market budgets"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "malformed-dest terminal insurance withdraw must not rewrite the ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "malformed-dest terminal insurance withdraw must not touch vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&malformed_dest).unwrap(),
+        malformed_dest_before,
+        "malformed destination remains byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&clean_dest).unwrap(),
+        clean_dest_before,
+        "clean destination is not paid by the rejected withdrawal"
+    );
+
+    env.svm.expire_blockhash();
+    let ok_cu = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(clean_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    )
+    .expect("terminal WithdrawInsurance remains live after malformed-dest rejection");
+    assert_cu_within(
+        "terminal WithdrawInsurance malformed-dest retry",
+        ok_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(clean_dest), 40);
+    assert_eq!(env.token_amount(env.vault), 60);
+    let ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 60);
+    assert_eq!(group.vault, 60);
+}
+
 // full-interface sweep: SwapSecondaryForPrimary performs a user-signed primary transfer followed by
 // a vault-signed secondary payout. A loaded non-SPL executable token-program id must reject before
 // either leg moves value, and the same accounts must remain usable with the real token program.
