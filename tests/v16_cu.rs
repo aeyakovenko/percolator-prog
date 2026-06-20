@@ -47286,6 +47286,124 @@ fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit(
     assert_domain_budget_remaining_total_consistent(&funded_group, "funded permissionless create");
 }
 
+// LoF/DoS sweep (cron135): permissionless activation's init fee must be paid in the
+// configured primary collateral mint before the market account grows. A wrong-mint fee source
+// cannot install a new asset, credit accounting, or consume the creator's unrelated tokens.
+#[test]
+fn v16_attack_permissionless_create_rejects_wrong_mint_fee_source_before_realloc() {
+    const FEE: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(FEE);
+    env.svm.warp_to_slot(1);
+
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    let wrong_mint = env.create_mint();
+    let wrong_source = env.token_account_for_mint(wrong_mint, creator.pubkey(), FEE as u64);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let wrong_source_before = env.svm.get_account(&wrong_source).unwrap();
+    let (_, group_before) = env.market_state();
+    assert_eq!(
+        group_before.config.max_market_slots, 1,
+        "starts as a one-asset market"
+    );
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(wrong_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    let err = rejected.expect_err("wrong-mint permissionless init fee source must reject");
+    assert!(
+        err.contains("Custom(10)"),
+        "wrong-mint permissionless init fee source must reject as InvalidMint, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-mint fee source must not realloc or install a new asset"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "wrong-mint fee source must not touch canonical vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&wrong_source).unwrap(),
+        wrong_source_before,
+        "wrong-mint fee source must not spend unrelated tokens"
+    );
+    let (_, rejected_group) = env.market_state();
+    assert_eq!(
+        rejected_group.config.max_market_slots, group_before.config.max_market_slots,
+        "wrong-mint fee source must not append a market slot"
+    );
+    assert_eq!(rejected_group.vault, group_before.vault);
+    assert_eq!(rejected_group.insurance, group_before.insurance);
+    assert_eq!(
+        rejected_group.insurance_domain_budget,
+        group_before.insurance_domain_budget
+    );
+
+    let valid_source = env.token_account(creator.pubkey(), FEE as u64);
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(valid_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        accepted.is_ok(),
+        "same permissionless activation works with the primary-mint fee source: {accepted:?}"
+    );
+    let (_, accepted_group) = env.market_state();
+    assert_eq!(accepted_group.config.max_market_slots, 2);
+    assert_eq!(
+        accepted_group.assets[1].lifecycle,
+        AssetLifecycleV16::Active
+    );
+    assert_eq!(env.token_amount(valid_source), 0);
+    assert_eq!(env.token_amount(env.vault), FEE as u64);
+    assert_eq!(accepted_group.vault, FEE);
+    assert_eq!(accepted_group.insurance, FEE);
+    assert_domain_budget_remaining_total_consistent(
+        &accepted_group,
+        "permissionless wrong-mint fee-source control",
+    );
+}
+
 // security.md sweep - permissionless init-fee vault binding (#44/#48): asset activation charges
 // the public creator before growing a new market slot. A funded creator must not be able to route the
 // fee into a non-canonical vault-authority-owned token account and still install a new asset, which
