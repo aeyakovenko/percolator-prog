@@ -48528,6 +48528,111 @@ fn v16_attack_base_unit_mints_reject_mismatched_decimals() {
     );
 }
 
+// LoF/DoS sweep (cron135): UpdateBaseUnitMints trusts the supplied SPL mint accounts as
+// permanent custody rails. Invalid mint account state must reject before any market config write,
+// while leaving the same key retryable once it becomes a real SPL mint.
+#[test]
+fn v16_attack_base_unit_mints_reject_malformed_new_mint_accounts() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let hostile_secondary = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            hostile_secondary,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; Mint::LEN],
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected_uninitialized = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: hostile_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(hostile_secondary, false),
+        ],
+        &[&admin],
+    );
+    let err =
+        rejected_uninitialized.expect_err("uninitialized secondary base-unit mint must reject");
+    assert!(
+        err.contains("Custom(10)"),
+        "uninitialized secondary base-unit mint must reject as InvalidMint, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "uninitialized mint rejection must not partially update base-unit config"
+    );
+    assert_eq!(
+        env.market_state().0.secondary_collateral_mint,
+        [0u8; 32],
+        "no secondary rail is installed after uninitialized mint rejection"
+    );
+
+    let mut hostile_account = env.svm.get_account(&hostile_secondary).unwrap();
+    hostile_account.data = make_mint_data();
+    hostile_account.owner = solana_sdk::system_program::ID;
+    env.svm
+        .set_account(hostile_secondary, hostile_account)
+        .unwrap();
+    let market_before_wrong_owner = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected_wrong_owner = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: hostile_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(hostile_secondary, false),
+        ],
+        &[&admin],
+    );
+    let err = rejected_wrong_owner.expect_err("wrong-owner secondary base-unit mint must reject");
+    assert!(
+        err.contains("Custom(10)"),
+        "wrong-owner secondary base-unit mint must reject as InvalidMint, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_wrong_owner,
+        "wrong-owner mint rejection must not partially update base-unit config"
+    );
+    assert_eq!(
+        env.market_state().0.secondary_collateral_mint,
+        [0u8; 32],
+        "no secondary rail is installed after wrong-owner mint rejection"
+    );
+
+    let mut valid_account = env.svm.get_account(&hostile_secondary).unwrap();
+    valid_account.owner = spl_token::ID;
+    env.svm
+        .set_account(hostile_secondary, valid_account)
+        .unwrap();
+    env.svm.expire_blockhash();
+    env.update_base_unit_mints_with_cu(env.mint, hostile_secondary);
+    assert_eq!(
+        env.market_state().0.secondary_collateral_mint,
+        hostile_secondary.to_bytes(),
+        "same key can configure the secondary rail once it is a valid SPL mint"
+    );
+}
+
 // LoF/DoS sweep (cron135): primary and secondary rails must remain distinct. A collapsed pair would
 // let secondary withdrawals and swaps target the primary mint namespace, so UpdateBaseUnitMints must
 // reject the same mint before any market config mutation.
