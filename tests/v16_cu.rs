@@ -51309,6 +51309,113 @@ fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_single_context() {
     );
 }
 
+// Liveness side of the stale-context fix: freshness must not mean "reject two identical honest
+// same-transaction fills." The single-fill request id is bound to the pre-call context state, so a
+// matcher that actually writes for each call can refresh the return even when the economic fill is
+// identical.
+#[test]
+fn v16_attack_honest_matcher_can_repeat_identical_single_fills_in_one_tx() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 10_000_000);
+    env.deposit(&lp, la, 10_000_000);
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &la,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[64] = 9; // persistent faithful mode; ctx[0..64] is overwritten by each call.
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
+
+    let size_q = POS_SCALE as i128;
+    let program_id = env.program_id;
+    let market = env.market;
+    let taker_key = taker.pubkey();
+    let trade_ix = || Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(taker_key, true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        data: ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q,
+            fee_bps: 100,
+            limit_price: 0,
+        }
+        .encode(),
+    };
+
+    env.svm.expire_blockhash();
+    let filled_twice = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), trade_ix(), trade_ix()],
+        &[&taker],
+    );
+    assert!(
+        filled_twice.is_ok(),
+        "freshly-written identical TradeCpi fills must not be DoSed: {filled_twice:?}"
+    );
+    let taker_after = env.portfolio_state(ta);
+    let lp_after = env.portfolio_state(la);
+    assert_eq!(
+        active_leg_for_asset(&taker_after, 0).basis_pos_q,
+        2 * size_q,
+        "both honest fills landed on the taker"
+    );
+    assert_eq!(
+        active_leg_for_asset(&lp_after, 0).basis_pos_q,
+        -2 * size_q,
+        "both honest fills landed on the LP"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault, group.c_tot + group.insurance);
+}
+
 // DoS/manipulation rate-limit: PushEwmaMark feeds a SMOOTHED mark (EWMA over dt slots). A mark
 // authority must not defeat the per-slot rate limit by pushing repeatedly within ONE slot (each push
 // compounding toward an extreme value -> instant mark manipulation -> mis-liquidation). The EWMA
