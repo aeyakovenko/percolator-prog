@@ -8576,6 +8576,77 @@ fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
     );
 }
 
+// LoF/DoS sweep: permissionless SyncMaintenanceFee can drain a dust portfolio to zero and then
+// dematerialize it via the shared rent-sweep helper. A late rent overflow must roll back the fee
+// charge, market insurance credit, materialized-count decrement, and portfolio close.
+#[test]
+fn v16_attack_sync_maintenance_late_lamport_overflow_rolls_back_fee_close() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 40,
+    );
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1);
+    env.svm.warp_to_slot(10);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    assert_eq!(
+        env.portfolio_state(portfolio).capital.get(),
+        1,
+        "dust portfolio has one atom before maintenance sync"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "dust portfolio is materialized before maintenance sync"
+    );
+
+    let mut saturated_market = market_before.clone();
+    saturated_market.lamports = u64::MAX;
+    env.svm
+        .set_account(env.market, saturated_market.clone())
+        .unwrap();
+    let saturated_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.try_sync_maintenance_fee_with_cu(portfolio, None, 10);
+    assert!(
+        rejected.is_err(),
+        "SyncMaintenanceFee must reject when the dust-close rent sweep overflows"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        saturated_before,
+        "overflow rejection must roll back market fee credit and materialized count"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "overflow rejection must not dematerialize the dust portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "overflow rejection must not debit or close the dust portfolio"
+    );
+
+    env.svm.set_account(env.market, market_before).unwrap();
+    env.svm.expire_blockhash();
+    let ok_cu = env.sync_maintenance_fee_with_cu(portfolio, None, 10);
+    assert_cu_within(
+        "SyncMaintenanceFee late-lamport-overflow retry",
+        ok_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.insurance, 1);
+    assert_eq!(group_after.materialized_portfolio_count, 0);
+    let closed = env.svm.get_account(&portfolio).unwrap();
+    assert_eq!(closed.lamports, 0);
+    assert!(closed.data.is_empty() || !state::is_initialized(&closed.data));
+}
+
 #[test]
 fn v16_attack_underfunded_sync_with_cranker_reward_still_closes_payer() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
