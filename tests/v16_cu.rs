@@ -15870,32 +15870,33 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
             )
             .unwrap();
     }
-    let settle_b_once = |env: &mut V16CuEnv, tail: &[Pubkey]| -> Result<u64, String> {
-        env.svm.expire_blockhash();
-        let mut accounts = vec![
-            AccountMeta::new_readonly(cranker.pubkey(), false),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(long, false),
-        ];
-        accounts.extend(
-            tail.iter()
-                .copied()
-                .map(|key| AccountMeta::new_readonly(key, false)),
-        );
-        env.send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 1,
-                close_q: 0,
-                observations: crank_observations(0),
-            },
-            accounts,
-            &[],
-        )
-    };
+    let settle_b_once =
+        |env: &mut V16CuEnv, close_q: u128, tail: &[Pubkey]| -> Result<u64, String> {
+            env.svm.expire_blockhash();
+            let mut accounts = vec![
+                AccountMeta::new_readonly(cranker.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ];
+            accounts.extend(
+                tail.iter()
+                    .copied()
+                    .map(|key| AccountMeta::new_readonly(key, false)),
+            );
+            env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 1,
+                    close_q,
+                    observations: crank_observations(0),
+                },
+                accounts,
+                &[],
+            )
+        };
 
     env.svm.warp_to_slot(1);
-    let first_cu = settle_b_once(&mut env, &ignored_tail)
-        .expect("first permissionless SettleB chunk with hostile ignored tail");
+    let first_cu = settle_b_once(&mut env, u128::MAX, &ignored_tail)
+        .expect("first permissionless SettleB chunk with hostile close_q/tail");
     assert_cu_within("PermissionlessCrank SettleB", first_cu, CRANK_CU_LIMIT);
     let after_first = env.portfolio_state(long);
     let after_first_leg = active_leg_for_asset(&after_first, 0);
@@ -15926,7 +15927,7 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
         "SettleB ignores the non-oracle tail and does not debit insurance"
     );
 
-    settle_b_once(&mut env, &[]).expect("second permissionless SettleB chunk");
+    settle_b_once(&mut env, 0, &[]).expect("second permissionless SettleB chunk");
     let after_second = env.portfolio_state(long);
     assert_eq!(
         active_leg_for_asset(&after_second, 0).b_snap,
@@ -15938,7 +15939,7 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
         "one chunk remains after second call"
     );
 
-    settle_b_once(&mut env, &[]).expect("final permissionless SettleB chunk");
+    settle_b_once(&mut env, 0, &[]).expect("final permissionless SettleB chunk");
     let after_final = env.portfolio_state(long);
     let final_leg = active_leg_for_asset(&after_final, 0);
     assert_eq!(final_leg.b_snap, 3, "all B debt settled after three chunks");
@@ -62684,8 +62685,8 @@ fn v16_attack_reward_liquidation_duplicate_ignored_tail_is_cu_bounded() {
     );
 }
 
-// PermissionlessCrank action=0 ignores the caller fee_bps field. A hostile cranker supplying
-// u64::MAX must not inject fees or DoS refresh progress.
+// PermissionlessCrank action=0 ignores the caller fee_bps and close_q fields. A hostile cranker
+// supplying extreme values must not inject fees, close positions, or DoS refresh progress.
 #[test]
 fn v16_attack_permissionless_refresh_ignores_hostile_fee_bps() {
     let mut env = V16CuEnv::new();
@@ -62714,7 +62715,7 @@ fn v16_attack_permissionless_refresh_ignores_hostile_fee_bps() {
             asset_index: 0,
             now_slot: 1,
             funding_rate_e9: 0,
-            close_q: 0,
+            close_q: u128::MAX,
             fee_bps: u64::MAX,
             recovery_reason: 0,
         },
@@ -62727,7 +62728,7 @@ fn v16_attack_permissionless_refresh_ignores_hostile_fee_bps() {
     let after = env.market_state().1;
     assert_eq!(
         after.current_slot, 1,
-        "hostile fee_bps must not block refresh progress"
+        "hostile fee_bps/close_q must not block refresh progress"
     );
     assert_eq!(after.vault, before.vault, "refresh moves no custody");
     assert_eq!(
@@ -62736,7 +62737,7 @@ fn v16_attack_permissionless_refresh_ignores_hostile_fee_bps() {
     );
     assert_eq!(
         after.insurance, before.insurance,
-        "refresh ignores caller fee_bps and charges no insurance"
+        "refresh ignores caller fee_bps/close_q and charges no insurance"
     );
     assert_eq!(
         after.assets[0].oi_eff_long_q,
