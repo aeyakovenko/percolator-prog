@@ -70516,6 +70516,256 @@ fn v16_attack_permissionless_create_rejects_wrong_token_program_before_realloc()
     assert_domain_budget_remaining_total_consistent(&group, "permissionless wrong-token control");
 }
 
+// full-interface sweep: permissionless activation validates fee-source bytes before mutating the
+// market, but the SPL transfer still requires the fee source to be owned by the token program. A
+// non-SPL-owned source must roll back both append reallocs and retired-slot reuse mutations.
+#[test]
+fn v16_attack_permissionless_activation_fake_fee_source_rolls_back_append_and_reuse() {
+    const FEE: u128 = 40;
+
+    {
+        let mut env = V16CuEnv::new();
+        env.update_market_init_fee_policy_with_cu(FEE);
+        env.svm.warp_to_slot(1);
+        let creator = Keypair::new();
+        env.ensure_signer_account(creator.pubkey());
+        let fake_source = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                fake_source,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(env.mint, creator.pubkey(), FEE as u64),
+                    owner: Pubkey::new_unique(),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let source_before = env.svm.get_account(&fake_source).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let (_, group_before) = env.market_state();
+        assert_eq!(group_before.config.max_market_slots, 1);
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+                asset_index: 1,
+                now_slot: 1,
+                initial_price: 100,
+                insurance_authority: creator.pubkey().to_bytes(),
+                insurance_operator: creator.pubkey().to_bytes(),
+                backing_bucket_authority: creator.pubkey().to_bytes(),
+                oracle_authority: creator.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(fake_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&creator],
+        );
+        assert!(
+            rejected.is_err(),
+            "permissionless append must reject a non-SPL-owned fee source"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "fake-source append must roll back the market realloc and asset install"
+        );
+        assert_eq!(
+            env.svm.get_account(&fake_source).unwrap(),
+            source_before,
+            "fake-source append must not debit the creator"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "fake-source append must not credit the fee vault"
+        );
+        let (_, rejected_group) = env.market_state();
+        assert_eq!(
+            rejected_group.config.max_market_slots, 1,
+            "failed append keeps market capacity unchanged"
+        );
+        assert_eq!(rejected_group.vault, group_before.vault);
+        assert_eq!(rejected_group.insurance, group_before.insurance);
+
+        let control_source = env.token_account(creator.pubkey(), FEE as u64);
+        env.svm.expire_blockhash();
+        let accepted = env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+                asset_index: 1,
+                now_slot: 1,
+                initial_price: 100,
+                insurance_authority: creator.pubkey().to_bytes(),
+                insurance_operator: creator.pubkey().to_bytes(),
+                backing_bucket_authority: creator.pubkey().to_bytes(),
+                oracle_authority: creator.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(control_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&creator],
+        );
+        assert!(
+            accepted.is_ok(),
+            "permissionless append remains live after fake-source rejection: {accepted:?}"
+        );
+        let (_, group) = env.market_state();
+        assert_eq!(group.config.max_market_slots, 2);
+        assert_eq!(group.assets[1].lifecycle, AssetLifecycleV16::Active);
+        assert_eq!(env.token_amount(control_source), 0);
+        assert_eq!(group.vault, FEE);
+        assert_eq!(group.insurance, FEE);
+    }
+
+    {
+        let mut env = V16CuEnv::new();
+        let creator = Keypair::new();
+        env.ensure_signer_account(creator.pubkey());
+        env.update_market_init_fee_policy_with_cu(FEE);
+
+        env.svm.warp_to_slot(1);
+        env.activate_permissionless_asset_with_fee(
+            &creator,
+            1,
+            1,
+            100,
+            creator.pubkey(),
+            creator.pubkey(),
+            creator.pubkey(),
+            creator.pubkey(),
+            FEE,
+        );
+        env.svm.warp_to_slot(3);
+        env.update_asset_lifecycle_as_admin_with_cu(
+            percolator_prog::processor::ASSET_ACTION_RETIRE,
+            1,
+            3,
+            0,
+        );
+        let (cfg_retired, group_retired) = env.market_state();
+        assert_eq!(cfg_retired.free_market_slot_count, 1);
+        assert_eq!(
+            group_retired.assets[1].lifecycle,
+            AssetLifecycleV16::Retired
+        );
+
+        let fake_source = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                fake_source,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(env.mint, creator.pubkey(), FEE as u64),
+                    owner: Pubkey::new_unique(),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let source_before = env.svm.get_account(&fake_source).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        env.svm.warp_to_slot(4);
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+                asset_index: 1,
+                now_slot: 4,
+                initial_price: 250,
+                insurance_authority: creator.pubkey().to_bytes(),
+                insurance_operator: creator.pubkey().to_bytes(),
+                backing_bucket_authority: creator.pubkey().to_bytes(),
+                oracle_authority: creator.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(fake_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&creator],
+        );
+        assert!(
+            rejected.is_err(),
+            "permissionless reuse must reject a non-SPL-owned fee source"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "fake-source reuse must roll back slot reactivation and fee accounting"
+        );
+        assert_eq!(
+            env.svm.get_account(&fake_source).unwrap(),
+            source_before,
+            "fake-source reuse must not debit the creator"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "fake-source reuse must not credit the fee vault"
+        );
+        let (cfg_after_reject, group_after_reject) = env.market_state();
+        assert_eq!(cfg_after_reject.free_market_slot_count, 1);
+        assert_eq!(
+            group_after_reject.assets[1].lifecycle,
+            AssetLifecycleV16::Retired
+        );
+        assert_eq!(group_after_reject.vault, group_retired.vault);
+        assert_eq!(group_after_reject.insurance, group_retired.insurance);
+
+        let control_source = env.token_account(creator.pubkey(), FEE as u64);
+        env.svm.expire_blockhash();
+        let accepted = env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+                asset_index: 1,
+                now_slot: 4,
+                initial_price: 250,
+                insurance_authority: creator.pubkey().to_bytes(),
+                insurance_operator: creator.pubkey().to_bytes(),
+                backing_bucket_authority: creator.pubkey().to_bytes(),
+                oracle_authority: creator.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(control_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&creator],
+        );
+        assert!(
+            accepted.is_ok(),
+            "permissionless reuse remains live after fake-source rejection: {accepted:?}"
+        );
+        let (cfg_reused, group_reused) = env.market_state();
+        assert_eq!(cfg_reused.free_market_slot_count, 0);
+        assert_eq!(group_reused.assets[1].lifecycle, AssetLifecycleV16::Active);
+        assert_eq!(group_reused.assets[1].effective_price, 250);
+        assert_eq!(env.token_amount(control_source), 0);
+        assert_eq!(group_reused.insurance - group_retired.insurance, FEE);
+        assert_eq!(group_reused.vault - group_retired.vault, FEE);
+    }
+}
+
 // full-interface sweep: permissionless activation validates the fee vault before it appends a market
 // slot and credits the init fee into engine insurance. A canonical vault with a delegate is still unsafe
 // custody; rejection must leave the market byte-identical and the creator source untouched.
