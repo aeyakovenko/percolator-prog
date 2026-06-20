@@ -24657,6 +24657,126 @@ fn v16_attack_sync_ledgers_cannot_overwrite_market_account() {
     );
 }
 
+// Full-interface ledger isolation: the standalone sync instructions mutate ledger accounting
+// without moving SPL custody. A real initialized insurance ledger and a real initialized backing
+// ledger are both program-owned writable accounts, but they must not be interchangeable here.
+#[test]
+fn v16_attack_sync_ledgers_reject_cross_ledger_type_reuse() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+
+    let insurance_ledger = env.insurance_ledger_account();
+    env.top_up_insurance_with_ledger_with_cu(insurance_ledger, 100);
+    let backing_ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(backing_ledger, 1, 100, 10_000);
+
+    env.mutate_market(|_, group| {
+        group.insurance += 9;
+        group.insurance_domain_budget[0] += 5;
+        group.insurance_domain_budget[1] += 4;
+        group.source_backing_buckets[1].utilization_fee_earnings = 13;
+        group.vault += 22;
+    });
+    let (_, group_with_delta) = env.market_state();
+    env.set_token_account_amount(
+        env.vault,
+        env.mint,
+        env.vault_authority,
+        group_with_delta.vault as u64,
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let insurance_ledger_before = env.svm.get_account(&insurance_ledger).unwrap();
+    let backing_ledger_before = env.svm.get_account(&backing_ledger).unwrap();
+
+    env.svm.expire_blockhash();
+    let backing_sync = env.send(
+        ProgInstruction::SyncBackingDomainLedger { domain: 1 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        backing_sync.is_err(),
+        "SyncBackingDomainLedger must reject an initialized insurance ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong ledger type must not mutate market state"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "wrong ledger type must not touch vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&insurance_ledger).unwrap(),
+        insurance_ledger_before,
+        "backing sync must not rewrite the insurance ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&backing_ledger).unwrap(),
+        backing_ledger_before,
+        "backing sync wrong-type rejection must leave backing ledger unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    let insurance_sync = env.send(
+        ProgInstruction::SyncInsuranceLedger,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        insurance_sync.is_err(),
+        "SyncInsuranceLedger must reject an initialized backing ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong ledger type must not mutate market state"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "wrong ledger type must not touch vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&insurance_ledger).unwrap(),
+        insurance_ledger_before,
+        "insurance sync wrong-type rejection must leave insurance ledger unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&backing_ledger).unwrap(),
+        backing_ledger_before,
+        "insurance sync must not rewrite the backing ledger"
+    );
+
+    env.sync_backing_domain_ledger_with_cu(backing_ledger, 1);
+    let backing_state =
+        state::read_backing_domain_ledger(&env.svm.get_account(&backing_ledger).unwrap().data)
+            .unwrap();
+    assert_eq!(backing_state.total_principal_atoms, 100);
+    assert_eq!(backing_state.total_earnings_atoms, 13);
+    assert_eq!(backing_state.last_observed_bucket_earnings_atoms, 13);
+
+    env.sync_insurance_ledger_with_cu(insurance_ledger);
+    let insurance_state =
+        state::read_insurance_ledger(&env.svm.get_account(&insurance_ledger).unwrap().data)
+            .unwrap();
+    assert_eq!(insurance_state.total_principal_atoms, 100);
+    assert_eq!(insurance_state.cumulative_profit_atoms, 9);
+    assert_eq!(insurance_state.last_observed_insurance_atoms, 109);
+}
+
 // security.md sweep — optional ledger account-kind confusion on token-moving paths (#44/#35):
 // top-up and withdraw instructions update engine accounting before/around SPL transfers. If their
 // optional ledger validation accepted or rewrote a portfolio account, an authorized operator could
