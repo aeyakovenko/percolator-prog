@@ -6534,7 +6534,12 @@ pub mod processor {
             max_market_slots,
             &[asset_index],
         )?;
-        let req_id = current_slot_pre.wrapping_add(1);
+        let req_id = matcher_state_bound_req_id(
+            current_slot_pre.wrapping_add(1),
+            account_a_ai,
+            account_b_ai,
+            max_market_slots,
+        )?;
         let lp_account_id = matcher_lp_account_id(&delegate);
 
         invoke_matcher(
@@ -11560,6 +11565,83 @@ pub mod processor {
     fn matcher_lp_account_id(delegate: &Pubkey) -> u64 {
         let bytes = delegate.to_bytes();
         u64::from_le_bytes(bytes[0..8].try_into().unwrap())
+    }
+
+    fn matcher_req_id_mix_u64(acc: u64, value: u64) -> u64 {
+        acc ^ value
+            .wrapping_add(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add(acc << 6)
+            .wrapping_add(acc >> 2)
+    }
+
+    fn matcher_req_id_mix_u128(acc: u64, value: u128) -> u64 {
+        let lo = value as u64;
+        let hi = (value >> 64) as u64;
+        matcher_req_id_mix_u64(matcher_req_id_mix_u64(acc, lo), hi)
+    }
+
+    fn matcher_req_id_mix_i128(acc: u64, value: i128) -> u64 {
+        matcher_req_id_mix_u128(acc, value as u128)
+    }
+
+    fn matcher_req_id_mix_portfolio(
+        mut acc: u64,
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+    ) -> Result<u64, ProgramError> {
+        acc = matcher_req_id_mix_u128(acc, portfolio.header.capital.get());
+        acc = matcher_req_id_mix_i128(acc, portfolio.header.pnl.get());
+        acc = matcher_req_id_mix_u128(acc, portfolio.header.reserved_pnl.get());
+        acc = matcher_req_id_mix_i128(acc, portfolio.header.fee_credits.get());
+        acc = matcher_req_id_mix_u64(acc, portfolio.header.last_fee_slot.get());
+        for word in portfolio.header.active_bitmap {
+            acc = matcher_req_id_mix_u64(acc, word.get());
+        }
+        for leg in portfolio.header.legs.iter() {
+            let leg = leg.try_to_runtime().map_err(map_v16_error)?;
+            acc = matcher_req_id_mix_u64(acc, u64::from(leg.active));
+            if leg.active {
+                acc = matcher_req_id_mix_u64(acc, leg.asset_index as u64);
+                acc = matcher_req_id_mix_u64(acc, leg.market_id);
+                acc = matcher_req_id_mix_u64(
+                    acc,
+                    match leg.side {
+                        SideV16::Long => 1,
+                        SideV16::Short => 2,
+                    },
+                );
+                acc = matcher_req_id_mix_i128(acc, leg.basis_pos_q);
+                acc = matcher_req_id_mix_u128(acc, leg.a_basis);
+                acc = matcher_req_id_mix_i128(acc, leg.k_snap);
+                acc = matcher_req_id_mix_i128(acc, leg.f_snap);
+                acc = matcher_req_id_mix_u64(acc, leg.epoch_snap);
+                acc = matcher_req_id_mix_u128(acc, leg.loss_weight);
+                acc = matcher_req_id_mix_u128(acc, leg.b_snap);
+                acc = matcher_req_id_mix_u128(acc, leg.b_rem);
+                acc = matcher_req_id_mix_u64(acc, leg.b_epoch_snap);
+                acc = matcher_req_id_mix_u64(acc, u64::from(leg.b_stale));
+                acc = matcher_req_id_mix_u64(acc, u64::from(leg.stale));
+            }
+        }
+        Ok(acc)
+    }
+
+    fn matcher_state_bound_req_id(
+        base_req_id: u64,
+        account_a_ai: &AccountInfo<'_>,
+        account_b_ai: &AccountInfo<'_>,
+        max_market_slots: usize,
+    ) -> Result<u64, ProgramError> {
+        let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
+        let account_a =
+            state::portfolio_view_mut_for_market_slots(&mut account_a_data, max_market_slots)?;
+        let mut acc = matcher_req_id_mix_portfolio(base_req_id, &account_a)?;
+        drop(account_a_data);
+
+        let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
+        let account_b =
+            state::portfolio_view_mut_for_market_slots(&mut account_b_data, max_market_slots)?;
+        acc = matcher_req_id_mix_portfolio(acc, &account_b)?;
+        Ok(acc)
     }
 
     fn invoke_matcher<'a>(
