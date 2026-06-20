@@ -25068,6 +25068,234 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     assert_eq!(env.token_amount(earnings_dest), 0);
 }
 
+// Full-interface ledger isolation: an initialized insurance ledger and an initialized backing ledger
+// are both program-owned writable accounts with similar optional-account routing. They must not be
+// interchangeable on value-moving paths, or an authorized operator could corrupt the wrong accounting
+// rail while moving custody.
+#[test]
+fn v16_attack_value_paths_reject_cross_ledger_type_reuse() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+
+    let insurance_ledger = env.insurance_ledger_account();
+    env.top_up_insurance_with_ledger_with_cu(insurance_ledger, 100);
+    let backing_ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(backing_ledger, 1, 100, 10_000);
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].utilization_fee_earnings = 20;
+        group.vault += 20;
+    });
+    let (_, funded) = env.market_state();
+    env.set_token_account_amount(
+        env.vault,
+        env.mint,
+        env.vault_authority,
+        funded.vault as u64,
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let insurance_ledger_before = env.svm.get_account(&insurance_ledger).unwrap();
+    let backing_ledger_before = env.svm.get_account(&backing_ledger).unwrap();
+    let assert_core_unchanged = |env: &V16CuEnv, label: &str| {
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label}: market accounting unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "{label}: vault custody unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&insurance_ledger).unwrap(),
+            insurance_ledger_before,
+            "{label}: insurance ledger unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&backing_ledger).unwrap(),
+            backing_ledger_before,
+            "{label}: backing ledger unchanged"
+        );
+    };
+
+    let insurance_source = env.token_account(admin.pubkey(), 25);
+    let insurance_source_before = env.svm.get_account(&insurance_source).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::TopUpInsurance { amount: 25 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(backing_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "TopUpInsurance must reject an initialized backing ledger"
+    );
+    assert_core_unchanged(&env, "TopUpInsurance/backing-ledger");
+    assert_eq!(
+        env.svm.get_account(&insurance_source).unwrap(),
+        insurance_source_before,
+        "wrong ledger type must not pull insurance source tokens"
+    );
+
+    let domain_source = env.token_account(admin.pubkey(), 30);
+    let domain_source_before = env.svm.get_account(&domain_source).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 30,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(domain_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(backing_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "TopUpInsuranceDomain must reject an initialized backing ledger"
+    );
+    assert_core_unchanged(&env, "TopUpInsuranceDomain/backing-ledger");
+    assert_eq!(
+        env.svm.get_account(&domain_source).unwrap(),
+        domain_source_before,
+        "wrong ledger type must not pull domain-insurance source tokens"
+    );
+
+    let insurance_dest = env.token_account(admin.pubkey(), 0);
+    let insurance_dest_before = env.svm.get_account(&insurance_dest).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(backing_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "WithdrawInsuranceAsset must reject an initialized backing ledger"
+    );
+    assert_core_unchanged(&env, "WithdrawInsuranceAsset/backing-ledger");
+    assert_eq!(
+        env.svm.get_account(&insurance_dest).unwrap(),
+        insurance_dest_before,
+        "wrong ledger type must not pay insurance destination tokens"
+    );
+
+    let backing_source = env.token_account(admin.pubkey(), 35);
+    let backing_source_before = env.svm.get_account(&backing_source).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 35,
+            expiry_slot: 10_000,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(insurance_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "TopUpBackingBucket must reject an initialized insurance ledger"
+    );
+    assert_core_unchanged(&env, "TopUpBackingBucket/insurance-ledger");
+    assert_eq!(
+        env.svm.get_account(&backing_source).unwrap(),
+        backing_source_before,
+        "wrong ledger type must not pull backing source tokens"
+    );
+
+    let backing_dest = env.token_account(admin.pubkey(), 0);
+    let backing_dest_before = env.svm.get_account(&backing_dest).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(insurance_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "WithdrawBackingBucket must reject an initialized insurance ledger"
+    );
+    assert_core_unchanged(&env, "WithdrawBackingBucket/insurance-ledger");
+    assert_eq!(
+        env.svm.get_account(&backing_dest).unwrap(),
+        backing_dest_before,
+        "wrong ledger type must not pay backing destination tokens"
+    );
+
+    let earnings_dest = env.token_account(admin.pubkey(), 0);
+    let earnings_dest_before = env.svm.get_account(&earnings_dest).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_ledger, false),
+            AccountMeta::new(earnings_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "WithdrawBackingBucketEarnings must reject an initialized insurance ledger"
+    );
+    assert_core_unchanged(&env, "WithdrawBackingBucketEarnings/insurance-ledger");
+    assert_eq!(
+        env.svm.get_account(&earnings_dest).unwrap(),
+        earnings_dest_before,
+        "wrong ledger type must not pay backing earnings"
+    );
+}
+
 // Full-interface rollback sweep: the inbound top-up routes optionally initialize/update program-owned
 // ledger accounts after tentatively crediting engine accounting and before the SPL transfer. A short
 // ledger account must fail at the late ledger write, with SVM rollback restoring market, vault, source,
